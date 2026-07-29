@@ -280,6 +280,16 @@ export interface MailMessage {
    * quoted chain, which is exactly the history the owner asked her to read. */
   body: string;
   bodyContentType: 'html' | 'text';
+  /** v4.3.x (report row 144) — Graph's OWN server-side isolation of the text
+   * unique to THIS message, excluding whatever it quotes from earlier in the
+   * conversation. This is the structural fact `connectors/email/inbound.ts`
+   * uses to decide whether a stated timezone was actually written by the
+   * current (already sender-gated) sender himself, rather than trusting a
+   * classifier's guess about where in the body a snippet sat. Empty string
+   * when Graph has nothing unique to report — treat empty as "nothing
+   * provably new", never as "everything is new". */
+  uniqueBody: string;
+  uniqueBodyContentType: 'html' | 'text';
   isRead: boolean;
 }
 
@@ -298,11 +308,13 @@ function normalizeMessage(raw: any): MailMessage {
     receivedDateTime: raw.receivedDateTime ?? '',
     body: raw.body?.content ?? '',
     bodyContentType: raw.body?.contentType === 'text' ? 'text' : 'html',
+    uniqueBody: raw.uniqueBody?.content ?? '',
+    uniqueBodyContentType: raw.uniqueBody?.contentType === 'text' ? 'text' : 'html',
     isRead: !!raw.isRead,
   };
 }
 
-const MESSAGE_SELECT = 'id,conversationId,subject,from,toRecipients,replyTo,receivedDateTime,body,isRead';
+const MESSAGE_SELECT = 'id,conversationId,subject,from,toRecipients,replyTo,receivedDateTime,body,uniqueBody,isRead';
 
 /**
  * List messages new since the last call, via /messages/delta. The

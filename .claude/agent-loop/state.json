@@ -2,13 +2,20 @@
   "lastSeenIso": "2026-07-27T17:16:00+0300",
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_b81e5b49-35b ran 17:16-18:18; anything said during that hour is still unreviewed, and re-reading an hour costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
-  "lastRun": { "id": "wf_b81e5b49-35b", "status": "complete", "note": "First run on the new scout pipeline. 8 agents, 62 min, 4 lanes (meeting/requests/slack/context), 394 tool uses, 1.14M subagent tokens. 7 findings -> 8 atomic: 4 built (C #153, H #149, G #150, D>dep), 2 needs-owner (A, F), 1 needs-shaping (B), 1 already-fixed (D). Verify ran, overturned 1 (A). ENGINE BUG: manifest reported alreadyBuilt.passedIn:0 although 11 refs were passed in args - the payload never reached triage, and the direct consequence is the `already-fixed` warning (D paid a full dispatch for nothing). Sixth instance of the 'a step did nothing while the run reported success' class; belongs to the infrastructure chat, NOT to a bug lane. Log review itself was healthy: cutoffUtcUsed 2026-07-26T16:19:00Z matched the watermark and filesRead covered BOTH the 07-26 and 07-27 files." },
+  "lastRun": {
+    "id": "wf_b81e5b49-35b",
+    "status": "complete",
+    "note": "First run on the new scout pipeline. 8 agents, 62 min, 4 lanes (meeting/requests/slack/context), 394 tool uses, 1.14M subagent tokens. 7 findings -> 8 atomic: 4 built (C #153, H #149, G #150, D>dep), 2 needs-owner (A, F), 1 needs-shaping (B), 1 already-fixed (D). Verify ran, overturned 1 (A). ENGINE BUG: manifest reported alreadyBuilt.passedIn:0 although 11 refs were passed in args - the payload never reached triage, and the direct consequence is the `already-fixed` warning (D paid a full dispatch for nothing). Sixth instance of the 'a step did nothing while the run reported success' class; belongs to the infrastructure chat, NOT to a bug lane. Log review itself was healthy: cutoffUtcUsed 2026-07-26T16:19:00Z matched the watermark and filesRead covered BOTH the 07-26 and 07-27 files."
+  },
   "lastWrapIso": "2026-07-29T01:40:00+0300",
   "openIssues": [],
   "pendingOverflow": [],
-
   "_inFlightNote": "What is being worked RIGHT NOW: [{ref, lane, description, dispatchedAt}]. Add on dispatch, remove on return, and CHECK IT BEFORE DISPATCHING — hand-dispatching has no memory unless it is kept here. On 2026-07-26 across nine direct dispatches, P1 went to requests twice and P19 ran in guard and slack concurrently; one may have overwritten the other. An entry older than ~30 min with nothing running is probably a dead agent: say so and ask, never silently assume either way.",
-  "inFlight": [],
+  "inFlight": [
+  ],
+  "_wrapPendingNote": "2026-07-29 — EVERYTHING IS BUILT AND VERIFIED; the only thing left is the owner's wrap. AT WRAP: close gh#144 (the owner explicitly said 'close as done' on 2026-07-29) with a comment that names (a) it was solved by ingestion-time forwarding rather than the ticket's own items 2/3, which are NOT built, (b) channel/@mention colleague images are not forwarded at all, (c) external/guest colleagues are never forwarded because of the domain gate. Do NOT close gh#24 (confirmed partial), gh#51, gh#52 or gh#45. The close was deliberately held until the wrap so the comment can carry a real commit sha.",
+  "_charterRulesDeclinedNote": "2026-07-29, OWNER RULED ON ALL NINE earned rules from the feature wave: 'all not agreed, they are not charter stuff.' Every one was declined. The signal to carry forward: a charter describes HOW A LANE WORKS - its scope, its boundaries, its standing method. A per-fix principle distilled from one build ('an audit row records the PRE state', 'a receipt reports what the message contained') is a good sentence about that fix and NOT charter material, however true it is. Both engines surface `earnedRules` / `charterRule` on every piece, so future waves will keep proposing them: report them once, expect them to be declined, and never let a lane treat one as authorised. Do not re-propose these nine.",
+  "_inFlightRunNote": "CLEARED 2026-07-29 — feature build wf_bb6eac4f-e8f RETURNED (9 agents, 1.14M subagent tokens, 432 tool calls, 57 min, 0 errors). 12 pieces approved, 11 built, 2 needs-owner-decision (R144 and T2, both overturned by the verify), 1 cross-lane ask raised AND built (O3-followup -> shepherd). MANAGER ERROR THIS RUN: I1 was in the approved ten but I omitted it from the build args — 12 pieces were dispatched, not 13. The verifier caught the silence and independently established that ZERO lines was the correct answer for I1 anyway (systemPrompt.ts:655-658 steers off the gender field and never claims the person stated it), so nothing is owed. But a dropped piece that happens to be a no-op is still a dropped piece; the lesson is to count the args against the approved list before dispatching. ALSO: `understood` was not passed back, so every builder re-derived its area — pass it next time.",
   "_transporterCorrectionsNote": "Round 2 corrected THREE orchestrator claims, all in the same direction — the orchestrator inferred a mechanism from a symptom without reading the persisted turn text. (1) Row 133 was NOT lossy extraction: run 3 had NO genuine forward at all, because Maelle's prior reply had cut the chain (row 130), so extractParticipants was parsing Outlook's reply-quote header and correctly found only maelle@ + idan@ — which the owner/assistant filter then emptied. Row 133 is a SYMPTOM of row 130, not a second root. (2) Row 129's 6am was NOT an ignored timezone: run 2's chain states no zone anywhere, so the owner's own sanctioned tier-3 fallback applied correctly. The 'He needs EST time' signal is in run 3's note, AFTER the bad offer. So 129 is a MISSING CAPABILITY, not a defect that fired. (3) locationTz mapped 'et' but NOT 'est' — the actual evidenced text — so the orchestrator's 'extraction is cheap, it already maps et' was wrong and B1 would have silently failed on the exact case. Transporter added EST/EDT, CST/CDT, MST/MDT, PST/PDT.",
   "_laneBoundaryChangeNote": "2026-07-29 00:08-00:09 the owner moved the Graph MAIL layer from outrider to TRANSPORTER (outrider keeps only the Graph CLIENT layer — auth, tokens, graphClient). So connectors/graph/mail*.ts and scripts/email-auth.mjs are transporter's now. Round 1 routed mail.ts to outrider under the OLD boundary; that work is built and correct, but future mail-layer work goes to transporter. Consequence: row 130 no longer needs cross-lane sequencing — transporter owns both halves.",
   "_round3Note": "Round 3 = instructor ALONE, row 135: split the reply into a short 'what I assumed / what I need from you' block above a CLEAN forwardable body. Escalated from nice-to-have to REQUIRED by evidence — the recovered run-2 reply ended 'should I loop in Philip Lewis, Jim Douglass, and Ali Momin on the invite?', a question to the owner inside text meant to be forwarded verbatim. One string cannot be both. Dispatch AFTER transporter returns so the frame describes what was actually built. Then one verifier pass (Opus) over the combined diff.",
@@ -17,10 +24,117 @@
   "_sequencingNote": "context is deliberately HELD until outer returns, so row 121's prose reachability filter sees the tool set outer's row-122 fix produces. Row 120 is held until slack returns, because it edits the same inbound.ts — dispatching those two together is what CAUSED row 120.",
   "_directDispatchNote": "Three DIRECT dispatches (independent items, different lanes) rather than the bugger workflow — nothing to route, nothing entangled. Going direct moves two jobs onto the Manager: read every return for a dependency ask, and run ONE verifier pass over the combined diff by hand. Both are owed before any wrap.",
   "_featureWaveNote": "wf_a9bc2bf7-43b (FEATURE build, gh#24 email chain) RETURNED 2026-07-28 — inFlight cleared, no lane is writing. 9 approved: 5 built, 4 needs-owner-decision after the verify overturned 4. Ledger append still owed. Three of the four overturns are lane-internal (E1 doc defect, a false completeness claim, robustness) and route back to their lanes; ONE is the owner's: E9's clamp also excluded ALWAYS_ON_TOOLS, so an email turn cannot get_person_memory — it cannot read the rows E6 creates. That is the seam class only a combined verify finds, and it came from the orchestrator's own 'and NOTHING else' spec.",
-
+  "_featurePlan_2026_07_29": {
+    "planRunId": "wf_a3bfe2a3-abe",
+    "status": "BUILT 2026-07-29 by wf_bb6eac4f-e8f. UNCOMMITTED — the owner wraps. Typecheck clean across the whole tree. See report.md for the rows.",
+    "refs": [
+      "gh#144",
+      "gh#52",
+      "gh#45",
+      "gh#51"
+    ],
+    "cost": "6 agents, 564,734 subagent tokens, 229 tool calls, 15.5 min, 0 errors. It corrected the premise on THREE of the four tickets — do not re-plan these, read this block.",
+    "approvedPieces": [
+      {
+        "id": "T0",
+        "lane": "transporter",
+        "needs": [],
+        "what": "Thread the already-computed Haiku imageDescPart (processMessage.ts:298-303) into the owner shadow via a new optional inboundAttachmentNote on PostReplyInput, so the receipt stops reading (image attached, no caption). Independent of every other gh#144 piece."
+      },
+      {
+        "id": "T1",
+        "lane": "transporter",
+        "needs": [],
+        "what": "EXTRACT the sendDM upload loop (connections/slack/messaging.ts:135-163) into one shared uploadAttachments helper and call it from BOTH sendDM and slackPostToChannel, so SendOptions.attachments is real on the owner path. Extract, never clone. Dead code if O1 and T2 are declined."
+      },
+      {
+        "id": "O1",
+        "lane": "outrider",
+        "needs": [
+          "T1"
+        ],
+        "what": "shadowNotify.ts gains attachments and forwards it on all four send paths, reusing the conversation-anchor cache so the image threads under the conversation already being read. Watch the v1_shadow_mode gate: shadow off currently means the image silently never forwards."
+      },
+      {
+        "id": "T2",
+        "lane": "transporter",
+        "needs": [
+          "O1"
+        ],
+        "what": "The actual forward, at INGESTION: inside processImageFileShare per-file loop immediately after the scan passes (fileIngestion.ts:81), where the url is already in scope. Code-driven, not model-driven."
+      },
+      {
+        "id": "M1",
+        "lane": "matchmaker",
+        "needs": [
+          "O3"
+        ],
+        "what": "LIVE DEAD-CODE BUG, one-line fix. create_meeting audit row writes details.start (calendarMutations.ts:300) but its only reader expects event_start_iso (calendarReads.ts:220-227), so the did-you-book-that recall for creates has never once fired. Rename the key."
+      },
+      {
+        "id": "M2",
+        "lane": "matchmaker",
+        "needs": [
+          "O3"
+        ],
+        "what": "moveMeeting.ts records where the meeting went but never where it was. The pre-move state is already fetched by the recurring probe at :810-824 and thrown away; add original_start, original_end, original_tz at :1441. Zero extra Graph calls."
+      },
+      {
+        "id": "O3",
+        "lane": "outrider",
+        "needs": [],
+        "what": "audit_log is the ONLY stateful table with no owner_user_id, and its reader feeds meeting subjects into the model context via the owner-DM calendar recall. Add owner_user_id plus index, make it required on the writer so all 12 sites supply it, add an owner filter. NEVER default to the first profile."
+      },
+      {
+        "id": "P1",
+        "lane": "profiler",
+        "needs": [],
+        "what": "Third tier in genderDetect.ts: FIRST-PERSON Hebrew morphology only, in the person own message, wired to SLACK not email/WhatsApp. Gate on detectMessageLanguage script range plus a new yaml advanced opt-in, default off. Fire only when gender is unknown, so one call per person ever."
+      },
+      {
+        "id": "I1",
+        "lane": "instructor",
+        "needs": [
+          "P1"
+        ],
+        "what": "systemPrompt.ts:655-658 wording for the third state, an inferred rather than stated gender. May legitimately be ZERO lines if P1 lands at a steering tier; that is an acceptable outcome, not a failure."
+      },
+      {
+        "id": "O4",
+        "lane": "outrider",
+        "needs": [],
+        "what": "whatsapp.ts:6 header falsely claims nothing imports startWhatsApp; index.ts:5 imports it and :174 calls it. Comment-only correction to what is actually true: wired at boot, inert per-profile without whatsapp_phone, owner-phone-only inbound."
+      }
+    ],
+    "deferredPieces": [
+      "S1 — attachments on the daily decision thread approval ask. Deferred deliberately: an image is not a decision, and shipping both surfaces creates a double-delivery problem because the ingestion forward fires before the orchestrator and cannot know an approval is coming."
+    ],
+    "ownerDecisions": {
+      "gh52_substrate": "The requests spine, NOT audit_log. His rule, better than anything in the ticket: REVERTIBILITY FOLLOWS SPINE MEMBERSHIP. Not on the spine means not revertible; wanting it revertible means putting it on the spine, not building a second undo substrate beside it.",
+      "gh52_cancellation": "A reverted cancellation is NOT an undo. Graph /cancel has already emailed every attendee and is not retractable; re-creating mints a new event id, re-invites everyone, and orphans requests.outcome_external_event_id, calendar_issues.event_id and the thread ledger. She refuses honestly and offers a re-book.",
+      "gh52_cascade": "Inverse cascade OUT OF SCOPE. There is no reopen path anywhere in src; closeRequest no-ops on terminal rows; the ticket instruction to fire closeMeetingArtifacts on revert is backwards and would risk double-relaying to colleagues.",
+      "gh51_tier": "It must actually steer output AND stay correctable by BOTH the owner and the person themselves. Not auto — the render gates at db/people.ts:1451 and :1563 mask auto as unknown, so the feature would be dead on arrival. ONE DETAIL LEFT: confirm equal-rank write behaviour so a later self-declaration beats an earlier inferred value.",
+      "gh144_surface": "The colleague-conversation shadow only. S1 deferred.",
+      "gh144_scope": "Every clean colleague image. Filtering needs intent-judgment, which provably cannot run on the arrival turn."
+    },
+    "notWorthBuilding": [
+      "gh#52 prompt rule — already shipped verbatim at skills/meetings.ts:110.",
+      "gh#52 revert_action as a SECOND tool — collides with revert_last_auto_move over the same trigger phrases. It must SUBSUME and DELETE the old one or not be built.",
+      "gh#51 as originally specified — email and WhatsApp both drop every non-owner sender before reading any body, so it buys zero behaviour change plus an LLM bill.",
+      "gh#144 SkillContext / OrchestratorInput plumbing — a model-driven forward cannot fire on the arrival turn (processMessage.ts:275 reads history before the url is appended at :307).",
+      "gh#144 colleague DOCUMENTS — dropped entirely today at handlers.ts:137, so this means opening a new ingestion path, not extending one. Separate, larger ticket."
+    ],
+    "held": [
+      "gh#52 the actual revert tool (needs the spine work first)",
+      "gh#45 — specified fix is a regression, body rewritten, architectural call belongs to gh#155",
+      "gh#155 — the parent question: making a skill MD prefs list code-actionable"
+    ],
+    "toDispatchTheBuild": "Workflow({scriptPath: '.claude/workflows/feature.js', args: {mode: 'build', pieces: [the ten above], answers: {the six ownerDecisions above}, priorClean: state.verifiedClean}}). Report rows 143, 144 and 145 are ALSO approved and awaiting dispatch — fold them in as instructor/transporter/matchmaker pieces rather than dispatching those lanes twice, since the per-agent floor is 70-85 turns.",
+    "reportRowRulings": "142 declined and removed from report.md (owner: not sure its a problem even). 143 approved, re-routed matchmaker to INSTRUCTOR since it is prompt-tiering work. 144 approved (transporter). 145 approved (matchmaker). 125 and 126 remain deferred.",
+    "buildRunId": "wf_bb6eac4f-e8f"
+  },
   "_nextReportIdNote": "Stable report-row ids, ONE flat sequence, no letter prefixes. Assign the current value when a row FIRST enters report.md, then increment. NEVER renumber and NEVER reuse — even after a row is wrapped and deleted, so `14` means the same thing next month. A row that reappears keeps its original number. Starts at 100 deliberately: the rows written before 2026-07-26 evening carry legacy labels (P1-P32, D7-D8, B1-B6, N1-N2) from four undefined prefix schemes nobody documented, which is exactly why this counter exists. Those keep their labels until the next full report rewrite migrates them; new rows take 100+, so no collision is possible in the meantime.",
-  "nextReportId": 146,
-
+  "nextReportId": 148,
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. DROP an entry the moment a wave changes the code it describes — a stale 'proven clean' silences a real check, which is worse than having no list. When in doubt, drop it. PRUNED at the 4.2.1 wrap: six entries deleted because 4.2.1 changed the code they described — the checkSlot ladder gained a work-band fit computed above it and `occupancy` became `slotFacts`; `honest_hard_reason`'s reason gate became slot-based rather than counter-based; the all-day-WE occupancy classification changed; `recordAssistantThreadPost` no longer exists; and the typecheck stamp was superseded.",
   "verifiedClean": [
     "The walker's ISO-week event fetch is a strict SUPERSET of the searched range — startOf(week) of the first day, endOf(week) of the last — so a multi-week search cannot validate against a partial calendar",
@@ -67,6 +181,23 @@
     "2026-07-27 VERIFY: `Settings.throwOnInvalid` is set NOWHERE in src (grepped, zero hits), so an invalid DateTime yields the string 'Invalid DateTime' rather than throwing — which is why moving arithmetic outside a catch in nearbyAlternatives is safe (`.isValid` filters it, NaN durations take the same route)",
     "2026-07-27 VERIFY: `tape.includes('mutated=book')` is exact, not a heuristic — MutationDomain is literally 'book' | 'task' | 'message' | 'other' (turnHelpers.ts:105), so the substring matches the calendar family and nothing else",
     "2026-07-27 VERIFY: the double offered-slots write in one turn is safe — recordOfferedSlots MERGES into the prior entry and preserves searchFingerprint on omit (offeredSlotsStash.ts:88-101), and buildTurnContext.ts:599 skips its own write when bookableStarts.length===0, which is precisely the all-blocked case where nearbyAlternatives writes. No overwrite, no fingerprint wipe",
-    "2026-07-27 VERIFY: `needs_confirmation` and `needs_owner_approval` are explicitly NOT `ok` in mutationOutcome (turnHelpers.ts:141), so an owner-confirmation turn carries NO `mutated=book` marker. Any guard that stands down on a completed mutation is blind to that turn by design — do not assume a confirmation request looks like a mutation"
+    "2026-07-27 VERIFY: `needs_confirmation` and `needs_owner_approval` are explicitly NOT `ok` in mutationOutcome (turnHelpers.ts:141), so an owner-confirmation turn carries NO `mutated=book` marker. Any guard that stands down on a completed mutation is blind to that turn by design — do not assume a confirmation request looks like a mutation",
+    "wf_bb6eac4f-e8f VERIFY: R143's meetings.ts prose split renders BYTE-IDENTICALLY on every Slack turn, derived from the code rather than from a dump: CHANNEL_TOOL_CLAMP has no 'slack' entry (registry.ts:276-280) so filterToolsByScope returns allTools unfiltered with scopes=undefined; all five gated meetings tools (get_calendar, analyze_calendar, move_meeting, delete_meeting, check_join_availability) are unconditional entries in MeetingsSkill.getTools; and create_approval lives in TASKS_MODULE which CORE_MODULES always includes (registry.ts:19) — so all six ships() gates plus isSlackNative are true on Slack for any role and any scope",
+    "wf_bb6eac4f-e8f VERIFY: R143 is live in production and not a no-op: src/core/orchestrator/systemPrompt.ts:380 passes the real turn `channel` into skill.getSystemPromptSection, and the 4th param is declared on the Skill interface at src/skills/types.ts:58",
+    "wf_bb6eac4f-e8f VERIFY: O3 introduces no circular import: src/config/userProfile.ts imports only fs, path, js-yaml, zod and utils/logger — nothing in that closure reaches back into src/db — so db/client.ts's new `import { loadAllProfiles }` is a leaf edge and the inline backfill cannot re-enter getDb()",
+    "wf_bb6eac4f-e8f VERIFY: O3's audit_log writer and reader agree on the owner id on the path M1 unblocks: OpCtx.userEmail is `context.profile.user.email` (src/skills/meetings/ops.ts:84-85), so resolveOwnerUserId (calendarMutations.ts:12-19) resolves through getProfileByEmail to the same profile.user.slack_user_id the reader passes at calendarReads.ts:218 — create_meeting rows are not excluded by the new owner filter",
+    "wf_bb6eac4f-e8f VERIFY: audit_log has exactly two read paths in src, both at src/skills/meetings/ops/handlers/calendarReads.ts:219-220 (get_calendar's empty-window recall), and both are now owner-filtered. There is no other reader anywhere",
+    "wf_bb6eac4f-e8f VERIFY: audit_log has exactly two WRITE paths in src: the typed auditLog() helper in db/client.ts and the raw INSERT in src/core/requests/closeRequest.ts:99-116. Both now supply owner_user_id",
+    "wf_bb6eac4f-e8f VERIFY: P1's owner constraint that a person can always override their own inferred gender holds with no store change: setCoreFieldWithProvenanceById refuses only when `currentValue && newRank < currentRank` (src/db/people.ts:412-419), and person(2) against person(2) is not strictly less, so a later confirm_gender at equal rank writes",
+    "wf_bb6eac4f-e8f VERIFY: P1's Hebrew gate is deterministic and free: detectMessageLanguage returns the literal string 'Hebrew' from a character-range scan (src/utils/detectMessageLanguage.ts:27, 44) with zero model calls, so the one Haiku call is genuinely gated",
+    "wf_bb6eac4f-e8f VERIFY: No prompt change was owed for P1 (the I1 question): src/core/orchestrator/systemPrompt.ts:655-658 steers Hebrew gendered forms off the gender field and never asserts that the person stated it, so a person-tier inferred gender creates no honesty defect in the wording",
+    "wf_bb6eac4f-e8f VERIFY: T0's rendered receipt is well-formed: imageDescPart is already `' — <desc>'` (processMessage.ts:306), so `[Image${inboundAttachmentNote}]` yields `[Image — <desc>]`, matching the bracket shape the history writer uses at :310-311; and the note never reaches runOutputGates",
+    "wf_bb6eac4f-e8f VERIFY: T2's forward cannot launder a suspicious image: imageUrls is pushed only on the `if (!block) continue` survivor path at fileIngestion.ts:81, and the forward sits after `if (images.length === 0) return` — the invariant is structural, not ordering-dependent",
+    "wf_bb6eac4f-e8f VERIFY: T2's forwarded url cannot reach the unscanned owner re-attach path: the forward never calls appendToConversation and never touches the owner's threadTs, and reattachRecentThreadImage is owner-only and reads the owner's own history",
+    "wf_bb6eac4f-e8f VERIFY: T2's and postReply's shadow posts collapse into ONE owner-DM thread: both pass `conversationKey: threadTs` (fileIngestion.ts:126, postReply.ts:620) against shadowNotify's `${ownerId}:${conversationKey}` anchor cache, and fileIngestion's threadTs is the same value it hands processMessage at :162",
+    "wf_bb6eac4f-e8f VERIFY: T2's external-domain gate is live rather than silently always-false: getOwnerDomain (src/utils/attendeeScope.ts:18-23) returns a bare lowercased domain and the sender side is lowercased identically before comparison",
+    "wf_bb6eac4f-e8f VERIFY: T1's uploadAttachments is a true extraction, not a clone: the 28-line loop is gone from sendDM, both callers go through the one helper, and the `safeThreadTs(opts.threadTs) ?? res.ts` thread fallback is preserved verbatim in both",
+    "wf_bb6eac4f-e8f VERIFY: O1 is inert for all 11 pre-existing shadowNotify call sites: none passes attachments, undefined is forwarded, and messaging.ts's `opts.attachments && length > 0` guard short-circuits before any Slack call",
+    "wf_bb6eac4f-e8f VERIFY: `npx tsc --noEmit` is clean across the whole working tree with all 13 pieces in place — every ownerUserId, selfText, channel, attachments and inboundAttachmentNote signature change is consistently applied at every call site"
   ]
 }

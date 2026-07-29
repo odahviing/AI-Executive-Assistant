@@ -1208,6 +1208,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // verbMap fallback is the only block and closes cleanly.
 
   auditLog({
+    ownerUserId: profile.user.slack_user_id,
     action: 'orchestrator_run',
     source: input.channel,
     actor: input.userId,

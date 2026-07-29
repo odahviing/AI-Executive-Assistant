@@ -388,6 +388,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
         auditLog({
+          ownerUserId: context.profile.user.slack_user_id,
           action: 'update_meeting',
           source: context.channel,
           actor: context.userId,
@@ -807,6 +808,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // follow-up "move X into the freed slot" resolve without Maelle
         // re-asking what time the moved meeting used to be at.
         let preMoveStartIso: string | undefined;
+        // #52 (M2) — pre-state for the audit row (original_start/original_end/
+        // original_tz below). Same probe already fetched for preMoveStartIso;
+        // no extra Graph call. `getEventType` sends no `Prefer: outlook.timezone`
+        // header, so Graph answers in UTC and `startTimeZone` says so — store it
+        // alongside the instants (mirrors the documented trap at
+        // calendarReads.ts's pre-delete capture) so a later reader converts with
+        // the right zone instead of assuming the owner's.
+        let preMoveEndIso: string | undefined;
+        let preMoveTz: string | undefined;
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
@@ -822,6 +832,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             };
           }
           preMoveStartIso = probe?.startDateTime;
+          preMoveEndIso = probe?.endDateTime;
+          preMoveTz = probe?.startTimeZone;
         } catch (err) {
           logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
@@ -1434,11 +1446,26 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           logger.warn('move_meeting — slot-hold release threw, continuing', { err: String(err).slice(0, 150) });
         }
         auditLog({
+          ownerUserId: context.profile.user.slack_user_id,
           action: 'move_meeting',
           source: context.channel,
           actor: context.userId,
           target: args.meeting_id as string,
-          details: { subject: args.meeting_subject, new_start: args.new_start, new_end: args.new_end },
+          // #52 (M2) — record where it WAS, not only where it went; the probe
+          // is already in hand from the recurring-preflight above (zero extra
+          // Graph calls). `original_tz` is the zone `original_start`/
+          // `original_end` are actually expressed in (Graph's default UTC
+          // absent a Prefer header) — keep it alongside so a later reader
+          // doesn't assume the owner's zone. Forensic groundwork only; no
+          // undo tool reads this yet.
+          details: {
+            subject: args.meeting_subject,
+            new_start: args.new_start,
+            new_end: args.new_end,
+            original_start: preMoveStartIso,
+            original_end: preMoveEndIso,
+            original_tz: preMoveTz,
+          },
           outcome: 'success',
         });
 

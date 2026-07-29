@@ -25,10 +25,15 @@ export type ConnectionId = 'slack' | 'email' | 'whatsapp' | string;
 
 /**
  * Outcome of a send. Every Connection returns this shape so callers handle
- * success/failure uniformly.
+ * success/failure uniformly. `attachments_failed` (v4.3.x, #144 T1) counts
+ * how many of SendOptions.attachments failed to upload even though the send
+ * itself succeeded (ok:true) — a swallowed upload used to be invisible: the
+ * text landed and the file silently didn't. Omitted (or 0) means every
+ * attachment uploaded, or none were requested; transports that don't
+ * implement attachments never set it.
  */
 export type SendResult =
-  | { ok: true; ref?: string; ts?: string }
+  | { ok: true; ref?: string; ts?: string; attachments_failed?: number }
   | { ok: false; reason: string; detail?: string };
 
 /**
@@ -52,8 +57,12 @@ export interface SendOptions {
    * v2.2.7 — Optional file attachments. Transport-specific shape: each
    * attachment carries a transport-native locator (e.g. Slack permalink or
    * url_private) the Connection knows how to fetch + re-upload. Other
-   * transports may interpret or ignore. Today: SlackConnection.sendDirect
-   * implements; other methods + transports ignore.
+   * transports may interpret or ignore. v4.3.x (#144, T1) — SlackConnection
+   * implements this on BOTH `sendDirect` and `postToChannel`, sharing one
+   * upload primitive (connections/slack/messaging.ts's `uploadAttachments`)
+   * rather than one verb carrying it while another silently drops it — see
+   * `SendResult.attachments_failed` for how an upload that fails after the
+   * text lands gets surfaced instead of swallowed.
    */
   attachments?: Array<{
     /** Transport-native file locator. For Slack: permalink or url_private. */

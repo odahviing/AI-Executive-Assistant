@@ -2,9 +2,13 @@
  * WhatsApp inbound connector (whatsapp-web.js, unofficial linked-device).
  *
  * STEP 1 of the WhatsApp transport build (.claude/WHATSAPP_PROJECT.md):
- * owner front-door only, multi-tenant, crash-safe — but DELIBERATELY UNWIRED.
- * Nothing imports `startWhatsApp` yet, and src/index.ts never calls it, so
- * this file has ZERO runtime effect on Maelle until Step 2 wires it in.
+ * owner front-door only, multi-tenant, crash-safe. WIRED AND RUNNING:
+ * src/index.ts imports `startWhatsApp` and calls it at boot (Phase 4) for
+ * every profile, with a watchdog around it for transient errors. It is
+ * inert per-profile unless that profile's YAML sets `whatsapp_phone`
+ * (no-op otherwise, byte-identical to Slack-only — see startWhatsApp
+ * below), and inbound is owner-phone-only — every other sender is
+ * silently dropped before any content work (the trust gate below).
  *
  * What this half does (inbound):
  *   - Owner (phone === profile.user.whatsapp_phone) → full owner orchestrator
@@ -126,7 +130,7 @@ function getChromePath(): string | undefined {
  * Start the WhatsApp client for a given profile. No-op (disabled) when the
  * profile has no whatsapp_phone. Shows a QR on first link, then reconnects.
  *
- * NOTE: not called from src/index.ts in Step 1. Step 2 wires it in (gated).
+ * Called from src/index.ts at boot for every profile (fire-and-forget).
  */
 export async function startWhatsApp(profile: UserProfile): Promise<void> {
   const ownerPhone = getOwnerPhone(profile);

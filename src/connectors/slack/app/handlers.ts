@@ -11,7 +11,7 @@ import { getAnthropicClient } from '../../../llm/client';
 import { ownerPostedInThread, classifyThreadAction, buildThreadRoster, buildThreadActionDirective } from '../../../core/threadActions';
 import { getConversationHistory, appendToConversation, upsertPersonMemory } from '../../../db';
 import { transcribeSlackAudio } from '../../../voice';
-import { downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
+import { downloadSlackImage, type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import { registerInboundReplay } from '../inboundReplayRegistry';
 import { markProcessed, markContentProcessed } from '../processedDedup';
@@ -22,21 +22,31 @@ import type { SlackAppContext } from './context';
   // On-restart catch-up routes missed messages THROUGH this live path instead
   // of reimplementing it. Register a replay fn (closure over processMessage +
   // the shared ingestion helpers) that core/background.ts calls per detected
-  // missed message — voice/video get transcribed, images downloaded, then the
-  // SAME processMessage handles the orchestrator + reply. One path, two callers.
+  // missed message — voice/video get transcribed; images are handed to
+  // processImageFileShare (download → injection scan → owner-forward →
+  // processMessage), the SAME guarded pipeline the live DM handler uses, so a
+  // suspicious colleague image caught up after downtime is scanned and refused
+  // exactly like a live one, never attached unscanned. One path, two callers.
 export function registerInboundReplayHandler(ctx: SlackAppContext): void {
-  const { app, processMessage } = ctx;
+  const { app, processMessage, processImageFileShare } = ctx;
   const { assistant, user } = ctx.profile;
-  registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs, source }) => {
+  registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs }) => {
     const senderId = message.user as string | undefined;
     if (!senderId) return;
     const ts = (message.ts as string) ?? postThreadTs;
     const files = (message.files as Array<Record<string, unknown>> | undefined) ?? [];
 
     let text = (message.text as string) ?? '';
-    let images: AnthropicImageBlock[] | undefined;
-    let imageUrls: string[] | undefined;
     let voiceInput = false;
+
+    const postCatchUpCaption = async () => {
+      try {
+        await app.client.chat.postMessage({
+          token: assistant.slack.bot_token, channel: channelId, thread_ts: postThreadTs,
+          text: '_↩️ Catching up on your message_', unfurl_links: false, unfurl_media: false,
+        });
+      } catch (_) { /* caption is cosmetic */ }
+    };
 
     const audioFile = files.find(f => typeof f.mimetype === 'string'
       && ((f.mimetype as string).startsWith('audio/') || (f.mimetype as string).startsWith('video/')));
@@ -50,28 +60,43 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
         logger.warn('inboundReplay — transcription failed, skipping media', { err: String(err).slice(0, 200) });
       }
     } else if (imageFiles.length > 0) {
-      const blocks: AnthropicImageBlock[] = [];
-      const urls: string[] = [];
-      for (const f of imageFiles) {
-        try {
-          const dl = await downloadSlackImage(f.url_private as string, assistant.slack.bot_token, f.mimetype as string);
-          if ('buffer' in dl) { blocks.push(buildImageBlock(dl)); if (f.url_private) urls.push(f.url_private as string); }
-        } catch (err) {
-          logger.warn('inboundReplay — image download failed', { err: String(err).slice(0, 200) });
-        }
-      }
-      if (blocks.length > 0) { images = blocks; imageUrls = urls; text = text || '(image attached, no caption)'; }
+      // Route through the SAME injection-guarded path the live DM handler uses
+      // (processImageFileShare: download → scanAndPrepareImage by the sender's
+      // TRUE role → owner-forward → processMessage) instead of downloading and
+      // attaching raw blocks here with no scan at all. This was the gap: the
+      // replay path built AnthropicImageBlocks directly from downloadSlackImage,
+      // so a suspicious colleague image caught up after downtime reached Sonnet
+      // completely unscanned. Delegating — rather than re-downloading here —
+      // is what guarantees an unscanned image can never become attachable or
+      // forwardable (fileIngestion.ts owns the one implementation).
+      //
+      // degradeOnDownloadFailure: catch-up ONLY. A live handler still aborts
+      // the whole turn on a download failure, but on replay that would drop a
+      // missed question that happened to carry an oversized/unfetchable
+      // image — text included. This flag makes processImageFileShare fall
+      // through to processMessage with the text when EVERY failure in the
+      // batch was a fetch failure. It does NOT relax the security path: a
+      // colleague image scanAndPrepareImage actually flags stays refused and
+      // the text is not answered either (see fileIngestion.ts's
+      // hadSecurityRefusal gate) — only a fetch failure ever degrades.
+      await postCatchUpCaption();
+      await processImageFileShare({
+        files: imageFiles,
+        message,
+        channelId,
+        ts,
+        threadTs: postThreadTs,
+        client: app.client,
+        isMpim: false,
+        degradeOnDownloadFailure: true,
+      });
+      return;
     }
 
     if (!text || text.trim().length < 1) return;  // nothing replayable
 
     // Caption first, then processMessage posts the actual reply via `say`.
-    try {
-      await app.client.chat.postMessage({
-        token: assistant.slack.bot_token, channel: channelId, thread_ts: postThreadTs,
-        text: '_↩️ Catching up on your message_', unfurl_links: false, unfurl_media: false,
-      });
-    } catch (_) { /* caption is cosmetic */ }
+    await postCatchUpCaption();
 
     const catchUpSay = async (msg: { text: string; thread_ts?: string }) => {
       await app.client.chat.postMessage({
@@ -84,8 +109,8 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     await processMessage({
       senderId, text, channelId, ts, threadTs: postThreadTs,
       say: catchUpSay as unknown as Function, client: app.client,
-      isChannel: false, isMpim: source === 'assistant_panel' ? false : false,
-      images, imageUrls, voiceInput,
+      isChannel: false, isMpim: false,
+      voiceInput,
     });
   });
 }
@@ -227,8 +252,12 @@ export function registerDmHandler(ctx: SlackAppContext): void {
         return;
       }
 
-      // Image branch (v1.7.1) — owner-only by convention (DM with the bot is
-      // owner-only in practice; the helper applies the injection guard regardless).
+      // Image branch (v1.7.1) — no role gate here, unlike the doc branch
+      // above (:137): both owner and colleague DM images reach
+      // processImageFileShare, which applies the injection guard by the
+      // sender's TRUE role (owner proceeds; suspicious colleague images are
+      // refused) and, since v4.3.x (#144, T2), forwards a clean colleague
+      // image to the owner's shadow DM so it isn't invisible to him.
       const hasImage = files?.some((f: any) =>
         typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
       );

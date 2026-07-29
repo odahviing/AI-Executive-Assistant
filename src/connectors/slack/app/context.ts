@@ -78,6 +78,19 @@ export interface ProcessImageFileShareParams {
     client: App['client'];
     isMpim: boolean;
     mpimMemberIds?: string[];
+    /**
+     * Catch-up only (registerInboundReplayHandler). Live paths (DM/MPIM/mention)
+     * leave this unset and keep the original behavior: any image download
+     * failure aborts the whole turn, text included. Replay sets this true so a
+     * missed message that merely failed to fetch/attach an image still reaches
+     * processMessage with its text — the owner's ruling was to exempt catch-up
+     * from dropping an answerable question over an unrelated download failure.
+     * This does NOT touch the security path: a colleague image flagged by
+     * scanAndPrepareImage is a verdict, not a fetch failure, and keeps failing
+     * closed (image dropped, refusal posted, text NOT answered) regardless of
+     * this flag — see the `securityRefused` handling in fileIngestion.ts.
+     */
+    degradeOnDownloadFailure?: boolean;
 }
 
 /** Params for the per-image injection guard. */

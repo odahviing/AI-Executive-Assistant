@@ -35,19 +35,32 @@
  * explicitly, and treats "can't tell forward from reply" as "return nothing"
  * rather than a guess.
  *
- * STATED TIMEZONE (row 129/136 fix) — same call, same bounded body, extended
- * rather than duplicated (one Haiku round trip, not two). The owner's
- * precedence ruling, verbatim: "don't ask. if I tell you in email the
- * timezone, you know it. if I didn't tell you and the email told you because
- * the email wrote its ET-> you know it. if you didn't get anything, you
- * assume my time. no asking in email routes." So this also extracts, when
- * actually WRITTEN somewhere: (1) the forwarding person's own new note above
- * any quoted content, or (2) the original chain's own text — never inferred
- * from a phone number, company, or general knowledge, and never a live
- * lookup (the caller resolves the returned free text to IANA statically —
- * see connectors/email/inbound.ts). No stated zone anywhere → an empty list;
- * the owner explicitly blessed the existing owner-zone fallback for that
- * case, so the caller does nothing further.
+ * STATED TIMEZONE (row 129/136 fix; tier-authority corrected report row 144)
+ * — same call, same bounded body, extended rather than duplicated (one Haiku
+ * round trip, not two). The owner's precedence ruling, verbatim: "don't ask.
+ * if I tell you in email the timezone, you know it. if I didn't tell you and
+ * the email told you because the email wrote its ET-> you know it. if you
+ * didn't get anything, you assume my time. no asking in email routes." So
+ * this also extracts, when actually WRITTEN anywhere in the email (the
+ * forwarding person's own new note, or deeper in the original chain): the
+ * participant it applies to and the zone/location exactly as written — never
+ * inferred from a phone number, company, or general knowledge, and never a
+ * live lookup (the caller resolves the returned free text to IANA statically
+ * — see connectors/email/inbound.ts). No stated zone anywhere → an empty
+ * list; the owner explicitly blessed the existing owner-zone fallback for
+ * that case, so the caller does nothing further.
+ *
+ * WHERE this module deliberately stops (report row 144): it used to also
+ * report WHICH part of the email a hint came from ('forwarding_note' vs
+ * 'chain'), and the caller wrote that classification straight through as the
+ * PERSISTENCE AUTHORITY (owner-tier vs auto-tier). One Haiku misjudgment
+ * about POSITION in the body then minted a wrong timezone at owner
+ * authority — sticky, because no later auto-tier correction can ever outrank
+ * it. Per the shared charter, a model classification may choose a VALUE,
+ * never the TIER that value is written at. This module now returns only the
+ * value; the caller derives the tier itself from Graph's own `uniqueBody` —
+ * a structural fact about which text is provably the current sender's own,
+ * never a classifier's guess about where in the body it sat.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -67,19 +80,16 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // top, so truncating far into a long chain never loses it.
 const MAX_BODY_CHARS = 12000;
 
-/** Where a stated timezone/location was found — drives the persistence
- *  provenance tier the caller applies (owner's own words outrank the chain's
- *  own words; see setPersonTimezoneByEmail's CoreFieldWrite precedence). */
-export type TimezoneHintSource = 'forwarding_note' | 'chain';
-
 export interface EmailTimezoneHint {
   /** The participant email this stated zone/location applies to. */
   email: string;
   /** Exactly as written — "EST", "Eastern", "New York", "GMT+2", etc. The
    *  caller maps this to IANA (inferTimezoneFromStateStatic); this module
-   *  never invents a zone name itself. */
+   *  never invents a zone name itself. Report row 144: this module does NOT
+   *  say where in the email it found this — the caller derives persistence
+   *  authority structurally (Graph's uniqueBody), never from a classification
+   *  this module would otherwise have to guess. */
   statedTimezone: string;
-  source: TimezoneHintSource;
 }
 
 export interface ExtractedParticipants {
@@ -120,21 +130,15 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
                 'For any participant whose timezone or location is ACTUALLY WRITTEN somewhere in this email — ' +
                 'either in the sender\'s own new note (above any quoted/forwarded content) or within the original ' +
                 'chain itself (e.g. "He needs EST time", "let\'s do 2pm ET", a signature naming a city) — the email ' +
-                'it applies to, the zone/location exactly as written, and which of the two places it came from. ' +
-                'Omit anyone with nothing stated anywhere — never infer from an area code, a company, or general ' +
-                'knowledge.',
+                'it applies to and the zone/location exactly as written. Omit anyone with nothing stated anywhere ' +
+                '— never infer from an area code, a company, or general knowledge.',
               items: {
                 type: 'object',
                 properties: {
                   email: { type: 'string', description: 'The participant email this stated zone applies to.' },
                   stated_timezone: { type: 'string', description: 'The zone/location exactly as written, e.g. "EST", "Eastern", "New York", "GMT+2".' },
-                  source: {
-                    type: 'string',
-                    enum: ['forwarding_note', 'chain'],
-                    description: '"forwarding_note" — in the CURRENT sender\'s own new text, above any quoted/forwarded content. "chain" — within the quoted/forwarded original content.',
-                  },
                 },
-                required: ['email', 'stated_timezone', 'source'],
+                required: ['email', 'stated_timezone'],
               },
             },
           },
@@ -185,10 +189,6 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
           .map(h => ({
             email: typeof h.email === 'string' ? h.email.trim().toLowerCase() : '',
             statedTimezone: typeof h.stated_timezone === 'string' ? h.stated_timezone.trim() : '',
-            // Unrecognized/malformed source defaults to the LOWER-authority
-            // tier ('chain' → by:'auto' downstream) rather than the higher
-            // one — never over-claim the owner's own word on ambiguous data.
-            source: (h.source === 'forwarding_note' ? 'forwarding_note' : 'chain') as TimezoneHintSource,
           }))
           .filter(h => EMAIL_RE.test(h.email) && h.statedTimezone.length > 0)
       : [];

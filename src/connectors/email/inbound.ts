@@ -57,6 +57,28 @@ import { runOutputGates } from '../../utils/guards/runOutputGates';
 import logger from '../../utils/logger';
 
 /**
+ * Report row 144 (predicate half) — is `statedTimezone` actually PRESENT in
+ * `uniqueBodyPlain`, tight enough to carry an owner-tier authority decision?
+ * A plain case-insensitive substring `.includes()` was the bug: a short zone
+ * token ("ET", "IST", "CST") matches incidentally inside an unrelated word
+ * (e.g. "ET" inside "market", "internet") — so text the owner never wrote
+ * could still mint an owner-tier value, re-opening the exact sticky-wrong
+ * class report row 144 closed. This requires a WORD boundary on both sides —
+ * the character immediately before/after the match (if any) must not be
+ * `[a-z0-9]` — so "ET" matches standalone or as "ET-" but not inside
+ * "market". Both sides already lowercased by the caller; the token is
+ * escaped so regex metacharacters in free text like "GMT+2" are matched
+ * literally, not interpreted.
+ */
+function statedZoneAppearsInUniqueBody(statedTimezone: string, uniqueBodyPlain: string): boolean {
+  const token = statedTimezone.trim().toLowerCase();
+  if (!token || !uniqueBodyPlain) return false;
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`);
+  return re.test(uniqueBodyPlain);
+}
+
+/**
  * Register the email Connection (E3) + the inbound handler (E4) for this
  * profile. Complete no-op — no Connection registered, no handler registered
  * — when channels.email is absent or enabled:false.
@@ -208,31 +230,53 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     }
   }
 
-  // ── Stated timezone (#24 rows 129/136) — owner's precedence ruling,
-  // verbatim: "don't ask. if I tell you in email the timezone, you know it.
-  // if I didn't tell you and the email told you because the email wrote its
-  // ET-> you know it. if you didn't get anything, you assume my time. no
-  // asking in email routes." `extracted.timezoneHints` already carries the
-  // free-text zone + which of the two tiers it came from; resolve to IANA
+  // ── Stated timezone (#24 rows 129/136; authority corrected report row 144)
+  // — owner's precedence ruling, verbatim: "don't ask. if I tell you in
+  // email the timezone, you know it. if I didn't tell you and the email
+  // told you because the email wrote its ET-> you know it. if you didn't get
+  // anything, you assume my time. no asking in email routes."
+  // `extracted.timezoneHints` carries the free-text zone; resolve to IANA
   // statically (never a live lookup on this leg) and persist through the
   // identity chokepoint. Only for a hint whose email survived the
   // meaningful-participant filter above (never stamp a "timezone" onto the
   // owner's own row or Maelle's own mailbox). An unresolvable string, or no
   // hint at all, means tier 3 applies — the existing owner-zone fallback in
   // attendeeAvailability.ts — and this loop deliberately does nothing further.
+  //
+  // AUTHORITY (report row 144) is a STRUCTURAL fact now, never a model
+  // classification: Graph's `uniqueBody` is its own server-side isolation of
+  // the text unique to THIS message — the sender-gated owner's own new
+  // words, excluding whatever it merely quotes from earlier in the chain. A
+  // stated zone earns owner-tier authority only when it is actually PRESENT
+  // in that unique text — checked with a WORD-BOUNDARY match
+  // (statedZoneAppearsInUniqueBody above), not a bare substring test, so a
+  // short token like "ET" can't match incidentally inside an unrelated word
+  // and mint owner-tier authority the owner never actually wrote. Used to
+  // trust a Haiku classifier's own claim that a snippet was "the owner's own
+  // note" and write that straight to owner authority — wrong once and it
+  // stuck forever, because no later auto-tier correction can outrank an
+  // owner-tier value. Reading Graph's own diff instead of a position guess
+  // closes that. An empty/unpopulated `uniqueBody` (Graph had nothing unique
+  // to report) fails safe here too — the helper returns false on an empty
+  // haystack, so it can never escalate to owner-tier on missing data.
+  const uniqueBodyPlain = (
+    message.uniqueBodyContentType === 'text' ? message.uniqueBody : htmlToPlainText(message.uniqueBody)
+  ).toLowerCase();
+
   for (const hint of extracted.timezoneHints) {
     if (!isMeaningfulParticipant(hint.email)) continue;
     const iana = inferTimezoneFromStateStatic(hint.statedTimezone);
     if (!iana) {
       logger.info('Email inbound — stated timezone did not resolve to a known IANA zone, leaving the owner-zone fallback in place', {
-        email: hint.email, stated: hint.statedTimezone, source: hint.source,
+        email: hint.email, stated: hint.statedTimezone,
       });
       continue;
     }
-    const setBy: CoreFieldSetBy = hint.source === 'forwarding_note' ? 'owner' : 'auto';
+    const provablyOwnersOwnText = statedZoneAppearsInUniqueBody(hint.statedTimezone, uniqueBodyPlain);
+    const setBy: CoreFieldSetBy = provablyOwnersOwnText ? 'owner' : 'auto';
     const { outcome } = setPersonTimezoneByEmail(hint.email, iana, setBy, { ownerDomain });
     logger.info('Email inbound — stated timezone resolved and applied', {
-      email: hint.email, stated: hint.statedTimezone, iana, source: hint.source, setBy, outcome,
+      email: hint.email, stated: hint.statedTimezone, iana, setBy, outcome, provablyOwnersOwnText,
     });
   }
 

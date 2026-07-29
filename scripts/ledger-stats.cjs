@@ -28,6 +28,7 @@
  *   node scripts/ledger-stats.cjs --since 2026-07-01
  *   node scripts/ledger-stats.cjs --lane meeting  # one lane, with its findings
  *   node scripts/ledger-stats.cjs --runs          # per-run summary
+ *   node scripts/ledger-stats.cjs --by-invariant  # one PRINCIPLE, however many places broke it
  *
  * `--open` exists because the backlog IS the ledger — every row whose verdict is
  * not `built` is still open, so a separate backlog file is a second copy that
@@ -48,6 +49,7 @@ const argOf = (flag) => {
 const since = argOf('--since');
 const laneFilter = argOf('--lane');
 const byRun = argv.includes('--runs');
+const byInvariant = argv.includes('--by-invariant');
 const openOnly = argv.includes('--open');
 
 if (!fs.existsSync(LEDGER)) {
@@ -350,6 +352,37 @@ if (byRun) {
   for (const [k, s] of rr) {
     console.log(`  ${pad(s.date || '?', 12)} ${pad(k, 28)} ${lpad(s.total, 4)} dispatches · ${lpad(s.built, 3)} built · ${lpad(s.push, 3)} pushback`);
   }
+}
+
+if (byInvariant) {
+  // N22 · Dedupe is by rootCause `file:line`, which answers "is this the same BUG"
+  // and is blind to "is this the same RULE". Three rows in three files broke one
+  // invariant — a model may pick a VALUE, never the TIER — and read as three
+  // unrelated findings; the product chat, reading the same rows, proposed three
+  // separate charter rules, one per lane. Correct from where it stood. This groups
+  // by the principle instead of the location, so a root gets fixed once.
+  console.log('\nBy invariant — one principle, however many places it broke');
+  const inv = new Map();
+  let untagged = 0;
+  for (const r of scoped) {
+    if (!r.invariant) {
+      untagged += 1;
+      continue;
+    }
+    if (!inv.has(r.invariant)) inv.set(r.invariant, []);
+    inv.get(r.invariant).push(r);
+  }
+  if (!inv.size) console.log('  No row carries an `invariant` tag yet.');
+  for (const [name, list] of [...inv.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    const lanes = [...new Set(list.map((r) => r.lane))];
+    console.log(`\n  ${name} — ${list.length} row(s) across ${lanes.length} lane(s): ${lanes.join(', ')}`);
+    for (const r of list) console.log(`    [${r.verdict}] ${pad(r.lane, 12)} ${r.ref || '(no ref)'}  ${String(r.finding || '').slice(0, 80)}`);
+    if (list.length > 1)
+      console.log(`    → ${list.length} places, ONE rule. Fix the root once; ${list.length} symptom fixes is the failure this view exists to catch.`);
+  }
+  // A5: the tag is optional, so its own coverage must be visible — otherwise this
+  // view prints "no invariants" on a ledger nobody tagged and reads like good news.
+  console.log(`\n  ${untagged} of ${scoped.length} row(s) carry NO \`invariant\` tag. This view sees only what was tagged.`);
 }
 
 if (laneFilter) {

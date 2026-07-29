@@ -2,6 +2,48 @@
 
 ---
 
+## 4.3.1 — he can see what they sent him, and the guard that was missing where nobody was watching
+
+A colleague could send Maelle a photo and the owner would only ever read *her description* of it. The file now reaches his DM, threaded under that colleague's other receipts, forwarded by code at ingestion rather than by the model — because a model-driven forward provably cannot fire on the turn the image arrives: history is read before the file url is appended, so the url does not exist until turn two.
+
+Building that surfaced something worse. The **catch-up path had no prompt-injection scan at all** — a colleague's image arriving while she was disconnected reached the model's context unscanned, and that path runs unattended after every outage, which is exactly when nobody is looking. It had drifted that way because the download-and-scan loop exists in more than one place and the replay copy was written before the shared scanner existed and never migrated.
+
+The third story is a fix that had to be caught. Making the image forward stop blocking the turn introduced a regression no test and no author would have noticed: a transient Slack failure would have written a colleague's **raw Slack ID over their real name** in `people_memory` — the name the system prompt, outreach and calendar invites all read — and it self-heals on the next turn, so the evidence erases itself. The combined verify found it, and the root cause was three `users.info` calls for one fact where the report had claimed two.
+
+### Added
+- **Colleague images reach the owner.** Forwarded at ingestion, strictly after the injection scan, into the same per-conversation shadow thread as that colleague's other receipts. Restricted to the owner's own email domain for now — a gate that is easy to lift and was chosen because the alternative is letting anyone outside the company push files into his DM.
+- **A file can ride any owner-facing message.** `SendOptions.attachments` was declared on the interface but implemented on exactly one method, and every owner post goes through the *other* one — so the primitive was unreachable from the owner path. The upload loop was extracted (not cloned) and both verbs now carry it, with a returned `attachments_failed` so a swallowed upload stops being invisible.
+- **The receipt says what the picture was.** The Haiku description already existed and was already paid for; only the persisted-history string ever read it, while the owner's shadow rendered the raw `(image attached, no caption)` placeholder.
+- **Hebrew gender from a person's own words** (gh#51). A third detection tier reading **first-person morphology only** — `אני שמח` vs `אני שמחה` is a self-declaration; second person reveals the *addressee* and third person a mentioned party, and conflating them is the failure that got the name-based guess deleted after a production incident. Gated on a deterministic script check, quoted lines stripped structurally, one model call per person *ever*, behind a new `advanced` profile block that defaults **off**.
+
+### Changed
+- **Prompt prose is now scoped to the channel that can act on it.** An email turn was still being taught `move_meeting`, `delete_meeting` and `create_approval(policy_exception)` — on the one leg whose reply is forwarded verbatim to a client. Measured: a Slack turn is unchanged at 13,081 tokens; an email turn went 13,081 → 9,498, **−27% on every email turn**.
+- **The image forward no longer blocks the turn.** It was awaited inline, so a colleague sending four screenshots waited on roughly nine sequential HTTP round trips before Maelle began thinking.
+- **Catch-up answers the words even when the picture fails.** Routing replay through the shared scanner imported a live-path behaviour the owner did not want there: a mere *download* failure aborted the whole missed message, so a question carrying one oversized attachment got "that image is a bit big" and no answer. The exemption keys on **why** the image is missing — a security refusal still fails closed, because the text of an injection attempt can itself be the attack.
+
+### Fixed
+- **A colleague's image on the catch-up path was never scanned for injection.** The ad-hoc loop was deleted and the branch now calls the one shared implementation, so there is no second copy to drift again on that surface.
+- **A transient Slack failure could overwrite a colleague's name with their Slack ID.** A pre-caught promise turned a throw-on-failure identify path into a silent-null path that still logged "Colleague identified" and still wrote to the person store. One hoisted fetch restores the throw and removes all three duplicate calls.
+- **A wrong timezone could stick at owner authority forever.** Persistence tier was derived from a model's guess about *where in the body* a zone appeared — a model choosing a tier, not a value. The tier now follows a structural fact (Graph's own isolation of the text unique to this message), tested with word boundaries rather than a substring match that fired on `ET` inside "market". Narrowed, not closed: the predicate proves he wrote the token, not that he asserted it about that person.
+- **The tool result claimed a person stated a timezone they never mentioned.** `_requested_time_local` described its zone as "the zone the times were given in" even when the system had inferred it. The numbers were always right; the provenance claim was not.
+- **`get_calendar`'s "did you book that?" recall had never once fired.** The create audit row wrote `details.start` while its only reader expected `event_start_iso` — a silent key mismatch that killed a shipped feature, and the direct argument against carrying more state in an unschema'd blob.
+- **A moved meeting recorded where it went but never where it was.** The pre-move state was already in memory from a call the code had already made, so persisting it cost nothing.
+- **A comment claimed a running subsystem was dead code.** `whatsapp.ts` announced that nothing imports it and it has zero runtime effect; it is imported and called at boot, and inert per-profile for a different reason entirely.
+
+### Migration
+- **`audit_log` is now owner-scoped.** It was the only stateful table in the schema without an `owner_user_id`, and its rows reach the model's context through the calendar-recall block — so with two profiles one owner's `get_calendar` could narrate the other's cancelled meetings. Adds the column, an index, and an owner filter on the reader; backfills existing rows **only** when exactly one profile is configured, and refuses to guess otherwise. A thirteenth writer was found during the work — a raw `INSERT` bypassing the typed helper, invisible to the type checker — so both write paths and both read paths are now filtered.
+
+### Invariants preserved
+- A forward never launders provenance: only urls that survived the scan are eligible, the forward sits structurally after the guard that judged them, and a forwarded url is never written into the owner's own conversation history.
+- Every existing `shadowNotify` caller is unaffected — none passes attachments, and the upload short-circuits before any Slack call.
+- A person can always correct their own inferred gender: the store already refuses only a *strictly lower* rank, so an equal-rank self-declaration wins without any change.
+
+### Not changed
+- The undo tool is still not built. The substrate decision landed instead, and it is the useful half: **revertibility follows spine membership** — an action on the requests spine can be reverted, one that is not cannot be, and making it revertible means putting it there rather than building a second undo mechanism beside it. A reverted cancellation is also not an undo: Graph has already emailed every attendee, so she says so rather than re-booking and calling it a revert.
+- Channel/@mention colleague images are not forwarded, and external or guest colleagues are excluded by the domain gate.
+
+---
+
 ## 4.3.0 — her first non-Slack transport, and he stays the gatekeeper
 
 Maelle can now be used *on* email without being *reachable* on email. He forwards a meeting-request thread to her own mailbox; she reads the whole chain, works out who is actually on it, computes options against his real calendar and rules, and replies **to him** — he forwards it onward himself. She never emails an external, and that single constraint is what let this ship as a narrow slice instead of the full two-way connector, which had been assessed as a project on the scale of the WhatsApp effort.

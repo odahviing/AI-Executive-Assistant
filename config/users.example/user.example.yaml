@@ -319,3 +319,16 @@ skills:
 # .md files you put in config/users/<your-name>_kb/. Each file is a
 # reference document she can pull from when answering questions or
 # composing replies.
+
+
+
+# ─── ADVANCED (RARE) ─────────────────────────────────────────────────
+#
+# Narrow, opt-in knobs most people never need. Every field defaults off.
+
+# advanced:
+#   # When a colleague writes to her in Hebrew and her gender is still
+#   # unknown, she notices a first-person self-declaration in their OWN
+#   # message ("אני שמח" vs "אני שמחה") and remembers it — same as if
+#   # they'd told her directly. Off by default.
+#   self_declared_gender_detection: false

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { config } from '../config';
 import logger from '../utils/logger';
+import { loadAllProfiles } from '../config/userProfile';
 import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requests';
 import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
 import { runDedupePeopleByEmail } from './migrations/v4_0_4_dedupe_people_email';
@@ -150,16 +151,21 @@ function initSchema(db: Database.Database): void {
 
     -- Audit log — immutable record of all actions taken
     CREATE TABLE IF NOT EXISTS audit_log (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      timestamp   TEXT NOT NULL DEFAULT (datetime('now')),
-      action      TEXT NOT NULL,
-      source      TEXT NOT NULL,  -- slack | email | system
-      actor       TEXT,           -- user id or 'maelle'
-      target      TEXT,           -- meeting id, user email, etc
-      details     TEXT,           -- JSON
-      outcome     TEXT            -- success | failure | pending_approval
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp     TEXT NOT NULL DEFAULT (datetime('now')),
+      owner_user_id TEXT NOT NULL DEFAULT '',  -- backfilled below on upgrade; see #52 tenancy fix
+      action        TEXT NOT NULL,
+      source        TEXT NOT NULL,  -- slack | email | system
+      actor         TEXT,           -- user id or 'maelle'
+      target        TEXT,           -- meeting id, user email, etc
+      details       TEXT,           -- JSON
+      outcome       TEXT            -- success | failure | pending_approval
     );
   `);
+  // idx_audit_log_owner is created further down, AFTER the owner_user_id
+  // ALTER TABLE migration runs — on an upgrade the column doesn't exist yet
+  // at this point (CREATE TABLE IF NOT EXISTS is a no-op on an existing
+  // table), so creating the index here would throw on every pre-#52 DB.
 
   // ── Migrations — safe to run every startup, idempotent ──────────────────────
   // v3.4.x — the multi-party coord subsystem was removed. Drop its legacy
@@ -218,9 +224,45 @@ function initSchema(db: Database.Database): void {
     // classified-as-response 10min-24h), or 24h elapsed.
     `ALTER TABLE outreach_jobs ADD COLUMN followup_closed_at TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN followup_close_reason TEXT`,
+    // #52 (O3) — audit_log was the only stateful table with no owner scope;
+    // its reader (recentAuditEntries, called from the owner-DM calendar-recall
+    // block) filtered action+outcome+timestamp only, so a second profile's
+    // get_calendar could narrate THIS owner's audit trail. Column added here
+    // for upgrades; CREATE TABLE above covers fresh installs.
+    `ALTER TABLE audit_log ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''`,
   ];
   for (const sql of columnMigrations) {
     try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
+  }
+
+  // #52 (O3) — now that owner_user_id exists on every audit_log row (fresh
+  // install via CREATE TABLE, upgrade via the ALTER TABLE above), the index
+  // can be created safely, and any row still carrying the '' placeholder
+  // (pre-existing rows on an upgraded DB) gets backfilled. Only backfill when
+  // there is EXACTLY one configured profile — with any other count we cannot
+  // safely assert whose rows these are, so we leave them '' rather than
+  // guess (a query with an empty owner filter simply returns nothing, which
+  // is the safe failure mode, not a leak).
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_log_owner ON audit_log(owner_user_id, action)`);
+    const unbackfilled = db.prepare(`SELECT COUNT(*) AS c FROM audit_log WHERE owner_user_id = ''`).get() as { c: number };
+    if (unbackfilled.c > 0) {
+      const profiles = loadAllProfiles();
+      if (profiles.size === 1) {
+        const [[, onlyProfile]] = [...profiles.entries()];
+        const ownerId = onlyProfile.user.slack_user_id;
+        const backfilled = db.prepare(`UPDATE audit_log SET owner_user_id = ? WHERE owner_user_id = ''`).run(ownerId);
+        logger.info('audit_log.owner_user_id backfilled to the single configured profile', {
+          ownerId, rows: backfilled.changes,
+        });
+      } else {
+        logger.warn('audit_log.owner_user_id backfill skipped — profile count is not exactly 1, refusing to guess', {
+          profileCount: profiles.size, unbackfilledRows: unbackfilled.c,
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn('audit_log.owner_user_id backfill failed (non-fatal)', { err: String(err) });
   }
 
   // #41 ("only one spine", owner ruling 2026-07-26) — retire outreach_jobs.status.
@@ -856,6 +898,11 @@ function initSchema(db: Database.Database): void {
 // ── Audit log helper ─────────────────────────────────────────────────────────
 
 export function auditLog(params: {
+  // #52 (O3) — required, not optional: audit_log was the one stateful table
+  // with no owner scope, and a defaulted/omitted value here would silently
+  // recreate the leak it closes. Every one of the 12 call sites must supply
+  // the ACTUAL owner this action belongs to — never the first-loaded profile.
+  ownerUserId: string;
   action: string;
   source: string;
   actor?: string;
@@ -865,9 +912,10 @@ export function auditLog(params: {
 }): void {
   const db = getDb();
   db.prepare(`
-    INSERT INTO audit_log (action, source, actor, target, details, outcome)
-    VALUES (@action, @source, @actor, @target, @details, @outcome)
+    INSERT INTO audit_log (owner_user_id, action, source, actor, target, details, outcome)
+    VALUES (@ownerUserId, @action, @source, @actor, @target, @details, @outcome)
   `).run({
+    ownerUserId: params.ownerUserId,
     action:  params.action,
     source:  params.source,
     actor:   params.actor  ?? null,
@@ -882,12 +930,19 @@ export function auditLog(params: {
  * Used by active-mode calendar-health to detect "owner just deleted this
  * floating block — don't re-book it" before auto-creating a missing block.
  *
- * Filters at SQL level on action + outcome + timestamp (cheap, indexed by
- * the AUTOINCREMENT primary key's row order). Returns parsed details so
- * callers can match on whatever fields they need (subject, event_start_iso,
- * etc.). Typically 0–10 rows in a normal window — no need to scan further.
+ * Filters at SQL level on owner + action + outcome + timestamp (cheap,
+ * indexed via idx_audit_log_owner). Returns parsed details so callers can
+ * match on whatever fields they need (subject, event_start_iso, etc.).
+ * Typically 0–10 rows in a normal window — no need to scan further.
+ *
+ * #52 (O3) — ownerUserId is required. Pre-fix this filtered only on
+ * action+outcome+timestamp, so with a second profile configured, this
+ * owner's get_calendar could narrate another owner's cancelled/created
+ * meetings — the one caller (calendarReads.ts) renders these audit entries
+ * straight into the model's context.
  */
 export function recentAuditEntries(params: {
+  ownerUserId: string;
   action: string;
   windowDays?: number;
   outcome?: 'success' | 'failure' | 'pending_approval';
@@ -905,11 +960,12 @@ export function recentAuditEntries(params: {
   const rows = db.prepare(`
     SELECT id, timestamp, actor, target, details, outcome
     FROM audit_log
-    WHERE action = @action
+    WHERE owner_user_id = @ownerUserId
+      AND action = @action
       AND outcome = @outcome
       AND timestamp > datetime('now', '-' || @windowDays || ' days')
     ORDER BY id DESC
-  `).all({ action: params.action, outcome, windowDays }) as Array<{
+  `).all({ ownerUserId: params.ownerUserId, action: params.action, outcome, windowDays }) as Array<{
     id: number;
     timestamp: string;
     actor: string | null;

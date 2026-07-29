@@ -464,6 +464,20 @@ const UserProfileSchema = z.object({
     search: true, social: false, venue: false, news: false,
   })),
 
+  // v4.3.x (#51) — narrow, opt-in advanced knobs most tenants never need.
+  // Every field defaults OFF, so a profile that omits `advanced:` entirely
+  // (every existing yaml) gets byte-identical behavior to today — no other
+  // tenant pays for or receives what's gated here.
+  advanced: z.preprocess(v => v ?? undefined, z.object({
+    // First-person Hebrew morphology as a THIRD gender-detection tier
+    // ("אני שמח" vs "אני שמחה" — a self-declaration in the person's own
+    // Slack message), alongside Slack pronouns + profile photo (see
+    // src/utils/genderDetect.ts). Off by default; opt in per tenant.
+    self_declared_gender_detection: z.boolean().default(false),
+  }).default({
+    self_declared_gender_detection: false,
+  })),
+
   // Which communication channels the assistant is active on
   channels: z.object({
     slack: z.object({
@@ -672,6 +686,20 @@ export function loadUserProfile(profileName: string): UserProfile {
   });
 
   return parsed.data as unknown as UserProfile;
+}
+
+// #52 (O3) — the Graph calendar-mutation layer (calendarMutations.ts) only
+// carries `userEmail`, never a slack id, so its audit_log writes need a
+// email → owner lookup. Scans profileCache (populated by loadUserProfile,
+// which loadAllProfiles calls for every profile at boot) rather than
+// re-reading YAML — cheap, and correct as soon as loadAllProfiles has run
+// once. Returns undefined rather than guessing when no profile matches.
+export function getProfileByEmail(email: string): UserProfile | undefined {
+  const target = email.toLowerCase();
+  for (const profile of profileCache.values()) {
+    if (profile.user.email.toLowerCase() === target) return profile;
+  }
+  return undefined;
 }
 
 export function loadAllProfiles(): Map<string, UserProfile> {

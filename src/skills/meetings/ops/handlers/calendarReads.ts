@@ -215,8 +215,9 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         if (isOwnerDm && eventCount === 0) {
           try {
             const { recentAuditEntries } = await import('../../../../db/client');
-            const audits = recentAuditEntries({ action: 'delete_meeting', windowDays: 7 });
-            const auditsCreate = recentAuditEntries({ action: 'create_meeting', windowDays: 7 });
+            const ownerUserId = context.profile.user.slack_user_id;
+            const audits = recentAuditEntries({ ownerUserId, action: 'delete_meeting', windowDays: 7 });
+            const auditsCreate = recentAuditEntries({ ownerUserId, action: 'create_meeting', windowDays: 7 });
             // Filter to entries whose event_start_iso falls inside the queried window.
             const windowStartMs = Date.parse(args.start_date as string);
             const windowEndMs = Date.parse(args.end_date as string);
@@ -797,6 +798,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         const confirmedGone = await verifyEventDeleted(userEmail, meetingId);
         if (!confirmedGone) {
           auditLog({
+            ownerUserId: context.profile.user.slack_user_id,
             action: 'delete_meeting',
             source: context.channel,
             actor: context.userId,
@@ -878,6 +880,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           });
         }
         auditLog({
+          ownerUserId: context.profile.user.slack_user_id,
           action: 'delete_meeting',
           source: context.channel,
           actor: context.userId,

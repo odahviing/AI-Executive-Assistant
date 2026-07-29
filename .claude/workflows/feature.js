@@ -58,7 +58,7 @@ if (typeof A === 'string') {
 }
 for (const [key, want] of [
   ['items', 'array'], ['refs', 'array'], ['pieces', 'array'],
-  ['priorClean', 'array'], ['understood', 'array'], ['answers', 'object'],
+  ['priorClean', 'array'], ['recon', 'array'], ['answers', 'object'], ['constraints', 'array'],
 ]) {
   const v = A[key]
   if (v === undefined || v === null) continue
@@ -360,8 +360,16 @@ if (MODE === 'plan') {
   // ago is often already half-built, or asks for something the code makes
   // impossible — both are findings, and both are cheaper to learn now than after
   // a lane has been dispatched.
+  // N19 · The owner's constraints, if he named any. `answers` is build-only — it
+  // responds to openQuestions this pass has not produced yet — so until now a
+  // constraint had no way to reach the one pass that decides what an item MEANS.
+  // At plan time the ticket got a voice and he did not; the product chat hit this
+  // and worked round it by holding four constraints in its own head and checking
+  // recon's output for compliance afterwards, which is checking instead of telling.
+  const CONSTRAINTS = (Array.isArray(A.constraints) ? A.constraints : []).filter((c) => typeof c === 'string' && c.trim())
+
   phase('Recon')
-  const understood = (
+  const recon = (
     await parallel(
       items.map((it) => () =>
         agent(
@@ -370,6 +378,16 @@ if (MODE === 'plan') {
             `**Say so plainly if the gap is bigger than the issue implies** — an improvement that reads like one line and is really a subsystem is the single most useful thing you can surface here.\n\n` +
             `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
             `List openQuestions — things only the owner can decide. Be honest rather than tidy: an improvement is a product decision, so a short list is suspicious, not efficient. But do not manufacture questions the code already answers.\n\n` +
+            // N20 · The `asks` are summarised from a ticket BODY, and those bodies
+            // routinely pre-pick a mechanism — one names the file to create, another
+            // decides "no new tool" before anyone read the code. Given a design this
+            // pass prices that design; given an outcome it works out the how and says
+            // when the gap is bigger than he thinks, which is the whole point of it.
+            `**The \`asks\` below may describe an implementation. Treat it as a PROPOSAL to test against the code, never as a spec to cost.** It was written from a ticket body that often picked a mechanism months ago without reading the code. If a better route exists, name it; if the proposed one is wrong or already impossible, say that plainly. Costing a design nobody checked is the failure mode of this phase.\n\n` +
+            (CONSTRAINTS.length
+              ? `**THE OWNER'S CONSTRAINTS — read these BEFORE deciding what the item means:**\n${CONSTRAINTS.map((c) => `• ${c}`).join('\n')}\n\n` +
+                `A constraint is not a hint. If one makes the item impossible, or forces a materially worse route than you would otherwise take, put that in \`openQuestions\` rather than quietly working round it — **a constraint he cannot have is the most valuable thing you can tell him**, and silently satisfying it hides the choice he needed to make.\n\n`
+              : '') +
             `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
           // N15 · OPUS, on the owner's call. This pass establishes the ground
           // truth every later piece stands on, and NOTHING backstops it: the
@@ -382,15 +400,15 @@ if (MODE === 'plan') {
     )
   ).filter(Boolean)
 
-  const stale = understood.filter((u) => u.alreadyExists)
-  const live = understood.filter((u) => !u.alreadyExists)
+  const stale = recon.filter((u) => u.alreadyExists)
+  const live = recon.filter((u) => !u.alreadyExists)
   if (stale.length) log(`${stale.length} already built — stale issue(s): ${stale.map((s) => s.ref).join(', ')}`)
 
   // Decompose — one pass over ALL of them together, because the cross-improvement
   // view is the whole point: two improvements often want the same seam moved once.
   phase('Decompose')
   const plan = await agent(
-    `Decompose these understood improvements into per-lane pieces the owner can approve one by one.\n\n` +
+    `Decompose these recon findings into per-lane pieces the owner can approve one by one.\n\n` +
       `LANES: ${LANE_MAP}\n\n` +
       `Rules that differ from bug triage — read these, they are the reason this is not the bugger loop:\n` +
       `• Split by CAPABILITY and SURFACE, not by root cause. One improvement legitimately landing in three lanes is normal and is NOT a merge candidate.\n` +
@@ -416,7 +434,7 @@ if (MODE === 'plan') {
     mode: 'plan',
     items,
     stale,
-    understood: live,
+    recon: live,
     pieces,
     blockingQuestions: (plan && plan.blockingQuestions) || [],
     notWorthBuilding: (plan && plan.notWorthBuilding) || [],
@@ -429,7 +447,7 @@ if (MODE === 'plan') {
       (DESCRIBED
         ? 'THESE ARE NOT ON GITHUB YET. If the owner approves, FILE the issue first (see `needsTicket`) — title from the item, body carrying his own words plus the decomposition below, labelled `Improvement`+priority or `Feature`+horizon — then replace the `new-N` placeholder ref on each piece with the real `gh#N` before building, so the ledger and the wrap have something to key on. If he declines, file nothing. Then: '
         : '') +
-      'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({name:"feature", args:{mode:"build", pieces:[...approved], answers:{...}, understood}}). PASS `understood` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered.',
+      'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({scriptPath:".claude/workflows/feature.js", args:{mode:"build", pieces:[...approved], answers:{...}, recon}}). PASS `recon` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered. The join is by `ref`, so the refs in `pieces` and `recon` must match exactly.',
   }
 }
 
@@ -442,13 +460,13 @@ if (!raw.length) {
 }
 
 // Plan mode already established, against the code, what each improvement's area
-// does TODAY — with file:line. Passing `understood` back in hands that to the
+// does TODAY — with file:line. Passing `recon` back in hands that to the
 // builder instead of making it re-derive the same ground from scratch. Same
 // saving as bugger.js's Locate pass, except here the work is already done and was
 // simply being thrown away between the two invocations.
-const understood = Array.isArray(A.understood) ? A.understood : []
+const recon = Array.isArray(A.recon) ? A.recon : []
 const approved = raw.map((p) => {
-  const u = understood.find((x) => x && x.ref === p.ref)
+  const u = recon.find((x) => x && x.ref === p.ref)
   return u ? { ...p, _where: { todayBehaviour: u.todayBehaviour, surfaces: u.surfaces || [] } } : p
 })
 
@@ -687,7 +705,7 @@ const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.
 // number that is obviously wrong, not as a successful-looking run.
 const featureManifest = {
   approved: approved.length,
-  understoodThreaded: approved.filter((p) => p._where).length,
+  reconThreaded: approved.filter((p) => p._where).length,
   wavesRun: wave,
   neverDispatched: remaining.map((p) => p.id),
   crossLaneAsks: { attached: results.filter((r) => hasAsk(r)).length, dispatched: results.filter((r) => String(r.id).endsWith('>dep')).length },
@@ -710,7 +728,14 @@ const featureManifest = {
 }
 const featureWarnings = []
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
-if (understood.length === 0) featureWarnings.push('`understood` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
+if (recon.length === 0) featureWarnings.push('`recon` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
+// The join is by `ref`. "Passed but nothing matched" used to be indistinguishable
+// from "worked" — reconThreaded read 0 with no warning while every builder silently
+// re-derived its area. Absent and non-joining are different failures; say which.
+else if (!featureManifest.reconThreaded && approved.length)
+  featureWarnings.push(
+    `\`recon\` carried ${recon.length} entr${recon.length === 1 ? 'y' : 'ies'} but NONE joined an approved piece — so plan and build disagree on \`ref\`, and every builder re-derived its area anyway. Check the refs match exactly.`
+  )
 if (built.length && A.verify === false) featureWarnings.push('Verify was disabled on a run that built code.')
 if (built.length && A.verify !== false && !verifyRan)
   featureWarnings.push(`THE VERIFY DID NOT RUN — ${built.length} built piece(s) are unchecked. Do NOT wrap without \`/manager verify\`.`)

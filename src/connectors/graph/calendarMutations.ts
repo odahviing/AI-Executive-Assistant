@@ -1,9 +1,24 @@
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import { auditLog } from '../../db';
+import { getProfileByEmail } from '../../config/userProfile';
 import { getClient } from './graphClient';
 import { verifyEventDeleted } from './calendarReads';
 import type { CreateMeetingParams, CreatedMeeting, UpdateMeetingParams } from './calendarTypes';
+
+// #52 (O3) — this layer only ever carries `userEmail`, never a slack id, so
+// every audit_log write here needs a lookup. Resolves via the profile
+// cache (see getProfileByEmail); returns '' (never guesses/defaults to the
+// first-loaded profile) when no profile matches, which is the safe failure
+// mode for the owner-scoped filter recentAuditEntries applies on read.
+function resolveOwnerUserId(userEmail: string): string {
+  const profile = getProfileByEmail(userEmail);
+  if (!profile) {
+    logger.warn('calendarMutations — no profile matches userEmail, audit row will carry no owner', { userEmail });
+    return '';
+  }
+  return profile.user.slack_user_id;
+}
 
 /**
  * v2.2.7 — Normalize an ISO datetime for Graph's `dateTime` field. Graph honors
@@ -29,6 +44,7 @@ function normalizeForGraph(iso: string, tz: string): string {
 
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {
   const client = getClient();
+  const ownerUserId = resolveOwnerUserId(params.userEmail);
 
   const patch: Record<string, unknown> = {};
   if (params.subject)    patch.subject    = params.subject;
@@ -80,6 +96,7 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     await client.api(`/users/${params.userEmail}/events/${params.meetingId}`).patch(patch);
 
     auditLog({
+      ownerUserId,
       action: 'update_meeting',
       source: 'graph_api',
       actor: 'assistant',
@@ -94,6 +111,7 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     (require('./calendarCache') as typeof import('./calendarCache')).invalidateCalendarCache(params.userEmail, 'update_meeting');
   } catch (err) {
     auditLog({
+      ownerUserId,
       action: 'update_meeting',
       source: 'graph_api',
       actor: 'assistant',
@@ -216,6 +234,7 @@ export async function declineMeeting(
 
 export async function createMeeting(params: CreateMeetingParams): Promise<CreatedMeeting> {
   const client = getClient();
+  const ownerUserId = resolveOwnerUserId(params.userEmail);
 
   // Teams-location sanitization: when isOnline=true, Graph auto-creates the
   // Teams meeting and populates the location with the actual join link.
@@ -293,11 +312,16 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     const created = await client.api(`/users/${params.userEmail}/events`).post(event);
 
     auditLog({
+      ownerUserId,
       action: 'create_meeting',
       source: 'graph_api',
       actor: 'assistant',
       target: created.id,
-      details: { subject: params.subject, start: params.start, attendees: params.attendees },
+      // #52 (M1) — key must match the delete row's `event_start_iso`
+      // (calendarReads.ts) so get_calendar's empty-window recall filter
+      // (`inWindow`, calendarReads.ts) can find create rows too. Was `start`,
+      // which the reader never looked for — relevantCreates was always empty.
+      details: { subject: params.subject, event_start_iso: params.start, attendees: params.attendees },
       outcome: 'success',
     });
 
@@ -310,6 +334,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
     return { id: created.id, joinUrl };
   } catch (err) {
     auditLog({
+      ownerUserId,
       action: 'create_meeting',
       source: 'graph_api',
       actor: 'assistant',

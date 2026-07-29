@@ -148,6 +148,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     });
 
     auditLog({
+      ownerUserId: user.slack_user_id,
       action: 'message_received',
       source: 'slack',
       actor: senderId,
@@ -165,6 +166,15 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     // If this is from a colleague — identify them FIRST, then check active jobs
     // Owner-in-group / owner-in-channel gets colleague TOOLS but skips the colleague
     // funnel (no self-upsert, no rate limit, no coord/outreach intercept)
+    // Report row 146b — ONE users.info fetch for this senderId, hoisted above
+    // the colleague block and reused by Step 4's logEvent title and by the
+    // colleagueName resolution further down (previously three separate round
+    // trips for the same fact across this function). Throw-on-failure is
+    // deliberate: a failed lookup must leave `colleagueSenderUser` unset, so
+    // no people_memory upsert happens and no "Colleague identified" log fires
+    // for a fetch that never succeeded (146a — a transient failure must never
+    // overwrite a stored real name with the raw Slack ID).
+    let colleagueSenderUser: any;
     if (role === 'colleague' && !isOwnerInGroup && !isOwnerInChannel) {
       // Step 1: Resolve persona — always do this before anything else so we know who we're talking to
       let colleagueIdentified = false;
@@ -173,8 +183,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           token: assistant.slack.bot_token,
           user: senderId,
         });
-        const u = senderInfo.user as any;
-        const senderName = u?.real_name ?? senderId;
+        colleagueSenderUser = senderInfo?.user as any;
+        const senderName = colleagueSenderUser?.real_name ?? senderId;
         logger.info('Colleague identified', { senderId, name: senderName, channel: channelId });
         colleagueIdentified = true;
 
@@ -182,17 +192,22 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         upsertPersonMemory({
           slackId:  senderId,
           name:     senderName,
-          email:    u?.profile?.email   || undefined,
-          timezone: u?.tz               || undefined,
+          email:    colleagueSenderUser?.profile?.email   || undefined,
+          timezone: colleagueSenderUser?.tz               || undefined,
         });
         // Detect gender in background if not yet known
-        const colImageUrl = u?.profile?.image_192 || u?.profile?.image_72 || undefined;
+        const colImageUrl = colleagueSenderUser?.profile?.image_192 || colleagueSenderUser?.profile?.image_72 || undefined;
         detectAndSaveGender({
           slackId:  senderId,
           name:     senderName,
-          pronouns: u?.profile?.pronouns || undefined,
+          pronouns: colleagueSenderUser?.profile?.pronouns || undefined,
           imageUrl: colImageUrl,
           botToken: assistant.slack.bot_token,
+          // #51 — first-person Hebrew morphology self-declaration tier. Opt-in
+          // (default off); `text` here is genuinely senderId's OWN message, the
+          // one condition detectAndSaveGender requires before reading it as a
+          // self-declaration.
+          selfText: profile.advanced.self_declared_gender_detection ? text : undefined,
         }).catch(() => {});
       } catch (err) {
         logger.warn('Could not identify colleague — proceeding anyway', { senderId, err: String(err) });
@@ -247,21 +262,14 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // history + outreach_jobs + audit log already preserve message content;
       // we don't need a third copy in the prompt.
       if (colleagueIdentified) {
-        try {
-          const senderInfo = await app.client.users.info({
-            token: assistant.slack.bot_token,
-            user: senderId,
-          });
-          const u = senderInfo.user as any;
-          const senderName = u?.real_name ?? senderId;
-          logEvent({
-            ownerUserId: profile.user.slack_user_id,
-            type: 'message',
-            title: `${senderName} sent you a message`,
-            detail: text.slice(0, 200),
-            actor: senderName,
-          });
-        } catch (_) { /* non-critical */ }
+        const senderName = colleagueSenderUser?.real_name ?? senderId;
+        logEvent({
+          ownerUserId: profile.user.slack_user_id,
+          type: 'message',
+          title: `${senderName} sent you a message`,
+          detail: text.slice(0, 200),
+          actor: senderName,
+        });
       }
     }
 
@@ -373,14 +381,11 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     try {
 
       // For colleagues, resolve their real name so the orchestrator can pass it
-      // into the system prompt as `senderName`.
-      let colleagueName: string | undefined;
-      if (role === 'colleague' && !isOwnerInGroup && !isOwnerInChannel) {
-        try {
-          const senderInfo = await client.users.info({ token: assistant.slack.bot_token, user: senderId });
-          colleagueName = (senderInfo.user as any)?.real_name || (senderInfo.user as any)?.name;
-        } catch (_) {}
-      }
+      // into the system prompt as `senderName`. Reuses the fetch from the
+      // colleague block above (row 146b) — no second round trip.
+      const colleagueName: string | undefined = (role === 'colleague' && !isOwnerInGroup && !isOwnerInChannel)
+        ? (colleagueSenderUser?.real_name || colleagueSenderUser?.name)
+        : undefined;
 
       // ── Group-DM addressee gate ──────────────────────────────────────────
       // In a group DM / channel, not every message is for Maelle. Run a
@@ -693,6 +698,13 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               // The person's own words — NOT framedText. Step 4.6 mirrors this
               // string to the owner as `X said: "…"` (GH #150).
               userMessage: text,
+              // v4.3.x (#144, T0) — the Haiku vision description already
+              // computed above (zero new LLM calls) so the Step 4.6 shadow
+              // receipt reports what the picture showed, not just the raw
+              // caption placeholder. undefined when there was no image (or
+              // the vision pass produced nothing) — the field only means
+              // "there is a description to add".
+              inboundAttachmentNote: imageDescPart || undefined,
               isMpim,
               isChannel,
               isOwnerInGroup,

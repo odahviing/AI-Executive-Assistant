@@ -662,9 +662,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // explicit present_in_timezone, used to echo each result back in that zone.
             // #24 B2 — falls back to the auto-derived attendee zone (declared above) when
             // neither was given; an explicit value here still wins outright.
-            const groundTz = searchWindowTz
-              || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '')
-              || autoPresentTz;
+            const explicitGroundTz = searchWindowTz
+              || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
+            const groundTz = explicitGroundTz || autoPresentTz;
+            // report row 145 (2026-07-29) — provenance: only the explicit branch above
+            // was actually STATED (search_window_timezone / present_in_timezone are
+            // both set because a person named that zone). The autoPresentTz fallback
+            // is a SYSTEM inference from the attendees' stored zones — nobody said it.
+            // A tool result must not claim a human said something they didn't (a lie
+            // the model will faithfully repeat), so the label below must say which.
+            const groundTzStated = !!explicitGroundTz;
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
                 rejectedCounts?: Record<string, number>;
@@ -745,7 +752,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               duration_minutes: durationMin,
               candidates_checked: normalized.length,
               results,
-              ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, the zone the times were given in. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
+              ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, ${groundTzStated ? 'the zone the times were given in' : 'a zone Maelle inferred from the attendees (nobody actually stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
 

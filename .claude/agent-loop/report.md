@@ -1,44 +1,41 @@
 # Agent-loop report
 
-**v4.3.0 SHIPPED — committed `0b70f0a`, pushed, built, and RUNNING.** Boot stamp confirmed `version: 4.3.0 / gitSha: 0b70f0a`, `bolt: Now connected to Slack`, `mailPoll — starting mailbox poll timer`. 72 files, +4,360/−709. Typecheck clean.
+**Everything is built, verified, and typecheck-green. Nothing is waiting on you except the wrap.**
 
-**The email leg is live and ready to forward into.** Nothing is waiting on you to make it work.
+## What shipped into the tree (uncommitted)
 
-## Read this before your first forward
+| # | What you'll notice | Status |
+|---|---|---|
+| gh#144 | **You can see colleague images now** — the file lands in your DM, threaded under that colleague's receipts. Also on catch-up after downtime | built |
+| gh#52 | `audit_log` is owner-scoped (a real multi-tenant leak) · the "did you book that?" recall now actually fires — it never had · a move records where it *was* | built |
+| gh#51 | Hebrew gender read from a person's own words. Opt-in, **default off** | built |
+| 143 | Email turns stop being taught `delete_meeting` — **−27% tokens per email turn** | built |
+| 145 | No more "you asked for EST" when the system guessed the zone | built |
+| 144 | A wrong timezone can no longer stick at owner authority | built |
+| 146 | A colleague no longer waits ~9 network calls to send a screenshot | built |
+| 147 | Colleague images arriving after downtime are injection-scanned | built |
+| 147a/b | Dead line removed · **catch-up now answers the text when an image fails to download** | built |
 
-| # | The chat problem | The issue | The solution | Agent | Risk | Status |
-|---|---|---|---|---|---|---|
-| 142 | — | **`humanGate('external')` judges the new two-part reply as ONE string and can rewrite it wholesale.** Nothing protects the `===== FORWARD ONLY BELOW THIS LINE =====` marker, and the fact-preservation veto pins *question-presence* — so a rewrite that correctly strips an owner-directed question from client-facing text gets vetoed and retried with that question pinned back in, plausibly into the forwardable half | Gate the parts separately: PART 2 through the external frame, PART 1 untouched or in the owner frame. That is instructor's own row-135 argument applied one layer up | gatekeeper + instructor | **This regenerates the row-135 harm, caused by the gate rather than the model.** Email leg only | pending owner — recommend build |
-| 143 | — | **`meetings.ts`'s ~400-line prose still renders in full on an email turn** (two of its nine tools survive the clamp), so she is taught `move_meeting`, `delete_meeting` and `create_approval(policy_exception)` on the leg forwarded verbatim to a client | Split that block into channel-aware paragraphs — a real, separate effort | matchmaker | Named residual, carried deliberately. The reply frame is a partial mitigant, not a fix | pending owner — recommend build |
-| 144 | — | A Haiku misclassification of chain text as *the owner's forwarding note* writes a timezone at **owner** authority, which by design no later `auto` correction can override — so a wrong zone is sticky | Derive authority from something other than the model's own judgement about where the text sat | transporter | Email leg, low. Malformed values correctly fall to `'chain'`; only the confidently-wrong case sticks | pending owner — recommend build |
-| 145 | — | `_requested_time_local` tells the model *"the zone the times were **given** in"* — false when the zone came from the new auto-fill, because the times were given in the owner's zone | One-line wording split | matchmaker | **Live Slack path**, benign — the numbers are computed deterministically and are correct, only the provenance label lies | pending owner — recommend build |
-| 126 | The client-bound email had its date text rewritten though the draft was correct | dateVerifier flags `שלישי` against `שלישי` as a mismatch. **Now known to be flag-only** — the swap guard already prevented the edit; only the log claimed a correction, and that log is now honest | Hebrew comparison/normalisation fix | gatekeeper | Lower than reported: it never actually edited the text | **deferred** — owner: "ignore for now" |
-| 125 | — | The slot-hold release DM is not role-gated, so an email booking can Slack-DM a colleague whose hold was released | Leave as-is, or role-gate | matchmaker | The one Slack emission reachable from the email path | **deferred** — owner: "not important for now" |
+## The one thing the verify caught
 
-## Three of my own claims were wrong, and the lanes caught all three
+The first version of 146 introduced a regression: a transient Slack failure would have **overwritten a colleague's real name with their raw Slack ID** in `people_memory` — and that name feeds the system prompt, outreach and invites. It self-heals on the next turn, so it would never have been noticed. Fixed at the root (one fetch, throw restored, `prefetchedSenderInfo` removed entirely). This is the whole reason a direct dispatch still owes a combined pass.
 
-Recorded because the pattern matters more than the instances — in every case I read a **log line as an action** without opening the persisted turn:
+Also corrected: the "two round trips" claim in that row was wrong — there were three.
 
-1. **No conversation topic was burned.** The coda log comes from a different block, and `recordCodaDelivered` only fires on confirmed Slack delivery. It was wasted computation and a dropped coda.
-2. **The 6am was not an ignored timezone.** Run 2's chain states no zone anywhere — your own sanctioned fallback applied correctly. The "He needs EST time" signal arrived in run 3, *after* the offer. Row 129 was a missing capability, not a defect that fired.
-3. **The dateVerifier never rewrote anything** (row 126 above).
+## Owner rulings recorded 2026-07-29
 
-And one estimate was wrong: I said `locationTz` already mapped `'et'` so extraction would be cheap. It mapped `'et'` but not `'est'` — the actual evidenced text — so the fix would have silently failed on the exact case it was for.
+Catch-up **exempted** (text still answered on a download failure; a *suspicious* image still fails closed) · 144's residual **accepted**, no ticket · all nine proposed charter rules **declined** — not charter material · gh#24 stays **partial** · gh#144 **closes at the wrap**.
 
-## What the pre-commit verify caught, and why I fixed it before shipping
+## AT WRAP
 
-**The one-address cap was validating an address the send never used.** `sendDirect` checked the inbound `From`, then `replyToMail` let Graph infer the recipient from the message id — so a `Reply-To` could have carried your availability somewhere the cap believed it had refused. Your `RequireSenderAuthenticationEnabled` flag makes it hard to reach, but the poll runs unattended every 30s, so it wasn't covered by "he's testing supervised." Fixed by PATCHing `toRecipients` explicitly — nothing is inferred now.
+**Close gh#144** with a note that it was solved by ingestion-time forwarding rather than the ticket's items 2/3 (unbuilt), that channel/@mention colleague images are not forwarded, and that external/guest colleagues are excluded by the domain gate. **Close nothing else.**
 
-**And I reclassified one of the verify's own findings.** It filed `cst`/`mst` as a discovery; this wave *introduced* them, on the **Slack** travel path, where `CST` would have produced a 14-hour error. An introduced defect is an overturn by its own rule. Removed, with a note saying why.
+## Known and deliberately left
 
-## Discoveries — next run, not built
+Two discoveries, not built (building a discovery invalidates the pass that found it): **the image download/scan loop exists in two places and has drifted twice** — the replay copy losing its scan *was* row 147, and the DM copy now has an owner-forward the channel copy lacks, so the next image change will hit one and miss the other. And **the forward is one config field from silently inert** — no `user.email` means `getOwnerDomain` returns null and every colleague image is skipped with no error, which for a second tenant is a feature that looks built and does nothing.
 
-`replyToMail` is three Graph calls with no idempotency guard, so a failure between the patch and the send leaves an orphaned draft in your mailbox · `gh#5`'s outbound sub-task is now blocked by design rather than unbuilt (commented on the ticket) · `gh#55` must **not** be closed on the `locationTz` change — that ticket explicitly lists improving the static map as out of scope · a stray `kind='self'` test row `p_SELF_U12345TEST` sits in the production DB.
+Cosmetic, accepted: with four uploads in flight the forward can race the reply receipt and produce two owner DMs instead of one thread.
 
-## Actions
+Still parked by your own call: gh#52's undo tool · gh#45 (the specified fix would silently fail) · gh#155 · rows 125/126.
 
-**Issues:** [#24](https://github.com/odahviing/AI-Executive-Assistant/issues/24) commented and **left open** — row 143 is why. [#5](https://github.com/odahviing/AI-Executive-Assistant/issues/5) commented as partial, with its outbound sub-task marked blocked-by-design. Nothing closed: no row met all three conditions.
-
-**Two changes no diff shows:** `config/users/idan.yaml` is gitignored, so `assistant.email`, `channels.email.enabled: true` and the mailbox live only on this machine. And the live DB row `p_SELF_U0F28CK6H` was repaired out of band.
-
-**One unrequested change for your veto:** `profiler` also fixed `src/core/assistant.ts`'s `update_person_profile` external branch — same root, different door, but a live Slack path you didn't ask for. The verify adjudicated it correct and would keep it.
+**One thing I cannot check from code:** `files:write` scope for the *channel* upload path. The bot has it for DMs. If it's missing, uploads now fail visibly via `attachments_failed` rather than vanishing.

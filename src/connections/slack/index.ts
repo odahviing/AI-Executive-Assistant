@@ -30,7 +30,7 @@ import { detectAndSaveGender } from '../../utils/genderDetect';
 import logger from '../../utils/logger';
 
 function toSendResult(outcome: SendOutcome): SendResult {
-  if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts };
+  if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts, attachments_failed: outcome.attachments_failed };
   return { ok: false, reason: outcome.reason, detail: outcome.detail };
 }
 
@@ -84,7 +84,11 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
     },
 
     async postToChannel(channelRef, text, opts) {
-      const outcome = await slackPostToChannel(app, botToken, channelRef, formatForSlack(text), { threadTs: opts?.threadTs, unfurl: opts?.unfurl });
+      const outcome = await slackPostToChannel(app, botToken, channelRef, formatForSlack(text), {
+        threadTs: opts?.threadTs,
+        unfurl: opts?.unfurl,
+        attachments: opts?.attachments,
+      });
       return toSendResult(outcome);
     },
 

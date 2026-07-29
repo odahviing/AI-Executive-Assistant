@@ -68,6 +68,20 @@ export interface PostReplyInput {
    * sentence, with the real words pushed past the preview cap (GH #150).
    */
   userMessage: string;
+  /**
+   * v4.3.x (#144, T0) — a description of a non-text payload this turn
+   * carried (today: the Haiku vision description of an attached image,
+   * already computed once at ingestion for the history string — see
+   * processMessage.ts's `imageDescPart`). Optional, and DELIBERATELY not
+   * folded into `userMessage` itself: `userMessage` also feeds the Step 3
+   * gate stack (runOutputGates — claimChecker/humanGate/securityGate read
+   * it), and overloading it would silently change what those gates see.
+   * This field is consumed ONLY by the Step 4.6 shadow-mirror receipt: an
+   * owner-facing receipt should report what the message CONTAINED, not just
+   * its text field — "(image attached)" with no description already
+   * computed is a receipt that failed.
+   */
+  inboundAttachmentNote?: string;
   isMpim?: boolean;
   // True when this turn arrived in a real channel (not a DM, not an MPIM). The
   // missing sibling of isMpim — the pipeline needs the full posture to decide
@@ -382,7 +396,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     app, profile, result, say,
     role, colleagueName,
     senderId, channelId, threadTs,
-    history, userMessage, isMpim, isChannel, isOwnerInGroup, mpimMemberIds, voiceInput,
+    history, userMessage, inboundAttachmentNote, isMpim, isChannel, isOwnerInGroup, mpimMemberIds, voiceInput,
     onDelivered,
   } = input;
   const { assistant } = profile;
@@ -574,7 +588,15 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       const { shadowNotify } = await import('../../utils/shadowNotify');
       const who = colleagueName ?? senderId;
       const replyPreview = shadowPreview(cleanReply);
-      const inboundPreview = shadowPreview(userMessage);
+      // v4.3.x (#144, T0) — fold in the attachment description (already
+      // computed at ingestion, zero new LLM calls) so the owner reads what
+      // the picture actually showed, not just "(image attached, no
+      // caption)". Same bracket shape processMessage.ts already uses when
+      // persisting the turn to history — reused, not reinvented.
+      const rawInboundPreview = shadowPreview(userMessage);
+      const inboundPreview = inboundAttachmentNote && inboundAttachmentNote.trim().length > 0
+        ? `[Image${inboundAttachmentNote}] ${rawInboundPreview}`
+        : rawInboundPreview;
       const distinctTools = [...new Set(
         (result.toolSummaries ?? [])
           .map(s => s.match(/^\[([a-z0-9_]+)/)?.[1] ?? '')

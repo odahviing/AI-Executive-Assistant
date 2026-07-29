@@ -95,11 +95,14 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
   });
 
   // Audit log entry — every terminal transition is recorded.
+  // #52 (O3 follow-up) — owner_user_id sourced from the row itself (never the
+  // first-loaded profile), matching every other auditLog() call site.
   try {
     getDb().prepare(`
-      INSERT INTO audit_log (action, source, actor, target, details, outcome)
-      VALUES ('request_closed', 'requests.closeRequest', @actor, @target, @details, 'success')
+      INSERT INTO audit_log (owner_user_id, action, source, actor, target, details, outcome)
+      VALUES (@ownerUserId, 'request_closed', 'requests.closeRequest', @actor, @target, @details, 'success')
     `).run({
+      ownerUserId: row.owner_user_id,
       actor: input.closedBy,
       target: input.id,
       details: JSON.stringify({

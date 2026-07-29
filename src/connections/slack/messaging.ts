@@ -51,7 +51,7 @@ export interface SlackChannelSearchResult {
 }
 
 export type SendOutcome =
-  | { ok: true; channel_id: string; ts?: string }
+  | { ok: true; channel_id: string; ts?: string; attachments_failed?: number }
   | { ok: false; reason: 'not_in_channel_private' | 'channel_not_found' | 'user_not_found' | 'error'; detail: string };
 
 // ── Sends ────────────────────────────────────────────────────────────────────
@@ -100,6 +100,59 @@ export async function resolveDmCounterpart(
   }
 }
 
+/**
+ * v4.3.x (#144, T1) — shared attachment-upload primitive. Download each
+ * Slack file URL with bot-token auth, then re-upload it to the given
+ * channel/thread via files.uploadV2. Extracted out of `sendDM` (the only
+ * caller until now) so `postToChannel` can share it rather than clone it —
+ * a transport capability belongs to the Connection, not to one method on
+ * it (see SendOptions.attachments' doc comment in connections/types.ts).
+ *
+ * Failures don't fail the whole send — by the time this runs the text has
+ * already landed — but they no longer vanish silently either: the caller
+ * gets a count back and surfaces it as SendOutcome.attachments_failed.
+ */
+async function uploadAttachments(
+  app: App,
+  botToken: string,
+  channelId: string,
+  threadTs: string,
+  attachments: Array<{ sourceUrl: string; filename?: string }>,
+): Promise<{ uploaded: number; failed: number }> {
+  let uploaded = 0;
+  let failed = 0;
+  for (const att of attachments) {
+    try {
+      const fileResp = await fetch(att.sourceUrl, {
+        headers: { Authorization: `Bearer ${botToken}` },
+      });
+      if (!fileResp.ok) {
+        logger.warn('uploadAttachments — download failed', {
+          url: att.sourceUrl, status: fileResp.status,
+        });
+        failed++;
+        continue;
+      }
+      const buf = Buffer.from(await fileResp.arrayBuffer());
+      const filename = att.filename || att.sourceUrl.split('/').pop() || 'attachment';
+      await app.client.files.uploadV2({
+        token: botToken,
+        channel_id: channelId,
+        thread_ts: threadTs,
+        file: buf,
+        filename,
+      });
+      uploaded++;
+    } catch (err) {
+      logger.warn('uploadAttachments — upload failed', {
+        url: att.sourceUrl, err: String(err).slice(0, 200),
+      });
+      failed++;
+    }
+  }
+  return { uploaded, failed };
+}
+
 /** Send a 1:1 DM to a Slack user. Opens the DM channel if needed. */
 export async function sendDM(
   app: App,
@@ -127,42 +180,15 @@ export async function sendDM(
       ...(opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
     });
 
-    // v2.2.7 — attachments. Download each Slack file URL with bot-token auth,
-    // then re-upload to the same channel under the same thread (or under the
-    // text message's own ts when no explicit thread). Failures don't fail the
-    // send — text already landed; we log and move on. Slack file URLs require
-    // Authorization: Bearer <bot_token> to download.
+    // v2.2.7 — attachments, under the same thread as the text (or the text
+    // message's own ts when no explicit thread) via uploadAttachments.
+    let attachmentsFailed = 0;
     if (opts.attachments && opts.attachments.length > 0 && res.ts) {
       const threadForAttachments = safeThreadTs(opts.threadTs) ?? res.ts;
-      for (const att of opts.attachments) {
-        try {
-          const fileResp = await fetch(att.sourceUrl, {
-            headers: { Authorization: `Bearer ${botToken}` },
-          });
-          if (!fileResp.ok) {
-            logger.warn('sendDM attachment download failed', {
-              url: att.sourceUrl, status: fileResp.status,
-            });
-            continue;
-          }
-          const buf = Buffer.from(await fileResp.arrayBuffer());
-          const filename = att.filename || att.sourceUrl.split('/').pop() || 'attachment';
-          await app.client.files.uploadV2({
-            token: botToken,
-            channel_id: channelId,
-            thread_ts: threadForAttachments,
-            file: buf,
-            filename,
-          });
-        } catch (err) {
-          logger.warn('sendDM attachment upload failed', {
-            url: att.sourceUrl, err: String(err).slice(0, 200),
-          });
-        }
-      }
+      attachmentsFailed = (await uploadAttachments(app, botToken, channelId, threadForAttachments, opts.attachments)).failed;
     }
 
-    return { ok: true, channel_id: channelId, ts: res.ts };
+    return { ok: true, channel_id: channelId, ts: res.ts, ...(attachmentsFailed > 0 ? { attachments_failed: attachmentsFailed } : {}) };
   } catch (err: any) {
     const detail = err?.data?.error ?? err?.message ?? String(err);
     logger.warn('sendDM failed', { userId, detail });
@@ -204,13 +230,18 @@ export async function sendMpim(
 /**
  * Post to a public or private channel. Auto-joins public channels we're
  * not in; refuses private channels we haven't been invited to.
+ *
+ * v4.3.x (#144, T1) — carries `opts.attachments` now (uploadAttachments,
+ * shared with sendDM): every owner decision post goes through this
+ * function into the daily thread, so before this fix SendOptions.attachments
+ * was unreachable from the owner path even though the type declared it.
  */
 export async function postToChannel(
   app: App,
   botToken: string,
   channelId: string,
   text: string,
-  opts: { threadTs?: string; unfurl?: boolean } = {},
+  opts: { threadTs?: string; unfurl?: boolean; attachments?: Array<{ sourceUrl: string; filename?: string }> } = {},
 ): Promise<SendOutcome> {
   const tryPost = async () => app.client.chat.postMessage({
     token: botToken,
@@ -220,9 +251,18 @@ export async function postToChannel(
     ...(opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
   });
 
+  const withAttachments = async (res: { ts?: string }): Promise<SendOutcome> => {
+    if (!opts.attachments || opts.attachments.length === 0 || !res.ts) {
+      return { ok: true, channel_id: channelId, ts: res.ts };
+    }
+    const threadForAttachments = safeThreadTs(opts.threadTs) ?? res.ts;
+    const { failed } = await uploadAttachments(app, botToken, channelId, threadForAttachments, opts.attachments);
+    return { ok: true, channel_id: channelId, ts: res.ts, ...(failed > 0 ? { attachments_failed: failed } : {}) };
+  };
+
   try {
     const res = await tryPost();
-    return { ok: true, channel_id: channelId, ts: res.ts };
+    return await withAttachments(res);
   } catch (err: any) {
     const code: string = err?.data?.error ?? err?.message ?? '';
 
@@ -239,7 +279,7 @@ export async function postToChannel(
         }
         await app.client.conversations.join({ token: botToken, channel: channelId });
         const res = await tryPost();
-        return { ok: true, channel_id: channelId, ts: res.ts };
+        return await withAttachments(res);
       } catch (joinErr: any) {
         return { ok: false, reason: 'error', detail: joinErr?.data?.error ?? String(joinErr) };
       }

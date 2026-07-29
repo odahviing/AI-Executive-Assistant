@@ -153,6 +153,7 @@ export async function handleManageCalendarIssue(args: Record<string, unknown>, c
           }
 
           auditLog({
+            ownerUserId,
             action: 'manage_calendar_issue',
             source: 'calendar_health',
             actor: profile.user.name,
@@ -231,6 +232,7 @@ export async function handleManageCalendarIssue(args: Record<string, unknown>, c
         }
 
         auditLog({
+          ownerUserId,
           action: 'manage_calendar_issue',
           source: 'calendar_health',
           actor: profile.user.name,

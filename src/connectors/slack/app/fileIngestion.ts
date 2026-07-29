@@ -8,6 +8,7 @@
 import { downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
 import { scanImageForInjection } from '../../../utils/imageGuard';
 import { shadowNotify } from '../../../utils/shadowNotify';
+import { getOwnerDomain } from '../../../utils/attendeeScope';
 import logger from '../../../utils/logger';
 import { isOverloadError } from './helpers';
 import type { SlackAppContext, ProcessImageFileShareParams, ScanAndPrepareImageParams } from './context';
@@ -22,7 +23,7 @@ import type { SlackAppContext, ProcessImageFileShareParams, ScanAndPrepareImageP
 export async function processImageFileShare(ctx: SlackAppContext, params: ProcessImageFileShareParams): Promise<void> {
   const { app, profile, getSenderRole, processMessage, scanAndPrepareImage } = ctx;
   const { assistant } = profile;
-    const { files, message, channelId, ts, threadTs, client, isMpim, mpimMemberIds } = params;
+    const { files, message, channelId, ts, threadTs, client, isMpim, mpimMemberIds, degradeOnDownloadFailure } = params;
 
     const imageFiles = files.filter((f: any) =>
       typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
@@ -38,6 +39,12 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
 
     const images: AnthropicImageBlock[] = [];
     const imageUrls: string[] = [];
+    // Two distinct failure kinds tracked separately (catch-up only cares about
+    // the first): a download failure is a fetch problem, no security verdict
+    // was made; a security refusal (scanAndPrepareImage → null) IS a verdict
+    // and must never be degraded around — see the gate below.
+    let hadDownloadFailure = false;
+    let hadSecurityRefusal = false;
     for (const f of toProcess) {
       const dl = await downloadSlackImage(f.url_private, assistant.slack.bot_token, f.mimetype);
       if ('error' in dl) {
@@ -57,7 +64,9 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
             text: friendly,
           });
         } catch (_) {}
-        return;
+        if (!degradeOnDownloadFailure) return;
+        hadDownloadFailure = true;
+        continue;  // catch-up: try the rest of the batch, degrade at the end
       }
 
       // Image injection guard (shared policy — see scanAndPrepareImage):
@@ -76,12 +85,92 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
           text,
         }).then(() => {}),
       });
-      if (!block) continue;  // suspicious colleague image — dropped
+      if (!block) { hadSecurityRefusal = true; continue; }  // suspicious colleague image — dropped
       images.push(block);
       imageUrls.push(f.url_private as string);
     }
 
-    if (images.length === 0) return;
+    if (images.length === 0) {
+      // Catch-up exemption: degrade to answering the text ONLY when every
+      // failure in the batch was a download failure — no security verdict
+      // fired. If even one image was refused by scanAndPrepareImage, this
+      // must stay fail-closed exactly like the live path (no processMessage
+      // call at all): the message's text can itself be the injection, so a
+      // refused image must never fall through to "answer the text anyway".
+      const shouldDegrade = degradeOnDownloadFailure && hadDownloadFailure && !hadSecurityRefusal;
+      if (!shouldDegrade) return;
+    }
+
+    // v4.3.x (#144, T2) — forward every clean colleague image to the owner's
+    // shadow DM as it arrives ("if a non-owner pass an image, first check it,
+    // if its not flag, give me a chance to see it" — owner). Fires here,
+    // strictly AFTER the scan loop above: only urls that survived
+    // scanAndPrepareImage land in `imageUrls`, so a suspicious colleague
+    // image (dropped + refused above, :79) can never be forwarded — a
+    // forward never launders provenance. The forwarded url is never written
+    // to the OWNER's own conversation history (appendToConversation in
+    // processMessage.ts keys on the COLLEAGUE's threadTs, not the owner's),
+    // so it can never re-enter the owner-only, unscanned image re-attach
+    // path (processMessage.ts's reattachRecentThreadImage).
+    //
+    // Internal-only for now — same conservative default as manage_knowledge's
+    // colleague-path KB gate (registry.ts:445-449). A sender whose email
+    // domain isn't the owner's (Slack Connect guest, or a sender whose email
+    // can't be resolved) is gated out; this is a gate the owner can lift
+    // later, not an architectural limit. Only reachable for DM colleague
+    // images in practice — the MPIM colleague image path is dropped before
+    // this function is ever called (handlers.ts, "owner-only" v1.7.1).
+    //
+    // Report row 146 (cost): this whole pipeline — `users.info` then
+    // `shadowNotify`'s own chat.postMessage + 4 × (download + upload) — used
+    // to run `await`ed HERE, ahead of `processMessage` below, so a colleague
+    // sending 4 images waited on ~9 sequential HTTP round trips before
+    // Maelle even started thinking. Every other `shadowNotify` on the reply
+    // path fires AFTER delivery, never gating it; this one now matches: the
+    // whole forward (its own `users.info` + the domain gate + shadowNotify)
+    // runs in the background via `void`, never delaying the orchestrator
+    // call. This `users.info` is its OWN fetch — never shared with
+    // processMessage's colleague-identify path (report row 146b): a failure
+    // here is genuinely non-fatal (falls through to the catch below, no DB
+    // write, forward just doesn't happen), which is only true because it
+    // isn't also feeding a path that upserts people_memory on success.
+    if (images.length > 0 && getSenderRole(message.user!) === 'colleague') {
+      void (async () => {
+        try {
+          const ownerDomain = getOwnerDomain(profile);
+          const senderInfo = await app.client.users.info({
+            token: assistant.slack.bot_token,
+            user: message.user!,
+          });
+          const senderUser = senderInfo?.user as any;
+          const senderEmail = String(senderUser?.profile?.email ?? '');
+          const senderDomain = senderEmail.includes('@')
+            ? senderEmail.split('@')[1].toLowerCase()
+            : null;
+          const isInternal = !!(ownerDomain && senderDomain && senderDomain === ownerDomain);
+          if (isInternal) {
+            const senderName = senderUser?.real_name || senderUser?.name || message.user;
+            await shadowNotify(profile, {
+              channel: channelId,
+              threadTs,
+              action: `Conversation with ${senderName}`,
+              detail: 'sent an image',
+              conversationKey: threadTs,
+              conversationHeader: `Conversation with ${senderName}`,
+              attachments: imageUrls.map(u => ({ sourceUrl: u })),
+            });
+          } else {
+            logger.info('Colleague image forward skipped — sender not on owner domain', {
+              senderId: message.user, senderDomain, ownerDomain,
+            });
+          }
+        } catch (err) {
+          logger.warn('Colleague image forward threw — proceeding without forward', {
+            err: String(err).slice(0, 200),
+          });
+        }
+      })();
+    }
 
     // Caption: Slack stuffs the user's typed text into event.text / message.text
     const captionText = ((message.text as string | undefined) ?? '').trim();

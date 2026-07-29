@@ -1,5 +1,6 @@
 import type { UserProfile } from '../config/userProfile';
 import { getConnection } from '../connections/registry';
+import type { SendOptions } from '../connections/types';
 import logger from './logger';
 
 /**
@@ -67,6 +68,13 @@ export async function shadowNotify(
      * overlap) pass a wrench 🔧 so a fix reads distinct from a conversation receipt.
      */
     icon?: string;
+    /**
+     * v4.3.x (#144, O1) — optional file attachments, forwarded as-is to
+     * whichever Connection send verb this call resolves to (postToChannel
+     * or sendDirect). Reuses SendOptions.attachments end-to-end; T1 gave
+     * both verbs the upload primitive, so no branching is needed here.
+     */
+    attachments?: SendOptions['attachments'];
   }
 ): Promise<void> {
   if (!profile.behavior.v1_shadow_mode) return;
@@ -94,8 +102,15 @@ export async function shadowNotify(
 
       if (anchorTs && ownerDm) {
         // Thread under existing anchor.
-        const res = await conn.postToChannel(ownerDm, text, { threadTs: anchorTs });
-        if (res.ok) return;
+        const res = await conn.postToChannel(ownerDm, text, { threadTs: anchorTs, attachments: params.attachments });
+        if (res.ok) {
+          if (res.attachments_failed) {
+            logger.warn('shadowNotify attachment upload failed (thread post)', {
+              attachments_failed: res.attachments_failed, action: params.action,
+            });
+          }
+          return;
+        }
         logger.info('shadowNotify thread post failed, falling back to fresh anchor', {
           reason: res.reason, detail: res.detail, action: params.action,
         });
@@ -108,7 +123,7 @@ export async function shadowNotify(
       const headerLine = params.conversationHeader
         ? `${icon} *${params.conversationHeader}*\n${text}`
         : text;
-      const res = await conn.sendDirect(ownerId, headerLine);
+      const res = await conn.sendDirect(ownerId, headerLine, { attachments: params.attachments });
       if (!res.ok) {
         logger.warn('shadowNotify (conversation-key, first send) failed', {
           reason: res.reason, detail: res.detail, action: params.action,
@@ -117,6 +132,11 @@ export async function shadowNotify(
       }
       if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
       if (res.ts) shadowThreadAnchors.set(cacheKey, res.ts);
+      if (res.attachments_failed) {
+        logger.warn('shadowNotify attachment upload failed (conversation-key first send)', {
+          attachments_failed: res.attachments_failed, action: params.action,
+        });
+      }
       return;
     }
 
@@ -133,9 +153,14 @@ export async function shadowNotify(
     // (cache empty) falls through to sendDirect, which populates the cache.
     const knownOwnerDm = ownerDmChannelCache.get(ownerId);
     if (params.channel && params.threadTs && knownOwnerDm && params.channel === knownOwnerDm) {
-      const res = await conn.postToChannel(params.channel, text, { threadTs: params.threadTs });
+      const res = await conn.postToChannel(params.channel, text, { threadTs: params.threadTs, attachments: params.attachments });
       if (res.ok) {
         ownerDmChannelCache.set(ownerId, params.channel);
+        if (res.attachments_failed) {
+          logger.warn('shadowNotify attachment upload failed (in-thread post)', {
+            attachments_failed: res.attachments_failed, action: params.action,
+          });
+        }
         return;
       }
       logger.info('shadowNotify in-thread post failed, falling back to DM', {
@@ -147,12 +172,17 @@ export async function shadowNotify(
     // Default: standalone DM to the owner. Used when the originating context
     // wasn't the owner's DM (e.g. coord initiated by a colleague, or top-level
     // ask with no thread_ts).
-    const res = await conn.sendDirect(ownerId, text);
+    const res = await conn.sendDirect(ownerId, text, { attachments: params.attachments });
     if (!res.ok) {
       logger.warn('shadowNotify failed (sendDirect)', { reason: res.reason, detail: res.detail, action: params.action });
       return;
     }
     if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
+    if (res.attachments_failed) {
+      logger.warn('shadowNotify attachment upload failed (default sendDirect)', {
+        attachments_failed: res.attachments_failed, action: params.action,
+      });
+    }
   } catch (err) {
     // Shadow notifications are fire-and-forget — never let them break the main flow.
     logger.warn('shadowNotify threw', { err: String(err), action: params.action });
