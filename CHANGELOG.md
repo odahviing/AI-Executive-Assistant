@@ -2,6 +2,34 @@
 
 ---
 
+## 4.3.2 — she was answering about the wrong calendar, and a withheld day read as an empty one
+
+Two shapes of the same failure, both from one afternoon of real threads. She told the owner **"11am is free for her too"** and he replied *"NOOOOOOO she has something"* — and she was not lying, she had never read the colleague's calendar at all. On a colleague-path or group-chat turn, *"is X free at Y?"* consulted only the attendee's **stored 09:00–18:00 work hours** plus the owner's own calendar; the real free/busy check was gated to owner-initiated searches. The same tool's spread-search branch had been doing it correctly all along, so two branches of one tool disagreed on how hard to establish the same fact. Pushing back did not help: the re-check fired every time and re-ran the same blind check.
+
+The second shape is worse because it reached a colleague. In a shared thread with Yael, Maelle stated there was **nothing on the calendar** involving her next week — denying a *Leadership Alignment* that has existed for months. The privacy clamp was working exactly as designed and withholding the day; the bug is that it withheld it by returning `events: []`, which is **byte-identical to a genuinely empty calendar**. She could not tell "not allowed to look" from "nothing there", so she asserted the second. Fixing the payload rather than the wording turned out to close a second door nobody had opened: the old shape also wrote **"0 events" into persisted conversation history**, so every later turn re-read a false absence regardless of what the prompt said.
+
+### Fixed — she answered about a calendar she had not read
+- **A named attendee's real free/busy is now checked on every path, not only owner-initiated searches.** Reuses the existing `attendee_busy_collision` rejection plumbing; owner-path validation is byte-identical, since it already had the check. Verified to add **zero** Graph round-trips — the existing request widens rather than a second one firing — and to open no new disclosure to a colleague, because the returned label is the generic *"an attendee is already booked then"* with no subject.
+- **An address that does not match the directory no longer passes silently.** She answered availability for `levana@` when the directory says `levana.b@`, and the unknown address was handed default working hours as though it were a known person. The diagnostic built for exactly this failure had not gone quiet — it had never run, because that branch never asked Graph about the attendee at all. Same root as the item above; the warning now surfaces on both branches from one shared helper rather than two copies.
+- **A rhetorical challenge no longer recruits an attendee.** *"Are you sure you didn't check Yael?"* — a question about a search already done — was read as naming a participant of the meeting being arranged, and Yael was unioned onto the next search. A code fix was established to be impossible: nothing at runtime distinguishes a correctly-omitted name from the dropped attendee that union exists to recover. The extraction now separates a real ask to include from a disputing question about the past, with the two hard cases worked as literal examples. **This one is unproven by construction** — a classifier prompt cannot be verified from code, and the surface forms *"are you sure you didn't check Yael?"* and *"did you also check Dana?"* are near-identical with opposite required outcomes.
+
+### Fixed — a restriction reported as an absence
+- **A withheld shared-surface calendar read now refuses instead of returning an empty list**, using the same error shape three other refusals in that file already use. The immediate reply can no longer claim absence, **and** the persisted history line changed from `0 events` to a named refusal, so later turns cannot re-derive the false claim. A set-but-never-read field in the same payload was retired in the same edit.
+- The prose that was the only control here **stays** as the backstop. It closed a real gap of its own: the old note forbade listing, summarising, counting and hinting, but never forbade *asserting absence* — which is the exact sentence that shipped.
+
+### Changed
+- The duplicated attendee-warning block is **one shared helper** both branches call, discharging an IOU the file had been carrying. Its remedy sentence was also corrected: *"re-call with a narrower window"* is true for a user-supplied range but wrong where the window **is** the candidate slot, so it now names the goal rather than the direction. Net line count down.
+- The agentic framework's seven lanes were renamed from role words to agent nouns, a dedicated **verifier** replaced using a builder lane to check its own work, and the loop gained an **architect** lane that owns the engines and the framework's own tooling. Every lane runs Sonnet; the verifier is pinned to Opus.
+
+### Not changed
+- **The claim-checker keeps confessing rather than acting.** Five draft replies in one day claimed a completed action no tool had performed — the checker caught all five and rewrote them into honest admissions. The remedy that *re-ran the tool* existed and was removed, because re-invoking the orchestrator could re-fire a **write** and once duplicate-sent a real message. Owner's decision to leave it.
+- Deferred with rows of their own: an availability question about one person answered with another person's hours; the "0 events" history line still reachable through three other branches; *"no history of meetings or notes"* told to a colleague on zero tool calls; and two gh#156 complaints nobody had worked.
+
+### Migration
+None. No schema change.
+
+---
+
 ## 4.3.1 — he can see what they sent him, and the guard that was missing where nobody was watching
 
 A colleague could send Maelle a photo and the owner would only ever read *her description* of it. The file now reaches his DM, threaded under that colleague's other receipts, forwarded by code at ingestion rather than by the model — because a model-driven forward provably cannot fire on the turn the image arrives: history is read before the file url is appended, so the url does not exist until turn two.

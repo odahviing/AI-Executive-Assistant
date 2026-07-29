@@ -235,9 +235,13 @@ How to choose scopes:
 ` : '';
 
   const meetingPeopleSection = needMeetingPeople ? `
-MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is asking to set up, schedule, move, or book a MEETING. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
+MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is giving a NEW instruction to set up, schedule, move, or book a MEETING WITH someone. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
 - Include everyone named as a participant EXCEPT ${assistantName} (you) and ${senderName} (the person writing this message).
 - "${isOwner ? 'book 30 min with Lori and Simon' : `I need a meeting with ${ownerFirst} and Simon`}" → the participants named are the OTHER people (e.g. Lori, Simon${isOwner ? '' : `, ${ownerFirst}`}).
+- A name can surface without being an instruction to include them. Test each named person: is this a REAL ASK to include them (now or going forward), or a question DISPUTING whether you already checked them, with nothing new asked?
+  - Disputing, nothing new asked ("are you sure you didn't check Yael?", "you didn't even look at Yael's calendar") → that name is excluded, even though it's named.
+  - A real ask, even phrased as a question ("did you also check Dana?", "can you add Yael too?") → that name IS included.
+- The two can share one sentence: "you didn't check Yael — anyway find me 25 min with Levana" disputes Yael (excluded) and separately asks for Levana (included) → return only Levana, never both.
 - NOT a scheduling request, or nobody named → return an empty array.
 - Do NOT invent, translate, or normalize names — copy them as written. Do NOT guess who a vague reference means; only list explicitly named people.
 ` : '';

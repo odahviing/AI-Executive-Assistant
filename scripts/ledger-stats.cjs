@@ -52,6 +52,54 @@ const byRun = argv.includes('--runs');
 const byInvariant = argv.includes('--by-invariant');
 const openOnly = argv.includes('--open');
 
+// --architect reads the OTHER ledger: `.claude/agent-loop/architect-ledger.jsonl`,
+// the framework's own backlog, filed by whichever chat hit the problem via
+// `scripts/architect-file.cjs`. Same collapse-to-latest logic (append-only means
+// A23-open and A23-built are two rows), different grouping — framework rows have a
+// `target` rather than a lane. Deliberately a self-contained early exit so it
+// cannot perturb the bug-ledger path below.
+if (argv.includes('--architect')) {
+  const AL = path.join(__dirname, '..', '.claude', 'agent-loop', 'architect-ledger.jsonl');
+  if (!fs.existsSync(AL)) {
+    console.error(`No architect ledger at ${AL}`);
+    console.error("It is created by the first 'node scripts/architect-file.cjs' call.");
+    process.exit(1);
+  }
+  const all = fs.readFileSync(AL, 'utf8').split(/\r?\n/).filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const latest = new Map();
+  for (const r of all) latest.set(r.id, r); // append-only: last row for an id wins
+  const rows = [...latest.values()];
+  const CLOSED = new Set(['built', 'declined', 'duplicate']);
+  const open = rows.filter((r) => !CLOSED.has(r.verdict));
+  const p = (s, n) => String(s).padEnd(n);
+
+  console.log(`\nArchitect ledger — ${rows.length} row(s) · ${open.length} open · ${rows.length - open.length} closed`);
+  const counts = {};
+  for (const r of rows) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
+  console.log(`  ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([v, n]) => `${v}:${n}`).join(' · ')}`);
+
+  if (!open.length) {
+    console.log(`\nNothing open. Every framework finding is built, declined or a duplicate.\n`);
+    process.exit(0);
+  }
+  const byTarget = new Map();
+  for (const r of open) {
+    if (!byTarget.has(r.target)) byTarget.set(r.target, []);
+    byTarget.get(r.target).push(r);
+  }
+  console.log(`\nOPEN — awaiting triage or approval\n`);
+  for (const [t, list] of [...byTarget.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    console.log(`${t}  (${list.length})`);
+    for (const r of list) {
+      console.log(`  ${p(r.id, 5)} ${p(r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
+      if (r.evidence) console.log(`        ${String(r.evidence).slice(0, 96)}`);
+    }
+    console.log('');
+  }
+  console.log(`Nothing here is approved to build. The architect triages and proposes; the owner rules.\n`);
+  process.exit(0);
+}
+
 if (!fs.existsSync(LEDGER)) {
   console.error(`No ledger at ${LEDGER}`);
   console.error('It is created on the first wrap that records a dispatch.');
@@ -208,8 +256,32 @@ if (openOnly) {
     console.log(`${lane}  (${rows.length})`);
     for (const r of rows) {
       const ref = r.ref ? `[${r.ref}] ` : '';
-      console.log(`  ${r.verdict === 'needs-owner-decision' ? 'DECIDE' : r.verdict === 'flagged-for-owner' ? 'FLAGGED' : r.verdict.toUpperCase()}  ${ref}${(r.finding || '').slice(0, 110)}`);
+      // A23 · `state` is on 310 of the ledger's 344 rows and was read by NOTHING, so a row the
+      // owner had already parked printed as `DECIDE` — the script asking him to
+      // decide the thing he decided. It stays in the list, deliberately: a lapsed
+      // deferral must not read as handled, so this shows the date it was PARKED
+      // (the row's own date, never a due date parsed out of prose) and lets him see
+      // for himself that it has gone stale. `deferred` is not in CLOSED and must
+      // never be — hiding it is the failure this replaces, one direction along.
+      //
+      // BOTH fields, because the ledger genuinely records a deferral in either: 6
+      // rows carry `state:'deferred'` and 3 more carry `verdict:'deferred'`, and all
+      // 9 print here. Keying on one field alone printed the same word for both and
+      // the date for only 6 of 9 — the same rule true on one path and not the other.
+      const isDeferred = r.state === 'deferred' || r.verdict === 'deferred';
+      const label = isDeferred
+        ? `DEFERRED ${r.date || '(no date)'}`
+        : r.verdict === 'needs-owner-decision'
+          ? 'DECIDE'
+          : r.verdict === 'flagged-for-owner'
+            ? 'FLAGGED'
+            : r.verdict.toUpperCase();
+      console.log(`  ${label}  ${ref}${(r.finding || '').slice(0, 110)}`);
       if (r.rootCause) console.log(`          ${r.rootCause.slice(0, 100)}`);
+      // His own words on the deferral, which is the only thing that distinguishes
+      // "not now" from "never" — first clause only; the rest of `note` is the fix.
+      if (isDeferred && String(r.note || '').trim())
+        console.log(`          parked: ${String(r.note).split('. ')[0].slice(0, 100)}`);
     }
     console.log('');
   }

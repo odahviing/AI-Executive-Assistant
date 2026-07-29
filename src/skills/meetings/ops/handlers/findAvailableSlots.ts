@@ -43,6 +43,64 @@ import { bookingLeadTimeHours, offeredSlotCount } from '../../../../utils/schedu
 import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
+/**
+ * Shared attendee-availability-warning construction for find_available_slots —
+ * called from both the strict/spread pass (a LIST of slots) and the
+ * candidate_slots point-check (a per-instant verdict). Extracted 2026-07-29
+ * (row 163): the candidate branch carried its own copy of this block behind
+ * an IOU ("kept in sync — extract to a shared helper next time we touch this
+ * file") and had already drifted from the original within the same commit
+ * (dropped two clauses of `_attendee_not_checked_warning`). One helper now;
+ * nothing left to drift.
+ *
+ * unresolvedAttendees (#124h): an internal address Graph can't resolve reads
+ * as fully-free — never offer it as checked; did_you_mean comes from
+ * people_memory. attendeesNotChecked (P15): a free/busy read that never
+ * happened (bad window / Graph rejection), same "don't call them free"
+ * consequence but the OPPOSITE cause — a bad address is the model's to fix,
+ * a bad window is not, so the wording must not blame the address.
+ */
+function attendeeCheckWarnings(params: {
+  userEmail: string;
+  ownerFirstName: string;
+  unresolvedAttendees: string[];
+  attendeesNotChecked: string[];
+  /** Appended to both log messages so the two call sites stay distinguishable in logs. */
+  logSuffix: string;
+  logExtra?: Record<string, unknown>;
+}): {
+  attendeeEmailWarning?: Record<string, unknown>;
+  attendeeNotCheckedWarning?: Record<string, unknown>;
+} {
+  const { userEmail, ownerFirstName, unresolvedAttendees, attendeesNotChecked, logSuffix, logExtra } = params;
+  const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
+  const unresolvedInternal = unresolvedAttendees.filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
+  let attendeeEmailWarning: Record<string, unknown> | undefined;
+  if (unresolvedInternal.length > 0) {
+    const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
+    attendeeEmailWarning = {
+      unresolved_attendee_emails: entries,
+      _attendee_email_warning: 'These attendee addresses do NOT exist in the company directory — their availability was NOT checked (a nonexistent mailbox reads as fully free). The address is most likely a wrong guess. Re-call find_available_slots with the corrected address (see did_you_mean) or resolve the person via find_slack_user first. Do NOT present any slot as working for that person until the address resolves.',
+    };
+    logger.warn(`find_available_slots — unresolved internal attendee email(s)${logSuffix}`, {
+      unresolvedInternal, entries, ...(logExtra ?? {}),
+    });
+  }
+
+  let attendeeNotCheckedWarning: Record<string, unknown> | undefined;
+  if (attendeesNotChecked.length > 0) {
+    attendeeNotCheckedWarning = {
+      attendees_not_checked: attendeesNotChecked,
+      _attendee_not_checked_warning: `Availability for ${attendeesNotChecked.join(', ')} could NOT be read for this window — the free/busy request failed, so their calendars were never looked at. These are NOT confirmed-free times for them. Present the slots as ${ownerFirstName}'s own openings and say plainly that you could not check the other side, or re-call with a window Graph can actually answer (this one wasn't one). Never say they are free, and never say their address is wrong — it isn't.`,
+    };
+    logger.warn(`find_available_slots — attendee free/busy was never read for this window${logSuffix}`, {
+      notChecked: attendeesNotChecked, ...(logExtra ?? {}),
+    });
+  }
+
+  return { attendeeEmailWarning, attendeeNotCheckedWarning };
+}
+
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
   // v4.1.x — resolved ONCE per call from the authenticated sender.
@@ -560,11 +618,34 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate pool,
           // not just work-hour clipping. Prior fixes (v2.2.3 #43, v2.3.6 #71)
-          // wired the work-hours half. The colleague-initiated path (coord state
-          // machine) deliberately does NOT auto-pass — coord uses
-          // annotateSlotsWithAttendeeStatus to TAG slots with status, showing
-          // all options per owner's rule.
+          // wired the work-hours half. The colleague-initiated SPREAD search
+          // (the main branch below, a LIST of options) deliberately does NOT
+          // auto-pass — coord/main-branch use annotateSlotsWithAttendeeStatus
+          // to TAG slots with status instead, so a colleague's search never
+          // silently loses an option to an attendee conflict (M6).
           const attendeeBusyEmails = (isOwnerInitiatedSearch && !ignoreAttendeeBusy && attendeeEmails.length > 0)
+            ? attendeeEmails
+            : undefined;
+
+          // 2026-07-29 (row 161, the Levana "she has something" incident) —
+          // candidate_slots (point validation: "is X free at exactly Y?") is
+          // NOT a spread search — there is no list of options a busy-subtract
+          // could silently thin out (M6 doesn't apply to a single instant).
+          // Gating this on isOwnerInitiatedSearch meant a colleague-path (or
+          // MPIM-clamped owner) point-check only ever consulted the named
+          // attendee's generic stored WORK HOURS (loadAttendeeAvailabilityForEmails
+          // is explicitly TZ+hours only, never busy/free) and the OWNER's own
+          // calendar — never the attendee's actual calendar — so "available:
+          // true" was asserted without ever being checked, and every re-ask
+          // ("are you sure?") repeated the same unverified answer (M2: the
+          // point-check must give the SAME real answer the spread search
+          // would; M11: a stated availability fact must be verified, not
+          // guessed). Sharing a NAMED attendee's free/busy (no detail, no
+          // subject) with a colleague is exactly what M12 allows, so this
+          // reuses the identical attendee_busy_collision plumbing the owner
+          // path already has — only the explicit override (ignoreAttendeeBusy)
+          // still turns it off.
+          const candidateAttendeeBusyEmails = (!ignoreAttendeeBusy && attendeeEmails.length > 0)
             ? attendeeEmails
             : undefined;
 
@@ -654,8 +735,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 };
               });
 
-            // Same rule-label mapping as Guard B uses; kept in sync (extract
-            // to a shared helper next time we touch this file).
+            // Local partial application of the shared humanizeViolationLabel
+            // (../../ops/violationLabels.ts) — already the one implementation,
+            // imported here and by calendarReads/createMeeting/moveMeeting;
+            // this just binds ownerFirst for the call site below.
             const labelFor = (reason: string | undefined): string => humanizeViolationLabel(reason, ownerFirst);
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
@@ -672,10 +755,20 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // A tool result must not claim a human said something they didn't (a lie
             // the model will faithfully repeat), so the label below must say which.
             const groundTzStated = !!explicitGroundTz;
+            // 2026-07-29 (row 163, "levana@" vs the directory's "levana.b@") —
+            // one diag per candidate, shared array so unresolved/not-checked
+            // attendee addresses survive the Promise.all and can be surfaced
+            // exactly like the main branch does below (attendeeEmailWarning /
+            // attendeeNotCheckedWarning) — reusing the SAME fields calendarReads.ts
+            // already populates, not a new diagnostic.
+            const perCandidateDiags: Array<{ unresolvedAttendees?: string[]; attendeesNotChecked?: string[] }> = [];
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
                 rejectedCounts?: Record<string, number>;
+                unresolvedAttendees?: string[];
+                attendeesNotChecked?: string[];
               } = {};
+              perCandidateDiags.push(diag);
               if (!cand.end) {
                 // Start didn't parse — a per-candidate fact, not a calendar fact.
                 logger.warn('candidate-slot validation — unparseable start, marking unavailable', {
@@ -688,7 +781,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   userEmail,
                   timezone,
                   durationMinutes: durationMin,
-                  attendeeBusyEmails,
+                  attendeeBusyEmails: candidateAttendeeBusyEmails,
                   attendeeAvailability,
                   searchFrom: cand.start,
                   searchTo: cand.end,
@@ -747,11 +840,23 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               threadTs: context.threadTs,
             });
 
+            // row 163 — same surfacing the main pass does below (shared helper).
+            const { attendeeEmailWarning: attendeeEmailWarningCand, attendeeNotCheckedWarning: attendeeNotCheckedWarningCand } =
+              attendeeCheckWarnings({
+                userEmail,
+                ownerFirstName: ownerFirst,
+                unresolvedAttendees: [...new Set(perCandidateDiags.flatMap(d => d.unresolvedAttendees ?? []))],
+                attendeesNotChecked: [...new Set(perCandidateDiags.flatMap(d => d.attendeesNotChecked ?? []))],
+                logSuffix: ' (candidate validation)',
+              });
+
             return {
               mode: 'candidate_validation',
               duration_minutes: durationMin,
               candidates_checked: normalized.length,
               results,
+              ...(attendeeEmailWarningCand ?? {}),
+              ...(attendeeNotCheckedWarningCand ?? {}),
               ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, ${groundTzStated ? 'the zone the times were given in' : 'a zone Maelle inferred from the attendees (nobody actually stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
@@ -807,49 +912,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               })),
             });
 
-            // v3.3.7 (#124h) — internal attendee addresses Graph could NOT
-            // resolve. A nonexistent mailbox returns NO busy data → reads as
-            // fully free → slots get offered without that person's calendar ever
-            // being checked. External addresses are skipped: Graph never has
-            // their data, and first-time externals are normal. did_you_mean
-            // comes from people_memory by the address's first name token.
-            const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
-            const unresolvedInternal = (diagnosticsOut.unresolvedAttendees ?? [])
-              .filter(e => ownerDomainLower && e.endsWith('@' + ownerDomainLower));
-            let attendeeEmailWarning: Record<string, unknown> | undefined;
-            if (unresolvedInternal.length > 0) {
-              const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
-              attendeeEmailWarning = {
-                unresolved_attendee_emails: entries,
-                _attendee_email_warning: 'These attendee addresses do NOT exist in the company directory — their availability was NOT checked (a nonexistent mailbox reads as fully free). The address is most likely a wrong guess. Re-call find_available_slots with the corrected address (see did_you_mean) or resolve the person via find_slack_user first. Do NOT present any slot as working for that person until the address resolves.',
-              };
-              logger.warn('find_available_slots — unresolved internal attendee email(s)', {
-                unresolvedInternal,
-                entries,
-              });
-            }
-
-            // P15 — attendees whose calendars were never READ (malformed window /
-            // Graph rejected it), as opposed to addresses that don't exist. Both
-            // used to arrive as "no busy data" and be offered as free; they get
-            // separate wording because the requester's next move is different —
-            // a bad address is the model's to fix, an unread window is not, and
-            // telling the owner his colleague's address is a typo when it isn't
-            // is the confidently-wrong reason M11 forbids. Deliberately NOT a
-            // refusal: the slots are still the owner's own valid openings, and
-            // refusing them would be #137 in reverse. It withholds only the claim
-            // that they work for the other people.
-            const notChecked = (diagnosticsOut.attendeesNotChecked ?? []);
-            let attendeeNotCheckedWarning: Record<string, unknown> | undefined;
-            if (notChecked.length > 0) {
-              attendeeNotCheckedWarning = {
-                attendees_not_checked: notChecked,
-                _attendee_not_checked_warning: `Availability for ${notChecked.join(', ')} could NOT be read for this window — the free/busy request failed, so their calendars were never looked at. These are NOT confirmed-free times for them. Present the slots as ${context.profile.user.name.split(' ')[0]}'s own openings and say plainly that you could not check the other side, or re-call with a narrower/valid window. Never say they are free, and never say their address is wrong — it isn't.`,
-              };
-              logger.warn('find_available_slots — attendee free/busy was never read for this window', {
-                notChecked, searchFrom: effectiveSearchFrom, searchTo: args.search_to,
-              });
-            }
+            const { attendeeEmailWarning, attendeeNotCheckedWarning } = attendeeCheckWarnings({
+              userEmail,
+              ownerFirstName: context.profile.user.name.split(' ')[0],
+              unresolvedAttendees: diagnosticsOut.unresolvedAttendees ?? [],
+              attendeesNotChecked: diagnosticsOut.attendeesNotChecked ?? [],
+              logSuffix: '',
+              logExtra: { searchFrom: effectiveSearchFrom, searchTo: args.search_to },
+            });
 
             // v3.3.7 (#125a) — colleague-path soft-block narration hint. When
             // the strict pass rejected slots on the owner's SOFT, owner-

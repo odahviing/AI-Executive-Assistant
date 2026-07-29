@@ -84,6 +84,22 @@ const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-firs
 // paying to re-derive routing he has already approved is pure waste.
 const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
 const PRESET = presetArg.length ? presetArg : null
+// A25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
+// shaped for a copy-paste straight back into `args.issues` — that is the whole
+// point of the shape — so the flag that says "he has not ruled on the parent yet"
+// has to be enforced at the door it makes easy to walk through. Building one of
+// these could implement a dependency of something he is about to decline.
+// Refused HERE because nothing has spawned yet: a loud stop costs one
+// re-invocation (N11), and once he rules, DELETING the flag from the row is the
+// approval. Without this read the field was decoration, which A5 forbids.
+const undecidedPreset = (PRESET || []).filter((i) => i && i.awaitingOwner)
+if (undecidedPreset.length)
+  throw new Error(
+    `args.issues carries ${undecidedPreset.length} row(s) still flagged \`awaitingOwner\`: ` +
+      `${undecidedPreset.map((i) => `${i.id || '(no id)'} (parent verdict ${i.fromVerdict || '?'})`).join(', ')}. ` +
+      `Each is a dependency ask whose PARENT is waiting on the owner, so building it could implement a dependency of something he declines. ` +
+      `Nothing has been dispatched. Get his ruling, delete \`awaitingOwner\` from the row, and re-invoke.`,
+  )
 // Bugs already FIXED but not yet in the running build. Production keeps
 // emitting the same tape until a fix is deployed, so every unattended night the
 // log review honestly re-finds work the previous run already did. The lane does
@@ -382,10 +398,31 @@ const depAsksFor = (lane, rs) =>
 // dependency could implement something he is about to decline. These are
 // RETURNED rather than executed — which is the actual fix here. The bug was
 // never that they went undispatched; it was that they went unmentioned.
+//
+// A25 · The SHAPE now matches `depAsksFor` above, field for field. It did not, and
+// that was the whole remaining defect: `{from, fromVerdict, lane, ask}` has no `id`,
+// no `severity`, no `clarity`, and `ask` where the engine reads `symptom` — so the
+// Manager had to recompose every one by hand into `args.issues`. That is the
+// compose-instead-of-copy failure A16 exists to remove.
+//
+// `awaitingOwner` travels WITH the row rather than living only in the array's name,
+// because the array name does not survive a copy-paste. Nothing in this engine
+// dispatches from here — the dispatch loop reads `depAsksFor`, which filters on
+// `DISPATCHABLE_DEP` — but a well-shaped row must never be mistaken for an approved
+// one by whatever reads it next.
 const deferredDepAsks = (rs) =>
   rs
     .filter((r) => hasAsk(r) && !DISPATCHABLE_DEP.has(r.verdict))
-    .map((r) => ({ from: r.id, fromVerdict: r.verdict, lane: r.dependencyAgent, ask: r.dependencyAsk }))
+    .map((r) => ({
+      id: `${r.id}>dep`,
+      symptom: r.dependencyAsk,
+      lane: r.dependencyAgent,
+      severity: 'high',
+      clarity: 'clear',
+      from: r.id,
+      fromVerdict: r.verdict,
+      awaitingOwner: true,
+    }))
 
 // ---- 1. Scout — find the work AND shape it, in one pass -------------------
 // This was three agents: a GitHub pull, a log review, and a triage that routed
@@ -504,11 +541,33 @@ if (MODE === 'collect') {
   log(`Collect mode: ${buildable.length} issue(s) recorded, ${flagged.length} flagged. NOTHING built — the owner batches these when he is back.`)
   return {
     mode: 'collect',
-    counts: { findings: findingsSeen, atomic: allIssues.length, built: 0, needsOwner: 0, flagged: flagged.length, pending: 0 },
+    // A24 · THE SAME KEY SET as the full-run funnel at the bottom of this file, and
+    // this is the path that needs it MOST: it is the one mode that builds nothing by
+    // design, so `built: 0` here is a CORRECT zero and must be legible as one. The old
+    // literal had six keys against the full run's ten, so the two modes could not be
+    // read the same way and a collect run looked like a failed full run.
+    // `dispatched: 0` is stated rather than omitted — the reason nothing was built is
+    // the mode, not the yield.
+    counts: {
+      findings: findingsSeen,
+      atomic: allIssues.length,
+      buildable: buildable.length + pending.length,
+      dispatched: 0, // by design: collect mode records and returns, it never dispatches
+      built: 0,
+      alreadyFixed: 0,
+      needsShaping: needsShaping.length,
+      flagged: flagged.length,
+      needsOwner: 0,
+      pending: pending.length,
+    },
     results: [],
     collected: buildable, // pass straight back as `args.issues` to build them
     flagged,
-    pending: [],
+    // The over-cap rows, not `[]`. They were computed above and then dropped from
+    // BOTH the return and the count, so a capped collect run silently lost them —
+    // and a funnel that names a number while withholding its rows is a worse lie
+    // than the zero it replaced.
+    pending,
     verifiedClean: [],
   }
 }
@@ -753,9 +812,26 @@ if (VERIFY) {
     // thrown away and only the objection survived. That happened on
     // wf_6b869440-ef7 to the one finding that mattered most. The verify runs
     // last so its asks cannot be dispatched in this run — they must be reported.
+    //
+    // A25 · SAME LITERAL as `deferredDepAsks` above, field for field. It was the
+    // old four-key shape, and `deferredNow` below CONCATENATES the two arrays — so
+    // one heterogeneous list went to the Manager, and a verify-raised row pasted
+    // into `args.issues` carried no `clarity`, joined neither `flagged` nor
+    // `buildable`, and was dropped without a word. A mixed array is worse than the
+    // old shape: half its rows work.
     verifyDepAsks = ((check && check.results) || [])
-      .filter((x) => hasAsk(x))
-      .map((x) => ({ from: x.id, fromVerdict: x.verdict || 'verify', lane: x.dependencyAgent, ask: x.dependencyAsk, fromVerify: true }))
+      .filter((x) => x && hasAsk(x))
+      .map((x) => ({
+        id: `${x.id}>dep`,
+        symptom: x.dependencyAsk,
+        lane: x.dependencyAgent,
+        severity: 'high',
+        clarity: 'clear',
+        from: x.id,
+        fromVerdict: x.verdict || 'verify',
+        awaitingOwner: true,
+        fromVerify: true,
+      }))
     const overturned = new Map(
       ((check && check.results) || [])
         .filter((x) => x.verdict && x.verdict !== 'built')
@@ -917,12 +993,27 @@ return {
   warnings,
   // Write `report.md` from THIS, before anything else, and quote `assertion`.
   persist,
+  // A24 · THE FUNNEL, not just its endpoints. `buildable` is computed at :482,
+  // logged at :494, and was returned in NOTHING — so a run where the work arrived
+  // and something legitimately stopped it read identically to a run that found
+  // nothing, and `already-fixed` was counted nowhere at all. Every drop between
+  // `findings` and `built` now has a named bucket. `buildable` is BEFORE the
+  // severity cap, `dispatched` is after it.
+  //
+  // Deliberately NOT a reconciliation assertion in code: a `>dep` row is dispatched
+  // without ever being an intake issue, so the arithmetic does not close on a
+  // healthy run and a check would cry wolf every time — the `startedAtLine: 1`
+  // mistake. The buckets are for the reader; the missing-bucket question is his.
   counts: {
     findings: findingsSeen,
     atomic: allIssues.length,
+    buildable: buildable.length + pending.length,
+    dispatched: buildable.length,
     built: verified.filter((r) => r.verdict === 'built').length,
-    needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
+    alreadyFixed: verified.filter((r) => r.verdict === 'already-fixed').length,
+    needsShaping: needsShaping.length,
     flagged: flagged.length,
+    needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
     pending: pending.length,
   },
   results: verified,

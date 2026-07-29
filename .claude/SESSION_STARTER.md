@@ -54,6 +54,18 @@ Every lane takes the product requirement into a different area. At a glance:
 
 **Not a lane — `scout`** (`.claude/agents/scout.md`). It owns no code and builds nothing: it pulls the open GitHub `Bug` issues, reviews the logs since the watermark, merges the two, and routes each atomic issue to the lane that owns the fix. Read-only (`Read · Grep · Glob · Bash`). **The lane table below is the map it routes against — keeping that table current is what keeps routing correct.**
 
+**Not a lane — `architect`** (`.claude/agents/architect.md`). It maintains **the framework itself** — the two engines, the Manager skill, this file, `agent-loop/` state, and the framework's own tooling. It never writes `src/` and never rules on product code quality; its subject is whether the agents are in sync, doing their job, and efficient. **Rule tag `A`.**
+
+> **If you hit a problem in the FRAMEWORK, file it — do not fix it, and do not ask Idan to relay it.**
+> ```bash
+> node scripts/architect-file.cjs --finding "…" --evidence "…" --target feature.js --source "this chat"
+> ```
+> A framework problem is an engine that did nothing while reporting success, a manifest that lied, a skill instruction that contradicts the code, a charter that no longer matches what a lane does. **A Maelle bug is not one** — that is a GitHub issue or a report row, and it belongs to a lane. The script refuses a row with no checkable evidence (`--targets` lists valid targets); read the backlog with `node scripts/ledger-stats.cjs --architect`.
+>
+> **The architect proposes; Idan approves; then it edits.** This is stricter than a lane on purpose: Maelle's code ships through a deploy, framework code does not — an engine edit is live on the very next run, so there is no gap in which a mistake gets caught.
+>
+> **And a framework edit only takes effect in a NEW session** — engines, skills and agent definitions all load once per session and none of them says so. If a framework change was made in this chat, it is not in force here.
+
 | Lane | Owns | Never touches |
 |---|---|---|
 | **Matchmaker** | deterministic scheduling core — search / validate / book / move / cancel, free-busy, TZ + Working-Elsewhere, floating blocks, the Graph CALENDAR layer + cache | the requests spine · the guards · prompt wording · transport |

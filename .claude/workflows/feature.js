@@ -458,6 +458,19 @@ const raw = Array.isArray(A.pieces) ? A.pieces : []
 if (!raw.length) {
   return { mode: 'build', error: 'No approved pieces. Run mode:"plan" first, get the owner\'s approval, then pass pieces:[...].' }
 }
+// A25 · THE READER FOR `awaitingOwner`, identical to bugger.js's guard on
+// `args.issues`. The verify's deferred asks are shaped for a paste straight back
+// into `args.pieces`, so the flag saying "the parent is still waiting on him" must
+// be enforced at exactly that door. `pieces` means APPROVED; a row carrying this
+// flag contradicts the container it arrived in. Deleting the flag is the approval.
+const undecidedPieces = raw.filter((p) => p && p.awaitingOwner)
+if (undecidedPieces.length)
+  throw new Error(
+    `args.pieces carries ${undecidedPieces.length} row(s) still flagged \`awaitingOwner\`: ` +
+      `${undecidedPieces.map((p) => `${p.id || '(no id)'} (parent verdict ${p.fromVerdict || '?'})`).join(', ')}. ` +
+      `Each is a dependency ask the verify raised on a piece that is waiting on the owner, so building it could implement a dependency of something he declines. ` +
+      `Nothing has been dispatched. Get his ruling, delete \`awaitingOwner\` from the row, and re-invoke.`,
+  )
 
 // Plan mode already established, against the code, what each improvement's area
 // does TODAY — with file:line. Passing `recon` back in hands that to the
@@ -654,6 +667,13 @@ let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
 let ticketCoverage = []
+// A25 · The verify runs LAST, so an ask it raises cannot be dispatched in this run —
+// same rule as `discoveries`, and until now the same rule with no destination.
+// `dependencyAgent`/`dependencyAsk` are in the verify's schema, so the verifier can
+// fill them, and the only read below took `verdict` and `notes` and nothing else:
+// accepted by the schema, dropped in silence. Kept SEPARATE from `discoveries`
+// because merging loses which verdict is waiting on the owner.
+let deferredDepAsks = []
 const built = results.filter((r) => r.verdict === 'built')
 if (built.length && A.verify !== false) {
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
@@ -691,6 +711,32 @@ if (built.length && A.verify !== false) {
   ticketCoverage = (check && check.ticketCoverage) || []
   if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built.`)
   ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
+  // A25 · Shaped to drop straight into the NEXT run's `args.pieces`, the way
+  // `discoveries` drops into `args.issues`. It is deliberately NOT dispatchable
+  // now: its parent piece is waiting on the owner, so a well-shaped ask must never
+  // be read as an approved one.
+  // A25 · REUSES the ask shape the dep loop already builds above, field for field.
+  // It emitted `what` where every reader wants `whatChanges` and carried no `ref`,
+  // so `describe()` rendered `158>dep [undefined] undefined` — the payload was
+  // there and the one line the builder actually reads was empty. `awaitingOwner`
+  // travels with the row and is refused at the `pieces` door, same as bugger.js.
+  deferredDepAsks = ((check && check.results) || [])
+    .filter((x) => x && hasAsk(x))
+    .map((x) => ({
+      id: `${x.id}>dep`,
+      ref: '',
+      lane: x.dependencyAgent,
+      whatChanges: x.dependencyAsk,
+      whyThisLane: 'raised by the wave verify',
+      dependsOn: [],
+      risk: '',
+      from: x.id,
+      fromVerdict: x.verdict || 'verify',
+      awaitingOwner: true,
+      fromVerify: true,
+    }))
+  if (deferredDepAsks.length)
+    log(`Verify raised ${deferredDepAsks.length} dependency ask(s) — NOT dispatched this run (the verify runs last): ${deferredDepAsks.map((a) => `${a.from}→${a.lane}`).join(', ')}`)
   const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
   verified = results.map((r) =>
     overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
@@ -707,7 +753,11 @@ const featureManifest = {
   approved: approved.length,
   reconThreaded: approved.filter((p) => p._where).length,
   wavesRun: wave,
-  neverDispatched: remaining.map((p) => p.id),
+  // `neverDispatched` lives in `counts` ONLY, as a number. It was here as an id LIST
+  // under the same name — one word meaning two shapes in one return object, which is
+  // how a reader ends up doing arithmetic on an array. The ids are not lost: the
+  // warning below prints every one of them, and it fires on exactly this condition
+  // (`waveCapHit` is set true iff `remaining.length`, in the same block).
   crossLaneAsks: { attached: results.filter((r) => hasAsk(r)).length, dispatched: results.filter((r) => String(r.id).endsWith('>dep')).length },
   resumed: resumedPieceIds.size,
   depRounds,
@@ -736,6 +786,10 @@ else if (!featureManifest.reconThreaded && approved.length)
   featureWarnings.push(
     `\`recon\` carried ${recon.length} entr${recon.length === 1 ? 'y' : 'ies'} but NONE joined an approved piece — so plan and build disagree on \`ref\`, and every builder re-derived its area anyway. Check the refs match exactly.`
   )
+if (deferredDepAsks.length)
+  featureWarnings.push(
+    `The verify raised ${deferredDepAsks.length} dependency ask(s) that this run CANNOT dispatch — it runs last. They are in \`deferredDepAsks\`, pre-shaped for the next run's \`args.pieces\`: ${deferredDepAsks.map((a) => `${a.from}→${a.lane}`).join(', ')}. Report each as a row awaiting the owner; a wrap that drops them loses a named incomplete fix.`
+  )
 if (built.length && A.verify === false) featureWarnings.push('Verify was disabled on a run that built code.')
 if (built.length && A.verify !== false && !verifyRan)
   featureWarnings.push(`THE VERIFY DID NOT RUN — ${built.length} built piece(s) are unchecked. Do NOT wrap without \`/manager verify\`.`)
@@ -747,17 +801,28 @@ return {
   mode: 'build',
   manifest: featureManifest,
   warnings: featureWarnings,
+  // A24 · The funnel, same reasoning as bugger.js: a run that dispatched nothing
+  // must not read like a run that built nothing. `neverDispatched` was in the
+  // manifest as a list and in no count.
   counts: {
     approved: approved.length,
+    dispatched: approved.length - remaining.length,
     built: verified.filter((r) => r.verdict === 'built').length,
+    // `already-fixed` is in the verdict enum, so a lane can and does return it —
+    // and it landed in NO bucket here, which is the one drop a funnel exists to
+    // name. It also costs a full dispatch, so a non-zero here is a signal in
+    // itself: the plan asked for something that was already in the tree.
+    alreadyFixed: verified.filter((r) => r.verdict === 'already-fixed').length,
     needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
     stillBlocked: verified.filter((r) => r.verdict === 'needs-dependency').length,
+    neverDispatched: remaining.length,
   },
   results: verified,
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
   discoveries, // NEW problems unrelated to these pieces. Report as fresh rows at `pending owner`; build on the NEXT run, never this one
+  deferredDepAsks, // A25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

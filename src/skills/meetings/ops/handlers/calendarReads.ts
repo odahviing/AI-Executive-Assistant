@@ -171,10 +171,24 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           logger.info('get_calendar — owner asked on a shared surface; calendar listing withheld', {
             channelId: context.channelId, isMpim: context.isMpim === true,
           });
+          // gh#157 (2026-07-29) / gh#166 (2026-07-29) — this branch has no
+          // scoped-by-colleague view to fall back on (every event on the
+          // calendar is "his"), so there is nothing safe to hand back as data.
+          // The old shape returned `events: []` — the literal wire shape of
+          // "checked, nothing's there" — and needed a comment to explain that
+          // it actually meant WITHHELD; Sonnet read the array, not the
+          // comment, and fabricated "there's nothing on the calendar at all,
+          // no Leadership Alignment" for a meeting that had existed for
+          // months. An `error` shape (matching every other owner-only /
+          // withheld refusal in this file: `owner_only`, `freebusy_not_read`,
+          // `event_not_found`) means there is no `events` key at all to
+          // misread — and the generic FAILED handling in
+          // orchestrator/turnHelpers.ts persists this same honest refusal
+          // into conversation history instead of "0 events", which is the
+          // ambiguity that mattered on the NEXT turn, not just this one.
           return {
-            events: [],
-            _owner_shared_surface: true,
-            _scope_note: `This is a group conversation, so ${context.profile.user.name.split(' ')[0]}'s calendar is not readable here — other people are in this thread. Do NOT list, summarise, count or hint at what is on his day, and do NOT try another tool to get around it. Tell him plainly you'll go through his day with him in your 1:1 DM. You CAN still work on a specific meeting he names here.`,
+            error: 'calendar_withheld_shared_surface',
+            message: `This is a group conversation, so ${context.profile.user.name.split(' ')[0]}'s calendar is not readable here — other people are in this thread. You have NOT checked his calendar: do NOT say or imply that nothing exists, that nothing is booked, or that something "hasn't been booked yet". Do NOT list, summarise, count, confirm, or deny anything about his day, and do NOT try another tool to get around it. Tell him plainly you can't check or confirm calendar details on a shared surface and you'll go through it with him in your 1:1 DM. You can still ACT on one specific meeting he references by name/id here (move it, cancel it) — that is not the same as confirming whether something exists, and must never be used to answer an existence question.`,
           };
         }
         const rawEvents = await getCalendarEvents(
