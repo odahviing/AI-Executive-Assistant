@@ -31,6 +31,7 @@
 import type { UserProfile } from '../../config/userProfile';
 import { listNewMessages, markMessageRead, hasMailRefreshToken, MailAuthRevokedError } from './mail';
 import { getMailInbound } from './mailInboundRegistry';
+import { getConnection } from '../../connections/registry';
 import logger from '../../utils/logger';
 
 const MAIL_POLL_INTERVAL_MS = 30 * 1000;
@@ -49,7 +50,7 @@ const revokedProfiles = new Set<string>();
 // every 30s, while still being visible.
 const warnedNoHandler = new Set<string>();
 
-async function pollProfile(profile: UserProfile): Promise<void> {
+async function pollProfile(profileName: string, profile: UserProfile): Promise<void> {
   const profileId = profile.user.slack_user_id;
   const handler = getMailInbound(profileId);
   if (!handler) {
@@ -72,6 +73,13 @@ async function pollProfile(profile: UserProfile): Promise<void> {
       logger.error('mailPoll — refresh token revoked; stopping polling for this profile until re-auth', {
         profileId, err: String(err).slice(0, 200),
       });
+      // Fires exactly once per revocation: this branch only runs while
+      // profileId was NOT yet in revokedProfiles (the .add above just put it
+      // there), and every tick from here on skips straight past pollProfile
+      // at the revokedProfiles.has(...) check in tick() below — there is no
+      // path back into this branch for the same revocation, so no 30s DM
+      // loop. Never call this from that skip check instead of from here.
+      await notifyOwnerOfRevokedMailAuth(profileName, profile);
       return;
     }
     logger.warn('mailPoll — listNewMessages failed, will retry next tick', {
@@ -127,6 +135,53 @@ async function pollProfile(profile: UserProfile): Promise<void> {
   logger.info('mailPoll — processed new mail', { profileId, count: toProcess.length });
 }
 
+/**
+ * DM's the owner when the delegated refresh token is revoked and email
+ * polling stops for this profile. Same reasoning as #24 row 120's
+ * `notifyOwnerOfMailFailure` (connectors/email/inbound.ts) — and stronger
+ * here: email itself is the thing that just failed, so Slack is the only
+ * channel known to still be reachable. `getConnection(profileId, 'slack')`
+ * from inside the email/Graph path is the same legitimate exception
+ * documented there: CHANNEL_TOOL_CLAMP narrows the MODEL's tool list on an
+ * email-originated turn, it does not gate a code-initiated send.
+ *
+ * Actionable by design, not just informative: re-running email-auth.mjs
+ * alone does NOT resume polling — revokedProfiles (above) is in-memory and
+ * cleared only by a restart, so the message spells out both steps in order.
+ *
+ * Never throws — a lost notification is recoverable, an unhandled rejection
+ * out of a notifier is not. Prototype-cheap on purpose, same as row 120: no
+ * retry, no backoff.
+ */
+async function notifyOwnerOfRevokedMailAuth(profileName: string, profile: UserProfile): Promise<void> {
+  const profileId = profile.user.slack_user_id;
+  try {
+    const slack = getConnection(profileId, 'slack');
+    if (!slack) {
+      logger.warn('mailPoll — no Slack connection registered, cannot notify owner of revoked mail auth', {
+        profileId,
+      });
+      return;
+    }
+    const mailbox = profile.channels?.email?.mailbox ?? 'the configured mailbox';
+    const text = `Your email connection (${mailbox}) stopped working — the refresh token was revoked, so I've `
+      + `stopped polling it (this won't retry or crash-loop on its own). To fix it:\n`
+      + `1. Run \`node scripts/email-auth.mjs ${profileName}\` to re-sign in.\n`
+      + `2. Then restart me — re-signing in alone only updates the token on disk, it doesn't resume polling `
+      + `by itself.`;
+    const res = await slack.sendDirect(profileId, text);
+    if (!res.ok) {
+      logger.error('mailPoll — Slack revoked-auth notification send failed', {
+        profileId, reason: res.reason, detail: res.detail,
+      });
+    }
+  } catch (err) {
+    logger.error('mailPoll — notifyOwnerOfRevokedMailAuth itself threw', {
+      profileId, err: String(err).slice(0, 200),
+    });
+  }
+}
+
 let tickInFlight = false;
 
 function tick(profiles: Map<string, UserProfile>): void {
@@ -136,11 +191,11 @@ function tick(profiles: Map<string, UserProfile>): void {
   }
   tickInFlight = true;
   (async () => {
-    for (const profile of profiles.values()) {
+    for (const [profileName, profile] of profiles.entries()) {
       if (!profileConfigured(profile)) continue;
       if (revokedProfiles.has(profile.user.slack_user_id)) continue;
       try {
-        await pollProfile(profile);
+        await pollProfile(profileName, profile);
       } catch (err) {
         logger.warn('mailPoll — profile tick error, continuing', {
           profileId: profile.user.slack_user_id, err: String(err).slice(0, 200),
