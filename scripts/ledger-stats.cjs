@@ -40,6 +40,80 @@ const fs = require('fs');
 const path = require('path');
 
 const LEDGER = path.join(__dirname, '..', '.claude', 'agent-loop', 'ledger.jsonl');
+const REPO = path.join(__dirname, '..');
+
+// ── A38 · STALENESS — one check, BOTH ledgers ───────────────────────────────
+// `verifiedClean` has carried a pruning discipline since 2026-07-27: drop an
+// entry the moment a wave changes the code it describes, because a stale "proven
+// clean" SILENCES a real check. The open list has the mirror failure and had no
+// rule — a stale open row silences nothing, it DILUTES, so 48 open rows read as
+// 48 live decisions when some describe code that has since moved. That is what
+// makes the list unreadable and therefore unread.
+//
+// A row's evidence names a `file:line`, so staleness is CHECKABLE rather than a
+// judgement: if a commit touched that file AFTER the row was written, the row
+// needs one re-read before it counts as open. Same check the scout already runs
+// outward for `alreadyBuilt` / `openKnown`, turned inward on the ledger.
+//
+// It MARKS, never closes. Most fixes touch a file without addressing every
+// defect in it, so auto-retiring would delete real findings.
+//
+// COMMITTED history only, and the output says so: an uncommitted edit carries no
+// date to compare against, and this repo is uncommitted by default.
+const fileTouchDates = (sinceDay) => {
+  let out = '';
+  try {
+    out = require('child_process').execFileSync(
+      'git',
+      ['-C', REPO, 'log', `--since=${sinceDay}`, '--name-only', '--pretty=format:%x01%cs'],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch {
+    return null; // no git, or not a repo — reported as "not checked", NEVER as confirmed
+  }
+  const map = new Map(); // repo path -> latest YYYY-MM-DD that touched it
+  let day = '';
+  for (const line of out.split(/\r?\n/)) {
+    if (line.startsWith('\x01')) {
+      day = line.slice(1).trim();
+      continue;
+    }
+    const p = line.trim();
+    if (!p || !day) continue;
+    if (!map.has(p) || map.get(p) < day) map.set(p, day);
+  }
+  return map;
+};
+const CITED = /[\w./@#-]*[\w-]\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|ya?ml|sql)\b/g;
+// A47 · a row that cites NO file is not confirmed — it is UNCHECKABLE, and
+// counting it as confirmed is the count-that-is-wrong failure inside the reader
+// that exists to be trusted. It can never be flagged RE-READ either, so the
+// nightly backlog pass will never look at it: 12 of the 49 open rows on
+// 2026-07-30. They need a hand read, so they are named rather than left to look
+// like the healthy majority.
+const uncheckable = (s) => s.checked && Array.isArray(s.cited) && !s.cited.length;
+/** Did the code a row cites move after the row was written? Marks, never closes. */
+const staleness = (touched, row, ...fields) => {
+  if (!touched) return { checked: false };
+  const cited = [...new Set(fields.map((f) => String(f || '')).join(' ').match(CITED) || [])];
+  if (!cited.length) return { checked: true, cited: [] };
+  let movedOn = null;
+  let which = '';
+  for (const c of cited) {
+    const base = '/' + c.replace(/^.*\//, '');
+    for (const [p, day] of touched) {
+      if (p !== c && !p.endsWith(base)) continue;
+      if (!movedOn || day > movedOn) {
+        movedOn = day;
+        which = p;
+      }
+    }
+  }
+  const rowDay = String(row.date || '');
+  return { checked: true, cited, movedOn, which, needsRecheck: !!(movedOn && rowDay && movedOn > rowDay) };
+};
+/** The oldest date in a set of rows, as the `git log --since` floor. */
+const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean).sort()[0] || '2026-01-01';
 
 const argv = process.argv.slice(2);
 const argOf = (flag) => {
@@ -66,12 +140,36 @@ if (argv.includes('--architect')) {
     process.exit(1);
   }
   const all = fs.readFileSync(AL, 'utf8').split(/\r?\n/).filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  // A41 · MERGE per id, not overwrite. Append-only means a finished row is TWO
+  // lines — the filing and the closing — and the closing row is deliberately
+  // minimal (`{id, date, verdict, built}`). A plain overwrite would blank the
+  // `finding`, `target` and `note` the filing carried, so a completed row would
+  // read as an anonymous one and `architect-file.cjs`'s clash check would lose the
+  // text it matches against. Spreading keeps the history and lets the writer append
+  // four fields instead of copying the whole row back into the file.
   const latest = new Map();
-  for (const r of all) latest.set(r.id, r); // append-only: last row for an id wins
+  for (const r of all) latest.set(r.id, { ...(latest.get(r.id) || {}), ...r });
   const rows = [...latest.values()];
   const CLOSED = new Set(['built', 'declined', 'duplicate']);
   const open = rows.filter((r) => !CLOSED.has(r.verdict));
   const p = (s, n) => String(s).padEnd(n);
+
+  // A38 · The ledger is append-only and a target label is not worth breaking
+  // that for, so drift is normalised at READ time. The hand-migrated rows carry
+  // `both engines` and `scripts/ledger-stats.cjs`, which printed as their own
+  // groups beside the enum values `both-engines` and `scripts` — one target in
+  // two places, which is the second-copy-that-drifts failure inside the reader
+  // whose whole job is to be the single copy. `architect-file.cjs` validates
+  // `--target` against its enum, so only legacy rows can be off-enum and every
+  // group printed here lands on an enum value.
+  const normTarget = (raw) => {
+    const t = String(raw || '').trim();
+    if (!t) return '(no target)';
+    if (/^scripts[/\\]/.test(t)) return 'scripts';
+    if (/^both[ -]engines$/i.test(t)) return 'both-engines';
+    if (/\.md$/.test(t) && t !== 'SKILL.md' && t !== 'SESSION_STARTER.md') return 'charter';
+    return t;
+  };
 
   console.log(`\nArchitect ledger — ${rows.length} row(s) · ${open.length} open · ${rows.length - open.length} closed`);
   const counts = {};
@@ -82,20 +180,42 @@ if (argv.includes('--architect')) {
     console.log(`\nNothing open. Every framework finding is built, declined or a duplicate.\n`);
     process.exit(0);
   }
+  // A38 · the open count splits, so a row describing code that has since moved
+  // stops being counted as a live decision.
+  const aTouched = fileTouchDates(oldestDay(open));
+  const aStale = new Map(open.map((r) => [r.id, staleness(aTouched, r, r.evidence, r.note, r.finding)]));
+  const aRecheck = open.filter((r) => aStale.get(r.id).needsRecheck);
+  const aNoCite = open.filter((r) => uncheckable(aStale.get(r.id)));
   const byTarget = new Map();
   for (const r of open) {
-    if (!byTarget.has(r.target)) byTarget.set(r.target, []);
-    byTarget.get(r.target).push(r);
+    const t = normTarget(r.target);
+    if (!byTarget.has(t)) byTarget.set(t, []);
+    byTarget.get(t).push(r);
   }
-  console.log(`\nOPEN — awaiting triage or approval\n`);
+  console.log(
+    `\nOPEN — ${open.length} awaiting triage or approval · ${open.length - aRecheck.length - aNoCite.length} confirmed · ${aRecheck.length} need a re-read · ${aNoCite.length} cite no file` +
+      (aTouched ? '' : ' (staleness NOT CHECKED — no git history available)'),
+  );
+  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read it, then rule; nothing is closed automatically.\n`);
   for (const [t, list] of [...byTarget.entries()].sort((a, b) => b[1].length - a[1].length)) {
     console.log(`${t}  (${list.length})`);
     for (const r of list) {
-      console.log(`  ${p(r.id, 5)} ${p(r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
+      const s = aStale.get(r.id);
+      console.log(`  ${p(r.id, 5)} ${p(s.needsRecheck ? 'RE-READ' : r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
       if (r.evidence) console.log(`        ${String(r.evidence).slice(0, 96)}`);
+      if (s.needsRecheck) console.log(`        ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      // A47 · somebody looked and it was still real. Printed with its date, so a
+      // confirmation is visible as a real read rather than clearing the flag silently.
+      if (r.recheck) console.log(`        re-read ${r.date}: ${String(r.recheck).slice(0, 88)}`);
+      if (r.amends) console.log(`        amends ${r.amends}`);
     }
     console.log('');
   }
+  if (aNoCite.length)
+    console.log(
+      `${aNoCite.length} row(s) cite no file, so staleness cannot be checked and they never print RE-READ — read these by hand: ${aNoCite.map((r) => r.id).join(', ')}\n`,
+    );
+  console.log(`Confirm one with: node scripts/architect-file.cjs --recheck <id> --checked "<what you opened>"`);
   console.log(`Nothing here is approved to build. The architect triages and proposes; the owner rules.\n`);
   process.exit(0);
 }
@@ -204,16 +324,34 @@ if (openOnly) {
   //
   // Tokenising handles both. Matching is exact per token, never substring, so
   // `P2` is not closed by `P24`.
+  //
+  // A47 · every token is NORMALISED for the `gh#` / `#` prefix, because the ledger
+  // genuinely holds all three forms of the same issue. `bugger.js` has normalised
+  // them since the `alreadyBuilt` fix — its brief says `#147` = `gh#147` = `147` —
+  // and this reader did not, so an open row `gh#144` sat in the list while the row
+  // that closed it was written `144`: one falsely-open row out of 49, in the count
+  // the report headline is computed from.
+  //
+  // A SPACE is deliberately NOT a suffix separator. `gh#52 O3` is one piece of a
+  // multi-lane ticket, and minting `52` from it would let one piece close its
+  // parent — measured on 2026-07-30 as 4 extra collapses, three of them wrong.
+  const normRef = (t) => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '');
   const refTokens = (ref) => {
     const out = new Set();
     const raw = String(ref || '').trim();
     if (!raw) return out;
-    out.add(raw);
+    out.add(normRef(raw));
     for (const part of raw.split(/[+,/]| and /i).map((s) => s.trim()).filter(Boolean)) {
-      out.add(part);
-      // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item
-      const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*\d+$/i);
-      if (m && m[1].length > 1) out.add(m[1]);
+      out.add(normRef(part));
+      // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item. A34 · the
+      // suffix may now be NON-numeric — his scheme is `156-a` for a complaint and
+      // `153-blockA` for a raised blocker, so a suffix that was previously
+      // unmatchable had to become linkable or a child could never close its parent.
+      // Gated on the BASE looking like a bare id (`156`, `gh#158`, `P14`, `A2`)
+      // rather than on the suffix, which is what keeps a long slug ref like
+      // `gh#158-exception-must-be-name-scoped` from minting a junk base token.
+      const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*([a-z0-9]{1,6})$/i);
+      if (m && /^(?:gh#)?\d+$|^[a-z]\d+$/i.test(m[1])) out.add(normRef(m[1]));
     }
     return out;
   };
@@ -224,18 +362,29 @@ if (openOnly) {
     for (const t of refTokens(r.ref)) if (!closedBy.has(t)) closedBy.set(t, r);
   }
 
-  // Keep the LATEST row per ref, so a re-raised item shows once with its newest state.
+  // Keep the LATEST state per ref, so a re-raised item shows once with its newest
+  // state. A47 · MERGED, not overwritten — the same fix `--architect` carries, for
+  // the same reason: append-only means a row is legitimately several lines, and a
+  // later line that carries only what CHANGED must not blank the `lane`, `finding`
+  // and `rootCause` the first one held. That is what lets a re-read append
+  // `{date, ref, recheck}` and nothing else. Measured across all 344 rows on
+  // 2026-07-30: 15 refs have more than one open line and merging changes no printed
+  // label on any of them.
   const latest = new Map();
   const refless = [];
   for (const r of scoped) {
     if (CLOSED.has(r.verdict)) continue;
     if (!r.ref) { refless.push(r); continue; }
-    latest.set(r.ref, r); // ledger is chronological, so last write wins
+    latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r }); // ledger is chronological, so later fields win
   }
   const collapsed = [];
   const open = [];
   for (const r of latest.values()) {
-    const closer = closedBy.get(r.ref);
+    // The CLOSER's ref is the one that expands into tokens; the open row is looked
+    // up by its own normalised ref alone. Expanding both would let a closed `gh#41-step1`
+    // collapse an open `gh#41-step5` through the shared base — measured as no
+    // difference on today's ledger, and a false close waiting for tomorrow's.
+    const closer = closedBy.get(normRef(r.ref));
     if (closer) collapsed.push({ r, closer });
     else open.push(r);
   }
@@ -245,7 +394,19 @@ if (openOnly) {
     console.log('\nNothing open. Every ledger row is built or already-fixed.\n');
     process.exit(0);
   }
-  console.log(`\nOPEN — ${open.length} row(s) awaiting you\n`);
+  // A38 · the same staleness check as `--architect`, on the same helper. A row
+  // whose cited code moved after it was written is not a live decision until
+  // someone re-reads it, and 18 of these rows are two to four days old across
+  // waves that changed the very files they cite. It MARKS; it never closes.
+  const touched = fileTouchDates(oldestDay(open));
+  const stale = new Map(open.map((r) => [r, staleness(touched, r, r.rootCause, r.finding, r.note)]));
+  const recheck = open.filter((r) => stale.get(r).needsRecheck);
+  const noCite = open.filter((r) => uncheckable(stale.get(r)));
+  console.log(
+    `\nOPEN — ${open.length} row(s) awaiting you · ${open.length - recheck.length - noCite.length} confirmed · ${recheck.length} need a re-read · ${noCite.length} cite no file` +
+      (touched ? '' : ' (staleness NOT CHECKED — no git history available)'),
+  );
+  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read before you rule; nothing is closed automatically.\n`);
   const laneGroups = new Map();
   for (const r of open) {
     const k = r.lane || '(no lane)';
@@ -275,9 +436,14 @@ if (openOnly) {
           ? 'DECIDE'
           : r.verdict === 'flagged-for-owner'
             ? 'FLAGGED'
-            : r.verdict.toUpperCase();
-      console.log(`  ${label}  ${ref}${(r.finding || '').slice(0, 110)}`);
+            : String(r.verdict || 'NO VERDICT').toUpperCase();
+      const s = stale.get(r);
+      console.log(`  ${s.needsRecheck ? 'RE-READ ' : ''}${label}  ${ref}${(r.finding || '').slice(0, 110)}`);
       if (r.rootCause) console.log(`          ${r.rootCause.slice(0, 100)}`);
+      if (s.needsRecheck) console.log(`          ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      // A47 · somebody re-read it and it was still real. This is what keeps the same
+      // row off tomorrow's RE-READ list, so it prints with the date that cleared it.
+      if (r.recheck) console.log(`          re-read ${r.date}: ${String(r.recheck).slice(0, 96)}`);
       // His own words on the deferral, which is the only thing that distinguishes
       // "not now" from "never" — first clause only; the rest of `note` is the fix.
       if (isDeferred && String(r.note || '').trim())
@@ -294,6 +460,15 @@ if (openOnly) {
     console.log('');
   }
   if (refless.length) console.log(`! ${refless.length} open row(s) carry NO ref, so nothing can ever close them automatically. Give every ledger row a ref.\n`);
+  // A47 · NAMED, never silently worked. The backlog pass takes only RE-READ rows, so
+  // these are the ones no run will ever reach: they cite no file, so no commit can
+  // flag them. Naming them is the difference between a known hand-read list and 12
+  // rows quietly counted as confirmed.
+  if (noCite.length) {
+    console.log(`${noCite.length} open row(s) cite no file, so staleness cannot be checked and no backlog pass will ever re-read them. Read these by hand:`);
+    for (const r of noCite) console.log(`  ${r.ref || '(no ref)'}  ${String(r.finding || '').slice(0, 88)}`);
+    console.log('');
+  }
   console.log(`To build a lane's list:  say "build the <lane> ones" and the Manager dispatches that lane directly.`);
   console.log(`Anything you do not want: say so and it is recorded as declined, not silently left open.\n`);
   process.exit(0);
@@ -415,14 +590,29 @@ if (byRun) {
   const rr = new Map();
   for (const r of scoped) {
     const k = r.runId || '(none)';
-    if (!rr.has(k)) rr.set(k, { total: 0, built: 0, push: 0, date: r.date });
+    if (!rr.has(k)) rr.set(k, { total: 0, built: 0, push: 0, days: new Map() });
     const s = rr.get(k);
     s.total += 1;
     if (r.verdict === 'built') s.built += 1;
     if (PUSHBACK.has(r.verdict)) s.push += 1;
+    if (r.date) s.days.set(r.date, (s.days.get(r.date) || 0) + 1);
   }
+  // A48 · A run that crossed midnight used to print its ENTIRE count under its
+  // FIRST row's date, because the bucket kept `date: r.date` from whichever row
+  // created it and every later row's own date was thrown away. `owner-review`
+  // holds 29 rows on 2026-07-26 and 3 on 2026-07-29, and this table read
+  // "2026-07-26 · 32 dispatches" — a wrong number on a real day, on the one view
+  // whose whole job is per-run attribution. `--since` and the header range were
+  // never affected: they read each row's own `date`.
+  //
+  // Both halves are printed because both are asked: the SPAN says when the run
+  // lived, the per-day split says what each day actually carried, so neither day
+  // can be read as owning dispatches it did not.
   for (const [k, s] of rr) {
-    console.log(`  ${pad(s.date || '?', 12)} ${pad(k, 28)} ${lpad(s.total, 4)} dispatches · ${lpad(s.built, 3)} built · ${lpad(s.push, 3)} pushback`);
+    const days = [...s.days.keys()].sort();
+    const when = days.length > 1 ? `${days[0]}→${days[days.length - 1].slice(5)}` : days[0] || '?';
+    const split = days.length > 1 ? `  [${days.map((d) => `${d.slice(5)}:${s.days.get(d)}`).join(' ')}]` : '';
+    console.log(`  ${pad(when, 17)} ${pad(k, 28)} ${lpad(s.total, 4)} dispatches · ${lpad(s.built, 3)} built · ${lpad(s.push, 3)} pushback${split}`);
   }
 }
 

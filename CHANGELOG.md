@@ -2,6 +2,44 @@
 
 ---
 
+## 4.3.3 — six real fixes shipped, every ticket read open, and nobody could say why
+
+**No product change. Nothing in `src/`.** This is the agent framework, and it exists because of one night. A bug wave on 2026-07-29 ran from 16:54 to 00:31, produced six genuine fixes, and ended with the owner saying he had no idea why every ticket was still open. The fixes were real. The trail was not.
+
+Reconstructing it found that the failures were not in the building — they were in every surface that reported on it. `report.md` said **"Nothing is waiting on you"** at the moment of the wrap while forty-eight rows sat open in the ledger, one of them a live hazard that can put an uninvited person on a real calendar invite. The ledger had **never recorded a single completion** in its existence — sixteen finished items still read *open*, because no mechanism to close one had ever been built. The tier check printed *"consistent — no dispatch path is overriding the charter"* while comparing two dispatch paths against each other and never against a charter. And `node --check`, run on both engines all day, **exits 0 without parsing them at all** — every "both files parse" reported that day was vacuous.
+
+The pattern is one thing wearing different clothes: **a mechanism that does nothing and looks exactly like success.** Twelve of the sixteen items below are that shape.
+
+### Fixed — surfaces that could not be trusted
+- **A report may never print a number it did not compute.** The open count now comes from `ledger-stats --open` and names the command that produced it, and rows are grouped by status with a count per group. Three existing rules that contradicted this were amended so the skill gives one answer.
+- **The ledger can record a completion, and a refusal.** `--close --built` and `--close --declined` append a closing row rather than rewriting, preserving append-only; the reader collapses per id by merge. Both pre-existing `declined` rows had been typed by hand at migration — a ruling nobody could write down was a ruling that got re-raised.
+- **A stale row is flagged, never silently trusted.** A row whose cited file was touched by a later commit is marked `RE-READ`; a row citing no file is named as uncheckable rather than counted as confirmed. It marks and never closes, and `--recheck` records that somebody looked.
+- **The tier check can now fail.** It reads `model:` out of each agent's charter and compares it to the tier each dispatch actually ran on. Verified in both directions on real data; absent `model:` reports *not checked* rather than agreeing.
+- **There is a real syntax check** — `scripts/check-syntax.cjs`, which parses the shape the Workflow tool actually runs, proves itself with a must-fail canary per file, and exits 2 printing `BLIND` if its own parser is stubbed.
+
+### Fixed — the intake lost work
+- **A ticket's numbered complaints each become their own issue.** Two tickets carrying three complaints each yielded one issue apiece, so each closed as partial with two complaints never surfaced by any run. Ticket coverage is now arithmetic.
+- **Every issue id names its ticket** — `156-a` for a complaint, `153-blockA` for a raised blocker, instead of an unrelated flat number that also collided with GitHub issue numbers. The rule forbidding letter *prefixes* was narrowed to what it meant; the reference matcher was extended to link non-numeric suffixes, proven byte-identical on existing refs.
+- **A merged GitHub-plus-log finding keeps its parent ref.** The one merged row dropped its ticket number, so nothing downstream could notice that ticket had been left two-thirds unworked.
+- **The carried-forward slot has a reader.** It was written and never read by either engine, so a deferred finding reached the next run only if a human remembered.
+
+### Changed — how the loop is run
+- **The backlog is a source on every run**, alongside GitHub and the logs. It re-reads only the rows whose code has moved, so the set stays small; a `fixed` verdict with no commit or line named is held out of the ledger, because a restructured file looks fixed when the defect has only moved.
+- **A verify DISCOVERY is the next run's intake, not a decision.** An overturn still blocks the wrap. Eight of one wave's twenty-five items were discoveries rendered as questions.
+- **A run has a ceiling on how many items it may put on the owner's desk** (12, measured across seven runs). It warns and proposes deferrals; it never truncates and never merges rows to get under the number.
+- **The wrap states verified-against-shipped**, so a lane that skipped its own verify pass is visible rather than implied.
+- **The architect distinguishes a defect from a decision.** Changing what the framework does, or how it is run, is the owner's; making it do what was already agreed is the architect's, fixed and reported without asking. Filing may be automatic — running it never is.
+- `SESSION_STARTER.md` cut from 173 lines to 133, its stale open-bug list checked item by item against GitHub and the ledger rather than trimmed on feel.
+
+### Not changed
+- **Backfilling the invariant tag onto existing rows.** New rows carry it from here; the owner declined a judgement pass over the old ones, on the grounds that a slug guessed wrong is worse than a blank one because it groups two unrelated bugs.
+- **The amendment detector stays noisy.** It fires 2.02 times per filing, not the 0.6 first measured, because closing rows quadrupled the pool it matches against. Every quieter threshold was measured and every one loses the single catch the detector has ever made.
+
+### Migration
+None. No schema change and no `src/` change.
+
+---
+
 ## 4.3.2 — she was answering about the wrong calendar, and a withheld day read as an empty one
 
 Two shapes of the same failure, both from one afternoon of real threads. She told the owner **"11am is free for her too"** and he replied *"NOOOOOOO she has something"* — and she was not lying, she had never read the colleague's calendar at all. On a colleague-path or group-chat turn, *"is X free at Y?"* consulted only the attendee's **stored 09:00–18:00 work hours** plus the owner's own calendar; the real free/busy check was gated to owner-initiated searches. The same tool's spread-search branch had been doing it correctly all along, so two branches of one tool disagreed on how hard to establish the same fact. Pushing back did not help: the re-check fired every time and re-ran the same blind check.

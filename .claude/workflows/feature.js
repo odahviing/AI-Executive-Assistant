@@ -223,6 +223,16 @@ const VERDICTS = {
           },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
+          // A22 · same field, same words as bugger.js. It matters here because
+          // `VERIFY_OUT.results` reuses this shape, so a feature wave's OVERTURN is a
+          // finding about live work — and without the field on this path the tag
+          // would be true on the bug engine and absent on the improvement engine,
+          // which is the tier-in-the-engine failure again.
+          invariant: {
+            type: 'string',
+            description:
+              'OMIT unless this is an instance of a GENERAL rule that could break elsewhere. When it is, one short stable slug, and the SAME slug on every piece that breaks the same rule — that is what lets the root be fixed once instead of three times.',
+          },
           notes: { type: 'string' },
         },
         required: ['id', 'verdict'],
@@ -251,9 +261,18 @@ const VERIFY_OUT = {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
           evidence: { type: 'string', description: 'file:line, REQUIRED' },
           lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
-          severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+          severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
+          // A22 · same field, same words as bugger.js' discoveries.
+          invariant: {
+            type: 'string',
+            description:
+              'OMIT unless this is an instance of a GENERAL rule that could break elsewhere. When it is, one short stable slug, and the SAME slug on every discovery that breaks the same rule — that is what lets the root be fixed once instead of three times.',
+          },
         },
-        required: ['symptom', 'evidence'],
+        // A30 · `lane` and `severity` are REQUIRED, same as bugger.js: a discovery
+        // is the next run's INTAKE rather than a row on his desk, so it has to be
+        // routable and rankable. Not blocking and not severe are different claims.
+        required: ['symptom', 'evidence', 'lane', 'severity'],
       },
       description: 'problems found that are NOT about the pieces under review. Empty array if none — never in `results`, and never suppressed to keep the wave clean.',
     },
@@ -749,8 +768,25 @@ const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.
 
 // Same reasoning as bugger.js: a step that quietly did nothing must show up as a
 // number that is obviously wrong, not as a successful-looking run.
+// A31 · THE DECISION BUDGET, the same one bugger.js carries and for the same
+// reason: `capBuilds` caps builds and nothing capped DECISIONS, yet decisions are
+// the only step that cannot be parallelised, batched or delegated. Measured
+// refs-on-his-desk per engine run across the window: 4, 3, 8, 1, 4, 12, then 25 —
+// and the 25 is the night he said he could not follow it. Default 12 is the
+// highest any run reached on a night that worked, so it fires on 25 and on nothing
+// that has ever been fine. It WARNS and proposes a deferral; it never truncates
+// and never merges. `discoveries` is deliberately excluded — since A30 they are
+// the next run's intake, not a row on his desk.
+const DECISION_BUDGET = typeof A.capDecisions === 'number' ? A.capDecisions : 12
+const onHisDesk =
+  verified.filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed').length +
+  deferredDepAsks.length +
+  remaining.length +
+  earnedRules.length +
+  ticketCoverage.filter((t) => t.state !== 'satisfied').length
 const featureManifest = {
   approved: approved.length,
+  decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
   reconThreaded: approved.filter((p) => p._where).length,
   wavesRun: wave,
   // `neverDispatched` lives in `counts` ONLY, as a number. It was here as an id LIST
@@ -762,6 +798,9 @@ const featureManifest = {
   resumed: resumedPieceIds.size,
   depRounds,
   earnedRules: earnedRules.length,
+  // A22 · the writer's own observable, same shape as bugger.js. No warning on a
+  // zero: a wave of genuinely local work is meant to tag none.
+  invariants: { tagged: verified.filter((r) => r.invariant).length, of: verified.length, slugs: [...new Set(verified.map((r) => r.invariant).filter(Boolean))] },
   verify:
     A.verify === false
       ? { ran: false, fixesToCheck: 0 }
@@ -795,6 +834,11 @@ if (built.length && A.verify !== false && !verifyRan)
   featureWarnings.push(`THE VERIFY DID NOT RUN — ${built.length} built piece(s) are unchecked. Do NOT wrap without \`/manager verify\`.`)
 if (results.some((r) => r.verdict === 'needs-dependency' && !satisfiedIds.has(r.id)))
   featureWarnings.push('A piece is still blocked on a dependency that never landed — it is unfinished, not built.')
+if (onHisDesk > DECISION_BUDGET)
+  featureWarnings.push(
+    `DECISION BUDGET EXCEEDED — ${onHisDesk} refs need the owner against a budget of ${DECISION_BUDGET}. Prior runs put 1 to 12 on his desk; 25 is the night he could not follow. ` +
+      `Nothing has been truncated. Propose DEFERRING the lowest-value rows to the next run and say which — never merge two rows to get under the number.`
+  )
 featureWarnings.forEach((w) => log(`! ${w}`))
 
 return {
@@ -821,7 +865,7 @@ return {
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
-  discoveries, // NEW problems unrelated to these pieces. Report as fresh rows at `pending owner`; build on the NEXT run, never this one
+  discoveries, // A30 · NEW problems unrelated to these pieces. NEXT RUN'S INTAKE, not rows on his desk — already lane-assigned and severity-ranked for `args.issues`. Never built this wave, and never softened: a `high` one arrives first in the next queue
   deferredDepAsks, // A25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',

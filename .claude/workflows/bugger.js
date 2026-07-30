@@ -1,7 +1,7 @@
 export const meta = {
   name: 'bugger',
   description:
-    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the scout is SKIPPED. Only pass `args.sources` for the nightly discovery run, which is the sole case needing a GitHub pull or a log review. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
+    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the scout is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
     { title: 'Scout' },
     { title: 'Build' },
@@ -67,8 +67,59 @@ const asArray = (name, v, critical) => {
   return []
 }
 
+// A pre-triaged list — the door from `report.md` back INTO the builder. Without
+// it the parked items had no path in at all: intake reads GitHub and the logs,
+// and neither can see the report. The owner would have had to re-file 30 issues
+// by hand to act on his own review, which makes the review pointless.
+// These are already lane-assigned, so intake and triage are skipped entirely —
+// paying to re-derive routing he has already approved is pure waste.
+// Read BEFORE `sources`, because what this holds decides what the source default
+// may be: a preset skips the scout, so it must never default a source in.
+const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
 const sourcesArg = asArray('sources', A.sources)
-const SOURCES = sourcesArg.length ? sourcesArg : ['github', 'logs'] // a discovery run does BOTH; the owner triggers every run, there is no timer
+// A discovery run does ALL THREE. Owner, 2026-07-30: *"put backlog in every run"* —
+// new bugs and old bugs all need resolving and the difference between them is
+// bookkeeping. What makes it affordable is A38's staleness marking: only the rows
+// whose code has MOVED need re-reading, so the set is small by construction, and a
+// re-read produces a closure or a confirmation rather than a decision.
+// Empty on a preset: `args.issues` skips the scout, so a source named there could
+// only be a source that never ran.
+const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['github', 'logs', 'backlog']
+// ── A42 · THE THIRD INPUT ────────────────────────────────────────────────────
+// Owner, 2026-07-30: *"its make sense that the input can be github/logs or just
+// reports overview, isnt it smarter."* The engine had three possible inputs and two
+// were wired. GitHub is what he filed, logs are what she did, and the BACKLOG is
+// what we already know and have not settled — the largest of the three (49 open
+// rows, 22 of them flagged RE-READ by A38) and the only one with no door. So the
+// input that needs the funnel most was the one worked by hand, and a hand pass gets
+// no scout, no counts, no manifest, no `inFlight` and no report persistence.
+//
+// The scout ALREADY does this class of work — it matches findings against
+// `alreadyBuilt` and `openKnown` and drops what is settled — so re-reading a
+// flagged row is the same skill pointed inward. One new SOURCE, not a new mode.
+//
+// It runs WITH `logs`, every night. There was a refusal here that forbade the
+// pair, and its comment credited the owner — wrongly: he gave the third input, and
+// the "never with logs" half was the architect's own reasoning filed under his
+// name. His actual ruling, 2026-07-30, is the opposite: *"put backlog in every
+// run."* A re-read does not compete with a discovery pass for his attention
+// because it does not produce decisions — it produces closures, confirmations, and
+// only occasionally a question. The two guards that DO earn their place are kept
+// below: an unevidenced `fixed` never reaches `closeInLedger`, and a row citing no
+// file is named for a hand read instead of burning a lane every night.
+//
+// The set is VALIDATED now. It never was, so `sources:['gihub']` produced a brief
+// with no source block at all — a run that finds nothing while reporting success,
+// which is the exact class every other guard in this file exists for. Adding a
+// third value to an unchecked set is what makes that typo reachable.
+const KNOWN_SOURCES = new Set(['github', 'logs', 'backlog'])
+const unknownSources = SOURCES.filter((s) => !KNOWN_SOURCES.has(s))
+if (unknownSources.length)
+  throw new Error(
+    `args.sources names ${unknownSources.length} unknown source(s): ${unknownSources.map((s) => `"${s}"`).join(', ')}. ` +
+      `Valid: ${[...KNOWN_SOURCES].join(', ')}. An unknown source produces a scout brief with nothing in it, so the run would find nothing and report success. Nothing has been dispatched.`,
+  )
+const BACKLOG = SOURCES.includes('backlog')
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 // The watermark in UTC, so the manifest can check the scout compared against the
 // right instant rather than guessing from a line number. Empty when no ISO
@@ -76,29 +127,16 @@ const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
 const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — log files are named by local date
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
-// A pre-triaged list — the door from `report.md` back INTO the builder. Without
-// it the parked items had no path in at all: intake reads GitHub and the logs,
-// and neither can see the report. The owner would have had to re-file 30 issues
-// by hand to act on his own review, which makes the review pointless.
-// These are already lane-assigned, so intake and triage are skipped entirely —
-// paying to re-derive routing he has already approved is pure waste.
-const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
-const PRESET = presetArg.length ? presetArg : null
-// A25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
-// shaped for a copy-paste straight back into `args.issues` — that is the whole
-// point of the shape — so the flag that says "he has not ruled on the parent yet"
-// has to be enforced at the door it makes easy to walk through. Building one of
-// these could implement a dependency of something he is about to decline.
-// Refused HERE because nothing has spawned yet: a loud stop costs one
-// re-invocation (N11), and once he rules, DELETING the flag from the row is the
-// approval. Without this read the field was decoration, which A5 forbids.
-const undecidedPreset = (PRESET || []).filter((i) => i && i.awaitingOwner)
-if (undecidedPreset.length)
+// A42 · `sources` and `issues` are different doors, and `backlog` must never be
+// passed through both: a preset SKIPS the scout, so the re-read would never run
+// while `manifest.backlog` reported a backlog pass with zero rows — a mechanism
+// that did nothing and looked like success. Refused before anything spawns. Only
+// an EXPLICIT `sources:['backlog']` can reach this now — the default cannot, since
+// a preset defaults to no sources at all.
+if (BACKLOG && presetArg.length)
   throw new Error(
-    `args.issues carries ${undecidedPreset.length} row(s) still flagged \`awaitingOwner\`: ` +
-      `${undecidedPreset.map((i) => `${i.id || '(no id)'} (parent verdict ${i.fromVerdict || '?'})`).join(', ')}. ` +
-      `Each is a dependency ask whose PARENT is waiting on the owner, so building it could implement a dependency of something he declines. ` +
-      `Nothing has been dispatched. Get his ruling, delete \`awaitingOwner\` from the row, and re-invoke.`,
+    `args.sources names \`backlog\` and args.issues carries ${presetArg.length} row(s). A preset skips the scout, so the backlog re-read could not run. ` +
+      `Pick one: \`sources:['backlog']\` to re-read the stale rows, or \`issues:[…]\` to build the ones he approved. Nothing has been dispatched.`,
   )
 // Bugs already FIXED but not yet in the running build. Production keeps
 // emitting the same tape until a fix is deployed, so every unattended night the
@@ -118,6 +156,79 @@ const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
 // of his rulings on 2026-07-26 — the same shape, one layer along.
 // Shape: [{ref, symptom, state, note}].
 const OPEN_KNOWN = asArray('openKnown', A.openKnown)
+// A22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
+// keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
+// groups nothing and the writer produces noise, which is the decoration A5 forbids.
+// No new arg for it: both lists above are already derived from `ledger.jsonl`, so
+// carrying each row's `invariant` through makes them the vocabulary too. Empty on a
+// run that passes neither, and then the lanes coin new slugs — correct, that is how
+// a first one gets created.
+const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) => r && r.invariant).filter(Boolean))]
+// ── A43 · THE READER FOR `state.pendingOverflow` ─────────────────────────────
+// The field was WRITE-ONLY. `grep pendingOverflow` returned SKILL.md:67, :231,
+// :385, :391 and state.json:20 — and nothing in either engine. A30 then made it
+// LOAD-BEARING: every verify discovery now routes ledger row → `pendingOverflow` →
+// the head of the next build, so the one link with no mechanism behind it became
+// the link the whole route depends on. A documented read is an instruction, and
+// nothing failed when it was skipped: a carried finding stopped here while its
+// ledger row read FLAGGED, which looks exactly like handled.
+//
+// It carries on a BUILD invocation only. `args.issues` is what makes a run a
+// preset, so draining overflow into a discovery run would skip the scout and lose
+// the log review (SKILL.md:385). Passed without `issues`, it is ignored and SAYS so.
+//
+// The drop is `openKnown` — the same list the scout drops against — because the one
+// thing this route must never do is re-dispatch something he parked or declined.
+//
+// A46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
+// never drained on. Most of his rulings are executed as a single direct `Agent`
+// dispatch (SKILL.md, the one-lane branch of `build`), where no engine runs, so
+// nothing there could read this field or delete an entry: an item carried once,
+// built by hand, then sat in `state.pendingOverflow` and rode into every later
+// build as duplicate work. The Manager now deletes what it hand-dispatches, and
+// this is the backstop for the night it forgets — the ledger already knows what
+// shipped, and `alreadyBuilt` is passed on every invocation.
+const refKey = (v) => String(v || '').toLowerCase().replace(/^gh#|^#/, '').trim()
+const overflowArg = asArray('pendingOverflow', A.pendingOverflow)
+const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? o : o.ref)).filter(Boolean))
+const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' ? b : b.ref)).filter(Boolean))
+const carriedDropped = overflowArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
+const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) && builtRefs.has(refKey(i.id || i.ref)))
+const carriedIn = presetArg.length ? overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i)) : []
+if (overflowArg.length && !presetArg.length)
+  argWarnings.push(
+    `\`pendingOverflow\` carried ${overflowArg.length} entr${overflowArg.length === 1 ? 'y' : 'ies'} but no \`issues\` were passed, so this is a DISCOVERY run and they were IGNORED — draining them here would make the run a preset and skip the scout, losing the log review. Carry them on the next \`build\`.`,
+  )
+if (carriedDropped.length)
+  argWarnings.push(
+    `${carriedDropped.length} \`pendingOverflow\` entr${carriedDropped.length === 1 ? 'y' : 'ies'} matched a parked \`openKnown\` ref and were DROPPED, not built: ${carriedDropped.map((i) => i.id || i.ref || '(no id)').join(', ')}. He has already ruled on those.`,
+  )
+if (carriedBuilt.length)
+  argWarnings.push(
+    `${carriedBuilt.length} \`pendingOverflow\` entr${carriedBuilt.length === 1 ? 'y' : 'ies'} matched an \`alreadyBuilt\` ref and were DROPPED, not re-built: ${carriedBuilt
+      .map((i) => i.id || i.ref || '(no id)')
+      .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
+  )
+// A25's guard reads the MERGED list below, so a carried row still flagged
+// `awaitingOwner` is refused exactly like a pasted one.
+const PRESET = presetArg.length ? [...carriedIn, ...presetArg] : null
+if (carriedIn.length) log(`Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`)
+// A25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
+// shaped for a copy-paste straight back into `args.issues` — that is the whole
+// point of the shape — so the flag that says "he has not ruled on the parent yet"
+// has to be enforced at the door it makes easy to walk through. Building one of
+// these could implement a dependency of something he is about to decline.
+// Refused HERE because nothing has spawned yet: a loud stop costs one
+// re-invocation (N11), and once he rules, DELETING the flag from the row is the
+// approval. Without this read the field was decoration, which A5 forbids.
+const undecidedPreset = (PRESET || []).filter((i) => i && i.awaitingOwner)
+if (undecidedPreset.length)
+  throw new Error(
+    `args.issues carries ${undecidedPreset.length} row(s) still flagged \`awaitingOwner\`: ` +
+      `${undecidedPreset.map((i) => `${i.id || '(no id)'} (parent verdict ${i.fromVerdict || '?'})`).join(', ')}. ` +
+      `Each is a dependency ask whose PARENT is waiting on the owner, so building it could implement a dependency of something he declines. ` +
+      `Nothing has been dispatched. Get his ruling, delete \`awaitingOwner\` from the row, and re-invoke.`,
+  )
 const describeOpen = (o) =>
   typeof o === 'string'
     ? `  • ${o}`
@@ -178,6 +289,67 @@ const SCOUT = {
       type: 'array',
       items: { type: 'string' },
       description: 'the ref or symptom of every finding you dropped because it is already fixed. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+    },
+    // A32 + A33 · ONE field for both halves of the ticket problem, because both
+    // are invisible in the same way. gh#156 carried three numbered complaints and
+    // one issue came back; gh#158 carried three and one came back. Neither was a
+    // drop — `droppedAsOpenKnown` was gh#155/gh#154 only and `droppedAsAlreadyBuilt`
+    // was empty — so two of every three complaints were never surfaced by any run,
+    // and nothing could tell. Worse, the one row that MERGED a ticket with a log
+    // moment came back as `flow-narrates-unexecuted-actions` with no 156 in it, so
+    // the ticket-coverage check had no row to fire on and gh#156 read exactly like
+    // a ticket with nothing wrong.
+    ticketComplaints: {
+      type: 'array',
+      description:
+        'one entry per GitHub ticket you read, ALWAYS — empty array only when you pulled no tickets. This is how 3-complaints-in / 1-issue-out becomes visible instead of silent.',
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'the ticket, as `#<number>`' },
+          complaintsFound: { type: 'number', description: 'how many distinct complaints the BODY explicitly lists. Count what is listed; never infer a list that is not there.' },
+          issuesEmitted: { type: 'number', description: 'how many issues you emitted whose id names this ticket' },
+        },
+        required: ['ref', 'complaintsFound', 'issuesEmitted'],
+      },
+    },
+    // A42 · the backlog re-read. Its product is FEWER rows on his desk, so the two
+    // numbers that matter are how many stale rows the list held and how many were
+    // actually examined — a pass that reached 8 of 22 must not read like a finished
+    // one, which is the `ticketComplaints` lesson applied to the third intake.
+    backlogSeen: {
+      type: 'number',
+      description: 'how many rows `ledger-stats --open` printed with the RE-READ prefix. 0 only when it printed none. Backlog runs only.',
+    },
+    // A47 · the rows no pass can ever reach. `--open` names them under "cite no
+    // file"; without this number `reread: 22 of 22` reads as a finished backlog
+    // while a third of it was never checkable at all.
+    backlogNoCite: {
+      type: 'number',
+      description:
+        'the count `ledger-stats --open` printed as `cite no file`. Do NOT re-read those rows and do not go hunting for their code — they need the owner, not a lane. Backlog runs only.',
+    },
+    backlogReread: {
+      type: 'array',
+      description: 'one entry per RE-READ row you actually opened the code for. Empty array when `backlog` was not a source — never omit it on a backlog run.',
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: 'the row ref exactly as `--open` printed it, so it collapses onto the row it came from' },
+          state: {
+            type: 'string',
+            enum: ['fixed', 'moved', 'still-real'],
+            description: '`fixed` = the defect is gone. `moved` = still real, in a different place. `still-real` = still real where the row says it is.',
+          },
+          evidence: {
+            type: 'string',
+            description:
+              'what you READ. For `fixed`: the commit that removed it (`git log -1 --format=%h -- <file>`) or the code that now handles the case. A bare "already fixed" is a FALSE CLOSE — a restructured file looks fixed when the defect has only moved, and once a row is closed nothing looks again.',
+          },
+          whereNow: { type: 'string', description: '`moved` only: the current `file:line`. This is what stops the row being flagged stale again tomorrow.' },
+        },
+        required: ['ref', 'state', 'evidence'],
+      },
     },
     issues: {
       type: 'array',
@@ -249,6 +421,20 @@ const VERDICTS = {
             enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
           },
           rootCause: { type: 'string', description: 'file:line — proven, not guessed' },
+          // A22 · THE COMPLEMENT TO `rootCause`, and until now it had a reader and
+          // no writer. `rootCause` answers "is this the same BUG"; nothing answered
+          // "is this the same RULE", so one principle broken in three files read as
+          // three unrelated findings and the chat reading them proposed three
+          // separate charter rules. `ledger-stats --by-invariant` has grouped by
+          // this field since it was added — and saw 16 of 344 rows, all 16 typed by
+          // hand in a single run, because no return schema ever asked for it. This
+          // is the ask. `knownInvariants` in the dispatch carries the slugs already
+          // in use so three lanes cannot name one principle three ways.
+          invariant: {
+            type: 'string',
+            description:
+              'OMIT unless this bug is an instance of a GENERAL rule that could break somewhere else. When it is, a short stable slug — `tier-follows-structure-not-classification`, `payload-scoped-to-caller` — reused VERBATIM from the slugs the dispatch names if one fits. A slug invented for one row groups nothing and is noise; a local bug is meant to carry none.',
+          },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
           // The STRUCTURED version of the same fact, and it is load-bearing in a
           // way the prose is not. The verify reads `git diff`, which on a normal
@@ -302,8 +488,14 @@ const VERIFY_OUT = {
     // loop: verify -> new row -> build -> re-verify -> new row. Observed
     // 2026-07-27 with a cached-reads finding in checkSlot.
     //
-    // So a discovery is REPORTED, never built in-wave. It is next run's input —
-    // shaped to drop straight into `args.issues`.
+    // So a discovery is REPORTED, never built in-wave. It is next run's INTAKE —
+    // shaped to drop straight into `args.issues`, and it does NOT go on the
+    // owner's decide list (A30, his words: "if i do want to fix discoveries, its
+    // not blocker, its bonus"). `lane` and `severity` are REQUIRED for exactly
+    // that reason: an item that is going to be dispatched as intake has to be
+    // routable and rankable, and severity has to survive the trip because
+    // blocking and severity are different axes — the wave that found it cannot be
+    // held for it, and a `high` one can still put a person on a real invite.
     discoveries: {
       type: 'array',
       items: {
@@ -312,9 +504,18 @@ const VERIFY_OUT = {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
           evidence: { type: 'string', description: 'file:line, REQUIRED' },
           lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
-          severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+          severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
+          // A22 · a DISCOVERY is the highest-value place for this tag and the only
+          // one where it was ever set: you read the whole diff, so you are the pass
+          // most likely to see one principle broken in three files. All three slugs
+          // in the ledger were typed by hand onto discovery rows in wf_33541300-121.
+          invariant: {
+            type: 'string',
+            description:
+              'OMIT unless this is an instance of a GENERAL rule that could break elsewhere. When it is, one short stable slug, and the SAME slug on every discovery that breaks the same rule — that is what lets the root be fixed once instead of three times. Reuse a slug the dispatch already named if one fits.',
+          },
         },
-        required: ['symptom', 'evidence'],
+        required: ['symptom', 'evidence', 'lane', 'severity'],
       },
       description:
         'problems you found that are NOT about the fixes under review. Return an empty array if none — do NOT put them in `results`, and do NOT stay quiet about one to keep the wave clean.',
@@ -361,9 +562,18 @@ const WHERE_NOTE =
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
+// A22 · Named in the dispatch, not left to the schema description alone: the slug
+// only groups if it is reused verbatim, and a lane cannot reuse a vocabulary it
+// has never been shown. Printed only when there IS one, so a run with no history
+// does not carry an empty instruction.
+const INVARIANT_NOTE = KNOWN_INVARIANTS.length
+  ? `\n\nINVARIANTS ALREADY IN USE — if an issue is an instance of one of these, set \`invariant\` to that slug VERBATIM: ${KNOWN_INVARIANTS.join(', ')}. ` +
+    `If it is an instance of a general rule NOT in that list, coin one short slug and use it for every issue in this batch that breaks the same rule. Leave it out for a genuinely local bug.`
+  : ''
+
 const dispatch = (lane, issues) =>
   agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
     // hand-dispatched lane gets it too. Setting it in the engine only made it
     // true on the engine path, which is the shape of failure this framework
@@ -443,6 +653,10 @@ let openKnownDropped = []
 let scoutReport = {}
 let findingsSeen = 0
 let locationsResolved = 0
+let ticketComplaints = []
+let backlogSeen = 0
+let backlogNoCite = 0
+let backlogReread = []
 if (PRESET) {
   log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the scout.`)
   allIssues = PRESET
@@ -464,7 +678,21 @@ const scout = await agent(
       : '') +
     (SOURCES.includes('github')
       ? `## The GitHub pull\n\n` +
-        `Run \`gh issue list --label Bug --state open --json number,title,body,labels\` (read-only). One command — do not explore the repo for more. For each issue the ref is \`#<number>\` and the symptom is the title; the evidence is the body **plus any \`file:line\` it names, quoted verbatim**, because a citation you do not carry through cannot be used downstream. Do not filter by label beyond \`Bug\` — de-duplication is the ledger's job below, not yours.\n\n`
+        `Run \`gh issue list --label Bug --state open --json number,title,body,labels\` (read-only). One command — do not explore the repo for more. Do not filter by label beyond \`Bug\` — de-duplication is the ledger's job below, not yours.\n\n` +
+        `**ENUMERATE THE BODY'S COMPLAINTS FIRST, THEN EMIT ONE ISSUE PER COMPLAINT.** The title is a LABEL for the group, not the symptom. He writes a ticket as a pasted transcript followed by a numbered list of what went wrong — gh#156 ends \`1. why first going to online or person 2. why she lied 3. what does getting back to you mean\` — and **that list IS the work.** Read the title as the symptom and all three collapse into one title-shaped issue: measured on 2026-07-29, gh#156 and gh#158 each carried three complaints and each came back as one issue, so two of every three were never surfaced by any run and every ticket ended PARTIAL.\n` +
+        `  • **Count what is explicitly listed. Never infer a list that is not there** — a body that is only a transcript has one complaint, and manufacturing three from it is worse than missing two.\n` +
+        `  • **Every emitted issue's \`id\` NAMES ITS PARENT TICKET: \`156-a\`, \`156-b\`, \`156-c\`.** The evidence is that complaint's own words plus any \`file:line\` quoted verbatim, because a citation you do not carry through cannot be used downstream.\n` +
+        `  • **A MERGED issue keeps the ticket ref too.** \`source: 'both'\` means both sources are NAMED, not that the log slug wins: on 2026-07-29 the one merged row came back as \`flow-narrates-unexecuted-actions\` with no \`156\` anywhere in it, so gh#156 got no coverage row at all while gh#158 got one — and a ticket with no coverage row is indistinguishable from a ticket with nothing wrong.\n` +
+        `  • **Report \`ticketComplaints\`: one \`{ref, complaintsFound, issuesEmitted}\` per ticket you read.** The manifest checks it, so 3-in-1-out is a number rather than something nobody notices for a week.\n\n`
+      : '') +
+    (BACKLOG
+      ? `## The backlog re-read\n\n` +
+        `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — a commit touched the file they cite after they were written, so nobody knows whether they are still real. **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
+        `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
+        `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
+        `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
+        `  • **Emit NO issue for a backlog row, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 22 old rows is a wave nobody approved.\n` +
+        `  • Work them in the order printed, and if you run out of room say how many you did NOT reach. \`backlogSeen\` against the length of \`backlogReread\` is how a half-finished pass shows up as a number instead of reading as a clean sweep.\n\n`
       : '') +
     `## Then shape it\n\n` +
     `Merge the two sources, split into ATOMIC issues, route each to the lane that owns the FIX, and classify \`kind\` — all four per your charter. Carry \`clarity\` forward. Give a one-line \`whyHypothesis\`; do NOT prove root causes or design fixes, because the lane does that properly and will re-derive anything you assert anyway.\n\n` +
@@ -487,8 +715,13 @@ allIssues = (scout && scout.issues) || []
 triageDropped = (scout && scout.droppedAsAlreadyBuilt) || []
 openKnownDropped = (scout && scout.droppedAsOpenKnown) || []
 findingsSeen = (scout && scout.findingsSeen) || allIssues.length
+ticketComplaints = (scout && scout.ticketComplaints) || []
+backlogSeen = (scout && typeof scout.backlogSeen === 'number' ? scout.backlogSeen : 0)
+backlogNoCite = (scout && typeof scout.backlogNoCite === 'number' ? scout.backlogNoCite : 0)
+backlogReread = (scout && scout.backlogReread) || []
 scoutReport = scout || {}
 log(`Scout: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
+if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 }
 
 // A lane name outside the known set means the issue matches no lane in the Build
@@ -568,6 +801,9 @@ if (MODE === 'collect') {
     // and a funnel that names a number while withholding its rows is a worse lie
     // than the zero it replaced.
     pending,
+    // A42 · a collect run over the backlog would otherwise drop the only thing it
+    // produced, since this return happens before the manifest is built.
+    backlogReread,
     verifiedClean: [],
   }
 }
@@ -867,9 +1103,38 @@ const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks]
 // left it could never fire. The counter was broken in the one direction that
 // hides the failure it exists to catch.
 const allDepAsks = asksMinted.size + deferredNow.length
+// Moved above the manifest so the decision budget can count it (A31); `persist`
+// below reuses the same list rather than recomputing it.
+const notBuilt = verified
+  .filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed')
+  .map((r) => ({ id: r.id, verdict: r.verdict, lane: (specById.get(r.id) || {}).lane || '', why: r.notes || r.fix || '' }))
+// ---- A31 · THE DECISION BUDGET -------------------------------------------
+// `capBuilds` caps BUILDS and nothing capped DECISIONS, yet decisions are the
+// scarce resource: they are the only step that cannot be parallelised, batched or
+// delegated, because there is one owner. Measured refs-on-his-desk per engine run
+// across the window: 4, 3, 8, 1, 4, 12, then 25 — and the 25 is the night he said
+// he could not follow it. His pushback RATE was normal; the number of items each
+// pushback had to be spent on was not, and the engine could not tell a run that
+// dispatched 100 fixes and asked nothing from one that dispatched 8 and asked 25.
+//
+// Default 12 is measured, not chosen: it is the highest any run reached on a night
+// that worked, so this fires on 25 and on nothing that has ever been fine. A
+// warning that fires on the healthy path is the `startedAtLine: 1` mistake.
+//
+// It WARNS and proposes a deferral. It never truncates — silently keeping the
+// first N is the no-silent-caps failure — and it never merges, because merging
+// unrelated rows to stay under a budget is worse than 25 honest rows.
+const DECISION_BUDGET = typeof A.capDecisions === 'number' ? A.capDecisions : 12
+const onHisDesk =
+  notBuilt.length + deferredNow.length + needsShaping.length + flagged.length + pending.length + ticketCoverage.filter((t) => t.state !== 'satisfied').length
 const manifest = {
   mode: MODE,
   preset: !!PRESET,
+  // A31 · the one number that predicts whether he can close the run tonight.
+  // `discoveries` is deliberately NOT counted: since A30 they are the next run's
+  // intake rather than a row on his desk, which is what brings a night like
+  // 2026-07-29 back under budget without dropping anything.
+  decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
   logReview: PRESET
     ? 'skipped (preset issues)'
     : {
@@ -886,9 +1151,52 @@ const manifest = {
   // and a warning that fires on the healthy path is the thing being fixed
   // everywhere else in this file.
   openKnown: { passedIn: OPEN_KNOWN.length, dropped: openKnownDropped.length, refs: openKnownDropped },
+  // A43 · what the build picked up out of `state.pendingOverflow`. Zero on a
+  // discovery run is correct — the carry is build-only. Zero on a build while the
+  // field holds entries is the failure this reader exists to end, and the arg
+  // warning above says so in words. **The Manager must DELETE `carry.refs` AND
+  // `carry.droppedAsBuiltRefs` from `state.pendingOverflow`** — the engine cannot
+  // write state, and an entry left there rides into every future build.
+  carry: {
+    carriedIn: carriedIn.length,
+    refs: carriedIn.map((i) => i.id || i.ref || '(no id)'),
+    droppedAsParked: carriedDropped.length,
+    // A46 · non-zero means the field did not drain on a hand dispatch. The refs are
+    // named so he can see WHICH stale entry rode in, and delete them from state.
+    droppedAsBuilt: carriedBuilt.length,
+    droppedAsBuiltRefs: carriedBuilt.map((i) => i.id || i.ref || '(no id)'),
+  },
+  // A42 · the backlog re-read. `seen` against `reread` is the half-finished tell;
+  // `fixed` is the only state that removes a row, so it is the one that has to be
+  // evidenced.
+  backlog: BACKLOG
+    ? {
+        seen: backlogSeen,
+        reread: backlogReread.length,
+        notReached: Math.max(0, backlogSeen - backlogReread.length),
+        // A47 · rows no pass can reach, because they cite no file. Printed beside the
+        // re-read counts so `22 of 22` cannot read as a finished backlog.
+        noCitation: backlogNoCite,
+        fixed: backlogReread.filter((b) => b.state === 'fixed').length,
+        moved: backlogReread.filter((b) => b.state === 'moved').length,
+        stillReal: backlogReread.filter((b) => b.state === 'still-real').length,
+      }
+    : 'n/a (not a backlog run)',
+  // A32 + A33 · the ticket funnel. `complaintsFound` against `issuesEmitted` per
+  // ticket, so three-in-one-out is a number here instead of something the owner
+  // discovers by re-reading his own ticket at midnight.
+  tickets: PRESET ? 'n/a (preset)' : { read: ticketComplaints.length, complaints: ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0), emitted: ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0), perTicket: ticketComplaints },
   locationsResolved: PRESET ? 'n/a (preset)' : locationsResolved,
   lanesDispatched: [...new Set(verified.map((r) => (specById.get(r.id) || {}).lane).filter(Boolean))],
   misroutedLanes: misrouted.length,
+  // A22 · the writer's OWN observable. The field had a reader for a week and no
+  // writer, and nothing anywhere said so. This is the number that makes a dead
+  // writer visible on the run it dies, instead of in a query a month later:
+  // `tagged` against `vocabulary`, so "nobody tagged" and "everybody coined a new
+  // slug" read differently. NO warning on a zero, deliberately — a wave of
+  // genuinely local bugs is meant to tag none, and a check that fires on the
+  // healthy case is the `startedAtLine: 1` mistake.
+  invariants: { tagged: verified.filter((r) => r.invariant).length, of: verified.length, vocabulary: KNOWN_INVARIANTS.length, slugs: [...new Set(verified.map((r) => r.invariant).filter(Boolean))] },
   dependencyAsks: { attached: allDepAsks, routedAndBuilt: verified.filter((r) => String(r.id).endsWith('>dep')).length, deferredToOwner: deferredNow.length },
   verify: VERIFY
     ? {
@@ -939,11 +1247,61 @@ if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
 if (verified.some((r) => r.verdict === 'already-fixed'))
   warnings.push('A lane returned `already-fixed` — a duplicate reached a full dispatch. alreadyBuilt should have caught it earlier and cheaper.')
 if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
+// A31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
+if (onHisDesk > DECISION_BUDGET)
+  warnings.push(
+    `DECISION BUDGET EXCEEDED — ${onHisDesk} refs need the owner against a budget of ${DECISION_BUDGET}. Prior runs put 1 to 12 on his desk; 25 is the night he could not follow. ` +
+      `Nothing has been truncated. Propose DEFERRING the lowest-severity rows to the next run and say which — never merge two rows to get under the number, which buys a smaller list and a worse one.`,
+  )
+// A32 · three complaints in, one issue out, and no drop to explain it.
+if (!PRESET && SOURCES.includes('github')) {
+  if (!ticketComplaints.length) warnings.push('The scout reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
+  const under = ticketComplaints.filter((t) => (t.complaintsFound || 0) > (t.issuesEmitted || 0))
+  if (under.length)
+    warnings.push(
+      `${under.length} ticket(s) listed MORE complaints than the issues emitted for them: ${under.map((t) => `${t.ref} ${t.complaintsFound}→${t.issuesEmitted}`).join(', ')}. ` +
+        `Those tickets are PARTIAL by arithmetic — do not close them, and the unemitted complaints are not on any list unless you put them there.`,
+    )
+  // A33 · the silent half. A merged row that drops the ticket ref leaves the
+  // coverage check with nothing to fire on, and a ticket with no coverage row
+  // looks exactly like a ticket with nothing wrong.
+  const orphanTickets = ticketComplaints
+    .map((t) => String(t.ref || '').replace(/\D/g, ''))
+    .filter((n) => n && !allIssues.some((i) => String(i.id || '').includes(n)))
+  if (orphanTickets.length)
+    warnings.push(
+      `${orphanTickets.length} ticket(s) named in the scout's input appear in NO issue id: ${orphanTickets.map((n) => `#${n}`).join(', ')}. ` +
+        `Nothing downstream can compute coverage for them — this is the gh#156 failure, where a merged row kept the log slug and dropped the ticket number.`,
+    )
+}
 if (deferredNow.length) warnings.push(`${deferredNow.length} dependency ask(s) were NOT dispatched and MUST be rendered in the report — an unreported ask is indistinguishable from one that never happened.`)
+// A42 · a cleanup pass that closes a row on an unevidenced "fixed" is worse than
+// the stale row it replaced: the row disappears and nothing ever looks again. The
+// brief refuses it; this counts the ones that got through, because a brief is a
+// request and a count is an observable.
+if (BACKLOG) {
+  const unevidenced = backlogReread.filter((b) => b.state === 'fixed' && !/(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
+  if (unevidenced.length)
+    warnings.push(
+      `${unevidenced.length} backlog row(s) were called \`fixed\` WITHOUT naming a commit or a line: ${unevidenced.map((b) => b.ref).join(', ')}. ` +
+        `A restructured file looks fixed when the defect has only moved. Treat these as unconfirmed — do NOT remove them from the report or close them in the ledger.`,
+    )
+  const notReached = Math.max(0, backlogSeen - backlogReread.length)
+  if (notReached)
+    warnings.push(`The backlog pass re-read ${backlogReread.length} of ${backlogSeen} stale row(s) — ${notReached} were never opened and are still unconfirmed. Run it again for the rest.`)
+  if (!backlogSeen && !backlogReread.length)
+    warnings.push(`\`backlog\` was a source and the pass reported NOTHING — either \`--open\` printed no RE-READ rows, or the re-read never ran. Check with \`node scripts/ledger-stats.cjs --open\` before reading this as a clean backlog.`)
+  if (backlogNoCite)
+    warnings.push(
+      `${backlogNoCite} open row(s) cite no file, so no backlog pass will ever re-read them — they are named at the end of \`node scripts/ledger-stats.cjs --open\` and need YOUR read, not a lane's. The backlog is not clean until that list is worked down too.`,
+    )
+}
 log(
   `Manifest — cutoff:${(!PRESET && scoutReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(scoutReport.filesRead) && scoutReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
-    ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}`,
+    ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
+    ` carried:${carriedIn.length}${BACKLOG ? ` backlog:${backlogReread.length}/${backlogSeen}+${backlogNoCite}nocite` : ''}` +
+    ` decisions:${onHisDesk}/${DECISION_BUDGET} tickets:${ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0)}→${ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0)}`,
 )
 warnings.forEach((w) => log(`! ${w}`))
 
@@ -963,9 +1321,6 @@ warnings.forEach((w) => log(`! ${w}`))
 // more reliably than a composition — and when it does not, the finished text is
 // still sitting here for anyone to recover. Same doctrine as "don't return it"
 // for security and "carry, don't guess" for guards: hand over the answer.
-const notBuilt = verified
-  .filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed')
-  .map((r) => ({ id: r.id, verdict: r.verdict, lane: (specById.get(r.id) || {}).lane || '', why: r.notes || r.fix || '' }))
 const persist = {
   notBuilt,
   // Quote this VERBATIM in the chat. It is written to be impossible to reconcile
@@ -978,13 +1333,51 @@ const persist = {
   // Counts of everything else that must reach the report, so an omission is
   // countable rather than a matter of someone remembering the list.
   mustAlsoAppear: {
-    discoveries: discoveries.length,
     deferredDepAsks: deferredNow.length,
     needsShaping: needsShaping.length,
     flaggedForOwner: flagged.length,
     ticketCoverage: ticketCoverage.length,
     pendingOverCap: pending.length,
+    backlogReread: backlogReread.length, // A42 · a re-read nobody wrote down leaves the same 22 rows flagged tomorrow
   },
+  // A42 · THE CLEANUP'S RESULT, pre-shaped both ways. Owner, 2026-07-30: a cleanup
+  // pass must leave the report UPDATED — dead rows gone, real ones kept. A pass that
+  // returns prose leaves the backlog exactly as long as it found it, which is the
+  // one outcome that makes it not worth running.
+  backlog: {
+    // Append each verbatim to `ledger.jsonl`, then DELETE that row from report.md.
+    // Collapse-by-ref does the rest: the row leaves `--open` for good.
+    closeInLedger: backlogReread
+      .filter((b) => b.state === 'fixed' && /(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
+      .map((b) => ({ date: new Date().toISOString().slice(0, 10), ref: b.ref, source: 'audit', verdict: 'already-fixed', note: `backlog re-read: ${b.evidence}` })),
+    // Still real. KEEP them as report rows.
+    keepInReport: backlogReread.filter((b) => b.state !== 'fixed').map((b) => ({ ref: b.ref, state: b.state, whereNow: b.whereNow || '', evidence: b.evidence })),
+    // A47 · AND append each of these to `ledger.jsonl` verbatim — this is what
+    // records that somebody looked. Without it the same row is flagged RE-READ again
+    // tomorrow and re-read again the night after, which is what made a nightly
+    // backlog pass unaffordable: the staleness check compares the citing commit's
+    // date against the ROW's date, so a confirmation is simply a later date.
+    // Deliberately carries NO verdict — `--open` merges by ref, so omitting it keeps
+    // the row's real state instead of a re-read quietly overwriting his ruling.
+    // `rootCause` is written only for a `moved` row, where the location genuinely
+    // changed.
+    confirmInLedger: backlogReread
+      .filter((b) => b.state !== 'fixed')
+      .map((b) => ({
+        date: new Date().toISOString().slice(0, 10),
+        ref: b.ref,
+        recheck: `${b.state}: ${b.evidence}`,
+        ...(b.whereNow ? { rootCause: b.whereNow } : {}),
+      })),
+  },
+  // A30 · `discoveries` USED TO BE COUNTED ABOVE, and that is what put a bonus
+  // finding on his decide list. His ruling: "if i do want to fix discoveries, its
+  // not blocker, its bonus." The label and the array have existed since A8 shipped
+  // them on 2026-07-27 — only the routing was wrong, and it was wrong in the
+  // policy, not the code. They do NOT become report rows at `pending owner`; they
+  // are the NEXT run's first intake items, already lane-assigned and severity-ranked
+  // so they drop straight into `args.issues`. He can still promote one by naming it.
+  carryToNextRun: { discoveries: discoveries.length },
 }
 
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----
@@ -1032,13 +1425,24 @@ return {
   // the engine cannot, and an entry left there silences a real check on every
   // future run. This is the pruning that used to depend on remembering.
   priorCleanDropped,
-  // NEW problems the verify found that are NOT about this wave's fixes. Render
-  // them in the report as fresh rows at `pending owner`, and dispatch whatever
-  // he approves via `args.issues` on the NEXT run. **Do not build them tonight**
-  // — that changes the tree the verify just examined, invalidates the pass that
-  // found them, and justifies another pass that can discover something else.
-  // Already shaped to drop straight into `args.issues`.
+  // NEW problems the verify found that are NOT about this wave's fixes. **These
+  // are NEXT RUN'S INTAKE, not rows on his desk** (A30) — carry them into the
+  // next invocation's `args.issues`, which they are already shaped for, lane
+  // included and severity included. **Do not build them tonight** — that changes
+  // the tree the verify just examined, invalidates the pass that found them, and
+  // justifies another pass that can discover something else. And do not soften
+  // one by calling it a bonus: not blocking and not severe are different claims,
+  // so a `high` discovery arrives first in the next queue.
   discoveries,
+  // A43 · what this build took out of `state.pendingOverflow` — the discoveries and
+  // over-cap items an earlier run parked there. **DELETE these from
+  // `state.pendingOverflow` when you persist**: the engine cannot write state, and
+  // an entry that stays rides into every future build as a duplicate dispatch.
+  carriedIn,
+  // A42 · the stale rows this pass re-read, with what it found. `persist.backlog`
+  // holds the same result pre-shaped for the ledger and the report — use that; this
+  // is the raw list for anything else you need to read.
+  backlogReread,
   // Open GitHub issues this wave landed on without being asked to. **Render
   // these** — `satisfied` closes at the wrap with everything else; `partial`
   // is the one that matters, because the owner can send it back for the

@@ -246,33 +246,60 @@ if (ONE_DAY) {
     console.log(`${pad(a.how, 8)}${pad(a.type.slice(0, 17), 18)}${pad(a.tiers.join('+'), 9)}${lp(a.turns, 7)}${lp(usd(a.cost), 9)}`)
   console.log(rule(51))
 
-  // The check that matters: same agent, two dispatch paths, two tiers.
+  // A39 · The check that matters: OBSERVED tier against the tier the charter
+  // DECLARES. It used to compare two dispatch paths to each other, which is not
+  // the claim the line makes — "no dispatch path is overriding the charter" is
+  // about the charter, and the charter was never read. For any agent dispatched
+  // by exactly ONE path the comparison had a single member, agreed with itself,
+  // and reported a consistency it never tested: on 2026-07-29 it printed
+  // "consistent for all 10 chartered agents" while `architect.md` declared
+  // `sonnet` and all three architect runs that day were opus. A check that
+  // cannot fail on known-bad input is not a check.
   //
   // Only agents that HAVE a charter can be checked. `workflow-subagent` and
   // `general-purpose` are generic — no `.claude/agents/*.md`, so no single source
   // of truth to violate, and the engine sets their tier per call on purpose
   // (haiku for intake, opus for recon). Warning on those would fire every run and
   // train everyone to ignore the one case that matters.
-  let chartered = new Set()
+  //
+  // An agent with NO `model:` line inherits the session default, so absent means
+  // NOT CHECKED and is reported as such — never silently counted as agreeing,
+  // which would be this same failure one layer along.
+  const declared = new Map()
+  let charterDir = true
   try {
-    chartered = new Set(fs.readdirSync(path.join(process.cwd(), '.claude', 'agents')).filter((f) => f.endsWith('.md')).map((f) => f.slice(0, -3)))
-  } catch {}
-  const seen = new Map()
-  for (const a of agents) {
-    if (!chartered.has(a.type)) continue
-    if (!seen.has(a.type)) seen.set(a.type, new Set())
-    for (const t of a.tiers) seen.get(a.type).add(t)
+    const dir = path.join(process.cwd(), '.claude', 'agents')
+    for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.md'))) {
+      const head = fs.readFileSync(path.join(dir, f), 'utf8').slice(0, 4000)
+      const m = head.match(/^model:\s*(\S+)/m)
+      declared.set(f.slice(0, -3), m ? tierOf(m[1]) : null)
+    }
+  } catch {
+    charterDir = false
   }
-  const split = [...seen.entries()].filter(([, t]) => t.size > 1)
-  if (!chartered.size) console.log(`\n(no .claude/agents found — skipping the tier check)`)
-  else if (split.length)
+  const off = []
+  const unchecked = new Set()
+  const checked = new Set()
+  for (const a of agents) {
+    if (!declared.has(a.type)) continue
+    const want = declared.get(a.type)
+    if (!want) {
+      unchecked.add(a.type)
+      continue
+    }
+    checked.add(a.type)
+    for (const t of a.tiers) if (t !== want) off.push({ type: a.type, want, got: t, turns: a.turns, cost: a.cost })
+  }
+  if (!charterDir) console.log(`\n(no .claude/agents found — the tier check did NOT run)`)
+  else if (off.length)
     console.log(
-      `\n!! TIER SPLIT — a chartered agent ran on more than one tier the same day,\n   so something other than its charter is choosing:\n${split.map(([n, t]) => `     ${n}: ${[...t].join(' + ')}`).join('\n')}`
+      `\n!! OFF CHARTER — ${off.length} dispatch(es) ran on a tier their charter does not declare:\n` +
+        off.map((o) => `     ${o.type}: charter says ${o.want}, ran ${o.got} (${o.turns} turns, ${usd(o.cost)})`).join('\n')
     )
   else
-    console.log(
-      `\nTier is consistent for all ${seen.size} chartered agent(s) seen — no dispatch\npath is overriding the charter. (Generic agents are excluded: no charter to hold.)`
-    )
+    console.log(`\nEvery dispatch matched its charter's declared tier — ${checked.size} chartered\nagent(s) checked against their own \`model:\` line.`)
+  if (unchecked.size)
+    console.log(`   NOT CHECKED (no \`model:\` in the charter, so it inherits the session default): ${[...unchecked].join(', ')}`)
   console.log('')
   process.exit(0)
 }
