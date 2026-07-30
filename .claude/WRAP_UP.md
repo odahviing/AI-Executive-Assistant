@@ -2,6 +2,18 @@
 
 Trigger phrases from the owner: "wrap up", "close the patch", "cut a version", "day close", "let's ship" — all map to running this checklist.
 
+## HIS STANDING ORDER — all of it is already given, do not ask for it again
+
+Stated 2026-07-30 and again 2026-07-31, with the explicit request that it be encoded: **patch version · take the code from other chats too · nothing left uncommitted · close the GitHub issues that are fully resolved and COMMENT the ones that are not · restart Maelle.** The skill file (`.claude/skills/wrap/SKILL.md`) carries the same list — it is the short form, this is the procedure.
+
+Three consequences the old checklist did not have:
+
+- **Step 2 means the WHOLE tree.** `git status --porcelain` with no path filter, every chat's files, framework included. A commit holding only your own files is the defect, not a tidy scope.
+- **Steps 12-13 are new and they are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
+- **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+
+**One trap worth naming: `npm run deploy` ends in `pm2 logs`, which never exits and hangs the turn.** Run `npm run build`, then `pm2 restart maelle`, then read the boot stamp out of `logs/maelle-<today>.log`. The stamp's `gitSha` must equal **HEAD**, which is the *last* commit — if the wrap made a bookkeeping commit after the version commit, the stamp shows that one.
+
 **Timing:** not strictly end-of-day. Any time enough has accumulated to warrant a version bump. Typical shape: owner made bigger changes this session + auto-triage landed some bug fixes during the day → one wrap-up bundles both into a single version.
 
 ---
@@ -162,9 +174,37 @@ git push origin master
 
 Use the owner's author (not `Maelle Auto-Triage`). That makes the commit NOT trigger the deploy watcher auto-pull — owner deploys their own wrap-up commits manually (or via PM2 restart if changes affect the running process).
 
-### 11. Summary back to the owner
+### 12. GitHub issues — close the resolved, COMMENT the rest
 
-One paragraph: "Shipped 2.x.y. Headline: <X>. Auto-triage closed #N, #N+1. CHANGELOG + memory files updated. Build clean. Deploy when ready."
+Close only when all three hold: verdict is `built`, the commit exists (close *after* the push, so the sha is real), and he said wrap.
+
+```bash
+gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what changed>"
+```
+
+**The half that used to get skipped:** a ticket whose complaints are not all resolved does not close — it gets a comment naming what landed, what is still open, and why. Use `gh issue comment <n> --body-file <tmp>.md`; never inline a markdown body. A ticket is partial when the verify's `ticketCoverage` says so, or when its numbered complaints outnumber the issues emitted for it. **Never close a row the verify overturned**, or one he has not decided.
+
+### 13. Restart Maelle and confirm the boot stamp
+
+```bash
+npm run build
+```
+
+```bash
+pm2 restart maelle
+```
+
+Then read the stamp from the log, not the PM2 table:
+
+```bash
+grep -n "starting up" logs/maelle-$(date +%Y-%m-%d).log | tail -2
+```
+
+`gitSha` must equal HEAD. Confirm database ready, connection registered, **Slack connected**, email registered if enabled, and `grep -c '"level":"error"' logs/error-$(date +%Y-%m-%d).log` returns 0. Exactly one Slack socket — two processes on the same app give `too_many_connections`.
+
+### 14. Summary back to the owner — verified against shipped
+
+One short block: version and sha, the headline, **how many fixes shipped and how many were verified** with the reason each gap carried, which issues closed and which were commented, and the confirmed boot stamp. Not "deploy when ready" — it is already deployed by now.
 
 ---
 

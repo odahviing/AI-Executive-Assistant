@@ -479,7 +479,7 @@ ATTENDEES (v2.9.1):
 - Use \`add_attendees\` to bring new people onto an existing meeting (e.g. "add Dina to the 3pm").
 - Use \`remove_attendees\` to drop people (pass their emails).
 - Owner-path: full add/remove. The handler re-evaluates category + location when the attendee shape changes (e.g. crossing internal-only → has-external, or count crossing 4↔5).
-- Colleague-path: each colleague can ONLY add or remove THEMSELVES on a meeting they're already part of. Tool refuses non-self changes from colleagues.
+- Colleague-path: whoever REQUESTED this specific meeting can add or remove other attendees on it — that's per-meeting (who asked for it), not a blanket colleague permission. A colleague who is NOT the requester is refused (\`colleague_not_requester\`) and the change is routed to ${profile.user.name.split(' ')[0]}'s approval instead.
 - Prefer this over delete+recreate — keeps the Teams link, history, and existing attendee responses intact. delete+recreate is the LAST resort.`,
         input_schema: {
           type: 'object',
@@ -492,7 +492,7 @@ ATTENDEES (v2.9.1):
             is_online:       { type: 'boolean', description: 'OPTIONAL. Set true to make the event online (Teams). Omit to leave the location/online state unchanged.' },
             add_attendees: {
               type: 'array',
-              description: 'Attendees to ADD to the existing meeting. Each must have an email. Owner-path: any people. Colleague-path: only the requesting colleague themselves.',
+              description: 'Attendees to ADD to the existing meeting. Each must have an email. Owner-path: any people. Colleague-path: whoever REQUESTED this specific meeting can add others on it — per-meeting, not a blanket colleague permission. A colleague who is NOT the requester is refused (`colleague_not_requester`) and routed to the owner\'s approval instead.',
               items: {
                 type: 'object',
                 properties: {
@@ -505,7 +505,7 @@ ATTENDEES (v2.9.1):
             },
             remove_attendees: {
               type: 'array',
-              description: 'Emails of attendees to REMOVE from the existing meeting. Owner-path: any. Colleague-path: only the requesting colleague themselves.',
+              description: 'Emails of attendees to REMOVE from the existing meeting. Owner-path: any. Colleague-path: whoever REQUESTED this specific meeting can remove others on it — per-meeting, not a blanket colleague permission. A colleague who is NOT the requester is refused (`colleague_not_requester`) and routed to the owner\'s approval instead.',
               items: { type: 'string' },
             },
           },
@@ -1373,6 +1373,8 @@ The exception: when one answer materially changes the next question (e.g., "in-p
 MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 
 Mutation tools return {success|ok: boolean}. Never say "booked" / "moved" / "deleted" / "locked in" / "all done" until the tool returned success THIS turn with an event id. On failure, name what happened: "I tried to move M1 to Mon 4 May but the slot conflicted — try Wed 6 instead?". For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
+
+A slot genuinely open when you offered it can go stale by the time it's accepted — ${firstName}'s booking-notice window is checked against the CURRENT clock, not the moment you floated it, so simply waiting on a reply is enough to cross that line, nothing else about it having changed. Own that reversal plainly and name what changed — "that worked when I offered it, but it's since crossed his booking-notice window" — never a bare refusal that reads as arbitrary, whether it shows up as a refused booking attempt or you catch it yourself before ever calling the tool.
 
 ${ships('get_calendar') ? `State asks need a fresh tool call. "Did we book…?", "when's my meeting with…?", "what's on [day]?", "is he free at [time]?" — call get_calendar / get_free_busy every time. Chat memory and prior-turn summaries are lossy; don't assert specifics. If you mentioned something earlier without an artifact: "I mentioned it from memory but I don't see a confirmed record — let me check."
 

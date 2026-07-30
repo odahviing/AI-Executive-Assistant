@@ -28,14 +28,24 @@ const STALE_SURFACE_THRESHOLD = 3;
 
 /** v3.2.6 — news gather is best-effort + fail-open. If it doesn't return within
  *  this window, the brief composes calendar+tasks exactly as today (no delay).
- *  #166 — MUST stay above the inner gather's own budget: an un-timed Haiku
- *  planning call (planNewsGoals, news.ts) followed by a NEWS_PER_GOAL_TIMEOUT_MS
- *  (12s, news.ts) per-goal search. 8s was narrower than that inner budget, so a
- *  legitimately-slow-but-fine gather raced this timeout and lost on a coin flip
- *  (measured margin 5.00s → 7.94s → 8.32s over four days). 20s clears the 12s
- *  search plus realistic planning latency with margin; don't lower this back
- *  below the inner budget without re-timing both sides. */
+ *  #166 — on the SCHEDULED path (nobody waiting live) this MUST stay above the
+ *  inner gather's own budget: an un-timed Haiku planning call (planNewsGoals,
+ *  news.ts) followed by a NEWS_PER_GOAL_TIMEOUT_MS (12s, news.ts) per-goal
+ *  search. 8s was narrower than that inner budget, so a legitimately-slow-but-
+ *  fine gather raced this timeout and lost on a coin flip (measured margin
+ *  5.00s → 7.94s → 8.32s over four days). 20s clears the 12s search plus
+ *  realistic planning latency with margin; don't lower this back below the
+ *  inner budget without re-timing both sides. */
 const NEWS_BRIEF_TIMEOUT_MS = 20_000;
+/** #166 follow-up — the ON-DEMAND path (owner asked for the brief in Slack,
+ *  `force: true`) has someone waiting live behind the eye-emoji receipt, so it
+ *  keeps a tighter budget than the scheduled path's 20s: a slower-than-usual
+ *  gather is dropped (fail-open, same as ever) rather than making a person
+ *  watch a spinner for 20s. Must stay ABOVE news.ts's NEWS_PER_GOAL_TIMEOUT_MS
+ *  (12_000) plus headroom — an outer wait below the inner per-goal budget
+ *  makes the Updates section a coin flip that drops silently (#166a); 14s
+ *  clears that with margin. */
+const NEWS_BRIEF_TIMEOUT_MS_ON_DEMAND = 14_000;
 /** Cap how many meeting-companies we derive into news goals (cost control). */
 const NEWS_MEETING_COMPANY_CAP = 3;
 /** v3.x — today's calendar-health pass folded into the brief is best-effort +
@@ -691,9 +701,10 @@ export async function sendMorningBriefing(
       const meetingCompanies = deriveMeetingCompanies(items, profile);
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { gatherNews } = require('../skills/news') as typeof import('../skills/news');
+      const newsTimeoutMs = force ? NEWS_BRIEF_TIMEOUT_MS_ON_DEMAND : NEWS_BRIEF_TIMEOUT_MS;
       const gathered = await Promise.race([
         gatherNews(profile, { meetingCompanies }),
-        new Promise<undefined>(res => { const t = setTimeout(() => res(undefined), NEWS_BRIEF_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
+        new Promise<undefined>(res => { const t = setTimeout(() => res(undefined), newsTimeoutMs); if (typeof t.unref === 'function') t.unref(); }),
       ]);
       // #167 — gatherNews (news.ts) never resolves to `undefined` itself (it
       // NEVER throws and always returns a NewsBundle, even an empty one on
@@ -706,7 +717,7 @@ export async function sendMorningBriefing(
       // own eventual success/failure log line — which keeps running after
       // losing the race and can land well after the brief has already sent.
       if (!gathered) {
-        logger.warn('briefs — news gather timed out, composing without it', { timeoutMs: NEWS_BRIEF_TIMEOUT_MS });
+        logger.warn('briefs — news gather timed out, composing without it', { timeoutMs: newsTimeoutMs, force });
       } else if (gathered.sources.length > 0) {
         newsBundle = gathered;
       } else {

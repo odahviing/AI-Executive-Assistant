@@ -24,6 +24,7 @@
  *
  * Usage:
  *   node scripts/ledger-stats.cjs --open          # THE OPEN BACKLOG — start here
+ *   node scripts/ledger-stats.cjs --report        # does report.md's own arithmetic add up?
  *   node scripts/ledger-stats.cjs                 # per-lane pushback ratios
  *   node scripts/ledger-stats.cjs --since 2026-07-01
  *   node scripts/ledger-stats.cjs --lane meeting  # one lane, with its findings
@@ -115,6 +116,41 @@ const staleness = (touched, row, ...fields) => {
 /** The oldest date in a set of rows, as the `git log --since` floor. */
 const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean).sort()[0] || '2026-01-01';
 
+// ── A59 · TWO REASONS TO RE-READ. A38 only ever had the first ────────────────
+// A38 asks "did the cited code MOVE", which is staleness of the CITATION. The
+// question the backlog exists to answer is "is this finding still worth fixing",
+// and for a row nobody has ever opened the honest answer is *nobody knows*.
+// Measured 2026-07-30: 4 of 47 open rows cited a file the day's wave touched, so
+// 38 read as `confirmed` while no lane had re-read any of them and several dated
+// from 07-26 — and the pass that exists to shorten the list looked at ONE row.
+//
+// A58 · `confirmed` was also the wrong NAME for the complement. It meant "no
+// commit touched the file" and read as "somebody verified this is still real" —
+// the weaker claim wearing the stronger one's name, on the surface he rules from.
+// It now means exactly one thing: a lane opened the code and stood behind the row,
+// which is what `architect-file --recheck` / a `recheck` field records. The
+// `unchanged` bucket A58 asked for is not renamed, it is GONE: once a
+// never-examined row prints RE-READ, nothing can land in it.
+//
+// FOUR buckets, mutually exclusive, summing to the open count:
+//   confirmed   — carries a `recheck` line and nothing has moved since
+//   moved       — the cited code changed after the row's latest date (A38)
+//   unexamined  — cites a file, and nobody has ever re-read it
+//   no-cite     — cites no file, so no pass can ever check it (A47) — HIS read
+// RE-READ = `moved` ∪ `unexamined`, which is the set the scout's brief takes.
+// `unexamined` deliberately does NOT depend on git: with no history available
+// `moved` is unknowable, but "nobody has looked" is still a fact.
+const bucketOf = (s, row) => {
+  if (String(row.recheck || '').trim() && !s.needsRecheck) return 'confirmed';
+  if (uncheckable(s)) return 'no-cite';
+  return s.needsRecheck ? 'moved' : 'unexamined';
+};
+const REREAD = new Set(['moved', 'unexamined']);
+const LEGEND_REREAD =
+  'RE-READ = nobody has stood behind this row yet — either the code it cites MOVED after it was written, or NO ONE HAS EVER RE-READ IT. Re-read it, then rule; nothing is closed automatically.';
+const LEGEND_CONFIRMED =
+  'CONFIRMED = a lane opened the code and said it is still real. It is the ONLY bucket that means somebody looked; "no commit touched the file" is not a confirmation.';
+
 const argv = process.argv.slice(2);
 const argOf = (flag) => {
   const i = argv.indexOf(flag);
@@ -184,8 +220,11 @@ if (argv.includes('--architect')) {
   // stops being counted as a live decision.
   const aTouched = fileTouchDates(oldestDay(open));
   const aStale = new Map(open.map((r) => [r.id, staleness(aTouched, r, r.evidence, r.note, r.finding)]));
-  const aRecheck = open.filter((r) => aStale.get(r.id).needsRecheck);
-  const aNoCite = open.filter((r) => uncheckable(aStale.get(r.id)));
+  // A58/A59 · one bucket per row, so every count below is the same partition.
+  const aBucket = new Map(open.map((r) => [r.id, bucketOf(aStale.get(r.id), r)]));
+  const aN = (b) => open.filter((r) => aBucket.get(r.id) === b).length;
+  const aRecheck = open.filter((r) => REREAD.has(aBucket.get(r.id)));
+  const aNoCite = open.filter((r) => aBucket.get(r.id) === 'no-cite');
   const byTarget = new Map();
   for (const r of open) {
     const t = normTarget(r.target);
@@ -193,17 +232,21 @@ if (argv.includes('--architect')) {
     byTarget.get(t).push(r);
   }
   console.log(
-    `\nOPEN — ${open.length} awaiting triage or approval · ${open.length - aRecheck.length - aNoCite.length} confirmed · ${aRecheck.length} need a re-read · ${aNoCite.length} cite no file` +
-      (aTouched ? '' : ' (staleness NOT CHECKED — no git history available)'),
+    `\nOPEN — ${open.length} awaiting triage or approval · ${aN('confirmed')} confirmed · ${aRecheck.length} need a re-read (${aN('moved')} moved · ${aN(
+      'unexamined',
+    )} never examined) · ${aNoCite.length} cite no file` + (aTouched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
-  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read it, then rule; nothing is closed automatically.\n`);
+  console.log(LEGEND_REREAD);
+  console.log(LEGEND_CONFIRMED + '\n');
   for (const [t, list] of [...byTarget.entries()].sort((a, b) => b[1].length - a[1].length)) {
     console.log(`${t}  (${list.length})`);
     for (const r of list) {
       const s = aStale.get(r.id);
-      console.log(`  ${p(r.id, 5)} ${p(s.needsRecheck ? 'RE-READ' : r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
+      const b = aBucket.get(r.id);
+      console.log(`  ${p(r.id, 5)} ${p(REREAD.has(b) ? 'RE-READ' : r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
       if (r.evidence) console.log(`        ${String(r.evidence).slice(0, 96)}`);
-      if (s.needsRecheck) console.log(`        ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      if (b === 'moved') console.log(`        ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      if (b === 'unexamined') console.log(`        ! never re-read — filed ${r.date || '(no date)'}, and nobody has opened it since`);
       // A47 · somebody looked and it was still real. Printed with its date, so a
       // confirmation is visible as a real read rather than clearing the flag silently.
       if (r.recheck) console.log(`        re-read ${r.date}: ${String(r.recheck).slice(0, 88)}`);
@@ -218,6 +261,97 @@ if (argv.includes('--architect')) {
   console.log(`Confirm one with: node scripts/architect-file.cjs --recheck <id> --checked "<what you opened>"`);
   console.log(`Nothing here is approved to build. The architect triages and proposes; the owner rules.\n`);
   process.exit(0);
+}
+
+// ── A54 · DOES THE REPORT'S OWN ARITHMETIC ADD UP? ──────────────────────────
+// Reads `report.md` and checks the numbers it asserts about ITSELF: every group
+// heading's count against the rows beneath it, the headline's "N rows await you"
+// against the pending group, and that group against the decision budget (A55).
+//
+// WHY A CHECK AND NOT A BETTER SENTENCE. SKILL.md already told the Manager to read
+// every count off the Status cells and never from the engine's return — and the
+// FIRST report produced under the grouped format printed `Pending owner (3)` above
+// FIVE rows. A27 is the same failure one release earlier: a head line reading
+// `ZERO built` above four `built` rows, alive four hours fifty-six minutes across
+// nine row-level edits, because every edit flipped a status and none touched the
+// count. A hand-written count is a hand-written count; the layer that fixes it is
+// a check (A7), not more prose.
+//
+// It NEVER writes. `report.md` belongs to whoever is mid-wave.
+if (argv.includes('--report')) {
+  const RP = argOf('--report') || path.join(__dirname, '..', '.claude', 'agent-loop', 'report.md');
+  if (!fs.existsSync(RP)) {
+    console.error(`\nNo report at ${RP}\n`);
+    process.exit(1);
+  }
+  // `capDecisions` — the engine's own default lives at bugger.js:1150. Pass --cap
+  // if he raised it for a run, so this check and that run agree on one number.
+  const CAP = Number(argOf('--cap')) || 12;
+  const lines = fs.readFileSync(RP, 'utf8').split(/\r?\n/);
+  const isPipe = (l) => /^\s*\|/.test(String(l));
+  const isSep = (l) => /^\s*\|[\s|:—–-]*\|\s*$/.test(String(l)) && /-/.test(String(l));
+  const groups = [];
+  let cur = null;
+  let loose = 0;
+  lines.forEach((l, i) => {
+    // A `#` heading, or a bold-only line that CARRIES a count. A bold sentence with
+    // no `(n)` in it is prose (the emptied report's headline is exactly that) and
+    // must not capture the rows below it as a group.
+    const h = l.match(/^\s{0,3}#{1,6}\s+(.+?)\s*$/) || (/\(\d+\)/.test(l) ? l.match(/^\s*\*\*(.+?)\*\*\s*$/) : null);
+    if (h) {
+      const m = h[1].match(/\((\d+)\)/);
+      cur = { line: i + 1, title: h[1].replace(/\*\*/g, '').trim(), claimed: m ? Number(m[1]) : null, rows: 0 };
+      groups.push(cur);
+      return;
+    }
+    if (!isPipe(l) || isSep(l)) return;
+    if (isSep(lines[i + 1])) return; // the column header, not a row
+    if (cur) cur.rows += 1;
+    else loose += 1;
+  });
+
+  const shown = groups.filter((g) => g.claimed !== null || g.rows);
+  const totalRows = groups.reduce((n, g) => n + g.rows, 0) + loose;
+  const pending = groups.filter((g) => /pending|await|decide|needs? you/i.test(g.title));
+  const pendingRows = pending.reduce((n, g) => n + g.rows, 0);
+  let bad = 0;
+  console.log(`\n${path.relative(REPO, RP).replace(/\\/g, '/')} — ${shown.length} group(s) · ${totalRows} table row(s) · budget ${CAP}\n`);
+  for (const g of shown) {
+    const claim = g.claimed === null ? 'no count claimed' : `claims ${g.claimed}`;
+    const ok = g.claimed === null || g.claimed === g.rows;
+    if (!ok) bad += 1;
+    console.log(`  line ${String(g.line).padStart(4)}  ${String(g.title).slice(0, 54).padEnd(56)} ${claim} · holds ${g.rows}   ${ok ? 'ok' : '! MISMATCH'}`);
+  }
+  if (loose) {
+    console.log(`\n  ! ${loose} table row(s) sit under NO heading — the format is grouped by status, so those rows are in no group and no count covers them.`);
+    bad += 1;
+  }
+  // The headline's own claim. NOT CHECKED, loudly, when it names no number — the
+  // one thing this must never do is print a clean line about something it skipped.
+  const numeric = lines.map((l) => l.match(/(\d+)\s+rows?\b[^.\n]{0,40}?await/i)).find(Boolean);
+  const zeroClaim = lines.find((l) => /noth(ing|in)\b[^.\n]{0,48}?await/i.test(l));
+  if (numeric) {
+    const ok = Number(numeric[1]) === pendingRows;
+    if (!ok) bad += 1;
+    console.log(`\n  headline says "${numeric[0]}" · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
+  } else if (zeroClaim) {
+    const ok = pendingRows === 0;
+    if (!ok) bad += 1;
+    console.log(`\n  headline claims nothing awaits him · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
+  } else {
+    console.log(`\n  headline: NOT CHECKED — no "<n> rows await you" line found. Its ledger total is a separate claim: node scripts/ledger-stats.cjs --open`);
+  }
+  // A55 · the budget GATES what the backlog may add, it does not merely warn. The
+  // run's own rows come first; the backlog fills whatever room is left, often none.
+  if (pendingRows > CAP) {
+    console.log(`  ! OVER BUDGET — ${pendingRows} rows need him, cap is ${CAP}. 2026-07-26 put 30 in front of him and he could not act on any of them.`);
+    bad += 1;
+  } else if (pending.length) {
+    console.log(`  decision budget: ${pendingRows} of ${CAP} spent · room for ${CAP - pendingRows} more backlog row(s)`);
+  }
+  if (!totalRows) console.log(`\n  0 table rows — an emptied report is a valid state. Its headline must still carry the ledger's open total (\`--open\`).`);
+  console.log(bad ? `\n${bad} problem(s). A count the table contradicts is the defect, not the number.\n` : `\nEvery count agrees with the rows beneath it.\n`);
+  process.exit(bad ? 1 : 0);
 }
 
 if (!fs.existsSync(LEDGER)) {
@@ -400,13 +534,18 @@ if (openOnly) {
   // waves that changed the very files they cite. It MARKS; it never closes.
   const touched = fileTouchDates(oldestDay(open));
   const stale = new Map(open.map((r) => [r, staleness(touched, r, r.rootCause, r.finding, r.note)]));
-  const recheck = open.filter((r) => stale.get(r).needsRecheck);
-  const noCite = open.filter((r) => uncheckable(stale.get(r)));
+  // A58/A59 · one bucket per row, so every count below is the same partition.
+  const bucket = new Map(open.map((r) => [r, bucketOf(stale.get(r), r)]));
+  const nOf = (b) => open.filter((r) => bucket.get(r) === b).length;
+  const recheck = open.filter((r) => REREAD.has(bucket.get(r)));
+  const noCite = open.filter((r) => bucket.get(r) === 'no-cite');
   console.log(
-    `\nOPEN — ${open.length} row(s) awaiting you · ${open.length - recheck.length - noCite.length} confirmed · ${recheck.length} need a re-read · ${noCite.length} cite no file` +
-      (touched ? '' : ' (staleness NOT CHECKED — no git history available)'),
+    `\nOPEN — ${open.length} row(s) awaiting you · ${nOf('confirmed')} confirmed · ${recheck.length} need a re-read (${nOf('moved')} moved · ${nOf(
+      'unexamined',
+    )} never examined) · ${noCite.length} cite no file` + (touched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
-  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read before you rule; nothing is closed automatically.`);
+  console.log(LEGEND_REREAD);
+  console.log(LEGEND_CONFIRMED);
   // A51 · the two states read alike and are opposites. A `converted` row is CLOSED
   // and never prints here; a `deferred` row is a ONE-RUN skip and is DUE. Deriving
   // `openKnown` from both told the scout to drop four rows the owner had ruled due.
@@ -442,9 +581,11 @@ if (openOnly) {
             ? 'FLAGGED'
             : String(r.verdict || 'NO VERDICT').toUpperCase();
       const s = stale.get(r);
-      console.log(`  ${s.needsRecheck ? 'RE-READ ' : ''}${label}  ${ref}${(r.finding || '').slice(0, 110)}`);
+      const b = bucket.get(r);
+      console.log(`  ${REREAD.has(b) ? 'RE-READ ' : ''}${label}  ${ref}${(r.finding || '').slice(0, 110)}`);
       if (r.rootCause) console.log(`          ${r.rootCause.slice(0, 100)}`);
-      if (s.needsRecheck) console.log(`          ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      if (b === 'moved') console.log(`          ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
+      if (b === 'unexamined') console.log(`          ! never re-read — filed ${r.date || '(no date)'}, and nobody has opened it since`);
       // A47 · somebody re-read it and it was still real. This is what keeps the same
       // row off tomorrow's RE-READ list, so it prints with the date that cleared it.
       if (r.recheck) console.log(`          re-read ${r.date}: ${String(r.recheck).slice(0, 96)}`);

@@ -38,7 +38,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { subjectViewerFor } from '../../../../utils/displaySubject';
+import { displaySubject, subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleCreateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -421,19 +421,27 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     const matchStart = DateTime.fromISO(match.start.dateTime, {
                       zone: match.start.timeZone ?? 'utc',
                     }).setZone(timezone).toFormat("EEEE d MMM 'at' HH:mm");
+                    // #175 (M12) — this whole branch is colleague-path only (the
+                    // `context.senderRole === 'colleague'` gate a few lines up), so
+                    // subjectViewerFor(context) is always 'other' here. match.subject
+                    // is the RAW Graph subject; an interview or sensitive 1:1 must not
+                    // leak into a colleague-facing refusal message. Mask it with the
+                    // same displaySubject helper Guard B already uses below (v4.3.4) —
+                    // one masking path, not a second one invented for this branch.
+                    const maskedSubject = displaySubject(match, context.profile, subjectViewerFor(context));
                     logger.info('create_meeting colleague-path refused — existing recurring occurrence in same week', {
                       requester: context.userId,
                       category: cat.name,
                       existing_event_id: match.id,
-                      existing_subject: match.subject,
+                      existing_subject: maskedSubject,
                     });
                     return {
                       success: false,
                       error: 'recurring_match_exists',
                       existing_event_id: match.id,
-                      existing_subject: match.subject,
+                      existing_subject: maskedSubject,
                       existing_start: match.start.dateTime,
-                      message: `An existing ${cat.name} occurrence with the same attendee is already on ${ownerFirst}'s calendar this week ("${match.subject}" on ${matchStart}). Don't create a duplicate — call move_meeting on the existing event (id: ${match.id}) to shift it to the requested time instead, or confirm with the colleague before doing anything else.`,
+                      message: `An existing ${cat.name} occurrence with the same attendee is already on ${ownerFirst}'s calendar this week ("${maskedSubject}" on ${matchStart}). Don't create a duplicate — call move_meeting on the existing event (id: ${match.id}) to shift it to the requested time instead, or confirm with the colleague before doing anything else.`,
                     };
                   }
                 }

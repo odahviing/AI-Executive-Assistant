@@ -2,6 +2,36 @@
 
 ---
 
+## 4.3.5 — one ternary of real code; the rest was Maelle being told things that were not true
+
+Six product fixes, and **the only executable change in the entire release is a single ternary** in `briefs.ts`. Everything else is prompt and description text — because that is where the bugs were. Four of the six are the same defect wearing different clothes: **the text Maelle is given contradicted the code it describes.**
+
+She told a colleague she could only add herself to a meeting, while the code had let requesters add anyone since v3.1.4. She told the owner *"no history of meetings or notes with her"* about someone whose record holds forty-four notes — because on that surface she can see nothing, and said so as a fact instead of as a limit. She promised a colleague *"you're all set"* for an approval still waiting. And she promised, unconditionally, that an availability answer matched what booking would do, when the lead-time floor is measured from the clock at each call and moves underneath her.
+
+None of those is a wrong calculation. Every one is a true system described falsely to the model driving it.
+
+### Fixed
+
+- **A private meeting's subject no longer leaks to a colleague.** Asking to book over a recurring occurrence returned the owner's real subject line in the refusal. It now goes through the same masking helper the neighbouring refusal already used — an ordinary meeting still shows its subject, a private one shows `[Private]`, and the event id is kept so the refusal stays actionable.
+- **She can add someone to a meeting she is allowed to add them to.** Three separate places told the model a colleague may only add or remove *themselves*. All three now say what the code does: whoever **requested** a meeting may change attendees **on that meeting**, and nobody else can. Per-meeting, not a blanket permission. The first attempt at this fixed one of the three and a verify pass rejected it — a payload contradicting itself is worse than one that is uniformly wrong.
+- **She says she cannot check, instead of saying there is nothing.** On a group-chat turn she has no access to a person's history and no tool to look. She was reporting that absence as a finding. Now it is reported as a restriction — the same principle already shipped for calendars, *an empty result withheld is not an empty result confirmed*.
+- **A pending approval is no longer relayed as a finished one.** *"You're all set, added you to the ask I've sent Idan"* described a request that had not been decided.
+- **When a time she offered stops being bookable, she says why.** The booking-notice window reads the current clock, so a slot legal when she proposes it can be illegal minutes later when someone accepts — correct both times, and indistinguishable from her changing her mind. She now names what moved, whether she catches it herself or a booking attempt is refused. **Nothing stopped being offered:** the alternative was a safety margin, which would have bought "never reverses" by silently withholding real slots, and that trade was declined.
+- **On-demand news survives the wait.** The window for an interactive brief now sits above the budget the search itself is allowed, instead of below it. Losing that race dropped the news section with no explanation, which is the original report.
+
+### Changed
+
+- **The wrap now ends with a running Maelle.** It bundles every chat's work, closes the resolved tickets and comments the partial ones, restarts, and confirms the boot stamp — instead of stopping at the push and saying "deploy when ready". The owner had specified the same five steps at three consecutive wraps; they are now written down.
+- **Both engines can finish, and a deferral is a one-run skip.** A clock call forbidden inside a workflow script was killing every run *after* the work was done, and rows deferred to a date were being handed back as settled decisions and dropped.
+
+### Verified against shipped
+
+**Six product rows shipped; five were verified by the pre-wrap adversarial pass.** That pass overturned one — the approval-relay text, which had grown a second clause contradicting the requester rule on the broadest prompt tier there is. It was corrected before this release rather than shipped or deferred, and the correction **shrank** that tier by 58 characters. Two smaller text corrections rode with it: a clause claiming calendar reads were restricted where they are not, and a comment three times the size of the deletion it described, asserting a fact was unique to its file when it was not. **Those three corrections were proven by targeted re-reads rather than a second full pass** — they are text, in files the pass had already opened, and an Opus run over three swapped sentences is not proportionate.
+
+Prompt growth was measured per tier for the first time: **about +1,750 rendered characters**, with the always-on tier ending the release **smaller** than it started.
+
+---
+
 ## 4.3.4 — the brief gets its news back, and three fixes ship that the verify would not sign
 
 Seven product fixes across ten files, **four verified and three shipped without a sign-off** at the owner's explicit call, with the follow-ups going to the next run. The wave began with a question — *"in my daily briefing i didn't get news update, know why?"* — and the answer turned out to be a stopwatch: the gather had succeeded with four goals and fifty-five sources, and lost an eight-second race it was permitted twelve seconds to run. It had been winning by narrowing margins for three days and finally lost by 0.32s.

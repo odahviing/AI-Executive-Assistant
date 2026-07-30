@@ -1,27 +1,25 @@
 # Agent-loop report
 
-**Empty — v4.3.4 wrapped and pushed as `1754444`. Nothing in this table awaits you.**
+**Empty — v4.3.5 wrapped, pushed, and deployed. Nothing in this table awaits you.**
 
-That is not the same claim as nothing is owed. The standing backlog is **52 open rows** (39 confirmed, 0 needing a re-read) — `node scripts/ledger-stats.cjs --open`. This file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended to the ledger.
+That is not the same claim as nothing is owed. The standing backlog is **56 open rows** (35 confirmed, 14 needing a re-read, 7 citing no file) — `node scripts/ledger-stats.cjs --open`. This file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended to the ledger.
 
-## Next run's first items — the three that shipped without a verify sign-off
+## What shipped, and what of it was verified
 
-You shipped these deliberately with the follow-ups queued. Each fixes its reported defect; each carries a named gap, and none is a correctness risk. All three are small.
+**Six product rows. Five verified by the pre-wrap pass.** It overturned one — the approval-relay text, whose second clause contradicted the requester rule on the always-on prompt tier — and that was corrected before release rather than shipped or deferred. **Three text corrections shipped on targeted re-reads rather than a second full pass**: the overturned clause, a false *"same as a calendar read here"*, and a comment three times the size of the deletion it described. All three are text in files the pass had already opened.
 
-1. **Gate the news window on `force`** — outrider. The 20s budget is right for the unattended 07:00 routine, but the same function serves an on-demand *send the brief*, so that request now waits 20s instead of 8. The arg is already in scope at `briefs.ts:631`. This is also what stands between **gh#166** and being closed.
-2. **Narrow the gh#158 bail** — matchmaker. It keys on *a colleague was named* rather than *a colleague's availability was asked about*, and inherits the email transport's forwarded-header addresses. Two named losses: a colleague-role email turn with any non-owner recipient bails the pre-check entirely, and a two-message group booking (*"10am with Idan?"* then *"can Yael join at 10am?"*) both bails **and deletes** the 10:00 block the earlier turn's own `checkSlot` established. Scope the forget rather than deleting.
-3. **Strip the duplicated sentence from the parity caveat** — matchmaker for the caveat, **instructor** for the behavioural half. One added sentence already exists at `systemPrompt.ts:707-708` and `meetings.ts:1375`, at ~+900 characters on every colleague turn. The caveat itself is confirmed right and stays.
+## Next run's first items
 
-Plus **three lane asks** the verify raised as non-blocking, all matchmaker: the whole `calendarReads.ts` change is a comment describing a mode that never shipped in any commit; `availabilityGate.ts:328-333` says *"two callers"* when there are three, in the file the wave's own safety argument rests on; and a raw Graph event id is interpolated into colleague-facing prose alongside the structured field.
+1. **`owner-memory-injected-into-clamped-mpim` · instructor · the one to look at first.** `systemPrompt.ts:779-791` and `:799-810` gate on `if (isOwner || !senderId) return ''` — in a clamped MPIM `isOwner` is false while `senderId` is yours, so **"MEMORY ON IDAN"** plus your full `.md` renders into a colleague-readable thread. Latent, not live. **The guard already exists** at `buildTurnContext.ts:575-578` and these siblings never got it. Queued, not built — I want your word first.
+2. **`honest-refusal-rule-is-mpim-only` · instructor · medium.** B157-c's rule lives in the `isOwnerInGroup` branch, so a clamped owner in a **channel** takes `:439` and can still fabricate the exact gh#157 negative. Same code path, owner as the victim. Connects to gh#154's parked per-surface question.
+3. **`nested-news-timeout-not-derived-from-inner-budget` · outrider · medium.** Three magic numbers, two files, the relation held in a comment. gh#166 has now been fixed twice by adjusting a number.
+4. **`prompt-budget-grew-1836-chars-unmeasured-by-anything` · outrider.** Nothing tracks rendered prompt growth per tier. This wave counted it by hand for the first time.
+5. Plus `create-approval-desc-contradicts-requester-grant` (now fixed, keep the row for the pattern), `order-violation-subject-unmasked` (low, latent), `movemeeting-comment-still-says-self-only` (low), and **B168-a — deferred, therefore DUE**, since a deferral is a one-run skip.
 
 ## Deploy
 
-Production is **4.3.2**. The commit is under your author, so the deploy watcher will not auto-pull it — run `npm run deploy` and confirm the boot stamp reads `version: 4.3.4` / `gitSha 1754444`. This deploy is genuinely owed: gh#165-b, the category classifier, the cached-read swap, both news fixes and the gh#158 work are all live only after it.
-
-## Verified against shipped
-
-**7 shipped, 4 verified.** The three above carry no sign-off, by your call. One GitHub issue closed — **#167**, the only one meeting all three conditions. **#166** was deliberately left open rather than closed on a fix that introduced a regression; **#164, #158, #165, #152, #156** are all partial and the verify said explicitly not to close them.
+Done. Boot stamp confirmed below in the wrap summary.
 
 ## Watch on first real use
 
-An on-demand *"send the brief"* — note how long the eye-emoji sits there before anything comes back; that is the gh#166 gap and 20s is the worst case. · A colleague asking to join a meeting you already have booked → the refusal should name **that** meeting and steer at adding her, not raise a second approval. · An onsite request with a venue → category **Physical**, not *Meeting*. · Any availability question naming a colleague on the **email** leg → the pre-check now stands down entirely there, which is the overshoot in follow-up 2.
+A colleague asking to book over a private recurring meeting → the refusal should say `[Private]`, not the real subject · a **requester** asking to add a third person to their own meeting → she should just do it, no approval · a **non**-requester asking → routed to you · an availability question about a named colleague in a group chat → *"I can't check or share that from here"*, never *"no history"* · an on-demand *"send the brief"* → news should survive the wait now · and if a slot she offered goes stale, she should **name what moved** rather than sounding like she changed her mind.

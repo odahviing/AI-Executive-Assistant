@@ -89,8 +89,9 @@ const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['githu
 // Owner, 2026-07-30: *"its make sense that the input can be github/logs or just
 // reports overview, isnt it smarter."* The engine had three possible inputs and two
 // were wired. GitHub is what he filed, logs are what she did, and the BACKLOG is
-// what we already know and have not settled — the largest of the three (49 open
-// rows, 22 of them flagged RE-READ by A38) and the only one with no door. So the
+// what we already know and have not settled — the largest of the three (52 open
+// rows, 28 of them flagged RE-READ once A59 widened the trigger from *the code
+// moved* to *nobody has ever looked*) and the only one with no door. So the
 // input that needs the funnel most was the one worked by hand, and a hand pass gets
 // no scout, no counts, no manifest, no `inFlight` and no report persistence.
 //
@@ -709,11 +710,11 @@ const scout = await agent(
       : '') +
     (BACKLOG
       ? `## The backlog re-read\n\n` +
-        `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — a commit touched the file they cite after they were written, so nobody knows whether they are still real. **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
+        `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — nobody has stood behind those rows: either the code they cite **moved** after they were written, or **nobody has ever re-read them** (A59, and that second reason is the large half — 28 of 52 on 2026-07-30 against 0 that had moved). **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
-        `  • **Emit NO issue for a row you RE-READ here, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 22 old rows is a wave nobody approved.\n` +
+        `  • **Emit NO issue for a row you RE-READ here, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 28 old rows is a wave nobody approved.\n` +
         `  • **This list is NOT a drop list.** When a GitHub complaint or a log moment you found matches an open row on it, that match CONFIRMS the row is still real — **emit the issue** and name the row in \`whyHypothesis\`. Never drop an intake because the backlog already tracks it, and never report such a match in \`droppedAsOpenKnown\`: on wf_6852af85-afc that is how four complaints the owner had ruled DUE were lost, absent from every count in the funnel. The only drop lists are the two the brief hands you below.\n` +
         `  • Work them in the order printed, and if you run out of room say how many you did NOT reach. \`backlogSeen\` against the length of \`backlogReread\` is how a half-finished pass shows up as a number instead of reading as a clean sweep.\n\n`
       : '') +
