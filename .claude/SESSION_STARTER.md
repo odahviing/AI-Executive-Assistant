@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Current version: v4.3.3** — `package.json` is the source of truth. **HEAD = the 4.3.3 wrap** (run `git log -1` for the SHA). Version-by-version history is in `CHANGELOG.md`, which is canonical — this file carries only what a session needs before it acts.
+Working on Maelle at `E:/Code/Maelle`. **Current version: v4.3.4** — `package.json` is the source of truth. **HEAD = the 4.3.4 wrap** (run `git log -1` for the SHA). 4.3.4 shipped seven product fixes of which **three carry no verify sign-off** — the owner shipped them deliberately with follow-ups queued for the next run, and the CHANGELOG names each gap. Two engine defects were fixed in the same wrap: `new Date()` in the backlog persist block killed every run after the work was done, and a `deferred` row passed on the drop list lost four items that were due. Version-by-version history is in `CHANGELOG.md`, which is canonical — this file carries only what a session needs before it acts.
 
 **One live shape worth knowing before you read any code:** since 4.3.0 she has a **second transport, email** (gh#24, a narrow slice of #5) — the owner forwards a meeting request to `maelle@reflectiz.com`, she computes options and **replies by email to him only**, so he stays the gatekeeper and she never emails an external. The recipient cap is in code, an email turn is clamped to four tools, and the whole path is inert without `channels.email.{enabled,mailbox}` plus a token from `scripts/email-auth.mjs`.
 

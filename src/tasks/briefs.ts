@@ -27,8 +27,15 @@ import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 const STALE_SURFACE_THRESHOLD = 3;
 
 /** v3.2.6 — news gather is best-effort + fail-open. If it doesn't return within
- *  this window, the brief composes calendar+tasks exactly as today (no delay). */
-const NEWS_BRIEF_TIMEOUT_MS = 8_000;
+ *  this window, the brief composes calendar+tasks exactly as today (no delay).
+ *  #166 — MUST stay above the inner gather's own budget: an un-timed Haiku
+ *  planning call (planNewsGoals, news.ts) followed by a NEWS_PER_GOAL_TIMEOUT_MS
+ *  (12s, news.ts) per-goal search. 8s was narrower than that inner budget, so a
+ *  legitimately-slow-but-fine gather raced this timeout and lost on a coin flip
+ *  (measured margin 5.00s → 7.94s → 8.32s over four days). 20s clears the 12s
+ *  search plus realistic planning latency with margin; don't lower this back
+ *  below the inner budget without re-timing both sides. */
+const NEWS_BRIEF_TIMEOUT_MS = 20_000;
 /** Cap how many meeting-companies we derive into news goals (cost control). */
 const NEWS_MEETING_COMPANY_CAP = 3;
 /** v3.x — today's calendar-health pass folded into the brief is best-effort +
@@ -688,7 +695,23 @@ export async function sendMorningBriefing(
         gatherNews(profile, { meetingCompanies }),
         new Promise<undefined>(res => { const t = setTimeout(() => res(undefined), NEWS_BRIEF_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
       ]);
-      if (gathered && gathered.sources.length > 0) newsBundle = gathered;
+      // #167 — gatherNews (news.ts) never resolves to `undefined` itself (it
+      // NEVER throws and always returns a NewsBundle, even an empty one on
+      // total internal failure); `undefined` here can ONLY mean the timeout
+      // branch of the race above won. So this is the one place that can tell
+      // "the pass never finished in time" apart from "it finished and there
+      // was genuinely nothing new" — log them distinctly (WARN vs INFO) so a
+      // dropped-for-cause morning doesn't read as a quiet news day, and so the
+      // signal lands HERE, synchronously, rather than relying on gatherNews's
+      // own eventual success/failure log line — which keeps running after
+      // losing the race and can land well after the brief has already sent.
+      if (!gathered) {
+        logger.warn('briefs — news gather timed out, composing without it', { timeoutMs: NEWS_BRIEF_TIMEOUT_MS });
+      } else if (gathered.sources.length > 0) {
+        newsBundle = gathered;
+      } else {
+        logger.info('briefs — news gather returned no sources (quiet day or no goals), composing without it');
+      }
     } catch (err) {
       logger.warn('briefs — news gather threw, composing without it', { err: String(err).slice(0, 200) });
     }

@@ -38,6 +38,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleCreateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -484,7 +485,13 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // by reference so we can name THIS slot's broken rule in the
               // refusal returned to Sonnet (instead of forcing her to guess,
               // which leads to "rule-non-compliant" + fabricated reasons).
-              const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
+              const diagnostics: {
+                rejectedCounts?: Record<string, number>;
+                rejectedExamples?: Record<string, string[]>;
+                // #165b — the real event behind an owner_busy_collision, read
+                // straight off checkSlot's own occupancy scan (see below).
+                conflictingEvent?: { id: string; subject: string };
+              } = {};
               if (fromIso && toIso) {
                 const runSlotCheck = () => findAvailableSlots({
                   userEmail,
@@ -500,6 +507,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   // here; outer matches() returns false; Sonnet escalates
                   // to create_approval with the rule name (RULE-NAMING).
                   category: args.category as string | undefined,
+                  // #165b — matches the masking `subjectViewerFor` already
+                  // applied to the conflicting-event subject below; without it
+                  // checkSlot's own occupancy scan falls back to its own
+                  // 'other' default, which happens to agree here but should
+                  // not depend on happening to agree.
+                  viewer: subjectViewerFor(context),
                   diagnosticsOut: diagnostics,
                   // v3.0.6 — single-slot yes/no validation. The window is
                   // exactly [start, end], so findAvailableSlots returns ≤1 slot →
@@ -532,6 +545,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   });
                   delete diagnostics.rejectedCounts;
                   delete diagnostics.rejectedExamples;
+                  delete diagnostics.conflictingEvent;
                   validSlots = await runSlotCheck();
                 }
               }
@@ -559,19 +573,54 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 const brokenRule = fired[0];
 
                 const brokenRuleLabel = labelFor(brokenRule);
+
+                // v4.3.x (#165b) — name the ACTUAL conflicting event when the
+                // rejection is a real calendar clash (not a work-hours/lunch/
+                // category rule). Without this, a colleague follow-up that means
+                // "add me to the meeting you just booked" ("include me as well,
+                // no need for a new invite") but re-enters create_meeting under a
+                // fresh subject collides with that very meeting and gets the same
+                // generic "conflicts with another meeting — call create_approval"
+                // as any unrelated conflict — producing a second, confusing
+                // policy_exception for a meeting that's already booked.
+                //
+                // Read the event straight off `diagnostics.conflictingEvent` —
+                // the SAME occupancy scan (checkSlot's overCommitment, via
+                // occupancyRoleOf) that decided `owner_busy_collision` in the
+                // first place, already fetched by the runSlotCheck() call above.
+                // The earlier version re-queried the calendar with a SEPARATE,
+                // weaker predicate (findDuplicateEvent(subject=null): "any event
+                // whose START sits within 2 minutes of the requested start") —
+                // which, when a real blocker overlapped from an EARLIER start
+                // while an occupancyRoleOf-ignored event (a free/floating lunch
+                // or focus block) happened to START exactly at the requested
+                // time, named the harmless block instead of the actual
+                // conflict and steered add_attendees at the wrong event. Reusing
+                // checkSlot's own finding removes the second predicate entirely —
+                // one occupancy scan, one answer (M2) — and costs no extra Graph
+                // call. Subject is already privacy-masked (M12) by the `viewer`
+                // passed into runSlotCheck above.
+                const conflictingEvent = brokenRule === 'owner_busy_collision'
+                  ? diagnostics.conflictingEvent
+                  : undefined;
+
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
+                  ...(conflictingEvent ? { conflicting_event_id: conflictingEvent.id } : {}),
                 });
                 return {
                   success: false,
                   error: 'not_rule_compliant',
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
+                  ...(conflictingEvent ? { existing_event_id: conflictingEvent.id, existing_subject: conflictingEvent.subject } : {}),
                   message: brokenRuleLabel === 'unknown'
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
-                    : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
+                    : conflictingEvent
+                      ? `That time conflicts with "${conflictingEvent.subject}" (id: ${conflictingEvent.id}) already on ${ownerFirst}'s calendar. If the goal is to add someone to THAT meeting rather than book a new one, call update_meeting(meeting_id: ${conflictingEvent.id}, add_attendees: [...]) instead — do NOT create a duplicate for that. Only call create_approval(kind=policy_exception) if a genuinely separate meeting is meant to override it.`
+                      : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                   // v2.8.6 (103E wiring) — stamp the deferred_action_hint so the
                   // orchestrator can auto-attach it to the follow-up
                   // create_approval. Without it, owner-approve would resolve the

@@ -297,6 +297,11 @@ export interface RuleCheckResult {
    * own-day rule). Subject is viewer-scoped.
    */
   overCommitment?: {
+    /** #165b — the actual colliding event's id, so a caller naming "the meeting
+     * that's already there" (e.g. steering toward update_meeting/add_attendees
+     * instead of a duplicate create_meeting) points at the SAME event this
+     * occupancy scan found, not a second, differently-matched guess. */
+    id: string;
     subject: string;
     attendeeCount: number;
     window: string;
@@ -579,6 +584,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     level = 'unfiltered';
     overOptional = undefined;
     overCommitment = {
+      id: ev.id,
       subject: displaySubject(ev, profile, viewer) || 'meeting',
       attendeeCount: (ev.attendees ?? []).filter(
         a => (a?.emailAddress?.address ?? '').toLowerCase() !== ownerEmailLower,

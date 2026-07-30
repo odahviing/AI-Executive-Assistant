@@ -14,7 +14,11 @@
  * validator the booking path runs — deterministically for each (date, time)
  * pair BEFORE Sonnet answers. Inject the rule-aware verdicts into the system
  * prompt for that turn so Sonnet's "free/busy" narration matches what the
- * booking flow will accept.
+ * booking flow will accept — for the calendar and category as they stand AT
+ * THIS CHECK. That is not an unconditional promise across elapsed turns (see
+ * the closing paragraph of `renderPromptBlock` for the two inputs — the
+ * lead-time clock and the category guess — that can still legitimately
+ * disagree with a LATER real booking call).
  *
  * Best-effort detector — fails open. If we miss a pattern, current behavior
  * stands (Sonnet eyeballs whatever tool she chooses). When we catch one, we
@@ -23,7 +27,7 @@
 
 import { DateTime, IANAZone } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getCalendarEvents } from '../connectors/graph/calendar';
+import { getOwnerEventsForDecision } from '../connectors/graph/calendar';
 import { renderClockInZone } from './timezoneConvert';
 import { bookingLeadTimeHours, checkSlot, type RuleViolationKind } from './scheduleRules';
 import { armsHardFloor, forgetHardBlockedSlot, hardBlockClassPhrase, recordHardBlockedSlot } from './availabilityGate';
@@ -487,10 +491,54 @@ export async function precheckAvailability(params: {
   // throws. No guard here refuses their absence.
   channelId?: string;
   threadTs?: string;
+  /**
+   * v4.3.x (gh#158) — the turn's resolved-attendee list (buildTurnContext's
+   * `resolvedMeetingAttendees`): non-empty ONLY when the message names someone
+   * OTHER than the owner (that resolver explicitly excludes the owner's own
+   * name). This whole pre-check answers exactly one question — "is the OWNER
+   * free at time Y" — by running `checkSlot` against the OWNER's calendar
+   * (`eventsForWeek` below always fetches `profile.user.email`). It has no
+   * concept of a THIRD PARTY's calendar at all. When the turn names one ("does
+   * Levana free tomorrow at 10am?"), this pre-check would still silently
+   * answer about the owner's own hours/calendar and inject that as settled
+   * ground truth — which is exactly what happened: "outside your usual
+   * hours... not a hard conflict" answered a question about Levana with a
+   * fact about the owner, and repeated on every re-ask because the wrong-
+   * subject verdict was already "confirmed" in context. Bail out here (fail
+   * open, per this file's own G6 philosophy) and let the normal tool path
+   * (find_available_slots / get_free_busy / check_join_availability) run its
+   * real, attendee-aware check on the named person instead.
+   */
+  namedAttendeeEmails?: string[];
 }): Promise<AvailabilityPreCheckResult> {
   const empty: AvailabilityPreCheckResult = { ran: false, verdicts: [], promptBlock: '' };
 
   if (!params.message || params.message.trim().length === 0) return empty;
+  if (params.namedAttendeeEmails && params.namedAttendeeEmails.length > 0) {
+    // v4.3.x (gh#158) — the bail above skips this whole pre-check for a turn that
+    // names someone OTHER than the owner, but a hard-block ledger entry for the
+    // OWNER (recordHardBlockedSlot, written only by this file, on an EARLIER turn
+    // that WAS about his own calendar) can still be armed for up to 45 minutes
+    // (availabilityGate's TTL_MS). Its only reader, runOutputGates'
+    // runAvailabilityFloorAndMaybeRewrite, has no attendee-awareness at all — it
+    // fires on every reply and asks Haiku whether THIS draft presents one of the
+    // stored INSTANTS as workable. So a reply about a named colleague at the same
+    // clock time this turn names would be judged against a fact that was never
+    // about them, and rewritten into a false "that doesn't work" about the OWNER's
+    // calendar. Forget any stored instant this message ALSO names — cost-free
+    // regex extraction, no Haiku spend, no verdict computed — so the floor has
+    // nothing stale to fire on for this turn.
+    //
+    // Pure removal: `recordHardBlockedSlot` is not called here, so this can only
+    // make the floor LESS likely to act, never grant, relax or widen anything, and
+    // it cannot reach a booking tool either way — the floor's own remedy is a
+    // tool-less text rewrite (runOutputGates.ts's `rewriteBlockedSlotClaim` call),
+    // never a re-check or a mutation. If a LATER turn really is about the owner at
+    // this same instant, its own checkSlot call re-arms the ledger fresh, exactly
+    // like every other invalidation rule on it (availabilityGate.ts's ledger doc).
+    forgetNamedInstantsFromHardBlockLedger(params.message, params.profile, params.requesterTimezone);
+    return empty;
+  }
 
   // Language-NEUTRAL cheap gate (G7 — no language words): spend a Haiku call
   // only when the message carries a schedulable signal — a time, a TZ cue, or a
@@ -585,14 +633,12 @@ export async function precheckAvailability(params: {
 
   // Regex fallback path. Runs when Haiku errored or returned nothing usable.
   if (pairs.length === 0) {
-    const times = extractTimes(params.message);
-    if (times.length === 0) return empty;
-    // Owner locale order for ambiguous DD/MM vs MM/DD: Americas → month-first,
-    // everywhere else → day-first. Heuristic (fails open — the real slot search
-    // re-interprets on Sonnet's reading anyway), no new profile field needed.
-    const monthFirst = /^America\//.test(tz);
-    const dateMatches = extractDates(params.message, tz, monthFirst);
-    pairs = pairTimesWithDates(params.message, times, dateMatches, today);
+    // Owner locale order for ambiguous DD/MM vs MM/DD (Americas → month-first,
+    // everywhere else → day-first) lives inside extractRawPairs — shared with the
+    // named-attendee bail's ledger-forget above so the two extractions cannot
+    // drift. Heuristic (fails open — the real slot search re-interprets on
+    // Sonnet's reading anyway), no new profile field needed.
+    pairs = extractRawPairs(params.message, tz, today);
     if (pairs.length === 0) return empty;
     // v4.2.2 — every clock this path can extract is a BARE one (it has no zone
     // signal at all), so the frame is undecided in exactly the sense resolveFrame
@@ -634,7 +680,10 @@ export async function precheckAvailability(params: {
   //       booking flow then refused (the "13:30 works" → walk-back class).
   // checkSlot evaluates against the slot's full WEEK of events (one
   // per-turn-memoized fetch per week), exactly like write-time validation —
-  // verdict and booking can no longer disagree.
+  // closing that hole. Two other inputs to the SAME checkSlot still can drift
+  // from what a later booking call sees: `within_lead_time`'s clock and the
+  // category guessed below (no real subject/body exists yet) — see the
+  // closing paragraph of `renderPromptBlock`, which is honest about both.
   //
   // v4.2.x (H3) — the GAP branch runs it too; it was the last caller of the
   // narrow-window findAvailableSlots the paragraph above removed, and it had a
@@ -652,16 +701,27 @@ export async function precheckAvailability(params: {
   const allowedDurations = params.profile.meetings.allowed_durations ?? [25];
   const eventsByWeek = new Map<string, import('../connectors/graph/calendar').CalendarEvent[]>();
 
-  /** The slot's own week of events, fetched once per week. THROWS on an unreadable
-   *  calendar — the Graph impl logs and re-throws (calendarReads.ts:618-620) and
-   *  nothing between here and there swallows it; see the catch below. NOT a typed
-   *  `CalendarOfflineError`: that class is minted only in `getOwnerEventsForDecision`
-   *  and the slot walker, and this file calls neither. */
+  /** The slot's own week of events, fetched once per PRE-CHECK CALL (this map is
+   *  local to this function invocation — it never survives past this one turn's
+   *  precheckAvailability call). v4.3.x (row "remaining-cached-decision-reads") —
+   *  now reads via `getOwnerEventsForDecision`, ALWAYS 'live': never the
+   *  cross-turn warm copy (up to CALENDAR_CACHE_TTL_SECONDS stale), with its own
+   *  one-retry-then-typed-offline contract. Pre-fix this called plain
+   *  `getCalendarEvents` (default freshness 'cached'), so "can you check again?"
+   *  could be answered from a copy up to 5 minutes old with no way to force past
+   *  it — the exact symptom `getOwnerEventsForDecision`'s own doc cites
+   *  (logs/maelle-2026-07-27.log:512 vs :559) and the exact one a colleague hit
+   *  again asking about Michal's slot. THROWS on an unreadable calendar —
+   *  `getOwnerEventsForDecision` can now throw a typed `CalendarOfflineError`,
+   *  which the catch below still treats like any other per-pair failure (log +
+   *  skip, no verdict for this pair) — unchanged and correct: a blind owner
+   *  calendar already has its own refusal elsewhere (D4), and this pre-check's
+   *  contract has always been "assert nothing when the data isn't there." */
   const eventsForWeek = async (startDt: DateTime) => {
     const weekKey = startDt.startOf('week').toFormat('yyyy-MM-dd');
     const cached = eventsByWeek.get(weekKey);
     if (cached) return cached;
-    const events = await getCalendarEvents(
+    const events = await getOwnerEventsForDecision(
       params.profile.user.email,
       startDt.startOf('week').toFormat("yyyy-MM-dd'T'00:00:00"),
       startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
@@ -784,17 +844,13 @@ export async function precheckAvailability(params: {
       // fails the caller injects no block at all (`verdicts.length === 0` below →
       // `ran: false` → buildTurnContext.ts:573 adds nothing), so a blind pre-check
       // can never assert "bookable" or "not bookable" with no data behind it. The
-      // data source is built for that too: `getCalendarEvents` PROPAGATES instead of
-      // returning `[]`, precisely because "no events" and "a completely free week"
-      // are the same value — the Graph impl logs and re-throws
-      // (calendarReads.ts:618-620) and neither the cross-turn cache nor the per-turn
-      // memo swallows it. It is NOT the typed `CalendarOfflineError` this comment
-      // used to cite: that class is minted in exactly two places,
-      // `getOwnerEventsForDecision` (calendarReads.ts:465) and the slot walker
-      // (findAvailableSlots.ts:275), and this file calls neither. Behaviour is
-      // unaffected — an untyped throw lands in this same catch and skips this same
-      // pair — but a later reader must not come here looking for a D4 offline
-      // verdict that never arrives.
+      // data source is built for that too: whether it's a typed `CalendarOfflineError`
+      // (v4.3.x — `eventsForWeek` now reads via `getOwnerEventsForDecision`,
+      // calendarReads.ts:435, the SAME decision-safe helper the slot walker uses) or
+      // any other propagated throw, "no events" and "a completely free week" are never
+      // the same value here, so both land in this same catch and skip this same
+      // pair — a later reader must not come here looking for a D4 offline verdict
+      // that never arrives; that refusal lives at the D4 call site, not here.
       //
       // v4.2.x — WARN, not debug. Debug is not persisted (zero `"level":"debug"`
       // rows in any log on disk), so the ONE path where this pre-check goes blind
@@ -1053,6 +1109,66 @@ function pairTimesWithDates(
   });
 }
 
+/**
+ * Cost-free (no LLM) extraction of the (date, time) pairs the bare clock digits
+ * in a message name, paired with the nearest preceding date mention (or
+ * `today`). Exactly the regex-fallback extraction `precheckAvailability` itself
+ * runs when Haiku errors/returns nothing — factored out so it has exactly ONE
+ * definition, shared with `forgetNamedInstantsFromHardBlockLedger` below (they
+ * must not drift about what a bare clock in this message names).
+ */
+function extractRawPairs(message: string, tz: string, today: string): Pair[] {
+  const times = extractTimes(message);
+  if (times.length === 0) return [];
+  // Owner locale order for ambiguous DD/MM vs MM/DD: Americas → month-first,
+  // everywhere else → day-first.
+  const monthFirst = /^America\//.test(tz);
+  const dates = extractDates(message, tz, monthFirst);
+  return pairTimesWithDates(message, times, dates, today);
+}
+
+/**
+ * v4.3.x (gh#158) — forgets any hard-block ledger entry (availabilityGate.ts)
+ * whose instant this message ALSO names, using the same cost-free regex
+ * extraction as the fallback path above — never the Haiku normalizer, and never
+ * a `checkSlot` call. Called ONLY from the named-attendee bail in
+ * `precheckAvailability`; see that call site for why.
+ *
+ * A bare clock's frame is undecided exactly as `resolveFrame` describes (a
+ * requester outside the owner's zone could mean either clock), so BOTH readings
+ * are forgotten — forgetting an instant that was never armed is a harmless
+ * no-op, and this function only ever DELETES ledger entries
+ * (`forgetHardBlockedSlot`); it never records one.
+ */
+function forgetNamedInstantsFromHardBlockLedger(
+  message: string,
+  profile: UserProfile,
+  requesterTimezone?: string,
+): void {
+  const tz = profile.user.timezone;
+  const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
+  const pairs = extractRawPairs(message, tz, today);
+  if (pairs.length === 0) return;
+  const requesterTz = requesterTimezone && IANAZone.isValidZone(requesterTimezone.trim())
+    ? requesterTimezone.trim()
+    : tz;
+  const frame = resolveFrame(undefined, requesterTz, tz);
+  for (const p of pairs) {
+    const primary = readClockIn(`${p.date}T${p.time}`, frame.zone, tz);
+    if (primary) {
+      const iso = DateTime.fromISO(`${primary.date}T${primary.time}`, { zone: tz }).toISO();
+      if (iso) forgetHardBlockedSlot(profile.user.email, iso);
+    }
+    if (frame.otherZone) {
+      const other = readClockIn(`${p.date}T${p.time}`, frame.otherZone, tz);
+      if (other) {
+        const iso = DateTime.fromISO(`${other.date}T${other.time}`, { zone: tz }).toISO();
+        if (iso) forgetHardBlockedSlot(profile.user.email, iso);
+      }
+    }
+  }
+}
+
 /** One rendering of a slot, shared by the prompt block and the hard-block ledger so
  *  a corrected reply names a slot exactly as the drafting context named it — and so
  *  a floor rewrite never answers a question about 16:00 by naming 17:00, which reads
@@ -1220,5 +1336,5 @@ Each line carries TWO clocks for one moment: ${ownerFirst}'s local time first, t
 ` : ''}${anyUndecidedFrame ? `
 One of the times above has TWO readings because they gave a clock with no timezone and they do not share ${ownerFirst}'s. I do not know which they meant, so you must not answer as if I did. Pick the reading you are answering, use ITS verdict, and NAME THE CLOCK in your own words to them — "16:00 your time" / "16:00 ${ownerFirst}'s time" — so that if you picked wrong they can correct it in one message instead of a wrong meeting appearing. To them, the NUMBER you give is the clock THEY WROTE, labelled with whose clock you read it as; do NOT also quote the "(= … where they are)" parenthetical off those two lines. Either reading IS that same stated clock seen from one of two zones, so that parenthetical adds a THIRD number to a thread that already has two, and for the reading you did not pick it is a time nobody has mentioned. Never state a time from one of those lines without saying whose clock it is, and never offer the two readings as two options to choose between: only one of them is the time they asked about.
 ` : ''}
-NOT BOOKABLE and NOT CLEAN are two DIFFERENT tiers and each line tells you which one you have — never treat one as the other. NOT BOOKABLE is a FACT about his calendar: say plainly that it doesn't work, use ONLY the reason that line gives (none at all when it gives none), and NEVER soften it into "tight but workable" / "he could push through" / "works on his end" — to him or to anyone else. If it's NOT CLEAN, it breaks one of ${profile.user.name.split(' ')[0]}'s OWN rules (outside his usual hours, a per-day category limit, or his day-load protection) — it is HIS to override, so do NOT flatly refuse and do NOT book: use the high-level reason on that line, and if the colleague wants that exact time, escalate via create_approval(kind=policy_exception) so he decides. If it's BOOKABLE, you can confirm. These verdicts run the SAME checkSlot the booking flow uses (work hours, buffer, focus blocks, category limits) — so your answer here matches what happens at booking time; never eyeball get_calendar and disagree.`;
+NOT BOOKABLE and NOT CLEAN are two DIFFERENT tiers and each line tells you which one you have — never treat one as the other. NOT BOOKABLE is a FACT about his calendar: say plainly that it doesn't work, use ONLY the reason that line gives (none at all when it gives none), and NEVER soften it into "tight but workable" / "he could push through" / "works on his end" — to him or to anyone else. If it's NOT CLEAN, it breaks one of ${profile.user.name.split(' ')[0]}'s OWN rules (outside his usual hours, a per-day category limit, or his day-load protection) — it is HIS to override, so do NOT flatly refuse and do NOT book: use the high-level reason on that line, and if the colleague wants that exact time, escalate via create_approval(kind=policy_exception) so he decides. If it's BOOKABLE, you can confirm — for right now. These verdicts run the SAME checkSlot the booking flow uses (work hours, buffer, focus blocks, category limits), so never eyeball get_calendar and disagree with them. That is not a standing promise, though: within_lead_time and in_the_past are checked against the CURRENT clock, so a slot clear of the lead-time floor here can fall inside it if real time passes before an actual booking call runs — waiting on the colleague's reply, or on ${ownerFirst}'s approval, is enough on its own. If a booking attempt made later is refused where this said BOOKABLE, say so plainly rather than insisting it should still work. The category above is also only a guess from this message — there is no real subject/body yet — so a category cap (per-day / per-week / office-only) can land differently once the actual meeting is classified at booking time. Never tell the colleague a time is booked until the booking tool call itself confirms it.`;
 }

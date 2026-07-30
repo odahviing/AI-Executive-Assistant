@@ -86,11 +86,13 @@ Keep one only if it is genuinely a different failure that merely looks similar �
 
 **An entry marked `state: "awaiting-owner"`: drop the finding entirely, even if you can see remaining work.** Its fix is built but unaccepted; building on a decision he may reverse compounds the problem.
 
-## Already on his desk
+## Left the bug track
 
-A second list, `openKnown`, holds items he has **seen and parked** — deferred for now, or turned into a GitHub issue where the design question is being worked. It differs from the list above in the way that matters: **nothing is fixed**, so these do not stop recurring after a deploy. The symptom can reappear indefinitely, you *will* find it again, and that is expected rather than news.
+A second list, `openKnown`, holds items **converted** into a GitHub issue where the design question is being worked. It differs from the list above in the way that matters: **nothing is fixed**, so these do not stop recurring after a deploy. The symptom can reappear indefinitely, you *will* find it again, and that is expected rather than news.
 
 **Drop any finding that matches one**, and report the refs. Filing one as new puts a decision he has already made back on his desk as a fresh bug.
+
+**`openKnown` and `alreadyBuilt` are the only lists you drop against.** The open backlog you read on a `backlog` run is not one. A finding that matches an open row there is **evidence that row is still real** — emit it and name the row. A `deferred` row is a one-run skip and is due now, so dropping it loses work he ruled due and nothing reports the loss.
 
 **One exception, and it goes under the SAME ref — never as a new issue:** if the recurrence carries materially new information — it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover — say so against that ref. A change in severity is worth knowing. A duplicate row is not.
 

@@ -640,6 +640,12 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // binding block looks up `C…|<ts>` — offered, never bindable.
         channelId: input.channelId,
         threadTs: input.threadTs,
+        // gh#158 — resolvedMeetingAttendees is non-empty ONLY when the turn
+        // names someone other than the owner (resolveNamedInternalAttendees
+        // explicitly filters the owner out). That's exactly the signal this
+        // owner-scoped pre-check needs to know it does not apply: "does Levana
+        // free tomorrow at 10am?" is not a question this file can answer.
+        namedAttendeeEmails: resolvedMeetingAttendees,
       });
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;

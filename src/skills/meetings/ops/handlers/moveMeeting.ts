@@ -271,6 +271,12 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                 subject: args.meeting_subject as string,
                 attendees: mergedAttendees,
                 isRecurring: false,
+                // Same gap as planMeeting's category detection (create_meeting's
+                // onsite request read as "Meeting" instead of "Physical" because
+                // the classifier never saw the location the caller gave) — this
+                // re-evaluation has the same blind spot when an explicit venue
+                // string came in on THIS call.
+                locationHint: typeof args.location === 'string' ? args.location : undefined,
               });
               const newCategory = catResult.category;
               const oldCategory = existing.categories[0] ?? null;

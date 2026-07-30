@@ -477,6 +477,15 @@ export async function getOwnerEventsForDecision(
  * new turn, and a direct create_meeting can race a coord book. Graph is the
  * source of truth — query it before creating so a re-attempt of an
  * already-booked meeting returns the existing id instead of a duplicate.
+ *
+ * (v4.3.x, #165b — a `subject: null` "match on start alone" mode briefly lived
+ * here to name the real conflicting event behind an owner_busy_collision
+ * refusal. Removed: matching on start-proximity alone, with no occupancy-role
+ * or overlap check, could name an occupancyRoleOf-ignored free/floating block
+ * that happened to start at the requested time instead of the real blocker
+ * overlapping from an earlier start. That case now reads the event straight
+ * off checkSlot's own overCommitment — the SAME occupancy scan that produced
+ * the rejection — instead of a second, differently-matched lookup here.)
  */
 export async function findDuplicateEvent(
   userEmail: string,

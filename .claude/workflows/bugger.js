@@ -148,14 +148,36 @@ if (BACKLOG && presetArg.length)
 // `rootCause`: prose alone makes this a fuzzy guess, a ref makes it a lookup.
 // Shape: [{ref, symptom, rootCause, state}].
 const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
-// Items the owner has SEEN and parked — deferred, or converted into a GitHub
-// issue where the design question is being worked. Distinct from ALREADY_BUILT
-// in the way that matters: nothing is fixed, so the symptom recurs INDEFINITELY
-// rather than only until the next deploy. Without this list a parked decision
-// comes back every night as a fresh bug, which is the failure that re-raised 24
-// of his rulings on 2026-07-26 — the same shape, one layer along.
+// Items that LEFT the bug track — `converted` into a GitHub issue where the design
+// question is being worked. Distinct from ALREADY_BUILT in the way that matters:
+// nothing is fixed, so the symptom recurs INDEFINITELY rather than only until the
+// next deploy. Without this list a settled decision comes back every night as a
+// fresh bug, which is the failure that re-raised 24 of his rulings on 2026-07-26.
+//
+// A51 · a `deferred` row is NOT one of these and must never be passed here. His
+// ruling, 2026-07-30: *"defer for tomorrow or anything like this means defer to
+// next run — the only thing we need is don't do it now."* A deferral is a ONE-RUN
+// skip, and since the ledger is only appended during and after a run, every
+// `deferred` row standing when a run starts was deferred by an earlier one and is
+// due by definition. Listing it here tells the scout to drop work he asked for.
+// If he never wants it, the verdict is `declined` — that is the parking state.
 // Shape: [{ref, symptom, state, note}].
-const OPEN_KNOWN = asArray('openKnown', A.openKnown)
+//
+// ENFORCED here, not only written in SKILL.md and scout.md. The rule that lived in
+// prose alone is the rule that broke: the derivation said `deferred` + `converted`,
+// the engine took whatever it was handed, and nothing could tell that a due row had
+// been listed as droppable. So a `deferred` entry is REMOVED from the drop list and
+// NAMED — the run continues with it as ordinary due work, which is his ruling.
+const openKnownRaw = asArray('openKnown', A.openKnown)
+const isDeferredRow = (o) => o && typeof o === 'object' && /^deferred/i.test(String(o.state || o.verdict || ''))
+const openKnownDeferred = openKnownRaw.filter(isDeferredRow)
+const OPEN_KNOWN = openKnownRaw.filter((o) => !isDeferredRow(o))
+if (openKnownDeferred.length)
+  argWarnings.push(
+    `${openKnownDeferred.length} \`openKnown\` entr${openKnownDeferred.length === 1 ? 'y was' : 'ies were'} \`deferred\` and ${openKnownDeferred.length === 1 ? 'was' : 'were'} REMOVED from the drop list: ${openKnownDeferred
+      .map((o) => o.ref || '(no ref)')
+      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the scout must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
+  )
 // A22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
 // groups nothing and the writer produces noise, which is the decoration A5 forbids.
@@ -201,7 +223,7 @@ if (overflowArg.length && !presetArg.length)
   )
 if (carriedDropped.length)
   argWarnings.push(
-    `${carriedDropped.length} \`pendingOverflow\` entr${carriedDropped.length === 1 ? 'y' : 'ies'} matched a parked \`openKnown\` ref and were DROPPED, not built: ${carriedDropped.map((i) => i.id || i.ref || '(no id)').join(', ')}. He has already ruled on those.`,
+    `${carriedDropped.length} \`pendingOverflow\` entr${carriedDropped.length === 1 ? 'y was' : 'ies were'} matched a parked \`openKnown\` ref and DROPPED, not built: ${carriedDropped.map((i) => i.id || i.ref || '(no id)').join(', ')}. He has already ruled on those.`,
   )
 if (carriedBuilt.length)
   argWarnings.push(
@@ -283,7 +305,7 @@ const SCOUT = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'the ref of every finding you dropped because the owner has already seen and parked it. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you. A51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
     },
     droppedAsAlreadyBuilt: {
       type: 'array',
@@ -691,7 +713,8 @@ const scout = await agent(
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
-        `  • **Emit NO issue for a backlog row, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 22 old rows is a wave nobody approved.\n` +
+        `  • **Emit NO issue for a row you RE-READ here, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 22 old rows is a wave nobody approved.\n` +
+        `  • **This list is NOT a drop list.** When a GitHub complaint or a log moment you found matches an open row on it, that match CONFIRMS the row is still real — **emit the issue** and name the row in \`whyHypothesis\`. Never drop an intake because the backlog already tracks it, and never report such a match in \`droppedAsOpenKnown\`: on wf_6852af85-afc that is how four complaints the owner had ruled DUE were lost, absent from every count in the funnel. The only drop lists are the two the brief hands you below.\n` +
         `  • Work them in the order printed, and if you run out of room say how many you did NOT reach. \`backlogSeen\` against the length of \`backlogReread\` is how a half-finished pass shows up as a number instead of reading as a clean sweep.\n\n`
       : '') +
     `## Then shape it\n\n` +
@@ -704,8 +727,8 @@ const scout = await agent(
         `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running the check, which is how this check silently failed before.\n\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
       : '') +
     (OPEN_KNOWN.length
-      ? `\n## Already on his desk — DROP these too\n\n` +
-        `He has SEEN each of these and parked it: deferred for now, or converted into a GitHub issue where the design question is being worked. **Nothing is fixed**, so unlike the list above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
+      ? `\n## Left the bug track — DROP these too\n\n` +
+        `Each of these was CONVERTED into a GitHub issue where the design question is being worked. **Nothing is fixed**, so unlike the list above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
@@ -1150,7 +1173,9 @@ const manifest = {
   // parked item may simply not have come up tonight. Zero is a normal answer,
   // and a warning that fires on the healthy path is the thing being fixed
   // everywhere else in this file.
-  openKnown: { passedIn: OPEN_KNOWN.length, dropped: openKnownDropped.length, refs: openKnownDropped },
+  // A51 · `deferredRejected` is the derivation error made visible. Non-zero means the
+  // Manager put a due row on the drop list and the engine took it back off.
+  openKnown: { passedIn: OPEN_KNOWN.length, deferredRejected: openKnownDeferred.length, dropped: openKnownDropped.length, refs: openKnownDropped },
   // A43 · what the build picked up out of `state.pendingOverflow`. Zero on a
   // discovery run is correct — the carry is build-only. Zero on a build while the
   // field holds entries is the failure this reader exists to end, and the arg
@@ -1345,14 +1370,20 @@ const persist = {
   // returns prose leaves the backlog exactly as long as it found it, which is the
   // one outcome that makes it not worth running.
   backlog: {
-    // Append each verbatim to `ledger.jsonl`, then DELETE that row from report.md.
-    // Collapse-by-ref does the rest: the row leaves `--open` for good.
+    // A50 · NO `date` FIELD HERE, and do not add one: `new Date()` and `Date.now()`
+    // THROW in a workflow script (they break resume), and the two that sat in these
+    // two `.map()`s killed the return of a finished 4-agent wave on 2026-07-30 — all
+    // the work paid for, the payload lost. The engine has no clock; the Manager has
+    // one and stamps every other ledger row already. So it is handed the act instead.
+    stamp: 'As you append each row below, add `"date":"<today, YYYY-MM-DD>"` to it. The engine has no clock and cannot fill it in. A `confirmInLedger` row whose date is not LATER than the commit that moved the code does not clear the RE-READ flag, so the same rows come back tomorrow.',
+    // Append each to `ledger.jsonl` — dated, otherwise unchanged — then DELETE that
+    // row from report.md. Collapse-by-ref does the rest: it leaves `--open` for good.
     closeInLedger: backlogReread
       .filter((b) => b.state === 'fixed' && /(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
-      .map((b) => ({ date: new Date().toISOString().slice(0, 10), ref: b.ref, source: 'audit', verdict: 'already-fixed', note: `backlog re-read: ${b.evidence}` })),
+      .map((b) => ({ ref: b.ref, source: 'audit', verdict: 'already-fixed', note: `backlog re-read: ${b.evidence}` })),
     // Still real. KEEP them as report rows.
     keepInReport: backlogReread.filter((b) => b.state !== 'fixed').map((b) => ({ ref: b.ref, state: b.state, whereNow: b.whereNow || '', evidence: b.evidence })),
-    // A47 · AND append each of these to `ledger.jsonl` verbatim — this is what
+    // A47 · AND append each of these to `ledger.jsonl` too, dated — this is what
     // records that somebody looked. Without it the same row is flagged RE-READ again
     // tomorrow and re-read again the night after, which is what made a nightly
     // backlog pass unaffordable: the staleness check compares the citing commit's
@@ -1364,7 +1395,6 @@ const persist = {
     confirmInLedger: backlogReread
       .filter((b) => b.state !== 'fixed')
       .map((b) => ({
-        date: new Date().toISOString().slice(0, 10),
         ref: b.ref,
         recheck: `${b.state}: ${b.evidence}`,
         ...(b.whereNow ? { rootCause: b.whereNow } : {}),

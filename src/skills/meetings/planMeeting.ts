@@ -324,6 +324,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         attendees: participants,
         isRecurring: input.isRecurring,
         requestedCategory: input.categoryHint,
+        locationHint: input.locationHint,
       });
       category = det.category;
       categoryReason = det.reason + ' (re-detected on move; day type changed)';
@@ -344,6 +345,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         attendees: participants,
         isRecurring: input.isRecurring,
         requestedCategory: input.categoryHint,
+        locationHint: input.locationHint,
       });
       category = det.category;
       categoryReason = det.reason;

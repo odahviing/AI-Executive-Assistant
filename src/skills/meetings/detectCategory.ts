@@ -27,6 +27,15 @@ export interface DetectCategoryInput {
   // A HINT to reconcile, not a command: honor it when it fits, override it when
   // it clearly doesn't. This classifier's output is authoritative for the write.
   requestedCategory?: string | null;
+  // v4.3.x — the caller's raw location/venue text (create_meeting's args.location,
+  // e.g. "in our offices", "23 Main St", "Zoom"). Without this the classifier
+  // judged a "Physical" suggestion purely from subject/body, so a genuine onsite
+  // request with no address MENTIONED IN THE SUBJECT read as "no physical location
+  // indicated" and got overridden to a generic Meeting — even though the caller's
+  // OWN location argument said otherwise and resolveLocation (runs right after
+  // this, given the category this call returns) independently agreed it was
+  // physical. Passed through verbatim, never parsed here (G7) — the model reads it.
+  locationHint?: string;
 }
 
 export interface DetectCategoryResult {
@@ -95,6 +104,7 @@ Subject: ${input.subject.slice(0, 200)}
 Recurring: ${input.isRecurring ? 'YES (part of a series)' : 'NO (one-time)'}
 Attendee count: ${attendeeCount} (${input.profile.user.name.split(' ')[0]} included)
 Attendees: ${attendeesLine}
+${input.locationHint ? `Location given: ${input.locationHint.slice(0, 200)}` : ''}
 ${input.body ? `Body: ${input.body.slice(0, 300)}` : ''}
 
 OUTPUT — ONE LINE in this exact format:

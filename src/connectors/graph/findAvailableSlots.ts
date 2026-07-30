@@ -203,6 +203,12 @@ export async function findAvailableSlots(params: {
     // consequence as `unresolvedAttendees`, opposite cause — a bad address is the
     // model's to correct, a bad window is not.
     attendeesNotChecked?: string[];
+    // #165b — the actual event behind the FIRST `owner_busy_collision` this
+    // search hits, straight from checkSlot's own occupancy scan (viewer-scoped
+    // subject already applied). Lets a single-candidate caller (the colleague-
+    // path narrow check) name the real conflicting meeting without a second,
+    // differently-matched lookup that can point at the wrong event.
+    conflictingEvent?: { id: string; subject: string };
   };
 }): Promise<SlotCandidate[]> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -1133,6 +1139,14 @@ export async function findAvailableSlots(params: {
         // time, create_meeting books it, and says what it lands on.
         if (verdict.overCommitment) {
           trackReject('owner_busy_collision', cursorDt.toISO()!, verdict.outsideWorkHours === true);
+          // #165b — first hit wins; a single-candidate caller has exactly one to
+          // report, and a spread search never reads this field.
+          if (params.diagnosticsOut && !params.diagnosticsOut.conflictingEvent) {
+            params.diagnosticsOut.conflictingEvent = {
+              id: verdict.overCommitment.id,
+              subject: verdict.overCommitment.subject,
+            };
+          }
           cursor = new Date(cursor.getTime() + step);
           continue;
         }

@@ -2,6 +2,42 @@
 
 ---
 
+## 4.3.4 — the brief gets its news back, and three fixes ship that the verify would not sign
+
+Seven product fixes across ten files, **four verified and three shipped without a sign-off** at the owner's explicit call, with the follow-ups going to the next run. The wave began with a question — *"in my daily briefing i didn't get news update, know why?"* — and the answer turned out to be a stopwatch: the gather had succeeded with four goals and fifty-five sources, and lost an eight-second race it was permitted twelve seconds to run. It had been winning by narrowing margins for three days and finally lost by 0.32s.
+
+The verify pass then earned its place twice. It overturned a colleague-facing fix that would have named the **wrong** conflicting meeting, sending the correction back to derive the answer from the same occupancy scan that produced the refusal rather than from a second lookup with weaker rules. And it caught that a fix built to stop Maelle answering *"is Levana free?"* with the owner's own hours had a trigger wider than its symptom.
+
+### Fixed — verified
+
+- **The morning brief no longer drops its news section to a stopwatch, and says so when it does.** The outer wait was shorter than the work it waited on was allowed to take, so news reached the brief only by luck. Timed-out and found-nothing had also collapsed into one silent outcome, which is why a broken pass and a quiet news day were indistinguishable — they are now separate log lines, and the gather's own success line can no longer be written after the consumer walked away.
+- **A colleague asking to join a meeting is steered at the meeting, not into a duplicate.** Asked to be added to a booking made moments earlier, Maelle re-ran the create under an invented subject at the same slot, collided with her own work, and raised a second approval to the owner. The refusal now names the real conflicting event, derived from the occupancy scan that rejected the slot — one fact, one derivation, and zero extra calendar calls where the previous attempt spent a second read.
+- **An onsite request booked as an onsite meeting.** The category classifier was never shown the location argument, so a stated venue read as *no physical location indicated* and overrode the classifier's own correct suggestion.
+- **The last stale calendar read on a decision path is gone.** One availability read still defaulted to the cross-turn cached copy while every other decision read went live, so *check again* could answer from a warm copy.
+
+### Shipped without a verify sign-off — the owner's call, follow-ups queued
+
+Each of these fixes the reported defect. Each carries something the verify would not pass, and none is a correctness risk:
+
+- **The news window is longer on the path where somebody is waiting.** Raising the budget is right for the unattended morning routine, but the same function serves an on-demand *send the brief* request, and the constant never consults the flag that would tell them apart — so that request can now wait twenty seconds instead of eight. The lever is already in scope at the call site.
+- **The availability pre-check bails on a wider signal than the question it protects against.** The safety condition holds and was re-derived rather than relayed: clearing an entry from the hard-block ledger can only make the output floor rewrite *less*, never grant a booking. But the trigger keys on *a colleague was named* rather than *a colleague's availability was asked about*, and it inherits the email transport's forwarded-header addresses, so it withdraws a deterministic check from turns nobody meant to lose.
+- **The pre-check's honesty caveat carries a third copy of an existing rule.** The caveat itself is correct and overdue — the block had been promising a booking-time parity the code does not keep, because lead-time is evaluated against the clock at each call and the category is a guess before any subject exists. But one added sentence already exists in two other places, and it lives in a `utils/` file that nobody editing honesty rules will open.
+
+### Removed
+
+- **A gate that could not catch the bug it was built for, and a second that cost latency the owner declined.** Both were built, both were overturned, and 531 lines came back out — a calendar-confirmation checker whose pre-filter stood down whenever a calendar tool *name* appeared in the tape (true on both evidenced turns), and an unbacked-promise checker that would have added a model call to one of the commonest turn shapes there is. The defects are real and recorded; the remedies were not the right ones.
+
+### Not changed
+
+- **The false calendar confirmation to a colleague needed no gate.** *"Yep, both work for Yael too"* was unbacked because the read never happened, not because an output gate missed it — and that root shipped in 4.3.2. A whole revisit closed on evidence rather than on a build.
+
+### Changed — the framework
+
+- **Both engines can finish.** The backlog persist block added in 4.3.3 called `new Date()`, which a workflow script forbids — so every run died while assembling its own return, after the entire wave had been paid for. The dates are now stamped by the caller, which has a clock.
+- **A deferral is a one-run skip, not a parking space.** Rows deferred to a date were being passed back as settled decisions and dropped by the intake, which lost four items the owner had ruled due. The drop list now takes converted rows only, and the engine rejects a deferred entry and says so.
+
+---
+
 ## 4.3.3 — six real fixes shipped, every ticket read open, and nobody could say why
 
 **No product change. Nothing in `src/`.** This is the agent framework, and it exists because of one night. A bug wave on 2026-07-29 ran from 16:54 to 00:31, produced six genuine fixes, and ended with the owner saying he had no idea why every ticket was still open. The fixes were real. The trail was not.

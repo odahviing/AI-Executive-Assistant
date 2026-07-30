@@ -406,7 +406,11 @@ if (openOnly) {
     `\nOPEN — ${open.length} row(s) awaiting you · ${open.length - recheck.length - noCite.length} confirmed · ${recheck.length} need a re-read · ${noCite.length} cite no file` +
       (touched ? '' : ' (staleness NOT CHECKED — no git history available)'),
   );
-  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read before you rule; nothing is closed automatically.\n`);
+  console.log(`RE-READ = a commit touched the file this row cites AFTER the row was written. Re-read before you rule; nothing is closed automatically.`);
+  // A51 · the two states read alike and are opposites. A `converted` row is CLOSED
+  // and never prints here; a `deferred` row is a ONE-RUN skip and is DUE. Deriving
+  // `openKnown` from both told the scout to drop four rows the owner had ruled due.
+  console.log(`DEFERRED = a ONE-RUN skip, DUE on the next run — not parked. It never belongs in \`openKnown\`; that list is \`converted\` rows only, and those left the bug track for GitHub.\n`);
   const laneGroups = new Map();
   for (const r of open) {
     const k = r.lane || '(no lane)';
@@ -431,7 +435,7 @@ if (openOnly) {
       // the date for only 6 of 9 — the same rule true on one path and not the other.
       const isDeferred = r.state === 'deferred' || r.verdict === 'deferred';
       const label = isDeferred
-        ? `DEFERRED ${r.date || '(no date)'}`
+        ? `DEFERRED ${r.date || '(no date)'} · DUE NEXT RUN`
         : r.verdict === 'needs-owner-decision'
           ? 'DECIDE'
           : r.verdict === 'flagged-for-owner'
