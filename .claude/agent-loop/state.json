@@ -3,10 +3,10 @@
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_b81e5b49-35b ran 17:16-18:18; anything said during that hour is still unreviewed, and re-reading an hour costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
   "lastRun": {
-    "id": "wf_33541300-121",
-    "status": "complete",
-    "notBuilt": ["158-attendee-misresolution"],
-    "reportRows": [160, 161, 162, 163, 164, 165, 166],
+    "id": "wf_e2f12e7c-6d6",
+    "status": "stopped",
+    "_stoppedNote": "KILLED BY THE OWNER inside ~3 minutes, 2026-07-30. NEVER AUTO-RESUME THIS ID - it is marked stopped precisely so the resume rule cannot re-fire, and the run is being started again from a different chat under a new id. Why it was killed, because the lesson is not the one the caches suggest: it was launched from the FRAMEWORK chat since he is on remote control and cannot pick a working directory for a new session, and all three session caches WERE checked and current (engine read off disk via scriptPath, agent definitions proven to refresh mid-session, Manager skill loaded fresh and verified to carry the 2026-07-30 rewrite). His objection was never the caches. It was that a multi-hour product wave running in the chat that holds the framework work buries the framework work - 'we are going to lose fully track of our entire framework work'. ONE CHAT PER JOB IS THE RULE AND A VERIFIED-SAFE CACHE IS NOT AN EXEMPTION FROM IT. The cache check answered a question nobody was asking.",
+    "_previousRunWas": "wf_33541300-121, complete, notBuilt [158-attendee-misresolution], reportRows 160-166",
     "note": "Owner-triggered full pass, 2026-07-29 afternoon, invoked by scriptPath (not name). WIDE WINDOW: sinceIso 2026-07-27T17:16 means ~2 days unreviewed, and that window contains the whole email-leg rollout and his testing of it. alreadyBuilt passed EMPTY and that is correct - HEAD d1898e0 is deployed (boot 13:50:12Z, 4.3.1) and the tree was clean at launch, so nothing is built-but-undeployed. openKnown carries 12 rows: 7 deferred, 4 converted (gh#154, gh#155, infra chat), plus gh#52/gh#45 parked at the 4.3.1 wrap. Tree clean at launch means the verify sees ONLY this run's work - the cleanest verify condition in a week."
   },
   "_previousRun": {
