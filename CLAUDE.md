@@ -54,6 +54,22 @@ any command.
    commits are fine; multi-line bodies via `-m "$(cat <<'EOF' ... EOF)"`.
    Never edit the previous commit (`--amend`) unless explicitly asked.
 
+## Reading Maelle's logs — she runs on the cloud now, not this laptop
+
+As of the cutover, Maelle runs on the GCP VM `maelle-agent-vm` (zone
+`europe-west4-b`) under PM2 — **not on this laptop**. The local `logs/` dir is
+**STALE** (frozen at the cutover); never diagnose a live problem from it.
+
+Read her CURRENT logs by fetching from the VM:
+`powershell -File scripts/vm-logs.ps1 [grep-term] [lines]`
+(e.g. `scripts/vm-logs.ps1 "Yael" 300`) — tails today's winston log (filtered if
+you pass a term) + recent pm2 stderr. Needs gcloud auth live; if it errors
+"Reauthentication failed", the user runs `gcloud auth login`.
+
+Everything else lives on the VM too (DB, config). SSH in with
+`gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap`;
+the app root is `/mnt/disks/maelle/app` (DB read-only via `node scripts/db-query.cjs`).
+
 ## Why this file exists
 
 The user got tired of approving `cd PATH; cmd` prompts that fire because
