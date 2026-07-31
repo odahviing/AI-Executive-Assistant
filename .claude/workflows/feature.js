@@ -75,7 +75,7 @@ const REFS = Array.isArray(A.refs) ? A.refs : null // explicit issue numbers, sk
 // Without this the only input was a ticket, so having an idea meant leaving the
 // conversation to run `gh issue create` and coming back, which is the friction
 // that makes someone skip the framework and hand-build instead. That costs the
-// lanes, the verifier and the record all at once.
+// lanes, the examiner and the record all at once.
 //
 // **The ticket is filed when the owner APPROVES the plan, not before** — at plan
 // time he may read what it actually costs and decide against it, and a ticket
@@ -205,6 +205,10 @@ const VERDICTS = {
           // one who did it. Same verdict and same reasoning as bugger.js; a lane
           // resumed to close out a dependency must not claim another lane's change
           // as its own, because the verify and the shipped count both double it.
+          //
+          // X95 · THIS ENUM MIRRORS THE CHARTERS; IT DOES NOT DEFINE THE VOCABULARY —
+          // the long note in bugger.js holds the reasoning. Adding a member here without
+          // adding it to all seven lane charters does nothing.
           verdict: {
             type: 'string',
             enum: ['built', 'confirmed-other-lane', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
@@ -223,7 +227,7 @@ const VERDICTS = {
           traced: {
             type: 'string',
             description:
-              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
+              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the examiner; one you quietly omit gets checked by nobody.',
           },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
@@ -381,7 +385,7 @@ if (MODE === 'plan') {
 
   // RECON each item against the CODE, in parallel. Named `Recon` (owner,
   // 2026-07-28) because the other phases are noun-shaped — Intake · Decompose ·
-  // Build · Context · Verify — and because rule 9c in every lane charter already
+  // Build · Context · Verify — and because rule 9b in every lane charter already
   // says "RECON in 2-4 batched rounds", so it is vocabulary the framework speaks.
   // "Planner" was rejected: it would leak into Decompose's job and this phase
   // must establish what is TRUE before anyone proposes a shape.
@@ -421,7 +425,7 @@ if (MODE === 'plan') {
             `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
           // N15 · OPUS, on the owner's call. This pass establishes the ground
           // truth every later piece stands on, and NOTHING backstops it: the
-          // verifier checks the diff, not whether the premise was right, and a
+          // examiner checks the diff, not whether the premise was right, and a
           // bad code-read is the one thing he cannot spot by reading a plan. He
           // runs one feature at a time, so this is a single agent.
           { label: `recon:${it.ref}`, phase: 'Recon', effort: 'high', model: 'opus', schema: UNDERSTOOD },
@@ -590,7 +594,11 @@ const DISPATCHABLE_DEP = new Set(['built', 'confirmed-other-lane', 'needs-depend
 // X66 · a dep row is DELIVERED whether the lane built it or confirmed another
 // lane had. Without this the new verdict would leave the originator looking
 // blocked on a dependency that actually landed.
-const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane'])
+// X97 · and `already-fixed` is the third way a dependency lands: "the thing you
+// asked for is already in the code" satisfies the ask exactly as building it
+// would. Same one-token omission as bugger.js, same effect — the originator is
+// never resumed and reads blocked for the rest of the run.
+const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane', 'already-fixed'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 
 // ---- Dependency rounds — the SAME loop bugger.js runs, for the same reasons ---
@@ -692,7 +700,7 @@ for (;;) {
 }
 
 // ONE combined-diff verify — same reasoning as bugger.js: a per-piece pass cannot
-// see the only class that needs a verifier, which is two pieces that are each
+// see the only class that needs an examiner, which is two pieces that are each
 // right alone and wrong together. Feature waves are MORE exposed to this than bug
 // waves, because the pieces were deliberately split across lanes to serve one idea.
 phase('Verify')
@@ -708,7 +716,7 @@ let discoveries = []
 let ticketCoverage = []
 // X25 · The verify runs LAST, so an ask it raises cannot be dispatched in this run —
 // same rule as `discoveries`, and until now the same rule with no destination.
-// `dependencyAgent`/`dependencyAsk` are in the verify's schema, so the verifier can
+// `dependencyAgent`/`dependencyAsk` are in the verify's schema, so the examiner can
 // fill them, and the only read below took `verdict` and `notes` and nothing else:
 // accepted by the schema, dropped in silence. Kept SEPARATE from `discoveries`
 // because merging loses which verdict is waiting on the owner.
@@ -725,15 +733,24 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
   // this wave, and a `priorClean` entry describing code this wave changed is a
   // stale "proven clean" that silences a real check.
   waveFiles = [...new Set(built.flatMap((r) => (Array.isArray(r.filesTouched) ? r.filesTouched : [])).filter(Boolean))]
+  // X84 · keyed on the entry's INDEX in the array the Manager passed, never on the
+  // text echoed back: a trimmed list in came back as trimmed names out, and 10 of 17
+  // stale "proven clean" claims survived the drop in silence on wf_4bbfc750-1a9. One
+  // silences a future check forever, so the key has to be the one thing the caller
+  // cannot reshape.
   const touchedBases = new Set(waveFiles.map((f) => String(f).split('/').pop()).filter(Boolean))
-  priorCleanDropped = priorClean.filter((c) => [...touchedBases].some((b) => String(c).includes(b)))
-  const priorCleanKept = priorClean.filter((c) => !priorCleanDropped.includes(c))
-  if (priorCleanDropped.length) log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
+  const dropsAt = (c) => [...touchedBases].some((b) => String(c).includes(b))
+  priorCleanDropped = priorClean.map((c, i) => ({ i, entry: c })).filter(({ entry }) => dropsAt(entry))
+  const priorCleanKept = priorClean.filter((c) => !dropsAt(c))
+  if (priorCleanDropped.length)
+    log(
+      `priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} at index ${priorCleanDropped.map((d) => d.i).join(',')} — this wave changed the code they described.`,
+    )
 
   const check = await agent(
     // Bar, standard, seams-first scope, trace sampling, budget,
     // overturn-vs-discovery and the return contract live in
-    // `.claude/agents/verifier.md`. Only the payload and the ONE thing that
+    // `.claude/agents/examiner.md`. Only the payload and the ONE thing that
     // differs from a bug wave stay here.
     `Verify this FEATURE wave's COMBINED change before the owner wraps it — ${built.length} piece(s). **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
       `**One thing differs from a bug wave: also ask whether it DELIVERS WHAT WAS APPROVED.** A feature can be perfectly safe and still not do the thing. Check the built pieces against the intent below, not only against the code. And these pieces were split across lanes to serve ONE idea, so the joins are where they are most likely to disagree.\n\n` +
@@ -749,9 +766,9 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
         ? `**SPOT-CHECK — ${claimedFixed.length} piece(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually there at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(claimedFixed, null, 2)}\n\n`
         : '') +
       (built.length ? `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}` : `**NO PIECE WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
-    // No `model` here: `verifier.md` pins Opus, so neither the session model nor
+    // No `model` here: `examiner.md` pins Opus, so neither the session model nor
     // a hand dispatch can downgrade the one agent that must not be downgraded.
-    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'verifier', effort: 'xhigh', schema: VERIFY_OUT },
+    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'examiner', effort: 'xhigh', schema: VERIFY_OUT },
   )
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []
@@ -914,7 +931,7 @@ return {
   results: verified,
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
-  priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
+  priorCleanDropped, // X84 · `[{i, entry}]`. **DELETE BY `i`** — the index in the array you passed as `priorClean`; `entry` is the text as received, for reading only. Match on the text and a list you trimmed on the way in drops nothing. `state.verifiedClean` ends exactly this many entries shorter
   discoveries, // X30 · NEW problems unrelated to these pieces. NEXT RUN'S INTAKE, not rows on his desk — already lane-assigned and severity-ranked for `args.issues`. Never built this wave, and never softened: a `high` one arrives first in the next queue
   deferredDepAsks, // X25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident

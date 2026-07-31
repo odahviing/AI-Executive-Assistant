@@ -217,7 +217,18 @@ const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? 
 const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' ? b : b.ref)).filter(Boolean))
 const carriedDropped = overflowArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
 const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) && builtRefs.has(refKey(i.id || i.ref)))
-const carriedIn = presetArg.length ? overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i)) : []
+// X88 · A DEFERRAL HE MAKES ON A CARRIED ITEM. A queued discovery drains at the
+// head of the next build by construction, so his `defer` on one had NOWHERE to be
+// expressed and was silently ignored — the item rode into that build anyway. Same
+// marker as a ledger row (`isDeferredRow` above reads `state` or `verdict`), same
+// meaning: skip exactly ONE run. Held here, NAMED, and NOT dispatched.
+//
+// The marker must be CLEARED once the skip has been served, and the engine cannot
+// write state — so the warning says so, and X88's `--report` gate is the backstop
+// for the night it is forgotten: the deferral's ledger row goes OVERDUE after one
+// run and blocks the report until it is back on his desk.
+const carriedDeferred = overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && isDeferredRow(i))
+const carriedIn = presetArg.length ? overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && !carriedDeferred.includes(i)) : []
 if (overflowArg.length && !presetArg.length)
   argWarnings.push(
     `\`pendingOverflow\` carried ${overflowArg.length} entr${overflowArg.length === 1 ? 'y' : 'ies'} but no \`issues\` were passed, so this is a DISCOVERY run and they were IGNORED — draining them here would make the run a preset and skip the scout, losing the log review. Carry them on the next \`build\`.`,
@@ -231,6 +242,12 @@ if (carriedBuilt.length)
     `${carriedBuilt.length} \`pendingOverflow\` entr${carriedBuilt.length === 1 ? 'y' : 'ies'} matched an \`alreadyBuilt\` ref and were DROPPED, not re-built: ${carriedBuilt
       .map((i) => i.id || i.ref || '(no id)')
       .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
+  )
+if (carriedDeferred.length && presetArg.length)
+  argWarnings.push(
+    `${carriedDeferred.length} \`pendingOverflow\` entr${carriedDeferred.length === 1 ? 'y is' : 'ies are'} marked \`deferred\` and ${carriedDeferred.length === 1 ? 'was' : 'were'} HELD, not built: ${carriedDeferred
+      .map((i) => i.id || i.ref || '(no id)')
+      .join(', ')}. A deferral is a ONE-RUN skip and this run is the skip. **Now delete \`"state":"deferred"\` from those entries in \`state.pendingOverflow\`** — the skip has been served, so the next build takes them. An uncleared marker parks the item forever, which is the failure this reads for.`,
   )
 // X25's guard reads the MERGED list below, so a carried row still flagged
 // `awaitingOwner` is refused exactly like a pasted one.
@@ -271,7 +288,7 @@ const describeBuilt = (b) =>
 // to-do list. Never select it from a timer or a staleness heuristic. Use it
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
-const VERIFY = A.verify !== false // one combined verifier pass over the wave, unless explicitly off
+const VERIFY = A.verify !== false // one combined examiner pass over the wave, unless explicitly off
 const CODE_LANES = ['matchmaker', 'shepherd', 'gatekeeper', 'profiler', 'transporter', 'outrider'] // run in parallel; context runs LAST, separately
 // Reasoning effort per lane (owner-set). Keys are agent names, renamed 2026-07-28.
 const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', transporter: 'xhigh', shepherd: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
@@ -332,8 +349,33 @@ const SCOUT = {
           ref: { type: 'string', description: 'the ticket, as `#<number>`' },
           complaintsFound: { type: 'number', description: 'how many distinct complaints the BODY explicitly lists. Count what is listed; never infer a list that is not there.' },
           issuesEmitted: { type: 'number', description: 'how many issues you emitted whose id names this ticket' },
+          // X80 · X32 gave this funnel its two endpoints and no accounting between
+          // them, so `emitted 1 of 3` and `emitted 1 of 3 because 2 were already
+          // built` were the same return — and the unexplained two landed on no list
+          // at all, recoverable only by the Manager re-reading a ticket the scout had
+          // already read and discarded. #156 collapsed 3→0 on wf_4bbfc750-1a9 after
+          // 3→3 and 3→0 on the two runs before it. Every complaint now comes back as
+          // an issue OR as a named drop with its reason, so the arithmetic closes in
+          // the return instead of being reconstructed.
+          dropped: {
+            type: 'array',
+            description:
+              'One entry per complaint you did NOT emit an issue for. `complaintsFound` must equal `issuesEmitted` + this length — the manifest checks it and names any shortfall. Empty array when you emitted one for every complaint; never omit it.',
+            items: {
+              type: 'object',
+              properties: {
+                complaint: { type: 'string', description: "the complaint in the ticket's own words, enough to recognise it" },
+                why: {
+                  type: 'string',
+                  description:
+                    'why no issue: `already-built <ref>` · `parked <ref>` · `open row <ref>` · `not a bug — <what the transcript shows instead>` · `too vague to act on`. A reason he can rule on, not "skipped".',
+                },
+              },
+              required: ['complaint', 'why'],
+            },
+          },
         },
-        required: ['ref', 'complaintsFound', 'issuesEmitted'],
+        required: ['ref', 'complaintsFound', 'issuesEmitted', 'dropped'],
       },
     },
     // X42 · the backlog re-read. Its product is FEWER rows on his desk, so the two
@@ -461,6 +503,18 @@ const VERDICTS = {
           // not reach the verify, it is not counted as a fix, and it still closes
           // the dependency. Claiming someone else's work as `built` inflates every
           // count downstream.
+          //
+          // X95 · THIS ENUM MIRRORS THE CHARTERS; IT DOES NOT DEFINE THE VOCABULARY. The
+          // dispatch brief below says "return one verdict per issue per your return
+          // contract", so the seven lane charters' return-contract list IS the contract
+          // and this line only enforces it. Adding a member here without adding it to all
+          // seven does nothing: a lane cannot choose a verdict it has never been told
+          // exists, and `confirmed-other-lane` proved it — 0 uses in 537 ledger rows while
+          // it lived only here. Payload FIELDS are the opposite and correctly live here
+          // alone (`filesTouched`, `traced`, `invariant`): they are mechanics carried by
+          // the schema description and the brief, one of them is computed per run, and
+          // they mean nothing off the engine path. Verdicts are judgments a lane must be
+          // taught; fields are attachments the dispatch asks for.
           verdict: {
             type: 'string',
             enum: ['built', 'confirmed-other-lane', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
@@ -496,11 +550,11 @@ const VERDICTS = {
               'repo-relative path of EVERY file you edited or created for this issue. Omit only if you edited nothing — a missing list makes the verify treat the entire tree as this wave, which is safe but wasteful.',
           },
           // Forwarded to the verify so it spends its budget on what you did NOT
-          // cover. Without it the verifier re-derives ground you already walked.
+          // cover. Without it the examiner re-derives ground you already walked.
           traced: {
             type: 'string',
             description:
-              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the verifier; one you quietly omit gets checked by nobody.',
+              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the examiner; one you quietly omit gets checked by nobody.',
           },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
@@ -526,7 +580,7 @@ const VERIFY_OUT = {
     // An OVERTURN says a fix in THIS wave is broken: it belongs to this wave and
     // must be settled before shipping. It goes in `results`.
     //
-    // A DISCOVERY is a pre-existing bug the verifier happened to notice while
+    // A DISCOVERY is a pre-existing bug the examiner happened to notice while
     // reading. It has nothing to do with the fixes under review — and building
     // it here would change the tree the verify just examined, invalidating the
     // very pass that found it, which then justifies another pass. That is the
@@ -577,7 +631,7 @@ const VERIFY_OUT = {
     },
     // Work lands on open tickets by accident constantly: a bug fix turns out to
     // be most of an Improvement nobody scheduled, the ticket sits open for
-    // months, and eventually it is built a second time. The verifier reads the
+    // months, and eventually it is built a second time. The examiner reads the
     // FINISHED diff, so it is the only pass positioned to notice. `partial` is
     // the valuable state — the owner can send it back for the remainder.
     ticketCoverage: {
@@ -671,7 +725,12 @@ const DISPATCHABLE_DEP = new Set(['built', 'confirmed-other-lane', 'needs-depend
 // X66 · a dep row is DELIVERED whether the lane built it or confirmed another
 // lane had. Without this the new verdict would leave the originator looking
 // blocked on a dependency that actually landed.
-const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane'])
+// X97 · and `already-fixed` is the third way a dependency lands: "the thing you
+// asked for is already in the code" satisfies the ask exactly as building it
+// would. It was the one delivering verdict missing here, so an originator whose
+// dep came back already-fixed was never resumed and read `needs-dependency` for
+// the rest of the run — verbatim the failure the X66 comment above describes.
+const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane', 'already-fixed'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 const depAsksFor = (lane, rs) =>
   rs
@@ -758,7 +817,7 @@ const scout = await agent(
         `  • **Count what is explicitly listed. Never infer a list that is not there** — a body that is only a transcript has one complaint, and manufacturing three from it is worse than missing two.\n` +
         `  • **Every emitted issue's \`id\` NAMES ITS PARENT TICKET: \`156-a\`, \`156-b\`, \`156-c\`.** The evidence is that complaint's own words plus any \`file:line\` quoted verbatim, because a citation you do not carry through cannot be used downstream.\n` +
         `  • **A MERGED issue keeps the ticket ref too.** \`source: 'both'\` means both sources are NAMED, not that the log slug wins: on 2026-07-29 the one merged row came back as \`flow-narrates-unexecuted-actions\` with no \`156\` anywhere in it, so gh#156 got no coverage row at all while gh#158 got one — and a ticket with no coverage row is indistinguishable from a ticket with nothing wrong.\n` +
-        `  • **Report \`ticketComplaints\`: one \`{ref, complaintsFound, issuesEmitted}\` per ticket you read.** The manifest checks it, so 3-in-1-out is a number rather than something nobody notices for a week.\n\n`
+        `  • **Report \`ticketComplaints\`: one \`{ref, complaintsFound, issuesEmitted, dropped}\` per ticket you read, and the arithmetic must close — \`complaintsFound\` = \`issuesEmitted\` + \`dropped.length\`.** Every complaint you do not emit an issue for gets a \`dropped\` entry naming it and WHY (already built, parked, an open row, not a bug, too vague). A complaint that is neither emitted nor named is on no list anywhere: #156 has come back 3→0 twice in three runs, and the manifest now names the shortfall per ticket.\n\n`
       : '') +
     (BACKLOG
       ? `## The backlog re-read\n\n` +
@@ -799,6 +858,24 @@ scoutReport = scout || {}
 log(`Scout: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 }
+
+// X98 · a backlog re-read that comes back `fixed` CLOSES a ledger row with no
+// diff behind it — the same no-evidence closure `already-fixed` is, arriving on
+// a different path. The X68 spot-check read lane results only, so this path was
+// checked by nothing but the scout's own sentence: measured 2026-07-31, 18 of
+// the 33 `already-fixed` rows in ledger.jsonl carry `source:'audit'`, which is
+// this path and the largest single population of no-diff closures.
+//
+// `backlogClosable` is the row that WOULD close — `fixed` AND naming a line or a
+// commit. It is ONE predicate for the three places that used to spell the same
+// regex separately: the unevidenced-fixed warning, this spot-check, and
+// `persist.backlog.closeInLedger`. A row the spot-check refuses or never answers
+// does not close; it stays a report row, which is the honest state.
+const CLOSABLE_CITE = /(:\d+)|(\b[0-9a-f]{7,40}\b)/i
+const backlogClosable = (b) => b.state === 'fixed' && CLOSABLE_CITE.test(String(b.evidence || ''))
+// `>backlog` mirrors the `>dep` suffix: a derived id, so a backlog ref can never
+// be mistaken for a wave issue that happens to carry the same ticket number.
+const backlogClaims = backlogReread.filter(backlogClosable).map((b) => ({ id: `${b.ref}>backlog`, ref: b.ref, claim: 'fixed at HEAD', evidence: b.evidence, whereNow: b.whereNow || '' }))
 
 // A lane name outside the known set means the issue matches no lane in the Build
 // phase and no `context` pass either — it is silently dropped. That happened on
@@ -1049,7 +1126,7 @@ if (queue.length) {
 // ---- 5. Verify — ONE adversarial pass over the COMBINED diff, never one per fix ----
 // This used to fan out N per-fix verifies. That shape is both more expensive and
 // strictly blinder: a per-fix pass cannot see the only defect class that actually
-// needs a verifier — two lanes whose fixes are each correct alone and wrong
+// needs an examiner — two lanes whose fixes are each correct alone and wrong
 // together. Every cross-lane defect this framework has caught came from a
 // combined-diff pass (the 4.2.0 wrap; the 2026-07-26 checkSlot wave, where a
 // combined pass caught a regression a fix had introduced ONE ROUND earlier).
@@ -1074,6 +1151,12 @@ let priorCleanDropped = []
 let discoveries = []
 let ticketCoverage = []
 let spotCheckUnanswered = [] // X68 · already-fixed rows the verify never answered on
+let backlogConfirmed = new Set() // X98 · backlog refs the spot-check agreed are fixed at HEAD — the only ones that close
+// X98 · the one test for "this backlog row is closed", read by `persist.backlog`
+// below and by the warning that counts what did not survive. It is deliberately
+// ONE function rather than the same conjunction written twice, because the two
+// lists it feeds must partition the re-read exactly.
+const backlogCloses = (b) => backlogClosable(b) && (!VERIFY || backlogConfirmed.has(b.ref))
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
   // X68 · `already-fixed` is the one bucket that CLOSES a row on a lane's own
@@ -1084,11 +1167,14 @@ if (VERIFY) {
   // point: nothing distinguished it from a bad one. These are SPOT-CHECKED, not
   // re-verified — one read of the cited code each, no trace, no budget.
   const claimedFixed = results.filter((r) => r.verdict === 'already-fixed')
+  // X98 · the backlog's `fixed` rows join them. Same claim, same one-read answer,
+  // one list — a second spot-check block would be a second copy of the same prose.
+  const spotCheck = [...claimedFixed, ...backlogClaims]
   verifyAttempted = built.length
-  if (built.length || claimedFixed.length) {
+  if (built.length || spotCheck.length) {
     // Two things are forwarded so nothing is derived twice:
     //   • each fix's own `traced` — what the builder already walked, so the
-    //     verifier attacks the GAPS instead of re-covering covered ground.
+    //     examiner attacks the GAPS instead of re-covering covered ground.
     //   • `priorClean` — what earlier verifies proved, carried in by the Manager
     //     from the report. Without it every pass re-audits settled ground.
     // Both are leads, not truth: a builder's coverage claim and a past pass's
@@ -1112,16 +1198,29 @@ if (VERIFY) {
     // costs one pass, missing a regression costs a person. Until now this was the
     // Manager remembering by hand. Matching is on basename, deliberately loose in
     // the DROP direction for exactly that reason.
+    // X84 · KEYED ON POSITION, not on the entry's text. The drop list used to echo
+    // back the strings it was handed, and the Manager then matched those strings
+    // against `state.verifiedClean` — so a list that was trimmed or reformatted on
+    // the way in came back unmatchable: on wf_4bbfc750-1a9, 17 named drops matched 7
+    // entries and the other 10 stale "proven clean" claims survived in silence. One
+    // of them was `conflictingEvent has exactly ONE writer`, falsified by gh#165-d in
+    // that same wave, so it would have told a future verify to SKIP auditing the
+    // branch the fix had just added. A stale entry silences a real check, which is
+    // strictly worse than having no list — so the key is the index in the array the
+    // Manager passed, which is the one thing it cannot reshape.
     const touchedBases = new Set(waveFiles.map((f) => String(f).split('/').pop()).filter(Boolean))
-    priorCleanDropped = priorClean.filter((c) => [...touchedBases].some((b) => String(c).includes(b)))
-    const priorCleanKept = priorClean.filter((c) => !priorCleanDropped.includes(c))
+    const dropsAt = (c) => [...touchedBases].some((b) => String(c).includes(b))
+    priorCleanDropped = priorClean.map((c, i) => ({ i, entry: c })).filter(({ entry }) => dropsAt(entry))
+    const priorCleanKept = priorClean.filter((c) => !dropsAt(c))
     if (priorCleanDropped.length)
-      log(`priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} — this wave changed the code they described.`)
+      log(
+        `priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} at index ${priorCleanDropped.map((d) => d.i).join(',')} — this wave changed the code they described.`,
+      )
 
     const check = await agent(
       // The bar, the standard, the seams-first scope, the trace sampling, the
       // budget, overturn-vs-discovery and the return contract all live in
-      // `.claude/agents/verifier.md` now. Restating them here would be a second
+      // `.claude/agents/examiner.md` now. Restating them here would be a second
       // copy that drifts — the same mistake the two engines made with the lane
       // map. This brief carries the PAYLOAD only.
       `Verify this wave's COMBINED change before the owner wraps it — ${built.length} fix(es) across the lanes below. **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
@@ -1141,20 +1240,20 @@ if (VERIFY) {
         // X68 · ONE LINE, not a second pass. The cost of a spot-check is one file
         // read per row; the cost of skipping it is a high-severity row closed on
         // an unchecked claim, which is what happened.
-        (claimedFixed.length
-          ? `**SPOT-CHECK — ${claimedFixed.length} row(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually fixed at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(
-              claimedFixed,
-              null,
-              2,
-            )}\n\n`
+        (spotCheck.length
+          ? `**SPOT-CHECK — ${spotCheck.length} row(s) CLOSED without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually fixed at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the claim was right, any other verdict if it was not. A row you do not return is reported as still unchecked.${
+              backlogClaims.length
+                ? ` **${backlogClaims.length} of them came from the BACKLOG re-read, not from a lane** — their ids end \`>backlog\` and the claim is that an OPEN ledger row is fixed at HEAD. Answer them in exactly the same way: one confirmed here is deleted from the backlog, one you refuse stays open.`
+                : ''
+            }\n${JSON.stringify(spotCheck, null, 2)}\n\n`
           : '') +
         (built.length ? `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}` : `**NO FIX WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
-      // No `model` here either — `verifier.md` pins Opus. Same reasoning as the
+      // No `model` here either — `examiner.md` pins Opus. Same reasoning as the
       // lanes, one rung stronger: this is the single highest-judgment step, the
       // only pass that sees the whole diff, and the backstop for Sonnet lanes'
       // traces. Pinning it on the charter means neither the session model nor a
       // hand dispatch can downgrade the one agent that must not be downgraded.
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'verifier', effort: 'xhigh', schema: VERIFY_OUT },
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'examiner', effort: 'xhigh', schema: VERIFY_OUT },
     )
     verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
@@ -1163,7 +1262,7 @@ if (VERIFY) {
     if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
     ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
     // The verify's OWN dependency asks were being discarded here — the overturn
-    // read only `verdict` and `notes`, so when the verifier said "this needs the
+    // read only `verdict` and `notes`, so when the examiner said "this needs the
     // owner, and here is precisely what would fix it", the prescription was
     // thrown away and only the objection survived. That happened on
     // wf_6b869440-ef7 to the one finding that mattered most. The verify runs
@@ -1201,7 +1300,17 @@ if (VERIFY) {
         .map((x) => [x.id, x.notes || '']),
     )
     const answered = new Set(((check && check.results) || []).map((x) => x && x.id))
-    spotCheckUnanswered = claimedFixed.filter((r) => !answered.has(r.id)).map((r) => r.id)
+    spotCheckUnanswered = spotCheck.filter((r) => !answered.has(r.id)).map((r) => r.id)
+    // X98 · the backlog half of the answer. A `>backlog` row the spot-check calls
+    // `already-fixed` is confirmed and closes; anything else — a different verdict,
+    // or no answer at all — leaves the ledger row OPEN. The lane half is handled by
+    // `overturned` above, which only reaches rows that live in `results`.
+    backlogConfirmed = new Set(
+      backlogClaims
+        .filter((c) => ((check && check.results) || []).some((x) => x && x.id === c.id && x.verdict === 'already-fixed'))
+        .map((c) => c.ref),
+    )
+    if (backlogClaims.length) log(`  backlog spot-check: ${backlogConfirmed.size} of ${backlogClaims.length} \`fixed\` claim(s) confirmed at HEAD — only these close.`)
     verified = results.map((r) =>
       overturned.has(r.id)
         ? {
@@ -1298,6 +1407,10 @@ const manifest = {
     // named so he can see WHICH stale entry rode in, and delete them from state.
     droppedAsBuilt: carriedBuilt.length,
     droppedAsBuiltRefs: carriedBuilt.map((i) => i.id || i.ref || '(no id)'),
+    // X88 · non-zero means he deferred a carried item and this build honoured the
+    // skip. The refs are named because the marker has to be cleared by hand now.
+    heldAsDeferred: carriedDeferred.length,
+    heldAsDeferredRefs: carriedDeferred.map((i) => i.id || i.ref || '(no id)'),
   },
   // X42 · the backlog re-read. `seen` against `reread` is the half-finished tell;
   // `fixed` is the only state that removes a row, so it is the one that has to be
@@ -1313,12 +1426,30 @@ const manifest = {
         fixed: backlogReread.filter((b) => b.state === 'fixed').length,
         moved: backlogReread.filter((b) => b.state === 'moved').length,
         stillReal: backlogReread.filter((b) => b.state === 'still-real').length,
+        // X98 · the three numbers that say whether the close was checked. `claimed`
+        // is the `fixed` rows citing something, `confirmed` is what the spot-check
+        // stood behind, `closed` is what actually leaves the backlog. `confirmed`
+        // sitting at 0 while `closed` is not is the verify-off run, and it is a
+        // warning as well — the shape of no-op this manifest exists to expose.
+        fixedClaimed: backlogClaims.length,
+        fixedConfirmed: backlogConfirmed.size,
+        closed: backlogReread.filter(backlogCloses).length,
       }
     : 'n/a (not a backlog run)',
   // X32 + X33 · the ticket funnel. `complaintsFound` against `issuesEmitted` per
   // ticket, so three-in-one-out is a number here instead of something the owner
   // discovers by re-reading his own ticket at midnight.
-  tickets: PRESET ? 'n/a (preset)' : { read: ticketComplaints.length, complaints: ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0), emitted: ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0), perTicket: ticketComplaints },
+  // X80 · `dropped` closes the arithmetic: complaints = emitted + dropped, and every
+  // drop in `perTicket` names the complaint and why. A shortfall is a warning below.
+  tickets: PRESET
+    ? 'n/a (preset)'
+    : {
+        read: ticketComplaints.length,
+        complaints: ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0),
+        emitted: ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0),
+        dropped: ticketComplaints.reduce((n, t) => n + (Array.isArray(t.dropped) ? t.dropped.length : 0), 0),
+        perTicket: ticketComplaints,
+      },
   locationsResolved: PRESET ? 'n/a (preset)' : locationsResolved,
   lanesDispatched: [...new Set(verified.map((r) => (specById.get(r.id) || {}).lane).filter(Boolean))],
   misroutedLanes: misrouted.length,
@@ -1389,6 +1520,20 @@ if (spotCheckUnanswered.length)
   )
 if (!VERIFY && verified.some((r) => r.verdict === 'already-fixed'))
   warnings.push('`already-fixed` row(s) closed with the verify OFF, so nothing checked the claim. That is the only bucket that closes a row without producing a diff anyone can read.')
+// X98 · the same sentence for the same closure arriving on the backlog path, plus
+// the count of `fixed` claims the spot-check would not stand behind. Both are
+// observables the run had no way to state before: the close was unconditional.
+if (!VERIFY && backlogClaims.length)
+  warnings.push(
+    `${backlogClaims.length} backlog row(s) close as \`already-fixed\` with the verify OFF, so nothing opened the code they cite: ${backlogClaims.map((c) => c.ref).join(', ')}.`,
+  )
+if (VERIFY && backlogClaims.length && backlogConfirmed.size < backlogClaims.length)
+  warnings.push(
+    `${backlogClaims.length - backlogConfirmed.size} of ${backlogClaims.length} backlog \`fixed\` claim(s) were NOT confirmed by the spot-check and stay OPEN: ${backlogClaims
+      .filter((c) => !backlogConfirmed.has(c.ref))
+      .map((c) => c.ref)
+      .join(', ')}. They are in \`keepInReport\`, not \`closeInLedger\` — do not delete them from the report.`,
+  )
 if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
 // X31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
 if (onHisDesk > DECISION_BUDGET)
@@ -1399,26 +1544,28 @@ if (onHisDesk > DECISION_BUDGET)
 // X32 · three complaints in, one issue out, and no drop to explain it.
 if (!PRESET && SOURCES.includes('github')) {
   if (!ticketComplaints.length) warnings.push('The scout reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
-  // X64 · SUBTRACT THE SCOUT'S OWN DROP LISTS. `complaintsFound > issuesEmitted`
-  // alone treats a complaint the scout deliberately dropped — already built, or
-  // parked as a converted GitHub issue — as an unexplained gap, so the warning
-  // named 7, 8 and 8 tickets across three consecutive runs when only 5, 3 and 4
-  // had actually lost a complaint with no reason. A warning that fires on the
-  // healthy path is the `startedAtLine: 1` mistake this file names at :1145, and
-  // it fired on more tickets than it skipped. The inputs were already read at
-  // :739-740 and used nowhere.
-  const ticketNum = (s) => (String(s || '').match(/\d+/) || [''])[0]
-  const dropRefs = [...triageDropped, ...openKnownDropped].map(ticketNum)
-  const droppedFor = (ref) => { const n = ticketNum(ref); return n ? dropRefs.filter((d) => d === n).length : 0 }
+  // X64 · SUBTRACT THE COMPLAINTS THE SCOUT DELIBERATELY DROPPED. `complaintsFound
+  // > issuesEmitted` alone treats an already-built or parked complaint as an
+  // unexplained gap, so the warning named 7, 8 and 8 tickets across three
+  // consecutive runs when only 5, 3 and 4 had really lost one. A warning that fires
+  // on the healthy path is the `startedAtLine: 1` mistake this file names at :1145.
+  //
+  // X80 · IT READS THE SCOUT'S PER-COMPLAINT ACCOUNT, not a guess assembled from
+  // the engine's ticket-number drop lists. That inference could only count drops,
+  // never say WHICH complaint or WHY — so a dropped complaint stayed unnamed and the
+  // recovery was the Manager re-reading a ticket the scout had already discarded.
+  // `dropped` is required in the schema and carries the reason, so the shortfall is
+  // now the true one and every drop is readable in `manifest.tickets.perTicket`.
+  const dropCount = (t) => (Array.isArray(t.dropped) ? t.dropped.length : 0)
   const under = ticketComplaints
-    .map((t) => ({ t, unexplained: (t.complaintsFound || 0) - (t.issuesEmitted || 0) - droppedFor(t.ref) }))
+    .map((t) => ({ t, unexplained: (t.complaintsFound || 0) - (t.issuesEmitted || 0) - dropCount(t) }))
     .filter((x) => x.unexplained > 0)
   if (under.length)
     warnings.push(
       `${under.length} ticket(s) lost complaints with NO reason given: ${under
-        .map(({ t, unexplained }) => `${t.ref} ${t.complaintsFound}→${t.issuesEmitted}, ${droppedFor(t.ref)} dropped, ${unexplained} unexplained`)
+        .map(({ t, unexplained }) => `${t.ref} ${t.complaintsFound}→${t.issuesEmitted}, ${dropCount(t)} dropped with a reason, ${unexplained} unexplained`)
         .join('; ')}. ` +
-        `Those tickets are PARTIAL by arithmetic — do not close them, and the unexplained complaints are not on any list unless you put them there.`,
+        `Those tickets are PARTIAL by arithmetic — do not close them. Each unexplained complaint is on NO list: read that ticket's body and either emit it next run or record why not.`,
     )
   // X33 · the silent half. A merged row that drops the ticket ref leaves the
   // coverage check with nothing to fire on, and a ticket with no coverage row
@@ -1445,12 +1592,23 @@ if (deferredNow.length) warnings.push(`${deferredNow.length} dependency ask(s) w
         `A log line shows the symptom happened, not that the code is still wrong — wf_0cebe938-c81's headline discovery was already fixed at HEAD. Do NOT carry these into the next run's intake without opening the file first.`,
     )
 }
+// X79 · ONE citation test for a re-read row, and it reads `whereNow` as well as
+// `evidence`. The schema tells a `moved` row to put its new `file:line` in
+// `whereNow`, so X71's gate — which read `evidence` only — scored a row that
+// answered exactly as asked as having opened nothing: on wf_4bbfc750-1a9 two rows
+// carrying `createMeeting.ts:1409-1428` and `:144-166` in that field were reported
+// unconfirmed and stayed flagged RE-READ, so a re-read that WAS paid for is charged
+// again every run — the cost X59 exists to remove. Used by the warning below AND by
+// `persist.confirmInLedger`, which is what actually clears the flag; one helper so
+// the two cannot answer differently.
+const CITES_LOCATION = /(:\d+)|(\b[0-9a-f]{7,40}\b)|(\b[\w./-]+\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|log)\b)/i
+const backlogCites = (b) => CITES_LOCATION.test(String(b.evidence || '')) || (b.state === 'moved' && CITES_LOCATION.test(String(b.whereNow || '')))
 // X42 · a cleanup pass that closes a row on an unevidenced "fixed" is worse than
 // the stale row it replaced: the row disappears and nothing ever looks again. The
 // brief refuses it; this counts the ones that got through, because a brief is a
 // request and a count is an observable.
 if (BACKLOG) {
-  const unevidenced = backlogReread.filter((b) => b.state === 'fixed' && !/(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
+  const unevidenced = backlogReread.filter((b) => b.state === 'fixed' && !backlogClosable(b))
   if (unevidenced.length)
     warnings.push(
       `${unevidenced.length} backlog row(s) were called \`fixed\` WITHOUT naming a commit or a line: ${unevidenced.map((b) => b.ref).join(', ')}. ` +
@@ -1459,9 +1617,7 @@ if (BACKLOG) {
   // X71 · the count of rows the pass called still-real WITHOUT opening anything.
   // They stay flagged; this says how many, so a pass that re-read nothing cannot
   // look like a pass that re-read everything.
-  const unopened = backlogReread.filter(
-    (b) => b.state !== 'fixed' && !/(:\d+)|(\b[0-9a-f]{7,40}\b)|(\b[\w./-]+\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|log)\b)/i.test(String(b.evidence || '')),
-  )
+  const unopened = backlogReread.filter((b) => b.state !== 'fixed' && !backlogCites(b))
   if (unopened.length)
     warnings.push(
       `${unopened.length} backlog row(s) were called \`${unopened[0].state}\` with evidence that names no file, line or commit: ${unopened.map((b) => b.ref).join(', ')}. ` +
@@ -1491,7 +1647,11 @@ log(
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
     ` carried:${carriedIn.length}${BACKLOG ? ` backlog:${backlogReread.length}/${backlogSeen}+${backlogNoCite}nocite` : ''}` +
-    ` decisions:${onHisDesk}/${DECISION_BUDGET} tickets:${ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0)}→${ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0)}`,
+    `${backlogClaims.length ? ` fixedOk:${backlogConfirmed.size}/${backlogClaims.length}` : ''}` +
+    ` decisions:${onHisDesk}/${DECISION_BUDGET} tickets:${ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0)}→${ticketComplaints.reduce(
+      (n, t) => n + (t.issuesEmitted || 0),
+      0,
+    )}+${ticketComplaints.reduce((n, t) => n + (Array.isArray(t.dropped) ? t.dropped.length : 0), 0)}dropped`,
 )
 warnings.forEach((w) => log(`! ${w}`))
 
@@ -1545,12 +1705,23 @@ const persist = {
     stamp: 'As you append each row below, add `"date":"<today, YYYY-MM-DD>"` to it. The engine has no clock and cannot fill it in. A `confirmInLedger` row whose date is not LATER than the commit that moved the code does not clear the RE-READ flag, so the same rows come back tomorrow.',
     // Append each to `ledger.jsonl` — dated, otherwise unchanged — then DELETE that
     // row from report.md. Collapse-by-ref does the rest: it leaves `--open` for good.
+    // X98 · AND the spot-check has to have agreed. `backlogClosable` is the CLAIM;
+    // `backlogConfirmed` is the second read standing behind it. Keyed on `VERIFY`,
+    // not on `verifyRan`: with the verify switched off nothing can confirm, so the
+    // claim closes alone and the warning below says nothing checked it — the same
+    // treatment a lane's `already-fixed` gets. With the verify ON, an examiner that
+    // died confirms nothing, so nothing closes and `spotCheckUnanswered` names them.
     closeInLedger: backlogReread
-      .filter((b) => b.state === 'fixed' && /(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
+      .filter(backlogCloses)
       .map((b) => ({ ref: b.ref, source: 'audit', verdict: 'already-fixed', note: `backlog re-read: ${b.evidence}` })),
-    // Still real. KEEP them as report rows.
+    // Everything the pass did NOT close stays a report row — still-real, moved, a
+    // `fixed` claim citing nothing, and (X98) a `fixed` claim the spot-check would
+    // not confirm. The two lists now PARTITION the re-read: before this, a `fixed`
+    // row with no citation fell out of both and the only trace it had existed was a
+    // warning. `state` is still what the pass claimed, so a `fixed` row appearing
+    // here is precisely one whose claim did not survive.
     keepInReport: backlogReread
-      .filter((b) => b.state !== 'fixed')
+      .filter((b) => !backlogCloses(b))
       .map((b) => ({ ref: b.ref, state: b.state, whereNow: b.whereNow || '', evidence: b.evidence, recommend: b.recommend || '' })),
     // X47 · AND append each of these to `ledger.jsonl` too, dated — this is what
     // records that somebody looked. Without it the same row is flagged RE-READ again
@@ -1574,6 +1745,9 @@ const persist = {
     // matches, which has no line number to cite. Everything that fails stays in
     // `keepInReport` and stays flagged, which is the honest state — nobody looked.
     //
+    // X79 · and it reads `whereNow` on a `moved` row, through the same helper the
+    // warning uses. The field the schema demands for a new location is a citation.
+    //
     // X77 · AND THE SAME GATE ON `recommend`, for the reason X71 gave about
     // evidence: a row that is confirmed but unrulable reads as HANDLED, and it will
     // never be flagged RE-READ again, so the one pass that could have written the
@@ -1581,12 +1755,7 @@ const persist = {
     // `keepInReport`, still flagged, which is the honest state. A false block costs
     // one re-read; a false confirm costs the row.
     confirmInLedger: backlogReread
-      .filter(
-        (b) =>
-          b.state !== 'fixed' &&
-          String(b.recommend || '').trim().length >= 10 &&
-          /(:\d+)|(\b[0-9a-f]{7,40}\b)|(\b[\w./-]+\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|log)\b)/i.test(String(b.evidence || '')),
-      )
+      .filter((b) => b.state !== 'fixed' && String(b.recommend || '').trim().length >= 10 && backlogCites(b))
       .map((b) => ({
         ref: b.ref,
         recheck: `${b.state}: ${b.evidence}`,
@@ -1657,6 +1826,10 @@ return {
   // it just ran. **The Manager must delete these from `state.verifiedClean`** —
   // the engine cannot, and an entry left there silences a real check on every
   // future run. This is the pruning that used to depend on remembering.
+  // X84 · `[{i, entry}]`. **DELETE BY `i`** — the index in the array you passed as
+  // `priorClean`. `entry` is the text as the engine received it, for reading only:
+  // match on it and a list you trimmed on the way in silently drops nothing.
+  // `state.verifiedClean` must end up exactly this many entries shorter.
   priorCleanDropped,
   // NEW problems the verify found that are NOT about this wave's fixes. **These
   // are NEXT RUN'S INTAKE, not rows on his desk** (X30) — carry them into the

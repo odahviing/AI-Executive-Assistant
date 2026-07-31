@@ -14,7 +14,6 @@ import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  getEventEndInstant,
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,

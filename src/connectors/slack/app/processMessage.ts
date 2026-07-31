@@ -25,7 +25,7 @@ import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
 import { failureReply } from './helpers';
 
-// C1 — re-attach a recent thread image on a follow-up owner turn. Image bytes
+// Re-attach a recent thread image on a follow-up owner turn. Image bytes
 // are multimodal ONLY on the turn they arrive; later turns saw just a lossy
 // one-line gist, so the owner kept hearing "I don't have the actual image
 // content" while still discussing a picture he'd just shared. When there's no
@@ -281,7 +281,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
 
 
     const dbHistory = getConversationHistory(threadTs);
-    // C1 — when the owner keeps discussing a picture from an earlier turn (no
+    // When the owner keeps discussing a picture from an earlier turn (no
     // fresh image this turn), re-attach the recent thread image so Sonnet sees
     // the real pixels, not the lossy gist. Owner 1:1 only; fresh images win.
     const reattachedImages = (!images?.length && role === 'owner' && !isChannel && !isMpim)

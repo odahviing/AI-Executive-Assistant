@@ -14,7 +14,6 @@ import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  getEventEndInstant,
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,
@@ -101,8 +100,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
 
         // v2.9.1 — attendee add/remove path. When `add_attendees` or
         // `remove_attendees` is non-empty
-        // we (a) gate colleague-path to self-only, (b) load the existing
-        // event, (c) compute the new attendee list, (d) re-evaluate
+        // we (a) gate colleague-path to whoever REQUESTED this specific
+        // meeting (v3.1.4 Y3 — per-meeting, not a blanket colleague
+        // permission; a non-requester colleague is routed to the owner's
+        // approval instead, see meetings.ts:482/495/508), (b) load the
+        // existing event, (c) compute the new attendee list, (d) re-evaluate
         // category + location ONLY when the change is shape-affecting
         // (internal-only ↔ has-external, or count crossing 4↔5), and
         // (e) call updateMeeting with the merged shape.

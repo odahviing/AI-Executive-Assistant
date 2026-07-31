@@ -26,9 +26,13 @@ export function humanizeViolationLabel(reason: string | undefined, ownerFirst: s
     // whole day is gone" and "that hour clashes" invite completely different
     // next moves from the person reading it.
     case 'owner_out_of_office': return `${ownerFirst} is out of office that whole day`;
-    case 'owner_busy_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+    // Adjectival, like every other label here — "That time is X" is the
+    // template several callers plug this into (createMeeting.ts), and a verb
+    // phrase there read as "That time is conflicts with..." (owner report,
+    // 2026-07-30).
+    case 'owner_busy_collision': return `in conflict with another meeting on ${ownerFirst}'s calendar`;
     // legacy label name kept as alias in case any older diagnostics path still emits it
-    case 'owner_busy_or_buffer_collision': return `conflicts with another meeting on ${ownerFirst}'s calendar`;
+    case 'owner_busy_or_buffer_collision': return `in conflict with another meeting on ${ownerFirst}'s calendar`;
     case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
     case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
     case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;

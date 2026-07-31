@@ -51,7 +51,13 @@ const NEWS_MORNING_RECENCY_DAYS = 3;   // daily brief window — fresh. Re-pull 
                                        // push it out within a day (no hard resurface guarantee).
 const NEWS_ONDEMAND_RECENCY_DAYS = 7;  // on-demand "catch me up": up to a week
 const NEWS_ONDEMAND_LOG_CEILING = 7;   // on-demand seen-log cap — matches the "up to 7" surface ceiling
-const NEWS_PER_GOAL_TIMEOUT_MS = 12_000; // a goal slower than this is dropped
+// Exported — this is the INNER budget tasks/briefs.ts derives its outer race
+// timeouts from (#166 / nested-news-timeout-not-derived-from-inner-budget).
+// Previously the outer/inner relationship was asserted only in a comment in
+// briefs.ts, which drifted from this number twice with no code-level signal.
+// Now briefs.ts computes its timeouts as this constant + an explicit margin,
+// so an edit here (or there) cannot silently invert the relationship again.
+export const NEWS_PER_GOAL_TIMEOUT_MS = 12_000; // a goal slower than this is dropped
 const NEWS_MAX_RESULTS = 15;           // Tavily candidates per goal — deep pool so showing
                                        // up to 7/day over a 3-day window (deduped) doesn't run dry
 const SEEN_LOG_DAYS = 7;               // rolling dedup window for SHOWN stories (don't-repeat)

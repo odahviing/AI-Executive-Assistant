@@ -498,7 +498,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 rejectedExamples?: Record<string, string[]>;
                 // #165b — the real event behind an owner_busy_collision, read
                 // straight off checkSlot's own occupancy scan (see below).
-                conflictingEvent?: { id: string; subject: string };
+                // gh#165-d — carries the structural all-day facts too, so the
+                // refusal below can tell "the whole day is gone" from "this
+                // hour clashes" without re-deriving it.
+                conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true };
               } = {};
               if (fromIso && toIso) {
                 const runSlotCheck = () => findAvailableSlots({
@@ -580,8 +583,6 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // either way.
                 const brokenRule = fired[0];
 
-                const brokenRuleLabel = labelFor(brokenRule);
-
                 // v4.3.x (#165b) — name the ACTUAL conflicting event when the
                 // rejection is a real calendar clash (not a work-hours/lunch/
                 // category rule). Without this, a colleague follow-up that means
@@ -611,24 +612,47 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 const conflictingEvent = brokenRule === 'owner_busy_collision'
                   ? diagnostics.conflictingEvent
                   : undefined;
+                // gh#165-d — the collision occupies the OWNER'S WHOLE DAY (a
+                // vacation / offsite / day-long hold), not one hour. "Add
+                // attendees to THAT meeting" is nonsense for a day-long block —
+                // suppress the steer and say the true fact instead. Keyed on the
+                // broad `isAllDay` (any all-day commitment), not the narrower
+                // `allDayOutOfOffice` — the WORDING below still only claims
+                // "out of office" when that's confirmed (M11: a held all-day
+                // block that isn't actually OOF is not "he's away").
+                const isAllDayCollision = conflictingEvent?.isAllDay === true;
+                const brokenRuleLabel = (brokenRule === 'owner_busy_collision' && conflictingEvent?.allDayOutOfOffice)
+                  ? humanizeViolationLabel('owner_out_of_office', ownerFirst)
+                  // No quotes here (unlike the other labels' plain phrasing) — the
+                  // message below already names the specific subject in its own
+                  // quotes, and nesting quotes-in-quotes when this string is
+                  // re-quoted verbatim into ask_text reads as a paste error.
+                  : (brokenRule === 'owner_busy_collision' && isAllDayCollision && conflictingEvent)
+                    ? `blocked all day by another commitment on ${ownerFirst}'s calendar`
+                    : labelFor(brokenRule);
 
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
-                  ...(conflictingEvent ? { conflicting_event_id: conflictingEvent.id } : {}),
+                  ...(conflictingEvent ? { conflicting_event_id: conflictingEvent.id, all_day: isAllDayCollision } : {}),
                 });
                 return {
                   success: false,
                   error: 'not_rule_compliant',
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
-                  ...(conflictingEvent ? { existing_event_id: conflictingEvent.id, existing_subject: conflictingEvent.subject } : {}),
+                  // The add-attendees steer only makes sense for a real, timed
+                  // meeting — an all-day collision omits existing_event_id so
+                  // nothing invites "add someone to" a day-long block.
+                  ...(conflictingEvent && !isAllDayCollision ? { existing_event_id: conflictingEvent.id, existing_subject: conflictingEvent.subject } : {}),
                   message: brokenRuleLabel === 'unknown'
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
-                    : conflictingEvent
-                      ? `That time conflicts with "${conflictingEvent.subject}" (id: ${conflictingEvent.id}) already on ${ownerFirst}'s calendar. If the goal is to add someone to THAT meeting rather than book a new one, call update_meeting(meeting_id: ${conflictingEvent.id}, add_attendees: [...]) instead — do NOT create a duplicate for that. Only call create_approval(kind=policy_exception) if a genuinely separate meeting is meant to override it.`
-                      : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
+                    : conflictingEvent && isAllDayCollision
+                      ? `${ownerFirst}'s whole day is already taken by "${conflictingEvent.subject}"${conflictingEvent.allDayOutOfOffice ? ' — he is out of office' : ''}. I can't book on top of an all-day commitment, and there's no meeting there to add anyone to. Call create_approval(kind=policy_exception) if this genuinely needs to happen anyway, and pass "${brokenRuleLabel}" in ask_text.`
+                      : conflictingEvent
+                        ? `That time conflicts with "${conflictingEvent.subject}" (id: ${conflictingEvent.id}) already on ${ownerFirst}'s calendar. If the goal is to add someone to THAT meeting rather than book a new one, call update_meeting(meeting_id: ${conflictingEvent.id}, add_attendees: [...]) instead — do NOT create a duplicate for that. Only call create_approval(kind=policy_exception) if a genuinely separate meeting is meant to override it.`
+                        : `That time is ${brokenRuleLabel} for ${ownerFirst}. I can't book it on my own — call create_approval(kind=policy_exception) and pass the same phrase ("${brokenRuleLabel}") in ask_text so he knows what he's overriding.`,
                   // v2.8.6 (103E wiring) — stamp the deferred_action_hint so the
                   // orchestrator can auto-attach it to the follow-up
                   // create_approval. Without it, owner-approve would resolve the
@@ -678,6 +702,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             const predecessor = await getEventEndInstant(userEmail, mustBeAfterId, timezone);
             if (predecessor) {
               if (requestedStart.toMillis() < predecessor.end.toMillis()) {
+                // o#178 (M12) — this refusal is reachable on a colleague-readable
+                // path (the requester need not be the owner), so the predecessor's
+                // RAW subject must not leak if it's marked private. Same masking
+                // helper Guard B already uses (:431) — one path, not a second.
+                const predecessorSubject = displaySubject(predecessor, context.profile, subjectViewerFor(context));
                 logger.info('create_meeting refused — must_be_after_event_id ordering violated', {
                   predecessorId: mustBeAfterId,
                   predecessorEnd: predecessor.end.toISO(),
@@ -686,7 +715,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 return {
                   success: false,
                   error: 'order_violation',
-                  message: `That start time (${requestedStart.toFormat("EEE d MMM 'at' HH:mm")}) is BEFORE the predecessor meeting "${predecessor.subject}" ends (${predecessor.end.toFormat("EEE d MMM 'at' HH:mm")}). The series must stay in order. Pick a slot after that.`,
+                  message: `That start time (${requestedStart.toFormat("EEE d MMM 'at' HH:mm")}) is BEFORE the predecessor meeting "${predecessorSubject}" ends (${predecessor.end.toFormat("EEE d MMM 'at' HH:mm")}). The series must stay in order. Pick a slot after that.`,
                 };
               }
             } else {
@@ -723,7 +752,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           attendees.push({ name: 'Meeting Room', email: roomEmail });
         }
 
-        // C4 — typo'd internal attendee guard. A nonexistent @company mailbox
+        // Typo'd internal attendee guard. A nonexistent @company mailbox
         // returns no busy data → reads as fully free → the meeting books with a
         // phantom attendee who never gets the invite. Probe internal attendees'
         // free/busy and refuse (with a did_you_mean) on any the directory can't
@@ -1413,6 +1442,22 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             );
             for (const h of cleared) {
               if (!h.holder_slack_id || h.holder_slack_id === context.userId) continue;
+              // o#181 — gate the notification on the booking's OWN inbound
+              // channel, not the (hardcoded-'slack') holder lookup below. An
+              // email- or whatsapp-triggered booking must not fire an outbound
+              // Slack DM on the requester's behalf — that surface never used
+              // Slack this turn, and getConnection(..., 'slack') would happily
+              // hand back the Slack connection regardless of context.channel.
+              // The hold is still released (bookkeeping above); only the DM
+              // is channel-gated. Slack-path notification (its legitimate use,
+              // e.g. the owner booking over a colleague's held slot) is
+              // unaffected.
+              if (context.channel !== 'slack') {
+                logger.info('create_meeting — hold-release DM skipped (non-Slack booking channel)', {
+                  channel: context.channel, holder: h.holder_slack_id,
+                });
+                continue;
+              }
               try {
                 const { getConnection } = await import('../../../../connections/registry');
                 const conn = getConnection(context.profile.user.slack_user_id, 'slack');

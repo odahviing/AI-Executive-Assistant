@@ -75,6 +75,28 @@ const TARGETS = [
   'process',
 ]
 
+// X10 · `refuted` closes a row the ARCHITECT disproved, and it is a third thing:
+// `built` is work that shipped, `declined` is the owner ruling against it, and a
+// withdrawal-on-measurement is neither. Until now it had to be written `--declined`,
+// whose own die message says "give HIS reason" — so X62, refuted by a measurement
+// that showed its premise false, is recorded in this ledger as if he had ruled on
+// it. The charter tells the architect to expect to refute a fair share of the rows
+// it is handed; a verdict it cannot write is a verdict that gets miswritten.
+//
+// X78 · THE ONE DEFINITION, and it lives with the WRITER because this file is the
+// only thing that can mint a verdict. `ledger-stats --architect` kept a second copy
+// and the two had already drifted — the reader also counted `duplicate`, a verdict
+// no row carries because a merge DELETES the absorbed row instead of writing one,
+// which is exactly why nobody noticed. It is exported and read there, so a new
+// closing verdict is added here and both views move together.
+const CLOSED = new Set(['built', 'declined', 'refuted'])
+const stillOpen = (rs) => rs.filter((r) => !CLOSED.has(r.verdict)).length
+module.exports = { CLOSED }
+// Required by the reader for that set alone. Everything below is the CLI, and the
+// filing path ends in `process.exit`, so a plain `require` of this file would kill
+// its caller. Nothing above this line touches the ledger or `process.argv`.
+if (require.main !== module) return
+
 const argv = process.argv.slice(2)
 const argOf = (flag) => {
   const i = argv.indexOf(flag)
@@ -136,16 +158,6 @@ if (fs.existsSync(LEDGER)) {
     })
   rows = [...latest.values()]
 }
-// X10 · `refuted` closes a row the ARCHITECT disproved, and it is a third thing:
-// `built` is work that shipped, `declined` is the owner ruling against it, and a
-// withdrawal-on-measurement is neither. Until now it had to be written `--declined`,
-// whose own die message says "give HIS reason" — so X62, refuted by a measurement
-// that showed its premise false, is recorded in this ledger as if he had ruled on
-// it. The charter tells the architect to expect to refute a fair share of the rows
-// it is handed; a verdict it cannot write is a verdict that gets miswritten.
-const CLOSED = new Set(['built', 'declined', 'refuted'])
-const stillOpen = (rs) => rs.filter((r) => !CLOSED.has(r.verdict)).length
-
 // ---- the merge gate, as code ------------------------------------------------
 // A merged row's number is only free once NOTHING still names it, because there
 // is no tombstone to resolve a leftover reference and the minter below hands that
@@ -374,7 +386,10 @@ if (recheckId) {
     die('that --checked does not point at anything.', 'Name the file you opened — `bugger.js the PRESET branch`, `SKILL.md the wrap step`. "still real" alone is a rubber stamp.')
   const confirm = { id: recheckId, date: new Date().toISOString().slice(0, 10), recheck: checked }
   fs.appendFileSync(LEDGER, JSON.stringify(confirm) + '\n')
-  console.log(`\nConfirmed ${recheckId} — still ${row.verdict}, re-read ${confirm.date}\n`)
+  // X86 · it says STILL REAL, not "confirmed": this row was just re-read and is
+  // still unfixed work, and `confirmed` is the word that made him read 38 open rows
+  // as done. The stored line below is untouched — `{id, date, recheck}`, no verdict.
+  console.log(`\nSTILL REAL — ${recheckId} re-read ${confirm.date}, verdict stays \`${row.verdict}\`\n`)
   console.log(`  finding : ${String(row.finding || '(no finding)').slice(0, 120)}`)
   console.log(`  checked : ${checked}`)
   console.log(`\nIt stays OPEN and will no longer print as RE-READ until the code it cites moves again.\n`)
@@ -469,20 +484,22 @@ if (openClash) {
 // 334 flags against 324, 4.51 per filing against 4.38, and the same 68 filings
 // refused once. It changes WHO gets named, not how often.
 //
-// Both thresholds are MEASURED, not chosen: `df <= 10% of rows` with `>= 2 shared`
-// names X8 for X30's exact text, and every tightening measured on 2026-07-30
-// (shared >= 3, or df <= 7%, or df <= 5%) loses X8 — the one case this detector was
-// built for.
+// X58 · BOTH THRESHOLDS ARE ABSOLUTE, on the owner's ruling 2026-07-31. The pair was
+// `df <= 10% of rows` with `>= 2 shared`, and the relative half was the defect: `RARE`
+// rose WITH the row count, so more words qualified as rare AND there were more rows to
+// match them against, both pushing the same way. MEASURED by mirroring this detector
+// over all 83 collapsed rows — the old pair fired **4.96 flags per filing and refused
+// 90% of them**, which is a refusal carrying almost no information and a second run
+// charged for nearly every filing. `RARE = 4` with `>= 3 shared` fires **0.16 per
+// filing, refusing 13%**, and the amend-linked pairs still name each other (X82→X77,
+// X58→X61).
 //
-// THE RATE, RE-MEASURED, BECAUSE THIS COMMENT HAD GONE STALE. It claimed **2.02
-// flags per filing, 32 of 43 refused once**, from when the ledger held 43 rows. At
-// 74 rows it is **4.51 per filing and 68 of 74 — 92% — refused once**, from growth
-// alone. And the old claim that a RELATIVE threshold stops that decay is refuted by
-// the same measurement: `RARE` rises WITH the row count, so more words qualify as
-// rare and there are more rows to match them against, both pushing the same way. A
-// refusal still costs one re-run with `--amends none`, but a check that fires on 92%
-// of filings is on its way to being ignored. Retuning the pair is a judgement call,
-// so it is filed as its own row rather than decided here.
+// The old comment kept the loose pair because tightening "loses X8, the one case this
+// detector was built for". That justification was already dead when it was written:
+// X30's text stopped naming X8 somewhere between 42 rows and 59, when the linking term
+// `next` grew past the rising `RARE`. The pair was priced for a catch it no longer made.
+//
+// OBSERVABLE: flags per filing, re-derivable by mirroring this block over the ledger.
 const STOP = new Set(
   ('the a an and or of to in on for it its is are was were be been that this those these so no not but with as at by from into than then when where which who whom whose what while has have had do does did can could may might must shall should will would if else there their they them his her our your my me we us you i one two also only even just about after before over under again more most less least other another same such per via yet own too very'.split(
     ' ',
@@ -494,7 +511,7 @@ const terms = (s) => new Set((String(s || '').toLowerCase().match(/[a-z]{4,}/g) 
 const corpusOf = (r) => `${r.finding} ${r.note} ${r.built || ''} ${r.declined || ''} ${r.duplicate || ''}`
 const df = new Map()
 for (const r of rows) for (const w of terms(corpusOf(r))) df.set(w, (df.get(w) || 0) + 1)
-const RARE = Math.max(2, Math.ceil(rows.length * 0.1))
+const RARE = 4
 const mine = [...terms(finding)].filter((w) => (df.get(w) || 0) <= RARE)
 // X61 · OPEN ROWS ARE IN THIS POOL TOO. They used to be skipped outright, so an
 // open row had exactly ONE detector — the 45-character exact head above — and a
@@ -505,15 +522,15 @@ const mine = [...terms(finding)].filter((w) => (df.get(w) || 0) <= RARE)
 // closed row had two detectors and a live decision had one.
 //
 // Same REFUSED-ONCE treatment, not a hard refusal: a fuzzy match is a question,
-// not a verdict, and refusing outright at 2.02 flags per filing would lose real
-// rows. The output says which state each match is in, because the right answer
+// not a verdict, and refusing outright would lose real rows. Even at X58's tighter
+// pair it stays a question. The output says which state each match is in, because the right answer
 // differs — an open match usually belongs ON that row, a closed one is usually
 // an amendment.
 const related = []
 for (const r of rows) {
   const theirs = terms(corpusOf(r))
   const shared = norm(r.finding).slice(0, 45) === head ? ['the same opening sentence'] : mine.filter((w) => theirs.has(w))
-  if (shared.length >= 2 || shared[0] === 'the same opening sentence') related.push({ r, shared })
+  if (shared.length >= 3 || shared[0] === 'the same opening sentence') related.push({ r, shared })
 }
 if (related.length && !amends) {
   const nOpen = related.filter(({ r }) => !CLOSED.has(r.verdict)).length

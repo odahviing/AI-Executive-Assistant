@@ -313,6 +313,19 @@ export interface RuleCheckResult {
      * Callers that say WHY use it to avoid "he's booked then" on a vacation day.
      */
     allDayOutOfOffice?: true;
+    /**
+     * gh#165-d — the commitment occupies the WHOLE day, whether or not Outlook
+     * marked it `showAs: 'oof'`. Distinct from `allDayOutOfOffice` on purpose:
+     * most synced PTO / day-off blocks carry no OOF status at all (a plain
+     * all-day `busy`), so a caller that needs "is this an all-day thing" (to
+     * suppress a nonsensical "add attendees to it" steer) must not depend on
+     * the narrower OOF-only signal. `allDayOutOfOffice` stays OOF-only because
+     * IT drives a "he's out of office" CLAIM (M11) — a held all-day block
+     * (conference / offsite) is not that, and saying so would be a confident
+     * wrong reason. Set from the same `ev.isAllDay` read that produces
+     * `window` below — never re-derive by string-matching `window`.
+     */
+    isAllDay?: true;
   };
 }
 
@@ -497,7 +510,7 @@ export function occupancyRoleOf(
   // free), NOT a hard commitment. This one classification is what lets the slot
   // finder TAG a slot over it as WE-soft instead of dropping it, and lets a
   // booking sit over it with no conflict flag.
-  if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') return 'optional';
+  if (!ev.isAllDay && (ev as any).showAs === 'workingElsewhere') return 'optional';
   // P32 — an ALL-DAY WE marker is a working day elsewhere, not a commitment and
   // not a skippable meeting. Ignored, which is what the walker always did.
   if ((ev as any).showAs === 'workingElsewhere') return 'ignore';
@@ -593,10 +606,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // rendering it as "00:00–00:00" reads like a zero-length meeting. It only
       // became visible here once the scan started reporting all-day commitments
       // ahead of the work-hours rule.
-      window: (ev as any).isAllDay
+      window: ev.isAllDay
         ? 'all day'
         : `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
       ...(isAllDayOutOfOffice(ev) ? { allDayOutOfOffice: true as const } : {}),
+      ...(ev.isAllDay ? { isAllDay: true as const } : {}),
     };
     break;
   }
@@ -885,7 +899,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // day's all-day event pulled into the buffer window by a slot near
       // midnight — "adjacent meeting at 00:00", which is a midnight boundary,
       // not a commute.
-      if ((ev as any).isAllDay) continue;
+      if (ev.isAllDay) continue;
       const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
       if (evStart < afterWindowEnd && evEnd > beforeWindowStart) {
@@ -940,8 +954,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           if (ev.isCancelled) continue;
           if (excludeSet.has(ev.id)) continue;
           if ((ev as any).showAs === 'free') continue;
-          if (!(ev as any).isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
-          if ((ev as any).isAllDay) continue;
+          if (!ev.isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
+          if (ev.isAllDay) continue;
           busyBlocks.push({
             start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),
             end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toJSDate(),

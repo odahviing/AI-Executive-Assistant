@@ -1,25 +1,20 @@
 # Agent-loop report
 
-**Empty — v4.3.5 wrapped, pushed, and deployed. Nothing in this table awaits you.**
+**5 rows await you** — one shape decision plus four deferrals that outlived their skip. Standing backlog: **34 open rows** across 34 bugs · 31 still-real · 1 need a re-read · 2 cite no file (`node scripts/ledger-stats.cjs --open`).
 
-That is not the same claim as nothing is owed. The standing backlog is **56 open rows** (32 confirmed, 17 needing a re-read, 7 citing no file) — `node scripts/ledger-stats.cjs --open`. This file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended to the ledger.
+## Pending owner (5)
 
-## What shipped, and what of it was verified
+| # · Lane · Status | The chat problem | The issue | The solution | Risk |
+|---|---|---|---|---|
+| `owner-memory-still-renders-in-a-real-channel` · transporter · recommend **build** | Latent. In a real Slack **channel** you post in, your own memory file and a VERIFIED SENDER stanza about you still render into a prompt every member's turn can read. `o#177` closed the group-DM surface; this is the wider one. | `isOwnerTyping` has no channel term — the role clamp fires for channels too, so `isOwner` is false, `isOwnerInGroup` is MPIM-only, and `senderId` is still yours. | **Two shapes, and that is the decision.** (a) **Authenticated identity** — `senderId === profile.user.slack_user_id`, already the spelling at `runOutputGates.ts:215`, both values in scope: **one line closes MPIM, channel and colleague-test together and deletes the flag.** (b) A third per-surface boolean wired through transporter. The verify prefers (a); `gh#154`'s body records (b) as the shape you set aside. | (b) adds a fourth surface flag to the ground `gh#154` exists to replace. (a) touches a predicate three prompt blocks read — narrow, but read the diff. |
+| `amend-reason-bypasses-id-veto` · shepherd · recommend **build** | You amend an approval and the **reason** you type rides straight into the body — the veto that guards the counter beside it doesn't look at it. **Deferred 12 runs ago and never came back.** | `resolver.ts:910/:919/:931/:934` — rationale is concatenated into `body` and `amendProse` without passing the id veto. | Route the reason through the same veto the counter already passes. | Longest-rotting row in the ledger; nothing has re-read it since it was filed. |
+| `D2-forward-inert-without-owner-email` · transporter · recommend **build** | The colleague-image forward is **one config field from silently doing nothing** — no error, no log, just no forward. **Deferred 9 runs ago.** | `getOwnerDomain` returns null when `user.email` is unset, so `isInternal` is always false. | Make the missing field loud rather than silent. | A guard that cannot fire is the class this loop keeps finding; it looks identical to working. |
+| `D1-dual-image-ingest-loop` · outrider · recommend **build** | Nothing a person sees. **Deferred 9 runs ago.** | The image download/scan loop exists **twice** (`fileIngestion.ts:42-83`, `handlers.ts:1210-1235`) and has already drifted twice. | One spine, delete the copy. | A second copy that has drifted twice will drift a third time. |
+| `146c` · transporter · recommend **decline** | Nothing a person sees. **Deferred 9 runs ago.** | Making the forward fire-and-forget removed the guarantee that the forward and the reply receipt collapse into one owner-DM thread. | Nothing — the forward still arrives; only its threading is unordered. | None. Declining closes it so it stops resurfacing. |
 
-**Six product rows. Five verified by the pre-wrap pass.** It overturned one — the approval-relay text, whose second clause contradicted the requester rule on the always-on prompt tier — and that was corrected before release rather than shipped or deferred. **Three text corrections shipped on targeted re-reads rather than a second full pass**: the overturned clause, a false *"same as a calendar read here"*, and a comment three times the size of the deletion it described. All three are text in files the pass had already opened.
+---
 
-## Next run's first items
-
-1. **`owner-memory-injected-into-clamped-mpim` · instructor · the one to look at first.** `systemPrompt.ts:779-791` and `:799-810` gate on `if (isOwner || !senderId) return ''` — in a clamped MPIM `isOwner` is false while `senderId` is yours, so **"MEMORY ON IDAN"** plus your full `.md` renders into a colleague-readable thread. Latent, not live. **The guard already exists** at `buildTurnContext.ts:575-578` and these siblings never got it. Queued, not built — I want your word first.
-2. **`honest-refusal-rule-is-mpim-only` · instructor · medium.** B157-c's rule lives in the `isOwnerInGroup` branch, so a clamped owner in a **channel** takes `:439` and can still fabricate the exact gh#157 negative. Same code path, owner as the victim. Connects to gh#154's parked per-surface question.
-3. **`nested-news-timeout-not-derived-from-inner-budget` · outrider · medium.** Three magic numbers, two files, the relation held in a comment. gh#166 has now been fixed twice by adjusting a number.
-4. **`prompt-budget-grew-1836-chars-unmeasured-by-anything` · outrider.** Nothing tracks rendered prompt growth per tier. This wave counted it by hand for the first time.
-5. Plus `create-approval-desc-contradicts-requester-grant` (now fixed, keep the row for the pattern), `order-violation-subject-unmasked` (low, latent), `movemeeting-comment-still-says-self-only` (low), and **B168-a — deferred, therefore DUE**, since a deferral is a one-run skip.
-
-## Deploy
-
-Done. Boot stamp confirmed below in the wrap summary.
-
-## Watch on first real use
-
-A colleague asking to book over a private recurring meeting → the refusal should say `[Private]`, not the real subject · a **requester** asking to add a third person to their own meeting → she should just do it, no approval · a **non**-requester asking → routed to you · an availability question about a named colleague in a group chat → *"I can't check or share that from here"*, never *"no history"* · an on-demand *"send the brief"* → news should survive the wait now · and if a slot she offered goes stale, she should **name what moved** rather than sounding like she changed her mind.
+- **Built and uncommitted — this is what a wrap ships (14):** `o#177` · `o#178` · `gh#158-a` · `gh#165-d` · `gh#168-a` · `o#180` · `o#181` · `o#182` · `o#183` · `o#184` · `broken-rule-label-is-a-verb-phrase-in-an-adjective-slot` · `isallday-read-through-as-any-six-times` · `candidate-validation-branch-has-no-grounded-window` · `three-dead-geteventendinstant-imports`.
+- **Two lanes tried the channel row and both stopped correctly.** Transporter edited **nothing** and returned `needs-dependency` rather than make a call-site change that would not typecheck. Outrider built the plumbing, and the verify overturned it twice over: it doesn't run without transporter's half, and it moved **against** `gh#154` — `ticketCoverage` returned that ticket **`contradicted`**, the first time this loop has caught a wave doing that.
+- **I reverted the inert plumbing** — the `systemPrompt` param and its `isOwnerTyping` term, `OrchestratorInput.isOwnerInChannel`, the `buildTurnContext` arg. The verify proved it dead, so removing it is cleanup, not a product call. `o#177`'s MPIM fix is intact, typecheck green, and a comment at `systemPrompt.ts:94` now states channels are **not** covered.
+- **Also in the tree:** three `src` comment-only files from the framework chat, the new `cleaner.md` agent, and two untracked scripts (`vm-cutover.ps1`, `checkpoint-db.cjs` — both read, no secrets). A wrap bundles all of it.

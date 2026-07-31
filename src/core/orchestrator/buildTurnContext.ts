@@ -200,7 +200,34 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
-      if (needMeetingPeople) turnMeetingPeople = turnResult.meetingPeople ?? [];
+      if (needMeetingPeople) {
+        const rawMeetingPeople = turnResult.meetingPeople ?? [];
+        // gh#158-a — classifyTurn is fed both THIS turn's message and up to 4
+        // turns of recentContext so it can read conversational state, but its
+        // own meeting_people contract promises names are "copied as written"
+        // from the current message. A name that only exists in the history
+        // (context bleed — this is what put "Yael Aharon" into a real invite
+        // for a turn that only ever named "Levana Bagants") is an unconfirmed
+        // classifier guess by the time it reaches resolvedMeetingAttendees,
+        // and createMeeting.ts's union has no way to tell it from a genuine
+        // ask. Gate it HERE, at the one place turnMeetingPeople is produced,
+        // instead of at each of its three downstream consumers: keep a name
+        // only if it is actually present in THIS turn's raw text. A
+        // genuinely-named attendee is copied verbatim per the classifier's
+        // own contract, so an ordinary booking is never touched — this only
+        // drops a name the model could not have read off this message.
+        const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
+        const normalizedMessage = normalize(userMessage);
+        turnMeetingPeople = rawMeetingPeople.filter(
+          name => typeof name === 'string' && name.trim() && normalizedMessage.includes(normalize(name)),
+        );
+        const droppedMeetingPeople = rawMeetingPeople.filter(name => !turnMeetingPeople.includes(name));
+        if (droppedMeetingPeople.length > 0) {
+          logger.warn('orchestrator — meeting_people dropped, not present in this turn\'s raw message (classifier context-bleed guard)', {
+            dropped: droppedMeetingPeople, kept: turnMeetingPeople, senderRole: turnSenderRole,
+          });
+        }
+      }
       // v3.x (Block 3 — calendar prose lazy-load). A free-time / buffer / "how
       // packed" question needs the calendar-health guidance. Deterministically
       // union the 'calendar' scope so that prose loads even if the classifier

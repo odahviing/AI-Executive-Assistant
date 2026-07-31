@@ -5,6 +5,7 @@ import { slotDayMinutes } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
+import type { RuleCheckResult } from '../../utils/scheduleRules';
 
 /**
  * ONE offered-slot shape. Was written out inline three times (the return type,
@@ -208,7 +209,10 @@ export async function findAvailableSlots(params: {
     // subject already applied). Lets a single-candidate caller (the colleague-
     // path narrow check) name the real conflicting meeting without a second,
     // differently-matched lookup that can point at the wrong event.
-    conflictingEvent?: { id: string; subject: string };
+    // gh#165-d — carried structurally off verdict.overCommitment (never
+    // string-matched from `window`), so a caller can tell "the whole day is
+    // gone" from "this hour clashes" without re-deriving the fact.
+    conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true };
   };
 }): Promise<SlotCandidate[]> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -745,6 +749,21 @@ export async function findAvailableSlots(params: {
         default: return 'owner_busy_collision';
       }
     };
+    // gh#165-d — the ONE writer for diagnosticsOut.conflictingEvent, called from
+    // both the STRICT-reject branch and the relaxed-pass branch below so a
+    // caller's single-slot check gets the fact regardless of which one fired
+    // (first hit wins; a spread search never reads this field). Carries the
+    // structural all-day facts straight off verdict.overCommitment — never a
+    // second, string-matched re-derivation.
+    const stampConflictingEvent = (oc: NonNullable<RuleCheckResult['overCommitment']>) => {
+      if (!params.diagnosticsOut || params.diagnosticsOut.conflictingEvent) return;
+      params.diagnosticsOut.conflictingEvent = {
+        id: oc.id,
+        subject: oc.subject,
+        ...(oc.allDayOutOfOffice ? { allDayOutOfOffice: true as const } : {}),
+        ...(oc.isAllDay ? { isAllDay: true as const } : {}),
+      };
+    };
     // P25 — `outOfWorkHours` is the VALIDATOR's own fact about this slot
     // (`checkSlot(...).outsideWorkHours`), not a re-derivation out here. The global
     // `rejectedCounts` / `rejectedExamples` keep the true per-slot reason — the
@@ -1113,6 +1132,17 @@ export async function findAvailableSlots(params: {
             // an out-of-hours slot is irrelevant to "why was this day empty".
             verdict.outsideWorkHours === true,
           );
+          // gh#165-d — a colleague's STRICT check (allowRelaxed:false) rejects
+          // here whenever overCommitment is set (scheduleRules.ts rule 8), so
+          // this is the ONLY branch a colleague's single-slot narrow-window call
+          // (Guard B) ever reaches for a real clash. The relaxed-pass branch
+          // below (verdict.passes===true) never fires for that caller, so before
+          // this the field could never be populated on a strict rejection —
+          // gh#165-b's add-attendees steer and any all-day-collision handling
+          // downstream were both unreachable dead code.
+          if (verdict.violation_kind === 'owner_busy_collision' && verdict.overCommitment) {
+            stampConflictingEvent(verdict.overCommitment);
+          }
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
@@ -1141,12 +1171,7 @@ export async function findAvailableSlots(params: {
           trackReject('owner_busy_collision', cursorDt.toISO()!, verdict.outsideWorkHours === true);
           // #165b — first hit wins; a single-candidate caller has exactly one to
           // report, and a spread search never reads this field.
-          if (params.diagnosticsOut && !params.diagnosticsOut.conflictingEvent) {
-            params.diagnosticsOut.conflictingEvent = {
-              id: verdict.overCommitment.id,
-              subject: verdict.overCommitment.subject,
-            };
-          }
+          stampConflictingEvent(verdict.overCommitment);
           cursor = new Date(cursor.getTime() + step);
           continue;
         }

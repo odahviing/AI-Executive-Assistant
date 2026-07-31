@@ -17,7 +17,7 @@ import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
 import { getPersonByEmail } from '../db/people';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
-import { formatSeenLogBlock, type NewsBundle } from '../skills/news';
+import { formatSeenLogBlock, NEWS_PER_GOAL_TIMEOUT_MS, type NewsBundle } from '../skills/news';
 import { processCalendarEvents } from '../skills/meetings/ops';
 import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifyScheduledOutcome';
 import logger from '../utils/logger';
@@ -28,24 +28,31 @@ const STALE_SURFACE_THRESHOLD = 3;
 
 /** v3.2.6 — news gather is best-effort + fail-open. If it doesn't return within
  *  this window, the brief composes calendar+tasks exactly as today (no delay).
- *  #166 — on the SCHEDULED path (nobody waiting live) this MUST stay above the
- *  inner gather's own budget: an un-timed Haiku planning call (planNewsGoals,
- *  news.ts) followed by a NEWS_PER_GOAL_TIMEOUT_MS (12s, news.ts) per-goal
- *  search. 8s was narrower than that inner budget, so a legitimately-slow-but-
- *  fine gather raced this timeout and lost on a coin flip (measured margin
- *  5.00s → 7.94s → 8.32s over four days). 20s clears the 12s search plus
- *  realistic planning latency with margin; don't lower this back below the
- *  inner budget without re-timing both sides. */
-const NEWS_BRIEF_TIMEOUT_MS = 20_000;
+ *  #166 came back twice from editing this number (or news.ts's inner
+ *  NEWS_PER_GOAL_TIMEOUT_MS) without re-checking the other side — the
+ *  relationship was asserted only in prose here, so it could drift silently
+ *  (the Updates section just vanishes, no error). Both outer timeouts below
+ *  are now DERIVED from news.ts's NEWS_PER_GOAL_TIMEOUT_MS (imported, the
+ *  inner per-goal search budget — the parallel per-goal fan-out is the long
+ *  pole; goal planning itself is a quick Haiku call) plus a fixed margin, so
+ *  an edit to either constant cannot invert the relationship without a
+ *  visible arithmetic change here. Margin sizing is unchanged from the prior
+ *  literals (12s inner + 8s scheduled margin = 20s; +2s on-demand margin =
+ *  14s) — those margins were already measured safe (gather-done timestamps
+ *  landing 4-8s after the preceding calendar step across
+ *  logs/maelle-2026-07-{28,29,30}.log; #166's own note measured 5.00s →
+ *  7.94s → 8.32s over four days). Don't shrink either margin without
+ *  re-timing both sides. */
+const NEWS_BRIEF_SCHEDULED_MARGIN_MS = 8_000;
+const NEWS_BRIEF_TIMEOUT_MS = NEWS_PER_GOAL_TIMEOUT_MS + NEWS_BRIEF_SCHEDULED_MARGIN_MS;
 /** #166 follow-up — the ON-DEMAND path (owner asked for the brief in Slack,
  *  `force: true`) has someone waiting live behind the eye-emoji receipt, so it
- *  keeps a tighter budget than the scheduled path's 20s: a slower-than-usual
- *  gather is dropped (fail-open, same as ever) rather than making a person
- *  watch a spinner for 20s. Must stay ABOVE news.ts's NEWS_PER_GOAL_TIMEOUT_MS
- *  (12_000) plus headroom — an outer wait below the inner per-goal budget
- *  makes the Updates section a coin flip that drops silently (#166a); 14s
- *  clears that with margin. */
-const NEWS_BRIEF_TIMEOUT_MS_ON_DEMAND = 14_000;
+ *  keeps a tighter margin than the scheduled path: a slower-than-usual gather
+ *  is dropped (fail-open, same as ever) rather than making a person watch a
+ *  long spinner. See NEWS_BRIEF_TIMEOUT_MS above for why this is derived
+ *  rather than a bare literal. */
+const NEWS_BRIEF_ON_DEMAND_MARGIN_MS = 2_000;
+const NEWS_BRIEF_TIMEOUT_MS_ON_DEMAND = NEWS_PER_GOAL_TIMEOUT_MS + NEWS_BRIEF_ON_DEMAND_MARGIN_MS;
 /** Cap how many meeting-companies we derive into news goals (cost control). */
 const NEWS_MEETING_COMPANY_CAP = 3;
 /** v3.x — today's calendar-health pass folded into the brief is best-effort +
@@ -467,6 +474,7 @@ async function generateBriefingText(
   newsBundle?: NewsBundle,
   healthSummary?: string,
   slotHoldsSummary?: string,
+  newsTimedOut = false,
 ): Promise<string> {
   // v3.2.6 — news is additive: it only changes the brief when there's grounded
   // material. Empty bundle (news off / nothing found / no derived companies) →
@@ -477,11 +485,18 @@ async function generateBriefingText(
   // passes a summary when the health pass had something to say (it drops the
   // text on `vacuous` — see the gather site), so presence IS the signal.
   const hasHealth = !!(healthSummary && healthSummary.trim().length > 0);
+  // o#180 — the timeout branch is distinct from "genuinely nothing to
+  // report": `newsTimedOut` only reaches here when the Promise.race in
+  // sendMorningBriefing lost to the clock, never on an empty-but-completed
+  // gather. That's the one case the composer must say something about.
+  const newsIncomplete = !hasNews && newsTimedOut;
 
   if (items.length === 0 && !hasNews && !hasHealth) {
     // No time-of-day greeting on line 1 — the Slack app shows the first line
     // as the preview, so lead with the useful state, not "Morning —".
-    return `All clear — nothing new today.`;
+    return newsIncomplete
+      ? `All clear — nothing new today. Didn't get to check today's updates in time — I'll fold them in next time.`
+      : `All clear — nothing new today.`;
   }
 
   const anthropic = getAnthropicClient();
@@ -512,6 +527,14 @@ UPDATES (news) — after the calendar/tasks body, add an "Updates" section of ne
 - NEVER assert a current-events fact not present in the sources.
 - If a topic/company returned nothing, just leave it out — do NOT add an apology or a "couldn't find anything on X" line. If nothing new at all, OMIT the Updates section entirely (no empty heading).
 Write it in ${ownerLangName}.${formatSeenLogBlock(profile)}`
+    : newsIncomplete
+    // o#180 — the gather lost the race against the clock (not "nothing new");
+    // say so in ONE short line so the owner can tell "dropped for cause" apart
+    // from a genuinely quiet news day, without composing a full section or
+    // inventing any content.
+    ? `
+
+UPDATES (news) — the news check didn't finish in time this morning, so there's no Updates section. Add ONE short plain-text line (not a section, no heading) noting that near the end of the brief, in ${ownerLangName} — e.g. "Didn't get to check today's updates in time, I'll fold them in next time." Do NOT invent or guess at any news content.`
     : '';
 
   const systemPrompt = `You are writing a morning briefing for ${firstName} from their AI executive assistant ${profile.assistant.name}.
@@ -696,6 +719,10 @@ export async function sendMorningBriefing(
   // fold a grounded "Updates" section in. A slow/empty gather never delays or
   // breaks the brief — calendar + tasks always ship.
   let newsBundle: NewsBundle | undefined;
+  // o#180 — distinct from "genuinely nothing to report": set only when the
+  // race above timed out, so the composer can say "didn't get to check in
+  // time" instead of silently dropping the whole Updates section.
+  let newsTimedOut = false;
   if ((profile.skills as any)?.news === true) {
     try {
       const meetingCompanies = deriveMeetingCompanies(items, profile);
@@ -717,6 +744,7 @@ export async function sendMorningBriefing(
       // own eventual success/failure log line — which keeps running after
       // losing the race and can land well after the brief has already sent.
       if (!gathered) {
+        newsTimedOut = true;
         logger.warn('briefs — news gather timed out, composing without it', { timeoutMs: newsTimeoutMs, force });
       } else if (gathered.sources.length > 0) {
         newsBundle = gathered;
@@ -806,7 +834,7 @@ export async function sendMorningBriefing(
   }
 
   // Generate + send.
-  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary, slotHoldsSummary);
+  const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary, slotHoldsSummary, newsTimedOut);
 
   // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
   // owner-facing voice check that postReply.ts applies to regular replies,

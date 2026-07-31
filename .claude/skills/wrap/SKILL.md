@@ -22,7 +22,7 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 ## Two gates that still belong to him — do not assume these
 
 - **The ship word itself.** Do not wrap because work has accumulated. Wait for "wrap" / "ship" / "commit" / "cut a version" / "bundle".
-- **A verify overturn blocks the wrap.** If the pre-wrap verifier pass overturned a fix, do NOT wrap it in. Report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **A verify overturn blocks the wrap.** If the pre-wrap examiner pass overturned a fix, do NOT wrap it in. Report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
 ## Other standing rules
 

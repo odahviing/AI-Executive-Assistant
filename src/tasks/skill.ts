@@ -287,7 +287,7 @@ ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do 
       },
       {
         name: 'send_briefing_now',
-        description: `Send the morning briefing immediately as a new standalone DM — not as a reply in this thread.`,
+        description: `Send the morning briefing immediately, posted in the current thread.`,
         input_schema: { type: 'object', properties: {}, required: [] },
       },
       {

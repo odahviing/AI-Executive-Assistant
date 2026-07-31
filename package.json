@@ -1,6 +1,6 @@
 {
   "name": "maelle",
-  "version": "4.3.6",
+  "version": "4.3.7",
   "description": "Executive Assistant Platform",
   "main": "dist/index.js",
   "scripts": {
@@ -8,7 +8,6 @@
     "deploy": "npm run build && pm2 restart maelle && pm2 logs maelle --lines 30",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only --project tsconfig.json src/index.ts",
-    "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "dev:tsx": "tsx watch src/index.ts"
   },
@@ -40,9 +39,6 @@
     "@types/form-data": "^2.2.1",
     "@types/node": "^20.14.0",
     "@types/qrcode-terminal": "^0.12.2",
-    "@typescript-eslint/eslint-plugin": "^7.13.0",
-    "@typescript-eslint/parser": "^7.13.0",
-    "eslint": "^8.57.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "tsx": "^4.7.0",

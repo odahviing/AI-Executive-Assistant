@@ -67,6 +67,20 @@ export function buildSystemPromptParts(
   const firstName = user.name.split(' ')[0];
   const companyRef = user.company ? ` and a full member of the ${user.company} team` : '';
   const isOwner = senderRole === 'owner';
+  // o#177 — WHO is typing, independent of the MPIM clamp. `isOwner` above is
+  // the post-clamp effective role (false in a clamped MPIM even when the
+  // owner is the one typing — see buildTurnContext.ts's isOwnerPath/isOwnerTyping
+  // split). `senderId` below is the raw typer id and stays the owner's own
+  // slack id through that clamp, so gating a per-SPEAKER lookup on `isOwner`
+  // alone let speakerMemoryBlock/verifiedSenderBlock resolve `senderId` to the
+  // owner's own people_memory row and render his memory .md into a
+  // colleague-readable MPIM. Mirrors buildTurnContext.ts's isOwnerTyping
+  // exactly so a per-speaker block never fires on the owner's own identity.
+  // NOTE: this covers MPIM only. A real CHANNEL turn takes the same clamp and
+  // still renders both blocks — open row `owner-memory-still-renders-in-a-real-channel`,
+  // awaiting the gh#154 ruling on whether the fix is a third surface flag or
+  // an authenticated-identity test (`senderId === profile.user.slack_user_id`).
+  const isOwnerTyping = isOwner || isOwnerInGroup === true;
 
   // ── DYNAMIC INPUTS ────────────────────────────────────────────────────────
   // These compute fresh per turn. Used only inside `dynamicContent` below.
@@ -777,7 +791,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // this — owner's curation goes through the same .md but he's not the
   // subject of the lookup.
   const speakerMemoryBlock = (() => {
-    if (isOwner || !senderId) return '';
+    if (isOwnerTyping || !senderId) return '';
     const personRow = getPersonMemory(senderId);
     if (!personRow) return '';
     const md = readPersonMemorySync(profile, personRow.person_id, personRow.name);
@@ -797,7 +811,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // this turn, free-text identity claims in the message body don't override.
   // Belt for the cheap email-mismatch + Haiku check in securityGate.ts.
   const verifiedSenderBlock = (() => {
-    if (isOwner || !senderId) return '';
+    if (isOwnerTyping || !senderId) return '';
     const personRow = getPersonMemory(senderId);
     if (!personRow) return '';
     return [

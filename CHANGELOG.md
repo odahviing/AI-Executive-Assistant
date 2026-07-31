@@ -2,6 +2,50 @@
 
 ---
 
+## 4.3.7 — a fix that had never once fired, and the four facts nobody could reach
+
+Fourteen product fixes in three waves. The one worth the headline is not a fix, it is a discovery: **the mechanism shipped in 4.3.4 for gh#165 had never fired a single time in production.** `diagnosticsOut.conflictingEvent` was written only on a *passing* verdict, and a colleague's strict single-slot check can never produce one — so its only reader never saw the field, there are zero `conflicting_event_id` lines in any log file, and the fix had **replaced a lookup that was reachable**. #165 was worse after it than before. That is now repaired at the root: the writer is called from the rejecting branch too, so both that steer and this release's day-off branch are live for the first time.
+
+Four of the fourteen are the same shape — **a fact that existed and never reached the path that needed it.** The conflict event written where its reader never looks. The privacy fields never fetched, so masking the subject downstream would have been inert. The attendee-hours overlap never computed, so the model did its own timezone arithmetic and quoted the off-hours recovery slots as if they were the answer. The news timeout logged and never surfaced, so a dropped Updates section and a quiet news day were byte-identical. Three now carry an invariant slug, so the next wave can group them instead of rediscovering them.
+
+The second theme is text that contradicted its own code, and it cuts both ways: a comment claiming the colleague path is self-only when the requester rule shipped in v3.1.4; a tool description promising a standalone DM the code cannot produce; a refusal reading *"That time is conflicts with another meeting on Idan's calendar for Idan"*, which the model is instructed to paste verbatim into the approval the owner reads. **The always-on prompt tier ended 34 characters smaller.**
+
+### Fixed — privacy and authority
+- **The owner's own memory file no longer renders into a group thread.** Both guards keyed on the *post-clamp* effective role, which an MPIM forces to `colleague`, while `senderId` stayed the owner's — so the per-speaker lookup resolved to his own row and emitted `MEMORY ON IDAN` plus his learned `.md` into a colleague-readable prompt. Now gated on who is typing. **Channels are NOT covered** — see Not changed.
+- **A private meeting's real subject no longer leaks through an order-violation refusal.** The row blamed the interpolation; the real root was one layer deeper — `getEventEndInstant` never selected `sensitivity`/`categories`, so masking at the message would have been inert. The fetch was widened, then masked with the helper the sibling guard already uses.
+- **An email-triggered booking can no longer Slack-DM a colleague on the owner's behalf.** The hold-release notification checked only who held the slot; `getConnection` is hardcoded to `slack`, so it resolved on any transport. The release still happens — only the outbound DM is gated.
+
+### Fixed — wrong real-world action
+- **A name the classifier lifted from earlier in the thread can no longer reach a real calendar invite.** Gated at the single producer rather than its three consumers: a name survives only if it appears in the current turn's own message.
+- **A colleague booking over an all-day day off is told the truth** — *"his whole day is already taken … there's no meeting there to add anyone to"* — instead of being steered to add attendees to a vacation block. The all-day fact is now carried structurally on the shared verdict rather than string-matched against a display value, so the steer cannot silently return when that wording changes.
+
+### Fixed — silent wrongness
+- **A rejected day or candidate now carries a code-computed attendee-hours window**, in a named zone rather than "your own zone" — the numbers are the owner's and the tool is colleague-callable. Covers both the day-summary and candidate-validation branches.
+- **The brief says when the news check timed out**, distinct from a genuinely quiet day, with an explicit ban on inventing content. This is the half gh#167 approved and shipped log-only.
+- **The news budget can no longer invert silently.** The inner per-goal timeout is exported as the single source of truth and both outer values are derived from it. Both deployed numbers are unchanged; gh#166 had been fixed twice by adjusting a number.
+
+### Fixed — small
+- The busy-collision labels are adjectival, so every template that says "That time is X" reads as a sentence.
+- Six `as any` casts off the hard scheduling validator's all-day detection. The field was already declared, so the casts were dead scaffolding hiding a typo that would have compiled clean and disabled every all-day protection.
+- A `moveMeeting` comment that told the next reader the opposite of the code, now in the same words the tool description uses.
+- The `send_briefing_now` description states one behaviour instead of a conditional whose second branch cannot occur.
+- Three handlers importing a function they never call — which this release proved costs something, since widening that function's return type made three files falsely appear affected.
+
+### Not changed
+- **The channel surface of the memory leak.** A real Slack channel takes the same role clamp, so both blocks still render there — a wider audience than the group DM this release closed. The plumbing for a per-surface flag was built, proven inert, and **reverted**: gh#154 records that shape as the one set aside in favour of an authenticated-identity test. A comment at the predicate now says channels are uncovered so the next reader is not misled. Awaiting the owner's ruling on which shape lands.
+- The offer-then-refuse lead-time sequence, declined by the owner in favour of narration.
+- WhatsApp Hebrew gender handling, declined while that transport is dormant.
+
+### Verified against shipped
+**14 product fixes; 13 covered by the Opus pass, and the exceptions are named rather than buried.** The pass overturned three rows: one was reverted, and two were sent back to their lanes and rebuilt — a one-string zone correction and a tool description, both re-read targeted rather than given a second full pass, because each is a literal inside text the pass had already read and prescribed the replacement for. `ticketCoverage` returned **gh#154 as `contradicted`** — the first time this loop has caught a wave moving against an open ticket — which is what triggered the revert.
+
+**Three lanes corrected the brief they were given, and all three were right:** the cast removal needed no type declaration because the field was already declared; the grounding fix reused an existing string rather than writing new phrasing, which carried a correction forward automatically; and one brief instructed a lane to describe a branch the code does not have. That last is the release's own defect class, aimed at the orchestrator.
+
+### Framework (other chats, bundled)
+The `verifier` agent is renamed **`examiner`** (rule tag E) and a new **`cleaner`** agent (rule tag C) owns provable hygiene — dead code, comments that contradict the code, dead config. `ledger-stats --report` drops the decision cap in favour of counting rows the owner *cannot* answer, and gains an **overdue-deferral check** that on first contact found five deferrals which had outlived their one-run skip, one of them by twelve runs. eslint and its dev dependencies are removed. Two migration scripts added (`vm-cutover.ps1`, `checkpoint-db.cjs`) for the GCP cutover; nothing provisioned by this release.
+
+---
+
 ## 4.3.6 — the loop could find and fix; it could not let him rule
 
 **No product change. Nothing in `src/`.** This is the framework, and it exists because of one question: *"If I can't approve or reject them the process is broken."*

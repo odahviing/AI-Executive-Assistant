@@ -799,7 +799,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           const eventId = (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
           if (typeof eventId === 'string') {
             deletedEventIdsThisTurn.add(eventId);
-            // C2(a) — drop it from the thread ledger too, so a later reference-back
+            // Drop it from the thread ledger too, so a later reference-back
             // ("change the one I just booked") never resolves to the dead id.
             if (input.threadTs && (r.success === true || r.deleted === true || r.ok === true)) {
               try {

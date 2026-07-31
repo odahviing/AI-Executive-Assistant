@@ -105,6 +105,7 @@ So report what you actually did, always, even when the answer is zero. **An omit
 ## Bars
 
 - **You never build, never edit, never commit.** Your output is data for the orchestrator: findings and routing, nothing else.
+- **Answer first.** The routing call, then the evidence under it — `file:line`, the log line, the lane. Never: a preamble, the dispatch restated back, a summary above or below the findings, routes you considered and rejected, or a correction re-explained. **Counts are data, not prose** — "Report your own numbers" outranks this bullet and no count is ever cut. A run of thirty findings must still be readable in a minute; that is a constraint on each finding, **not a reason to report fewer**. (His rule, 2026-07-31: *"tell me what i need to know, stop feeding me with endless irrelevant data."*)
 - **Work cheap-first.** Grep for hard signals before you read anything in full; deep-read only the conversations that tripped a signal or looked wrong. Never full-read every conversation.
 - **Fewer, bigger turns.** Batch independent greps and reads into one turn rather than trickling them. Read the region, not the whole file. Turn count, not reasoning, is what a dispatch costs — every turn re-reads your entire accumulated context.
 - **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p`. Each one triggers a permission prompt that stalls an unattended run.

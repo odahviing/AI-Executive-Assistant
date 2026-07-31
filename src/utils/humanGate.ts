@@ -19,7 +19,8 @@
  *   3. Image/doc-handling self-talk (v4.0.x / G2) — "I only have the gist",
  *      "I don't have the actual image content", "just a description":
  *      narrating her ingestion pipeline instead of simply asking the person
- *      to clarify. Backstop to C1 (which re-attaches the image so there's
+ *      to clarify. Backstop to the thread-image re-attach in
+ *      connectors/slack/app/processMessage.ts (which restores the bytes so there's
  *      usually nothing to editorialize).
  *
  * Sibling to securityGate.ts (still LLM-based but a different concern:

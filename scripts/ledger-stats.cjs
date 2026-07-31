@@ -70,7 +70,7 @@ const fileTouchDates = (sinceDay) => {
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
     );
   } catch {
-    return null; // no git, or not a repo — reported as "not checked", NEVER as confirmed
+    return null; // no git, or not a repo — reported as "not checked", NEVER as still-real
   }
   const map = new Map(); // repo path -> latest YYYY-MM-DD that touched it
   let day = '';
@@ -86,8 +86,8 @@ const fileTouchDates = (sinceDay) => {
   return map;
 };
 const CITED = /[\w./@#-]*[\w-]\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|ya?ml|sql)\b/g;
-// X47 · a row that cites NO file is not confirmed — it is UNCHECKABLE, and
-// counting it as confirmed is the count-that-is-wrong failure inside the reader
+// X47 · a row that cites NO file is not still-real — it is UNCHECKABLE, and
+// counting it as still-real is the count-that-is-wrong failure inside the reader
 // that exists to be trusted. It can never be flagged RE-READ either, so the
 // nightly backlog pass will never look at it: 12 of the 49 open rows on
 // 2026-07-30. They need a hand read, so they are named rather than left to look
@@ -121,19 +121,28 @@ const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean
 // question the backlog exists to answer is "is this finding still worth fixing",
 // and for a row nobody has ever opened the honest answer is *nobody knows*.
 // Measured 2026-07-30: 4 of 47 open rows cited a file the day's wave touched, so
-// 38 read as `confirmed` while no lane had re-read any of them and several dated
+// 38 read as still-real while no lane had re-read any of them and several dated
 // from 07-26 — and the pass that exists to shorten the list looked at ONE row.
 //
-// SAME ROW, second half: `confirmed` was also the wrong NAME for it. It meant "no
-// commit touched the file" and read as "somebody verified this is still real" —
-// the weaker claim wearing the stronger one's name, on the surface he rules from.
-// It now means exactly one thing: a lane opened the code and stood behind the row,
-// which is what `architect-file --recheck` / a `recheck` field records. The
-// `unchanged` bucket it asked for is not renamed, it is GONE: once a
-// never-examined row prints RE-READ, nothing can land in it.
+// SAME ROW, second half: the NAME was wrong too. It meant "no commit touched the
+// file" and read as "somebody verified this is still real" — the weaker claim
+// wearing the stronger one's name, on the surface he rules from. It now means
+// exactly one thing: a lane opened the code and stood behind the row, which is what
+// `architect-file --recheck` / a `recheck` field records. The `unchanged` bucket it
+// asked for is not renamed, it is GONE: once a never-examined row prints RE-READ,
+// nothing can land in it.
+//
+// X86 · and the name was STILL wrong one turn further along: `confirmed` reads as
+// SETTLED. He read his own `--open` on 2026-07-31 — "Backlog confirmed. Meaning in
+// next committ they are done and remove?" — inverting 38 of 44 open rows on the
+// surface he rules from. It carried a gloss on EVERY run to hold it upright while
+// `need a re-read` and `cite no file` needed none, and a label that must be defined
+// every time it prints is the wrong label. It is `still-real`, and THE GLOSS IS
+// DELETED — that deletion is the test. DISPLAY ONLY: stored `verdict` values are
+// untouched, and `confirmed-other-lane` is one of those, not this bucket.
 //
 // FOUR buckets, mutually exclusive, summing to the open count:
-//   confirmed   — carries a `recheck` line and nothing has moved since
+//   still-real  — carries a `recheck` line and nothing has moved since
 //   moved       — the cited code changed after the row's latest date (X38)
 //   unexamined  — cites a file, and nobody has ever re-read it
 //   no-cite     — cites no file, so no pass can ever check it (X47) — HIS read
@@ -141,15 +150,13 @@ const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean
 // `unexamined` deliberately does NOT depend on git: with no history available
 // `moved` is unknowable, but "nobody has looked" is still a fact.
 const bucketOf = (s, row) => {
-  if (String(row.recheck || '').trim() && !s.needsRecheck) return 'confirmed';
+  if (String(row.recheck || '').trim() && !s.needsRecheck) return 'still-real';
   if (uncheckable(s)) return 'no-cite';
   return s.needsRecheck ? 'moved' : 'unexamined';
 };
 const REREAD = new Set(['moved', 'unexamined']);
 const LEGEND_REREAD =
   'RE-READ = nobody has stood behind this row yet — either the code it cites MOVED after it was written, or NO ONE HAS EVER RE-READ IT. Re-read it, then rule; nothing is closed automatically.';
-const LEGEND_CONFIRMED =
-  'CONFIRMED = a lane opened the code and said it is still real. It is the ONLY bucket that means somebody looked; "no commit touched the file" is not a confirmation.';
 
 const argv = process.argv.slice(2);
 const argOf = (flag) => {
@@ -186,9 +193,9 @@ if (argv.includes('--architect')) {
   const latest = new Map();
   for (const r of all) latest.set(r.id, { ...(latest.get(r.id) || {}), ...r });
   const rows = [...latest.values()];
-  // X10 · `refuted` closes a row the architect DISPROVED. It is not `declined` —
-  // that word claims the owner ruled — and it is not `built`.
-  const CLOSED = new Set(['built', 'declined', 'refuted', 'duplicate']);
+  // X78 · which verdicts CLOSE a row is defined once, by the only thing that can
+  // write one. This file kept its own copy and the two had drifted already.
+  const { CLOSED } = require('./architect-file.cjs');
   const open = rows.filter((r) => !CLOSED.has(r.verdict));
   const p = (s, n) => String(s).padEnd(n);
 
@@ -234,12 +241,11 @@ if (argv.includes('--architect')) {
     byTarget.get(t).push(r);
   }
   console.log(
-    `\nOPEN — ${open.length} awaiting triage or approval · ${aN('confirmed')} confirmed · ${aRecheck.length} need a re-read (${aN('moved')} moved · ${aN(
+    `\nOPEN — ${open.length} awaiting triage or approval · ${aN('still-real')} still-real · ${aRecheck.length} need a re-read (${aN('moved')} moved · ${aN(
       'unexamined',
     )} never examined) · ${aNoCite.length} cite no file` + (aTouched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
-  console.log(LEGEND_REREAD);
-  console.log(LEGEND_CONFIRMED + '\n');
+  console.log(LEGEND_REREAD + '\n');
   for (const [t, list] of [...byTarget.entries()].sort((a, b) => b[1].length - a[1].length)) {
     console.log(`${t}  (${list.length})`);
     for (const r of list) {
@@ -260,7 +266,7 @@ if (argv.includes('--architect')) {
     console.log(
       `${aNoCite.length} row(s) cite no file, so staleness cannot be checked and they never print RE-READ — read these by hand: ${aNoCite.map((r) => r.id).join(', ')}\n`,
     );
-  console.log(`Confirm one with: node scripts/architect-file.cjs --recheck <id> --checked "<what you opened>"`);
+  console.log(`Re-read one with: node scripts/architect-file.cjs --recheck <id> --checked "<what you opened>"`);
   console.log(`Nothing here is approved to build. The architect triages and proposes; the owner rules.\n`);
   process.exit(0);
 }
@@ -372,15 +378,21 @@ if (argv.includes('--report')) {
     console.error(`\nNo report at ${RP}\n`);
     process.exit(1);
   }
-  // `capDecisions` — the engine's own default lives at bugger.js:1150. Pass --cap
-  // if he raised it for a run, so this check and that run agree on one number.
-  const CAP = Number(argOf('--cap')) || 12;
   const lines = fs.readFileSync(RP, 'utf8').split(/\r?\n/);
   const isPipe = (l) => /^\s*\|/.test(String(l));
   const isSep = (l) => /^\s*\|[\s|:—–-]*\|\s*$/.test(String(l)) && /-/.test(String(l));
   const groups = [];
   let cur = null;
   let loose = 0;
+  // X83 · HIS OWN BOUND ON THE PROSE, checked. "THE TABLE IS THE REPORT — at most 5
+  // lines outside it" has been in the format spec since 2026-07-26 with nothing
+  // reading it, and the file it describes drifted back into a run narrative: 14 rows
+  // of which 5 were decisions, wrapped in seven paragraphs, and his verdict was
+  // "Im begging the chat to let me see stuff." Rows do NOT move off this surface to
+  // fix that — chat scrolls and the ledger is behind a command he has to remember,
+  // so a recommendation written anywhere else has no reader at all. What gets cut is
+  // the narration around them. Blank lines, headings and table rows are free.
+  const prose = [];
   lines.forEach((l, i) => {
     // A `#` heading, or a bold-only line that CARRIES a count. A bold sentence with
     // no `(n)` in it is prose (the emptied report's headline is exactly that) and
@@ -392,7 +404,14 @@ if (argv.includes('--report')) {
       groups.push(cur);
       return;
     }
-    if (!isPipe(l) || isSep(l)) return;
+    if (!isPipe(l)) {
+      // A blank line and a horizontal rule carry no narration and are not spent
+      // against his five — firing on those would be a check that goes off on the
+      // healthy path, which is the mistake this whole file is written against.
+      if (String(l).trim() && !/^\s*([-*_])\1{2,}\s*$/.test(l)) prose.push({ line: i + 1, text: String(l).trim() });
+      return;
+    }
+    if (isSep(l)) return;
     if (isSep(lines[i + 1])) return; // the column header, not a row
     // The first cell is `# · lane · status`, which is where the recommendation lives.
     if (cur) { cur.rows += 1; cur.cells.push(String(l).split('|')[1] || ''); }
@@ -404,7 +423,7 @@ if (argv.includes('--report')) {
   const pending = groups.filter((g) => /pending|await|decide|needs? you/i.test(g.title));
   const pendingRows = pending.reduce((n, g) => n + g.rows, 0);
   let bad = 0;
-  console.log(`\n${path.relative(REPO, RP).replace(/\\/g, '/')} — ${shown.length} group(s) · ${totalRows} table row(s) · budget ${CAP}\n`);
+  console.log(`\n${path.relative(REPO, RP).replace(/\\/g, '/')} — ${shown.length} group(s) · ${totalRows} table row(s) · ${prose.length} line(s) outside the table\n`);
   for (const g of shown) {
     const claim = g.claimed === null ? 'no count claimed' : `claims ${g.claimed}`;
     const ok = g.claimed === null || g.claimed === g.rows;
@@ -417,18 +436,29 @@ if (argv.includes('--report')) {
   }
   // The headline's own claim. NOT CHECKED, loudly, when it names no number — the
   // one thing this must never do is print a clean line about something it skipped.
-  const numeric = lines.map((l) => l.match(/(\d+)\s+rows?\b[^.\n]{0,40}?await/i)).find(Boolean);
-  const zeroClaim = lines.find((l) => /noth(ing|in)\b[^.\n]{0,48}?await/i.test(l));
-  if (numeric) {
-    const ok = Number(numeric[1]) === pendingRows;
-    if (!ok) bad += 1;
-    console.log(`\n  headline says "${numeric[0]}" · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
-  } else if (zeroClaim) {
-    const ok = pendingRows === 0;
-    if (!ok) bad += 1;
-    console.log(`\n  headline claims nothing awaits him · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
-  } else {
+  //
+  // X83 · EVERY claim about that group, not the first one. This read the first
+  // numeric match and consulted the zero-claim only when there was none, so a file
+  // asserting both passed on the half that happened to agree: report.md said "5 rows
+  // await you" on line 3 and "the pending owner group is empty for the first time" on
+  // line 38, both written in the same pass, and this printed one `ok`. A sentence
+  // about the group's state is a count like any other — the one that went stale is
+  // the one he read.
+  const claims = [];
+  lines.forEach((l, i) => {
+    const n = String(l).match(/(\d+)\s+rows?\b[^.\n]{0,40}?await/i);
+    if (n) claims.push({ line: i + 1, says: n[0], want: Number(n[1]) });
+    else if (/(?:noth(?:ing|in)|empty|zero)\b[^.\n]{0,60}?(?:await|pending|need(?:s|ing)? you)/i.test(l) || /pending[^.\n]{0,40}?(?:is|are)\s+empty/i.test(l))
+      claims.push({ line: i + 1, says: String(l).trim().slice(0, 72), want: 0 });
+  });
+  if (!claims.length) {
     console.log(`\n  headline: NOT CHECKED — no "<n> rows await you" line found. Its ledger total is a separate claim: node scripts/ledger-stats.cjs --open`);
+  } else {
+    for (const c of claims) {
+      const ok = c.want === pendingRows;
+      if (!ok) bad += 1;
+      console.log(`\n  line ${String(c.line).padStart(4)} claims "${c.says}" · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
+    }
   }
   // ── X77 · A ROW HE CANNOT ANSWER IS THE DEFECT — not the length of the list ──
   // He is not asking for a shorter table: forty rulable rows are fine and one row
@@ -440,19 +470,83 @@ if (argv.includes('--report')) {
   // he reads the table, which is the only moment the row can still be fixed.
   // `in flight` and `blocked` sit in this group and are owed to an AGENT, not to
   // him; they are the only exemptions.
+  // X82 · AND IT IS THE ONLY BOUND ON THE GROUP'S SIZE. A 12-row cap gated the same
+  // group on ROW COUNT (X55), which contradicts the invariant this check enforces in
+  // the very next line: forty rulable rows are fine and one unanswerable row is the
+  // defect. It cost exactly what the invariant predicts — five still-real rows
+  // carrying a verb were held off wf_4bbfc750-1a9's report to stay under 12, and he
+  // ruled the eleven shown in ONE message and then asked where the rest were. A
+  // rulable row costs him a word, so the number of them was never the problem.
   const unrulable = pending.flatMap((g) => g.cells.filter((c) => !/recommend/i.test(c) && !/in flight|blocked/i.test(c)));
   if (unrulable.length) {
-    console.log(`\n  ! ${unrulable.length} pending row(s) carry NO recommendation — he cannot rule on one without reading the whole finding:`);
+    console.log(`\n  ! ${unrulable.length} of ${pendingRows} pending row(s) carry NO recommendation — he cannot rule on one without reading the whole finding:`);
     for (const c of unrulable) console.log(`      ${c.trim().slice(0, 72)}`);
     bad += 1;
-  }
-  // X55 · the budget GATES what the backlog may add, it does not merely warn. The
-  // run's own rows come first; the backlog fills whatever room is left, often none.
-  if (pendingRows > CAP) {
-    console.log(`  ! OVER BUDGET — ${pendingRows} rows need him, cap is ${CAP}. 2026-07-26 put 30 in front of him and he could not act on any of them.`);
-    bad += 1;
   } else if (pending.length) {
-    console.log(`  decision budget: ${pendingRows} of ${CAP} spent · room for ${CAP - pendingRows} more backlog row(s)`);
+    console.log(`\n  all ${pendingRows} pending row(s) carry a recommendation · each costs him one word · no cap on how many`);
+  }
+  // ── X52 · THE BUILT LIST IS PART OF THE REPORT, NOT NARRATION ──────────────
+  // His words, 2026-07-31: *"We said that i want list of build stuff before commit.
+  // As the agents running alone."* The loop builds while he is away, so the list of
+  // what a wrap would ship is the thing he actually reviews before committing. It
+  // was DELETED from `report.md` as noise on 2026-07-31 and NOTHING complained,
+  // which is this file's own failure class one level up: a required part of his
+  // decision surface that no check read.
+  //
+  // PRESENCE, never a count against the ledger. The wrap boundary is the last row
+  // stamped `runId: wrap-<version>` (X54) and only 2 of the 7 wraps ever stamped
+  // one, so a number derived from it would be wrong — but whether ANY built row
+  // stands since it is still right, because uncommitted built work is this repo's
+  // normal state. If a wrap forgets the stamp this keeps asking for the list, and
+  // the remedy is the stamp, which `--wrap` already demands.
+  //
+  // Its OWN count is checked like every other count on this surface: the line names
+  // one backticked ref per item, so `(6)` is derivable from the line itself.
+  const builtAt = lines.findIndex((l) => /built and uncommitted/i.test(String(l)));
+  const builtSinceWrap = (() => {
+    if (!fs.existsSync(LEDGER)) return [];
+    const rs = [];
+    for (const t of fs.readFileSync(LEDGER, 'utf8').split(/\r?\n/)) {
+      const s = t.trim();
+      if (!s) continue;
+      try {
+        rs.push(JSON.parse(s));
+      } catch {
+        /* the main reader counts unparseable lines */
+      }
+    }
+    let from = 0;
+    rs.forEach((r, i) => {
+      if (/^wrap-/.test(String(r.runId || ''))) from = i + 1;
+    });
+    return rs.slice(from).filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
+  })();
+  if (builtAt < 0 && builtSinceWrap.length) {
+    console.log(
+      `\n  ! NO BUILT LIST, and the ledger holds ${builtSinceWrap.length} \`built\` row(s) since the last wrap stamp: ${builtSinceWrap
+        .map((r) => r.ref || '(no ref)')
+        .slice(0, 12)
+        .join(', ')}${builtSinceWrap.length > 12 ? ' …' : ''}`,
+    );
+    console.log(`      He reviews the wrap off this line. Write it as ONE line — \`**Built and uncommitted — this is what a wrap ships (n):** \`ref\` what · \`ref\` what\` — reasoning stays in the ledger \`note\`.`);
+    bad += 1;
+  } else if (builtAt >= 0) {
+    const claimedBuilt = (String(lines[builtAt]).match(/\((\d+)\)/) || [])[1];
+    // A backticked span that is not a file path is an item; `createMeeting.ts:128` is not.
+    const namedBuilt = (String(lines[builtAt]).match(/`[^`]+`/g) || []).filter((s) => !/[.:]/.test(s.slice(1, -1))).length;
+    const okBuilt = claimedBuilt === undefined || Number(claimedBuilt) === namedBuilt;
+    if (!okBuilt) bad += 1;
+    console.log(
+      `\n  line ${String(builtAt + 1).padStart(4)}  built list ${claimedBuilt === undefined ? 'claims NO count' : `claims ${claimedBuilt}`} · names ${namedBuilt} ref(s)   ${
+        okBuilt ? 'ok' : '! MISMATCH'
+      }`,
+    );
+  }
+  // X83 · his bound on the narration, and the only length rule left on this file.
+  if (prose.length > 5) {
+    console.log(`\n  ! ${prose.length} lines sit OUTSIDE the table, and the format allows 5. The table is the report — anything longer belongs in the ledger \`note\`:`);
+    for (const p of prose) console.log(`      line ${String(p.line).padStart(4)}  ${p.text.slice(0, 76)}`);
+    bad += 1;
   }
   if (!totalRows) console.log(`\n  0 table rows — an emptied report is a valid state. Its headline must still carry the ledger's open total (\`--open\`).`);
 
@@ -468,15 +562,28 @@ if (argv.includes('--report')) {
   // It re-runs THIS script's own `--open` rather than re-deriving the buckets
   // here. A second copy of the collapse-and-bucket logic is precisely the drift
   // this reader exists to prevent, and one extra node start is cheaper than two
-  // definitions of `confirmed`.
-  const openLine = (() => {
+  // definitions of `still-real`.
+  const openOut = (() => {
     try {
-      const out = require('child_process').execFileSync(process.execPath, [__filename, '--open'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-      return out.split(/\r?\n/).find((l) => /^OPEN —/.test(l)) || '';
+      return require('child_process').execFileSync(process.execPath, [__filename, '--open'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split(/\r?\n/);
     } catch {
-      return '';
+      return [];
     }
   })();
+  const openLine = openOut.find((l) => /^OPEN —/.test(l)) || '';
+  // X88 · THE DEFERRAL GATE, off the same `--open` run. A deferral is a one-run
+  // skip, so one that has outlived a run is either due on his desk this run or it
+  // was never a deferral — and it fires HERE, at render, which is the last moment
+  // the row can still be put back in `pending owner` before he reads the table.
+  const overdueLine = openOut.find((l) => /^OVERDUE DEFERRALS —/.test(l)) || '';
+  const overdueN = Number((overdueLine.match(/—\s*(\d+)/) || [])[1] || 0);
+  if (!openOut.length) {
+    console.log(`\n  overdue deferrals: NOT CHECKED — \`--open\` did not run.`);
+  } else if (overdueN) {
+    console.log(`\n  ! ${overdueN} OVERDUE DEFERRAL(S) — ${overdueLine.replace(/^OVERDUE DEFERRALS — \d+:?\s*/, '')}`);
+    console.log(`      A deferral is a ONE-RUN skip. Each of those outlived a run without coming back: put it in this run's \`pending owner\` group with its recommendation, or record \`declined\`.`);
+    bad += 1;
+  }
   const claimLine = lines.find((l) => /\d[\d,]*\s*\**\s*open rows?\b/i.test(l));
   const num = (re, s) => { const m = String(s).match(re); return m ? Number(m[1]) : null; };
   if (!openLine) {
@@ -487,19 +594,22 @@ if (argv.includes('--report')) {
   } else {
     const want = {
       total: num(/^OPEN — (\d+) row/, openLine),
-      confirmed: num(/(\d+) confirmed/, openLine),
+      'still-real': num(/(\d+) still-real/, openLine),
       reread: num(/(\d+) need a re-read/, openLine),
       noCite: num(/(\d+) cite no file/, openLine),
     };
+    // X86 · the headline is the MANAGER's line and this reader must never edit it, so
+    // both spellings parse: a report written before the rename says `confirmed` and
+    // its number is still the same number. Only what `--open` prints moved.
     const got = {
       total: num(/(\d+)[^\d]{0,4}open rows?\b/i, claimLine),
-      confirmed: num(/(\d+)\s*confirmed/i, claimLine),
+      'still-real': num(/(\d+)\s*(?:still-real|confirmed)/i, claimLine),
       reread: num(/(\d+)\s*(?:need|needing)\b[^,)]*re-read/i, claimLine),
       noCite: num(/(\d+)\s*(?:cite|citing)\b[^,)]*no file/i, claimLine),
     };
     const wrong = Object.keys(want).filter((k) => want[k] !== null && got[k] !== want[k]);
     console.log(
-      `\n  headline's ledger total: claims ${got.total} open (${got.confirmed} confirmed, ${got.reread} re-read, ${got.noCite} no-cite) · --open derives ${want.total} (${want.confirmed}, ${want.reread}, ${want.noCite})   ${
+      `\n  headline's ledger total: claims ${got.total} open (${got['still-real']} still-real, ${got.reread} re-read, ${got.noCite} no-cite) · --open derives ${want.total} (${want['still-real']}, ${want.reread}, ${want.noCite})   ${
         wrong.length ? `! MISMATCH on ${wrong.join(', ')}` : 'ok'
       }`,
     );
@@ -681,6 +791,43 @@ if (openOnly) {
     for (const t of refTokens(r.ref)) if (!closedBy.has(t)) closedBy.set(t, r);
   }
 
+  // ── X85 · ONE BUG, SEVERAL REFS ────────────────────────────────────────────
+  // A bug legitimately wears more than one ref: a complaint of a ticket (`gh#157-b`),
+  // a slug minted when the same defect arrived through the logs
+  // (`gh#157-no-history-with-colleague`), and a row filed under the retired letter
+  // scheme. So this count was counting REFS and calling them open bugs, and each ref
+  // needed its own closure — gh#157 held three and all three closed on one sentence
+  // from him, five of the fourteen closures on wf_4bbfc750-1a9 being the count being
+  // wrong rather than the product improving. That is the mechanical half of "the
+  // framework fights against closing stuff": a backlog that inflates itself cannot
+  // reach zero.
+  //
+  // NO NEW FIELD. His id scheme already names the parent — *"if you had ticket 153
+  // and you got something that block it, it won't be 170, it will be 153-blockA"* —
+  // so the owning bug is DERIVED from the ref at read time, which also works on the
+  // rows already written and rewrites no history.
+  //
+  // A LEADING LETTER IS NEVER STRIPPED. `B157` is not `gh#157`: the retired scheme
+  // minted its numbers off `nextReportId`, which had climbed to 177 while GitHub was
+  // at 168 (X74), so collapsing the letter would merge two different bugs. Those
+  // print as separate bugs and the list below is what makes them visible by eye.
+  //
+  // IT GROUPS; IT NEVER CLOSES. A parent ruling closing its children automatically
+  // was built and MEASURED here first, and it closed exactly one row on this ledger:
+  // `gh#24-cap-checks-wrong-address`, a re-read, still-real From-spoof exfiltration
+  // path, because ten OTHER pieces filed under the bare `gh#24` had shipped. A suffix
+  // means "complaint b of ticket 156" in his scheme and "a defect found while
+  // building ticket 24" in half the ledger, and no read of the id can tell those
+  // apart — so the grouping is shown to him and the closure stays an act somebody
+  // performs. He rules on the group in one word; the wrap writes one closing row per
+  // ref, which is the same ruling with nothing guessed.
+  const parentOf = (ref) => {
+    const t = normRef(ref);
+    const m = t.match(/^((?:[a-z])?\d+)[-–_]/i);
+    return m && m[1] !== t ? m[1] : '';
+  };
+  const bugOf = (r) => parentOf(r.ref) || normRef(r.ref) || '(no ref)';
+
   // Keep the LATEST state per ref, so a re-raised item shows once with its newest
   // state. X47 · MERGED, not overwritten — the same fix `--architect` carries, for
   // the same reason: append-only means a row is legitimately several lines, and a
@@ -724,11 +871,25 @@ if (openOnly) {
   const nOf = (b) => open.filter((r) => bucket.get(r) === b).length;
   const recheck = open.filter((r) => REREAD.has(bucket.get(r)));
   const noCite = open.filter((r) => bucket.get(r) === 'no-cite');
+  // X85 · refs, and the number of BUGS they are. The two were the same number in
+  // every count built on this line, including the report headline.
+  const bugs = new Map();
+  for (const r of open) {
+    const k = bugOf(r);
+    if (!bugs.has(k)) bugs.set(k, []);
+    bugs.get(k).push(r);
+  }
   console.log(
-    `\nOPEN — ${open.length} row(s) · ${nOf('confirmed')} confirmed · ${recheck.length} need a re-read (${nOf('moved')} moved · ${nOf(
+    `\nOPEN — ${open.length} row(s) across ${bugs.size} bug(s) · ${nOf('still-real')} still-real · ${recheck.length} need a re-read (${nOf('moved')} moved · ${nOf(
       'unexamined',
     )} never examined) · ${noCite.length} cite no file` + (touched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
+  const multiRef = [...bugs.entries()].filter(([, rs]) => rs.length > 1);
+  if (multiRef.length)
+    console.log(
+      `ONE BUG, SEVERAL REFS — ${multiRef.length} bug(s) hold ${multiRef.reduce((n, [, rs]) => n + rs.length, 0)} of the rows above. Rule on the BUG once and close EVERY ref listed on it in the same act; ruling ref by ref is how one bug stayed three open rows.\n` +
+        multiRef.map(([k, rs]) => `           ${k}: ${rs.map((r) => r.ref).join(', ')}`).join('\n'),
+    );
   // X77 · the second header line, and it answers the only question that decides
   // whether a run can be taken to zero: how many of these can he actually rule on.
   // `awaiting you` was dropped from the line above because 17 of the 56 were not.
@@ -743,12 +904,51 @@ if (openOnly) {
     console.log(
       `           ${retired.length} row(s) still carry the RETIRED verdict \`flagged-for-owner\`, read here as \`queued-next-run\`. Write the new one; the ledger is append-only so these stay.`,
     );
+  // ── X88 · A DEFERRAL THAT SURVIVED A RUN IS A PARKED ROW ────────────────────
+  // X51 settled the SEMANTICS — a deferral is a one-run skip, due on the next run,
+  // never parked — and enforced only the half that keeps it off the drop list.
+  // Nothing ever asked whether it came back. Measured 2026-07-31 across the whole
+  // ledger: 10 rows have ever been deferred and every one of them was overdue,
+  // `B168-a` by 3 engine runs and `gh#158-availability-answered-about-owner-not-
+  // attendee` by 5 — that one sat open across the release that fixed it, which is
+  // exactly what X51 was written to prevent.
+  //
+  // COMPUTED, not stored. The park is the LAST row that carried the marker; runs
+  // since are the distinct later `wf_` runIds, which is what "a run" means here —
+  // `direct-*` is a hand dispatch and `verify-*` is a pass, neither is a run he
+  // could have ruled on. Self-clearing by the correct act: the merge above keeps
+  // the latest fields per ref, so appending the row's return to his desk
+  // (`needs-owner-decision`, `state:'open'`) drops the marker and the count with it.
+  const deferredMark = (o) => o && (o.state === 'deferred' || o.verdict === 'deferred');
+  const parkedAt = new Map(); // ref -> index in `scoped` of the row that parked it
+  scoped.forEach((r, i) => {
+    if (r.ref && deferredMark(r)) parkedAt.set(r.ref, i);
+  });
+  const runsSincePark = (r) => {
+    const i = parkedAt.get(r.ref);
+    if (i === undefined) return 0;
+    const own = String(scoped[i].runId || '');
+    const later = new Set();
+    for (let j = i + 1; j < scoped.length; j++) {
+      const id = String(scoped[j].runId || '');
+      if (/^wf_/.test(id) && id !== own) later.add(id);
+    }
+    return later.size;
+  };
+  const overdue = open.filter((r) => deferredMark(r) && runsSincePark(r) > 0);
+  // Parsed by `--report`, which gates on it. One line, whatever the count, so a
+  // zero is a printed zero rather than a line that failed to appear.
+  console.log(
+    `OVERDUE DEFERRALS — ${overdue.length}${overdue.length ? `: ${overdue.map((r) => `${r.ref} (${runsSincePark(r)} run${runsSincePark(r) === 1 ? '' : 's'})`).join(', ')}` : ''}`,
+  );
   console.log(LEGEND_REREAD);
-  console.log(LEGEND_CONFIRMED);
   // X51 · the two states read alike and are opposites. A `converted` row is CLOSED
   // and never prints here; a `deferred` row is a ONE-RUN skip and is DUE. Deriving
   // `openKnown` from both told the scout to drop four rows the owner had ruled due.
-  console.log(`DEFERRED = a ONE-RUN skip, DUE on the next run — not parked. It never belongs in \`openKnown\`; that list is \`converted\` rows only, and those left the bug track for GitHub.\n`);
+  console.log(
+    `DEFERRED = a ONE-RUN skip, DUE on the next run — not parked. It never belongs in \`openKnown\`; that list is \`converted\` rows only, and those left the bug track for GitHub.\n` +
+      `OVERDUE = a run has happened since and it did not come back. Put it in this run's \`pending owner\` group with its recommendation, or record \`declined\` — \`--report\` exits 1 while one stands.\n`,
+  );
   const laneGroups = new Map();
   for (const r of open) {
     const k = r.lane || '(no lane)';
@@ -771,12 +971,12 @@ if (openOnly) {
       // rows carry `state:'deferred'` and 3 more carry `verdict:'deferred'`, and all
       // 9 print here. Keying on one field alone printed the same word for both and
       // the date for only 6 of 9 — the same rule true on one path and not the other.
-      const isDeferred = r.state === 'deferred' || r.verdict === 'deferred';
+      const isDeferred = deferredMark(r);
       // X77 · `FLAGGED` read as "he has been told"; the row meant "a future agent
       // should look". `QUEUED` says which, and it is the same word the Manager and
       // the report now use for a discovery.
       const label = isDeferred
-        ? `DEFERRED ${r.date || '(no date)'} · DUE NEXT RUN`
+        ? `DEFERRED ${r.date || '(no date)'} · ${runsSincePark(r) ? `OVERDUE — ${runsSincePark(r)} run(s) since` : 'DUE NEXT RUN'}`
         : verdictOf(r) === 'needs-owner-decision'
           ? 'DECIDE'
           : verdictOf(r) === 'queued-next-run'
@@ -814,7 +1014,7 @@ if (openOnly) {
   // X47 · NAMED, never silently worked. The backlog pass takes only RE-READ rows, so
   // these are the ones no run will ever reach: they cite no file, so no commit can
   // flag them. Naming them is the difference between a known hand-read list and 12
-  // rows quietly counted as confirmed.
+  // rows quietly counted as still-real.
   if (noCite.length) {
     console.log(`${noCite.length} open row(s) cite no file, so staleness cannot be checked and no backlog pass will ever re-read them. Read these by hand:`);
     for (const r of noCite) console.log(`  ${r.ref || '(no ref)'}  ${String(r.finding || '').slice(0, 88)}`);

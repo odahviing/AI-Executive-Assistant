@@ -1140,19 +1140,23 @@ export async function getEventEndInstant(
   userEmail: string,
   eventId: string,
   timezone: string,
-): Promise<{ end: DateTime; subject: string } | null> {
+): Promise<{ end: DateTime; subject: string; sensitivity?: string; categories?: string[] } | null> {
   try {
     const client = getClient();
     const event = await client
       .api(`/users/${userEmail}/events/${eventId}`)
       .header('Prefer', `outlook.timezone="${timezone}"`)
-      .select('id,subject,end')
+      // o#178 — sensitivity + categories ride along with subject so a caller
+      // that surfaces this subject to a colleague (the must_be_after_event_id
+      // ordering refusal) can mask it through displaySubject instead of
+      // shipping the raw Graph subject of a private predecessor meeting.
+      .select('id,subject,end,sensitivity,categories')
       .get();
     const endIso = event?.end?.dateTime;
     if (!endIso) return null;
     const dt = DateTime.fromISO(endIso, { zone: event.end.timeZone ?? timezone }).setZone(timezone);
     if (!dt.isValid) return null;
-    return { end: dt, subject: event.subject ?? 'unknown' };
+    return { end: dt, subject: event.subject ?? 'unknown', sensitivity: event.sensitivity, categories: event.categories };
   } catch (err) {
     logger.warn('getEventEndInstant — failed, returning null', {
       eventId, err: String(err).slice(0, 200),

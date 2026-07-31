@@ -14,7 +14,6 @@ import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  getEventEndInstant,
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,
@@ -42,6 +41,7 @@ import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { bookingLeadTimeHours, offeredSlotCount } from '../../../../utils/scheduleRules';
 import { subjectViewerFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
+import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
 /**
  * Shared attendee-availability-warning construction for find_available_slots —
@@ -99,6 +99,52 @@ function attendeeCheckWarnings(params: {
   }
 
   return { attendeeEmailWarning, attendeeNotCheckedWarning };
+}
+
+/**
+ * gh#168-a — for a day rejected on `outside_attendee_work_hours`, compute the
+ * blocked attendee's STATED hours converted into the owner's zone for that
+ * exact date, as a self-instructing string Sonnet can quote verbatim. Same
+ * "grounded string" pattern as `_requested_time_local` above
+ * (reinterpretClockInZone + luxon format, never left to Sonnet's own head) —
+ * applied to the DAY-level narration this time. Without it, a follow-up ("why
+ * does Monday fall outside Tyler's hours?") has no computed fact to quote, so
+ * Sonnet converts the two zones herself and free-hands the arithmetic — which
+ * produced three different answers to one question (two of them wrong) on
+ * 2026-07-30, logs/maelle-2026-07-30.log:427-466. Best-effort: an attendee not
+ * present in `attendeeAvailability` (no stored hours) or a parse failure just
+ * yields no note — `top_reasons` / `blocked_by` still carry the fact on their own.
+ */
+function attendeeHoursGroundingNotes(
+  blockedBy: Array<{ email: string; slots_blocked: number }> | undefined,
+  date: string,
+  attendeeAvailability: AttendeeAvailabilityEntry[] | undefined,
+  ownerTz: string,
+  ownerFirstName: string,
+): string[] | undefined {
+  if (!blockedBy || blockedBy.length === 0 || !attendeeAvailability || attendeeAvailability.length === 0) return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { attendeeTzForDay } = require('../../../../utils/attendeeAvailability') as
+    typeof import('../../../../utils/attendeeAvailability');
+  const notes: string[] = [];
+  for (const b of blockedBy) {
+    const entry = attendeeAvailability.find(a => a.email.toLowerCase() === b.email.toLowerCase());
+    if (!entry || !entry.hoursStart || !entry.hoursEnd) continue;
+    const attendeeTz = attendeeTzForDay(entry, date);
+    try {
+      const startOwnerIso = reinterpretClockInZone(`${date}T${entry.hoursStart}:00`, attendeeTz, ownerTz);
+      const endOwnerIso = reinterpretClockInZone(`${date}T${entry.hoursEnd}:00`, attendeeTz, ownerTz);
+      const startOwner = DateTime.fromISO(startOwnerIso, { zone: ownerTz });
+      const endOwner = DateTime.fromISO(endOwnerIso, { zone: ownerTz });
+      if (!startOwner.isValid || !endOwner.isValid) continue;
+      notes.push(
+        `${b.email}'s stated hours ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded; do NOT recompute the conversion yourself.`,
+      );
+    } catch {
+      // best-effort grounding note — day_summary still has top_reasons/blocked_by without it
+    }
+  }
+  return notes.length > 0 ? notes : undefined;
 }
 
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -659,6 +705,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               accepted: number;
               top_reasons: string[];
               blocked_by?: Array<{ email: string; slots_blocked: number }>;
+              // gh#168-a — grounded, code-computed strings for a day whose
+              // top_reasons names `outside_attendee_work_hours`, so a follow-up
+              // ("why does Monday fall outside their hours?") is answered by
+              // QUOTING this instead of Sonnet converting the two zones herself.
+              attendee_hours_note?: string[];
             }>;
             unresolvedAttendees?: string[];
             attendeesNotChecked?: string[];
@@ -809,12 +860,31 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // instead of head-converting the owner-local time back to the foreign zone.
                 // Guard the empty-string parse-fail exactly like the present_in_timezone path.
                 const presentLocal = groundTz ? renderClockInZone(cand.start, timezone, groundTz) : '';
+                // gh#169 — same grounding gh#168-a computes for the bulk day_summary
+                // path (attendeeHoursGroundingNotes), applied to the sibling
+                // candidate_validation branch: a candidate rejected on
+                // outside_attendee_work_hours carries the blocked attendee's real
+                // hours converted into the owner's zone, so a follow-up ("why is
+                // that excluded?") is answered by quoting this instead of Sonnet
+                // inferring the conversion herself.
+                const brokenRuleKind = brokenRule?.includes(':') ? brokenRule.split(':')[0] : brokenRule;
+                const blockedEmail = brokenRule?.includes(':') ? brokenRule.slice(brokenRule.indexOf(':') + 1) : undefined;
+                const attendeeHoursNote = (brokenRuleKind === 'outside_attendee_work_hours' && blockedEmail)
+                  ? attendeeHoursGroundingNotes(
+                      [{ email: blockedEmail, slots_blocked: 1 }],
+                      cand.start.slice(0, 10),
+                      attendeeAvailability,
+                      timezone,
+                      ownerFirst,
+                    )
+                  : undefined;
                 return {
                   start: cand.start,
                   end: cand.end,
                   available: matches,
                   ...(presentLocal ? { presentation_local: presentLocal } : {}),
                   ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
+                  ...(attendeeHoursNote ? { attendee_hours_note: attendeeHoursNote } : {}),
                 };
               } catch (err) {
                 // D4 — `available:false` is a factual claim about his calendar
@@ -893,6 +963,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               category: args.category as string | undefined,
               diagnosticsOut,
             });
+            // gh#168-a — ground the day-level narration BEFORE any return branch
+            // below reads diagnosticsOut.daySummary (one enrichment, every exit
+            // path benefits — early-return, relaxed-recovery, and full success).
+            if (diagnosticsOut.daySummary) {
+              for (const day of diagnosticsOut.daySummary) {
+                if (day.top_reasons.includes('outside_attendee_work_hours')) {
+                  const notes = attendeeHoursGroundingNotes(day.blocked_by, day.date, attendeeAvailability, timezone, context.profile.user.name.split(' ')[0]);
+                  if (notes) day.attendee_hours_note = notes;
+                }
+              }
+            }
             // v3.0.3 — strict-pass log. Shows the effective args the low-level
             // function actually ran with, plus what came back. The crucial fields:
             // effectiveSearchFrom / search_to (after any internal clipping) and
