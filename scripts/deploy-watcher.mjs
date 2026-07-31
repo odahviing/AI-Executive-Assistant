@@ -77,11 +77,13 @@ function tick() {
     run(`git pull --ff-only origin ${BRANCH}`);
 
     if (depsChanged) {
-      log('dependencies changed — running npm ci (Chromium download skipped)');
-      // PUPPETEER_SKIP_*: WhatsApp/puppeteer is disabled, and the Chromium
-      // download fails on this small VM. Without skipping it, `npm ci` aborts and
-      // the whole deploy fails on any dependency change. Matches vm-setup.sh.
-      sh('npm ci', {
+      log('dependencies changed — running npm ci (dev deps included, Chromium skipped)');
+      // --include=dev: this watcher runs with NODE_ENV=production (ecosystem.config.js),
+      //   under which `npm ci` OMITS devDependencies — but the very next steps
+      //   (typecheck + build) need typescript + @types/*, so force them in.
+      // PUPPETEER_SKIP_*: WhatsApp/puppeteer is off and the Chromium download fails
+      //   on this small VM boot disk; without skipping it, `npm ci` aborts.
+      sh('npm ci --include=dev', {
         stdio: ['ignore', 'inherit', 'inherit'],
         env: { ...process.env, PUPPETEER_SKIP_DOWNLOAD: 'true', PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true' },
       });
