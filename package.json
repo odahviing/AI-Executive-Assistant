@@ -1,11 +1,11 @@
 {
   "name": "maelle",
-  "version": "4.3.8",
+  "version": "4.4.0",
   "description": "Executive Assistant Platform",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "deploy": "npm run build && pm2 restart maelle && pm2 logs maelle --lines 30",
+    "deploy": "echo 'Maelle runs on the GCP VM (maelle-agent-vm). Deploys are AUTOMATIC: git push to master and the VM watcher builds + restarts in ~2 min. Read logs with scripts/vm-logs.ps1. There is no local Maelle to restart.'",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only --project tsconfig.json src/index.ts",
     "typecheck": "tsc --noEmit",

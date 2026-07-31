@@ -12,7 +12,7 @@ Three consequences the old checklist did not have:
 - **Steps 12-13 are new and they are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
 - **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
-**One trap worth naming: `npm run deploy` ends in `pm2 logs`, which never exits and hangs the turn.** Run `npm run build`, then `pm2 restart maelle`, then read the boot stamp out of `logs/maelle-<today>.log`. The stamp's `gitSha` must equal **HEAD**, which is the *last* commit — if the wrap made a bookkeeping commit after the version commit, the stamp shows that one.
+**Deploy is now AUTOMATIC and REMOTE — there is no local restart.** Maelle runs on the GCP VM; after the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. Do NOT `npm run deploy` / `pm2 restart maelle` (no local Maelle exists — starting one = a second Slack socket). Confirm the deploy from the VM's boot stamp: `powershell -File scripts/vm-logs.ps1 "starting up" 6`. The stamp's `gitSha` must equal **HEAD** (the *last* commit — a bookkeeping commit after the version commit shows that one).
 
 **Timing:** not strictly end-of-day. Any time enough has accumulated to warrant a version bump. Typical shape: owner made bigger changes this session + auto-triage landed some bug fixes during the day → one wrap-up bundles both into a single version.
 

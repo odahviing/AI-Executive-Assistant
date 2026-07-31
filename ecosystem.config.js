@@ -6,8 +6,9 @@
 //   pm2 startup systemd          # prints a command — run it once (sudo) so PM2
 //                                # (and Maelle) come back after a reboot
 //
-// New code goes live automatically via `maelle-deploy-watcher` below, or manually
-// via `npm run deploy` (build → pm2 restart maelle → tail).
+// New code goes live AUTOMATICALLY via `maelle-deploy-watcher` below — push to
+// master and it pulls, builds, and restarts within ~2 min. There is no local
+// deploy (`npm run deploy` is a no-op notice); Maelle runs only on this VM.
 //
 // Two processes:
 //   • maelle                — the bot (compiled dist/index.js). ONE Slack Socket

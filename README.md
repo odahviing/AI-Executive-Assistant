@@ -207,7 +207,7 @@ npm run build && npm start    # production
 4. `node scripts/email-auth.mjs <profileName>` — signs in **as the mailbox**, writes a rotating refresh token under `data/` (gitignored). A delegated token belongs to whoever signs in, so signing in as the owner would point her at his own inbox.
 5. Recommended: `Set-Mailbox <her address> -RequireSenderAuthenticationEnabled $true`, so only authenticated tenant senders can reach her at all.
 
-PM2 (single fork-mode process) is configured in `ecosystem.config.js` for unattended operation; deploys are manual via `npm run deploy` (build → restart → tail logs). Startup logs a build stamp (version + git SHA) so `pm2 logs` shows which build is live.
+Maelle runs under PM2 on a GCP VM (single fork-mode process, `ecosystem.config.js`). Deploys are automatic: push to `master` and the VM's `maelle-deploy-watcher` pulls, builds, and restarts within ~2 min. Startup logs a build stamp (version + git SHA); read her live logs from the VM with `scripts/vm-logs.ps1`.
 
 ---
 

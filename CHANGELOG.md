@@ -2,6 +2,27 @@
 
 ---
 
+## 4.4.0 — she runs in the cloud now, and no longer goes dark when the laptop sleeps
+
+The move that was two weeks of discovery and one careful hour: Maelle lives on a GCP VM (`maelle-agent-vm`, europe-west4-b) under PM2, not on the owner's Windows laptop. She stopped being tied to whether the host was awake — one always-on process holds the single Slack socket, runs the in-process timers, and owns the SQLite file, on a 20G persistent disk that survives every restart and reboot. The cutover was a clean single-socket hand-off: stop local, checkpoint and copy the DB and config, start on the VM, verify the boot stamp and every row count against the baseline. Nothing was lost — people memory, open requests, prefs all came across intact.
+
+Deploys are now automatic and remote. A `git push` to master is the whole ritual: the VM's `maelle-deploy-watcher` polls, pulls, type-checks, builds, and restarts within ~2 minutes — never `pm2 reload` (that would open a second socket), and it leaves the running build untouched if the new one fails to compile. The bug the first real deploy surfaced: its `npm ci` tried to download Chromium (a puppeteer dependency of the dormant WhatsApp path) and choked on the small boot disk, so every deps-changing deploy failed safe — Maelle stayed up, but the code never advanced. Fixed by skipping the Chromium download and treating only a lockfile change as a real dependency change.
+
+Every doc that said "runs on the laptop / `npm run deploy` / restart locally" now says the truth: she runs in the cloud, deploys on push, and there is no local Maelle to restart (starting one is the `too_many_connections` footgun). Her logs moved with her — `scripts/vm-logs.ps1` reads them live off the VM; the local `logs/` dir is frozen at the cutover.
+
+### Changed
+- **Maelle runs on the GCP VM, not the laptop.** PM2 + `ecosystem.config.js` (two apps: `maelle` + `maelle-deploy-watcher`), on a 20G persistent disk, reboot-persistent via `pm2 startup systemd`. LLM on the Anthropic key for launch (Vertex is a later flip).
+- **Deploys are automatic on push** — the watcher pulls/builds/restarts. `npm run deploy` is now a no-op notice; the wrap flow no longer restarts a local Maelle. README, SESSION_STARTER, WRAP_UP, the wrap skill, the architecture memory, CLAUDE.md, and ecosystem all now say cloud.
+
+### Added
+- **`scripts/vm-logs.ps1` + `scripts/tail-logs.sh`** — read Maelle's live logs from the VM over IAP.
+- **`scripts/deploy-watcher.mjs`, `vm-setup.sh`, `checkpoint-db.cjs`, `vm-cutover.ps1`** — the auto-deploy poller, VM provisioner, DB-checkpoint helper, and cutover runbook.
+
+### Fixed
+- **VM auto-deploy** — `npm ci` skips the puppeteer Chromium download (WhatsApp is off; the download failed on the boot disk), and only a `package-lock.json` change triggers a reinstall, so a bare version bump no longer runs `npm ci`.
+
+---
+
 ## 4.3.8 — the requester gets her own invite, and every open bug ticket closes
 
 Five fixes, and the one that matters is small and was got wrong twice before it was got right. **The colleague who asks for a meeting was left off its invite** (gh#165) — because requester identity resolved to `undefined` on every path except the live colleague turn, including the **owner-approval replay**, which is the path the reported case actually took. The tool schema tells the model to *omit* `requester_slack_id` on the colleague path, so her identity was never in `args`, so no snapshot could carry it one hop later. The fix stamps it back onto `args` the moment it resolves. That single move also closes a second, worse bug found beside it: **a colleague who only relayed a message could receive a real calendar invite to a meeting she is not in**, because the scrub meant to remove her read the same absent identity.

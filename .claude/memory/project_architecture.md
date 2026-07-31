@@ -45,12 +45,12 @@ Architecture reference for Maelle **v3.0.5**. Living document of the four-layer 
 
 ## Runtime + deploy pipeline (v3.3.9)
 
-**Runs under PM2 on the owner's laptop.** ONE process in `ecosystem.config.js`:
+**Runs under PM2 on the GCP VM `maelle-agent-vm` (europe-west4-b), NOT the laptop** (cutover 2026-07-31). Two processes in `ecosystem.config.js`:
 
-- `maelle` — main bot, `dist/index.js`, `exec_mode: 'fork'` pinned (single stateful process: one Slack socket, in-memory dedup/queues, one SQLite — never cluster). Deploys are MANUAL: `npm run deploy` (build → `pm2 restart maelle` → tail logs). Startup logs a build stamp (version + git SHA) so `pm2 logs` shows which build is live.
-- `maelle-deploy-watcher` REMOVED (v3.3.9) — auto-triage is retired, the watcher had nothing to poll for. `scripts/deploy-watcher.mjs` orphaned on disk.
+- `maelle` — main bot, `dist/index.js`, `exec_mode: 'fork'` pinned (single stateful process: one Slack socket, in-memory dedup/queues, one SQLite — never cluster). Startup logs a build stamp (version + git SHA); read it via `scripts/vm-logs.ps1` to confirm which build is live.
+- `maelle-deploy-watcher` — polls origin/master every 120s and AUTO-DEPLOYS: `git pull --ff-only` → typecheck gate → build → `pm2 restart maelle`. A `git push` to master goes live in ~2 min. Its `npm ci` skips the puppeteer Chromium download (WhatsApp off; the download fails on the small VM boot disk).
 
-Startup flow (one-time): `npm i -g pm2 pm2-windows-startup` → `pm2 start ecosystem.config.js` → `pm2 save` → `pm2-startup install` (Windows auto-start on reboot).
+App + node_modules + SQLite + config live on a 20G persistent disk at `/mnt/disks/maelle` (repo at `/mnt/disks/maelle/app`; `data/` + `config/users` symlinked there). Reboot-persistent via `pm2 startup systemd`. Deploys are AUTOMATIC (push) — **NEVER `npm run deploy` / restart a local Maelle** (a second Slack socket = `too_many_connections`). SSH: `gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap`.
 
 **Auto-triage + auto-build (GitHub Actions, v1.8.2 propose-only flow):**
 

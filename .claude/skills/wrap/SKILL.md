@@ -68,28 +68,20 @@ gh issue comment <n> --body-file <tmp>.md
 
 naming what landed, what is still open, and why. Two things make a ticket partial: the verify's `ticketCoverage` says `partial`, or its numbered complaints outnumber the issues emitted for it. **Never close a row the verify overturned**, and never close one he has not decided. If a ticket has several findings and only some shipped, leave it open and say which parts landed — a half-fixed issue that reads as closed is worse than one still open.
 
-## Restarting — and why not `npm run deploy`
+## Restarting — the VM auto-deploys; NEVER restart locally
 
-`npm run deploy` is `build && pm2 restart && pm2 logs`, and **the log tail never exits**, so it hangs the turn. Run the two halves and read the stamp from the file instead:
+Maelle runs on the GCP VM `maelle-agent-vm`, **not this machine**. After the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. **Do NOT run `npm run deploy` / `pm2 restart maelle` here** — there is no local Maelle, and starting one opens a second Slack socket (`too_many_connections`).
 
-```bash
-npm run build
-```
+Confirm the deploy landed by reading the VM's boot stamp (give it ~2 min after the push):
 
 ```bash
-pm2 restart maelle
+powershell -File scripts/vm-logs.ps1 "starting up" 6
 ```
 
-Then confirm from the log, not from the PM2 table:
-
-```bash
-grep -n "starting up" logs/maelle-$(date +%Y-%m-%d).log | tail -2
-```
-
-- **The `gitSha` must equal HEAD — which is the LAST commit, including the bookkeeping commit.** If the wrap made two commits, the stamp shows the second. Quoting the first is wrong (done once, 2026-07-30).
-- Check the boot completed: database ready, connection registered, **Slack connected**, email registered if enabled.
-- **Exactly ONE Slack socket.** Two Maelle processes on the same app give `too_many_connections`.
-- Confirm zero errors: `grep -c '"level":"error"' logs/error-$(date +%Y-%m-%d).log`
+- **The `gitSha` must equal HEAD** — the LAST commit (including any bookkeeping commit). If the wrap made two commits, the stamp shows the second.
+- If the sha is still old after ~3 min, check the watcher: `gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap --command "pm2 logs maelle-deploy-watcher --lines 20 --nostream"`.
+- **Exactly ONE Slack socket** — the VM holds it; never start a local Maelle.
+- Errors since the restart: `powershell -File scripts/vm-logs.ps1 error 40`
 
 ## The summary — verified against shipped
 
