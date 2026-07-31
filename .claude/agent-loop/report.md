@@ -2,7 +2,7 @@
 
 **Empty — v4.3.5 wrapped, pushed, and deployed. Nothing in this table awaits you.**
 
-That is not the same claim as nothing is owed. The standing backlog is **56 open rows** (35 confirmed, 14 needing a re-read, 7 citing no file) — `node scripts/ledger-stats.cjs --open`. This file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended to the ledger.
+That is not the same claim as nothing is owed. The standing backlog is **56 open rows** (32 confirmed, 17 needing a re-read, 7 citing no file) — `node scripts/ledger-stats.cjs --open`. This file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended to the ledger.
 
 ## What shipped, and what of it was verified
 

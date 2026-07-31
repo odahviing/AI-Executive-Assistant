@@ -2,7 +2,7 @@
 /**
  * check-syntax — the ONLY real syntax check for the framework's own files.
  *
- * WHY THIS EXISTS (A28). `node --check .claude/workflows/bugger.js` exits 0 on a
+ * WHY THIS EXISTS (X28). `node --check .claude/workflows/bugger.js` exits 0 on a
  * file with a deliberate `const x = {,}` in it. Node v20 sees ESM syntax in a
  * `.js` file and declines to parse it as a script rather than parsing it as a
  * module — so the check reports success having verified nothing. Identical bytes
@@ -23,7 +23,7 @@
  * these files non-strict, and matching the real runtime is the point. A parse
  * that is stricter than the runtime invents failures.
  *
- * THE CANARY IS THE POINT, and it runs per file, not once. A28's lesson is that
+ * THE CANARY IS THE POINT, and it runs per file, not once. X28's lesson is that
  * whether a check is real depends on the file's own shape, so for every file
  * checked this appends a known-broken line to the SAME bytes and requires the
  * parse to FAIL. If a canary ever passes, this script exits 2 and says the check
@@ -109,4 +109,4 @@ if (failed) {
   process.exit(1)
 }
 console.log(`\n${files.length} file(s) parse, and each one's canary failed as it must.`)
-console.log(`Do NOT use \`node --check\` on a workflow engine — it exits 0 without parsing (A28).\n`)
+console.log(`Do NOT use \`node --check\` on a workflow engine — it exits 0 without parsing (X28).\n`)

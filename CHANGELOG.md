@@ -2,6 +2,46 @@
 
 ---
 
+## 4.3.6 — the loop could find and fix; it could not let him rule
+
+**No product change. Nothing in `src/`.** This is the framework, and it exists because of one question: *"If I can't approve or reject them the process is broken."*
+
+Fifty-six findings sat open. Four of them were deferrals he had made. The rest were things the loop had found and never turned into a question — **only 14 of 488 ledger lines contained the word *recommend***, because a recommendation lives in the report and the wrap empties the report. So after every wrap, fifty findings survived in a form nobody could act on. The backlog was never a decision queue; it was the residue of everything discovered and not built.
+
+Underneath that, a naming collision the whole framework had been working around: `A5` meant both a charter rule and a ledger row, in the same paragraph, on the same day.
+
+### Fixed — a finding you cannot answer no longer exists
+- **Five verbs and nothing else**: build · decline · defer · resend · **convert**. Every open row is one of them away from closed. `flagged-for-owner` — 17 rows in a verdict that sounded like the owner's and was really a note to a future agent — is retired to `queued-next-run`, which drains itself.
+- **The recommendation survives the wrap.** It is what makes a row rulable, and it now lives on the ledger row rather than only in the file that gets emptied. Proven by execution: three real `flagged-for-owner` rows read `0 of 3 carry a recommendation`, and after only the lines the new wrap step writes, `3 of 3` — with the report playing no part in the read.
+- **`--report` exits 1** on any pending row carrying no recommendation, so a report that cannot be ruled on cannot be rendered. `convert` joins the command menu after six uses and full documentation, invisible until now on the surface where a verb is chosen.
+- **The backlog pass writes a recommendation onto every stale row it re-reads**, which is how the standing fifty-six drains through passes that already run.
+
+### Fixed — one letter, one meaning
+- **The framework ledger moved from `A` to `X`.** 385 tokens across nine files, driven from a protect-list that asserted each entry was hit exactly once. Charter rules keep `A`; every one of the 33 ambiguous references was read individually rather than swept. Bug rows take a source prefix in the shape already in use — `gh#` · `l#` · `o#` — where a GitHub row carries the ticket's own number and never touches the report counter.
+- **Duplicates merge and release their number.** Four folded; the ledger runs `X1`–`X78` with no gaps, because the two rows filed after the merge took the freed ids instead of the next ones. A new `--duplicate` writer rewrites every reference first and **refuses while one still stands** — a code gate over 95 files, proven against known-bad input.
+- A closing verdict for a row the architect **disproved itself** (`--refuted`), held to the same evidence bar as a build, because a decline is the owner's ruling and a refutation has nothing behind it but the measurement.
+
+### Fixed — mechanisms that reported success while doing nothing
+- **`already-fixed` never reached the verify** — the one verdict that closes a row on a lane's own word was the one bucket nothing checked, and a severity-high row closed that way. Both engines now send them for a spot-check.
+- A lane resumed to close out a dependency **claimed another lane's change as its own** `built`, so the verify was handed three rows for two changes.
+- The ticket-coverage warning **never subtracted the scout's own drop lists**, so it named seven tickets as incomplete when the drops were legitimate.
+- A verify **discovery had no currency gate** — the night's headline finding turned out to have been fixed at HEAD two releases earlier. Discoveries now cite the line as it stands today.
+- **The Manager skill contradicted itself on resume**: the run procedure said resume an incomplete run, the hard rules said never auto-resume. The wrong instruction was the one on the hot path, and two dead runs were sitting in state.
+
+### Changed
+- A number bounding a duration must arrive with an observed figure or an explicit "never measured" — the news budget had gone 20s → 8s → 14s across three waves with no path ever timed.
+- `ledger-stats --wrap <version>` answers *what shipped in this release*, which nothing could do before, so wrap counts were hand-typed.
+- A dead run is visible: `spend --runs` separates a run that **died whole** from one that **lost an agent and returned**.
+
+### Not changed
+- **The log-avoidance clause in the dispatch prompt**, proposed as the single most expensive line in the file and then **withdrawn on measurement by the agent that raised it**: one build lane opens the logs every run, five runs for five, always the one holding a timing question.
+- The duplicate-detector threshold, and the measurement inverts its own premise — the comment keeps a loose setting to preserve one catch that the shipped setting **has already lost**, because the relative rarity ceiling rises with the ledger. Left as an owner decision with the recall table beside it.
+
+### Migration
+None. No schema change and no `src/` change.
+
+---
+
 ## 4.3.5 — one ternary of real code; the rest was Maelle being told things that were not true
 
 Six product fixes, and **the only executable change in the entire release is a single ternary** in `briefs.ts`. Everything else is prompt and description text — because that is where the bugs were. Four of the six are the same defect wearing different clothes: **the text Maelle is given contradicted the code it describes.**

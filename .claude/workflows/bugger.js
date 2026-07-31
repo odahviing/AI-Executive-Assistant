@@ -79,18 +79,18 @@ const presetArg = asArray('issues', A.issues, true) // critical: the silent defa
 const sourcesArg = asArray('sources', A.sources)
 // A discovery run does ALL THREE. Owner, 2026-07-30: *"put backlog in every run"* —
 // new bugs and old bugs all need resolving and the difference between them is
-// bookkeeping. What makes it affordable is A38's staleness marking: only the rows
+// bookkeeping. What makes it affordable is X38's staleness marking: only the rows
 // whose code has MOVED need re-reading, so the set is small by construction, and a
 // re-read produces a closure or a confirmation rather than a decision.
 // Empty on a preset: `args.issues` skips the scout, so a source named there could
 // only be a source that never ran.
 const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['github', 'logs', 'backlog']
-// ── A42 · THE THIRD INPUT ────────────────────────────────────────────────────
+// ── X42 · THE THIRD INPUT ────────────────────────────────────────────────────
 // Owner, 2026-07-30: *"its make sense that the input can be github/logs or just
 // reports overview, isnt it smarter."* The engine had three possible inputs and two
 // were wired. GitHub is what he filed, logs are what she did, and the BACKLOG is
 // what we already know and have not settled — the largest of the three (52 open
-// rows, 28 of them flagged RE-READ once A59 widened the trigger from *the code
+// rows, 28 of them flagged RE-READ once X59 widened the trigger from *the code
 // moved* to *nobody has ever looked*) and the only one with no door. So the
 // input that needs the funnel most was the one worked by hand, and a hand pass gets
 // no scout, no counts, no manifest, no `inFlight` and no report persistence.
@@ -128,7 +128,7 @@ const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
 const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — log files are named by local date
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
-// A42 · `sources` and `issues` are different doors, and `backlog` must never be
+// X42 · `sources` and `issues` are different doors, and `backlog` must never be
 // passed through both: a preset SKIPS the scout, so the re-read would never run
 // while `manifest.backlog` reported a backlog pass with zero rows — a mechanism
 // that did nothing and looked like success. Refused before anything spawns. Only
@@ -155,7 +155,7 @@ const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
 // next deploy. Without this list a settled decision comes back every night as a
 // fresh bug, which is the failure that re-raised 24 of his rulings on 2026-07-26.
 //
-// A51 · a `deferred` row is NOT one of these and must never be passed here. His
+// X51 · a `deferred` row is NOT one of these and must never be passed here. His
 // ruling, 2026-07-30: *"defer for tomorrow or anything like this means defer to
 // next run — the only thing we need is don't do it now."* A deferral is a ONE-RUN
 // skip, and since the ledger is only appended during and after a run, every
@@ -179,7 +179,7 @@ if (openKnownDeferred.length)
       .map((o) => o.ref || '(no ref)')
       .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the scout must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
   )
-// A22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
+// X22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
 // groups nothing and the writer produces noise, which is the decoration A5 forbids.
 // No new arg for it: both lists above are already derived from `ledger.jsonl`, so
@@ -187,9 +187,9 @@ if (openKnownDeferred.length)
 // run that passes neither, and then the lanes coin new slugs — correct, that is how
 // a first one gets created.
 const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) => r && r.invariant).filter(Boolean))]
-// ── A43 · THE READER FOR `state.pendingOverflow` ─────────────────────────────
+// ── X43 · THE READER FOR `state.pendingOverflow` ─────────────────────────────
 // The field was WRITE-ONLY. `grep pendingOverflow` returned SKILL.md:67, :231,
-// :385, :391 and state.json:20 — and nothing in either engine. A30 then made it
+// :385, :391 and state.json:20 — and nothing in either engine. X30 then made it
 // LOAD-BEARING: every verify discovery now routes ledger row → `pendingOverflow` →
 // the head of the next build, so the one link with no mechanism behind it became
 // the link the whole route depends on. A documented read is an instruction, and
@@ -203,7 +203,7 @@ const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) =
 // The drop is `openKnown` — the same list the scout drops against — because the one
 // thing this route must never do is re-dispatch something he parked or declined.
 //
-// A46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
+// X46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
 // never drained on. Most of his rulings are executed as a single direct `Agent`
 // dispatch (SKILL.md, the one-lane branch of `build`), where no engine runs, so
 // nothing there could read this field or delete an entry: an item carried once,
@@ -232,11 +232,11 @@ if (carriedBuilt.length)
       .map((i) => i.id || i.ref || '(no id)')
       .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
   )
-// A25's guard reads the MERGED list below, so a carried row still flagged
+// X25's guard reads the MERGED list below, so a carried row still flagged
 // `awaitingOwner` is refused exactly like a pasted one.
 const PRESET = presetArg.length ? [...carriedIn, ...presetArg] : null
 if (carriedIn.length) log(`Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`)
-// A25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
+// X25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
 // shaped for a copy-paste straight back into `args.issues` — that is the whole
 // point of the shape — so the flag that says "he has not ruled on the parent yet"
 // has to be enforced at the door it makes easy to walk through. Building one of
@@ -306,14 +306,14 @@ const SCOUT = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you. A51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you. X51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
     },
     droppedAsAlreadyBuilt: {
       type: 'array',
       items: { type: 'string' },
       description: 'the ref or symptom of every finding you dropped because it is already fixed. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
     },
-    // A32 + A33 · ONE field for both halves of the ticket problem, because both
+    // X32 + X33 · ONE field for both halves of the ticket problem, because both
     // are invisible in the same way. gh#156 carried three numbered complaints and
     // one issue came back; gh#158 carried three and one came back. Neither was a
     // drop — `droppedAsOpenKnown` was gh#155/gh#154 only and `droppedAsAlreadyBuilt`
@@ -336,7 +336,7 @@ const SCOUT = {
         required: ['ref', 'complaintsFound', 'issuesEmitted'],
       },
     },
-    // A42 · the backlog re-read. Its product is FEWER rows on his desk, so the two
+    // X42 · the backlog re-read. Its product is FEWER rows on his desk, so the two
     // numbers that matter are how many stale rows the list held and how many were
     // actually examined — a pass that reached 8 of 22 must not read like a finished
     // one, which is the `ticketComplaints` lesson applied to the third intake.
@@ -344,7 +344,7 @@ const SCOUT = {
       type: 'number',
       description: 'how many rows `ledger-stats --open` printed with the RE-READ prefix. 0 only when it printed none. Backlog runs only.',
     },
-    // A47 · the rows no pass can ever reach. `--open` names them under "cite no
+    // X47 · the rows no pass can ever reach. `--open` names them under "cite no
     // file"; without this number `reread: 22 of 22` reads as a finished backlog
     // while a third of it was never checkable at all.
     backlogNoCite: {
@@ -370,8 +370,20 @@ const SCOUT = {
               'what you READ. For `fixed`: the commit that removed it (`git log -1 --format=%h -- <file>`) or the code that now handles the case. A bare "already fixed" is a FALSE CLOSE — a restructured file looks fixed when the defect has only moved, and once a row is closed nothing looks again.',
           },
           whereNow: { type: 'string', description: '`moved` only: the current `file:line`. This is what stops the row being flagged stale again tomorrow.' },
+          // X77 · THE FIELD THAT MAKES A ROW RULABLE, written by the only pass that
+          // reads the code without building anything. His invariant: every open row
+          // is one of five verbs away from closed, and a row none of them can act on
+          // must not exist. 56 open rows carried no recommendation on 2026-07-31
+          // because the recommendation lived in `report.md` and the wrap empties it.
+          // This is the drain — a re-read is already opening the file, so naming the
+          // verb costs one clause and clears the row for good.
+          recommend: {
+            type: 'string',
+            description:
+              'REQUIRED on `still-real` and `moved`; write `fixed — no action` on a `fixed` row. One of his five verbs and ONE clause of why: `build — <why now>` · `decline — <why never>` · `defer — <what it waits on>` · `resend — <what the lane got wrong>` · `convert — <the design question>`. He rules on this sentence; without it he has to read the whole finding to rule at all.',
+          },
         },
-        required: ['ref', 'state', 'evidence'],
+        required: ['ref', 'state', 'evidence', 'recommend'],
       },
     },
     issues: {
@@ -439,12 +451,22 @@ const VERDICTS = {
         type: 'object',
         properties: {
           id: { type: 'string' },
+          // X66 · `confirmed-other-lane` — the row is DONE, and you are not the
+          // one who did it. A lane resumed to close out a dependency returned
+          // `built` for a change gatekeeper had made (wf_0cebe938-c81, shepherd
+          // a2602ac7: 21 turns, 13 tools, ZERO edits, fix text opening "Not built
+          // by me"), so the verify was handed 3 rows for 2 changes and spent a
+          // result saying so, and the Manager typed the de-duplication into
+          // state.json by hand. Use it whenever you did not edit a file: it does
+          // not reach the verify, it is not counted as a fix, and it still closes
+          // the dependency. Claiming someone else's work as `built` inflates every
+          // count downstream.
           verdict: {
             type: 'string',
-            enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
+            enum: ['built', 'confirmed-other-lane', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
           },
           rootCause: { type: 'string', description: 'file:line — proven, not guessed' },
-          // A22 · THE COMPLEMENT TO `rootCause`, and until now it had a reader and
+          // X22 · THE COMPLEMENT TO `rootCause`, and until now it had a reader and
           // no writer. `rootCause` answers "is this the same BUG"; nothing answered
           // "is this the same RULE", so one principle broken in three files read as
           // three unrelated findings and the chat reading them proposed three
@@ -513,7 +535,7 @@ const VERIFY_OUT = {
     //
     // So a discovery is REPORTED, never built in-wave. It is next run's INTAKE —
     // shaped to drop straight into `args.issues`, and it does NOT go on the
-    // owner's decide list (A30, his words: "if i do want to fix discoveries, its
+    // owner's decide list (X30, his words: "if i do want to fix discoveries, its
     // not blocker, its bonus"). `lane` and `severity` are REQUIRED for exactly
     // that reason: an item that is going to be dispatched as intake has to be
     // routable and rankable, and severity has to survive the trip because
@@ -525,10 +547,20 @@ const VERIFY_OUT = {
         type: 'object',
         properties: {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
-          evidence: { type: 'string', description: 'file:line, REQUIRED' },
+          // X65 · AT HEAD, and that word is the whole field. A discovery is the
+          // only claim in this loop nothing checks for currency: on
+          // wf_0cebe938-c81 the night's headline HIGH discovery was already fixed
+          // at HEAD by 4.3.2, and the pass that raised it had 17 log reads and
+          // zero reads of the current file. A log line proves the symptom
+          // happened; only the file proves it still would.
+          evidence: {
+            type: 'string',
+            description:
+              'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
+          },
           lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
-          // A22 · a DISCOVERY is the highest-value place for this tag and the only
+          // X22 · a DISCOVERY is the highest-value place for this tag and the only
           // one where it was ever set: you read the whole diff, so you are the pass
           // most likely to see one principle broken in three files. All three slugs
           // in the ledger were typed by hand onto discovery rows in wf_33541300-121.
@@ -585,7 +617,7 @@ const WHERE_NOTE =
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
-// A22 · Named in the dispatch, not left to the schema description alone: the slug
+// X22 · Named in the dispatch, not left to the schema description alone: the slug
 // only groups if it is reused verbatim, and a lane cannot reuse a vocabulary it
 // has never been shown. Printed only when there IS one, so a run with no history
 // does not carry an empty instruction.
@@ -594,9 +626,25 @@ const INVARIANT_NOTE = KNOWN_INVARIANTS.length
     `If it is an instance of a general rule NOT in that list, coin one short slug and use it for every issue in this batch that breaks the same rule. Leave it out for a genuinely local bug.`
   : ''
 
+// X73 · A NUMBER THAT BOUNDS A DURATION IS THE ONE FIX THAT CANNOT BE SETTLED
+// FROM THE CODE. gh#166's news budget went 20s → 8s → 14s across three runs and
+// nobody ever timed the path: the outrider dispatch that changed it made ZERO
+// log accesses in 17 turns on an issue whose entire content is a duration, and
+// the verify escalated it saying verbatim that it had not measured a real
+// on-demand gather either. So the third number was a guess dressed as a fix.
+//
+// This is NOT a widening of the log clause above — measured across five
+// consecutive runs, exactly one build lane per run opens the logs, always the
+// one holding a timing question, so the clause is not what suppresses this. It
+// is one extra thing to CARRY on the narrow class where the code cannot answer,
+// and `needs-owner-decision` already exists for the honest negative.
+const TIMEOUT_NOTE =
+  `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at logs/maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
+  `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
+
 const dispatch = (lane, issues) =>
   agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
     // hand-dispatched lane gets it too. Setting it in the engine only made it
     // true on the engine path, which is the shape of failure this framework
@@ -619,7 +667,11 @@ const dispatch = (lane, issues) =>
 // prompt-guidance gap that materially strengthened the fix it belonged to, and
 // the verify's own prescription for a harm it had just proved. All four looked
 // like success in the report because their parent issues said `built`.
-const DISPATCHABLE_DEP = new Set(['built', 'needs-dependency', 'already-fixed'])
+const DISPATCHABLE_DEP = new Set(['built', 'confirmed-other-lane', 'needs-dependency', 'already-fixed'])
+// X66 · a dep row is DELIVERED whether the lane built it or confirmed another
+// lane had. Without this the new verdict would leave the originator looking
+// blocked on a dependency that actually landed.
+const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 const depAsksFor = (lane, rs) =>
   rs
@@ -632,11 +684,11 @@ const depAsksFor = (lane, rs) =>
 // RETURNED rather than executed — which is the actual fix here. The bug was
 // never that they went undispatched; it was that they went unmentioned.
 //
-// A25 · The SHAPE now matches `depAsksFor` above, field for field. It did not, and
+// X25 · The SHAPE now matches `depAsksFor` above, field for field. It did not, and
 // that was the whole remaining defect: `{from, fromVerdict, lane, ask}` has no `id`,
 // no `severity`, no `clarity`, and `ask` where the engine reads `symptom` — so the
 // Manager had to recompose every one by hand into `args.issues`. That is the
-// compose-instead-of-copy failure A16 exists to remove.
+// compose-instead-of-copy failure X16 exists to remove.
 //
 // `awaitingOwner` travels WITH the row rather than living only in the array's name,
 // because the array name does not survive a copy-paste. Nothing in this engine
@@ -710,7 +762,7 @@ const scout = await agent(
       : '') +
     (BACKLOG
       ? `## The backlog re-read\n\n` +
-        `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — nobody has stood behind those rows: either the code they cite **moved** after they were written, or **nobody has ever re-read them** (A59, and that second reason is the large half — 28 of 52 on 2026-07-30 against 0 that had moved). **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
+        `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — nobody has stood behind those rows: either the code they cite **moved** after they were written, or **nobody has ever re-read them** (X59, and that second reason is the large half — 28 of 52 on 2026-07-30 against 0 that had moved). **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
@@ -771,12 +823,31 @@ if (misrouted.length) {
 // does not fail loudly: it ping-pongs, burns the night, and still lands on his
 // desk needing judgement, which is the most expensive possible order.
 // A PRESET item is exempt — he has already approved that routing by naming it.
-const needsShaping = PRESET ? [] : allIssues.filter((i) => i.kind === 'needs-shaping' && i.clarity === 'clear')
-const flagged = allIssues.filter((i) => i.clarity === 'ambiguous')
-let buildable = allIssues.filter((i) => i.clarity === 'clear' && !needsShaping.includes(i))
+// X63 · `kind` DECIDES THE BUCKET; `clarity` is a property of the item, not a
+// gate on it. The two are not orthogonal in practice — a scout that judges an
+// item undecidable marks it `ambiguous` AND `needs-shaping` — so requiring
+// `clear` here put all five of wf_27f03aca-0dd's needs-shaping items in
+// `flagged`, and `mustAlsoAppear.needsShaping` reported 0 on a run where five
+// needed him. The one sentence he must answer reached no surface.
+//
+// X70 · and a `needs-shaping` item with NO `shapingQuestion` is not a decision,
+// it is an un-triaged row. Three of those same five carried none and their
+// `whyHypothesis` read "nobody has looked at the code yet". Both go to him
+// either way — but SEPARATED and named, so a ruling is visibly a ruling and
+// homework is visibly homework. gh#164 came back needs-shaping on two
+// consecutive runs, still unexamined, because nothing told them apart.
+const shapingAll = PRESET ? [] : allIssues.filter((i) => i.kind === 'needs-shaping')
+const needsShaping = shapingAll.filter((i) => String(i.shapingQuestion || '').trim().length >= 15)
+const unshaped = shapingAll.filter((i) => !needsShaping.includes(i))
+const flagged = allIssues.filter((i) => i.clarity === 'ambiguous' && !shapingAll.includes(i))
+let buildable = allIssues.filter((i) => i.clarity === 'clear' && !shapingAll.includes(i))
 if (needsShaping.length) {
   log(`${needsShaping.length} item(s) need SHAPING before anyone builds — not dispatched:`)
-  needsShaping.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${i.shapingQuestion || i.symptom}`))
+  needsShaping.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${i.shapingQuestion}`))
+}
+if (unshaped.length) {
+  log(`! ${unshaped.length} needs-shaping item(s) carry NO shapingQuestion — nobody has read the code yet, so these are homework, not decisions:`)
+  unshaped.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${(i.symptom || '').slice(0, 90)}`))
 }
 
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
@@ -785,9 +856,13 @@ buildable.sort((a, b) => (RANK[a.severity] ?? 3) - (RANK[b.severity] ?? 3))
 const pending = buildable.slice(CAP)
 buildable = buildable.slice(0, CAP)
 if (pending.length) log(`Cap ${CAP}: ${pending.length} lower-severity issues deferred to next run.`)
-log(`Queue: ${buildable.length} clear to build, ${flagged.length} flagged for owner, ${pending.length} pending.`)
+// X77 · `flagged-for-owner` was a LEDGER VERDICT as well, meaning the opposite of
+// this — a verify discovery that is explicitly NOT for him. That verdict is now
+// `queued-next-run`, and these rows keep the state they always had: ambiguous
+// intake, genuinely his, and they reach him as `pending owner` report rows.
+log(`Queue: ${buildable.length} clear to build, ${flagged.length} ambiguous for owner, ${pending.length} pending.`)
 buildable.forEach((i) => log(`  • build [${i.lane}/${i.severity}] ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
-flagged.forEach((i) => log(`  • flagged-for-owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
+flagged.forEach((i) => log(`  • ambiguous — pending owner ${i.id} — ${(i.symptom || '').slice(0, 90)}`))
 
 // ---- 2c. COLLECT mode stops here — found and recorded, nothing built ----
 // Reached ONLY when the owner explicitly asked for findings without work. The
@@ -798,7 +873,7 @@ if (MODE === 'collect') {
   log(`Collect mode: ${buildable.length} issue(s) recorded, ${flagged.length} flagged. NOTHING built — the owner batches these when he is back.`)
   return {
     mode: 'collect',
-    // A24 · THE SAME KEY SET as the full-run funnel at the bottom of this file, and
+    // X24 · THE SAME KEY SET as the full-run funnel at the bottom of this file, and
     // this is the path that needs it MOST: it is the one mode that builds nothing by
     // design, so `built: 0` here is a CORRECT zero and must be legible as one. The old
     // literal had six keys against the full run's ten, so the two modes could not be
@@ -813,6 +888,7 @@ if (MODE === 'collect') {
       built: 0,
       alreadyFixed: 0,
       needsShaping: needsShaping.length,
+      needsShapingUnexamined: unshaped.length, // X70 · needs-shaping with no question — homework, not a decision
       flagged: flagged.length,
       needsOwner: 0,
       pending: pending.length,
@@ -820,12 +896,13 @@ if (MODE === 'collect') {
     results: [],
     collected: buildable, // pass straight back as `args.issues` to build them
     flagged,
+    unshaped,
     // The over-cap rows, not `[]`. They were computed above and then dropped from
     // BOTH the return and the count, so a capped collect run silently lost them —
     // and a funnel that names a number while withholding its rows is a worse lie
     // than the zero it replaced.
     pending,
-    // A42 · a collect run over the backlog would otherwise drop the only thing it
+    // X42 · a collect run over the backlog would otherwise drop the only thing it
     // produced, since this return happens before the manifest is built.
     backlogReread,
     verifiedClean: [],
@@ -928,7 +1005,7 @@ while (queue.length && rounds < MAX_ROUNDS) {
   // wave read as blocked.
   const satisfied = new Map()
   for (const r of results) {
-    if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
+    if (DELIVERED_DEP.has(r.verdict) && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
   }
   const resumes = results
     .filter((r) => r.verdict === 'needs-dependency' && satisfied.has(r.id) && !resumedIds.has(r.id))
@@ -996,10 +1073,19 @@ let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
 let ticketCoverage = []
+let spotCheckUnanswered = [] // X68 · already-fixed rows the verify never answered on
 if (VERIFY) {
   const built = results.filter((r) => r.verdict === 'built')
+  // X68 · `already-fixed` is the one bucket that CLOSES a row on a lane's own
+  // word, and it was the one bucket the verify never saw — the payload was
+  // `built` only. On wf_27f03aca-0dd a severity-HIGH row
+  // (gh#158-availability-asserted-unsearched) closed that way with `filesTouched`
+  // empty and nobody checked it. The lane's evidence there was good, which is the
+  // point: nothing distinguished it from a bad one. These are SPOT-CHECKED, not
+  // re-verified — one read of the cited code each, no trace, no budget.
+  const claimedFixed = results.filter((r) => r.verdict === 'already-fixed')
   verifyAttempted = built.length
-  if (built.length) {
+  if (built.length || claimedFixed.length) {
     // Two things are forwarded so nothing is derived twice:
     //   • each fix's own `traced` — what the builder already walked, so the
     //     verifier attacks the GAPS instead of re-covering covered ground.
@@ -1052,7 +1138,17 @@ if (VERIFY) {
         (queue.length
           ? `**THIS WAVE IS NOT FINISHED.** The dependency loop hit its ${MAX_ROUNDS}-round cap with ${queue.length} item(s) still owed: ${queue.map((i) => `${i.id}→${i.lane}`).join(', ')}. Verify what IS here, and open your return by saying plainly that the wave was truncated and which lanes still owe work — the owner must not read this as a finished pass.\n\n`
           : `The dependency loop closed cleanly in ${rounds} round(s) with nothing owed, so this wave is complete.\n\n`) +
-        `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}`,
+        // X68 · ONE LINE, not a second pass. The cost of a spot-check is one file
+        // read per row; the cost of skipping it is a high-severity row closed on
+        // an unchecked claim, which is what happened.
+        (claimedFixed.length
+          ? `**SPOT-CHECK — ${claimedFixed.length} row(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually fixed at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(
+              claimedFixed,
+              null,
+              2,
+            )}\n\n`
+          : '') +
+        (built.length ? `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}` : `**NO FIX WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
       // No `model` here either — `verifier.md` pins Opus. Same reasoning as the
       // lanes, one rung stronger: this is the single highest-judgment step, the
       // only pass that sees the whole diff, and the backstop for Sonnet lanes'
@@ -1073,7 +1169,7 @@ if (VERIFY) {
     // wf_6b869440-ef7 to the one finding that mattered most. The verify runs
     // last so its asks cannot be dispatched in this run — they must be reported.
     //
-    // A25 · SAME LITERAL as `deferredDepAsks` above, field for field. It was the
+    // X25 · SAME LITERAL as `deferredDepAsks` above, field for field. It was the
     // old four-key shape, and `deferredNow` below CONCATENATES the two arrays — so
     // one heterogeneous list went to the Manager, and a verify-raised row pasted
     // into `args.issues` carried no `clarity`, joined neither `flagged` nor
@@ -1092,11 +1188,20 @@ if (VERIFY) {
         awaitingOwner: true,
         fromVerify: true,
       }))
+    // X68 · ONE map for both populations, keyed on what each row CLAIMED. A `built`
+    // row the verify does not call `built` is an overturn, as before; an
+    // `already-fixed` row the verify does not call `already-fixed` is the lane
+    // having closed a live bug on its own word. Keying on the claim also fixes a
+    // latent bug in the old line: it flipped ANY non-`built` result, so a
+    // spot-check answering `already-fixed` would have been read as an overturn.
+    const claimed = new Map([...built.map((r) => [r.id, 'built']), ...claimedFixed.map((r) => [r.id, 'already-fixed'])])
     const overturned = new Map(
       ((check && check.results) || [])
-        .filter((x) => x.verdict && x.verdict !== 'built')
+        .filter((x) => x.verdict && claimed.has(x.id) && x.verdict !== claimed.get(x.id))
         .map((x) => [x.id, x.notes || '']),
     )
+    const answered = new Set(((check && check.results) || []).map((x) => x && x.id))
+    spotCheckUnanswered = claimedFixed.filter((r) => !answered.has(r.id)).map((r) => r.id)
     verified = results.map((r) =>
       overturned.has(r.id)
         ? {
@@ -1127,12 +1232,14 @@ const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks]
 // left it could never fire. The counter was broken in the one direction that
 // hides the failure it exists to catch.
 const allDepAsks = asksMinted.size + deferredNow.length
-// Moved above the manifest so the decision budget can count it (A31); `persist`
+// Moved above the manifest so the decision budget can count it (X31); `persist`
 // below reuses the same list rather than recomputing it.
+// X66 · `confirmed-other-lane` is DONE, so it never lands on his desk — it is
+// excluded here for the same reason `already-fixed` is.
 const notBuilt = verified
-  .filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed')
+  .filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed' && r.verdict !== 'confirmed-other-lane')
   .map((r) => ({ id: r.id, verdict: r.verdict, lane: (specById.get(r.id) || {}).lane || '', why: r.notes || r.fix || '' }))
-// ---- A31 · THE DECISION BUDGET -------------------------------------------
+// ---- X31 · THE DECISION BUDGET -------------------------------------------
 // `capBuilds` caps BUILDS and nothing capped DECISIONS, yet decisions are the
 // scarce resource: they are the only step that cannot be parallelised, batched or
 // delegated, because there is one owner. Measured refs-on-his-desk per engine run
@@ -1150,12 +1257,12 @@ const notBuilt = verified
 // unrelated rows to stay under a budget is worse than 25 honest rows.
 const DECISION_BUDGET = typeof A.capDecisions === 'number' ? A.capDecisions : 12
 const onHisDesk =
-  notBuilt.length + deferredNow.length + needsShaping.length + flagged.length + pending.length + ticketCoverage.filter((t) => t.state !== 'satisfied').length
+  notBuilt.length + deferredNow.length + needsShaping.length + unshaped.length + flagged.length + pending.length + ticketCoverage.filter((t) => t.state !== 'satisfied').length
 const manifest = {
   mode: MODE,
   preset: !!PRESET,
-  // A31 · the one number that predicts whether he can close the run tonight.
-  // `discoveries` is deliberately NOT counted: since A30 they are the next run's
+  // X31 · the one number that predicts whether he can close the run tonight.
+  // `discoveries` is deliberately NOT counted: since X30 they are the next run's
   // intake rather than a row on his desk, which is what brings a night like
   // 2026-07-29 back under budget without dropping anything.
   decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
@@ -1174,10 +1281,10 @@ const manifest = {
   // parked item may simply not have come up tonight. Zero is a normal answer,
   // and a warning that fires on the healthy path is the thing being fixed
   // everywhere else in this file.
-  // A51 · `deferredRejected` is the derivation error made visible. Non-zero means the
+  // X51 · `deferredRejected` is the derivation error made visible. Non-zero means the
   // Manager put a due row on the drop list and the engine took it back off.
   openKnown: { passedIn: OPEN_KNOWN.length, deferredRejected: openKnownDeferred.length, dropped: openKnownDropped.length, refs: openKnownDropped },
-  // A43 · what the build picked up out of `state.pendingOverflow`. Zero on a
+  // X43 · what the build picked up out of `state.pendingOverflow`. Zero on a
   // discovery run is correct — the carry is build-only. Zero on a build while the
   // field holds entries is the failure this reader exists to end, and the arg
   // warning above says so in words. **The Manager must DELETE `carry.refs` AND
@@ -1187,12 +1294,12 @@ const manifest = {
     carriedIn: carriedIn.length,
     refs: carriedIn.map((i) => i.id || i.ref || '(no id)'),
     droppedAsParked: carriedDropped.length,
-    // A46 · non-zero means the field did not drain on a hand dispatch. The refs are
+    // X46 · non-zero means the field did not drain on a hand dispatch. The refs are
     // named so he can see WHICH stale entry rode in, and delete them from state.
     droppedAsBuilt: carriedBuilt.length,
     droppedAsBuiltRefs: carriedBuilt.map((i) => i.id || i.ref || '(no id)'),
   },
-  // A42 · the backlog re-read. `seen` against `reread` is the half-finished tell;
+  // X42 · the backlog re-read. `seen` against `reread` is the half-finished tell;
   // `fixed` is the only state that removes a row, so it is the one that has to be
   // evidenced.
   backlog: BACKLOG
@@ -1200,7 +1307,7 @@ const manifest = {
         seen: backlogSeen,
         reread: backlogReread.length,
         notReached: Math.max(0, backlogSeen - backlogReread.length),
-        // A47 · rows no pass can reach, because they cite no file. Printed beside the
+        // X47 · rows no pass can reach, because they cite no file. Printed beside the
         // re-read counts so `22 of 22` cannot read as a finished backlog.
         noCitation: backlogNoCite,
         fixed: backlogReread.filter((b) => b.state === 'fixed').length,
@@ -1208,14 +1315,14 @@ const manifest = {
         stillReal: backlogReread.filter((b) => b.state === 'still-real').length,
       }
     : 'n/a (not a backlog run)',
-  // A32 + A33 · the ticket funnel. `complaintsFound` against `issuesEmitted` per
+  // X32 + X33 · the ticket funnel. `complaintsFound` against `issuesEmitted` per
   // ticket, so three-in-one-out is a number here instead of something the owner
   // discovers by re-reading his own ticket at midnight.
   tickets: PRESET ? 'n/a (preset)' : { read: ticketComplaints.length, complaints: ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0), emitted: ticketComplaints.reduce((n, t) => n + (t.issuesEmitted || 0), 0), perTicket: ticketComplaints },
   locationsResolved: PRESET ? 'n/a (preset)' : locationsResolved,
   lanesDispatched: [...new Set(verified.map((r) => (specById.get(r.id) || {}).lane).filter(Boolean))],
   misroutedLanes: misrouted.length,
-  // A22 · the writer's OWN observable. The field had a reader for a week and no
+  // X22 · the writer's OWN observable. The field had a reader for a week and no
   // writer, and nothing anywhere said so. This is the number that makes a dead
   // writer visible on the run it dies, instead of in a query a month later:
   // `tagged` against `vocabulary`, so "nobody tagged" and "everybody coined a new
@@ -1272,23 +1379,48 @@ if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
   warnings.push(`alreadyBuilt passed ${ALREADY_BUILT.length} entries and triage dropped NONE — either genuinely all-new, or ref matching failed again (gh#147 vs #147).`)
 if (verified.some((r) => r.verdict === 'already-fixed'))
   warnings.push('A lane returned `already-fixed` — a duplicate reached a full dispatch. alreadyBuilt should have caught it earlier and cheaper.')
+// X68 · the close itself, not the waste. A row closed on a lane's own word that
+// the verify never answered on is CLOSED AND UNCHECKED, which is the state a
+// severity-high row sat in on wf_27f03aca-0dd.
+if (spotCheckUnanswered.length)
+  warnings.push(
+    `${spotCheckUnanswered.length} \`already-fixed\` row(s) were sent for spot-check and came back with NO answer: ${spotCheckUnanswered.join(', ')}. ` +
+      `Those rows are closed on the lane's own word and nobody has checked them — do not wrap them as verified.`,
+  )
+if (!VERIFY && verified.some((r) => r.verdict === 'already-fixed'))
+  warnings.push('`already-fixed` row(s) closed with the verify OFF, so nothing checked the claim. That is the only bucket that closes a row without producing a diff anyone can read.')
 if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
-// A31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
+// X31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
 if (onHisDesk > DECISION_BUDGET)
   warnings.push(
     `DECISION BUDGET EXCEEDED — ${onHisDesk} refs need the owner against a budget of ${DECISION_BUDGET}. Prior runs put 1 to 12 on his desk; 25 is the night he could not follow. ` +
       `Nothing has been truncated. Propose DEFERRING the lowest-severity rows to the next run and say which — never merge two rows to get under the number, which buys a smaller list and a worse one.`,
   )
-// A32 · three complaints in, one issue out, and no drop to explain it.
+// X32 · three complaints in, one issue out, and no drop to explain it.
 if (!PRESET && SOURCES.includes('github')) {
   if (!ticketComplaints.length) warnings.push('The scout reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
-  const under = ticketComplaints.filter((t) => (t.complaintsFound || 0) > (t.issuesEmitted || 0))
+  // X64 · SUBTRACT THE SCOUT'S OWN DROP LISTS. `complaintsFound > issuesEmitted`
+  // alone treats a complaint the scout deliberately dropped — already built, or
+  // parked as a converted GitHub issue — as an unexplained gap, so the warning
+  // named 7, 8 and 8 tickets across three consecutive runs when only 5, 3 and 4
+  // had actually lost a complaint with no reason. A warning that fires on the
+  // healthy path is the `startedAtLine: 1` mistake this file names at :1145, and
+  // it fired on more tickets than it skipped. The inputs were already read at
+  // :739-740 and used nowhere.
+  const ticketNum = (s) => (String(s || '').match(/\d+/) || [''])[0]
+  const dropRefs = [...triageDropped, ...openKnownDropped].map(ticketNum)
+  const droppedFor = (ref) => { const n = ticketNum(ref); return n ? dropRefs.filter((d) => d === n).length : 0 }
+  const under = ticketComplaints
+    .map((t) => ({ t, unexplained: (t.complaintsFound || 0) - (t.issuesEmitted || 0) - droppedFor(t.ref) }))
+    .filter((x) => x.unexplained > 0)
   if (under.length)
     warnings.push(
-      `${under.length} ticket(s) listed MORE complaints than the issues emitted for them: ${under.map((t) => `${t.ref} ${t.complaintsFound}→${t.issuesEmitted}`).join(', ')}. ` +
-        `Those tickets are PARTIAL by arithmetic — do not close them, and the unemitted complaints are not on any list unless you put them there.`,
+      `${under.length} ticket(s) lost complaints with NO reason given: ${under
+        .map(({ t, unexplained }) => `${t.ref} ${t.complaintsFound}→${t.issuesEmitted}, ${droppedFor(t.ref)} dropped, ${unexplained} unexplained`)
+        .join('; ')}. ` +
+        `Those tickets are PARTIAL by arithmetic — do not close them, and the unexplained complaints are not on any list unless you put them there.`,
     )
-  // A33 · the silent half. A merged row that drops the ticket ref leaves the
+  // X33 · the silent half. A merged row that drops the ticket ref leaves the
   // coverage check with nothing to fire on, and a ticket with no coverage row
   // looks exactly like a ticket with nothing wrong.
   const orphanTickets = ticketComplaints
@@ -1301,7 +1433,19 @@ if (!PRESET && SOURCES.includes('github')) {
     )
 }
 if (deferredNow.length) warnings.push(`${deferredNow.length} dependency ask(s) were NOT dispatched and MUST be rendered in the report — an unreported ask is indistinguishable from one that never happened.`)
-// A42 · a cleanup pass that closes a row on an unevidenced "fixed" is worse than
+// X65 · the same gate `closeInLedger` applies to a backlog `fixed` at :1309,
+// pointed at the one claim that had none. A discovery becomes the NEXT run's
+// intake without passing any check, so an unevidenced one spends a whole lane
+// turn next run to be told `already-fixed`.
+{
+  const uncited = discoveries.filter((d) => !/:\d+/.test(String(d.evidence || '')))
+  if (uncited.length)
+    warnings.push(
+      `${uncited.length} of ${discoveries.length} discovery(ies) cite no \`file:line\` at HEAD: ${uncited.map((d) => String(d.symptom || '').slice(0, 60)).join(' | ')}. ` +
+        `A log line shows the symptom happened, not that the code is still wrong — wf_0cebe938-c81's headline discovery was already fixed at HEAD. Do NOT carry these into the next run's intake without opening the file first.`,
+    )
+}
+// X42 · a cleanup pass that closes a row on an unevidenced "fixed" is worse than
 // the stale row it replaced: the row disappears and nothing ever looks again. The
 // brief refuses it; this counts the ones that got through, because a brief is a
 // request and a count is an observable.
@@ -1311,6 +1455,26 @@ if (BACKLOG) {
     warnings.push(
       `${unevidenced.length} backlog row(s) were called \`fixed\` WITHOUT naming a commit or a line: ${unevidenced.map((b) => b.ref).join(', ')}. ` +
         `A restructured file looks fixed when the defect has only moved. Treat these as unconfirmed — do NOT remove them from the report or close them in the ledger.`,
+    )
+  // X71 · the count of rows the pass called still-real WITHOUT opening anything.
+  // They stay flagged; this says how many, so a pass that re-read nothing cannot
+  // look like a pass that re-read everything.
+  const unopened = backlogReread.filter(
+    (b) => b.state !== 'fixed' && !/(:\d+)|(\b[0-9a-f]{7,40}\b)|(\b[\w./-]+\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|log)\b)/i.test(String(b.evidence || '')),
+  )
+  if (unopened.length)
+    warnings.push(
+      `${unopened.length} backlog row(s) were called \`${unopened[0].state}\` with evidence that names no file, line or commit: ${unopened.map((b) => b.ref).join(', ')}. ` +
+        `They are NOT confirmed and stay flagged RE-READ — "still real" with nothing opened is the same claim as "nobody looked".`,
+    )
+  // X77 · the count of re-reads that opened the code and did not say what to DO
+  // about it. Same shape as the two above: they stay flagged rather than being
+  // confirmed into a state he cannot rule on.
+  const unruled = backlogReread.filter((b) => b.state !== 'fixed' && String(b.recommend || '').trim().length < 10)
+  if (unruled.length)
+    warnings.push(
+      `${unruled.length} backlog row(s) came back with no \`recommend\`: ${unruled.map((b) => b.ref).join(', ')}. ` +
+        `They stay flagged RE-READ — a row he cannot build, decline, defer, resend or convert must not be recorded as confirmed.`,
     )
   const notReached = Math.max(0, backlogSeen - backlogReread.length)
   if (notReached)
@@ -1361,17 +1525,19 @@ const persist = {
   mustAlsoAppear: {
     deferredDepAsks: deferredNow.length,
     needsShaping: needsShaping.length,
-    flaggedForOwner: flagged.length,
+    needsShapingUnexamined: unshaped.length, // X70 · these reach him too, labelled as unexamined, never merged into the line above
+    ambiguousForOwner: flagged.length, // X77 · was `flaggedForOwner`, one letter from re-minting the verdict this run retired
+
     ticketCoverage: ticketCoverage.length,
     pendingOverCap: pending.length,
-    backlogReread: backlogReread.length, // A42 · a re-read nobody wrote down leaves the same 22 rows flagged tomorrow
+    backlogReread: backlogReread.length, // X42 · a re-read nobody wrote down leaves the same 22 rows flagged tomorrow
   },
-  // A42 · THE CLEANUP'S RESULT, pre-shaped both ways. Owner, 2026-07-30: a cleanup
+  // X42 · THE CLEANUP'S RESULT, pre-shaped both ways. Owner, 2026-07-30: a cleanup
   // pass must leave the report UPDATED — dead rows gone, real ones kept. A pass that
   // returns prose leaves the backlog exactly as long as it found it, which is the
   // one outcome that makes it not worth running.
   backlog: {
-    // A50 · NO `date` FIELD HERE, and do not add one: `new Date()` and `Date.now()`
+    // X50 · NO `date` FIELD HERE, and do not add one: `new Date()` and `Date.now()`
     // THROW in a workflow script (they break resume), and the two that sat in these
     // two `.map()`s killed the return of a finished 4-agent wave on 2026-07-30 — all
     // the work paid for, the payload lost. The engine has no clock; the Manager has
@@ -1383,8 +1549,10 @@ const persist = {
       .filter((b) => b.state === 'fixed' && /(:\d+)|(\b[0-9a-f]{7,40}\b)/i.test(String(b.evidence || '')))
       .map((b) => ({ ref: b.ref, source: 'audit', verdict: 'already-fixed', note: `backlog re-read: ${b.evidence}` })),
     // Still real. KEEP them as report rows.
-    keepInReport: backlogReread.filter((b) => b.state !== 'fixed').map((b) => ({ ref: b.ref, state: b.state, whereNow: b.whereNow || '', evidence: b.evidence })),
-    // A47 · AND append each of these to `ledger.jsonl` too, dated — this is what
+    keepInReport: backlogReread
+      .filter((b) => b.state !== 'fixed')
+      .map((b) => ({ ref: b.ref, state: b.state, whereNow: b.whereNow || '', evidence: b.evidence, recommend: b.recommend || '' })),
+    // X47 · AND append each of these to `ledger.jsonl` too, dated — this is what
     // records that somebody looked. Without it the same row is flagged RE-READ again
     // tomorrow and re-read again the night after, which is what made a nightly
     // backlog pass unaffordable: the staleness check compares the citing commit's
@@ -1393,17 +1561,42 @@ const persist = {
     // the row's real state instead of a re-read quietly overwriting his ruling.
     // `rootCause` is written only for a `moved` row, where the location genuinely
     // changed.
+    // X71 · THE SAME EVIDENCE GATE `closeInLedger` has one field above, and it had
+    // none. Every non-fixed row was stamped `confirmed` unconditionally, so a row
+    // whose own evidence read verbatim "Not independently re-read this pass" was
+    // relabelled as re-read and stopped being flagged. Measured on wf_f0cfd84d-5f5:
+    // 4 of 24 said exactly that, all 4 got a recheck line, and `--open` moved
+    // confirmed from 11 to 35. A confirmation nobody made is worse than the stale
+    // flag it cleared — the row is now invisible to the very pass that would catch it.
+    //
+    // It accepts a NAMED FILE as well as a `file:line`, deliberately: two genuine
+    // re-reads (gh#144 T2, gh#51 profiler) were proved by a grep returning zero
+    // matches, which has no line number to cite. Everything that fails stays in
+    // `keepInReport` and stays flagged, which is the honest state — nobody looked.
+    //
+    // X77 · AND THE SAME GATE ON `recommend`, for the reason X71 gave about
+    // evidence: a row that is confirmed but unrulable reads as HANDLED, and it will
+    // never be flagged RE-READ again, so the one pass that could have written the
+    // sentence never looks at it twice. Empty recommendation → it stays in
+    // `keepInReport`, still flagged, which is the honest state. A false block costs
+    // one re-read; a false confirm costs the row.
     confirmInLedger: backlogReread
-      .filter((b) => b.state !== 'fixed')
+      .filter(
+        (b) =>
+          b.state !== 'fixed' &&
+          String(b.recommend || '').trim().length >= 10 &&
+          /(:\d+)|(\b[0-9a-f]{7,40}\b)|(\b[\w./-]+\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|log)\b)/i.test(String(b.evidence || '')),
+      )
       .map((b) => ({
         ref: b.ref,
         recheck: `${b.state}: ${b.evidence}`,
+        recommend: b.recommend,
         ...(b.whereNow ? { rootCause: b.whereNow } : {}),
       })),
   },
-  // A30 · `discoveries` USED TO BE COUNTED ABOVE, and that is what put a bonus
+  // X30 · `discoveries` USED TO BE COUNTED ABOVE, and that is what put a bonus
   // finding on his decide list. His ruling: "if i do want to fix discoveries, its
-  // not blocker, its bonus." The label and the array have existed since A8 shipped
+  // not blocker, its bonus." The label and the array have existed since X8 shipped
   // them on 2026-07-27 — only the routing was wrong, and it was wrong in the
   // policy, not the code. They do NOT become report rows at `pending owner`; they
   // are the NEXT run's first intake items, already lane-assigned and severity-ranked
@@ -1417,7 +1610,7 @@ return {
   warnings,
   // Write `report.md` from THIS, before anything else, and quote `assertion`.
   persist,
-  // A24 · THE FUNNEL, not just its endpoints. `buildable` is computed at :482,
+  // X24 · THE FUNNEL, not just its endpoints. `buildable` is computed at :482,
   // logged at :494, and was returned in NOTHING — so a run where the work arrived
   // and something legitimately stopped it read identically to a run that found
   // nothing, and `already-fixed` was counted nowhere at all. Every drop between
@@ -1434,8 +1627,12 @@ return {
     buildable: buildable.length + pending.length,
     dispatched: buildable.length,
     built: verified.filter((r) => r.verdict === 'built').length,
+    // X66 · a row another lane delivered. NOT added to `built` — one change
+    // counted twice is what the Manager was correcting by hand in state.json.
+    confirmedOtherLane: verified.filter((r) => r.verdict === 'confirmed-other-lane').length,
     alreadyFixed: verified.filter((r) => r.verdict === 'already-fixed').length,
     needsShaping: needsShaping.length,
+    needsShapingUnexamined: unshaped.length, // X70
     flagged: flagged.length,
     needsOwner: verified.filter((r) => r.verdict === 'needs-owner-decision' || r.verdict === 'blocked-charter').length,
     pending: pending.length,
@@ -1446,6 +1643,11 @@ return {
   // the report as `pending owner` with the shapingQuestion, and dispatch whatever
   // he approves via `args.issues`, where the preset path exempts them.
   needsShaping,
+  // X70 · needs-shaping items whose `shapingQuestion` is missing or a stub. They
+  // are STILL his rows and still rendered — but as `pending owner — nobody has
+  // read the code yet`, never as a shaping question, because asking him to rule
+  // on an unexamined row is how gh#164 spent two runs on his desk unchanged.
+  unshaped,
   pending,
   // Persist under "Verified clean" in report.md and pass straight back as
   // `priorClean` next run. It is the only thing that stops each verify starting
@@ -1457,7 +1659,7 @@ return {
   // future run. This is the pruning that used to depend on remembering.
   priorCleanDropped,
   // NEW problems the verify found that are NOT about this wave's fixes. **These
-  // are NEXT RUN'S INTAKE, not rows on his desk** (A30) — carry them into the
+  // are NEXT RUN'S INTAKE, not rows on his desk** (X30) — carry them into the
   // next invocation's `args.issues`, which they are already shaped for, lane
   // included and severity included. **Do not build them tonight** — that changes
   // the tree the verify just examined, invalidates the pass that found them, and
@@ -1465,12 +1667,12 @@ return {
   // one by calling it a bonus: not blocking and not severe are different claims,
   // so a `high` discovery arrives first in the next queue.
   discoveries,
-  // A43 · what this build took out of `state.pendingOverflow` — the discoveries and
+  // X43 · what this build took out of `state.pendingOverflow` — the discoveries and
   // over-cap items an earlier run parked there. **DELETE these from
   // `state.pendingOverflow` when you persist**: the engine cannot write state, and
   // an entry that stays rides into every future build as a duplicate dispatch.
   carriedIn,
-  // A42 · the stale rows this pass re-read, with what it found. `persist.backlog`
+  // X42 · the stale rows this pass re-read, with what it found. `persist.backlog`
   // holds the same result pre-shaped for the ledger and the report — use that; this
   // is the raw list for anything else you need to read.
   backlogReread,

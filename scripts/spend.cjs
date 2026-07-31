@@ -194,13 +194,39 @@ for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
     } catch {
       continue
     }
+    // X69 · DID THIS RUN DIE. A run whose scout is killed leaves a journal holding
+    // one `started` line and no `result`, and it appeared on NO surface —
+    // wf_e2f12e7c-6d6 ran on 2026-07-30, died, cost $1.19, and nothing in
+    // report.md, state.json or ledger.jsonl records that a run began at all. The
+    // journal already holds the answer; it just had no reader. `started` without a
+    // matching `result` is the whole derivation.
+    let dead = 0
+    let begunN = 0
+    try {
+      const lines = fs.readFileSync(path.join(wfDir, id, 'journal.jsonl'), 'utf8').split(/\r?\n/).filter((l) => l.trim())
+      const done = new Set()
+      const begun = new Set()
+      for (const l of lines) {
+        let j = null
+        try { j = JSON.parse(l) } catch { continue }
+        if (!j || !j.agentId) continue
+        if (j.type === 'result') done.add(j.agentId)
+        else if (j.type === 'started') begun.add(j.agentId)
+      }
+      begunN = begun.size
+      dead = [...begun].filter((a) => !done.has(a)).length
+    } catch {
+      dead = 0
+    }
     for (const f of files) {
       const a = readAgent(path.join(wfDir, id, f), 'engine')
       if (!a) continue
       agents.push({ ...a, session: sid, run: id })
-      const r = runs.get(id) || { id, session: sid, lo: a.lo, hi: a.hi }
+      const r = runs.get(id) || { id, session: sid, lo: a.lo, hi: a.hi, dead, begun: begunN }
       if (a.lo < r.lo) r.lo = a.lo
       if (a.hi > r.hi) r.hi = a.hi
+      r.dead = dead
+      r.begun = begunN
       runs.set(id, r)
     }
   }
@@ -246,7 +272,7 @@ if (ONE_DAY) {
     console.log(`${pad(a.how, 8)}${pad(a.type.slice(0, 17), 18)}${pad(a.tiers.join('+'), 9)}${lp(a.turns, 7)}${lp(usd(a.cost), 9)}`)
   console.log(rule(51))
 
-  // A39 · The check that matters: OBSERVED tier against the tier the charter
+  // X39 · The check that matters: OBSERVED tier against the tier the charter
   // DECLARES. It used to compare two dispatch paths to each other, which is not
   // the claim the line makes — "no dispatch path is overriding the charter" is
   // about the charter, and the charter was never read. For any agent dispatched
@@ -325,12 +351,31 @@ if (flag('--runs')) {
     tA += ac
     tC += cc
     console.log(
-      `${pad(r.lo.slice(5, 16).replace('T', ' '), 15)}${pad(r.id.slice(0, 15), 16)}${lp(mine.length, 4)}${lp(mins(r.lo, r.hi), 6)}${lp(usd(ac), 9)}${lp(usd(cc), 8)}${lp(usd(ac + cc), 9)}`
+      `${pad(r.lo.slice(5, 16).replace('T', ' '), 15)}${pad(r.id.slice(0, 15), 16)}${lp(mine.length, 4)}${lp(mins(r.lo, r.hi), 6)}${lp(usd(ac), 9)}${lp(usd(cc), 8)}${lp(usd(ac + cc), 9)}${
+        r.dead ? (r.dead === r.begun ? `  ! DIED — produced nothing` : `  ! ${r.dead} of ${r.begun} agent(s) never returned`) : ''
+      }`
     )
   }
   console.log(rule(67))
   console.log(`${pad('ALL RUNS', 41)}${lp(usd(tA), 9)}${lp(usd(tC), 8)}${lp(usd(tA + tC), 9)}`)
   const loose = agents.filter((a) => !a.run)
+  // X69 · a dead run is money spent and work not done, so it is named here rather
+  // than left to be spotted as an odd-looking row. Nothing else in the framework
+  // records that a run began and never came back.
+  const withDead = [...runs.values()].filter((r) => r.dead && agents.some((a) => a.run === r.id))
+  const totalDeath = withDead.filter((r) => r.dead === r.begun)
+  if (totalDeath.length)
+    console.log(
+      `\n${totalDeath.length} run(s) DIED WHOLE — every agent started and none returned, so the run produced no result and appears on NO other surface (not report.md, not state.json, not the ledger): ${totalDeath
+        .map((r) => `${r.id} (${r.lo.slice(0, 16).replace('T', ' ')}, ${usd(sum(agents.filter((a) => a.run === r.id), (a) => a.cost))})`)
+        .join(', ')}`
+    )
+  const partial = withDead.filter((r) => r.dead !== r.begun)
+  if (partial.length)
+    console.log(
+      `${totalDeath.length ? '' : '\n'}${partial.length} run(s) LOST AN AGENT but returned: ${partial.map((r) => `${r.id} ${r.dead}/${r.begun}`).join(', ')}. ` +
+        `A lane that never returned is work paid for and not done — check its rows reached the report.`
+    )
   console.log(
     `\n${loose.length} agent(s) outside any run window: ${usd(sum(loose, (a) => a.cost))}` +
       `\nRuns are ${((tA + tC) / TOTAL * 100).toFixed(0)}% of the ${usd(TOTAL)} spent in this window.\n`

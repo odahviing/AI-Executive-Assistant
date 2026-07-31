@@ -43,7 +43,9 @@ Read `.claude/WRAP_UP.md` end-to-end and run it in order. The steps that exist b
 6. CHANGELOG entry, above the previous one
 7. Memory / `SESSION_STARTER.md` version line — conditional, but **the version line is not conditional**: a stale "Current version" misleads every agent that boots
 8. `README.md` — conditional
-9. **Ledger BEFORE report.** Append every row on `report.md` to `ledger.jsonl` — whatever its verdict, not only the built ones — then reset the report. This is the only moment history can be lost, and it has been lost this way (A23).
+9. **Ledger BEFORE report.** Append every row on `report.md` to `ledger.jsonl` — whatever its verdict, not only the built ones — then reset the report. This is the only moment history can be lost, and it has been lost this way (X23). **Two fields on every row you append, and both exist because this step dropped them:**
+   - **`"runId":"wrap-<version>"`** (X54) — `node scripts/ledger-stats.cjs --wrap <version>` can name a release's own rows on exactly the two versions that carried it, out of twenty released.
+   - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built` (X77) — it is sitting in the Status cell you are about to delete (*"pending owner — recommend build"*), and the ledger row is where it has to live to survive this step. **54 of 56** standing open rows carry none because this was never said. Verify after the append: `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.
 10. `npm run typecheck` — must pass
 11. Commit + push under the owner's author
 12. **GitHub issues** — close or comment (below)
@@ -91,7 +93,7 @@ grep -n "starting up" logs/maelle-$(date +%Y-%m-%d).log | tail -2
 
 ## The summary — verified against shipped
 
-State what shipped and **what of it was verified**, naming every gap. A lane may reasonably skip its own verify pass, and it is often right — but the decision must be visible at the last gate before real people see the change (A37). *"7 shipped, 4 verified"* plus the reason each unverified one carried. **One field, never a justification** — making the skip expensive to declare pushes lanes into asking for passes they do not need.
+State what shipped and **what of it was verified**, naming every gap. A lane may reasonably skip its own verify pass, and it is often right — but the decision must be visible at the last gate before real people see the change (X37). *"7 shipped, 4 verified"* plus the reason each unverified one carried. **One field, never a justification** — making the skip expensive to declare pushes lanes into asking for passes they do not need.
 
 ## The one-question test
 

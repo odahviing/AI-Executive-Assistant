@@ -201,9 +201,13 @@ const VERDICTS = {
         type: 'object',
         properties: {
           id: { type: 'string' },
+          // X66 · `confirmed-other-lane` — the piece is DONE and you are not the
+          // one who did it. Same verdict and same reasoning as bugger.js; a lane
+          // resumed to close out a dependency must not claim another lane's change
+          // as its own, because the verify and the shipped count both double it.
           verdict: {
             type: 'string',
-            enum: ['built', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
+            enum: ['built', 'confirmed-other-lane', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'already-fixed'],
           },
           fix: { type: 'string', description: 'files touched, +/- lines, plain English' },
           // Structured, because the verify reads `git diff` and the tree
@@ -223,7 +227,7 @@ const VERDICTS = {
           },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
-          // A22 · same field, same words as bugger.js. It matters here because
+          // X22 · same field, same words as bugger.js. It matters here because
           // `VERIFY_OUT.results` reuses this shape, so a feature wave's OVERTURN is a
           // finding about live work — and without the field on this path the tag
           // would be true on the bug engine and absent on the improvement engine,
@@ -259,17 +263,24 @@ const VERIFY_OUT = {
         type: 'object',
         properties: {
           symptom: { type: 'string', description: 'what a person would see go wrong — not the mechanism' },
-          evidence: { type: 'string', description: 'file:line, REQUIRED' },
+          // X65 · same words as bugger.js. A log line proves the symptom
+          // happened; only the file proves it still would, and a discovery is the
+          // only claim in the loop nothing checks for currency.
+          evidence: {
+            type: 'string',
+            description:
+              'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
+          },
           lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
-          // A22 · same field, same words as bugger.js' discoveries.
+          // X22 · same field, same words as bugger.js' discoveries.
           invariant: {
             type: 'string',
             description:
               'OMIT unless this is an instance of a GENERAL rule that could break elsewhere. When it is, one short stable slug, and the SAME slug on every discovery that breaks the same rule — that is what lets the root be fixed once instead of three times.',
           },
         },
-        // A30 · `lane` and `severity` are REQUIRED, same as bugger.js: a discovery
+        // X30 · `lane` and `severity` are REQUIRED, same as bugger.js: a discovery
         // is the next run's INTAKE rather than a row on his desk, so it has to be
         // routable and rankable. Not blocking and not severe are different claims.
         required: ['symptom', 'evidence', 'lane', 'severity'],
@@ -477,7 +488,7 @@ const raw = Array.isArray(A.pieces) ? A.pieces : []
 if (!raw.length) {
   return { mode: 'build', error: 'No approved pieces. Run mode:"plan" first, get the owner\'s approval, then pass pieces:[...].' }
 }
-// A25 · THE READER FOR `awaitingOwner`, identical to bugger.js's guard on
+// X25 · THE READER FOR `awaitingOwner`, identical to bugger.js's guard on
 // `args.issues`. The verify's deferred asks are shaped for a paste straight back
 // into `args.pieces`, so the flag saying "the parent is still waiting on him" must
 // be enforced at exactly that door. `pieces` means APPROVED; a row carrying this
@@ -517,7 +528,12 @@ const WHERE_NOTE =
 const buildLane = (lane, pcs, roundNote) =>
   agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
-      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%, and **list every file you edited in \`filesTouched\`** so the verify can tell your change from work already sitting in the tree.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
+      `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%, and **list every file you edited in \`filesTouched\`** so the verify can tell your change from work already sitting in the tree.` +
+        // X73 · a number that bounds a duration is the one change that cannot be
+        // settled from the code. Same sentence as bugger.js, same reason: gh#166
+        // was "fixed" three times by picking a different number and the path was
+        // never timed once.
+        `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
       `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
       `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +
@@ -570,7 +586,11 @@ if (remaining.length) {
 // `built` verdict — and "I finished my piece, this adjacent bit is yours" is the
 // common case. Six asks were lost that way in bugger.js on 2026-07-26 before
 // anyone noticed, because their parents said `built`. Same shape, same fix.
-const DISPATCHABLE_DEP = new Set(['built', 'needs-dependency', 'already-fixed'])
+const DISPATCHABLE_DEP = new Set(['built', 'confirmed-other-lane', 'needs-dependency', 'already-fixed'])
+// X66 · a dep row is DELIVERED whether the lane built it or confirmed another
+// lane had. Without this the new verdict would leave the originator looking
+// blocked on a dependency that actually landed.
+const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
 
 // ---- Dependency rounds — the SAME loop bugger.js runs, for the same reasons ---
@@ -614,7 +634,7 @@ for (;;) {
   //     is the fix for bug 1: a dep built this round can resume its originator next.
   const satisfied = new Map()
   for (const r of results) {
-    if (r.verdict === 'built' && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
+    if (DELIVERED_DEP.has(r.verdict) && typeof r.id === 'string' && r.id.endsWith('>dep')) satisfied.set(r.id.slice(0, -'>dep'.length), r)
   }
   satisfied.forEach((_v, k) => satisfiedIds.add(k))
   const resumes = results
@@ -686,7 +706,7 @@ let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
 let ticketCoverage = []
-// A25 · The verify runs LAST, so an ask it raises cannot be dispatched in this run —
+// X25 · The verify runs LAST, so an ask it raises cannot be dispatched in this run —
 // same rule as `discoveries`, and until now the same rule with no destination.
 // `dependencyAgent`/`dependencyAsk` are in the verify's schema, so the verifier can
 // fill them, and the only read below took `verdict` and `notes` and nothing else:
@@ -694,7 +714,12 @@ let ticketCoverage = []
 // because merging loses which verdict is waiting on the owner.
 let deferredDepAsks = []
 const built = results.filter((r) => r.verdict === 'built')
-if (built.length && A.verify !== false) {
+// X68 · `already-fixed` closes a piece on the lane's own word and the verify
+// payload was `built` only, so that bucket was never checked. Same spot-check
+// as bugger.js: one read of the cited code per row, no trace, no budget.
+const claimedFixed = results.filter((r) => r.verdict === 'already-fixed')
+let spotCheckUnanswered = []
+if ((built.length || claimedFixed.length) && A.verify !== false) {
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
   // Same two mechanisms as bugger.js, same reasoning — the tree holds more than
   // this wave, and a `priorClean` entry describing code this wave changed is a
@@ -719,7 +744,11 @@ if (built.length && A.verify !== false) {
         ? `**THIS WAVE'S FILES. Everything else in the diff is the environment:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n`
         : `**No lane reported which files it touched, so the whole diff is in scope.** Say in your return that you could not separate this wave from work already in the tree.\n\n`) +
       `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
-      `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}`,
+      // X68 · one line, not a second pass.
+      (claimedFixed.length
+        ? `**SPOT-CHECK — ${claimedFixed.length} piece(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually there at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(claimedFixed, null, 2)}\n\n`
+        : '') +
+      (built.length ? `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}` : `**NO PIECE WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
     // No `model` here: `verifier.md` pins Opus, so neither the session model nor
     // a hand dispatch can downgrade the one agent that must not be downgraded.
     { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'verifier', effort: 'xhigh', schema: VERIFY_OUT },
@@ -730,11 +759,11 @@ if (built.length && A.verify !== false) {
   ticketCoverage = (check && check.ticketCoverage) || []
   if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built.`)
   ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
-  // A25 · Shaped to drop straight into the NEXT run's `args.pieces`, the way
+  // X25 · Shaped to drop straight into the NEXT run's `args.pieces`, the way
   // `discoveries` drops into `args.issues`. It is deliberately NOT dispatchable
   // now: its parent piece is waiting on the owner, so a well-shaped ask must never
   // be read as an approved one.
-  // A25 · REUSES the ask shape the dep loop already builds above, field for field.
+  // X25 · REUSES the ask shape the dep loop already builds above, field for field.
   // It emitted `what` where every reader wants `whatChanges` and carried no `ref`,
   // so `describe()` rendered `158>dep [undefined] undefined` — the payload was
   // there and the one line the builder actually reads was empty. `awaitingOwner`
@@ -756,7 +785,14 @@ if (built.length && A.verify !== false) {
     }))
   if (deferredDepAsks.length)
     log(`Verify raised ${deferredDepAsks.length} dependency ask(s) — NOT dispatched this run (the verify runs last): ${deferredDepAsks.map((a) => `${a.from}→${a.lane}`).join(', ')}`)
-  const overturned = new Map(((check && check.results) || []).filter((x) => x.verdict && x.verdict !== 'built').map((x) => [x.id, x.notes || '']))
+  // X68 · keyed on what each row CLAIMED, so a spot-check answering
+  // `already-fixed` is not misread as an overturn. Same map as bugger.js.
+  const claimed = new Map([...built.map((r) => [r.id, 'built']), ...claimedFixed.map((r) => [r.id, 'already-fixed'])])
+  const answered = new Set(((check && check.results) || []).map((x) => x && x.id))
+  spotCheckUnanswered = claimedFixed.filter((r) => !answered.has(r.id)).map((r) => r.id)
+  const overturned = new Map(
+    ((check && check.results) || []).filter((x) => x.verdict && claimed.has(x.id) && x.verdict !== claimed.get(x.id)).map((x) => [x.id, x.notes || '']),
+  )
   verified = results.map((r) =>
     overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
   )
@@ -768,18 +804,18 @@ const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.
 
 // Same reasoning as bugger.js: a step that quietly did nothing must show up as a
 // number that is obviously wrong, not as a successful-looking run.
-// A31 · THE DECISION BUDGET, the same one bugger.js carries and for the same
+// X31 · THE DECISION BUDGET, the same one bugger.js carries and for the same
 // reason: `capBuilds` caps builds and nothing capped DECISIONS, yet decisions are
 // the only step that cannot be parallelised, batched or delegated. Measured
 // refs-on-his-desk per engine run across the window: 4, 3, 8, 1, 4, 12, then 25 —
 // and the 25 is the night he said he could not follow it. Default 12 is the
 // highest any run reached on a night that worked, so it fires on 25 and on nothing
 // that has ever been fine. It WARNS and proposes a deferral; it never truncates
-// and never merges. `discoveries` is deliberately excluded — since A30 they are
+// and never merges. `discoveries` is deliberately excluded — since X30 they are
 // the next run's intake, not a row on his desk.
 const DECISION_BUDGET = typeof A.capDecisions === 'number' ? A.capDecisions : 12
 const onHisDesk =
-  verified.filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed').length +
+  verified.filter((r) => r.verdict !== 'built' && r.verdict !== 'already-fixed' && r.verdict !== 'confirmed-other-lane').length +
   deferredDepAsks.length +
   remaining.length +
   earnedRules.length +
@@ -798,7 +834,7 @@ const featureManifest = {
   resumed: resumedPieceIds.size,
   depRounds,
   earnedRules: earnedRules.length,
-  // A22 · the writer's own observable, same shape as bugger.js. No warning on a
+  // X22 · the writer's own observable, same shape as bugger.js. No warning on a
   // zero: a wave of genuinely local work is meant to tag none.
   invariants: { tagged: verified.filter((r) => r.invariant).length, of: verified.length, slugs: [...new Set(verified.map((r) => r.invariant).filter(Boolean))] },
   verify:
@@ -839,19 +875,33 @@ if (onHisDesk > DECISION_BUDGET)
     `DECISION BUDGET EXCEEDED — ${onHisDesk} refs need the owner against a budget of ${DECISION_BUDGET}. Prior runs put 1 to 12 on his desk; 25 is the night he could not follow. ` +
       `Nothing has been truncated. Propose DEFERRING the lowest-value rows to the next run and say which — never merge two rows to get under the number.`
   )
+// X68 · a piece closed on a lane's own word that the verify never answered on is
+// CLOSED AND UNCHECKED.
+if (spotCheckUnanswered.length)
+  featureWarnings.push(
+    `${spotCheckUnanswered.length} \`already-fixed\` row(s) were sent for spot-check and came back with NO answer: ${spotCheckUnanswered.join(', ')}. Do not wrap them as verified.`,
+  )
+// X65 · the currency gate on a discovery, same as bugger.js.
+if (discoveries.filter((d) => !/:\d+/.test(String(d.evidence || ''))).length)
+  featureWarnings.push(
+    `${discoveries.filter((d) => !/:\d+/.test(String(d.evidence || ''))).length} of ${discoveries.length} discovery(ies) cite no \`file:line\` at HEAD. A log line shows the symptom happened, not that the code is still wrong — do NOT carry them into the next run's intake without opening the file first.`,
+  )
 featureWarnings.forEach((w) => log(`! ${w}`))
 
 return {
   mode: 'build',
   manifest: featureManifest,
   warnings: featureWarnings,
-  // A24 · The funnel, same reasoning as bugger.js: a run that dispatched nothing
+  // X24 · The funnel, same reasoning as bugger.js: a run that dispatched nothing
   // must not read like a run that built nothing. `neverDispatched` was in the
   // manifest as a list and in no count.
   counts: {
     approved: approved.length,
     dispatched: approved.length - remaining.length,
     built: verified.filter((r) => r.verdict === 'built').length,
+    // X66 · a piece another lane delivered. NOT added to `built` — one change
+    // counted twice is what the Manager was correcting by hand in state.json.
+    confirmedOtherLane: verified.filter((r) => r.verdict === 'confirmed-other-lane').length,
     // `already-fixed` is in the verdict enum, so a lane can and does return it —
     // and it landed in NO bucket here, which is the one drop a funnel exists to
     // name. It also costs a full dispatch, so a non-zero here is a signal in
@@ -865,8 +915,8 @@ return {
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // **DELETE these from `state.verifiedClean`** — this wave changed the code they described, and a stale entry silences a real check forever
-  discoveries, // A30 · NEW problems unrelated to these pieces. NEXT RUN'S INTAKE, not rows on his desk — already lane-assigned and severity-ranked for `args.issues`. Never built this wave, and never softened: a `high` one arrives first in the next queue
-  deferredDepAsks, // A25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
+  discoveries, // X30 · NEW problems unrelated to these pieces. NEXT RUN'S INTAKE, not rows on his desk — already lane-assigned and severity-ranked for `args.issues`. Never built this wave, and never softened: a `high` one arrives first in the next queue
+  deferredDepAsks, // X25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

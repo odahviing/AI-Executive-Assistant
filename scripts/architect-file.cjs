@@ -13,22 +13,38 @@
  * script.
  *
  * Why a script rather than "append a JSON line":
- *   • It assigns the next A-number, so two chats filing at once cannot collide.
+ *   • It assigns the LOWEST FREE X-number, so two chats filing at once cannot
+ *     collide and a number a merge freed comes back into use.
  *   • It REFUSES a row with no evidence. The bug ledger has the scout as a
  *     filter; this ledger has none, so the only defence against it filling with
  *     half-formed notes is that a bad row cannot be created in the first place.
  *   • One shape, so `ledger-stats` can read it.
  *
- * Append-only. Never rewrites an existing row — a completed row is TWO lines, the
+ * Append-only, with ONE mechanised exception. A completed row is TWO lines, the
  * filing and the closing, and `ledger-stats --architect` collapses them by id.
+ * The exception is `--duplicate`, below: a merge REMOVES the absorbed row's lines
+ * so its number is genuinely free, and copies its finding, evidence and analysis
+ * onto the survivor so nothing is lost. Every other path only ever appends.
+ *
+ * ONE HISTORICAL EXCEPTION besides that: on 2026-07-31 the owner authorised a full
+ * rewrite of every line to move this ledger's ids from `A` to `X` (row X75), so
+ * that `A` means the architect's charter rules and nothing else. Ids, `amends`
+ * fields and every citation were rewritten in place; the X75 row's own prose is
+ * frozen because it narrates the rename.
  *
  * Usage:
- *   node scripts/architect-file.cjs --close A29 \
+ *   node scripts/architect-file.cjs --close X29 \
  *     --built "no new mode — bugger.js PRESET path already is it; SKILL.md routes rulings back through `build`"
  *
- *   node scripts/architect-file.cjs --close A22 --declined "his words: not worth the second index"
+ *   node scripts/architect-file.cjs --close X22 --declined "his words: not worth the second index"
  *
- *   node scripts/architect-file.cjs --recheck A26 --checked "read architect.md frontmatter — still session-cached"
+ *   node scripts/architect-file.cjs --close X62 --refuted "mirrored the detector over all 74 rows: 4.51 flags per filing, not the 2.02 the row assumed"
+ *
+ *   node scripts/architect-file.cjs --close <the duplicate> --duplicate <the row that survives>
+ *     A merge names no number here on purpose: a freed one is reused, so an example
+ *     citing it would be pointing at different work within the week.
+ *
+ *   node scripts/architect-file.cjs --recheck X26 --checked "read architect.md frontmatter — still session-cached"
  *
  *   node scripts/architect-file.cjs \
  *     --finding "the manifest reports plumbing health, not yield" \
@@ -36,7 +52,7 @@
  *     --target both-engines \
  *     --source "product chat" \
  *     [--note "fix shape: a yield line"] \
- *     [--amends A8 | --amends none]
+ *     [--amends X8 | --amends none]
  *
  *   node scripts/architect-file.cjs --targets     # list valid targets
  */
@@ -79,6 +95,8 @@ const amends = argOf('--amends') || ''
 const closeId = argOf('--close')
 const built = argOf('--built')
 const declined = argOf('--declined')
+const refuted = argOf('--refuted')
+const duplicate = argOf('--duplicate')
 const recheckId = argOf('--recheck')
 const checked = argOf('--checked')
 
@@ -96,7 +114,7 @@ const die = (msg, extra) => {
 const POINTS_SOMEWHERE = /(:\d+)|(\bwf_[a-z0-9-]+)|(\.(?:js|cjs|ts|md|log|jsonl|json|yaml)\b)|(\bnode |\bgit |\bnpm )/i
 
 // ---- read what exists, collapsing each id to its LATEST state ---------------
-// A41 · append-only means one id legitimately has several lines: the filing, then
+// X41 · append-only means one id legitimately has several lines: the filing, then
 // the closing. Every check below asks "what is this row's state NOW", so it reads
 // the collapsed view — otherwise a built row still matches the OPEN clash check
 // and every re-file is refused with "still open" about work that shipped. Same
@@ -118,12 +136,80 @@ if (fs.existsSync(LEDGER)) {
     })
   rows = [...latest.values()]
 }
-const CLOSED = new Set(['built', 'declined'])
+// X10 · `refuted` closes a row the ARCHITECT disproved, and it is a third thing:
+// `built` is work that shipped, `declined` is the owner ruling against it, and a
+// withdrawal-on-measurement is neither. Until now it had to be written `--declined`,
+// whose own die message says "give HIS reason" — so X62, refuted by a measurement
+// that showed its premise false, is recorded in this ledger as if he had ruled on
+// it. The charter tells the architect to expect to refute a fair share of the rows
+// it is handed; a verdict it cannot write is a verdict that gets miswritten.
+const CLOSED = new Set(['built', 'declined', 'refuted'])
 const stillOpen = (rs) => rs.filter((r) => !CLOSED.has(r.verdict)).length
 
-// ── A41 · CLOSE A ROW. The ledger had no way to record that work was DONE ────
-// A44 · and no way to record that the owner said NO. `--built` was the only
-// closing, so the two `declined` rows in this ledger (A4, A13) were typed in by
+// ---- the merge gate, as code ------------------------------------------------
+// A merged row's number is only free once NOTHING still names it, because there
+// is no tombstone to resolve a leftover reference and the minter below hands that
+// number to the next filing. So this scans the places a row id is ever written —
+// this ledger, the bug ledger, `report.md`, `state.json`, every charter, both
+// engines, the Manager skill, SESSION_STARTER and every script — and the merge
+// REFUSES while one remains. His gate, 2026-07-31, mechanised rather than
+// remembered.
+const REPO = path.join(__dirname, '..')
+const SCAN_DIRS = [path.join(REPO, '.claude'), path.join(REPO, 'scripts')]
+const SCANNABLE = /\.(md|js|cjs|mjs|json|jsonl|ts)$/
+const SKIP_DIR = /^(node_modules|worktrees|\.git)$/
+/** Every place `id` is still named, excluding its OWN lines in this ledger. */
+const refsElsewhere = (id) => {
+  const re = new RegExp(`\\b${id}\\b`)
+  const out = []
+  const scan = (file) => {
+    fs.readFileSync(file, 'utf8')
+      .split(/\r?\n/)
+      .forEach((l, i) => {
+        if (!re.test(l)) return
+        if (file === LEDGER) {
+          try {
+            if (JSON.parse(l).id === id) return
+          } catch {
+            /* an unparseable ledger line still counts as a reference */
+          }
+        }
+        out.push(`${path.relative(REPO, file).replace(/\\/g, '/')}:${i + 1}  ${l.trim().slice(0, 130)}`)
+      })
+  }
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name)
+      if (e.isDirectory()) {
+        if (!SKIP_DIR.test(e.name)) walk(p)
+      } else if (SCANNABLE.test(e.name)) scan(p)
+    }
+  }
+  for (const d of SCAN_DIRS) if (fs.existsSync(d)) walk(d)
+  return out
+}
+/** The absorbed row's whole substance, in one string, naming no dead number. */
+const carryOver = (r) => {
+  const bits = [
+    `ABSORBED A DUPLICATE — a second row for this same defect, filed ${r.date || '(no date)'} by ${r.source || '(no source)'}, target ${
+      r.target || '(no target)'
+    }. Its number was freed for reuse, so it is named nowhere; its own words are kept here.`,
+    `FINDING: ${r.finding || '(none)'}`,
+    `EVIDENCE: ${r.evidence || '(none)'}`,
+  ]
+  if (String(r.note || '').trim()) bits.push(`NOTE: ${r.note}`)
+  if (r.amends) bits.push(`IT AMENDED: ${r.amends}`)
+  if (r.recheck) bits.push(`RE-READ: ${r.recheck}`)
+  if (r.built) bits.push(`IT CLOSED built: ${r.built}`)
+  if (r.declined) bits.push(`IT CLOSED declined: ${r.declined}`)
+  if (r.refuted) bits.push(`IT CLOSED refuted: ${r.refuted}`)
+  if (!r.built && !r.declined && !r.refuted) bits.push(`ITS STATE AT MERGE: ${r.verdict || 'open'}`)
+  return bits.join(' · ')
+}
+
+// ── X41 · CLOSE A ROW. The ledger had no way to record that work was DONE ────
+// X44 · and no way to record that the owner said NO. `--built` was the only
+// closing, so the two `declined` rows in this ledger (X4, X13) were typed in by
 // hand at migration and every decline since would have been too — which is the
 // same hole one direction along: a ruling nobody can write down gets re-raised,
 // and re-raising a decision he already made is the failure the whole ledger
@@ -147,21 +233,89 @@ if (closeId) {
   if (!rows.length) die('the ledger is empty — there is nothing to close.')
   const row = rows.find((r) => r.id === closeId)
   if (!row) die(`--close ${closeId} is not a row in this ledger.`, `Read it with: node scripts/ledger-stats.cjs --architect`)
-  if (CLOSED.has(row.verdict))
+  // A MERGE is exempt from this guard and nothing else is: a duplicate row is
+  // removed whatever its state, and all four of the first merges were between rows
+  // already built.
+  if (!duplicate && CLOSED.has(row.verdict))
     die(
       `${closeId} is already ${row.verdict} (${row.date}).`,
-      `It says: ${String(row.built || row.declined || row.note || '(no closing evidence recorded)').slice(0, 200)}\n` +
+      `It says: ${String(row.built || row.declined || row.refuted || row.note || '(no closing evidence recorded)').slice(0, 200)}\n` +
         `If the work has MOVED or come undone, that is a new finding — file it with --amends ${closeId}.`,
     )
-  if (built && declined) die('--close takes --built OR --declined, never both.', 'Work that shipped is `built`. A ruling against it is `declined`. One row cannot be each.')
-  if (!built && !declined)
+  const flags = [built && '--built', declined && '--declined', refuted && '--refuted', duplicate && '--duplicate'].filter(Boolean)
+  if (flags.length > 1)
     die(
-      `no --built and no --declined.`,
+      `--close takes ONE of --built, --declined, --refuted or --duplicate. Got ${flags.join(' and ')}.`,
+      'Work that shipped is `built`. A ruling against it is `declined`. A row DISPROVED by measurement is `refuted`. A second row for one defect is `duplicate`. One row cannot be two of those.',
+    )
+  if (!flags.length)
+    die(
+      `no --built, no --declined, no --refuted and no --duplicate.`,
       'A build closing names what shipped and WHERE. A closing row with no evidence destroys the history this ledger exists for.\n' +
         'Cite the FILE AND THE THING — `bugger.js manifest.carry`, `SKILL.md the wrap step` — not only a line number.\n' +
         'A line drifts with the next edit: nineteen rows closed on 2026-07-30 went 9 lines stale the same hour, from one later edit above them.\n' +
-        'If the OWNER ruled against it, that is `--declined "<his reason>"` — his words, no citation needed.',
+        'If the OWNER ruled against it, that is `--declined "<his reason>"` — his words, no citation needed.\n' +
+        'If YOU DISPROVED IT, that is `--refuted "<the measurement>"` — never `--declined`, which claims he ruled.\n' +
+        'If it is a SECOND ROW FOR ONE DEFECT, that is `--duplicate <the row that survives>`.',
     )
+
+  // ── X41 · A MERGE — the one path here that REMOVES a line ───────────────────
+  // Two rows for one defect cost a triage slot every time the pile is read, and a
+  // merged row's number is worth more free than occupied: his ceiling is about a
+  // hundred live rows and the minter below fills the lowest gap, so a freed number
+  // comes back into use instead of being left behind.
+  //
+  // NO TOMBSTONE — his call, 2026-07-31, and it is what makes the number genuinely
+  // free. A `{id, verdict:'duplicate'}` stub would keep the id occupied AND point
+  // at content that had moved, which is one number meaning two things — the exact
+  // failure the A-to-X rename was done to kill.
+  //
+  // X41's objection to rewriting is ANSWERED, not ignored: rewriting a filing row
+  // would delete the finding, the evidence and the analysis that are the whole
+  // point of keeping a ledger, so `carryOver` copies all of it onto the survivor,
+  // which is the row that now carries the defect. Nothing is lost but a number.
+  //
+  if (duplicate) {
+    const survivor = rows.find((r) => r.id === duplicate)
+    if (!survivor) die(`--duplicate ${duplicate} is not a row in this ledger.`, 'Name the row that SURVIVES — it keeps its number and gains this one\'s words.')
+    if (duplicate === closeId) die('--duplicate names the same row as --close.', 'A row cannot absorb itself.')
+    const hits = refsElsewhere(closeId)
+    if (hits.length)
+      die(
+        `${closeId} is still named in ${hits.length} place(s), so its number is NOT free.`,
+        hits.join('\n') +
+          `\n\nRewrite every one of them to ${duplicate} first. There is no tombstone to resolve a leftover reference,\n` +
+          `so one left behind will point at whatever is minted into ${closeId} next.\n` +
+          `If a reference cannot be rewritten TRUTHFULLY, stop and say so — do not force it.`,
+      )
+    const carried = carryOver(row)
+    if (new RegExp(`\\b${closeId}\\b`).test(carried))
+      die(
+        `the absorbed row's own text names ${closeId}, so copying it would re-create the reference this merge removes.`,
+        'Rewrite that sentence in the row itself first, then re-run.',
+      )
+    const record = { id: duplicate, date: new Date().toISOString().slice(0, 10), duplicate: carried }
+    const kept = fs
+      .readFileSync(LEDGER, 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.trim())
+      .filter((l) => {
+        try {
+          return JSON.parse(l).id !== closeId
+        } catch {
+          return true
+        }
+      })
+    fs.writeFileSync(LEDGER, kept.concat(JSON.stringify(record)).join('\n') + '\n')
+    const openNow = stillOpen(rows.filter((r) => r.id !== closeId))
+    console.log(`\nMerged ${closeId} into ${duplicate} — ${closeId} is GONE and its number is free\n`)
+    console.log(`  absorbed : ${String(row.finding || '(no finding)').slice(0, 120)}`)
+    console.log(`  survivor : ${duplicate} [${survivor.verdict || 'open'}] ${String(survivor.finding || '(no finding)').slice(0, 108)}`)
+    console.log(`  kept     : ${carried.length} chars of the absorbed row's own words, on ${duplicate}'s \`duplicate\` line`)
+    console.log(`\n${openNow} row(s) still open. The next filing takes the LOWEST free number, which may now be ${closeId.slice(1)}.\n`)
+    process.exit(0)
+  }
+
   if (built && built.length < 20) die(`--built is ${built.length} chars.`, 'Too short to check. Cite the file and the symbol, the command, or the commit.')
   if (built && !POINTS_SOMEWHERE.test(built))
     die(
@@ -171,20 +325,34 @@ if (closeId) {
     )
   if (declined && declined.length < 20)
     die(`--declined is ${declined.length} chars.`, 'Give his reason, not just "no". The next reader must be able to tell a decline from a deferral without asking him again.')
+  // X10 · held to the SAME bar as `--built` and for the same reason. A decline is
+  // exempt because his ruling is the evidence; a refutation has no such backing —
+  // it is a claim that the row was wrong, and a claim nobody can re-derive is how
+  // a real finding gets closed by an agent that simply could not reproduce it.
+  if (refuted && refuted.length < 20) die(`--refuted is ${refuted.length} chars.`, 'State what you MEASURED and what it showed. "not real" is not a refutation.')
+  if (refuted && !POINTS_SOMEWHERE.test(refuted))
+    die(
+      'that --refuted does not point at anything checkable.',
+      `It needs at least one of: a \`file:line\`, a filename, a run id (\`wf_…\`), or the command that proves it.\n` +
+        `The row claimed something about the code — name where you looked and what was there instead.`,
+    )
+  const today = new Date().toISOString().slice(0, 10)
   const closing = built
-    ? { id: closeId, date: new Date().toISOString().slice(0, 10), verdict: 'built', built }
-    : { id: closeId, date: new Date().toISOString().slice(0, 10), verdict: 'declined', declined }
+    ? { id: closeId, date: today, verdict: 'built', built }
+    : refuted
+      ? { id: closeId, date: today, verdict: 'refuted', refuted }
+      : { id: closeId, date: today, verdict: 'declined', declined }
   fs.appendFileSync(LEDGER, JSON.stringify(closing) + '\n')
   const openNow = stillOpen(rows.map((r) => (r.id === closeId ? closing : r)))
   console.log(`\nClosed ${closeId} — ${closing.verdict}\n`)
   console.log(`  was    : ${String(row.finding || '(no finding)').slice(0, 120)}`)
-  console.log(`  ${built ? 'built  ' : 'declined'}: ${built || declined}`)
+  console.log(`  ${closing.verdict.padEnd(8)}: ${built || refuted || declined}`)
   console.log(`\n${openNow} row(s) still open. Check with: node scripts/ledger-stats.cjs --architect\n`)
   process.exit(0)
 }
 
-// ── A47 · RECORD THAT SOMEBODY LOOKED ────────────────────────────────────────
-// A38 flags a row RE-READ when a commit touched the file it cites after the row
+// ── X47 · RECORD THAT SOMEBODY LOOKED ────────────────────────────────────────
+// X38 flags a row RE-READ when a commit touched the file it cites after the row
 // was written. Nothing could record the answer "I opened it, it is still real",
 // so a row re-read today was flagged again tomorrow and the re-read had to be
 // paid again — which is what makes a nightly backlog pass unaffordable rather
@@ -230,28 +398,46 @@ if (!/owner/i.test(source) && !POINTS_SOMEWHERE.test(evidence)) {
 }
 
 // ---- assign the next id, check for an obvious re-file ----
-const maxId = rows.reduce((n, r) => {
-  const m = String(r.id || '').match(/^A(\d+)$/)
-  return m ? Math.max(n, Number(m[1])) : n
-}, 0)
-const id = `A${maxId + 1}`
+// X75 · the letter is X, and it is X so that it can never move again. `A` now
+// means exactly one thing — the architect's own charter rules in
+// `.claude/agents/architect.md` — and `F` was rejected because Foreman /
+// Forecaster / Filter are all agents someone may want, while nothing will ever
+// want X. The 2026-07-31 migration rewrote every id, every `amends` and every
+// citation; the only text left on `A` in this ledger is a charter-rule citation.
+//
+// THE LOWEST FREE NUMBER, never the next one. His rule, 2026-07-31: merging
+// duplicates releases ids and those gaps get filled, which is how this ledger
+// stays around a hundred live rows instead of climbing forever. The minter is
+// where that has to live — prose in two files would be remembered on some
+// filings and not others.
+const used = new Set(
+  rows
+    .map((r) => {
+      const m = String(r.id || '').match(/^X(\d+)$/)
+      return m ? Number(m[1]) : 0
+    })
+    .filter(Boolean),
+)
+let next = 1
+while (used.has(next)) next += 1
+const id = `X${next}`
 
 const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim()
 const head = norm(finding).slice(0, 45)
 
-// ── A40 · THE CLASH CHECK, both directions ──────────────────────────────────
+// ── X40 · THE CLASH CHECK, both directions ──────────────────────────────────
 // It used to skip `built` and `declined` rows entirely, which is exactly
 // backwards for the most expensive mistake this ledger can hold. Re-filing an
 // OPEN row wastes a triage slot. Re-filing a BUILT one sends a lane to build a
-// mechanism that already exists — and it happened: A30 was filed on 2026-07-30
-// claiming the verify's discovery routing did not exist, while A8 had shipped
-// exactly that on 2026-07-27. The filer said nothing, because A8 was built. This
+// mechanism that already exists — and it happened: X30 was filed on 2026-07-30
+// claiming the verify's discovery routing did not exist, while X8 had shipped
+// exactly that on 2026-07-27. The filer said nothing, because X8 was built. This
 // ledger has no scout in front of it, so this check IS the filter, and its hole
 // sat precisely where the framework's memory lives.
 //
 // An open clash still REFUSES — that is unchanged and it is right.
 // A closed clash is usually an AMENDMENT: the mechanism exists and the policy on
-// top of it is wrong, which is what A30 turned out to be. So it asks for the link
+// top of it is wrong, which is what X30 turned out to be. So it asks for the link
 // instead of refusing outright, because refusing outright would lose real rows.
 const openClash = rows.find((r) => !CLOSED.has(r.verdict) && norm(r.finding).slice(0, 45) === head)
 if (openClash) {
@@ -263,27 +449,40 @@ if (openClash) {
 }
 
 // TWO detectors, one destination. The 45-char head is exact and catches a
-// near-verbatim re-file; it could never have caught A30 against A8, which share
+// near-verbatim re-file; it could never have caught X30 against X8, which share
 // no opening at all. So the second detector is by DISTINCTIVE TERM: a word this
 // ledger rarely uses, shared between the new finding and a closed row.
 //
-// A45 · the corpus is the closed row's `finding` + `note` + **`built`** — what
+// X45 · the corpus is the closed row's `finding` + `note` + **`built`** — what
 // shipped, not only what was wrong. The question this detector exists to answer is
 // "does that mechanism already EXIST", and the sentence that describes the
 // mechanism is the closing one; `built` did not exist as a field until 2026-07-30,
 // so it could only ever match the complaint. MEASURED across all 43 rows: adding
 // it leaves the flag rate identical at 87 total flags, and moves WHICH rows are
-// named — A30's text now also reaches A41 and A11's stops matching A30 on
+// named — X30's text now also reaches X41 and X11's stops matching X30 on
 // `bugger/warned`. Same cost, better aim.
 //
-// Both thresholds are MEASURED, not chosen, and they are the ONLY pair that still
-// works: `df <= 10% of rows` with `>= 2 shared` names A8 for A30's exact text, and
-// every tightening measured on 2026-07-30 (shared >= 3, or df <= 7%, or df <= 5%)
-// loses A8 — the one case this detector was built for. So the rate is what it is:
-// **2.02 flags per filing, 32 of 43 filings refused once.** The comment here used
-// to claim 0.6, measured when 19 rows were closed; 40 are closed now and the pool
-// it matches against doubled. A refusal costs one re-run with `--amends none`.
-// The 10% is relative so it does not decay further as the ledger grows.
+// `duplicate` joined the corpus on 2026-07-31 with the merge path above, and it is
+// not optional: an absorbed row's finding and evidence live ONLY on its survivor
+// now, so leaving the field out would make a merged defect re-fileable — the hole
+// X40 and X61 closed, re-opened by the merge itself. MEASURED over all 74 rows:
+// 334 flags against 324, 4.51 per filing against 4.38, and the same 68 filings
+// refused once. It changes WHO gets named, not how often.
+//
+// Both thresholds are MEASURED, not chosen: `df <= 10% of rows` with `>= 2 shared`
+// names X8 for X30's exact text, and every tightening measured on 2026-07-30
+// (shared >= 3, or df <= 7%, or df <= 5%) loses X8 — the one case this detector was
+// built for.
+//
+// THE RATE, RE-MEASURED, BECAUSE THIS COMMENT HAD GONE STALE. It claimed **2.02
+// flags per filing, 32 of 43 refused once**, from when the ledger held 43 rows. At
+// 74 rows it is **4.51 per filing and 68 of 74 — 92% — refused once**, from growth
+// alone. And the old claim that a RELATIVE threshold stops that decay is refuted by
+// the same measurement: `RARE` rises WITH the row count, so more words qualify as
+// rare and there are more rows to match them against, both pushing the same way. A
+// refusal still costs one re-run with `--amends none`, but a check that fires on 92%
+// of filings is on its way to being ignored. Retuning the pair is a judgement call,
+// so it is filed as its own row rather than decided here.
 const STOP = new Set(
   ('the a an and or of to in on for it its is are was were be been that this those these so no not but with as at by from into than then when where which who whom whose what while has have had do does did can could may might must shall should will would if else there their they them his her our your my me we us you i one two also only even just about after before over under again more most less least other another same such per via yet own too very'.split(
     ' ',
@@ -292,29 +491,44 @@ const STOP = new Set(
 const terms = (s) => new Set((String(s || '').toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !STOP.has(w)))
 // One corpus function, used for the rarity count AND for the per-row match, so a
 // word cannot be "rare" by one definition and matched by another.
-const corpusOf = (r) => `${r.finding} ${r.note} ${r.built || ''} ${r.declined || ''}`
+const corpusOf = (r) => `${r.finding} ${r.note} ${r.built || ''} ${r.declined || ''} ${r.duplicate || ''}`
 const df = new Map()
 for (const r of rows) for (const w of terms(corpusOf(r))) df.set(w, (df.get(w) || 0) + 1)
 const RARE = Math.max(2, Math.ceil(rows.length * 0.1))
 const mine = [...terms(finding)].filter((w) => (df.get(w) || 0) <= RARE)
+// X61 · OPEN ROWS ARE IN THIS POOL TOO. They used to be skipped outright, so an
+// open row had exactly ONE detector — the 45-character exact head above — and a
+// PARAPHRASE walked straight past it: X53 was open with "the report's id column
+// carries ledger slugs instead of numbers…" and "the report id column carries
+// ledger slugs instead of numbers so he cannot type a row id" filed clean as a
+// new row. The cheap error and the expensive one had swapped protections; a
+// closed row had two detectors and a live decision had one.
+//
+// Same REFUSED-ONCE treatment, not a hard refusal: a fuzzy match is a question,
+// not a verdict, and refusing outright at 2.02 flags per filing would lose real
+// rows. The output says which state each match is in, because the right answer
+// differs — an open match usually belongs ON that row, a closed one is usually
+// an amendment.
 const related = []
 for (const r of rows) {
-  if (!CLOSED.has(r.verdict)) continue
   const theirs = terms(corpusOf(r))
   const shared = norm(r.finding).slice(0, 45) === head ? ['the same opening sentence'] : mine.filter((w) => theirs.has(w))
   if (shared.length >= 2 || shared[0] === 'the same opening sentence') related.push({ r, shared })
 }
 if (related.length && !amends) {
-  console.error(`\nREFUSED ONCE — ${related.length} row(s) already CLOSED cover ground this finding names:\n`)
+  const nOpen = related.filter(({ r }) => !CLOSED.has(r.verdict)).length
+  console.error(`\nREFUSED ONCE — ${related.length} row(s) cover ground this finding names (${nOpen} still OPEN):\n`)
   for (const { r, shared } of related)
-    console.error(`  ${r.id} [${r.verdict} ${r.date}] shares ${shared.slice(0, 4).join(', ')}\n     ${String(r.finding).slice(0, 130)}`)
-  console.error(`\nA match against a built row is usually an AMENDMENT — the mechanism exists and the`)
-  console.error(`POLICY on top of it is wrong. Read the row, then re-run with ONE of:`)
+    console.error(`  ${r.id} [${CLOSED.has(r.verdict) ? r.verdict : 'OPEN'} ${r.date}] shares ${shared.slice(0, 4).join(', ')}\n     ${String(r.finding).slice(0, 130)}`)
+  console.error(`\nAn OPEN match is usually the same live decision said differently — that belongs on`)
+  console.error(`that row, not on a second one competing with it. A CLOSED match is usually an`)
+  console.error(`AMENDMENT: the mechanism exists and the POLICY on top of it is wrong.`)
+  console.error(`Read them, then re-run with ONE of:`)
   console.error(`  --amends <id>    it amends that row; the link is recorded and stays greppable`)
   console.error(`  --amends none    you read them and it is genuinely unrelated\n`)
   process.exit(1)
 }
-if (amends && amends !== 'none' && !rows.some((r) => r.id === amends)) die(`--amends ${amends} is not a row in this ledger.`, 'Pass an existing A-number, or `--amends none`.')
+if (amends && amends !== 'none' && !rows.some((r) => r.id === amends)) die(`--amends ${amends} is not a row in this ledger.`, 'Pass an existing X-number, or `--amends none`.')
 
 const row = {
   id,
