@@ -14,7 +14,7 @@ import {
   getRecentOutreachOwnerThread,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
-import { resolveRequest, renderCounter, type ResolveVerdict } from '../core/requests/resolver';
+import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
 import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import {
@@ -1339,6 +1339,19 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             return {
               error: 'missing_counter',
               reason: 'verdict=amend needs a counter the requester can actually act on — put the owner\'s alternative in `counter` (e.g. {"duration_min": 55}) and his words in `reason`.',
+            };
+          }
+          // amend-reason-bypasses-id-veto — `reason` is free text the owner
+          // types about a specific meeting, the field most likely on this
+          // tool to carry one of our own ids, and it rode straight into the
+          // requester relay with no veto at all. Same check the counter
+          // above just passed, reused on the one other free-text field
+          // reaching the requester on this verdict.
+          const reasonArg = typeof args.reason === 'string' ? args.reason.trim() : '';
+          if (reasonArg && textCarriesInternalWorkItemId(reasonArg)) {
+            return {
+              error: 'unrelayable_counter',
+              reason: 'verdict=amend can\'t carry an internal identifier to a colleague — your `reason` text holds one of our own request/task ids, which mean nothing to them. Restate it in human terms and send the amend again.',
             };
           }
           decision = { verdict: 'amend', counter, reason: args.reason as string | undefined };

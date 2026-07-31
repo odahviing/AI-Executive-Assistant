@@ -2,6 +2,37 @@
 
 ---
 
+## 4.3.8 — the requester gets her own invite, and every open bug ticket closes
+
+Five fixes, and the one that matters is small and was got wrong twice before it was got right. **The colleague who asks for a meeting was left off its invite** (gh#165) — because requester identity resolved to `undefined` on every path except the live colleague turn, including the **owner-approval replay**, which is the path the reported case actually took. The tool schema tells the model to *omit* `requester_slack_id` on the colleague path, so her identity was never in `args`, so no snapshot could carry it one hop later. The fix stamps it back onto `args` the moment it resolves. That single move also closes a second, worse bug found beside it: **a colleague who only relayed a message could receive a real calendar invite to a meeting she is not in**, because the scrub meant to remove her read the same absent identity.
+
+**Both attempts before this one were reverted, and the CHANGELOG names why, because it is the more useful half.** The first made the requester's work hours a hard clip on every colleague search — an auto-guessed Sun–Thu 09:00–18:00 that deleted the owner's real Tue 20:30–23:59 window, with the payload naming her own email as the blocker. The second put the add **above** two sensitivity gates that both decide by asking whether the colleague is on the attendee list: it guaranteed the condition they test, turning a deterministic privacy control into a model-supplied flag, and on the branch where the model omits her without setting that flag it sent a real Graph invite to someone the meeting was not about. **A fix for an invite list twice became a change to who can see what.** The third attempt moves one block below the gate and touches nothing else.
+
+### Fixed
+- **The meeting requester is on her own invite**, and identity now resolves the same way on the colleague path and the owner-approval replay. Invite list only — no availability clip anywhere.
+- **A relay-only colleague no longer receives an invite** to a meeting she is not part of, on the replay path where the scrub previously no-opped.
+- **An amend reason can no longer carry a raw internal id into a colleague's DM.** The owner types a free-text reason beside a counter-proposal; the counter passed an id veto and the reason passed nothing. Now gated at the single store point, reusing the existing regex rather than a second copy.
+- **One image download-and-scan loop instead of two.** The duplicate had already drifted twice, and it is the boundary where the malicious-image block decision lives — two copies means one can stop blocking while the other still does. The real divergence was **download-failure handling**, not the block verdict, and both behaviours were preserved rather than merged away: the DM path aborts the turn, the channel path continues, because that turn still has document text to fold in.
+- Two comments corrected: they tagged this work as an unrelated open ticket about MPIM privacy, which would have read as coverage that ticket never received.
+
+### Changed
+- **A colleague booking a time she herself is busy at now gets one "Book anyway, or pick a different time?"** where the booking used to just happen. A consequence of her becoming a real attendee, kept deliberately: excluding her would need a per-person exception the validator does not otherwise have. It never blocks silently.
+- One clamped-owner predicate instead of two. The invite roster and the shadow-DM gate had separate spellings of "is this genuinely a colleague and not the owner speaking in a group DM"; open Improvement #154 proposes replacing that clamp with a single fact, and it now has one site to replace instead of two that could disagree.
+
+### Not changed
+- The sensitivity rule still has two implementations that fire on the same call. This release proved they can be disabled together — one misplaced block did it — but the outer gate is now authoritative, so the second can only agree with it. Queued, not urgent.
+
+### Verified against shipped
+**5 fixes; the combined Opus pass covered all of them and overturned one.** That overturn is the privacy regression above; it was sent back to its lane and rebuilt. **The rebuild did not get its own full pass** — it moved one block to a position the pass itself had prescribed and proved safe, and its one new claim (that the outer gate's `delete args.sensitivity` makes the twin gate return early) was checked by reading both sites directly. The pass also spot-checked a row closed with no diff behind it and stood behind the closure.
+
+### Tickets
+**Every open `Bug` issue closes with this release** — three as fixed (#158, #165, #168), three as decided or moved: #156 on an explicit decline, #157 and #151 on handoffs to Improvements #154 and #155. The three comments say *decided* and *moved* rather than *solved*, because a bare close on those would claim work that was never done.
+
+### Framework (other chat, bundled)
+The deploy watcher now triggers `npm ci` on the **lockfile** alone — a bare version bump touches `package.json` only and must not force a reinstall — and skips the Chromium download, which fails on the target VM and previously aborted the whole deploy on any dependency change.
+
+---
+
 ## 4.3.7 — a fix that had never once fired, and the four facts nobody could reach
 
 Fourteen product fixes in three waves. The one worth the headline is not a fix, it is a discovery: **the mechanism shipped in 4.3.4 for gh#165 had never fired a single time in production.** `diagnosticsOut.conflictingEvent` was written only on a *passing* verdict, and a colleague's strict single-slot check can never produce one — so its only reader never saw the field, there are zero `conflicting_event_id` lines in any log file, and the fix had **replaced a lookup that was reachable**. #165 was worse after it than before. That is now repaired at the root: the writer is called from the rejecting branch too, so both that steer and this release's day-off branch are live for the first time.

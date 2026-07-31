@@ -66,15 +66,26 @@ function tick() {
     log('new commits detected', `${local.slice(0, 7)} → ${remote.slice(0, 7)}`);
 
     // Decide whether deps need reinstalling BEFORE pulling (diff old→new).
+    // Only the LOCKFILE signals a real dependency change — a bare version bump
+    // touches package.json alone and must NOT trigger a reinstall.
     let depsChanged = false;
     try {
       const changed = sh(`git diff --name-only HEAD origin/${BRANCH}`).split('\n');
-      depsChanged = changed.includes('package.json') || changed.includes('package-lock.json');
+      depsChanged = changed.includes('package-lock.json');
     } catch { /* fall through — treat as no dep change */ }
 
     run(`git pull --ff-only origin ${BRANCH}`);
 
-    if (depsChanged) { log('dependencies changed — running npm ci'); run(`npm ci`); }
+    if (depsChanged) {
+      log('dependencies changed — running npm ci (Chromium download skipped)');
+      // PUPPETEER_SKIP_*: WhatsApp/puppeteer is disabled, and the Chromium
+      // download fails on this small VM. Without skipping it, `npm ci` aborts and
+      // the whole deploy fails on any dependency change. Matches vm-setup.sh.
+      sh('npm ci', {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: { ...process.env, PUPPETEER_SKIP_DOWNLOAD: 'true', PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true' },
+      });
+    }
 
     // Typecheck GATE — abort the deploy on a bad build; leave dist/ + the running
     // process untouched so Maelle stays up on the last-good build.

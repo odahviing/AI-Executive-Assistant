@@ -1270,6 +1270,18 @@ const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
  */
 const INTERNAL_WORK_ITEM_ID_RE = /\b(?:(?:req|task)_[a-z0-9][a-z0-9_]*|(?:out|ci)_\d{10,}_[a-z0-9]+)\b/i;
 
+/**
+ * amend-reason-bypasses-id-veto — the id veto `renderCounter` applies to a
+ * counter's rendered parts, exposed so a free-text field that isn't counter-shaped
+ * (the owner's `reason` on an amend, accepted by resolve_approval and typed by him
+ * about a specific meeting — the field most likely to carry one of our own ids)
+ * can be checked with the identical regex instead of a second, drifting copy.
+ * One spelling of the rule, two call sites.
+ */
+export function textCarriesInternalWorkItemId(text: string): boolean {
+  return INTERNAL_WORK_ITEM_ID_RE.test(text);
+}
+
 function renderCounterValue(raw: unknown, formatInstant?: (iso: string) => string): string {
   if (raw === null || raw === undefined) return '';
   if (typeof raw === 'string') {

@@ -164,6 +164,80 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             });
           }
         }
+        // v4.3.x (gh#165-a / relay-invite gap) — ONE requester-identity
+        // resolution, read by the DROP branch immediately below
+        // (requester_is_attending:false: relayer/organizer, not an
+        // attendee) and by the ADD (default: requester attends), which now
+        // sits AFTER the colleague-path sensitivity gate a few lines down
+        // (2026-08-01 overturn — see the ADD's own comment for why). Both
+        // read off the SAME requesterId/requesterEmail resolved here, on
+        // every path — owner included. An owner-approval REPLAY
+        // (deferredActionReplay.ts) re-invokes this handler with
+        // senderRole:'owner' and context.userId === the OWNER, so the
+        // colleague-path fallback (context.userId) can't name the original
+        // requester on replay — only a `requester_slack_id` stamped into
+        // args at the ORIGINAL call survives into the replay (every
+        // `_deferred_action_hint: { args: {...args} }` below snapshots
+        // whatever args holds at that moment). Resolve + stamp HERE, before
+        // any of those snapshots, so the add, the scrub, and the replay all
+        // read the same requester.
+        //
+        // `isGenuineColleague` excludes the MPIM-clamped owner (senderRole
+        // reads 'colleague' but context.userId IS the owner's own slack id).
+        // ONE definition, read at both use sites in this handler — here, and
+        // by the shadow-DM gate further down (that site used to independently
+        // re-type the same test; collapsed to this one variable 2026-08-01).
+        // Open Improvement #154 proposes replacing this clamp with a single
+        // `ownerClampSurface` fact; when it lands, updating THIS one
+        // definition covers both the invite roster and the shadow-DM, so
+        // they can no longer disagree about who "the colleague" is.
+        const ownerSlackId = context.profile.user.slack_user_id;
+        const isGenuineColleague = context.senderRole === 'colleague' && context.userId !== ownerSlackId;
+        let requesterId: string | undefined = (typeof args.requester_slack_id === 'string' && args.requester_slack_id.trim())
+          ? args.requester_slack_id.trim()
+          : (isGenuineColleague ? context.userId : undefined);
+        if (requesterId === ownerSlackId) requesterId = undefined;  // the owner himself is never "the requester"
+        if (requesterId && (typeof args.requester_slack_id !== 'string' || !args.requester_slack_id.trim())) {
+          args.requester_slack_id = requesterId;
+        }
+        let requesterEmail: string | undefined;      // lowercased — comparisons only
+        let requesterEmailRaw: string | undefined;   // original case — used when adding to attendees
+        let requesterName: string | undefined;
+        if (requesterId) {
+          try {
+            const mem = getPersonMemory(requesterId);
+            requesterEmailRaw = mem?.email;
+            requesterEmail = requesterEmailRaw?.toLowerCase();
+            requesterName = mem?.name;
+          } catch (err) {
+            logger.warn('create_meeting — requester person-memory lookup threw, continuing', { err: String(err).slice(0, 160) });
+          }
+        }
+        if (args.requester_is_attending === false) {
+          // Bug 4 (2026-06-29) — a colleague who only RELAYED a meeting between OTHERS
+          // ("tell Idan I want to meet Tal") is the REQUESTER, not an attendee, but the
+          // model had added her to attendees → she was invited AND the booking was logged
+          // against her ("What we've discussed"). Scrub them from the attendees array IN
+          // PLACE — `attendees` aliases args.attendees, so the one splice covers the
+          // normalizer→planMeeting→Graph event AND recordBooking (which reads this same
+          // array).
+          if (requesterId) {
+            const before = attendees.length;
+            for (let i = attendees.length - 1; i >= 0; i--) {
+              const a = attendees[i];
+              const byId = !!a.slack_id && a.slack_id === requesterId;
+              const byEmail = !!requesterEmail && (a.email ?? '').toLowerCase() === requesterEmail;
+              if (byId || byEmail) attendees.splice(i, 1);
+            }
+            if (attendees.length < before) {
+              logger.info('create_meeting — requester not attending; scrubbed from attendees (relayer/organizer)', {
+                requesterId, dropped: before - attendees.length, remaining: attendees.length,
+              });
+            }
+          }
+        }
+        // (gh#165-a ADD — requester_is_attending unset/true — moved below the
+        // colleague-path sensitivity gate; see there for why.)
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 
@@ -230,6 +304,47 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               attendeeEmails: Array.isArray(attendees) ? attendees.map(a => a.email) : [],
             });
             delete args.sensitivity;
+          }
+        }
+
+        // gh#165-a — DEFAULT case (requester_is_attending unset/true): the tool
+        // description promises the requester is "one of the meeting attendees" by
+        // default, but nothing enforced it — Sonnet sometimes omits her own email from
+        // `attendees`, and the invite never reaches the person who asked for the
+        // meeting. Add her deterministically. INVITE LIST ONLY: this only pushes into
+        // `attendees` (the Graph invite roster).
+        //
+        // 2026-08-01 overturn — moved BELOW the sensitivity gate above (and its twin
+        // `gateSensitivity` in bookingRequest.ts, reached later via
+        // normalizeBookingRequest below): this used to sit right after the
+        // requester-identity resolution, i.e. ABOVE both gates, so "is the colleague's
+        // email in attendees" always read true on this default path — a deterministic
+        // privacy control was reduced to a no-op for every ordinary colleague booking.
+        // Nothing between the old position and here reads `attendees` except that
+        // gate, and every `{ ...args }` deferred-action snapshot is further down
+        // still, so moving this add changes nothing else about what gets booked or
+        // replayed.
+        //
+        // NOT advisory-only: planMeeting's internal-attendee freebusy check
+        // (planMeeting.ts ~666-757) also sees the requester once she's added here, and
+        // on a fresh owner-initiated book (not a move, not already relaxed) a
+        // genuinely busy requester now trips the same one-time "book anyway, or pick a
+        // different time?" confirm any other attendee would. Kept deliberately: once
+        // she's a real attendee, checking her calendar the same way as everyone
+        // else's is the consistent answer — carving her out would need a new
+        // exclusion this gate doesn't otherwise have, for no reason a colleague's own
+        // busy slot doesn't already have.
+        if (args.requester_is_attending !== false && requesterId && requesterEmailRaw) {
+          const already = attendees.some(a => {
+            const byId = !!a.slack_id && a.slack_id === requesterId;
+            const byEmail = (a.email ?? '').toLowerCase() === requesterEmail;
+            return byId || byEmail;
+          });
+          if (!already) {
+            attendees.push({ name: requesterName, email: requesterEmailRaw, slack_id: requesterId });
+            logger.info('create_meeting — added requester to attendees (default: attending)', {
+              requesterId, requesterEmail, senderRole: context.senderRole,
+            });
           }
         }
 
@@ -844,41 +959,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // gate, email auto-fill); the normalizer reads those mutated values and
         // produces the canonical shape. See bookingRequest.ts for the invariants
         // the normalizer enforces.
-        // Bug 4 (2026-06-29) — a colleague who only RELAYED a meeting between OTHERS
-        // ("tell Idan I want to meet Tal") is the REQUESTER, not an attendee, but the
-        // model had added her to attendees → she was invited AND the booking was logged
-        // against her ("What we've discussed"). Reuse the existing requester concept
-        // (requester_is_attending — the find_available_slots flag): when the requester
-        // isn't attending, scrub them from the attendees array IN PLACE — `attendees`
-        // aliases args.attendees, so the one splice covers the normalizer→planMeeting→
-        // Graph event AND recordBooking (which reads this same array). Identity: the
-        // named requester_slack_id (works on the OWNER path, where the relayer isn't the
-        // one talking — the incident), else the colleague currently talking.
-        if (args.requester_is_attending === false) {
-          const requesterId = (typeof args.requester_slack_id === 'string' && args.requester_slack_id.trim())
-            ? args.requester_slack_id.trim()
-            : (context.senderRole === 'colleague' ? context.userId : undefined);
-          if (requesterId) {
-            try {
-              const { getPersonMemory } = await import('../../../../db');
-              const reqEmail = (getPersonMemory(requesterId)?.email ?? '').toLowerCase();
-              const before = attendees.length;
-              for (let i = attendees.length - 1; i >= 0; i--) {
-                const a = attendees[i];
-                const byId = !!a.slack_id && a.slack_id === requesterId;
-                const byEmail = !!reqEmail && (a.email ?? '').toLowerCase() === reqEmail;
-                if (byId || byEmail) attendees.splice(i, 1);
-              }
-              if (attendees.length < before) {
-                logger.info('create_meeting — requester not attending; scrubbed from attendees (relayer/organizer)', {
-                  requesterId, dropped: before - attendees.length, remaining: attendees.length,
-                });
-              }
-            } catch (err) {
-              logger.warn('create_meeting — requester-drop lookup threw, continuing', { err: String(err).slice(0, 160) });
-            }
-          }
-        }
+        // Requester add/drop now resolved once, up front (see the
+        // gh#165-a / relay-invite-gap block above `assistantEmail`) — both
+        // branches read the SAME `requesterId`, stamped into
+        // args.requester_slack_id before any early-return can snapshot it
+        // for a later approval replay.
         // Create-vs-move slop guard (2026-07-05 Simon double-book). On an explicit
         // "move X to <day>" the model sometimes calls create_meeting (it needs no
         // event id) → a duplicate beside the still-live original. Before booking,
@@ -1484,7 +1569,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // Skip when the "colleague" is really the OWNER clamped to colleague-
           // context in an MPIM/channel: he booked it himself and was right there,
           // so a self-shadow ("Idan confirmed slot in DM — booked…") is nonsense.
-          if (context.senderRole === 'colleague' && context.userId !== context.profile.user.slack_user_id) {
+          // `isGenuineColleague` — same clamped-owner test resolved once, above.
+          if (isGenuineColleague) {
             try {
               const { shadowNotify } = await import('../../../../utils/shadowNotify');
               const { getPersonMemory } = await import('../../../../db');

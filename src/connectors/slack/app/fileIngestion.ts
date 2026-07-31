@@ -1,8 +1,9 @@
 /**
- * File-ingestion primitives extracted from app.ts: the image file_share
- * helper, the doc-type predicates, the download/parse core, and the per-image
- * injection guard. Shared by the DM file_share path and the channel @mention
- * path so the security-critical bits have one implementation.
+ * File-ingestion primitives extracted from app.ts: the shared download-and-
+ * scan image batch loop, the image file_share helper, the doc-type
+ * predicates, the download/parse core, and the per-image injection guard.
+ * Shared by the DM file_share path and the channel @mention path so the
+ * security-critical bits have one implementation.
  */
 
 import { downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
@@ -11,7 +12,51 @@ import { shadowNotify } from '../../../utils/shadowNotify';
 import { getOwnerDomain } from '../../../utils/attendeeScope';
 import logger from '../../../utils/logger';
 import { isOverloadError } from './helpers';
-import type { SlackAppContext, ProcessImageFileShareParams, ScanAndPrepareImageParams } from './context';
+import type { SlackAppContext, ProcessImageFileShareParams, ScanAndPrepareImageParams, SenderRole } from './context';
+
+  // ── Shared download-and-scan loop (D1) ────────────────────────────────────
+  // THE security boundary for image input: a colleague image reaches Sonnet
+  // only via scanAndPrepareImage's `if (!block) continue` path below. Shared
+  // by processImageFileShare (DM/MPIM/replay) and the channel @mention
+  // handler (handlers.ts) so the two can never silently drift again.
+export async function downloadAndScanImageBatch(files: any[], opts: {
+  botToken: string; senderId: string; senderRole: SenderRole; channelId: string; threadTs: string;
+  post: (text: string) => Promise<void>;
+  scanAndPrepareImage: (params: ScanAndPrepareImageParams) => Promise<AnthropicImageBlock | null>;
+  // DM/MPIM/replay: a download failure aborts the whole batch. Channel
+  // @mention: false — that turn continues regardless of one bad image.
+  stopOnDownloadFailure: boolean;
+}) {
+  const { botToken, senderId, senderRole, channelId, threadTs, post, scanAndPrepareImage, stopOnDownloadFailure } = opts;
+  const images: AnthropicImageBlock[] = [];
+  const imageUrls: string[] = [];
+  // Tracked separately: a download failure made no security verdict; a
+  // refusal (scanAndPrepareImage → null) IS one and must stay fail-closed.
+  let hadDownloadFailure = false;
+  let hadSecurityRefusal = false;
+  for (const f of files) {
+    const dl = await downloadSlackImage(f.url_private, botToken, f.mimetype);
+    if ('error' in dl) {
+      logger.warn('Image download failed', { error: dl.error, detail: dl.detail, filetype: f.filetype });
+      const friendly = dl.error === 'too_large'
+        ? `That image is a bit big for me to look at — could you try a smaller version?`
+        : dl.error === 'unsupported_type'
+        ? `I can only look at JPEG, PNG, GIF, or WebP images — that file type doesn't work for me.`
+        : `I couldn't open that image. Try sending it again?`;
+      try { await post(friendly); } catch (_) {}
+      hadDownloadFailure = true;
+      if (stopOnDownloadFailure) return { images, imageUrls, hadDownloadFailure, hadSecurityRefusal, abortedOnDownloadFailure: true };
+      continue;  // catch-up / channel: try the rest of the batch
+    }
+    // owner proceeds (shadow-notified); a suspicious colleague image is
+    // dropped and refused so Sonnet never sees the bytes.
+    const block = await scanAndPrepareImage({ dl, senderId, senderRole, channelId, threadTs, post });
+    if (!block) { hadSecurityRefusal = true; continue; }  // suspicious colleague image — dropped
+    images.push(block);
+    imageUrls.push(f.url_private as string);
+  }
+  return { images, imageUrls, hadDownloadFailure, hadSecurityRefusal, abortedOnDownloadFailure: false };
+}
 
   // ── Image file_share helper (v1.7.1) ──────────────────────────────────────
   // Owner-only image input. Downloads each image, runs the injection guard
@@ -37,58 +82,15 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
       });
     }
 
-    const images: AnthropicImageBlock[] = [];
-    const imageUrls: string[] = [];
-    // Two distinct failure kinds tracked separately (catch-up only cares about
-    // the first): a download failure is a fetch problem, no security verdict
-    // was made; a security refusal (scanAndPrepareImage → null) IS a verdict
-    // and must never be degraded around — see the gate below.
-    let hadDownloadFailure = false;
-    let hadSecurityRefusal = false;
-    for (const f of toProcess) {
-      const dl = await downloadSlackImage(f.url_private, assistant.slack.bot_token, f.mimetype);
-      if ('error' in dl) {
-        logger.warn('Image download failed', {
-          error: dl.error, detail: dl.detail, filetype: f.filetype,
-        });
-        const friendly = dl.error === 'too_large'
-          ? `That image is a bit big for me to look at — could you try a smaller version?`
-          : dl.error === 'unsupported_type'
-          ? `I can only look at JPEG, PNG, GIF, or WebP images — that file type doesn't work for me.`
-          : `I couldn't open that image. Try sending it again?`;
-        try {
-          await client.chat.postMessage({
-            token: assistant.slack.bot_token,
-            channel: channelId,
-            thread_ts: threadTs,
-            text: friendly,
-          });
-        } catch (_) {}
-        if (!degradeOnDownloadFailure) return;
-        hadDownloadFailure = true;
-        continue;  // catch-up: try the rest of the batch, degrade at the end
-      }
+    const post = (text: string) => client.chat.postMessage(
+      { token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text },
+    ).then(() => {});
 
-      // Image injection guard (shared policy — see scanAndPrepareImage):
-      // owner proceeds (shadow-notified); a suspicious colleague image is
-      // dropped and refused so Sonnet never sees the bytes.
-      const block = await scanAndPrepareImage({
-        dl,
-        senderId: message.user!,
-        senderRole: getSenderRole(message.user!),
-        channelId,
-        threadTs,
-        post: (text) => client.chat.postMessage({
-          token: assistant.slack.bot_token,
-          channel: channelId,
-          thread_ts: threadTs,
-          text,
-        }).then(() => {}),
-      });
-      if (!block) { hadSecurityRefusal = true; continue; }  // suspicious colleague image — dropped
-      images.push(block);
-      imageUrls.push(f.url_private as string);
-    }
+    const { images, imageUrls, hadDownloadFailure, hadSecurityRefusal, abortedOnDownloadFailure } = await downloadAndScanImageBatch(
+      toProcess,
+      { botToken: assistant.slack.bot_token, senderId: message.user!, senderRole: getSenderRole(message.user!), channelId, threadTs, post, scanAndPrepareImage, stopOnDownloadFailure: !degradeOnDownloadFailure },
+    );
+    if (abortedOnDownloadFailure) return;
 
     if (images.length === 0) {
       // Catch-up exemption: degrade to answering the text ONLY when every
@@ -106,7 +108,8 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
     // if its not flag, give me a chance to see it" — owner). Fires here,
     // strictly AFTER the scan loop above: only urls that survived
     // scanAndPrepareImage land in `imageUrls`, so a suspicious colleague
-    // image (dropped + refused above, :79) can never be forwarded — a
+    // image (dropped + refused inside downloadAndScanImageBatch's
+    // `if (!block) continue` above) can never be forwarded — a
     // forward never launders provenance. The forwarded url is never written
     // to the OWNER's own conversation history (appendToConversation in
     // processMessage.ts keys on the COLLEAGUE's threadTs, not the owner's),

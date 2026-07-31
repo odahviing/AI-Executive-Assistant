@@ -11,12 +11,12 @@ import { getAnthropicClient } from '../../../llm/client';
 import { ownerPostedInThread, classifyThreadAction, buildThreadRoster, buildThreadActionDirective } from '../../../core/threadActions';
 import { getConversationHistory, appendToConversation, upsertPersonMemory } from '../../../db';
 import { transcribeSlackAudio } from '../../../voice';
-import { downloadSlackImage, type AnthropicImageBlock } from '../../../vision';
+import { type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import { registerInboundReplay } from '../inboundReplayRegistry';
 import { markProcessed, markContentProcessed } from '../processedDedup';
 import { is1on1DM, OVERLOAD_REPLY } from './helpers';
-import { isSlackDocFile, isSlackImageFile, extractSlackDocText } from './fileIngestion';
+import { isSlackDocFile, isSlackImageFile, extractSlackDocText, downloadAndScanImageBatch } from './fileIngestion';
 import type { SlackAppContext } from './context';
 
   // On-restart catch-up routes missed messages THROUGH this live path instead
@@ -1218,32 +1218,22 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
           }
 
           // Images → injection-guarded blocks (cap 4, same as the DM path).
+          // Shared loop with processImageFileShare (fileIngestion.ts) — see
+          // downloadAndScanImageBatch's doc comment (D1). Channel @mention
+          // never stops early on a download failure: this turn still has doc
+          // text / thread directives to fold in regardless of one bad image.
           const imgFiles = mentionFiles.filter(isSlackImageFile).slice(0, 4);
-          const blocks: AnthropicImageBlock[] = [];
-          const urls: string[] = [];
-          for (const f of imgFiles) {
-            const dl = await downloadSlackImage(f.url_private, assistant.slack.bot_token, f.mimetype);
-            if ('error' in dl) {
-              await postToThread(
-                dl.error === 'too_large' ? `That image is a bit big for me to look at — a smaller version?`
-                : dl.error === 'unsupported_type' ? `I can only look at JPEG, PNG, GIF, or WebP images.`
-                : `I couldn't open that image. Try sharing it again?`,
-              );
-              continue;
-            }
-            const block = await scanAndPrepareImage({
-              dl,
-              senderId: event.user!,
-              senderRole: senderRoleForFiles,
-              channelId: event.channel,
-              threadTs,
-              post: postToThread,
-            });
-            if (!block) continue;  // suspicious colleague image — dropped
-            blocks.push(block);
-            if (f.url_private) urls.push(f.url_private as string);
-          }
-          if (blocks.length > 0) { channelImages = blocks; channelImageUrls = urls; }
+          const scanned = await downloadAndScanImageBatch(imgFiles, {
+            botToken: assistant.slack.bot_token,
+            senderId: event.user!,
+            senderRole: senderRoleForFiles,
+            channelId: event.channel,
+            threadTs,
+            post: postToThread,
+            scanAndPrepareImage,
+            stopOnDownloadFailure: false,
+          });
+          if (scanned.images.length > 0) { channelImages = scanned.images; channelImageUrls = scanned.imageUrls; }
         }
       }
 
