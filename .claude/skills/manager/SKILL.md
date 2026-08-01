@@ -279,28 +279,11 @@ Full detail on each, for you — not for the menu:
   - **The ledger row carries his words in `note`, in the same turn** — same rule as a `deferred` or `declined` row (X23), and for the same reason: the report cell holding your correction is deleted at the wrap, so a counter recorded nowhere else becomes a row the next run cannot tell from a first attempt.
 - **convert `<id>`** — also reached by *"that's not a bug, that's a design question"*, *"park it as a ticket"*, *"take it off the bug track"*. **The fifth verb, and it was the only one missing from the menu above** — implemented since 2026-07-27, used six times, fully specified, and invisible at the moment a verb is chosen (X77). Run the six-step conversion under `converted` in "State you own": open the `Improvement`/`Feature` issue carrying his words and the evidence, state the QUESTION not a solution, append the ledger row with the gh ref in `note`, remove the row from `report.md`. **Do not close the source `Bug` issue** — that is outward-facing and belongs to a wrap.
 - **status** — mid-run OR post-run snapshot. Read the live `journal.jsonl` in the current run's transcript dir (`<project>/subagents/workflows/<state.lastRun.id>/journal.jsonl`) and print: findings count, the triaged atomic bugs (id · lane · severity · symptom), and each verdict so far (built / needs-dependency / blocked-charter / needs-owner-decision / already-fixed). Also show last-run time + whether it's incomplete (resumable). **Works while a run is in progress** — the journal streams as agents finish.
-- **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. After a clean wrap: **append EVERY row on the report to `ledger.jsonl` FIRST — whatever its verdict, not only the wrapped ones** — then set `lastWrapIso` **to the wrap commit's own timestamp** (`git log -1 --date=iso-strict --format=%ad` — the cleaner scopes itself off this, so a skipped stamp makes it re-scan judged commits; **`--report` exits 1 naming any release commit that neither marker stands behind**, X103), then **close the GitHub issues** (below), then clear the built rows and reset `report.md` to empty. Never clear the report before the ledger append — that is the only moment the history can be lost. **Then reduce `state.json` to the documented keys** — the append you just made is what makes the run's notes deletable, so this is the one moment it costs nothing.
+- **wrap** / **wrap up and close (patch|minor)** — the ONLY commit path. Invoke the `wrap` skill. Default **patch** unless the owner says minor. **The procedure is `.claude/WRAP_UP.md` and that is the only numbered copy of it — follow it, do not restate it here, do not improvise around it.** The stamp, the fields each appended row carries, the GitHub closes and the verified-against-shipped summary all live there.
 
-  **X77 · THE APPEND CARRIES THE ROW'S RECOMMENDATION, and this is the half that was being dropped.** Every row that is not closed goes in with `"recommend"` and `"runId":"wrap-<version>"` (X54). The recommendation is sitting in the Status cell you are about to delete — *"pending owner — recommend build"* becomes `"recommend":"build — <the clause>"`. Skip it and the row survives in a form he cannot rule on, which is how **54 of 56** open rows got there. **Check it in one command after the append: `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.**
+  **One invariant is yours rather than the skill's, because `report.md` is your surface: it is not reset until every row on it has been appended to `ledger.jsonl` — whatever its verdict, not only the wrapped ones.** That is the single moment the history can be lost, and it has been lost: the append once named only the *wrapped* rows while the reset took everything, so `slot-hold-release-dm-role-gate` sits at `ledger.jsonl:253` as `needs-owner-decision` after he had already deferred it, and `--open` shows him a decision he has made as one he has never seen (X23). **This is the 24-declines failure one wrap later: then the declines were prose that never became rows, now the deferrals are.**
 
-  **X37 · The wrap summary states VERIFIED against SHIPPED, and names every gap.** A lane may decide its own fix does not need an bouncer pass and it is often right — `candidate-branch-narrower-window-clause-wrong` skipped one for *"two prose edits with no logic change"*, citing this file's own cost guidance, and an Opus pass over two string literals genuinely is disproportionate. **The defect is not the decision, it is that the decision was invisible at the last gate before real people see the change.** So the wrap says *"6 pieces shipped, 4 verified"* and lists the two with the reason each carried, straight out of its ledger `note`. Then he rules on it — the bouncer guards the agents, he guards the wrap. **One field, never a justification:** making the skip expensive to declare pushes lanes into asking for passes they do not need.
-
-  **An emptied `report.md` still carries its headline.** Resetting it to empty means no rows, not *"nothing is waiting on you"* — run `node scripts/ledger-stats.cjs --open` as part of the wrap and write its open total and split into the headline. This is the same defect as a summary that omits its own exceptions, and it stood on the surface he trusts most at the moment he trusts it most.
-
-**X23, and it is the reason that sentence changed:** the append named only *wrapped* rows while the reset took everything, so a row he had RULED ON died with the file. `slot-hold-release-dm-role-gate` is the proof — `report.md` recorded *"deferred — owner: not important for now"*, the report was emptied at the 4.3.1 wrap, and `ledger.jsonl:253` still carries it as `needs-owner-decision`, so `--open` lists it as something he has never seen. A `deferred` or `declined` row appends with his words in `note` and its state, exactly as `ledger.jsonl:235` already does for one that was captured correctly. **This is the 24-declines failure one wrap later: then the declines were prose that never became rows, now the deferrals are.**
-
-  **Closing the GitHub issues is part of wrapping** (owner's instruction, 2026-07-26: *"after the verify succeed and I committed the code, the workflow should close the github ticket"*). This replaces the `Agent` label entirely — a closed issue leaves `--state open` and is never re-pulled, which is what the label was trying to approximate and never did.
-
-  For every ledger row being wrapped that carries a `gh#<n>` ref:
-  ```bash
-  gh issue close <n> --comment "Fixed in <commit-sha> (v<version>). <one line on what changed>"
-  ```
-  **Three conditions, all required:**
-  1. The verdict is **`built`** — never close a row the verify overturned to `needs-owner-decision`, and never one the owner hasn't decided. Those stay open, because they are not done.
-  2. The commit **exists** — close after the push, never before, so the sha in the comment is real.
-  3. **The owner said wrap.** Closing an issue is outward-facing and irreversible-ish; it happens only inside his explicit wrap, never on a nightly run and never autonomously.
-
-  If one issue had several findings (e.g. #147 → B1–B4), close it once and name all of them. If only *some* of an issue's findings shipped, **leave it open** and say in the comment which parts landed — a half-fixed issue that reads as closed is worse than one still open.
+  **`node scripts/ledger-stats.cjs --report` is the acceptance test for the whole wrap** — both wrap markers against the newest release commit, and the report's own headline counts against the ledger. It exits 1. A wrap does not finish on a red one.
 
 ## Cost control — WITHOUT stopping the build
 
@@ -492,17 +475,23 @@ One backticked ref per item, `·` between them, three or four words each — **`
 - **A question for him is not a second table.** It is a row, with `Status: pending owner — recommend <your call>`. That field exists to carry exactly this. On 2026-07-27 a run returned a separate "Decide" table while the main table was *already* carrying two `pending owner` rows doing the same job.
 - **A FRAMEWORK bug** — the engine, a charter, the Manager itself — **does not belong in this report at all.** Maelle did nothing, so there is no chat problem, and he cannot act on it. It goes to the **infrastructure chat**. Putting it here only makes him a router for work he cannot do.
 
-**WHERE A `cleaner` RUN'S FINDINGS LAND** (`.claude/agents/cleaner.md`, tag `C`, **not in rotation** — he dispatches it himself and no engine calls it). Five verdicts, three destinations. The row shape is the table above **unchanged** — `C7 · cleaner · pending owner — recommend build`, with `—` in **The chat problem** because nobody complained. No new column, no second table.
+**WHERE A `cleaner` RUN'S FINDINGS LAND** (`.claude/agents/cleaner.md`, tag `C`, **not in rotation** — he dispatches it himself and no engine calls it). The row shape is the table above **unchanged** — `C7 · cleaner · pending owner — recommend build`, with `—` in **The chat problem** because nobody complained. No new column, no second table.
 
-- **`cleaned`** → the **ledger** as `built`. Nothing to approve; the numbers go in the run summary, not as rows.
-- **`needs-lane`** → the **ledger**. It drains into a later run's intake and you route it then.
-- **`needs-owner`** → **report.md**. The YAML / config interface is his.
-- **`audit`** → **report.md**, carrying a recommendation (M6b).
-- **`nothing-to-do`** → nothing at all.
+**A HAND DISPATCH BYPASSES THE ENGINE'S PERSIST BLOCK, and EVERY cleaner run is one.** You write these rows yourself, in the same turn the verdicts come back. That is the 2026-07-28 failure exactly: four overturns were reported in chat while `report.md` still read *"Empty, nothing is waiting on you."*
+
+**Every cleaner verdict maps onto a ledger verdict that already exists — mint no new one.** Write `lane:"cleaner"`, `source:"audit"`, and **`ref` = the finding's own SYMBOL slug** (`dead-export:db/people.ts:updatePersonGender`) — the `C7` is its handle on this surface and never a second identity (X101). Where that slug matches an open ledger row, write the row under **that row's** ref and the append closes it.
+
+| Cleaner verdict | Ledger verdict | Where it goes |
+|---|---|---|
+| `cleaned` | `built` | ledger only — the numbers go in the run summary, never as rows |
+| `needs-lane` | `queued-next-run` | ledger **plus a `state.pendingOverflow` entry** shaped for `args.issues`, or nothing drains it (X43) |
+| `needs-owner` | `needs-owner-decision` + `recommend` | ledger **and** a `pending owner` row on report.md — the YAML / config interface is his |
+| `audit` | `needs-owner-decision` + `recommend` | ledger **and** a `pending owner` row on report.md |
+| `nothing-to-do` | — | nothing at all |
+
+**Never write `verdict:"audit"` for a cleaner finding.** That spelling already means *a findings-only pass RAN* and `ledger-stats.cjs:821` counts it CLOSED — 16 rows carry it today — so the row would vanish from `--open` the moment the wrap emptied the report that held it. X23 on a new carrier. `source:"audit"` records that the sweep happened; the verdict says what it found.
 
 The two that reach report.md sit in the `pending owner` group and **carry a recommendation like every other row** — a sweep gets no exemption from the one bound there is. No code change is needed for either: `ledger-stats --report` reads the Status cell and is blind to both the prefix and the lane.
-
-**A HAND DISPATCH BYPASSES THE ENGINE’S PERSIST BLOCK, and the cleaner’s FIRST run will be one.** Whoever dispatches it writes these rows himself, in the same turn the verdicts come back. That is the 2026-07-28 failure exactly: four overturns were reported in chat while `report.md` still read *"Empty, nothing is waiting on you."*
 
 Under the table, in prose: **the manifest and any warnings** (see step 3 of the run), the actions above, then anything not yet ready to be a row.
 

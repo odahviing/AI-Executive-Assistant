@@ -1,7 +1,7 @@
 ---
 name: wrap
 description: |
-  Finish the current working session by bundling the day's work into a version. Triggered when the owner says "wrap", "wrap up", "close the patch", "cut a version", "day close", "ship it", "let's ship", "let's finish for today", "bundle this", "let's commit", or similar phrases. This skill walks the full release checklist and ENDS WITH A RUNNING MAELLE: bundle every chat's work, bump package.json, write the CHANGELOG, ledger-then-report bookkeeping, typecheck, commit, push, close or comment the GitHub issues, restart, and confirm the boot stamp. Default bump is PATCH. The detailed step-by-step lives at .claude/WRAP_UP.md — open it and follow it without improvising.
+  Finish the current working session by bundling the day's work into a version. Triggered when the owner says "wrap", "wrap up", "close the patch", "cut a version", "day close", "ship it", "let's ship", "let's finish for today", "bundle this", "let's commit", or similar phrases. This skill walks the full release checklist and ENDS WITH A RUNNING MAELLE: bundle every chat's work, bump package.json, write the CHANGELOG, ledger-then-report bookkeeping, typecheck, commit, push, close or comment the GitHub issues, and confirm the VM's boot stamp. Default bump is PATCH. The detailed step-by-step lives at .claude/WRAP_UP.md — open it and follow it without improvising.
 ---
 
 # Wrap — finish the session, ship a version, leave Maelle running
@@ -15,8 +15,8 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 1. **PATCH.** Never minor unless he says the word. Never major, ever.
 2. **Bundle EVERY chat's work, not just this one's.** Read the FULL working tree — `git status --porcelain` with no path filter — and commit all of it, framework files included. He has said *"take from other chats as well"* / *"take other chat code"* on three separate wraps. A commit containing only your own files is the defect.
 3. **Nothing uncommitted when you are done.** Re-run `git status --porcelain` at the end; empty output is the acceptance test. That includes `.claude/agent-loop/**` bookkeeping.
-4. **Close the GitHub issues that are fully resolved — and COMMENT the ones that are not.** The second half is the part that used to get skipped: a partial ticket gets a comment naming what landed and what is still open, so it is not silently left to rot. See the rules below.
-5. **Restart Maelle.** The wrap is not finished at the push. Build, restart, and confirm the boot stamp.
+4. **Close the GitHub issues that are fully resolved — and COMMENT the ones that are not.** The second half is the part that used to get skipped: a partial ticket gets a comment naming what landed and what is still open, so it is not silently left to rot. The three closing conditions and the partial rule are WRAP_UP.md step 12.
+5. **Maelle running on the new sha.** The push *is* the restart — the VM auto-deploys. **Never build or restart locally: there is no local Maelle and starting one opens a second Slack socket.** The wrap is not finished until the VM's boot stamp confirms the new sha (step 13).
 6. **Then one summary**, stating verified-against-shipped.
 
 ## Two gates that still belong to him — do not assume these
@@ -33,81 +33,13 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 
 ## Now — open WRAP_UP.md and run the checklist
 
-Read `.claude/WRAP_UP.md` end-to-end and run it in order. The steps that exist because they were once missed:
+`.claude/WRAP_UP.md` is the procedure and **the only numbered copy of it**. Read it end-to-end and run it in order. This file used to number the fourteen steps as well, one step short and one number out of step against the file it delegates to — which is how the wrap ran for seven releases with no bookkeeping at all. **This file names steps; that file numbers them.** When a step changes, it changes there.
 
-1. Check there is something to ship
-2. Inventory the changes — **the whole tree, every chat**
-3. Classify high-impact vs small
-4. Version bump — **PATCH by default**
-5. `package.json`
-6. CHANGELOG entry, above the previous one
-7. Memory / `SESSION_STARTER.md` version line — conditional, but **the version line is not conditional**: a stale "Current version" misleads every agent that boots
-8. `README.md` — conditional
-9. **Ledger BEFORE report.** Append every row on `report.md` to `ledger.jsonl` — whatever its verdict, not only the built ones — then reset the report. This is the only moment history can be lost, and it has been lost this way (X23). **Two fields on every row you append, and both exist because this step dropped them:**
-   - **`"runId":"wrap-<version>"`** (X54) — `node scripts/ledger-stats.cjs --wrap <version>` can name a release's own rows on exactly the two versions that carried it, out of twenty released.
-   - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built` (X77) — it is sitting in the Status cell you are about to delete (*"pending owner — recommend build"*), and the ledger row is where it has to live to survive this step. **54 of 56** standing open rows carry none because this was never said. Verify after the append: `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.
-   - **A THIRD marker is owed and it is not on a row — `state.lastWrapIso`, set at step 11** because its value is the release commit's own timestamp, which does not exist yet here. `cleaner.md` C10 scopes its entire scan off that instant, so a skipped stamp makes the next cleaner re-scan commits it has already judged. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.**
-10. `npm run typecheck` — must pass
-11. Commit + push under the owner's author — **then stamp the wrap** (below)
-12. **GitHub issues** — close or comment (below)
-13. **Restart and confirm the boot stamp** (below)
-14. Summary — **verified against shipped**
+Four of them exist because they were once missed. Confirm each actually happened before you call the wrap done:
 
-## Stamping the wrap — two markers, one check
+- **Inventory the whole tree, every chat** — `git status --porcelain` with no path filter.
+- **The `SESSION_STARTER.md` version line.** The rest of the memory update is conditional; that line is not — a stale "Current version" misleads every agent that boots.
+- **Bookkeeping: the ledger BEFORE the report, then the wrap stamp after the push.** Two markers, `"runId":"wrap-<version>"` on every appended row and `state.lastWrapIso`, and one acceptance test for both — `node scripts/ledger-stats.cjs --report` must be **green**. Do not finish a wrap on a red one.
+- **Verified against shipped** in the summary — *"7 shipped, 4 verified"*, plus the reason each gap carried.
 
-The wrap leaves two markers behind, and until 2026-08-01 this file named only one of them. Both describe the same fact — *which release this wrap shipped* — so set both in the same turn as the push:
-
-```bash
-git log -1 --date=iso-strict --format=%ad     # -> state.json `lastWrapIso`
-```
-
-Run it after the release commit and write the value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 true. The other marker is `"runId":"wrap-<version>"` on every row appended at step 9.
-
-**The check, and it is one command:**
-
-```bash
-node scripts/ledger-stats.cjs --report
-```
-
-It exits 1 naming any release commit that neither marker stands behind (X103). A green `--report` is the acceptance test for this step — do not finish the wrap on a red one.
-
-## Closing the GitHub issues — three conditions, and the partial half
-
-Close only when **all three** hold: the verdict is `built`, the commit exists (close *after* the push so the sha is real), and he said wrap.
-
-```bash
-gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what changed>"
-```
-
-**A ticket whose complaints are not all resolved does NOT close — it gets a comment instead:**
-
-```bash
-gh issue comment <n> --body-file <tmp>.md
-```
-
-naming what landed, what is still open, and why. Two things make a ticket partial: the verify's `ticketCoverage` says `partial`, or its numbered complaints outnumber the issues emitted for it. **Never close a row the verify overturned**, and never close one he has not decided. If a ticket has several findings and only some shipped, leave it open and say which parts landed — a half-fixed issue that reads as closed is worse than one still open.
-
-## Restarting — the VM auto-deploys; NEVER restart locally
-
-Maelle runs on the GCP VM `maelle-agent-vm`, **not this machine**. After the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. **Do NOT run `npm run deploy` / `pm2 restart maelle` here** — there is no local Maelle, and starting one opens a second Slack socket (`too_many_connections`).
-
-Confirm the deploy landed by reading the VM's boot stamp (give it ~2 min after the push):
-
-```bash
-powershell -File scripts/vm-logs.ps1 "starting up" 6
-```
-
-- **The `gitSha` must equal HEAD** — the LAST commit (including any bookkeeping commit). If the wrap made two commits, the stamp shows the second.
-- If the sha is still old after ~3 min, check the watcher: `gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap --command "pm2 logs maelle-deploy-watcher --lines 20 --nostream"`.
-- **Exactly ONE Slack socket** — the VM holds it; never start a local Maelle.
-- Errors since the restart: `powershell -File scripts/vm-logs.ps1 error 40`
-
-## The summary — verified against shipped
-
-State what shipped and **what of it was verified**, naming every gap. A lane may reasonably skip its own verify pass, and it is often right — but the decision must be visible at the last gate before real people see the change (X37). *"7 shipped, 4 verified"* plus the reason each unverified one carried. **One field, never a justification** — making the skip expensive to declare pushes lanes into asking for passes they do not need.
-
-## The one-question test
-
-> *"If someone reads the CHANGELOG in 6 months, do they know what shipped in this version and why?"*
-
-If no → the entry needs more. If yes → you are done.
+Issue closing, the boot stamp and the summary are steps 12-14 there, and the CHANGELOG's one-question test closes that file. All four stood in full in both files until 2026-08-01; **one copy, and it is that one.**

@@ -36,7 +36,7 @@ export const meta = {
 // so those rules get written down instead of being absorbed silently into code.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// N6 · A MALFORMED ARG MUST NEVER BE INDISTINGUISHABLE FROM AN ABSENT ONE.
+// X6 · A MALFORMED ARG MUST NEVER BE INDISTINGUISHABLE FROM AN ABSENT ONE.
 // The Workflow tool delivers a stringified object as ONE STRING, so every
 // `A.<key>` below reads undefined and the `Array.isArray(...) ? ... : null`
 // defaults swallow it in silence: a described item becomes null and the engine
@@ -360,7 +360,7 @@ if (MODE === 'plan') {
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
   items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
 
-  // ── N12 · ONE ITEM IS THE DEFAULT. A SWEEP MUST BE ASKED FOR. ─────────────
+  // ── X12 · ONE ITEM IS THE DEFAULT. A SWEEP MUST BE ASKED FOR. ─────────────
   // Owner, 2026-07-28: "always do 1 unless I'M SAYING more."
   //
   // This was a LOG line: it printed "32 items means 32 agents" and then fanned
@@ -396,7 +396,7 @@ if (MODE === 'plan') {
   // ago is often already half-built, or asks for something the code makes
   // impossible — both are findings, and both are cheaper to learn now than after
   // a lane has been dispatched.
-  // N19 · The owner's constraints, if he named any. `answers` is build-only — it
+  // X19 · The owner's constraints, if he named any. `answers` is build-only — it
   // responds to openQuestions this pass has not produced yet — so until now a
   // constraint had no way to reach the one pass that decides what an item MEANS.
   // At plan time the ticket got a voice and he did not; the product chat hit this
@@ -414,7 +414,7 @@ if (MODE === 'plan') {
             `**Say so plainly if the gap is bigger than the issue implies** — an improvement that reads like one line and is really a subsystem is the single most useful thing you can surface here.\n\n` +
             `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
             `List openQuestions — things only the owner can decide. Be honest rather than tidy: an improvement is a product decision, so a short list is suspicious, not efficient. But do not manufacture questions the code already answers.\n\n` +
-            // N20 · The `asks` are summarised from a ticket BODY, and those bodies
+            // X20 · The `asks` are summarised from a ticket BODY, and those bodies
             // routinely pre-pick a mechanism — one names the file to create, another
             // decides "no new tool" before anyone read the code. Given a design this
             // pass prices that design; given an outcome it works out the how and says
@@ -425,7 +425,7 @@ if (MODE === 'plan') {
                 `A constraint is not a hint. If one makes the item impossible, or forces a materially worse route than you would otherwise take, put that in \`openQuestions\` rather than quietly working round it — **a constraint he cannot have is the most valuable thing you can tell him**, and silently satisfying it hides the choice he needed to make.\n\n`
               : '') +
             `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
-          // N15 · OPUS, on the owner's call. This pass establishes the ground
+          // X15 · OPUS, on the owner's call. This pass establishes the ground
           // truth every later piece stands on, and NOTHING backstops it: the
           // bouncer checks the diff, not whether the premise was right, and a
           // bad code-read is the one thing he cannot spot by reading a plan. He

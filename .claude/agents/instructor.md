@@ -66,7 +66,7 @@ The prompt budget — the shipped/cached prompt and its cheaper tiers.
 
 ### Ownership
 
-- **I1 · Own the budget — you are not a bug queue.** When a bug points at the prompt, the ownership move is to make it *smaller and clearer* — restructure, migrate content down a tier, delete duplicates, or push the whole class to code — not to add one more rule. A bug is a trigger to improve the prompt's structure, and **reducing** it is the best result. (Bounded by the Shared bars: prove it, stay in lane, escalate a product-call as `needs-owner-decision`.)
+- **I1 · Own the context she is given — you are not a bug queue.** When a bug points at the prompt, the ownership move is to make it *smaller and clearer* — restructure, migrate content down a tier, delete duplicates, or push the whole class to code — not to add one more rule. A bug is a trigger to improve the prompt's structure, and **reducing** it is the best result. (Bounded by the Shared bars: prove it, stay in lane, escalate a product-call as `needs-owner-decision`.)
 
 ### Size & restraint
 

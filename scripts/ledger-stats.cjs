@@ -587,16 +587,41 @@ if (argv.includes('--report')) {
           /* the main reader counts unparseable lines */
         }
       }
+    // X123 · THE ROW STAMP IS OWED ONLY BY A WRAP THAT HAD ROWS TO APPEND. The
+    // marker rides ON the rows, so a wrap whose report was already empty has
+    // nowhere to write it — and an empty report is a legitimate wrap, which is
+    // exactly what 4.4.1 was. Asked unconditionally, this exited 1 forever on a
+    // correctly executed wrap: a check that cannot pass on a valid input is the
+    // same family as one that passes on known-bad input.
+    //
+    // NO FOURTH MARKER (X103 found the three that exist already disagree). What
+    // was owed is derived from the artifact the wrap consumed: the report as it
+    // stood in the release commit's PARENT, before step 9 emptied it. Rows there
+    // and no stamp = they were appended unstamped. No rows there = nothing owed.
+    const rowsAtWrap = (() => {
+      try {
+        const l = require('child_process')
+          .execFileSync('git', ['-C', REPO, 'show', `${lastRelease.sha}^:.claude/agent-loop/report.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+          .split(/\r?\n/);
+        return l.filter((x, i) => isPipe(x) && !isSep(x) && !isSep(l[i + 1])).length;
+      } catch {
+        return 0; // no report at that commit — nothing could have been appended from it
+      }
+    })();
     const isoBehind = !stampedIso || new Date(stampedIso) < new Date(lastRelease.date);
-    const ledgerBehind = !wrapRunIds.has(lastRelease.v);
+    const ledgerBehind = rowsAtWrap > 0 && !wrapRunIds.has(lastRelease.v);
     if (isoBehind || ledgerBehind) {
       console.log(`\n  ! WRAP MARKER(S) SKIPPED — the newest release commit is ${lastRelease.sha} \`${lastRelease.v}\` at ${lastRelease.date}:`);
-      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C10 scopes off this, so the next cleaner re-scans commits it already judged.`);
-      if (ledgerBehind) console.log(`      no ledger row is stamped \`runId: wrap-${lastRelease.v}\` — so \`--wrap ${lastRelease.v}\` cannot name that release's own rows, and the built-list count above reaches back past it.`);
-      console.log(`      Set both at the wrap: \`lastWrapIso\` to \`git log -1 --date=iso-strict --format=%ad\`, and \`runId:"wrap-<version>"\` on every row appended.`);
+      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C10 scopes off this, so the next cleaner re-scans commits it already judged. Set it to \`git log -1 --date=iso-strict --format=%ad\`.`);
+      if (ledgerBehind)
+        console.log(
+          `      the report held ${rowsAtWrap} row(s) at ${lastRelease.sha}^ and NO ledger row is stamped \`runId: wrap-${lastRelease.v}\` — they were appended unstamped, so \`--wrap ${lastRelease.v}\` cannot name them and the built-list count above reaches back past the release. Stamp \`runId:"wrap-<version>"\` on every row appended.`,
+        );
       bad += 1;
+    } else if (rowsAtWrap) {
+      console.log(`\n  wrap markers: both current at \`${lastRelease.v}\` (${lastRelease.sha}) · ${rowsAtWrap} report row(s) appended and stamped   ok`);
     } else {
-      console.log(`\n  wrap markers: both current at \`${lastRelease.v}\` (${lastRelease.sha})   ok`);
+      console.log(`\n  wrap markers: lastWrapIso current at \`${lastRelease.v}\` (${lastRelease.sha}) · no row stamp owed — the report was already empty at ${lastRelease.sha}^   ok`);
     }
   }
   // X83 · his bound on the narration, and the only length rule left on this file.
@@ -1264,7 +1289,7 @@ if (byRun) {
 }
 
 if (byInvariant) {
-  // N22 · Dedupe is by rootCause `file:line`, which answers "is this the same BUG"
+  // X22 · Dedupe is by rootCause `file:line`, which answers "is this the same BUG"
   // and is blind to "is this the same RULE". Three rows in three files broke one
   // invariant — a model may pick a VALUE, never the TIER — and read as three
   // unrelated findings; the product chat, reading the same rows, proposed three

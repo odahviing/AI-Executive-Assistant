@@ -19,7 +19,7 @@ export const meta = {
 // "already-fixed" — the entire price of a bug, paid for a shape error.
 const argWarnings = []
 
-// N10 · GUARD THE CONTAINER, NOT ONLY THE VALUES. The Workflow tool can deliver
+// X6 · GUARD THE CONTAINER, NOT ONLY THE VALUES. The Workflow tool can deliver
 // the whole `args` OBJECT as one string — and then every `A.<key>` below reads
 // `undefined`, nothing is "present but wrong-shaped", the per-key guard has
 // nothing to fire on, and the engine takes its default path in total silence.
@@ -36,7 +36,7 @@ if (typeof A === 'string') {
   }
 }
 
-// N11 · STOP where a silent default is EXPENSIVE; warn where it is cheap.
+// X11 · STOP where a silent default is EXPENSIVE; warn where it is cheap.
 // Owner, 2026-07-28: don't abort a wave, it is slow and costly. Correct — but
 // this runs before a single agent spawns, so stopping HERE is free, and the one
 // arg worth stopping for is `issues`: malformed, it silently becomes null and the
@@ -259,7 +259,7 @@ if (carriedIn.length) log(`Carried in ${carriedIn.length} item(s) from state.pen
 // has to be enforced at the door it makes easy to walk through. Building one of
 // these could implement a dependency of something he is about to decline.
 // Refused HERE because nothing has spawned yet: a loud stop costs one
-// re-invocation (N11), and once he rules, DELETING the flag from the row is the
+// re-invocation (X11), and once he rules, DELETING the flag from the row is the
 // approval. Without this read the field was decoration, which A5 forbids.
 const undecidedPreset = (PRESET || []).filter((i) => i && i.awaitingOwner)
 if (undecidedPreset.length)
@@ -1185,7 +1185,7 @@ if (VERIFY) {
     // prompt says so. Spot-check cheaply; spend the budget on what is NOT there.
     const priorClean = asArray('priorClean', A.priorClean)
 
-    // ── N2: which files are THIS wave's ────────────────────────────────────
+    // ── X2: which files are THIS wave's ────────────────────────────────────
     // `git diff` shows every uncommitted change in the tree, and on a normal
     // night that includes another chat's work — seven `src/` files and five
     // `.claude/` files were already modified before the 2026-07-27 run wrote a
@@ -1195,7 +1195,7 @@ if (VERIFY) {
     // whole tree as ours", which over-checks rather than under-checks.
     waveFiles = [...new Set(built.flatMap((r) => (Array.isArray(r.filesTouched) ? r.filesTouched : [])).filter(Boolean))]
 
-    // ── N3: drop the `priorClean` entries this wave invalidated ────────────
+    // ── X3: drop the `priorClean` entries this wave invalidated ────────────
     // A stale "proven clean" silences a real check, which is strictly worse than
     // having no list — hence the charter's rule to drop when in doubt: re-proving
     // costs one pass, missing a regression costs a person. Until now this was the
@@ -1658,7 +1658,7 @@ log(
 )
 warnings.forEach((w) => log(`! ${w}`))
 
-// ---- N16 · WHAT MUST BE WRITTEN DOWN, pre-shaped -------------------------
+// ---- X16 · WHAT MUST BE WRITTEN DOWN, pre-shaped -------------------------
 // The engine physically cannot write its own result — workflow scripts have no
 // filesystem access — so every run's durability depends on the Manager choosing
 // to persist it. That makes this the most load-bearing prompt-only step in the

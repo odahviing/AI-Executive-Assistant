@@ -6,10 +6,13 @@ Trigger phrases from the owner: "wrap up", "close the patch", "cut a version", "
 
 Stated 2026-07-30 and again 2026-07-31, with the explicit request that it be encoded: **patch version · take the code from other chats too · nothing left uncommitted · close the GitHub issues that are fully resolved and COMMENT the ones that are not · restart Maelle.** The skill file (`.claude/skills/wrap/SKILL.md`) carries the same list — it is the short form, this is the procedure.
 
-Three consequences the old checklist did not have:
+**THIS FILE IS THE PROCEDURE AND THE ONLY NUMBERED COPY OF IT.** Three entry points — `.claude/commands/wrap.md`, `.claude/skills/wrap/SKILL.md` and the Manager's `wrap` verb — all delegate here, so a step that is missing here is a step that does not run. The skill used to number the checklist too, one step short and one number out of step; the wrap therefore ran for seven releases with no bookkeeping at all. **They name steps, this file numbers them** — when a step changes, it changes here.
+
+Four consequences the old checklist did not have:
 
 - **Step 2 means the WHOLE tree.** `git status --porcelain` with no path filter, every chat's files, framework included. A commit holding only your own files is the defect, not a tidy scope.
-- **Steps 12-13 are new and they are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
+- **Step 9 and the stamp at step 11 are the bookkeeping, and they are what gets skipped.** The ledger append is the only moment the day's history can be lost; the stamp is what stops the next run reporting a release nothing stands behind. `node scripts/ledger-stats.cjs --report` is green or the wrap is not finished.
+- **Steps 12-13 are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
 - **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
 **Deploy is now AUTOMATIC and REMOTE — there is no local restart.** Maelle runs on the GCP VM; after the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. Do NOT `npm run deploy` / `pm2 restart maelle` (no local Maelle exists — starting one = a second Slack socket). Confirm the deploy from the VM's boot stamp: `powershell -File scripts/vm-logs.ps1 "starting up" 6`. The stamp's `gitSha` must equal **HEAD** (the *last* commit — a bookkeeping commit after the version commit shows that one).
@@ -150,7 +153,23 @@ Do NOT update for:
 - Internal refactors
 - Prompt tweaks
 
-### 9. Typecheck
+### 9. Bookkeeping — the ledger BEFORE the report
+
+**This is the only moment the day's history can be lost, and it has been lost exactly this way.** The append once named only the *wrapped* rows while the reset took everything, so a row he had already RULED ON died with the file: `slot-hold-release-dm-role-gate` was recorded on `report.md` as *"deferred — owner: not important for now"*, the report was emptied at the 4.3.1 wrap, and `ledger.jsonl:253` still carries it as `needs-owner-decision` — so `--open` lists a decision he has already made as one he has never seen. Do these three in this order:
+
+1. **Append EVERY row on `.claude/agent-loop/report.md` to `.claude/agent-loop/ledger.jsonl`** — whatever its verdict, not only the built ones. Two fields on every row, and both exist because this step dropped them:
+   - **`"runId":"wrap-<version>"`** — without it `node scripts/ledger-stats.cjs --wrap <version>` cannot name a release's own rows, and the built-list check reaches back past the release to count everything since the last stamp.
+   - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built`. It is sitting in the Status cell you are about to delete — *"pending owner — recommend build"* becomes `"recommend":"build — <the clause>"`. Skip it and the row survives in a form he cannot rule on, which is how **54 of 56** standing open rows got there. A `deferred` or `declined` row also carries **his words** in `note`, or the counter he gave dies with the cell.
+
+2. **Then reset `report.md` — never before the append.** An emptied report **still carries its headline**: run `node scripts/ledger-stats.cjs --open` and write its open total and split into that line. Empty means no rows, not *"nothing is waiting on you"*.
+
+3. **Then reduce `state.json` to the keys documented in `.claude/skills/manager/SKILL.md` "State you own".** The append you just made is what makes the run's notes deletable, so this is the one moment it costs nothing.
+
+**Check the append in one command:** `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.
+
+The third marker this step is owed is **not on a row** — it is `state.lastWrapIso`, and it is set at **step 11**, because its value is the release commit's own timestamp and that commit does not exist yet here.
+
+### 10. Typecheck
 
 ```bash
 npm run typecheck
@@ -158,7 +177,7 @@ npm run typecheck
 
 Must pass. If it doesn't, stop and fix — don't ship broken.
 
-### 10. Commit + push under owner author
+### 11. Commit + push under owner author — then stamp the wrap
 
 ```bash
 git add -A
@@ -172,7 +191,26 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 git push origin master
 ```
 
-Use the owner's author (not `Maelle Auto-Triage`). That makes the commit NOT trigger the deploy watcher auto-pull — owner deploys their own wrap-up commits manually (or via PM2 restart if changes affect the running process).
+Use the owner's author (not `Maelle Auto-Triage`).
+
+**Then stamp the wrap, in the same turn as the push.** The wrap leaves **two** markers and they describe the same fact — *which release this wrap shipped*:
+
+- `"runId":"wrap-<version>"` on every row appended at step 9.
+- `state.lastWrapIso` — the release commit's own timestamp:
+
+```bash
+git log -1 --date=iso-strict --format=%ad     # -> .claude/agent-loop/state.json `lastWrapIso`
+```
+
+Write that value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 (*nothing uncommitted*) true. `cleaner.md` C10 scopes its entire scan off that instant, so a skipped stamp makes the next cleaner re-scan commits it has already judged. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.**
+
+**The check, and it is one command:**
+
+```bash
+node scripts/ledger-stats.cjs --report
+```
+
+It exits 1 naming any release commit that neither marker stands behind, and it checks the report's own headline counts against the ledger at the same time. **A green `--report` is the acceptance test for this step — do not finish the wrap on a red one.**
 
 ### 12. GitHub issues — close the resolved, COMMENT the rest
 
@@ -184,17 +222,9 @@ gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what cha
 
 **The half that used to get skipped:** a ticket whose complaints are not all resolved does not close — it gets a comment naming what landed, what is still open, and why. Use `gh issue comment <n> --body-file <tmp>.md`; never inline a markdown body. A ticket is partial when the verify's `ticketCoverage` says so, or when its numbered complaints outnumber the issues emitted for it. **Never close a row the verify overturned**, or one he has not decided.
 
-### 13. Restart Maelle and confirm the boot stamp
+### 13. Confirm the boot stamp — the push already restarted her
 
-```bash
-npm run build
-```
-
-```bash
-pm2 restart maelle
-```
-
-Then read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
+**Build and restart nothing here.** The push at step 11 is the deploy: the VM's `maelle-deploy-watcher` pulls, builds and restarts her within ~2 min (header, and `SESSION_STARTER.md:149`). Read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
 
 ```bash
 powershell -File scripts/vm-logs.ps1 "starting up" 6
@@ -202,9 +232,17 @@ powershell -File scripts/vm-logs.ps1 "starting up" 6
 
 `gitSha` must equal HEAD. Confirm database ready, connection registered, **Slack connected**, email registered if enabled, and that `powershell -File scripts/vm-logs.ps1 error 40` shows no errors since the restart. Exactly one Slack socket — two processes on the same app give `too_many_connections`. If the reader errors (`Reauthentication failed` → the owner runs `gcloud auth login`), the deploy is UNCONFIRMED — say so rather than reporting a clean boot.
 
+If the sha is still old after ~3 min, read the watcher rather than restarting anything:
+
+```bash
+gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap --command "pm2 logs maelle-deploy-watcher --lines 20 --nostream"
+```
+
 ### 14. Summary back to the owner — verified against shipped
 
 One short block: version and sha, the headline, **how many fixes shipped and how many were verified** with the reason each gap carried, which issues closed and which were commented, and the confirmed boot stamp. Not "deploy when ready" — it is already deployed by now.
+
+A lane may reasonably skip its own bouncer pass and it is often right; the defect is the decision being invisible at the last gate before real people see the change. So say *"6 shipped, 4 verified"* and list the two with the reason each carried, straight out of its ledger `note`. **One field, never a justification** — making the skip expensive to declare pushes lanes into asking for passes they do not need.
 
 ---
 

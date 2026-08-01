@@ -80,8 +80,8 @@ Read `.claude/SESSION_STARTER.md` **only when you need it** — version, state, 
 ### C · What an approval is
 - **R6 · An approval is a DEVIATION from normal work.** Raise one ONLY for something that breaks a rule or needs owner-only judgment. If the action is already allowed, just DO it — an approval for permitted work is a bug.
 - **R7 · No reason → no approval.** The owner always wants to know *why* it reached him, so he decides on data, not gut. If Maelle cannot state the reason, it does not reach him — which leaves exactly two honest outcomes: the action was allowed (do it), or the real reason isn't understood yet (go find it).
-- **R8 · The owner is the boss; his resolution may differ WILDLY from the request.** He can book 3am, override anyone, change the shape of the ask entirely. Record the DECISION and adapt the action and the close-loop to it — never force the outcome back toward what was originally requested.
-- **R9 · Open-ended in KIND, bounded in COUNT.** A "book" may resolve to a *move*, a "cancel" to a *message* — never constrain what the outcome can be or which tool delivers it. But **counter-offers cap at 2**: past that it is annoying, so bring it to a close.
+- **R8 · The owner is the boss, and his resolution may differ WILDLY from the request.** He can book 3am, override anyone, change the shape of the ask entirely — a "book" may resolve to a *move*, a "cancel" to a *message*, and no tool is off the table. Record the DECISION, then act it and close the loop on **it**, never on what was originally asked for.
+- **R9 · Counter-offers cap at 2.** A third offer is pestering, not helping — so make the second one the last: take whatever answer comes back, or end the request and tell both sides what happened (R4).
 
 ### D · The owner's surface
 - **R10 · One thread a day — the signature book.** All of a day's decisions gather in ONE thread so he can scan them together and sign each whenever he gets to it, in any order, across the day — the asks *and* their outcomes in one place. The model is a secretary who comes once a day for the boss's signatures, not a stream of interruptions.
