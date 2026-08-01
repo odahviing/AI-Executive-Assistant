@@ -2,6 +2,20 @@
 
 ---
 
+## 4.4.1 — every agent now names a job, and the mail channel got its own
+
+No `src/` change. This is the squad: five identities moved, one agent added, and the rules each of them is held to.
+
+**The names.** An agent's name is read hundreds of times a day by something that has to route on it, so the test became *does "The X" name a job someone could hold, and does it describe what that agent knows.* Four failed it. `shepherd` → **registrar** (a register of what is open, where the metaphor needed explaining) · `transporter` → **slacker** (Slack-only once mail left) · `verifier`/`examiner` → **bouncer** (it does not only examine, it sends work back) · `scout` → **usher** (a scout reports and someone else decides; this agent *is* the decision — it shows work to the right lane). `registrar` takes back `R`, the letter that named the requests spine before July, so the reuse restores meaning rather than overloading it.
+
+**The eighth lane.** Mail split out of the transport lane as **exchanger** — 6 files and 863 lines that were named in no charter, while `connectors/email/inbound.ts` was quietly the most-cited transport file in the repo. Its charter is ten rules about the thing that makes mail different from chat: an unauthenticated sender, a reader who is not the recipient, and a send that leaves the building.
+
+**The transport spine has no owner.** `Connection` is the interface every channel obeys, so it became a shared invariant — Shared rule 12, identical in all eight lane charters — rather than a territory the largest implementer polices.
+
+Underneath: rule tags migrated across `src/` comments **by reading each sentence**, which caught five citations that a sweep would have corrupted — three `S` tags that were the gatekeeper's, and one that July's blind sweep had already broken. Spent build-piece ids that masquerade as rule tags were cleared from `src/` entirely.
+
+---
+
 ## 4.4.0 — she runs in the cloud now, and no longer goes dark when the laptop sleeps
 
 The move that was two weeks of discovery and one careful hour: Maelle lives on a GCP VM (`maelle-agent-vm`, europe-west4-b) under PM2, not on the owner's Windows laptop. She stopped being tied to whether the host was awake — one always-on process holds the single Slack socket, runs the in-process timers, and owns the SQLite file, on a 20G persistent disk that survives every restart and reboot. The cutover was a clean single-socket hand-off: stop local, checkpoint and copy the DB and config, start on the VM, verify the boot stamp and every row count against the baseline. Nothing was lost — people memory, open requests, prefs all came across intact.

@@ -57,6 +57,32 @@ const PRICE = {
 // take the whole report down, but it must not silently price as the dearest tier.
 const tierOf = (m) => (/opus/i.test(m) ? 'opus' : /haiku/i.test(m) ? 'haiku' : 'sonnet')
 
+// Agent names change, and every rename splits that lane in two. ONE map, read by
+// every mode: the old dispatch name -> the charter that exists now. Under `--day`
+// an unmapped name silently dropped nine dispatches out of the tier check (X106);
+// under `--agents` it printed $1281 of `meeting` beside $91 of `matchmaker` and
+// called them different agents, so no row showed what a lane had ever cost (X113).
+// ADD A ROW HERE AT EVERY RENAME — `--day` names anything it does not know, with
+// the dispatch count, which is the prompt to come back to this list.
+const RENAMED = new Map([
+  ['shepherd', 'registrar'],
+  ['transporter', 'slacker'],
+  ['verifier', 'bouncer'],
+  ['examiner', 'bouncer'],
+  ['scout', 'usher'],
+  ['meeting', 'matchmaker'],
+  ['requests', 'registrar'],
+  ['guard', 'gatekeeper'],
+  ['people', 'profiler'],
+  ['context', 'instructor'],
+  ['slack', 'slacker'],
+  ['outer', 'outrider'],
+])
+const canon = (t) => RENAMED.get(t) || t
+// Generic dispatch types: no `.claude/agents/*.md`, and the engine sets their tier
+// per call on purpose. Never judged against a charter, never folded into a lane.
+const GENERIC = new Set(['workflow-subagent', 'general-purpose'])
+
 // ---------------------------------------------------------------- args
 const argv = process.argv.slice(2)
 const flag = (n) => argv.includes(n)
@@ -194,7 +220,7 @@ for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
     } catch {
       continue
     }
-    // X69 · DID THIS RUN DIE. A run whose scout is killed leaves a journal holding
+    // X69 · DID THIS RUN DIE. A run whose usher is killed leaves a journal holding
     // one `started` line and no `result`, and it appeared on NO surface —
     // wf_e2f12e7c-6d6 ran on 2026-07-30, died, cost $1.19, and nothing in
     // report.md, state.json or ledger.jsonl records that a run began at all. The
@@ -303,17 +329,38 @@ if (ONE_DAY) {
   } catch {
     charterDir = false
   }
+  // X106 · A RENAME MUST NOT NARROW THIS CHECK IN SILENCE — that is X39's own rule
+  // one step along. X39 fixed "no `model:` line" (absent means NOT CHECKED, never
+  // silently counted as agreeing) and left "no FILE" dropping a whole agent on a
+  // bare `continue`. Renames make that fire: on 2026-07-31 nine dispatches —
+  // 3 shepherd, 3 transporter, 3 verifier — were skipped while the day printed
+  // "Every dispatch matched its charter's declared tier".
+  //
+  // TWO HALVES, and each covers the other's failure. The `RENAMED` map above
+  // checks a renamed agent against the charter it actually has now, so those nine
+  // are judged rather than counted. The NAMED BUCKET below catches whatever the
+  // map does not know — an unmapped rename shows up by name with its dispatch
+  // count, which is the prompt to add it. Map alone rots at the next rename;
+  // naming alone leaves the dispatches unchecked forever. The two generic types
+  // are excluded EXPLICITLY, not by falling through the same `continue`.
   const off = []
   const unchecked = new Set()
   const checked = new Set()
+  const unchartered = new Map()
+  const viaRename = new Set()
   for (const a of agents) {
-    if (!declared.has(a.type)) continue
-    const want = declared.get(a.type)
-    if (!want) {
-      unchecked.add(a.type)
+    const type = canon(a.type)
+    if (!declared.has(type)) {
+      if (!GENERIC.has(a.type)) unchartered.set(a.type, (unchartered.get(a.type) || 0) + 1)
       continue
     }
-    checked.add(a.type)
+    const want = declared.get(type)
+    if (!want) {
+      unchecked.add(type)
+      continue
+    }
+    if (type !== a.type) viaRename.add(`${a.type} -> ${type}`)
+    checked.add(type)
     for (const t of a.tiers) if (t !== want) off.push({ type: a.type, want, got: t, turns: a.turns, cost: a.cost })
   }
   if (!charterDir) console.log(`\n(no .claude/agents found — the tier check did NOT run)`)
@@ -324,8 +371,16 @@ if (ONE_DAY) {
     )
   else
     console.log(`\nEvery dispatch matched its charter's declared tier — ${checked.size} chartered\nagent(s) checked against their own \`model:\` line.`)
+  if (viaRename.size) console.log(`   checked through a rename (its dispatches predate the current name): ${[...viaRename].join(', ')}`)
   if (unchecked.size)
     console.log(`   NOT CHECKED (no \`model:\` in the charter, so it inherits the session default): ${[...unchecked].join(', ')}`)
+  if (unchartered.size)
+    console.log(
+      `   NOT CHECKED (no \`.claude/agents/<type>.md\` under this name or any rename this script knows) — ${sum([...unchartered.values()], (n) => n)} dispatch(es): ${[...unchartered.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, n]) => `${t} x${n}`)
+        .join(', ')}\n   If one of those is a renamed agent, add it to RENAMED above and it is judged instead of counted.`
+    )
   console.log('')
   process.exit(0)
 }
@@ -385,24 +440,36 @@ if (flag('--runs')) {
 
 // ---- --agents ----
 if (flag('--agents')) {
+  // X113 · GROUP BY THE NAME THE LANE CARRIES NOW, not by the name on the dispatch.
+  // Raw grouping made this table useless for exactly the question it is for — what
+  // has a lane ever cost — because a rename started a second row: 2026-07-20→08-01
+  // printed `meeting` $1281 / `guard` $1081 beside a `matchmaker` row of $91, and
+  // `registrar`, `bouncer` and `slacker` had no row at all under their own names.
+  // The merge is NAMED per row (`incl.`) rather than done quietly: a table that
+  // folds rows together without saying so is a worse defect than the split was.
   const by = new Map()
   for (const a of agents) {
-    if (!by.has(a.type)) by.set(a.type, { n: 0, turns: 0, cost: 0, cacheRead: 0, tiers: new Set(), hand: 0 })
-    const g = by.get(a.type)
+    const type = canon(a.type)
+    if (!by.has(type)) by.set(type, { n: 0, turns: 0, cost: 0, cacheRead: 0, tiers: new Set(), hand: 0, was: new Set() })
+    const g = by.get(type)
     g.n++
     g.turns += a.turns
     g.cost += a.cost
     g.cacheRead += a.cacheRead
     if (a.how === 'hand') g.hand++
+    if (type !== a.type) g.was.add(a.type)
     for (const t of a.tiers) g.tiers.add(t)
   }
-  console.log(`\nPer agent type. Watch t/run: a cheaper tier that explores more can`)
+  console.log(`\nPer agent type, under the name the lane carries NOW — \`incl.\` names the`)
+  console.log(`older names folded in. Watch t/run: a cheaper tier that explores more can`)
   console.log(`give the saving back in turns, because turns are what cache reads bill.\n`)
   console.log(`${pad('agent', 18)}${lp('runs', 5)}${lp('hand', 5)}${lp('turns', 7)}${lp('t/run', 7)}${lp('cache-rd', 10)}${lp('cost', 9)}${lp('$/run', 8)}  tier`)
   console.log(rule(83))
   for (const [n, g] of [...by.entries()].sort((a, b) => b[1].cost - a[1].cost))
     console.log(
-      `${pad(n.slice(0, 17), 18)}${lp(g.n, 5)}${lp(g.hand, 5)}${lp(g.turns, 7)}${lp((g.turns / g.n).toFixed(0), 7)}${lp(k(g.cacheRead), 10)}${lp(usd(g.cost), 9)}${lp(usd(g.cost / g.n), 8)}  ${[...g.tiers].join('+')}`
+      `${pad(n.slice(0, 17), 18)}${lp(g.n, 5)}${lp(g.hand, 5)}${lp(g.turns, 7)}${lp((g.turns / g.n).toFixed(0), 7)}${lp(k(g.cacheRead), 10)}${lp(usd(g.cost), 9)}${lp(usd(g.cost / g.n), 8)}  ${[...g.tiers].join('+')}${
+        g.was.size ? `  incl. ${[...g.was].sort().join(', ')}` : ''
+      }`
     )
   console.log('')
   process.exit(0)

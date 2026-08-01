@@ -75,7 +75,9 @@ to the requester — exactly once.
   dead code. Reduce LOC — replace a path, delete the old one. A fix that lets us
   DELETE a mechanism beats one that adds a 13th.
 - **C5. Prove the root — don't assume.** Read the code + logs
-  (`logs/maelle-YYYY-MM-DD.log`), cite `file:line`. Reads (log grep,
+  (`powershell -File scripts/vm-logs.ps1 [term] [lines]` — the local `logs/`
+  dir is STALE since the 2026-07-31 VM cutover; an empty result or a reader
+  error means UNREACHABLE, not absent), cite `file:line`. Reads (log grep,
   `node scripts/db-query.cjs`, code) are free — verify, never ask permission to.
 - **C6. Wrap/version is the OWNER's call.** Never bump `package.json` / commit
   without an explicit ship word. Typecheck must pass before "done." Paper-trace

@@ -15,7 +15,7 @@
  * Why a script rather than "append a JSON line":
  *   • It assigns the LOWEST FREE X-number, so two chats filing at once cannot
  *     collide and a number a merge freed comes back into use.
- *   • It REFUSES a row with no evidence. The bug ledger has the scout as a
+ *   • It REFUSES a row with no evidence. The bug ledger has the usher as a
  *     filter; this ledger has none, so the only defence against it filling with
  *     half-formed notes is that a bad row cannot be created in the first place.
  *   • One shape, so `ledger-stats` can read it.
@@ -400,7 +400,7 @@ if (!finding) die('no --finding.', 'One sentence: what is wrong. Not a topic —
 if (finding.length < 25) die(`--finding is ${finding.length} chars.`, 'Too short to act on. State the defect, not the area.')
 if (!target) die('no --target.', `One of:\n  ${TARGETS.join('\n  ')}`)
 if (!TARGETS.includes(target)) die(`--target "${target}" is not a known target.`, `One of:\n  ${TARGETS.join('\n  ')}`)
-if (!evidence) die('no --evidence.', 'A framework finding without evidence is a hunch, and the architect has no scout to filter it.')
+if (!evidence) die('no --evidence.', 'A framework finding without evidence is a hunch, and the architect has no usher to filter it.')
 if (evidence.length < 30) die(`--evidence is ${evidence.length} chars.`, 'Cite the thing you actually saw.')
 
 if (!/owner/i.test(source) && !POINTS_SOMEWHERE.test(evidence)) {
@@ -447,7 +447,7 @@ const head = norm(finding).slice(0, 45)
 // mechanism that already exists — and it happened: X30 was filed on 2026-07-30
 // claiming the verify's discovery routing did not exist, while X8 had shipped
 // exactly that on 2026-07-27. The filer said nothing, because X8 was built. This
-// ledger has no scout in front of it, so this check IS the filter, and its hole
+// ledger has no usher in front of it, so this check IS the filter, and its hole
 // sat precisely where the framework's memory lives.
 //
 // An open clash still REFUSES — that is unchanged and it is right.

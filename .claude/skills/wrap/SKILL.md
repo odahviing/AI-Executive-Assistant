@@ -22,7 +22,7 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 ## Two gates that still belong to him — do not assume these
 
 - **The ship word itself.** Do not wrap because work has accumulated. Wait for "wrap" / "ship" / "commit" / "cut a version" / "bundle".
-- **A verify overturn blocks the wrap.** If the pre-wrap examiner pass overturned a fix, do NOT wrap it in. Report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **A verify overturn blocks the wrap.** If the pre-wrap bouncer pass overturned a fix, do NOT wrap it in. Report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
 ## Other standing rules
 
@@ -46,11 +46,30 @@ Read `.claude/WRAP_UP.md` end-to-end and run it in order. The steps that exist b
 9. **Ledger BEFORE report.** Append every row on `report.md` to `ledger.jsonl` — whatever its verdict, not only the built ones — then reset the report. This is the only moment history can be lost, and it has been lost this way (X23). **Two fields on every row you append, and both exist because this step dropped them:**
    - **`"runId":"wrap-<version>"`** (X54) — `node scripts/ledger-stats.cjs --wrap <version>` can name a release's own rows on exactly the two versions that carried it, out of twenty released.
    - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built` (X77) — it is sitting in the Status cell you are about to delete (*"pending owner — recommend build"*), and the ledger row is where it has to live to survive this step. **54 of 56** standing open rows carry none because this was never said. Verify after the append: `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.
+   - **A THIRD marker is owed and it is not on a row — `state.lastWrapIso`, set at step 11** because its value is the release commit's own timestamp, which does not exist yet here. `cleaner.md` C10 scopes its entire scan off that instant, so a skipped stamp makes the next cleaner re-scan commits it has already judged. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.**
 10. `npm run typecheck` — must pass
-11. Commit + push under the owner's author
+11. Commit + push under the owner's author — **then stamp the wrap** (below)
 12. **GitHub issues** — close or comment (below)
 13. **Restart and confirm the boot stamp** (below)
 14. Summary — **verified against shipped**
+
+## Stamping the wrap — two markers, one check
+
+The wrap leaves two markers behind, and until 2026-08-01 this file named only one of them. Both describe the same fact — *which release this wrap shipped* — so set both in the same turn as the push:
+
+```bash
+git log -1 --date=iso-strict --format=%ad     # -> state.json `lastWrapIso`
+```
+
+Run it after the release commit and write the value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 true. The other marker is `"runId":"wrap-<version>"` on every row appended at step 9.
+
+**The check, and it is one command:**
+
+```bash
+node scripts/ledger-stats.cjs --report
+```
+
+It exits 1 naming any release commit that neither marker stands behind (X103). A green `--report` is the acceptance test for this step — do not finish the wrap on a red one.
 
 ## Closing the GitHub issues — three conditions, and the partial half
 

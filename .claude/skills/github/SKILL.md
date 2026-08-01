@@ -53,8 +53,8 @@ For every atomic bug:
 - Cite root cause as `file:line`.
 - One short paragraph describing what's actually happening.
 - **Prove it — don't assume.** If the symptom is timing-dependent or runtime-only, also check the logs:
-  - Logs live under `logs/` (winston daily rotate). File pattern: `maelle-YYYY-MM-DD.log`
-  - Grep for relevant function names, error messages, tool names
+  - **Logs live on the GCP VM she runs on, not here.** Read them with `powershell -File scripts/vm-logs.ps1 [term] [lines]` — same winston daily-rotate file (`maelle-YYYY-MM-DD.log`), reached over IAP SSH. The local `logs/` dir is STALE, frozen at the 2026-07-31 cutover; an empty result or a reader error means UNREACHABLE, never "it didn't happen".
+  - Pass the grep term as the first argument — filtering runs on the VM, so only matches cross the wire
   - Useful diagnostic: `findAvailableSlots — rejection breakdown` for slot-finder issues
 - If you're guessing, say so explicitly. Don't write "probably" without flagging it.
 

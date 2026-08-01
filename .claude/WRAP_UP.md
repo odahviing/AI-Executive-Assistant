@@ -194,13 +194,13 @@ npm run build
 pm2 restart maelle
 ```
 
-Then read the stamp from the log, not the PM2 table:
+Then read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
 
 ```bash
-grep -n "starting up" logs/maelle-$(date +%Y-%m-%d).log | tail -2
+powershell -File scripts/vm-logs.ps1 "starting up" 6
 ```
 
-`gitSha` must equal HEAD. Confirm database ready, connection registered, **Slack connected**, email registered if enabled, and `grep -c '"level":"error"' logs/error-$(date +%Y-%m-%d).log` returns 0. Exactly one Slack socket — two processes on the same app give `too_many_connections`.
+`gitSha` must equal HEAD. Confirm database ready, connection registered, **Slack connected**, email registered if enabled, and that `powershell -File scripts/vm-logs.ps1 error 40` shows no errors since the restart. Exactly one Slack socket — two processes on the same app give `too_many_connections`. If the reader errors (`Reauthentication failed` → the owner runs `gcloud auth login`), the deploy is UNCONFIRMED — say so rather than reporting a clean boot.
 
 ### 14. Summary back to the owner — verified against shipped
 

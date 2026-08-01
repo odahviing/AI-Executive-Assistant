@@ -36,7 +36,7 @@ Target: **10+ scenarios**; the number falls out of the matrix, never pad and nev
 ## Step 3 — Trace each scenario against code ON DISK
 
 - Follow the actual call path: entry point → guards → the changed lines → output. Cite `file:line` for the load-bearing branch in every row. Do NOT trace from memory of what you just wrote — read the file; off-by-one in an edit is exactly what this catches.
-- Use real data freely (reads are free): `node scripts/db-query.cjs` for actual rows, `logs/maelle-*.log` for the original incident's parameters, yaml for config values. The v3.3.8 trace used Daniel's real travel record.
+- Use real data freely (reads are free): `node scripts/db-query.cjs` for actual rows, the logs for the original incident's parameters — `powershell -File scripts/vm-logs.ps1 [term] [lines]` for anything she did since the 2026-07-31 cutover (she runs on the VM now), the local `logs/` dir for pre-cutover history only, which is all it still holds — yaml for config values. The v3.3.8 trace used Daniel's real travel record.
 - STRICT paper: no live DMs, no calendar writes, no DB writes, nothing against the running process.
 - Account for LLM-judgment links honestly: when a step depends on Sonnet choosing the right tool, the row can still pass if the wrong option was *physically removed* — say which it is ("the only grounded path left" vs "relies on the model"). Those caveats go in footnotes, not buried.
 

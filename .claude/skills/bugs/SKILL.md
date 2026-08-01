@@ -12,9 +12,9 @@ Use this skill when the owner is describing bugs / improvements directly in conv
 
 - ❌ **Never auto-fix.** Propose only. Owner approves before any code change.
 - ❌ **Build signals are EXACT and per-bug.** Only an explicit, bug-specific "fix it / fix bug N / build it / do it / land it" means write code on THAT bug. A bare "yes / ok / go" with no bug reference is ambiguous — ask "go on N specifically?". "No, I want X different", "explain better", and "are you sure?" are REVISION requests, not build signals — write a new proposal, don't touch code. When in doubt, don't build: the cost of waiting is small; the cost of unwanted code is large.
-- ❌ **Do reads without asking.** `git log`, log greps (`logs/maelle-YYYY-MM-DD.log`), `node scripts/db-query.cjs`, yaml/code reads, a temp read-only script — all free. Never ask "want me to verify X" — verify, then report. The owner is tired of granting permission for basic investigation.
+- ❌ **Do reads without asking.** `git log`, log reads (`powershell -File scripts/vm-logs.ps1 [term] [lines]`), `node scripts/db-query.cjs`, yaml/code reads, a temp read-only script — all free. Never ask "want me to verify X" — verify, then report. The owner is tired of granting permission for basic investigation.
 - ❌ **No tier numbering or skill jargon in owner-facing summaries.** Don't say "tier 3 fix" / "small `if`" / "tier 4 helper". Describe the fix concretely: which file, which function, what's added vs deleted, in plain English.
-- ❌ **Never assume the root cause.** Prove it via code reading and logs (`logs/maelle-YYYY-MM-DD.log`). If you're guessing, say so explicitly.
+- ❌ **Never assume the root cause.** Prove it via code reading and logs (`powershell -File scripts/vm-logs.ps1 [term] [lines]`). If you're guessing, say so explicitly.
 - ❌ **Code-first; the prompt is a budget, not a junk drawer.** Fix at the core in code — a chokepoint guard, a return-value the model reacts to, a tool that owns the decision. That's the durable, zero-prompt-cost fix. A one-line prompt patch Sonnet may ignore is NOT "smaller" than a code guard that holds. Touch the prompt only for judgment / tone / format / language, and NEVER to enforce something code could. Net prompt should go down, not up (we pulled the owner turn ~59k→~36k — don't regress it).
 - ❌ **Avoid regex on natural language — Maelle is multi-lingual** (Hebrew, Russian, Spanish, English, …). A keyword/pattern regex on what a human typed works in English and silently fails in every other language. "Code-first" does NOT mean "regex-first." For meaning/intent → a Haiku classifier; for language/script → Unicode-block detection (e.g. `detectMessageLanguage`); for state → a structured-field / enum check. Regex is fine ONLY on language-independent STRUCTURED strings — IDs (`req_…`), emails, ISO datetimes, slack_ids — never on message text.
 - ❌ **Look at existing systems before proposing new state.** When you're tempted to add a new flag / new field / new tracking layer, FIRST scan the codebase for existing systems that already cover the case. Tasks have lifecycle. Approvals have payloads. Categories have flags. Outreach has status. The brief reads tasks-spine. If your fix can ride on something that's already there, ride. Inventing a parallel tracking system is the v2.x pattern that creates drift bugs later. When the owner says *"don't add new X — use what we have"*, your first reflex should already have been to scan for what's there.
@@ -47,8 +47,8 @@ For each atomic bug capture:
 Read the actual files on disk. Cite `file:line`. Don't reason from memory or the architecture doc.
 
 If the symptom is timing-dependent or runtime-only, also check the logs:
-- Logs live under `logs/` (winston daily rotate). File pattern: `maelle-YYYY-MM-DD.log`
-- Grep for relevant function names, error messages, tool names
+- **Logs live on the GCP VM she runs on, not here.** Read them with `powershell -File scripts/vm-logs.ps1 [term] [lines]` — same winston daily-rotate file (`maelle-YYYY-MM-DD.log`), reached over IAP SSH. The local `logs/` dir is STALE, frozen at the 2026-07-31 cutover; an empty result or a reader error means UNREACHABLE, never "it didn't happen".
+- Pass the grep term as the first argument — filtering runs on the VM, so only matches cross the wire
 - Useful diagnostic: `findAvailableSlots — rejection breakdown` for slot-finder issues
 - Owner-said-done scanner, claim-checker, security gate, etc. all log distinctively — search by name
 

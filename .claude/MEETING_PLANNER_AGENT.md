@@ -44,7 +44,7 @@ These are the owner's standing principles for this subsystem. Keep them **few-an
 
 ## The discipline — the ONE diagnostic process for every bug
 
-1. **Reproduce from the log.** `logs/maelle-YYYY-MM-DD.log`. Find the turn(s); pull the tool calls, the `find_available_slots`/`checkSlot`/`getFreeBusy` results, the rejection breakdowns, the verdicts. State the root as `file:line — what actually happens`. If you can't see it in the log, say so and add a definitive log line before guessing.
+1. **Reproduce from the log.** `powershell -File scripts/vm-logs.ps1 [term] [lines]` — Maelle runs on the GCP VM and the local `logs/` dir is STALE (frozen 2026-07-31); an empty result or a reader error means UNREACHABLE, not that the bug did not happen. Find the turn(s); pull the tool calls, the `find_available_slots`/`checkSlot`/`getFreeBusy` results, the rejection breakdowns, the verdicts. State the root as `file:line — what actually happens`. If you can't see it in the log, say so and add a definitive log line before guessing.
 2. **Ask: which root is this?** Map it to a cluster below. If it's a new root, name it. Most "new" bugs are an old root resurfacing.
 3. **Fix at the chokepoint, deterministically.** A return value the model reacts to, a single validator, a code-owned resolution — not a prompt rule. If a prior layer patched this, *remove* it.
 4. **One validator / one source.** Search, candidate-check, and booking must give the SAME answer for the same slot; a decision made in two places that can disagree IS the bug.

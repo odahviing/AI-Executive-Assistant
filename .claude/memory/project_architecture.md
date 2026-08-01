@@ -262,3 +262,5 @@ Always use top-level ES imports: `import { getDb, appendToConversation } from '.
 ## Skill boundary — CRITICAL (v2.0)
 
 Skills import ONLY from `src/connections/types` + `src/connections/registry`. NEVER from `src/connectors/slack/*`. NEVER `app.client.*`. Task dispatchers follow the same rule. If you need a Slack-specific feature, either add it to the Connection interface or keep the code inside `src/connectors/slack/`.
+
+`types.ts` and `registry.ts` are the **shared spine — no lane owns them** (owner's ruling 2026-08-01): any lane may add an OPTIONAL member, because every existing implementer stays valid; a change that binds every implementer (a signature, a return shape, a required verb) goes through each channel lane that has to satisfy it.

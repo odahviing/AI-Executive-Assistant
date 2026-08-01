@@ -65,8 +65,8 @@ Supporting: `coord/*` (transport-agnostic coordination state machine), `floating
 One `people_memory` table for everyone (internal / external / `self`), keyed by surrogate `person_id`. **`resolvePerson({slackId?,email?,name?})` is the identity chokepoint** (find-or-create-or-merge: slack→email→fuzzy-name). Per-person operational facts live as `.md` files.
 
 ### 8. 🔌 Connection / transport layer
-`connections/types.ts` (interface) · `connections/slack/*` · `connections/registry.ts` · inbound in `connectors/slack/*`
-Outbound goes through the `Connection` interface; **skills never import from `connectors/`**. The seam for future transports (email/WhatsApp). `connectors/graph/calendar.ts` is the Outlook backend (not a messaging Connection).
+`connections/types.ts` (interface) · `connections/registry.ts` · `connections/slack/*` · `connections/email/*` · inbound in `connectors/slack/*` + `connectors/email/*`
+Outbound goes through the `Connection` interface; **skills never import from `connectors/`**. **The interface and the registry are the shared spine — no lane owns them** (owner's ruling 2026-08-01); the per-transport folders belong to their lanes. Email shipped in 4.3.0; WhatsApp is the next seam. `connectors/graph/calendar.ts` is the Outlook backend (not a messaging Connection).
 
 ### 9. 🧩 Skills registry — how capabilities plug in
 `skills/registry.ts` · `skills/types.ts`

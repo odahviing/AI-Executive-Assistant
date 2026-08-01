@@ -27,7 +27,7 @@
  *   node scripts/ledger-stats.cjs --report        # does report.md's own arithmetic add up?
  *   node scripts/ledger-stats.cjs                 # per-lane pushback ratios
  *   node scripts/ledger-stats.cjs --since 2026-07-01
- *   node scripts/ledger-stats.cjs --lane meeting  # one lane, with its findings
+ *   node scripts/ledger-stats.cjs --lane matchmaker   # one lane, with its findings
  *   node scripts/ledger-stats.cjs --runs          # per-run summary
  *   node scripts/ledger-stats.cjs --by-invariant  # one PRINCIPLE, however many places broke it
  *
@@ -53,7 +53,7 @@ const REPO = path.join(__dirname, '..');
 //
 // A row's evidence names a `file:line`, so staleness is CHECKABLE rather than a
 // judgement: if a commit touched that file AFTER the row was written, the row
-// needs one re-read before it counts as open. Same check the scout already runs
+// needs one re-read before it counts as open. Same check the usher already runs
 // outward for `alreadyBuilt` / `openKnown`, turned inward on the ledger.
 //
 // It MARKS, never closes. Most fixes touch a file without addressing every
@@ -146,7 +146,7 @@ const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean
 //   moved       — the cited code changed after the row's latest date (X38)
 //   unexamined  — cites a file, and nobody has ever re-read it
 //   no-cite     — cites no file, so no pass can ever check it (X47) — HIS read
-// RE-READ = `moved` ∪ `unexamined`, which is the set the scout's brief takes.
+// RE-READ = `moved` ∪ `unexamined`, which is the set the usher's brief takes.
 // `unexamined` deliberately does NOT depend on git: with no history available
 // `moved` is unknowable, but "nobody has looked" is still a fact.
 const bucketOf = (s, row) => {
@@ -542,6 +542,63 @@ if (argv.includes('--report')) {
       }`,
     );
   }
+  // ── X103 · BOTH WRAP MARKERS, CHECKED AGAINST THE ONE THING THAT CANNOT DRIFT ──
+  // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7
+  // wraps skipped it — it stood at 4.3.7 while 4.3.8 and 4.4.0 shipped) and the
+  // `runId: wrap-<version>` ledger stamp (2 of 7). A skipped stamp is not
+  // cosmetic — it silently OVER-SCOPES both readers: `cleaner.md` C10 re-scans
+  // commits it has already judged, and the built-list check above counts every
+  // `built` row back to the last stamp, which is how it reported 42.
+  //
+  // The release commit is the fact both markers describe, and git already has it,
+  // so this compares them against it rather than adding a third marker.
+  const lastRelease = (() => {
+    try {
+      const out = require('child_process')
+        .execFileSync('git', ['-C', REPO, 'log', '-40', '--date=iso-strict', '--format=%h|%ad|%s'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .split(/\r?\n/);
+      for (const l of out) {
+        const [sha, date, ...rest] = l.split('|');
+        const subject = rest.join('|');
+        const v = (subject.match(/^(\d+\.\d+\.\d+)\b/) || [])[1];
+        if (v) return { sha, date, v, subject };
+      }
+    } catch {
+      /* no git history — nothing to compare against */
+    }
+    return null;
+  })();
+  if (lastRelease) {
+    let stampedIso = null;
+    try {
+      stampedIso = JSON.parse(fs.readFileSync(path.join(REPO, '.claude', 'agent-loop', 'state.json'), 'utf8')).lastWrapIso || null;
+    } catch {
+      /* reported below as absent */
+    }
+    const wrapRunIds = new Set();
+    if (fs.existsSync(LEDGER))
+      for (const t of fs.readFileSync(LEDGER, 'utf8').split(/\r?\n/)) {
+        const s = t.trim();
+        if (!s) continue;
+        try {
+          const r = JSON.parse(s);
+          if (/^wrap-/.test(String(r.runId || ''))) wrapRunIds.add(String(r.runId).slice(5));
+        } catch {
+          /* the main reader counts unparseable lines */
+        }
+      }
+    const isoBehind = !stampedIso || new Date(stampedIso) < new Date(lastRelease.date);
+    const ledgerBehind = !wrapRunIds.has(lastRelease.v);
+    if (isoBehind || ledgerBehind) {
+      console.log(`\n  ! WRAP MARKER(S) SKIPPED — the newest release commit is ${lastRelease.sha} \`${lastRelease.v}\` at ${lastRelease.date}:`);
+      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C10 scopes off this, so the next cleaner re-scans commits it already judged.`);
+      if (ledgerBehind) console.log(`      no ledger row is stamped \`runId: wrap-${lastRelease.v}\` — so \`--wrap ${lastRelease.v}\` cannot name that release's own rows, and the built-list count above reaches back past it.`);
+      console.log(`      Set both at the wrap: \`lastWrapIso\` to \`git log -1 --date=iso-strict --format=%ad\`, and \`runId:"wrap-<version>"\` on every row appended.`);
+      bad += 1;
+    } else {
+      console.log(`\n  wrap markers: both current at \`${lastRelease.v}\` (${lastRelease.sha})   ok`);
+    }
+  }
   // X83 · his bound on the narration, and the only length rule left on this file.
   if (prose.length > 5) {
     console.log(`\n  ! ${prose.length} lines sit OUTSIDE the table, and the format allows 5. The table is the report — anything longer belongs in the ledger \`note\`:`);
@@ -584,6 +641,15 @@ if (argv.includes('--report')) {
     console.log(`      A deferral is a ONE-RUN skip. Each of those outlived a run without coming back: put it in this run's \`pending owner\` group with its recommendation, or record \`declined\`.`);
     bad += 1;
   }
+  // X87 · AND HOW MANY OF THAT TOTAL HE CAN ACTUALLY RULE ON. X77 keeps a row with
+  // no recommendation OUT of the table, which is right — an unanswerable row is
+  // worse than a hidden one — but it also made the unanswerable ones invisible:
+  // 5 rows printed and gated clean on 2026-07-31 while 18 sat in the ledger
+  // needing his build-or-decline. NO NEW SURFACE AND NO NEW MECHANISM (the three
+  // rows before this one each added one): `--open` already computes the split and
+  // the headline is already a checked claim, so this is one more number on the
+  // line and one more comparison in the loop below.
+  const rulableLine = openOut.find((l) => /^RULABLE —/.test(l)) || '';
   const claimLine = lines.find((l) => /\d[\d,]*\s*\**\s*open rows?\b/i.test(l));
   const num = (re, s) => { const m = String(s).match(re); return m ? Number(m[1]) : null; };
   if (!openLine) {
@@ -597,6 +663,8 @@ if (argv.includes('--report')) {
       'still-real': num(/(\d+) still-real/, openLine),
       reread: num(/(\d+) need a re-read/, openLine),
       noCite: num(/(\d+) cite no file/, openLine),
+      rulable: num(/^RULABLE — (\d+) of/, rulableLine),
+      'waiting on a verb': num(/(\d+) carry NONE/, rulableLine),
     };
     // X86 · the headline is the MANAGER's line and this reader must never edit it, so
     // both spellings parse: a report written before the rename says `confirmed` and
@@ -606,13 +674,25 @@ if (argv.includes('--report')) {
       'still-real': num(/(\d+)\s*(?:still-real|confirmed)/i, claimLine),
       reread: num(/(\d+)\s*(?:need|needing)\b[^,)]*re-read/i, claimLine),
       noCite: num(/(\d+)\s*(?:cite|citing)\b[^,)]*no file/i, claimLine),
+      rulable: num(/(\d+)\s*rulable/i, claimLine),
+      'waiting on a verb': num(/(\d+)\s*(?:waiting|await(?:ing)?)\b[^,)]*verb/i, claimLine),
     };
     const wrong = Object.keys(want).filter((k) => want[k] !== null && got[k] !== want[k]);
+    const wrongTotal = wrong.filter((k) => k !== 'rulable' && k !== 'waiting on a verb');
     console.log(
       `\n  headline's ledger total: claims ${got.total} open (${got['still-real']} still-real, ${got.reread} re-read, ${got.noCite} no-cite) · --open derives ${want.total} (${want['still-real']}, ${want.reread}, ${want.noCite})   ${
-        wrong.length ? `! MISMATCH on ${wrong.join(', ')}` : 'ok'
+        wrongTotal.length ? `! MISMATCH on ${wrongTotal.join(', ')}` : 'ok'
       }`,
     );
+    console.log(
+      `  headline's rulable split: claims ${got.rulable === null ? 'NOTHING' : `${got.rulable} rulable, ${got['waiting on a verb']} waiting on a verb`} · --open derives ${want.rulable} rulable, ${
+        want['waiting on a verb']
+      } waiting on a verb   ${wrong.includes('rulable') || wrong.includes('waiting on a verb') ? '! MISMATCH' : 'ok'}`,
+    );
+    if (got.rulable === null && want['waiting on a verb'])
+      console.log(
+        `      ${want['waiting on a verb']} open row(s) need his build-or-decline and carry no verb, so X77 keeps every one of them OFF the table. Silence on this line reads as nothing pending — write it, then give those rows their verb (M6b).`,
+      );
     if (wrong.length) bad += 1;
   }
   console.log(bad ? `\n${bad} problem(s). A count the table contradicts is the defect, not the number.\n` : `\nEvery count agrees with the rows beneath it.\n`);
@@ -944,7 +1024,7 @@ if (openOnly) {
   console.log(LEGEND_REREAD);
   // X51 · the two states read alike and are opposites. A `converted` row is CLOSED
   // and never prints here; a `deferred` row is a ONE-RUN skip and is DUE. Deriving
-  // `openKnown` from both told the scout to drop four rows the owner had ruled due.
+  // `openKnown` from both told the usher to drop four rows the owner had ruled due.
   console.log(
     `DEFERRED = a ONE-RUN skip, DUE on the next run — not parked. It never belongs in \`openKnown\`; that list is \`converted\` rows only, and those left the bug track for GitHub.\n` +
       `OVERDUE = a run has happened since and it did not come back. Put it in this run's \`pending owner\` group with its recommendation, or record \`declined\` — \`--report\` exits 1 while one stands.\n`,
@@ -1150,7 +1230,7 @@ const bothRows = bySource.get('both');
 const logTotal = (logRows ? logRows.total : 0) + (bothRows ? bothRows.total : 0);
 if (logTotal && logTotal < 6)
   console.log(`  · the log review has raised ${logTotal} — thin, but it is the only source for bugs nobody reported. Judge it on WHAT it catches, not how much.`);
-if (bothRows) console.log(`  · ${bothRows.total} row(s) merged a GitHub issue with a log moment — his words as the ask, the transcript as the proof. That merge working is the scout doing its job.`);
+if (bothRows) console.log(`  · ${bothRows.total} row(s) merged a GitHub issue with a log moment — his words as the ask, the transcript as the proof. That merge working is the usher doing its job.`);
 
 if (byRun) {
   console.log('\nBy run');

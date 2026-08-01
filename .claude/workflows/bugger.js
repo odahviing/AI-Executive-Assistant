@@ -1,9 +1,9 @@
 export const meta = {
   name: 'bugger',
   description:
-    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the scout is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
+    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the usher is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
-    { title: 'Scout' },
+    { title: 'Usher' },
     { title: 'Build' },
     { title: 'Context' },
     { title: 'Verify' },
@@ -74,7 +74,7 @@ const asArray = (name, v, critical) => {
 // These are already lane-assigned, so intake and triage are skipped entirely —
 // paying to re-derive routing he has already approved is pure waste.
 // Read BEFORE `sources`, because what this holds decides what the source default
-// may be: a preset skips the scout, so it must never default a source in.
+// may be: a preset skips the usher, so it must never default a source in.
 const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
 const sourcesArg = asArray('sources', A.sources)
 // A discovery run does ALL THREE. Owner, 2026-07-30: *"put backlog in every run"* —
@@ -82,7 +82,7 @@ const sourcesArg = asArray('sources', A.sources)
 // bookkeeping. What makes it affordable is X38's staleness marking: only the rows
 // whose code has MOVED need re-reading, so the set is small by construction, and a
 // re-read produces a closure or a confirmation rather than a decision.
-// Empty on a preset: `args.issues` skips the scout, so a source named there could
+// Empty on a preset: `args.issues` skips the usher, so a source named there could
 // only be a source that never ran.
 const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['github', 'logs', 'backlog']
 // ── X42 · THE THIRD INPUT ────────────────────────────────────────────────────
@@ -93,9 +93,9 @@ const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['githu
 // rows, 28 of them flagged RE-READ once X59 widened the trigger from *the code
 // moved* to *nobody has ever looked*) and the only one with no door. So the
 // input that needs the funnel most was the one worked by hand, and a hand pass gets
-// no scout, no counts, no manifest, no `inFlight` and no report persistence.
+// no usher, no counts, no manifest, no `inFlight` and no report persistence.
 //
-// The scout ALREADY does this class of work — it matches findings against
+// The usher ALREADY does this class of work — it matches findings against
 // `alreadyBuilt` and `openKnown` and drops what is settled — so re-reading a
 // flagged row is the same skill pointed inward. One new SOURCE, not a new mode.
 //
@@ -118,25 +118,25 @@ const unknownSources = SOURCES.filter((s) => !KNOWN_SOURCES.has(s))
 if (unknownSources.length)
   throw new Error(
     `args.sources names ${unknownSources.length} unknown source(s): ${unknownSources.map((s) => `"${s}"`).join(', ')}. ` +
-      `Valid: ${[...KNOWN_SOURCES].join(', ')}. An unknown source produces a scout brief with nothing in it, so the run would find nothing and report success. Nothing has been dispatched.`,
+      `Valid: ${[...KNOWN_SOURCES].join(', ')}. An unknown source produces a usher brief with nothing in it, so the run would find nothing and report success. Nothing has been dispatched.`,
   )
 const BACKLOG = SOURCES.includes('backlog')
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
-// The watermark in UTC, so the manifest can check the scout compared against the
+// The watermark in UTC, so the manifest can check the usher compared against the
 // right instant rather than guessing from a line number. Empty when no ISO
 // watermark was passed (the first run, or a manual one).
 const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
 const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — log files are named by local date
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
 // X42 · `sources` and `issues` are different doors, and `backlog` must never be
-// passed through both: a preset SKIPS the scout, so the re-read would never run
+// passed through both: a preset SKIPS the usher, so the re-read would never run
 // while `manifest.backlog` reported a backlog pass with zero rows — a mechanism
 // that did nothing and looked like success. Refused before anything spawns. Only
 // an EXPLICIT `sources:['backlog']` can reach this now — the default cannot, since
 // a preset defaults to no sources at all.
 if (BACKLOG && presetArg.length)
   throw new Error(
-    `args.sources names \`backlog\` and args.issues carries ${presetArg.length} row(s). A preset skips the scout, so the backlog re-read could not run. ` +
+    `args.sources names \`backlog\` and args.issues carries ${presetArg.length} row(s). A preset skips the usher, so the backlog re-read could not run. ` +
       `Pick one: \`sources:['backlog']\` to re-read the stale rows, or \`issues:[…]\` to build the ones he approved. Nothing has been dispatched.`,
   )
 // Bugs already FIXED but not yet in the running build. Production keeps
@@ -160,11 +160,11 @@ const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
 // next run — the only thing we need is don't do it now."* A deferral is a ONE-RUN
 // skip, and since the ledger is only appended during and after a run, every
 // `deferred` row standing when a run starts was deferred by an earlier one and is
-// due by definition. Listing it here tells the scout to drop work he asked for.
+// due by definition. Listing it here tells the usher to drop work he asked for.
 // If he never wants it, the verdict is `declined` — that is the parking state.
 // Shape: [{ref, symptom, state, note}].
 //
-// ENFORCED here, not only written in SKILL.md and scout.md. The rule that lived in
+// ENFORCED here, not only written in SKILL.md and usher.md. The rule that lived in
 // prose alone is the rule that broke: the derivation said `deferred` + `converted`,
 // the engine took whatever it was handed, and nothing could tell that a due row had
 // been listed as droppable. So a `deferred` entry is REMOVED from the drop list and
@@ -177,7 +177,7 @@ if (openKnownDeferred.length)
   argWarnings.push(
     `${openKnownDeferred.length} \`openKnown\` entr${openKnownDeferred.length === 1 ? 'y was' : 'ies were'} \`deferred\` and ${openKnownDeferred.length === 1 ? 'was' : 'were'} REMOVED from the drop list: ${openKnownDeferred
       .map((o) => o.ref || '(no ref)')
-      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the scout must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
+      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the usher must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
   )
 // X22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
@@ -197,10 +197,10 @@ const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) =
 // ledger row read FLAGGED, which looks exactly like handled.
 //
 // It carries on a BUILD invocation only. `args.issues` is what makes a run a
-// preset, so draining overflow into a discovery run would skip the scout and lose
+// preset, so draining overflow into a discovery run would skip the usher and lose
 // the log review (SKILL.md:385). Passed without `issues`, it is ignored and SAYS so.
 //
-// The drop is `openKnown` — the same list the scout drops against — because the one
+// The drop is `openKnown` — the same list the usher drops against — because the one
 // thing this route must never do is re-dispatch something he parked or declined.
 //
 // X46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
@@ -231,7 +231,7 @@ const carriedDeferred = overflowArg.filter((i) => i && !carriedDropped.includes(
 const carriedIn = presetArg.length ? overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && !carriedDeferred.includes(i)) : []
 if (overflowArg.length && !presetArg.length)
   argWarnings.push(
-    `\`pendingOverflow\` carried ${overflowArg.length} entr${overflowArg.length === 1 ? 'y' : 'ies'} but no \`issues\` were passed, so this is a DISCOVERY run and they were IGNORED — draining them here would make the run a preset and skip the scout, losing the log review. Carry them on the next \`build\`.`,
+    `\`pendingOverflow\` carried ${overflowArg.length} entr${overflowArg.length === 1 ? 'y' : 'ies'} but no \`issues\` were passed, so this is a DISCOVERY run and they were IGNORED — draining them here would make the run a preset and skip the usher, losing the log review. Carry them on the next \`build\`.`,
   )
 if (carriedDropped.length)
   argWarnings.push(
@@ -288,10 +288,10 @@ const describeBuilt = (b) =>
 // to-do list. Never select it from a timer or a staleness heuristic. Use it
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
-const VERIFY = A.verify !== false // one combined examiner pass over the wave, unless explicitly off
-const CODE_LANES = ['matchmaker', 'shepherd', 'gatekeeper', 'profiler', 'transporter', 'outrider'] // run in parallel; context runs LAST, separately
+const VERIFY = A.verify !== false // one combined bouncer pass over the wave, unless explicitly off
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slacker', 'exchanger', 'outrider'] // run in parallel; context runs LAST, separately
 // Reasoning effort per lane (owner-set). Keys are agent names, renamed 2026-07-28.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', transporter: 'xhigh', shepherd: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slacker: 'xhigh', exchanger: 'xhigh', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
 
 // ---- schemas (force structured returns) ----
 // ── SELF-REPORT ─────────────────────────────────────────────────────────────
@@ -304,7 +304,7 @@ const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', transporter: 'xhigh',
 // So the step REPORTS ITS OWN WORK, and the run manifest prints it. A no-op
 // stops being invisible and becomes a zero in a column where zero is obviously
 // wrong. Diagnostics only — nothing branches on them.
-const SCOUT = {
+const USHER = {
   type: 'object',
   properties: {
     filesRead: {
@@ -352,7 +352,7 @@ const SCOUT = {
           // X80 · X32 gave this funnel its two endpoints and no accounting between
           // them, so `emitted 1 of 3` and `emitted 1 of 3 because 2 were already
           // built` were the same return — and the unexplained two landed on no list
-          // at all, recoverable only by the Manager re-reading a ticket the scout had
+          // at all, recoverable only by the Manager re-reading a ticket the usher had
           // already read and discarded. #156 collapsed 3→0 on wf_4bbfc750-1a9 after
           // 3→3 and 3→0 on the two runs before it. Every complaint now comes back as
           // an issue OR as a named drop with its reason, so the arithmetic closes in
@@ -443,7 +443,7 @@ const SCOUT = {
           // issue takes `both`; that IS the interesting case, because the
           // owner's words carry the ask and the transcript carries the proof.
           source: { type: 'string', enum: ['github', 'logs', 'both'] },
-          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           // KIND is what drives cost, not count. 15-20 atomic items is a normal
@@ -463,7 +463,7 @@ const SCOUT = {
           evidence: { type: 'string' },
           clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
           // Filled ONLY when the issue cites a code location. This was its own
-          // Haiku pass; the scout is already holding the issue, so it resolves
+          // Haiku pass; the usher is already holding the issue, so it resolves
           // the citation in the same turn instead of a second agent re-opening
           // what the first just read.
           where: {
@@ -495,7 +495,7 @@ const VERDICTS = {
           id: { type: 'string' },
           // X66 · `confirmed-other-lane` — the row is DONE, and you are not the
           // one who did it. A lane resumed to close out a dependency returned
-          // `built` for a change gatekeeper had made (wf_0cebe938-c81, shepherd
+          // `built` for a change gatekeeper had made (wf_0cebe938-c81, registrar
           // a2602ac7: 21 turns, 13 tools, ZERO edits, fix text opening "Not built
           // by me"), so the verify was handed 3 rows for 2 changes and spent a
           // result saying so, and the Manager typed the de-duplication into
@@ -506,9 +506,9 @@ const VERDICTS = {
           //
           // X95 · THIS ENUM MIRRORS THE CHARTERS; IT DOES NOT DEFINE THE VOCABULARY. The
           // dispatch brief below says "return one verdict per issue per your return
-          // contract", so the seven lane charters' return-contract list IS the contract
+          // contract", so the eight lane charters' return-contract list IS the contract
           // and this line only enforces it. Adding a member here without adding it to all
-          // seven does nothing: a lane cannot choose a verdict it has never been told
+          // eight does nothing: a lane cannot choose a verdict it has never been told
           // exists, and `confirmed-other-lane` proved it — 0 uses in 537 ledger rows while
           // it lived only here. Payload FIELDS are the opposite and correctly live here
           // alone (`filesTouched`, `traced`, `invariant`): they are mechanics carried by
@@ -550,13 +550,13 @@ const VERDICTS = {
               'repo-relative path of EVERY file you edited or created for this issue. Omit only if you edited nothing — a missing list makes the verify treat the entire tree as this wave, which is safe but wasteful.',
           },
           // Forwarded to the verify so it spends its budget on what you did NOT
-          // cover. Without it the examiner re-derives ground you already walked.
+          // cover. Without it the bouncer re-derives ground you already walked.
           traced: {
             type: 'string',
             description:
-              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the examiner; one you quietly omit gets checked by nobody.',
+              'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -580,7 +580,7 @@ const VERIFY_OUT = {
     // An OVERTURN says a fix in THIS wave is broken: it belongs to this wave and
     // must be settled before shipping. It goes in `results`.
     //
-    // A DISCOVERY is a pre-existing bug the examiner happened to notice while
+    // A DISCOVERY is a pre-existing bug the bouncer happened to notice while
     // reading. It has nothing to do with the fixes under review — and building
     // it here would change the tree the verify just examined, invalidating the
     // very pass that found it, which then justifies another pass. That is the
@@ -612,7 +612,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'shepherd', 'gatekeeper', 'instructor', 'profiler', 'transporter', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · a DISCOVERY is the highest-value place for this tag and the only
           // one where it was ever set: you read the whole diff, so you are the pass
@@ -631,7 +631,7 @@ const VERIFY_OUT = {
     },
     // Work lands on open tickets by accident constantly: a bug fix turns out to
     // be most of an Improvement nobody scheduled, the ticket sits open for
-    // months, and eventually it is built a second time. The examiner reads the
+    // months, and eventually it is built a second time. The bouncer reads the
     // FINISHED diff, so it is the only pass positioned to notice. `partial` is
     // the valuable state — the owner can send it back for the remainder.
     ticketCoverage: {
@@ -667,7 +667,7 @@ const VERIFY_OUT = {
 const WHERE_NOTE =
   `\n\nSome issues carry \`_where\` — the cited location resolved for you, with an excerpt and its immediate neighbours. ` +
   `That is a STARTING POINT, not the truth: it is a snapshot taken before this dispatch, another lane may have moved the code since, ` +
-  `and the citation itself came from the scout and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
+  `and the citation itself came from the usher and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
@@ -693,7 +693,7 @@ const INVARIANT_NOTE = KNOWN_INVARIANTS.length
 // is one extra thing to CARRY on the narrow class where the code cannot answer,
 // and `needs-owner-decision` already exists for the honest negative.
 const TIMEOUT_NOTE =
-  `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at logs/maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
+  `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
   `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
 
 const dispatch = (lane, issues) =>
@@ -768,14 +768,14 @@ const deferredDepAsks = (rs) =>
       awaitingOwner: true,
     }))
 
-// ---- 1. Scout — find the work AND shape it, in one pass -------------------
+// ---- 1. Usher — find the work AND shape it, in one pass -------------------
 // This was three agents: a GitHub pull, a log review, and a triage that routed
 // from their combined output. The split meant the agent making the run's most
 // consequential call — which lane owns this, and is it safe to dispatch at all —
 // worked from a one-line symptom and a quoted fragment, while the agent that had
 // actually read the transcript was already gone. Merging recovers that context.
 //
-// The routing and shaping DOCTRINE now lives in `.claude/agents/scout.md`, so
+// The routing and shaping DOCTRINE now lives in `.claude/agents/usher.md`, so
 // this prompt carries only the mechanics and the payload — the same split the
 // lane dispatches use, and the fix for two engines each holding their own
 // drifting copy of the lane map.
@@ -784,7 +784,7 @@ const deferredDepAsks = (rs) =>
 let allIssues = []
 let triageDropped = []
 let openKnownDropped = []
-let scoutReport = {}
+let usherReport = {}
 let findingsSeen = 0
 let locationsResolved = 0
 let ticketComplaints = []
@@ -792,19 +792,22 @@ let backlogSeen = 0
 let backlogNoCite = 0
 let backlogReread = []
 if (PRESET) {
-  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the scout.`)
+  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the usher.`)
   allIssues = PRESET
 } else {
-phase('Scout')
-const scout = await agent(
+phase('Usher')
+const usher = await agent(
   `Find this run's work and shape it for the lanes. Sources: **${SOURCES.join(' + ')}**. Your charter holds the bar for a finding, the routing map, the merge rules and the \`kind\` call — this brief carries only the mechanics and the payload.\n\n` +
     (SOURCES.includes('logs')
       ? `## The log review\n\n` +
         `**0. ESTABLISH THE CUTOFF MECHANICALLY, BEFORE READING ANYTHING.** The watermark is \`${SINCE}\`.\n` +
         `  a. **Convert it to UTC first.** The watermark carries a local offset (e.g. \`+0300\`); every log line is UTC with a \`Z\`. \`2026-07-26T18:22:00+0300\` is \`2026-07-26T15:22:00Z\`. Comparing the two as text without converting silently reviews the whole day — measured at ~430k wasted on 2026-07-26, when an 18:22 watermark let 04:32Z lines through.\n` +
-        `  b. **READ EVERY DATED FILE FROM THE WATERMARK'S DATE THROUGH TODAY — not just today's.** Logs are one file per day (\`logs/maelle-YYYY-MM-DD.log\`) and the watermark is normally ~24h back, so it lands in YESTERDAY's file. Reviewing only today's leaves the previous evening unreviewed on every single run, which is exactly when she is used. \`ls logs/\` first, then take every dated file at or after the watermark's date. (\`logs/maelle.log\` is a stale legacy file — ignore it.)\n` +
+        `  b. **READ EVERY DATED FILE FROM THE WATERMARK'S DATE THROUGH TODAY — not just today's — AND READ THEM OFF THE VM.** She runs on the GCP VM: the local \`logs/\` dir is STALE (frozen at the 2026-07-31 cutover), and reviewing it returns a clean zero-finding pass over a window nobody read. Same winston file per day (\`maelle-YYYY-MM-DD.log\`), now at \`/mnt/disks/maelle/app/logs/\`, and the watermark is normally ~24h back so it lands in YESTERDAY's file — reviewing only today's leaves the previous evening unreviewed on every single run, which is exactly when she is used. Reach it over IAP SSH:\n` +
+        `     \`"C:\\Users\\idanc\\AppData\\Local\\Google\\Cloud SDK\\google-cloud-sdk\\bin\\gcloud.cmd" compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap --quiet --command "<bash to run on the VM>"\`\n` +
+        `     \`ls /mnt/disks/maelle/app/logs/\` as that command lists the days; take every dated file at or after the watermark's date, and run your greps as further remote commands so the filtering happens ON the VM and only matches cross the wire. (No \`>\`, \`<\` or bare \`%\` inside a remote command — cmd.exe mangles them. \`powershell -File scripts/vm-logs.ps1 [term] [lines]\` is the quick reader, but it tails only the LATEST file and cannot cover a multi-day window. \`maelle.log\` is a stale legacy file — ignore it.)\n` +
+        `     **If the connection fails — \`Reauthentication failed\` means the owner must run \`gcloud auth login\` — STOP and report the log review as UNREACHABLE. Never return \`{issues: []}\` for a log you could not read:** that is indistinguishable from a quiet night, and it is exactly the wrong negative this step exists to prevent.\n` +
         `  c. In the EARLIEST of those files, start at the first entry whose \`"timestamp"\` is >= that UTC instant; everything above it is already reviewed and re-finding it produces a duplicate the owner has seen. Every later file is read from the top.\n` +
-        `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events after the cutoff, across all those files. If ZERO, she handled no turns since the last review — return \`{issues: []}\` immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.\n` +
+        `  d. **ACTIVITY CHECK:** count \`Orchestrator invoked\` events after the cutoff, across all those files. If ZERO **from a successful read** (see b), she handled no turns since the last review — return \`{issues: []}\` immediately and stop. Do not scan, do not reason further. Count that event specifically: \`Catch-up: scanning DMs\` is an idle heartbeat that fires whether or not anyone spoke, and reading it as activity is what made a zero-finding run cost 124k.\n` +
         `  **Report \`filesRead\`, \`cutoffUtc\` and \`turnsAfterCutoff\`.** The manifest prints them and checks \`cutoffUtc\` against the watermark, so a conversion slip or a one-file review shows up instead of passing silently.\n\n` +
         `1. Grep for HARD trouble signals (language-neutral): error and exception lines, guard fires (claimChecker / humanGate / dateVerifier / securityGate flagged or rewrote), "truncated at max_tokens", tool retries and failures, findAvailableSlots rejection breakdowns, approval-escalation misfires, abnormally long threads.\n` +
         `2. Scan shallowly for SOFT signals that leave no error: a reply that does not match what was asked, an attendee or time that silently changed between turns, a confidently-worded answer on a partial result.\n` +
@@ -844,25 +847,25 @@ const scout = await agent(
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
-  { label: 'scout', phase: 'Scout', effort: 'medium', agentType: 'scout', schema: SCOUT },
+  { label: 'usher', phase: 'Usher', effort: 'medium', agentType: 'usher', schema: USHER },
 )
-allIssues = (scout && scout.issues) || []
-triageDropped = (scout && scout.droppedAsAlreadyBuilt) || []
-openKnownDropped = (scout && scout.droppedAsOpenKnown) || []
-findingsSeen = (scout && scout.findingsSeen) || allIssues.length
-ticketComplaints = (scout && scout.ticketComplaints) || []
-backlogSeen = (scout && typeof scout.backlogSeen === 'number' ? scout.backlogSeen : 0)
-backlogNoCite = (scout && typeof scout.backlogNoCite === 'number' ? scout.backlogNoCite : 0)
-backlogReread = (scout && scout.backlogReread) || []
-scoutReport = scout || {}
-log(`Scout: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
+allIssues = (usher && usher.issues) || []
+triageDropped = (usher && usher.droppedAsAlreadyBuilt) || []
+openKnownDropped = (usher && usher.droppedAsOpenKnown) || []
+findingsSeen = (usher && usher.findingsSeen) || allIssues.length
+ticketComplaints = (usher && usher.ticketComplaints) || []
+backlogSeen = (usher && typeof usher.backlogSeen === 'number' ? usher.backlogSeen : 0)
+backlogNoCite = (usher && typeof usher.backlogNoCite === 'number' ? usher.backlogNoCite : 0)
+backlogReread = (usher && usher.backlogReread) || []
+usherReport = usher || {}
+log(`Usher: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 }
 
 // X98 · a backlog re-read that comes back `fixed` CLOSES a ledger row with no
 // diff behind it — the same no-evidence closure `already-fixed` is, arriving on
 // a different path. The X68 spot-check read lane results only, so this path was
-// checked by nothing but the scout's own sentence: measured 2026-07-31, 18 of
+// checked by nothing but the usher's own sentence: measured 2026-07-31, 18 of
 // the 33 `already-fixed` rows in ledger.jsonl carry `source:'audit'`, which is
 // this path and the largest single population of no-diff closures.
 //
@@ -881,12 +884,12 @@ const backlogClaims = backlogReread.filter(backlogClosable).map((b) => ({ id: `$
 // phase and no `context` pass either — it is silently dropped. That happened on
 // 2026-07-25: the router emitted lane `general`, which does not exist. It was
 // harmless only because that issue was flagged for the owner and never
-// dispatched. Route the unknown to `outer` (the catch-all, by definition) and
+// dispatched. Route the unknown to `outrider` (the catch-all, by definition) and
 // SAY SO, rather than losing the issue to a typo.
 const KNOWN_LANES = new Set([...CODE_LANES, 'instructor'])
 const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
 if (misrouted.length) {
-  log(`! Scout emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outer so they are not silently dropped.`)
+  log(`! Usher emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outrider so they are not silently dropped.`)
   misrouted.forEach((i) => {
     i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
     i.lane = 'outrider'
@@ -901,7 +904,7 @@ if (misrouted.length) {
 // desk needing judgement, which is the most expensive possible order.
 // A PRESET item is exempt — he has already approved that routing by naming it.
 // X63 · `kind` DECIDES THE BUCKET; `clarity` is a property of the item, not a
-// gate on it. The two are not orthogonal in practice — a scout that judges an
+// gate on it. The two are not orthogonal in practice — a usher that judges an
 // item undecidable marks it `ambiguous` AND `needs-shaping` — so requiring
 // `clear` here put all five of wf_27f03aca-0dd's needs-shaping items in
 // `flagged`, and `mustAlsoAppear.needsShaping` reported 0 on a run where five
@@ -986,7 +989,7 @@ if (MODE === 'collect') {
   }
 }
 
-// ---- 2b. Locations — resolved by the scout, in the same turn ---------------
+// ---- 2b. Locations — resolved by the usher, in the same turn ---------------
 // Every builder used to open with the same hunt: grep, read a 1,400-line file,
 // read the wrong one, find the thing, then read it properly. Six lanes each
 // paying that discovery tax — ~5,300 lines across the five files the scheduling
@@ -994,7 +997,7 @@ if (MODE === 'collect') {
 //
 // That used to be a separate Haiku pass. It could only fire when `evidence`
 // happened to carry a file path, and when it did it re-opened from scratch the
-// very issue the router had just been holding. The scout is already there with
+// very issue the router had just been holding. The usher is already there with
 // the issue body and the transcript in hand, so it fills `where` as it goes and
 // the pass is gone.
 //
@@ -1003,7 +1006,7 @@ if (MODE === 'collect') {
 // bug at framework scale.
 buildable = buildable.map((i) => (i.where && i.where.excerpt ? { ...i, _where: i.where } : i))
 locationsResolved = buildable.filter((i) => i._where).length
-if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved by the scout — the lanes skip the hunt.`)
+if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved by the usher — the lanes skip the hunt.`)
 
 // ---- 3. THE BUILD LOOP — rounds until nothing is pending ------------------
 // Replaces a fixed Build → Context → single-tail sequence, which capped
@@ -1126,7 +1129,7 @@ if (queue.length) {
 // ---- 5. Verify — ONE adversarial pass over the COMBINED diff, never one per fix ----
 // This used to fan out N per-fix verifies. That shape is both more expensive and
 // strictly blinder: a per-fix pass cannot see the only defect class that actually
-// needs an examiner — two lanes whose fixes are each correct alone and wrong
+// needs an bouncer — two lanes whose fixes are each correct alone and wrong
 // together. Every cross-lane defect this framework has caught came from a
 // combined-diff pass (the 4.2.0 wrap; the 2026-07-26 checkSlot wave, where a
 // combined pass caught a regression a fix had introduced ONE ROUND earlier).
@@ -1174,7 +1177,7 @@ if (VERIFY) {
   if (built.length || spotCheck.length) {
     // Two things are forwarded so nothing is derived twice:
     //   • each fix's own `traced` — what the builder already walked, so the
-    //     examiner attacks the GAPS instead of re-covering covered ground.
+    //     bouncer attacks the GAPS instead of re-covering covered ground.
     //   • `priorClean` — what earlier verifies proved, carried in by the Manager
     //     from the report. Without it every pass re-audits settled ground.
     // Both are leads, not truth: a builder's coverage claim and a past pass's
@@ -1220,7 +1223,7 @@ if (VERIFY) {
     const check = await agent(
       // The bar, the standard, the seams-first scope, the trace sampling, the
       // budget, overturn-vs-discovery and the return contract all live in
-      // `.claude/agents/examiner.md` now. Restating them here would be a second
+      // `.claude/agents/bouncer.md` now. Restating them here would be a second
       // copy that drifts — the same mistake the two engines made with the lane
       // map. This brief carries the PAYLOAD only.
       `Verify this wave's COMBINED change before the owner wraps it — ${built.length} fix(es) across the lanes below. **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
@@ -1248,12 +1251,12 @@ if (VERIFY) {
             }\n${JSON.stringify(spotCheck, null, 2)}\n\n`
           : '') +
         (built.length ? `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}` : `**NO FIX WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
-      // No `model` here either — `examiner.md` pins Opus. Same reasoning as the
+      // No `model` here either — `bouncer.md` pins Opus. Same reasoning as the
       // lanes, one rung stronger: this is the single highest-judgment step, the
       // only pass that sees the whole diff, and the backstop for Sonnet lanes'
       // traces. Pinning it on the charter means neither the session model nor a
       // hand dispatch can downgrade the one agent that must not be downgraded.
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'examiner', effort: 'xhigh', schema: VERIFY_OUT },
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: 'xhigh', schema: VERIFY_OUT },
     )
     verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
@@ -1262,7 +1265,7 @@ if (VERIFY) {
     if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
     ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
     // The verify's OWN dependency asks were being discarded here — the overturn
-    // read only `verdict` and `notes`, so when the examiner said "this needs the
+    // read only `verdict` and `notes`, so when the bouncer said "this needs the
     // owner, and here is precisely what would fix it", the prescription was
     // thrown away and only the objection survived. That happened on
     // wf_6b869440-ef7 to the one finding that mattered most. The verify runs
@@ -1380,9 +1383,9 @@ const manifest = {
     : {
         watermarkGiven: SINCE,
         watermarkUtc: WATERMARK_UTC || '(not an ISO watermark)',
-        cutoffUtcUsed: scoutReport.cutoffUtc ?? '(not reported)',
-        filesRead: scoutReport.filesRead ?? '(not reported)',
-        turnsAfterCutoff: scoutReport.turnsAfterCutoff ?? '(not reported)',
+        cutoffUtcUsed: usherReport.cutoffUtc ?? '(not reported)',
+        filesRead: usherReport.filesRead ?? '(not reported)',
+        turnsAfterCutoff: usherReport.turnsAfterCutoff ?? '(not reported)',
       },
   alreadyBuilt: { passedIn: ALREADY_BUILT.length, droppedByTriage: triageDropped.length, dropped: triageDropped },
   // No warning on a zero here, deliberately. Unlike `alreadyBuilt` — where
@@ -1484,21 +1487,21 @@ const REVIEWED_LOGS = !PRESET && SOURCES.includes('logs')
 // This used to ask "did the review start at line 1?" — which is the CORRECT
 // answer whenever the watermark predates today's file, i.e. every normal night.
 // So it fired on the healthy path and stayed silent on the real failure. Ask the
-// question that actually matters: did the scout compare against the right instant?
-if (REVIEWED_LOGS && WATERMARK_UTC && typeof scoutReport.cutoffUtc === 'string') {
-  const got = Date.parse(scoutReport.cutoffUtc)
-  if (!Number.isFinite(got)) warnings.push(`Log review reported an unparseable cutoff (\`${scoutReport.cutoffUtc}\`) — its watermark cannot be verified.`)
+// question that actually matters: did the usher compare against the right instant?
+if (REVIEWED_LOGS && WATERMARK_UTC && typeof usherReport.cutoffUtc === 'string') {
+  const got = Date.parse(usherReport.cutoffUtc)
+  if (!Number.isFinite(got)) warnings.push(`Log review reported an unparseable cutoff (\`${usherReport.cutoffUtc}\`) — its watermark cannot be verified.`)
   else if (Math.abs(got - Date.parse(WATERMARK_UTC)) > 60000)
-    warnings.push(`LOG WATERMARK SLIPPED — the scout compared against ${scoutReport.cutoffUtc}, but the watermark ${SINCE} is ${WATERMARK_UTC}. A timezone slip here re-reviews the whole day; it cost ~430k on 2026-07-26.`)
+    warnings.push(`LOG WATERMARK SLIPPED — the usher compared against ${usherReport.cutoffUtc}, but the watermark ${SINCE} is ${WATERMARK_UTC}. A timezone slip here re-reviews the whole day; it cost ~430k on 2026-07-26.`)
 }
-if (REVIEWED_LOGS && scoutReport.cutoffUtc === undefined)
+if (REVIEWED_LOGS && usherReport.cutoffUtc === undefined)
   warnings.push('Log review did not report the instant it compared against, so its watermark cannot be verified. Treat any log finding as possibly already-reviewed.')
 // The watermark is normally ~24h back, so it lands in YESTERDAY's file. A review
 // that never opened that file skipped the previous evening — every night, in the
 // window she is actually used.
-if (REVIEWED_LOGS && WATERMARK_DAY && Array.isArray(scoutReport.filesRead) && scoutReport.filesRead.length && !scoutReport.filesRead.some((f) => String(f).includes(WATERMARK_DAY)))
-  warnings.push(`Log review never opened the watermark's own day (${WATERMARK_DAY}); it read ${scoutReport.filesRead.join(', ')}. Everything between ${SINCE} and midnight went unreviewed.`)
-if (REVIEWED_LOGS && !Array.isArray(scoutReport.filesRead))
+if (REVIEWED_LOGS && WATERMARK_DAY && Array.isArray(usherReport.filesRead) && usherReport.filesRead.length && !usherReport.filesRead.some((f) => String(f).includes(WATERMARK_DAY)))
+  warnings.push(`Log review never opened the watermark's own day (${WATERMARK_DAY}); it read ${usherReport.filesRead.join(', ')}. Everything between ${SINCE} and midnight went unreviewed.`)
+if (REVIEWED_LOGS && !Array.isArray(usherReport.filesRead))
   warnings.push('Log review did not report which files it opened, so a single-file review — which skips the previous evening — cannot be ruled out.')
 if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
   warnings.push(
@@ -1534,7 +1537,7 @@ if (VERIFY && backlogClaims.length && backlogConfirmed.size < backlogClaims.leng
       .map((c) => c.ref)
       .join(', ')}. They are in \`keepInReport\`, not \`closeInLedger\` — do not delete them from the report.`,
   )
-if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outer.`)
+if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outrider.`)
 // X31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
 if (onHisDesk > DECISION_BUDGET)
   warnings.push(
@@ -1543,17 +1546,17 @@ if (onHisDesk > DECISION_BUDGET)
   )
 // X32 · three complaints in, one issue out, and no drop to explain it.
 if (!PRESET && SOURCES.includes('github')) {
-  if (!ticketComplaints.length) warnings.push('The scout reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
-  // X64 · SUBTRACT THE COMPLAINTS THE SCOUT DELIBERATELY DROPPED. `complaintsFound
+  if (!ticketComplaints.length) warnings.push('The usher reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
+  // X64 · SUBTRACT THE COMPLAINTS THE USHER DELIBERATELY DROPPED. `complaintsFound
   // > issuesEmitted` alone treats an already-built or parked complaint as an
   // unexplained gap, so the warning named 7, 8 and 8 tickets across three
   // consecutive runs when only 5, 3 and 4 had really lost one. A warning that fires
   // on the healthy path is the `startedAtLine: 1` mistake this file names at :1145.
   //
-  // X80 · IT READS THE SCOUT'S PER-COMPLAINT ACCOUNT, not a guess assembled from
+  // X80 · IT READS THE USHER'S PER-COMPLAINT ACCOUNT, not a guess assembled from
   // the engine's ticket-number drop lists. That inference could only count drops,
   // never say WHICH complaint or WHY — so a dropped complaint stayed unnamed and the
-  // recovery was the Manager re-reading a ticket the scout had already discarded.
+  // recovery was the Manager re-reading a ticket the usher had already discarded.
   // `dropped` is required in the schema and carries the reason, so the shortfall is
   // now the true one and every drop is readable in `manifest.tickets.perTicket`.
   const dropCount = (t) => (Array.isArray(t.dropped) ? t.dropped.length : 0)
@@ -1575,7 +1578,7 @@ if (!PRESET && SOURCES.includes('github')) {
     .filter((n) => n && !allIssues.some((i) => String(i.id || '').includes(n)))
   if (orphanTickets.length)
     warnings.push(
-      `${orphanTickets.length} ticket(s) named in the scout's input appear in NO issue id: ${orphanTickets.map((n) => `#${n}`).join(', ')}. ` +
+      `${orphanTickets.length} ticket(s) named in the usher's input appear in NO issue id: ${orphanTickets.map((n) => `#${n}`).join(', ')}. ` +
         `Nothing downstream can compute coverage for them — this is the gh#156 failure, where a merged row kept the log slug and dropped the ticket number.`,
     )
 }
@@ -1643,7 +1646,7 @@ if (BACKLOG) {
     )
 }
 log(
-  `Manifest — cutoff:${(!PRESET && scoutReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(scoutReport.filesRead) && scoutReport.filesRead.length) || 0}` +
+  `Manifest — cutoff:${(!PRESET && usherReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(usherReport.filesRead) && usherReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
     ` carried:${carriedIn.length}${BACKLOG ? ` backlog:${backlogReread.length}/${backlogSeen}+${backlogNoCite}nocite` : ''}` +
@@ -1709,7 +1712,7 @@ const persist = {
     // `backlogConfirmed` is the second read standing behind it. Keyed on `VERIFY`,
     // not on `verifyRan`: with the verify switched off nothing can confirm, so the
     // claim closes alone and the warning below says nothing checked it — the same
-    // treatment a lane's `already-fixed` gets. With the verify ON, an examiner that
+    // treatment a lane's `already-fixed` gets. With the verify ON, an bouncer that
     // died confirms nothing, so nothing closes and `spotCheckUnanswered` names them.
     closeInLedger: backlogReread
       .filter(backlogCloses)
