@@ -127,7 +127,13 @@ const SINCE = A.sinceIso || 'the last run' // watermark for the log review
 // watermark was passed (the first run, or a manual one).
 const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
 const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — log files are named by local date
-const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 100 // severity-first build cap per run
+// Severity-first build cap per run. 250, his call 2026-08-02, raised from 100:
+// the cap protects against runaway COST, which he has explicitly said he does
+// not care about for a wave that fixes the bugs — and one reported bug legitimately
+// decomposes into several atomic issues, so ten tickets plus a backlog can reach
+// three figures without anything being wrong. The round cap below is the guard
+// that actually matters, and it came DOWN in the same change.
+const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 250
 // X42 · `sources` and `issues` are different doors, and `backlog` must never be
 // passed through both: a preset SKIPS the usher, so the re-read would never run
 // while `manifest.backlog` reported a backlog pass with zero rows — a mechanism
@@ -1164,7 +1170,10 @@ if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved
 // Ids encode depth and stay unique: `1` → `1>dep` → `1>dep>dep`. A RESUME reuses
 // the original id (it replaces that row) and is tracked separately so it cannot
 // re-fire forever.
-const MAX_ROUNDS = 6
+// 4, his call 2026-08-02, down from 6: a chain needing six hand-offs is not a
+// dependency, it is a decomposition that was wrong, and six rounds spend a full
+// lane dispatch each to discover that. Four still allows `1 > dep > dep > dep`.
+const MAX_ROUNDS = 4
 let results = []
 let queue = buildable
 const dispatchedIds = new Set()
@@ -1180,7 +1189,7 @@ let rounds = 0
 // `{}`, lost its lane, and was silently dropped by the queue filter below,
 // AFTER the log line had already announced it would finish next round. The
 // manifest's `lanesDispatched` had the identical blind spot for the identical
-// reason, so both now read from here. MAX_ROUNDS=6 exists precisely to allow
+// reason, so both now read from here. `MAX_ROUNDS` exists precisely to allow
 // that depth; the lookup and the cap disagreed.
 const specById = new Map(buildable.map((i) => [i.id, i]))
 
