@@ -573,7 +573,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
 
           // Guard B — slot rule-compliance via findAvailableSlots narrow window.
           //
-          // D7 — Guard B no longer has an owner-in-MPIM escape. The v2.8.6 block
+          // Guard B no longer has an owner-in-MPIM escape. The v2.8.6 block
           // that used to sit here pre-stamped `args.relaxed = true` whenever the
           // literal string "sender: <owner name>" plus a time plus an
           // English/Hebrew proposal cue appeared in the recent history, and then
@@ -659,7 +659,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 try {
                   validSlots = await runSlotCheck();
                 } catch (firstErr) {
-                  // D4 — the owner-event read owns its OWN retry now
+                  // The owner-event read owns its OWN retry now
                   // (getOwnerEventsForDecision), so a CalendarOfflineError has
                   // already been retried at the source and re-running the whole
                   // check would only spend a second round-trip to reach the same
@@ -780,7 +780,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               }
             }
           } catch (err) {
-            // D4 — "I couldn't verify, ask him to decide" is the right answer to
+            // "I couldn't verify, ask him to decide" is the right answer to
             // a rule check that FAILED; it is the wrong answer to a calendar we
             // cannot read at all. Escalating here would put an approval in front
             // of the owner for a booking nobody can validate either — and he'd be
@@ -901,7 +901,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         }
 
         // #135b — weekday/date sanity. If a weekday was named and the model
-        // resolved `start` to a date whose weekday contradicts it (the F2 class —
+        // resolved `start` to a date whose weekday contradicts it (the wrong-day class —
         // "Thursday" written as a Friday), refuse with the corrected same-week
         // date so the model re-issues in the same turn, instead of booking the
         // wrong day. Number-vs-number, language-agnostic. Shared with move_meeting.
@@ -1014,7 +1014,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // instead of escalating; only if the colleague insists (or none fit)
         // does Sonnet fall to create_approval.
         if (plan.action === 'propose_alternative') {
-          // D8 — these times are being SAID to the colleague, so they are offered
+          // These times are being SAID to the colleague, so they are offered
           // times: stash them or "the Sunday one works" comes back as
           // slot_not_offered and a bare weekday+time gets re-derived onto the
           // wrong week.
@@ -1029,7 +1029,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             success: false,
             error: 'soft_rule_offer_alternatives',
             violation_label: plan.violationLabel,
-            // D3 — the day they asked for and the widening are separate fields
+            // The day they asked for and the widening are separate fields
             // on purpose. Offer the requested day's options as THE answer; the
             // other-day ones only exist because that day ran out, so they are
             // offered as a widening, never merged into one list.
@@ -1363,7 +1363,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         return createMeeting({
           userEmail,
           timezone,
-          // v2.4.3 (E1) — subject NOT scrubbed: " - " separator is fine in
+          // v2.4.3 — subject NOT scrubbed: " - " separator is fine in
           // subjects ("Welcome Meeting - X & Y" reads naturally). The em-dash /
           // " - " pattern is only a chat-side issue; calendar subjects can keep them.
           subject:    args.subject  as string,
@@ -1372,7 +1372,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // By this point Guard A has refused any attendee missing email and
           // the auto-fill has populated names. Coerce to the strict shape.
           attendees:  attendees.map(a => ({ name: a.name ?? '', email: a.email ?? '' })),
-          // v2.4.3 (E1) — body scrubbed AND auto-enriched with location. The
+          // v2.4.3 — body scrubbed AND auto-enriched with location. The
           // Outlook location field is truncated by many clients, so the body
           // always carries a readable location line at the top — attendees can find the meeting
           // regardless of how their client renders the location field.
@@ -1381,7 +1381,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             const { scrubInternalLeakage } = require('../../../../utils/textScrubber') as typeof import('../../../../utils/textScrubber');
             const raw = args.body as string | undefined;
             const cleanedRaw = raw ? scrubInternalLeakage(raw) : '';
-            // v2.6.2 (D5) — use skipLocationField (not effectiveIsOnline) so
+            // v2.6.2 — use skipLocationField (not effectiveIsOnline) so
             // office-day internal hybrid meetings DO get a location block in the
             // body even when a Teams link is also being added.
             if (skipLocationField) {
@@ -1410,7 +1410,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // start/end to midnight-of-day → midnight-of-next-day per Graph's
           // requirement; we just pass the flag through here.
           isAllDay:   args.is_all_day === true,
-          // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 (E1) — clean comma-joined
+          // v2.3.2 (1C) / v2.3.6 (#73) / v2.4.3 — clean comma-joined
           // location with no em-dash separators (an em-dash joiner makes the
           // Outlook location field hard to read), routed through
           // scrubInternalLeakage for safety against any owner-yaml accidental
@@ -1443,7 +1443,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             const match = (context.profile.categories ?? []).find(c => c.name === cat);
             return match?.sets_sensitivity_private ? 'private' : undefined;
           })(),
-          // v2.3.1 (B23) — invite-body attribution names this assistant + owner.
+          // v2.3.1 — invite-body attribution names this assistant + owner.
           defaultBodyAuthor: `${context.profile.assistant.name}, ${context.profile.user.name.split(' ')[0]} Assistant`,
         }).then(async createdMeeting => {
           const meetingId = createdMeeting.id;
@@ -1703,7 +1703,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             } catch (_) { /* non-fatal */ }
           }
 
-          // v3.1.4 (Y3) — record the requester-link for a colleague's direct
+          // v3.1.4 — record the requester-link for a colleague's direct
           // booking. findMeetingOwner reads the requests spine to decide "who
           // controls this meeting"; a direct colleague create_meeting must record its
           // requester (coord bookings already do), else a colleague editing the

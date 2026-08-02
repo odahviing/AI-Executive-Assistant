@@ -228,11 +228,17 @@ const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) 
 // for the night it is forgotten: the deferral's ledger row goes OVERDUE after one
 // run and blocks the report until it is back on his desk.
 const carriedDeferred = overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && isDeferredRow(i))
-const carriedIn = presetArg.length ? overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && !carriedDeferred.includes(i)) : []
-if (overflowArg.length && !presetArg.length)
-  argWarnings.push(
-    `\`pendingOverflow\` carried ${overflowArg.length} entr${overflowArg.length === 1 ? 'y' : 'ies'} but no \`issues\` were passed, so this is a DISCOVERY run and they were IGNORED — draining them here would make the run a preset and skip the usher, losing the log review. Carry them on the next \`build\`.`,
-  )
+// X128 · A DISCOVERY RUN DRAINS THE QUEUE TOO — but AFTER the usher, never
+// INSTEAD of it. The old rule ignored `pendingOverflow` on every non-preset run
+// because the only way to inject items was `args.issues`, and that flag makes a
+// run a PRESET and skips discovery. That is a property of the DOOR, not of the
+// goal: merging the queue into `buildable` once the usher has already returned
+// loses nothing. `args.issues` is untouched and still throws on a run (:137) —
+// this ADDS a path, it does not loosen the guard.
+// Only pre-authorized rows are in here. `queued-next-run` means "found, not
+// built, already lane-assigned and shaped for args.issues" and drains itself by
+// his X30 ruling; a row awaiting his decision never reaches `pendingOverflow`.
+const carriedIn = overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && !carriedDeferred.includes(i))
 if (carriedDropped.length)
   argWarnings.push(
     `${carriedDropped.length} \`pendingOverflow\` entr${carriedDropped.length === 1 ? 'y was' : 'ies were'} matched a parked \`openKnown\` ref and DROPPED, not built: ${carriedDropped.map((i) => i.id || i.ref || '(no id)').join(', ')}. He has already ruled on those.`,
@@ -243,7 +249,9 @@ if (carriedBuilt.length)
       .map((i) => i.id || i.ref || '(no id)')
       .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
   )
-if (carriedDeferred.length && presetArg.length)
+// X128 · fires on a DISCOVERY run too, now that one drains the queue. A deferral
+// is a one-run skip and this run is the skip, whichever door the items came in.
+if (carriedDeferred.length)
   argWarnings.push(
     `${carriedDeferred.length} \`pendingOverflow\` entr${carriedDeferred.length === 1 ? 'y is' : 'ies are'} marked \`deferred\` and ${carriedDeferred.length === 1 ? 'was' : 'were'} HELD, not built: ${carriedDeferred
       .map((i) => i.id || i.ref || '(no id)')
@@ -252,7 +260,12 @@ if (carriedDeferred.length && presetArg.length)
 // X25's guard reads the MERGED list below, so a carried row still flagged
 // `awaitingOwner` is refused exactly like a pasted one.
 const PRESET = presetArg.length ? [...carriedIn, ...presetArg] : null
-if (carriedIn.length) log(`Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`)
+if (carriedIn.length)
+  log(
+    presetArg.length
+      ? `Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`
+      : `Queue: ${carriedIn.length} item(s) from state.pendingOverflow will MERGE into this run's buildable list AFTER the usher: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`,
+  )
 // X25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
 // shaped for a copy-paste straight back into `args.issues` — that is the whole
 // point of the shape — so the flag that says "he has not ruled on the parent yet"
@@ -289,9 +302,20 @@ const describeBuilt = (b) =>
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
 const VERIFY = A.verify !== false // one combined bouncer pass over the wave, unless explicitly off
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slacker', 'exchanger', 'outrider'] // run in parallel; context runs LAST, separately
-// Reasoning effort per lane (owner-set). Keys are agent names, renamed 2026-07-28.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slacker: 'xhigh', exchanger: 'xhigh', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'outrider'] // run in parallel; context runs LAST, separately
+// Reasoning effort per agent (owner-set). Keys are agent names, renamed 2026-07-28.
+// The non-lane agents live here too, so every dispatch in this engine reads its
+// effort from ONE table — a hardcoded effort at the call site is invisible to
+// anyone tuning the run, which is how the usher sat at `medium` unnoticed.
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+// X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
+// CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
+// an agentType that does not exist, and reads as a perfectly normal run.
+// charter-audit.js:16-17 has had this guard since it was written; the two
+// engines that actually BUILD did not.
+const DISPATCHABLE = [...CODE_LANES, 'instructor', 'usher', 'bouncer']
+const UNKNOWN = DISPATCHABLE.filter((l) => !EFFORT[l])
+if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — they have no effort setting and no agent, so they would dispatch to nothing.`)
 
 // ---- schemas (force structured returns) ----
 // ── SELF-REPORT ─────────────────────────────────────────────────────────────
@@ -422,7 +446,28 @@ const USHER = {
           recommend: {
             type: 'string',
             description:
-              'REQUIRED on `still-real` and `moved`; write `fixed — no action` on a `fixed` row. One of his five verbs and ONE clause of why: `build — <why now>` · `decline — <why never>` · `defer — <what it waits on>` · `resend — <what the lane got wrong>` · `convert — <the design question>`. He rules on this sentence; without it he has to read the whole finding to rule at all.',
+              'REQUIRED on `still-real` and `moved`; write `fixed — no action` on a `fixed` row. One of his five verbs and ONE clause of why: `build — <why now>` · `decline — <why never>` · `defer — <what it waits on>` · `resend — <what the lane got wrong>` · `convert — <the design question>`. **X129 · `build` is now ACTED ON, not just advice** — his ruling 2026-08-02: *"everything that is able to build should be build."* A `build` verb sends this row to a lane in THIS run, so write it only when you would dispatch it; `convert` and `decline` and `defer` do not build, and a row that genuinely needs him gets no recommendation at all.',
+          },
+          // X129 · a backlog row that BUILDS has to be dispatchable, and the two
+          // fields a dispatch needs were never on this shape. The usher already
+          // makes exactly this call on every fresh issue — same routing table,
+          // same judgement, applied to a row it has just re-read.
+          lane: {
+            type: 'string',
+            enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'],
+            description: 'REQUIRED when `recommend` starts with `build` — the lane that owns the FIX, routed exactly as you route a fresh issue. Omit on any other verb. A `build` row without this cannot be dispatched and is reported as dropped.',
+          },
+          severity: {
+            type: 'string',
+            enum: ['high', 'medium', 'low'],
+            description: 'REQUIRED when `recommend` starts with `build` — it orders the shared severity-first cap against this run\'s fresh findings. Judge the harm, not the age of the row.',
+          },
+          // X130 · which rows had no `recommend` before this run. They are the
+          // ones the usher verbed on his behalf, so they are named separately in
+          // the manifest and he can overturn any of them in one word.
+          verbAdded: {
+            type: 'boolean',
+            description: 'true ONLY for a row that came off the "carry NO `recommend`" list — i.e. this run wrote its first verb. Omit or false for a normal RE-READ row that already had one.',
           },
         },
         required: ['ref', 'state', 'evidence', 'recommend'],
@@ -443,7 +488,7 @@ const USHER = {
           // issue takes `both`; that IS the interesting case, because the
           // owner's words carry the ask and the transcript carries the proof.
           source: { type: 'string', enum: ['github', 'logs', 'both'] },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           // KIND is what drives cost, not count. 15-20 atomic items is a normal
@@ -556,7 +601,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -612,7 +657,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · a DISCOVERY is the highest-value place for this tag and the only
           // one where it was ever set: you read the whole diff, so you are the pass
@@ -828,8 +873,15 @@ const usher = await agent(
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
-        `  • **Emit NO issue for a row you RE-READ here, not even a \`still-real\` one.** You triage; the owner rules and dispatches what he wants through \`build <ids>\`. A re-read that quietly re-dispatches 28 old rows is a wave nobody approved.\n` +
+        `  • **Emit NO issue for a row you RE-READ here** — it rides on its own row, not as a duplicate. **X129 · your \`recommend\` verb is now ACTED ON in this same run:** a \`build\` verb sends that row to the lane you name in \`lane\`, so write it only where you would dispatch a fresh atomic bug. Every other verb keeps the row on his desk and builds nothing.\n` +
+        `  • **THE BAR FOR \`build\`, and erring toward WAITING is correct.** Write \`build\` ONLY when the fix is unambiguous from the finding **and** lands in ONE lane — the same bar you already apply to an atomic issue. **If the answer is a product decision, if it spans two lanes, or if the finding's own premise still needs checking, write a verb that WAITS FOR HIM** (\`resend\` / \`defer\`, or \`convert\` where it has left the bug track). A wrong \`build\` spends a lane on something he never chose; a wrong \`defer\` costs him one word in the morning.\n` +
         `  • **This list is NOT a drop list.** When a GitHub complaint or a log moment you found matches an open row on it, that match CONFIRMS the row is still real — **emit the issue** and name the row in \`whyHypothesis\`. Never drop an intake because the backlog already tracks it, and never report such a match in \`droppedAsOpenKnown\`: on wf_6852af85-afc that is how four complaints the owner had ruled DUE were lost, absent from every count in the funnel. The only drop lists are the two the brief hands you below.\n` +
+        `\n### The rows that carry NO \`recommend\` — X130, and this is the valuable half\n\n` +
+        `The same \`--open\` output ends with a list headed **"open row(s) carry NO \`recommend\` — he cannot rule on one without reading the whole finding"**. **Take those rows too.** They are the only rows on the board he cannot act on at all: every other row is one word from closed, these need him to read the whole finding first, so they sit for weeks.\n` +
+        `  • **Treat each exactly like a RE-READ row** — open the file it cites, judge \`fixed\` / \`moved\` / \`still-real\`, and return it in \`backlogReread\` in the same shape. **Set \`verbAdded: true\` on these**, so the manifest can show what was decided on his behalf and he can overturn it.\n` +
+        `  • **Your job here is to make the row RULABLE IN ONE WORD, never to rule it.** The bar for \`build\` above binds hardest here, because nobody has ever looked at these: unambiguous fix, one lane, no product decision — otherwise a verb that waits for him. **His condition, verbatim: fill them "as long as it doesn't hurt my ability to take decisions on places that need me."** A row that needs him must come back still needing him, just with a sentence he can answer.\n` +
+        `  • **A bare verb is not rulable, it is a different kind of blank.** Always \`<verb> — <one clause of why>\`.\n` +
+        `  • If you cannot reach them all, that is fine and expected — say how many you did not reach. Leaving one unverbed is exactly the status quo and costs nothing.\n\n` +
         `  • Work them in the order printed, and if you run out of room say how many you did NOT reach. \`backlogSeen\` against the length of \`backlogReread\` is how a half-finished pass shows up as a number instead of reading as a clean sweep.\n\n`
       : '') +
     `## Then shape it\n\n` +
@@ -847,7 +899,7 @@ const usher = await agent(
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
-  { label: 'usher', phase: 'Usher', effort: 'medium', agentType: 'usher', schema: USHER },
+  { label: 'usher', phase: 'Usher', effort: EFFORT.usher, agentType: 'usher', schema: USHER },
 )
 allIssues = (usher && usher.issues) || []
 triageDropped = (usher && usher.droppedAsAlreadyBuilt) || []
@@ -930,7 +982,97 @@ if (unshaped.length) {
   unshaped.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${(i.symptom || '').slice(0, 90)}`))
 }
 
+// ── X128 · MERGE THE QUEUE, AFTER THE USHER ─────────────────────────────────
+// The whole reason the old prohibition existed is a run that quietly skips
+// discovery, so the merge is gated on PROOF the usher actually ran and its
+// result is reported as its OWN number, never folded into one total.
+// `usherRan` is the observable: on a discovery run the usher block above either
+// produced a report or it did not, and "did not" must stop the run rather than
+// read as a quiet night with a full queue.
+const usherRan = PRESET ? null : Boolean(usherReport && Object.keys(usherReport).length)
+const fromUsher = buildable.length
+let fromQueue = 0
+let fromBacklog = 0
+
+// ── X129 · A RE-READ BACKLOG ROW THAT SAYS `build` BUILDS ────────────────────
+// His ruling, 2026-08-02: *"usher build also need to be build. everything that
+// is able to build should be build. the stuff that are not to build is the ones
+// waiting for me, or the one decline/deferred/moved to github and then there are
+// there only for history."* So BUILD is the default and the exclusions are
+// explicit — the usher's `recommend` verb IS the authority, the same trust it
+// already carries for the atomic-vs-needs-shaping call on every fresh issue.
+// Gate on the VERB, never on the display bucket: `--open` prints some rows as
+// DECIDE and some as QUEUED, and that column describes where the row sits on his
+// desk, not whether the usher would dispatch it.
+const BUILD_VERB = /^\s*build\b/i
+// X130 · rows that carried no `recommend` until this run. Tracked separately so
+// the manifest can name what was decided on his behalf, whichever verb it got.
+const newlyVerbed = backlogReread.filter((r) => r && r.verbAdded === true)
+const backlogBuildable = []
+const backlogUndispatchable = []
+if (!PRESET && BACKLOG) {
+  for (const r of backlogReread) {
+    if (!r || r.state === 'fixed') continue // fixed closes the row; nothing to build
+    // `decline` / `defer` / `resend` / `convert` / no recommendation at all — a
+    // row waiting on him, or parked, or headed for GitHub. The verb is the whole
+    // gate; there is no second list to keep in sync with it.
+    if (!BUILD_VERB.test(String(r.recommend || ''))) continue
+    if (!r.lane || !KNOWN_LANES.has(r.lane)) {
+      backlogUndispatchable.push(r)
+      continue
+    }
+    backlogBuildable.push({
+      id: r.ref,
+      lane: r.lane,
+      severity: r.severity || 'medium',
+      clarity: 'clear',
+      source: 'backlog',
+      symptom: String(r.evidence || '').slice(0, 300),
+      evidence: r.whereNow || r.evidence || '',
+      notes: `[backlog re-read ${r.state}] ${r.recommend}`,
+    })
+  }
+}
+// A row the usher told us to build and then made undispatchable is NOT a quiet
+// skip — it is the one case where its own recommendation cannot be honoured.
+if (backlogUndispatchable.length)
+  argWarnings.push(
+    `${backlogUndispatchable.length} backlog row(s) recommend \`build\` but carry no usable \`lane\`, so they could NOT be dispatched: ${backlogUndispatchable
+      .map((r) => r.ref || '(no ref)')
+      .join(', ')}. They stay open and reach him as usual.`,
+  )
+
+if (!PRESET) {
+  if (!usherRan)
+    throw new Error(
+      `The usher returned nothing on a DISCOVERY run, so this run found no work of its own — and ${carriedIn.length} queued item(s) are waiting. Building only the queue here would skip the GitHub pull and the log review while reading as a normal night. Nothing has been dispatched. Re-run, or drain the queue deliberately with \`build\`.`,
+    )
+  // One de-dupe pass over BOTH extra sources, in order, so a row that is in the
+  // queue AND was re-read from the backlog AND was independently re-found by
+  // tonight's intake is added exactly once.
+  const seen = new Set(buildable.map((i) => refKey(i.id || i.ref)))
+  const take = (items) => {
+    const out = []
+    for (const i of items) {
+      const k = refKey(i.id || i.ref)
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(i)
+    }
+    return out
+  }
+  const mergedQueue = take(carriedIn)
+  const mergedBacklog = take(backlogBuildable)
+  fromQueue = mergedQueue.length
+  fromBacklog = mergedBacklog.length
+  buildable = buildable.concat(mergedQueue, mergedBacklog)
+  if (fromQueue || fromBacklog)
+    log(`Merged: ${fromUsher} from the usher + ${fromQueue} from state.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
+}
+
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
+// X128 · the merged queue rides the SAME sort and the SAME cap — a carried item
+// is not privileged, it just joins the list.
 const RANK = { high: 0, medium: 1, low: 2 }
 buildable.sort((a, b) => (RANK[a.severity] ?? 3) - (RANK[b.severity] ?? 3))
 const pending = buildable.slice(CAP)
@@ -1256,7 +1398,7 @@ if (VERIFY) {
       // only pass that sees the whole diff, and the backstop for Sonnet lanes'
       // traces. Pinning it on the charter means neither the session model nor a
       // hand dispatch can downgrade the one agent that must not be downgraded.
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: 'xhigh', schema: VERIFY_OUT },
+      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
     )
     verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
@@ -1396,13 +1538,31 @@ const manifest = {
   // X51 · `deferredRejected` is the derivation error made visible. Non-zero means the
   // Manager put a due row on the drop list and the engine took it back off.
   openKnown: { passedIn: OPEN_KNOWN.length, deferredRejected: openKnownDeferred.length, dropped: openKnownDropped.length, refs: openKnownDropped },
-  // X43 · what the build picked up out of `state.pendingOverflow`. Zero on a
-  // discovery run is correct — the carry is build-only. Zero on a build while the
-  // field holds entries is the failure this reader exists to end, and the arg
-  // warning above says so in words. **The Manager must DELETE `carry.refs` AND
-  // `carry.droppedAsBuiltRefs` from `state.pendingOverflow`** — the engine cannot
-  // write state, and an entry left there rides into every future build.
+  // X43 · what the run picked up out of `state.pendingOverflow`. **The Manager
+  // must DELETE `carry.refs` AND `carry.droppedAsBuiltRefs` from
+  // `state.pendingOverflow`** — the engine cannot write state, and an entry left
+  // there rides into every future run.
+  // X128 · a DISCOVERY run drains it too now, so zero-while-the-field-holds-rows
+  // is a failure on BOTH doors, not just on a build. `usherRan` and the two
+  // source counts below are the proof that the merge did not replace discovery:
+  // `fromUsher` is what tonight's GitHub pull + log review actually found, and
+  // `fromQueue` is what the queue contributed, and X129's `fromBacklog` is what
+  // the re-read sent to a lane. They are never summed into one number, because
+  // one total cannot show a run that skipped the usher.
   carry: {
+    usherRan,
+    fromUsher,
+    fromQueue,
+    fromBacklog,
+    backlogUndispatchable: backlogUndispatchable.map((r) => r.ref || '(no ref)'),
+    // X130 · the rows that had NO recommendation until this run, and the verb
+    // each was given. This is the engine deciding on his behalf, so it is named
+    // per row rather than counted: the morning read shows exactly what was
+    // filled in, and any of it is one word to overturn. `newlyVerbedBuild` is
+    // the subset that actually went to a lane tonight.
+    newlyVerbed: newlyVerbed.length,
+    newlyVerbedBuild: newlyVerbed.filter((r) => BUILD_VERB.test(String(r.recommend || ''))).length,
+    newlyVerbedRows: newlyVerbed.map((r) => `${r.ref || '(no ref)'} → ${String(r.recommend || '(none)').slice(0, 80)}`),
     carriedIn: carriedIn.length,
     refs: carriedIn.map((i) => i.id || i.ref || '(no id)'),
     droppedAsParked: carriedDropped.length,

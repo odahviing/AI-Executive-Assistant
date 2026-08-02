@@ -434,7 +434,7 @@ export async function rewriteOwningTheMiss(opts: {
   actionType?: ClaimActionType;
   targetName?: string | null;
   ownerFirstName: string;
-  // v3.7.x (#B2) — the tool activity this turn. Without it the rewriter's
+  // v3.7.x — the tool activity this turn. Without it the rewriter's
   // "the action DID happen → keep" veto was BLIND: it re-judged the draft's
   // SHAPE only and could not confirm a completed-action claim was backed by a
   // tool, so it inverted a TRUE "added meeting@reflectiz.com" into "not done,

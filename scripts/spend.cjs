@@ -66,7 +66,9 @@ const tierOf = (m) => (/opus/i.test(m) ? 'opus' : /haiku/i.test(m) ? 'haiku' : '
 // the dispatch count, which is the prompt to come back to this list.
 const RENAMED = new Map([
   ['shepherd', 'registrar'],
-  ['transporter', 'slacker'],
+  ['transporter', 'slackmaster'],
+  ['slacker', 'slackmaster'],
+  ['exchanger', 'diplomat'],
   ['verifier', 'bouncer'],
   ['examiner', 'bouncer'],
   ['scout', 'usher'],
@@ -75,7 +77,7 @@ const RENAMED = new Map([
   ['guard', 'gatekeeper'],
   ['people', 'profiler'],
   ['context', 'instructor'],
-  ['slack', 'slacker'],
+  ['slack', 'slackmaster'],
   ['outer', 'outrider'],
 ])
 const canon = (t) => RENAMED.get(t) || t
@@ -444,7 +446,7 @@ if (flag('--agents')) {
   // Raw grouping made this table useless for exactly the question it is for — what
   // has a lane ever cost — because a rename started a second row: 2026-07-20→08-01
   // printed `meeting` $1281 / `guard` $1081 beside a `matchmaker` row of $91, and
-  // `registrar`, `bouncer` and `slacker` had no row at all under their own names.
+  // `registrar`, `bouncer` and `slackmaster` had no row at all under their own names.
   // The merge is NAMED per row (`incl.`) rather than done quietly: a table that
   // folds rows together without saying so is a worse defect than the split was.
   const by = new Map()

@@ -21,7 +21,7 @@ export function humanizeViolationLabel(reason: string | undefined, ownerFirst: s
     case 'outside_requested_window': return `outside the time window that was asked for`;
     case 'travel_buffer_collision': return `no room for travel time around it`;
     case 'vacation_or_off_day': return `${ownerFirst} is off that day`;
-    // D6 — the search's day-level verdict when his own calendar carries an
+    // The search's day-level verdict when his own calendar carries an
     // all-day out-of-office. Distinct from owner_busy_collision on purpose: "the
     // whole day is gone" and "that hour clashes" invite completely different
     // next moves from the person reading it.

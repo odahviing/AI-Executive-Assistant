@@ -180,7 +180,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
         // NOT pre-pass workDays from here — the function's own mode-aware logic
         // decides so in_person is enforced as a hard rule.
         {
-          // v3.1.6 (L2) — duration safety default — code backstop for when
+          // v3.1.6 — duration safety default — code backstop for when
           // Sonnet omits duration entirely (the tool description tells her to
           // default to default_meeting_duration when no length was stated).
           if (args.duration_minutes == null) {
@@ -637,7 +637,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
-          // #24 B2 (2026-07-29) — auto-default the presentation timezone. When
+          // #24 (2026-07-29) — auto-default the presentation timezone. When
           // the caller omits present_in_timezone but the loaded attendees name
           // EXACTLY ONE distinct zone that differs from the owner's, use that
           // zone as the default so every candidate still comes back with a
@@ -794,7 +794,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
             // explicit present_in_timezone, used to echo each result back in that zone.
-            // #24 B2 — falls back to the auto-derived attendee zone (declared above) when
+            // #24 — falls back to the auto-derived attendee zone (declared above) when
             // neither was given; an explicit value here still wins outright.
             const explicitGroundTz = searchWindowTz
               || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
@@ -887,7 +887,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   ...(attendeeHoursNote ? { attendee_hours_note: attendeeHoursNote } : {}),
                 };
               } catch (err) {
-                // D4 — `available:false` is a factual claim about his calendar
+                // `available:false` is a factual claim about his calendar
                 // ("that time doesn't work"). When the calendar can't be read,
                 // that claim is unfounded and reads to the requester exactly
                 // like "he's busy" — the confident wrong "no" M11 forbids.
@@ -1014,7 +1014,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // labels it `travel_buffer_collision`); the attendee side keeps the
             // canonical label too. Same set of soft, owner-relaxable protections.
             //
-            // D5 — this hint makes a FACTUAL CLAIM ("NOT by real meetings") and
+            // This hint makes a FACTUAL CLAIM ("NOT by real meetings") and
             // then invites the requester to push for an override on the strength
             // of it, so it may only speak about times that genuinely were soft-
             // blocked. Two things make that true now. (1) The labels it reads come
@@ -1599,7 +1599,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // each slot in the requested zone deterministically. Ship only the
             // formatted string (with the short offset name, e.g. "EDT") — never
             // the raw IANA, to avoid the "America/New_York → New York" paste.
-            // #24 B2 — falls back to autoPresentTz (declared above) when the caller
+            // #24 — falls back to autoPresentTz (declared above) when the caller
             // left this unset but exactly one loaded attendee zone differs from the
             // owner's; an explicit value here still wins.
             const presentTz = (typeof args.present_in_timezone === 'string'
@@ -1616,8 +1616,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // later pick ("Tuesday 20:30") binds to the offered instant instead
             // of re-deriving the date. The orchestrator injects these on
             // subsequent turns. Colleague-path only — the owner-path has its own
-            // correction loop. v4.3.0 (#24 E7) — ALSO the email channel: every
-            // email turn carries senderRole 'owner' (E4's sender gate), but the
+            // correction loop. v4.3.0 (#24) — ALSO the email channel: every
+            // email turn carries senderRole 'owner' (the email sender gate), but the
             // actual picker is the external on the other end of a forwarded
             // chain, so the email leg needs the exact same binding the
             // colleague path gets. offeredSlotsStash itself gives the email key

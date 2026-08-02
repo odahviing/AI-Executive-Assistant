@@ -69,7 +69,7 @@ export interface PostReplyInput {
    */
   userMessage: string;
   /**
-   * v4.3.x (#144, T0) — a description of a non-text payload this turn
+   * v4.3.x (#144) — a description of a non-text payload this turn
    * carried (today: the Haiku vision description of an attached image,
    * already computed once at ingestion for the history string — see
    * processMessage.ts's `imageDescPart`). Optional, and DELIBERATELY not
@@ -187,7 +187,7 @@ const CODA_DELAY_MS = 10_000;
  * not a sentence. Composition and delivery both happen here, inside the beat.
  *
  * Contract:
- * - SAME thread (T3), always — never a new top-level message. It is a follow-on
+ * - SAME thread (S3), always — never a new top-level message. It is a follow-on
  *   to the reply, not a new topic.
  * - TEXT, never audio, even when the turn came in as a voice note. TTS exists so
  *   an answer comes back in the modality it was asked in; the coda was not asked
@@ -197,7 +197,7 @@ const CODA_DELAY_MS = 10_000;
  *   can never be followed by a cheerful aside about someone's weekend.
  * - Dropped if the person has typed again by the time it fires — the coda's
  *   premise is a lull, and a lull broken inside 10s wasn't one.
- * - 1:1 DM only (T4/T6). The orchestrator already restricts it; asserted again
+ * - 1:1 DM only (S4/S6). The orchestrator already restricts it; asserted again
  *   here so no future caller can put personal small-talk in a shared surface.
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
  *   path is ever awaited by the person's reply — composition included, which is
@@ -588,7 +588,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       const { shadowNotify } = await import('../../utils/shadowNotify');
       const who = colleagueName ?? senderId;
       const replyPreview = shadowPreview(cleanReply);
-      // v4.3.x (#144, T0) — fold in the attachment description (already
+      // v4.3.x (#144) — fold in the attachment description (already
       // computed at ingestion, zero new LLM calls) so the owner reads what
       // the picture actually showed, not just "(image attached, no
       // caption)". Same bracket shape processMessage.ts already uses when

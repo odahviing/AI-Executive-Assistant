@@ -142,11 +142,11 @@ const REASON_FIELDS: Record<ApprovalSubkind, string> = {
 };
 
 /**
- * THE approval gate (S6 + S7) — the one place that decides whether an ask is
+ * THE approval gate (R6 + R7) — the one place that decides whether an ask is
  * allowed to reach the owner at all. Runs before dedup, before the row, before
  * the DM. Returns null to let the ask through, or the refusal to hand back.
  *
- * S6 — an approval is a DEVIATION. A `policy_exception` overrides a specific
+ * R6 — an approval is a DEVIATION. A `policy_exception` overrides a specific
  * calendar action, so it must CARRY that action (`payload.deferred_action`).
  * That stamp is not decoration: the orchestrator copies it from the meeting
  * tool's own `_deferred_action_hint`, which only exists because a tool actually
@@ -169,7 +169,7 @@ const REASON_FIELDS: Record<ApprovalSubkind, string> = {
  * "Did a tool refuse this?" is the fact; "would checkSlot refuse it?" is a
  * second opinion, and it belongs where it already is — labelling, not gating.
  *
- * S7 — no reason, no approval. Every kind must state WHY it reached him, in the
+ * R7 — no reason, no approval. Every kind must state WHY it reached him, in the
  * field its own payload contract names, so he decides on data rather than gut.
  * The two honest outcomes when there is none are exactly the two refusals below:
  * the action was allowed (do it), or the reason isn't understood yet (find it).
@@ -674,7 +674,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // `rule: owner_busy_collision`.)
         delete payload.honest_hard_reason;
 
-        // ── The gate (S6 + S7) ────────────────────────────────────────────────
+        // ── The gate (R6 + R7) ────────────────────────────────────────────────
         // Nothing below this line runs for an ask that shouldn't reach him: no
         // row, no dedup, no DM, no slot in his signature book. See gateApprovalAsk.
         {

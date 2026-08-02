@@ -2,7 +2,7 @@
  * Request dedup (v2.7.0).
  *
  * LLM-judged "is this a new ask or a duplicate of something already open?"
- * Per owner direction (Q6): Sonnet sees the open requests for (owner,
+ * Per owner direction: Sonnet sees the open requests for (owner,
  * requester) and decides match_existing / new.
  *
  * Why LLM instead of string-normalize: "investor call Sunday" and "call with

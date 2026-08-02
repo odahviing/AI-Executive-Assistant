@@ -10,7 +10,7 @@
  * second copy of connections/slack/messaging.findChannelByName — same
  * conversations.list, same substring filter — which meant a second, separately
  * maintained path that listed private channels. One listing path is enough, and it
- * belongs behind the Connection (T12), not in the connector.
+ * belongs behind the Connection (S12), not in the connector.
  *
  * What used to live here but is gone in 1.6:
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:

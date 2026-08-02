@@ -1,7 +1,7 @@
 import type { UserProfile } from '../../config/userProfile';
 
 /**
- * ownerEmailAddresses (v4.3.0, #24 E3/E4) — the ONE rule for "which email
+ * ownerEmailAddresses (v4.3.0, #24) — the ONE rule for "which email
  * addresses count as the owner", shared by both directions of this
  * transport:
  *   - the inbound sender gate (connectors/email/inbound.ts) — who may drive

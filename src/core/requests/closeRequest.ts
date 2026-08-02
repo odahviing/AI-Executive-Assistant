@@ -95,7 +95,7 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
   });
 
   // Audit log entry — every terminal transition is recorded.
-  // #52 (O3 follow-up) — owner_user_id sourced from the row itself (never the
+  // #52 (piece 3 follow-up) — owner_user_id sourced from the row itself (never the
   // first-loaded profile), matching every other auditLog() call site.
   try {
     getDb().prepare(`

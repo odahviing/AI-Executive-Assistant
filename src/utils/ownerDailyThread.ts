@@ -126,7 +126,7 @@ export interface OwnerDecisionPost {
  * as a bare `sendDirect` — a fresh top-level DM outside the signature book. The
  * counter bounce-back ("Approve, reject, or counter again?") and the re-ask
  * revival ("still need your call") both escaped that way. Routing them here is
- * what makes S10 a property of the code rather than of each call site
+ * what makes R10 a property of the code rather than of each call site
  * remembering.
  *
  * Thread choice — owner ruling 2026-07-25: a decision that resurfaces goes into

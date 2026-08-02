@@ -11,12 +11,12 @@
  *   escalate_approval     — colleague-initiated, rule failed → create_approval(kind=policy_exception)
  *   decline_as_attendee   — owner-attendee cancel asked → decline his copy on Graph;
  *                           Outlook's own decline response tells the organizer (no Slack DM)
- *   refuse_not_owners     — owner-attendee move asked → polite refuse, no DM (per D4)
+ *   refuse_not_owners     — owner-attendee move asked → polite refuse, no DM
  *
  * Pipeline (strict order):
  *   1. LOAD STATE          day type, working hours, existing event metadata
  *   2. DETECT CATEGORY     (new bookings) OR USE EXISTING (existing events)
- *                          For moves: re-detect only when day type changed (per Q2)
+ *                          For moves: re-detect only when day type changed
  *   3. RESOLVE LOCATION    via utils/resolveLocation
  *   4. CHECK RULES         via utils/scheduleRules
  *   5. DECIDE ACTION       branches on initiator + ownership + rule result
@@ -211,7 +211,7 @@ export type PlanAction =
   | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   /**
-   * D3 — two lists, never one. `alternatives` is what exists on the day the
+   * Two lists, never one. `alternatives` is what exists on the day the
    * requester named; `widenedAlternatives` is what only exists if the search is
    * widened past it. `requestedDay` (yyyy-MM-dd) names the day both are measured
    * against. `alternatives` empty + `widenedAlternatives` non-empty is the exact
@@ -256,7 +256,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // Owner is attendee, not organizer:
     if (!ownerInfo.ownerIsOrganizer) {
       if (intent === 'move') {
-        // Per D4 — just refuse, no DM.
+        // Just refuse, no DM.
         return {
           action: 'refuse_not_owners',
           organizerName: ownerInfo.organizerName,
@@ -280,7 +280,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // Owner IS organizer → fall through to normal pipeline (book = delete/move on Graph).
   }
 
-  // ── Owner state (load preferences — per D1, load first) ─────────────────
+  // ── Owner state (load preferences first) ────────────────────────────────
   // Travel state lookup
   const ownerTravel = getCurrentTravel(profile.user.slack_user_id);
   let anyParticipantRemote = !!ownerTravel;
@@ -312,7 +312,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   if (intent === 'cancel') {
     // Category doesn't matter for cancel — skip detection.
   } else if (intent === 'move') {
-    // Per Q2: re-detect only when location changed (day type flipped).
+    // Re-detect only when location changed (day type flipped).
     const dayChanged = input.priorSlotStartIso && input.slotStartIso
       ? sameDayType(profile, input.priorSlotStartIso, input.slotStartIso) === false
       : true;  // unknown → conservative re-detect
@@ -413,7 +413,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // to offer before escalating (#8). Both feed the single combined return.
   let ruleViolationLabel: string | undefined;
   let attendeeBusyLabel: string | undefined;
-  // D3 — the two sets are kept APART all the way to the caller. Options on the
+  // The two sets are kept APART all the way to the caller. Options on the
   // day the requester actually named are the answer; anything on a later day is
   // a widening he has to be offered as a widening, not slipped into one list.
   let ruleAlternatives: Array<{ start: string; end: string; label: string }> = [];
@@ -942,7 +942,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-// D4 — no catch, deliberately. This is the event set checkSlot validates the
+// No catch, deliberately. This is the event set checkSlot validates the
 // booking against; returning `[]` on a Graph fault told the validator the owner
 // had nothing on his calendar, so every rule passed and the write went straight
 // over whatever was really there. A read that fails now throws

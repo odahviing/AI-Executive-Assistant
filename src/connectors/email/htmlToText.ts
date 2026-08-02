@@ -1,6 +1,6 @@
 /**
  * Minimal HTML → plain-text normalizer for inbound email bodies (v4.3.0,
- * #24 E4). Structural only — tag stripping and entity decoding, never a
+ * #24). Structural only — tag stripping and entity decoding, never a
  * parse of the natural-language CONTENT — so it sits with the other
  * language-independent structural regexes this codebase allows (rule 4),
  * the same way an ISO-datetime or email-shape pattern does.

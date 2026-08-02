@@ -14,7 +14,7 @@ import logger from '../../../utils/logger';
 import { isOverloadError } from './helpers';
 import type { SlackAppContext, ProcessImageFileShareParams, ScanAndPrepareImageParams, SenderRole } from './context';
 
-  // ── Shared download-and-scan loop (D1) ────────────────────────────────────
+  // ── Shared download-and-scan loop ─────────────────────────────────────────
   // THE security boundary for image input: a colleague image reaches Sonnet
   // only via scanAndPrepareImage's `if (!block) continue` path below. Shared
   // by processImageFileShare (DM/MPIM/replay) and the channel @mention
@@ -103,7 +103,7 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
       if (!shouldDegrade) return;
     }
 
-    // v4.3.x (#144, T2) — forward every clean colleague image to the owner's
+    // v4.3.x (#144) — forward every clean colleague image to the owner's
     // shadow DM as it arrives ("if a non-owner pass an image, first check it,
     // if its not flag, give me a chance to see it" — owner). Fires here,
     // strictly AFTER the scan loop above: only urls that survived

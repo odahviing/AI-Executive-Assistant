@@ -138,7 +138,7 @@ export interface OutreachJob {
   // fresh top-level DM.
   dm_message_ts?: string;
   dm_channel_id?: string;
-  // v2.6.1 (D4) — DM follow-up tracking, independent of the request's lifecycle.
+  // v2.6.1 — DM follow-up tracking, independent of the request's lifecycle.
   // Populated when the conversation around this outbound DM has closed: emoji
   // reaction on the message, thread reply, deterministic <10min match,
   // LLM-classified 10min-24h response, 24h auto-expiry, or a terminal transition
@@ -292,12 +292,12 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
     db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
   }
 
-  // v2.6.1 (D4) — when the transition signal is terminal (via handleOutreachReply,
+  // v2.6.1 — when the transition signal is terminal (via handleOutreachReply,
   // meetingReschedule, the coordinator relay, or a failed send) ALSO close
   // followup_closed_at if not already set. Without this, the reply pipeline consumes
-  // the outreach but the D4 followup tracker stays open, and a SECOND inbound DM from
+  // the outreach but the followup tracker stays open, and a SECOND inbound DM from
   // the same colleague would falsely match the already-consumed row. Idempotent —
-  // preserves an existing followup_close_reason if D4's own paths already closed it.
+  // preserves an existing followup_close_reason if the tracker's own paths closed it.
   const isTerminal = updates.status === 'replied' || updates.status === 'cancelled';
   if (isTerminal) {
     db.prepare(`

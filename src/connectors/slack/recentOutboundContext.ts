@@ -1,5 +1,5 @@
 /**
- * Recent-outbound context attachment for inbound colleague DMs (v2.6.1, D4).
+ * Recent-outbound context attachment for inbound colleague DMs (v2.6.1).
  *
  * Problem this solves:
  *   When Maelle proactively DMs a colleague via `message_colleague` (e.g. a
@@ -115,7 +115,7 @@ function findOpenOutboundForColleague(params: {
  * Mark an outreach_jobs row as having its conversational follow-up closed.
  *
  * `followup_closed_at` + `followup_close_reason` are this module's OWN signal
- * (D4) — "the conversation around this outbound DM is over" — and they are the
+ * — "the conversation around this outbound DM is over" — and they are the
  * only state this function claims. It deliberately does NOT write
  * `outreach_jobs.status`: the linked request is the lifecycle, and that column is
  * retired (#41, "only one spine" — canonical note: db/jobs.ts, top of file). The

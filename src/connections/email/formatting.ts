@@ -1,5 +1,5 @@
 /**
- * Email-specific outbound text formatting (v4.3.0, #24 E3).
+ * Email-specific outbound text formatting (v4.3.0, #24).
  *
  * Applies the cross-cutting scrubber (same one Slack uses) then renders as
  * simple HTML — email has no markdown dialect, so **bold** / ## headers /

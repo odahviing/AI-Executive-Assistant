@@ -101,7 +101,7 @@ export async function resolveDmCounterpart(
 }
 
 /**
- * v4.3.x (#144, T1) — shared attachment-upload primitive. Download each
+ * v4.3.x (#144) — shared attachment-upload primitive. Download each
  * Slack file URL with bot-token auth, then re-upload it to the given
  * channel/thread via files.uploadV2. Extracted out of `sendDM` (the only
  * caller until now) so `postToChannel` can share it rather than clone it —
@@ -231,7 +231,7 @@ export async function sendMpim(
  * Post to a public or private channel. Auto-joins public channels we're
  * not in; refuses private channels we haven't been invited to.
  *
- * v4.3.x (#144, T1) — carries `opts.attachments` now (uploadAttachments,
+ * v4.3.x (#144) — carries `opts.attachments` now (uploadAttachments,
  * shared with sendDM): every owner decision post goes through this
  * function into the daily thread, so before this fix SendOptions.attachments
  * was unreachable from the owner path even though the type declared it.
@@ -408,7 +408,7 @@ export async function findUserByName(
  *
  * ⚠️ OPEN — owner's call, not settled here. `types` still lists `private_channel`,
  * so a private channel the BOT belongs to can be matched by a fuzzy name search and
- * its name handed to the model; on a colleague-readable surface (T6 — the owner is
+ * its name handed to the model; on a colleague-readable surface (S6 — the owner is
  * not the owner in an MPIM) that name can then be read out to the room. Narrowing to
  * `public_channel` closes it and also removes posting to private channels entirely.
  * Never invoked in any log to date, so this is hardening, not an incident.

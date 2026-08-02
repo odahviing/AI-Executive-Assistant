@@ -1,5 +1,5 @@
 /**
- * EmailConnection — concrete Connection impl for email (v4.3.0, #24 E3,
+ * EmailConnection — concrete Connection impl for email (v4.3.0, #24,
  * reply-path hardened #24 row 130; recipient-validation gap closed
  * 2026-07-29 — see "RECIPIENT IS VALIDATED AND ENFORCED" below).
  *

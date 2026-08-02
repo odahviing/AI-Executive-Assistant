@@ -180,7 +180,7 @@ No issue_id needed. A terminal row gets created directly so the next check_calen
   }
 
   /**
-   * P24 — dispatch through the SAME D4 refusal the meeting tools use
+   * P24 — dispatch through the SAME offline refusal the meeting tools use
    * (meetings/calendarOffline). These four tools read the owner's own calendar
    * through the very same helpers — the health scan's defrag calls the slot walker,
    * `book_floating_block` goes through planMeeting — so they can raise the same

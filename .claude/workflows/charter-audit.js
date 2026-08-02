@@ -11,8 +11,8 @@ const A = args || {}
 // So `agentType: 'other'` was dispatching to a type that does not exist, and
 // this engine has never been able to audit the catch-all lane. Same class as
 // triage emitting lane `general` on 2026-07-25: a name nobody checked.
-const LANES = A.lanes || ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'instructor', 'slacker', 'exchanger', 'outrider']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slacker: 'xhigh', exchanger: 'xhigh', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
+const LANES = A.lanes || ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'instructor', 'slackmaster', 'diplomat', 'outrider']
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 const UNKNOWN = LANES.filter((l) => !EFFORT[l])
 if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — they have no effort setting and no agent, so they would dispatch to nothing.`)
 

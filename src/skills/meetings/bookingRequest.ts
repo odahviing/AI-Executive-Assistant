@@ -226,7 +226,7 @@ async function buildParticipants(
     let name = a.name?.trim();
     const slackId = a.slack_id?.trim();
 
-    // v3.1.4 (Y2) — email auto-fill via the shared resolver (one function all
+    // v3.1.4 — email auto-fill via the shared resolver (one function all
     // booking paths use: create / move / update). Only when raw email is
     // missing or malformed.
     if (!email || !email.includes('@')) {
@@ -394,7 +394,7 @@ async function gateSensitivity(
  * authenticated sender post-clamp — never a claim from the message.
  *
  * The two grants that used to exist and why neither survives:
- *   • OWNER-IN-MPIM PROPOSED — D7 (owner 2026-07-26: *"yes, if i want to do
+ *   • OWNER-IN-MPIM PROPOSED (owner 2026-07-26: *"yes, if i want to do
  *     something wrong in group chat, raise for approval or at least tell me"*).
  *     Silent by construction: the group-DM clamp (processMessage) makes his
  *     `senderRole` 'colleague', so planMeeting's one-step owner heads-up

@@ -86,19 +86,32 @@ const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
 // The ONLY way to survey the whole board. Owner, 2026-07-28: "always do 1 unless
 // I'M SAYING more." Without this flag the engine plans at most one unnamed item.
 const SWEEP = A.sweep === true
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slacker', 'exchanger', 'outrider']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slacker: 'xhigh', exchanger: 'xhigh', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high' }
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'outrider']
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+// X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
+// CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
+// an agentType that does not exist, and reads as a perfectly normal run.
+// charter-audit.js:16-17 has had this guard since it was written; the two
+// engines that actually BUILD did not.
+// `framer` and not `usher`: this engine's three intake/plan dispatches are the
+// FEATURE door. bugger.js's list names `usher` instead, which is the only
+// legitimate difference between the two — the EFFORT map above stays identical
+// across all three engines so one table prices every agent.
+const DISPATCHABLE = [...CODE_LANES, 'instructor', 'framer', 'bouncer']
+const UNKNOWN = DISPATCHABLE.filter((l) => !EFFORT[l])
+if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — they have no effort setting and no agent, so they would dispatch to nothing.`)
 
 const LANE_MAP =
   '`matchmaker` the scheduling core — finding a time that fits several calendars and rules · ' +
   '`registrar` the async work-item spine (approvals, outreach, reminders, follow-ups, close-loop); nothing raised gets lost · ' +
   '`gatekeeper` the output-time gates — nothing leaves without passing them · `profiler` identity, person store, memory, social · ' +
   '`instructor` everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and it runs LAST · ' +
-  '`slacker` SLACK end to end (routing, threading, DM/MPIM/channel posture, ' +
+  '`slackmaster` INSIDE the workspace — Slack end to end (routing, threading, DM/MPIM/channel posture, ' +
   'authority-by-authenticated-sender, the postReply delivery pipeline, Slack\'s `Connection` implementation) · ' +
-  '`exchanger` the MAIL channel end to end (mailbox poll, the inbound sender gate, forwarded-header extraction, ' +
-  'the one-address send cap, reply-not-compose, mail auth) · `outrider` only where NO lane owns the subsystem ' +
-  '(news, brief, routines, the Graph CLIENT layer only — calendar is matchmaker, mail is exchanger — core orchestrator, DB, health, config, scripts)'
+  '`diplomat` OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one ' +
+  '(mailbox poll, the inbound sender gate, forwarded-header extraction, the one-address send cap, reply-not-compose, ' +
+  'mail auth); WhatsApp/iMessage land here too when they open · `outrider` only where NO lane owns the subsystem ' +
+  '(news, brief, routines, the Graph CLIENT layer only — calendar is matchmaker, mail is diplomat — core orchestrator, DB, health, config, scripts)'
 
 // ---- schemas ----
 const RAW = {
@@ -148,7 +161,7 @@ const PLAN = {
         properties: {
           id: { type: 'string' },
           ref: { type: 'string', description: 'the improvement this serves' },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
           // WHY this piece exists, in product terms. Added on the owner's ask
           // 2026-07-28: the first plan he read gave him lane · change · deps ·
           // size, and he could not decide from it because nothing said what any
@@ -231,7 +244,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider', ''] },
           dependencyAsk: { type: 'string' },
           // X22 · same field, same words as bugger.js. It matters here because
           // `VERIFY_OUT.results` reuses this shape, so a feature wave's OVERTURN is a
@@ -277,7 +290,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slacker', 'exchanger', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · same field, same words as bugger.js' discoveries.
           invariant: {
@@ -352,7 +365,12 @@ if (MODE === 'plan') {
       `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
         `Return each as {ref:"#<number>", title, priority:<whichever priority label it carries — High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
         `If the list is empty return {items:[]} immediately.`,
-      { label: 'intake:backlog', phase: 'Intake', effort: 'low', model: 'haiku', schema: RAW },
+      // X126 · The FEATURE door is the `framer`, not the usher. Both read a
+      // backlog, but the bug usher's charter is defect-shaped end to end — a
+      // very hard "obvious defect" bar, one-root-one-issue, and "a product
+      // decision means do not dispatch" — and every one of those is wrong here.
+      // Effort and model stay as tuned: one shell command does not need more.
+      { label: 'intake:backlog', phase: 'Intake', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
     )
     items = (raw && raw.items) || []
     log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
@@ -430,7 +448,11 @@ if (MODE === 'plan') {
           // bouncer checks the diff, not whether the premise was right, and a
           // bad code-read is the one thing he cannot spot by reading a plan. He
           // runs one feature at a time, so this is a single agent.
-          { label: `recon:${it.ref}`, phase: 'Recon', effort: 'high', model: 'opus', schema: UNDERSTOOD },
+          // X126 · agentType framer — drafting the shape IS its charter (F1).
+          // The explicit `model: 'opus'` STAYS and overrides framer.md's declared
+          // sonnet: X15 above is an owner ruling on this specific call, and the
+          // tier must not move as a side effect of giving the pass a charter.
+          { label: `recon:${it.ref}`, phase: 'Recon', agentType: 'framer', effort: 'high', model: 'opus', schema: UNDERSTOOD },
         ),
       ),
     )
@@ -458,7 +480,11 @@ if (MODE === 'plan') {
       `• \`blockingQuestions\` are things that must be settled BEFORE building. Do NOT guess to keep the list short — a guess here becomes built code the owner never chose.\n` +
       `• If a piece is not worth its cost, put it in \`notWorthBuilding\` with the reason. Declining is a result.\n\n` +
       `UNDERSTOOD:\n${JSON.stringify(live, null, 2)}`,
-    { label: 'decompose', phase: 'Decompose', effort: 'xhigh', schema: PLAN },
+    // X126 · agentType framer — every bullet below is now one of its rules
+    // (F5-F10), so the engine states the schema and the charter states the
+    // standing duty. Effort stays xhigh; no model pin, so the tier comes from
+    // the charter, which is where spend.cjs:293 says it belongs.
+    { label: 'decompose', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
   )
 
   const pieces = (plan && plan.pieces) || []
@@ -770,7 +796,7 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
       (built.length ? `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}` : `**NO PIECE WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
     // No `model` here: `bouncer.md` pins Opus, so neither the session model nor
     // a hand dispatch can downgrade the one agent that must not be downgraded.
-    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: 'xhigh', schema: VERIFY_OUT },
+    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
   )
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []

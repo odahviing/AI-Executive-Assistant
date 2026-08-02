@@ -1,8 +1,8 @@
 /**
- * Email inbound front door (v4.3.0, #24 E3/E4).
+ * Email inbound front door (v4.3.0, #24).
  *
  * This is a HANDLER, not a poller. The mailbox poll timer (`connectors/graph/
- * mailPoll.ts`, #24 E2) owns the ~30s /messages/delta cadence, the isRead
+ * mailPoll.ts`) owns the ~30s /messages/delta cadence, the isRead
  * second-dedup, and the "drop Maelle's own outgoing mail" loop guard — it
  * hands each surviving message to whatever this module registers via
  * `registerMailInbound` (mirrors `connectors/slack/inboundReplayRegistry.ts`).
@@ -79,7 +79,7 @@ function statedZoneAppearsInUniqueBody(statedTimezone: string, uniqueBodyPlain: 
 }
 
 /**
- * Register the email Connection (E3) + the inbound handler (E4) for this
+ * Register the email Connection + the inbound handler for this
  * profile. Complete no-op — no Connection registered, no handler registered
  * — when channels.email is absent or enabled:false.
  */
@@ -113,7 +113,7 @@ async function handleInboundMail(profile: UserProfile, connection: Connection, m
     // Dropped SILENTLY — no bounce, no auto-reply, no "I can't help you".
     // Returning normally (not throwing) lets mailPoll.ts mark it read, so a
     // persistent spoofed sender isn't reprocessed forever. The spoof
-    // containment here is disclosure-only (E3's one-address send cap): a
+    // containment here is disclosure-only (the one-address send cap): a
     // forged sender can never receive an answer anywhere but the owner's own
     // mailbox. It does NOT contain writes on its own — that's why
     // CHANNEL_TOOL_CLAMP (skills/registry.ts) narrows the email turn to a
@@ -211,7 +211,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     !ownerAddresses.includes(email) && email !== mailboxEmail && email !== assistantEmail && !isNonHumanAttendee(email);
   const externalParticipants = extracted.participants.filter(isMeaningfulParticipant);
 
-  // ── Person store (#24 E6) — resolve-or-create a row for each address on
+  // ── Person store (#24) — resolve-or-create a row for each address on
   // the message Maelle is ACTING on, never for one seen only in the deeper
   // quoted history further down the chain. `extractForwardedParticipants`
   // already binds to the top forwarded header only, so that boundary is
@@ -321,9 +321,9 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     extractedAttendeeEmails: externalParticipants,
   });
 
-  // ── Output-time gate stack (#24 E5) — the FIRST transport-neutral entry into
+  // ── Output-time gate stack (#24) — the FIRST transport-neutral entry into
   // guard's runOutputGates. Gated in the EXTERNAL frame even though the only
-  // live recipient is the owner's own mailbox (E3's one-address cap): he
+  // live recipient is the owner's own mailbox (the one-address cap): he
   // forwards this reply on verbatim, so the gate follows the eventual READER,
   // not the addressee. See runEmailLegGates in runOutputGates.ts for what
   // runs (claim-check, humanGate('external'), date-verify) and why the

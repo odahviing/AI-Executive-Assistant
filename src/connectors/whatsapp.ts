@@ -13,8 +13,8 @@
  * What this half does (inbound):
  *   - Owner (phone === profile.user.whatsapp_phone) → full owner orchestrator
  *     turn on channel:'whatsapp', text + voice both directions.
- *   - Anyone else (1:1) → SILENT DROP. No reply, before any content work
- *     (D1/D2 in the spec). The colleague path + trust gate land in Step 5.
+ *   - Anyone else (1:1) → SILENT DROP. No reply, before any content work.
+ *     The colleague path + trust gate land in Step 5.
  *   - Groups / status / broadcast → dropped in Step 1 (groups land in Step 6).
  *
  * Multi-tenant: owner phone comes from the per-profile YAML (env is a dev-only
@@ -22,7 +22,7 @@
  * hardcoded phone / path.
  *
  * Resilience: disconnect / auth_failure / QR all alert the owner ON SLACK (the
- * one transport we know is still up when WhatsApp drops — D8) and reconnect is
+ * one transport we know is still up when WhatsApp drops) and reconnect is
  * bounded + backed-off, never an infinite blind loop.
  */
 
@@ -272,7 +272,7 @@ async function handleWhatsAppMessage(
   // Step 1: drop groups / status / broadcast (groups land in Step 6).
   if (message.from.includes('@g.us') || message.from.includes('@broadcast')) return;
 
-  // ── TRUST GATE (D1/D2) ──────────────────────────────────────────────────
+  // ── TRUST GATE ──────────────────────────────────────────────────────────
   // Resolve sender by PHONE ONLY. In Step 1 the only known phone is the owner;
   // everyone else is dropped SILENTLY before any content work — no body read,
   // no media download, no transcription, no history, no orchestrator. The

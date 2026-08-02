@@ -49,7 +49,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // refuse early with a clear human message so Maelle doesn't offer a fake
         // "I'll add the location" then silently fail.
         try {
-          // v2.7.0 — ownership via findMeetingOwner (per D4 / Q1).
+          // v2.7.0 — ownership via findMeetingOwner.
           const { findMeetingOwner } = await import('../../findMeetingOwner');
           const ownerInfo = await findMeetingOwner({
             ownerUserId: context.profile.user.slack_user_id,
@@ -101,7 +101,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // v2.9.1 — attendee add/remove path. When `add_attendees` or
         // `remove_attendees` is non-empty
         // we (a) gate colleague-path to whoever REQUESTED this specific
-        // meeting (v3.1.4 Y3 — per-meeting, not a blanket colleague
+        // meeting (v3.1.4 — per-meeting, not a blanket colleague
         // permission; a non-requester colleague is routed to the owner's
         // approval instead, see meetings.ts:482/495/508), (b) load the
         // existing event, (c) compute the new attendee list, (d) re-evaluate
@@ -128,7 +128,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
 
         if (hasAttendeeChange || venueChangeRequested) {
           const ownerFirst = context.profile.user.name.split(' ')[0];
-          // v3.1.4 (Y2) — resolve name-only adds to emails from the directory
+          // v3.1.4 — resolve name-only adds to emails from the directory
           // BEFORE the missing-email filter, via the shared resolver every
           // booking path uses. Without this, "add Eli Feldman" (no email) gets
           // dropped → attendee_missing_email → Maelle asks the colleague for an
@@ -154,7 +154,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             };
           }
 
-          // v3.1.4 (Y3) — requester-controls gate (replaces the old self-only
+          // v3.1.4 — requester-controls gate (replaces the old self-only
           // gate). Owner direction: whoever REQUESTED a meeting controls it —
           // they can add anyone, rename, change location, even if they're not on
           // it. A non-requester colleague editing the owner's meeting → escalate
@@ -370,7 +370,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           userEmail,
           timezone,
           meetingId:  args.meeting_id  as string,
-          subject:    args.new_subject as string | undefined,  // subjects allow " - " (E1, owner direction)
+          subject:    args.new_subject as string | undefined,  // subjects allow " - " (owner direction)
           categories: args.category
             ? [args.category as string]
             : (newCategoryFromShape ? [newCategoryFromShape] : undefined),
@@ -416,7 +416,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         if (args.new_subject) updateChanges.push(`renamed to '${args.new_subject}'`);
         if (args.category) updateChanges.push(`category set to ${args.category}`);
         if (rawAdd.length > 0) {
-          // v3.7.2 (#B1) — carry the EMAIL, not just a display name. A room mailbox's
+          // v3.7.2 — carry the EMAIL, not just a display name. A room mailbox's
           // name ("Meeting Room") reads as a VENUE, so the old summary "added Meeting
           // Room" was indistinguishable from a location change — the claim-checker
           // couldn't match it to a draft's "added meeting@…" and inverted a TRUE add
@@ -760,7 +760,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 }
               }
             } catch (err) {
-              // D4 — an unreadable calendar is not a "couldn't verify, he decides"
+              // An unreadable calendar is not a "couldn't verify, he decides"
               // case: the owner would be approving a move nobody can validate.
               // Falls through to the offline refusal at the tool surface.
               if (err instanceof CalendarOfflineError) throw err;
@@ -780,7 +780,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
 
         // v2.1.4 — same attendee-only guard as update_meeting.
         // v2.7.0 — ownership check via findMeetingOwner (requests + Graph).
-        // Per D4: when owner isn't organizer, refuse politely. No DM, no
+        // When owner isn't organizer, refuse politely. No DM, no
         // propose-reschedule — just tell the asker it's not the owner's to move.
         try {
           const { findMeetingOwner } = await import('../../findMeetingOwner');
@@ -846,7 +846,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
-        // v2.3.1 (B1 / #61) — deterministic floating-block alignment. When the
+        // v2.3.1 (#61) — deterministic floating-block alignment. When the
         // meeting being moved is a floating block (lunch, coffee, etc.), don't
         // trust args.new_start verbatim — Sonnet keeps doing time math in
         // chat and getting it wrong (window check, buffer, alignment). Run
@@ -857,7 +857,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // — code computes the right answer once.
         // #135b — weekday/date sanity (shared with create_meeting). Refuse a move
         // whose resolved new_start weekday contradicts the weekday the owner named
-        // ("return it to Thursday" that resolved to a Friday — the F2 wrong-day
+        // ("return it to Thursday" that resolved to a Friday — the wrong-day
         // write), handing back the corrected same-week date to retry with.
         {
           const wk = checkIntendedWeekday(args.new_start as string | undefined, args.intended_weekday as number | undefined, timezone);
@@ -913,7 +913,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             const movingEvent = dayEvents.find(e => e.id === args.meeting_id);
             const matchedBlock = movingEvent ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
             if (matchedBlock) {
-              // v3.4.2 (E1) — preserve the MOVING EVENT's own duration. Pre-fix
+              // v3.4.2 — preserve the MOVING EVENT's own duration. Pre-fix
               // a move re-derived the end from the block CONFIG (duration_minutes,
               // e.g. 25), so moving an owner-stretched 40-min lunch silently reset
               // it to 25. Read the event's actual span; fall back to config only
@@ -967,7 +967,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               // override still reaches him through the approval flow.
               const isOwnerPath = context.senderRole === 'owner';
               if (isOwnerPath) {
-                // v3.1.8 (D5) — snap the hint to the quarter grid. The general
+                // v3.1.8 — snap the hint to the quarter grid. The general
                 // snap above is bypassed on the floating-block path because this
                 // branch overwrites effectiveStart with the raw hint, so a "right
                 // after" landing at :40 would book lunch at :40 instead of the
@@ -1074,7 +1074,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         }
 
         // v2.7.0 — route the move through planMeeting so location + category
-        // re-resolve when the day-type flips (office↔home). Per Q2: only
+        // re-resolve when the day-type flips (office↔home). Only
         // re-detect category when location-relevant attributes change; same-
         // day-type moves keep the existing category. resolveLocation always
         // runs so the Graph PATCH can update location + isOnline.
@@ -1145,7 +1145,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // v3.2.x (#8) — colleague reschedule onto a soft-rule-breaking slot:
           // offer nearby rule-compliant alternatives before escalating.
           if (movePlan.action === 'propose_alternative') {
-            // D8 — same as create_meeting's branch: an alternative that gets said
+            // Same as create_meeting's branch: an alternative that gets said
             // out loud is an offered slot, so it binds and can be held.
             recordProposedAlternatives({
               channelId: context.channelId,
@@ -1159,7 +1159,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               error: 'soft_rule_offer_alternatives',
               meeting_subject: args.meeting_subject,
               violation_label: movePlan.violationLabel,
-              // D3 — see the parallel return in create_meeting. The day they
+              // See the parallel return in create_meeting. The day they
               // asked for and the widening stay in separate fields so the reply
               // can name which is which.
               requested_day: movePlan.requestedDay,
@@ -1244,7 +1244,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             }
           }
         } catch (err) {
-          // D4 — "proceed with a time-only move" is a fine degrade when
+          // "proceed with a time-only move" is a fine degrade when
           // planMeeting couldn't classify a CATEGORY or a location; it is not
           // fine when the reason it failed is that his calendar is unreadable,
           // because then the destination was never checked against anything.
@@ -1321,7 +1321,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // those should fire on a move that didn't actually happen.
         {
           const { verifyEventMoved } = await import('../../../../connectors/graph/calendar');
-          // v2.3.1 (B1) — verify against the EFFECTIVE start (post-snap for
+          // v2.3.1 — verify against the EFFECTIVE start (post-snap for
           // floating blocks), not the original args.new_start hint.
           const verify = await verifyEventMoved(userEmail, args.meeting_id as string, effectiveStart, timezone);
           if (!verify.ok) {

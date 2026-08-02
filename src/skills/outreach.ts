@@ -237,7 +237,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           // forks on isFuture; this one didn't, so a send_at already in the past
           // sent the DM immediately AND still armed send_scheduled_outreach at that
           // past instant — the sweep then sent it a SECOND time, and the row sat in
-          // phase 'outreach:scheduled' forever (S4: never twice).
+          // phase 'outreach:scheduled' forever (R4: never twice).
           scheduled_at: isFuture ? sendAt : undefined,
           intent,
           context_json: contextPayload,
@@ -354,7 +354,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         }
 
         // DM branch: send directly to the colleague
-        // v2.2.7 — optional file attachments (T6). Tool schema uses
+        // v2.2.7 — optional file attachments. Tool schema uses
         // snake_case slack_file_url for Sonnet ergonomics; SendOptions uses
         // camelCase sourceUrl. Map at the boundary.
         const attachmentsArg = Array.isArray(args.attachments)

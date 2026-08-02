@@ -87,7 +87,7 @@ function slotZonedStart(slot: SpreadSlot, timezone: string): DateTime {
  *
  * Exported because "which day is this slot on" is asked in two places: the
  * spreader's own grouping, and the caller that has to say which picks landed on
- * the day the requester actually named (D3). One definition, so the split and
+ * the day the requester actually named. One definition, so the split and
  * the pick order can never disagree about what "Thursday" means.
  */
 export function slotLocalDay(slot: SpreadSlot, timezone: string): string {
@@ -110,7 +110,7 @@ export function slotLocalDay(slot: SpreadSlot, timezone: string): string {
  *     each round, then the rest chronologically, but every day still gets at
  *     most one pick per round. Diversity is the point: the meeting is being
  *     moved, so "the day it currently sits on" is a preference, never the ask.
- *   • 'exhaustive' — the REQUESTED-DAY shape (D3, owner 2026-07-26: "if he
+ *   • 'exhaustive' — the REQUESTED-DAY shape (owner 2026-07-26: "if he
  *     asked thursday, its thursday"). The anchor day is drained through the
  *     FULL tier ladder — gapped, then optional-tier, then relaxed-gap — up to
  *     the whole budget, before any other day is considered at all. Other days
@@ -227,7 +227,7 @@ export function pickSpreadSlots(
     if (chosen.length < count) fillFrom(pool.filter(s => !s.over_optional), true);
   };
 
-  // D3 — 'exhaustive' runs the SAME ladder over the requested day alone first,
+  // 'exhaustive' runs the SAME ladder over the requested day alone first,
   // so that day is filled to the budget (including the relaxed-gap depth) before
   // any other day is looked at. Not a second spreader: one ladder, run over a
   // narrower pool. When the anchor day has nothing, both passes see the same
@@ -315,7 +315,7 @@ export async function getCalendarEvents(
 }
 
 /**
- * D4 (owner, 2026-07-26: "refuse all booking 'idan calendar is offline'").
+ * Owner, 2026-07-26: "refuse all booking 'idan calendar is offline'".
  *
  * Thrown when the owner's own calendar cannot be read at all. It is NOT
  * "he's busy" and it is NOT "nothing fits" — it means Maelle is blind, and a
@@ -337,8 +337,9 @@ export class CalendarOfflineError extends Error {
  * that the transport or the service is down. Everything else keeps its own
  * honest failure and travels up unchanged.
  *
- * D4 shipped the wrapper without one, so `getOwnerEventsForDecision` and the
- * slot walker wrapped whatever they caught. That turned a 403 `ErrorAccessDenied`
+ * The outage refusal shipped the wrapper without one, so
+ * `getOwnerEventsForDecision` and the slot walker wrapped whatever they caught.
+ * That turned a 403 `ErrorAccessDenied`
  * on the owner's own calendarView (a tenant-consent problem), a 404 from a wrong
  * `profile.user.email`, a 400 from a malformed window, and our own TypeErrors all
  * into "I can't reach his calendar right now — try again shortly": advice that
@@ -606,7 +607,7 @@ async function getCalendarEventsImpl(
       if (!nextLink) break;
       // Graph SDK accepts the full nextLink as an api() URL. The cursor
       // preserves the QUERY (filter/select/orderby) but NOT request HEADERS.
-      // v2.3.1 (B6 / #63) — re-attach Prefer so subsequent pages also come
+      // v2.3.1 (#63) — re-attach Prefer so subsequent pages also come
       // back in the owner's timezone instead of defaulting to UTC.
       request = client.api(nextLink).header('Prefer', `outlook.timezone="${timezone}"`);
     }
@@ -740,7 +741,7 @@ export async function getFreeBusy(
   if (!parsedStart.isValid || !parsedEnd.isValid) {
     return nothingChecked('unparseable date param');
   }
-  // V3 (v4.2.x) — A DATE-ONLY `endDate` MEANS THE END OF THAT DAY, not its first
+  // v4.2.x — A DATE-ONLY `endDate` MEANS THE END OF THAT DAY, not its first
   // instant. "Is she free Thursday" is what a model turns into
   // start_date === end_date === '2026-07-30' — and correctly so: the tool asks for
   // "a date range in ISO 8601" (skills/meetings.ts), so a bare date is the
@@ -751,12 +752,12 @@ export async function getFreeBusy(
   // off-by-a-day silently truncated every multi-day date-only range ('07-30' →
   // '07-31' read the 30th only).
   //
-  // V3b (v4.2.2) — the same whole-day question has a SECOND spelling, and V3's
-  // regex only recognized the first. `'2026-07-30T00:00:00'` for both start and end
+  // v4.2.2 — the same whole-day question has a SECOND spelling, and the date-only
+  // regex above only recognized the first. `'2026-07-30T00:00:00'` for both start and end
   // is what "a date range in ISO 8601" invites a model to write: it failed the
   // date-only test, fell to the instant branch, and asked Graph about 00:00–01:00,
-  // so a day booked solid 09:00–18:00 came back FREE with `notChecked` empty — V3's
-  // own failure reached by a different route. So the recognizer is on the INSTANT
+  // so a day booked solid 09:00–18:00 came back FREE with `notChecked` empty — the
+  // failure above reached by a different route. So the recognizer is on the INSTANT
   // now, not on the spelling: start === end AND that instant is midnight IN THE
   // CALLER'S ZONE (`timezone`, never the server's — M13) is a whole day however it
   // was typed. A REAL instant carries a time and is not midnight

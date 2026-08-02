@@ -72,7 +72,7 @@ export interface CreateMeetingParams {
   isAllDay?: boolean;
   userEmail: string;
   timezone: string;
-  // v2.3.1 (B23) — when `body` is not provided, the default attribution line
+  // v2.3.1 — when `body` is not provided, the default attribution line
   // names this assistant + owner instead of "your executive assistant".
   // E.g. "Maelle, Idan Assistant". Pass `${assistant.name}, ${owner first name} Assistant`
   // from the call site where profile is in scope. When omitted, falls back to

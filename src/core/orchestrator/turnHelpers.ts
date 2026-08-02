@@ -257,19 +257,19 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // so the claim-checker couldn't verify "renamed to X" / "added Yael" and
         // inferred the change failed → fabricated a "not done yet" on a done
         // action (2026-07-08). On success, render the tool's OWN action_summary —
-        // it enumerates the actual post-change values (S4: the log carries what
+        // it enumerates the actual post-change values (G3: the log carries what
         // HAPPENED, not the stale label used to find the meeting).
         if (toolName === 'update_meeting' && outcome.ok) {
           const changes = typeof (result as { action_summary?: unknown }).action_summary === 'string'
             ? (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 140)
             : '';
-          // v3.7.x (#B2) — surface the structured added-attendee EMAILS beside the
+          // v3.7.x — surface the structured added-attendee EMAILS beside the
           // prose. action_summary renders an added attendee by DISPLAY NAME ("added
           // Meeting Room"); a draft that names the EMAIL ("added meeting@…") then
           // can't be matched against the summary and the checker inverted a TRUE
           // add. The email is already in the tool result (added_attendees) — carry
           // it into the log the checker reads so a claim in EITHER form matches
-          // (S4: carry the truth, don't make the checker guess a name↔email bridge).
+          // (G3: carry the truth, don't make the checker guess a name↔email bridge).
           const addedEmails = Array.isArray((result as { added_attendees?: unknown }).added_attendees)
             ? ((result as { added_attendees: unknown[] }).added_attendees.filter(e => typeof e === 'string') as string[])
             : [];
@@ -305,7 +305,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         return `[set_event_category OK${cat ? ` ${String(cat).slice(0, 40)}` : ''}]`;
       }
       case 'resolve_approval': {
-        // v3.7.x (#B2-approval) — CARRY THE REPLAY OUTCOME so the claim-checker
+        // v3.7.x — CARRY THE REPLAY OUTCOME so the claim-checker
         // can tell a real mutation-replay from a decision-only approve. The
         // DURABLE signal (approval chat's contract) is `action_summary`: a
         // deferred_action that replayed returns it (+ `booked` for a booking
@@ -319,7 +319,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // replay' would otherwise read to the checker as a replay). Only the
         // EXPLICIT no-op is marked "NO calendar change"; an unknown resolve shape
         // (reject / amend / expired) stays neutral so the checker never
-        // manufactures a flag off it (S7 safe-miss).
+        // manufactures a flag off it (G6 safe-miss).
         const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string };
         if (r.ok === false) {
           return `[resolve_approval — not resolved${typeof r.reason === 'string' ? `: ${r.reason.slice(0, 60)}` : ''}]`;

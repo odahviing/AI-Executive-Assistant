@@ -1,5 +1,5 @@
 /**
- * Graph MAIL module (v4.3.0, #24 E1) — low-level Outlook mail access, kept
+ * Graph MAIL module (v4.3.0, #24) — low-level Outlook mail access, kept
  * deliberately separate from graphClient.ts (calendar).
  *
  * AUTH MODE — this is DELEGATED OAuth (authorization-code + refresh token),

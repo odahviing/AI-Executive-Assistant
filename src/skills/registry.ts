@@ -225,7 +225,7 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
 };
 
 /**
- * v4.3.0 (E9, #24) — per-CHANNEL tool clamp, keyed on the turn's inbound
+ * v4.3.0 (#24) — per-CHANNEL tool clamp, keyed on the turn's inbound
  * transport (not on scope, not on senderRole). The email transport's sender
  * gate is a spoofable From-header string compare (owner-accepted risk —
  * containment is that a spoofed sender only ever gets a reply to the OWNER'S
@@ -238,8 +238,8 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
  * clamp was applied AFTER the ALWAYS_ON_TOOLS union (see filterToolsByScope
  * below) — an ordering the row 122 follow-up below later replaced, because
  * back then the original 2-tool clamp silently stripped get_person_memory /
- * log_interaction too — an email turn could never read the person row E6
- * writes on that same turn. Owner, verbatim: "get person memory is
+ * log_interaction too — an email turn could never read the person row the
+ * inbound handler writes on that same turn. Owner, verbatim: "get person memory is
  * important, log intreaction as well. but create approval or move/cancel ->
  * no need for now." The clamp is now an explicit 4-tool allowlist —
  * find_available_slots + create_meeting ("find a slot and book it," the
@@ -402,7 +402,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // (themselves), rule-compliant slot, English subject. Auto shadow-DMs owner.
   // Same trust pattern as v2.2.1 move_meeting — rule-compliance is the gate.
   'create_meeting',
-  // v3.1.4 (Y3) — a colleague who REQUESTED a meeting controls it: add people,
+  // v3.1.4 — a colleague who REQUESTED a meeting controls it: add people,
   // rename, change location. The update_meeting handler gates this on
   // requester-identity (findMeetingOwner): requester → allowed; non-requester
   // → returns a clean needs-approval signal so Sonnet fires ONE create_approval.
@@ -562,7 +562,7 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
  * include 'general') to ship every tool. Colleagues always see the static
  * allowlist regardless of `scopes`.
  *
- * v4.3.0 (E9, #24) — `channel` is the turn's inbound transport. It scopes
+ * v4.3.0 (#24) — `channel` is the turn's inbound transport. It scopes
  * BOTH which Connection's tools are merged in (own-transport only — see
  * below) AND, via CHANNEL_TOOL_CLAMP, which ACTIONS that transport's trust
  * level earns (today: email → find_available_slots, create_meeting,
@@ -592,7 +592,7 @@ export function getSkillTools(
   // on the Connection itself, not as a separate skill. Merge them in here so
   // Sonnet sees one unified tool list. Same dedupe + colleague filter applies.
   //
-  // v4.3.0 (E9, #24) — a connection's getTools() loads ONLY for its OWN
+  // v4.3.0 (#24) — a connection's getTools() loads ONLY for its OWN
   // transport. This used to loop every REGISTERED connection for the
   // profile and merge ALL of their tools into EVERY turn regardless of
   // which transport the turn arrived on — so once an email connection is
@@ -665,7 +665,7 @@ export async function executeSkillTool(
     return { error: 'not_permitted', reason: `Tool "${toolName}" is owner-only.` };
   }
 
-  // v4.3.0 (E9, #24) — same defense-in-depth pattern, keyed on CHANNEL instead
+  // v4.3.0 (#24) — same defense-in-depth pattern, keyed on CHANNEL instead
   // of role. getSkillTools already clamps a channel-restricted turn (today:
   // email → the 4-tool allowlist in CHANNEL_TOOL_CLAMP) at SHIPPING time;
   // this re-applies that same clamp at DISPATCH so a call on a clamped
@@ -716,7 +716,7 @@ export async function executeSkillTool(
   }
 
   // v2.6.4 — fall through to the Connection for THIS transport (find_slack_channel
-  // etc.). v4.3.0 (E9, #24) — scoped to context.channel only, same seam-fix as
+  // etc.). v4.3.0 (#24) — scoped to context.channel only, same seam-fix as
   // getSkillTools above: a tool call that arrived on one transport must never
   // dispatch to a DIFFERENT transport's Connection.
   const profileId = context.profile.user.slack_user_id;

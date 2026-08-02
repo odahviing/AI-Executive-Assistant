@@ -66,11 +66,11 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
         }
 
         // Get events for the day to find a free slot in the block window.
-        // P24 / D4 — the SHARED owner-event read, no local catch. This read decides
+        // P24 — the SHARED owner-event read, no local catch. This read decides
         // WHERE the block lands and whether it collides, so an unreadable calendar
         // is a blind spot, not a placement. It sat BEFORE the planMeeting call
         // below, so its own mechanical `Failed to fetch calendar events.` was what
-        // an outage actually produced for this tool — the skill's D4 wrapper never
+        // an outage actually produced for this tool — the skill's offline wrapper never
         // saw a typed error to answer. Same read, same retry, same one refusal now.
         const events: CalendarEvent[] = await getOwnerEventsForDecision(
           userEmail, date, date, timezone,
@@ -176,7 +176,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               blockIsOnline = plan.isOnline;
             }
           } catch (err) {
-            // D4 — the blind spot is never a classification fallback. Same
+            // The blind spot is never a classification fallback. Same
             // one-liner the create / move / search handlers carry around their own
             // best-effort catches: an unreadable owner calendar goes to the skill's
             // one refusal, it does not silently become "no category".
@@ -428,7 +428,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             blockIsOnline = plan.isOnline;
           }
         } catch (err) {
-          // D4 — as on the override path above, and it matters more here:
+          // As on the override path above, and it matters more here:
           // `allowRelaxed:false` means this plan call can REFUSE, so swallowing an
           // unreadable calendar would book the block with no rule check at all.
           if (err instanceof CalendarOfflineError) throw err;

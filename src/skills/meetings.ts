@@ -550,7 +550,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
   }
 
   /**
-   * D4 — every meeting tool the model can call arrives here, including the ones
+   * Every meeting tool the model can call arrives here, including the ones
    * this class delegates to SchedulingSkill, so an unreadable owner calendar
    * becomes ONE written refusal instead of a raw Graph string no handler owns.
    * P24 — the refusal itself moved to `meetings/calendarOffline` so the
@@ -604,7 +604,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // and the focus-time floor is measured across the day, so the validator
         // needs the whole WEEK — a single-day fetch made every weekly cap read 0.
         //
-        // D4 — through the shared owner-event read (one retry, then a typed
+        // Through the shared owner-event read (one retry, then a typed
         // offline error). This tool answers "can he join?" straight from these
         // events, so a failed read is the same blind spot the search and write
         // paths have; the local catch used to answer `Could not check calendar.`,
@@ -920,7 +920,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             time: timeStr,
             subject,
             conflict_with: held?.subject,
-            // D6 — an all-day OOF is not "he has something at that time", it is
+            // An all-day OOF is not "he has something at that time", it is
             // "he is away that day". The old wording invited the obvious next
             // question ("could he do 30 min later?"), which has the same answer
             // for every hour of the day.

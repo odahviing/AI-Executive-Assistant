@@ -502,7 +502,7 @@ export async function handleRescheduleReply(
  * whether the DM actually reached the colleague — v4.2.x, so the option-C
  * correction relay can't report a correction it never delivered.
  *
- * S4/S5 — this ask ENDS ON ITS OWN. It is `await_reply: 1`, so it needs the two
+ * R4/R5 — this ask ENDS ON ITS OWN. It is `await_reply: 1`, so it needs the two
  * things that make silence a complete outcome instead of an orphan: a
  * `reply_deadline` (the only thing that arms the linked request's
  * `outreach_expiry` timer) and the owner's return channel on that request (the

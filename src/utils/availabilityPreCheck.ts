@@ -411,7 +411,7 @@ interface SlotOutcome {
    */
   maxFreeMinutes?: number | null;
   /**
-   * D6 — the hard block is an all-day OUT OF OFFICE, not a clash. Both render as
+   * The hard block is an all-day OUT OF OFFICE, not a clash. Both render as
    * `owner_busy_collision`, and "he's booked then" is the wrong sentence for a
    * vacation day: it is a confident wrong reason, and it invites "then what about
    * an hour later", which has the same answer all day. So this bit, not the kind,
@@ -685,7 +685,7 @@ export async function precheckAvailability(params: {
   // category guessed below (no real subject/body exists yet) — see the
   // closing paragraph of `renderPromptBlock`, which is honest about both.
   //
-  // v4.2.x (H3) — the GAP branch runs it too; it was the last caller of the
+  // v4.2.x — the GAP branch runs it too; it was the last caller of the
   // narrow-window findAvailableSlots the paragraph above removed, and it had a
   // third hole on top of (a) and (b): `searchFrom === searchTo` is a ZERO-WIDTH
   // window, and the walker's `cursor + durationMs <= searchEnd` guard is false
@@ -715,7 +715,7 @@ export async function precheckAvailability(params: {
    *  `getOwnerEventsForDecision` can now throw a typed `CalendarOfflineError`,
    *  which the catch below still treats like any other per-pair failure (log +
    *  skip, no verdict for this pair) — unchanged and correct: a blind owner
-   *  calendar already has its own refusal elsewhere (D4), and this pre-check's
+   *  calendar already has its own refusal elsewhere, and this pre-check's
    *  contract has always been "assert nothing when the data isn't there." */
   const eventsForWeek = async (startDt: DateTime) => {
     const weekKey = startDt.startOf('week').toFormat('yyyy-MM-dd');
@@ -849,14 +849,14 @@ export async function precheckAvailability(params: {
       // calendarReads.ts:435, the SAME decision-safe helper the slot walker uses) or
       // any other propagated throw, "no events" and "a completely free week" are never
       // the same value here, so both land in this same catch and skip this same
-      // pair — a later reader must not come here looking for a D4 offline verdict
-      // that never arrives; that refusal lives at the D4 call site, not here.
+      // pair — a later reader must not come here looking for an offline verdict
+      // that never arrives; that refusal lives at the meeting-lane call site, not here.
       //
       // v4.2.x — WARN, not debug. Debug is not persisted (zero `"level":"debug"`
       // rows in any log on disk), so the ONE path where this pre-check goes blind
       // was the one event a log review could not see, and "did she answer without
       // data?" was unanswerable from the tape. Behaviour is unchanged on purpose:
-      // an unreadable owner calendar already has an owner — D4's refusal in the
+      // an unreadable owner calendar already has an owner — the refusal in the
       // meeting lane — and a second "I couldn't check" narration from here would be
       // a competing voice for the same fact (G1/G2). Make it visible; leave the
       // remedy where it lives.
@@ -879,7 +879,7 @@ export async function precheckAvailability(params: {
   // Recorded per OWNER rather than per thread on purpose: in the 2026-07-27
   // incident the fact was established on the owner's turn and the false statement
   // went out on the NEXT turn, to the colleague.
-  // B1 — and the SAME loop invalidates. A verdict here is the newest possible
+  // And the SAME loop invalidates. A verdict here is the newest possible
   // knowledge about that instant: the same validator, on the same calendar,
   // milliseconds ago. If a stale entry from an earlier turn disagrees, the entry is
   // simply WRONG and must go — otherwise the floor rewrites a truthful "11:30 is open
@@ -944,7 +944,7 @@ export async function precheckAvailability(params: {
         ownerEmail: params.profile.user.email,
         ownerFirst: ownerFirstName,
         instantIso,
-        // Owner-local ONLY (W2). This ledger is owner-keyed and is read in later
+        // Owner-local ONLY. This ledger is owner-keyed and is read in later
         // threads with other askers, so "(= … where they are)" baked in here is one
         // colleague's clock presented to the next one as a fact to preserve. The
         // floor adds the current reader's clock itself, per turn, from `instantIso`
@@ -1247,7 +1247,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
   const outcomeClause = (o: SlotOutcome, gapQuery?: boolean): string => {
     // v3.6.x — gap query ("how much is free there?"): report the REAL largest
     // bookable length so the reply states it instead of estimating a smaller one.
-    // v4.2.x (H3) — only the POSITIVE case is special-cased. A gap query that
+    // v4.2.x — only the POSITIVE case is special-cased. A gap query that
     // fits nothing falls through to the ladder below and carries checkSlot's
     // real reason. The old flat "nothing bookable there" did two dishonest
     // things: it claimed a NEIGHBOURHOOD ("there") when the probe only ever
@@ -1281,7 +1281,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
     // instruction, sitting under a header that hands the drafter the whole
     // OVERRIDABLE vocabulary ("outside his usual hours", "day-load protection",
     // "HIS to override, do NOT flatly refuse") — a reason-shaped hole next to a
-    // ready-made wrong reason. D6 had already found exactly this for the vacation
+    // ready-made wrong reason. The all-day-OOO fix had already found this for the vacation
     // sub-case; the general case had the same hole. Reason visibility = owner
     // decision 2026-07-27: the CLASS of the blocker, in-thread, and nothing that
     // identifies the event. The class comes off the verdict via
@@ -1303,7 +1303,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
       allDayOutOfOffice: o.outOfOfficeAllDay,
     });
     // The all-day case also rules out the obvious follow-up: a different hour on
-    // the same day has the same answer (D6).
+    // the same day has the same answer.
     const sameDayNote = o.outOfOfficeAllDay
       ? ` Offer another DAY — do NOT offer a different time on the same day, and do NOT say he's booked.`
       : '';

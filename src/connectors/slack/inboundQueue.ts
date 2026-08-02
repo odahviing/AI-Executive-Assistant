@@ -123,7 +123,7 @@ function getOrCreate(key: string): ThreadState {
  * Exported because the RUNNER has to ask the same question the queue asks, and
  * two copies of the predicate would eventually disagree. A runner that reports
  * a failure to the person must consult this FIRST and re-throw on true: an
- * aborted turn was superseded on purpose (T8), a fresh turn is already queued
+ * aborted turn was superseded on purpose (S8), a fresh turn is already queued
  * behind it, and a superseded turn apologising would be a brand-new bug.
  *
  * `signal.aborted` is part of the test, not just the error shape: an abort can
@@ -187,8 +187,8 @@ export function enqueueMessage(params: {
   const key = keyFor(params.channelId, params.threadTs, params.isOneOnOneDm);
   const state = getOrCreate(key);
 
-  // v2.6.1 — diagnostic to investigate D2 (duplicate orchestrator turns
-  // from same Slack event). Logs the queue state at every enqueue so we
+  // v2.6.1 — diagnostic to investigate duplicate orchestrator turns
+  // from the same Slack event. Logs the queue state at every enqueue so we
   // can correlate "two scheduleRun calls with batchSize:1" against what
   // each enqueue saw. Triggered by the 2026-05-06 21:39 incident where
   // both MPIM `message` and `app_mention` events ran independently. If

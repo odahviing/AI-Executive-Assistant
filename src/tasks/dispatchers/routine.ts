@@ -57,7 +57,7 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     return;
   }
 
-  // O2 — ONE Connection for every outbound send in this dispatcher. A task
+  // Piece 2 — ONE Connection for every outbound send in this dispatcher. A task
   // dispatcher posts through the transport-neutral Connection interface, never
   // a transport module directly; resolved once here so the skip notice, the
   // progress placeholder and the final post cannot drift onto different paths.
@@ -138,7 +138,7 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
   // no transport handle of its own.
   let placeholderTs: string | undefined;
   try {
-    // O2 — the placeholder is an outbound SEND, so it goes through the
+    // Piece 2 — the placeholder is an outbound SEND, so it goes through the
     // Connection like every other send here. SendResult already carries the
     // message ref (`ts`), which is all the threading below needs. No
     // connection registered → no placeholder, and the synthetic-threadTs

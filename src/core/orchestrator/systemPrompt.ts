@@ -55,7 +55,7 @@ export function buildSystemPromptParts(
   // prose only when its scope is active.
   // Undefined → render everything (colleague path, classifier off, non-Slack).
   toolScopes?: string[],
-  // v4.3.0 (E9, #24) — the turn's inbound transport. Threaded into the
+  // v4.3.0 (#24) — the turn's inbound transport. Threaded into the
   // internal getSkillTools call below so `shippedToolNames` reflects the
   // SAME channel clamp buildTurnContext applies to the real tool array —
   // otherwise a clamped channel's prompt could describe a capability
@@ -590,7 +590,7 @@ INTERACTION MEMORY — log_interaction + note_about_person build the per-person 
     // transport names its reach criteria so Sonnet can map person → channel.
     return active.map(id => {
       if (id === 'slack')    return '- Slack — reaches INTERNAL workspace members only (need a slack_id in people_memory). External attendees (different email domain, gmail / company.com that isn\'t the owner\'s) are NOT on Slack and CANNOT be DMed.';
-      // v4.3.0 (E10, #24) — was "reaches anyone with an email address
+      // v4.3.0 (#24) — was "reaches anyone with an email address
       // (internal or external)" until #24 registered the transport and made
       // that flatly false: EmailConnection.sendDirect hard-caps every send to
       // the owner's own address(es) (connections/email/index.ts). Restating
@@ -824,8 +824,8 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   })();
   const verifiedSenderSection = verifiedSenderBlock ? `\n\n${verifiedSenderBlock}` : '';
 
-  // v4.3.0 (E10, #24) — email-turn reply shape. Dynamic tier: fires ONLY when
-  // this turn's channel is 'email' (never billed on the Slack path). E3's
+  // v4.3.0 (#24) — email-turn reply shape. Dynamic tier: fires ONLY when
+  // this turn's channel is 'email' (never billed on the Slack path). The
   // one-address cap means the owner himself relays this reply on to the
   // externals essentially unedited, so it must stand alone rather than open
   // a back-and-forth. Also resolves a real ambiguity against the

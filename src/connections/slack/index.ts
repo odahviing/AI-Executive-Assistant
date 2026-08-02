@@ -202,7 +202,7 @@ If you already have an email for the person, you don't need this tool to book a 
       }
     },
 
-    // v4.1.x (O2) — EDIT + RETRACT over chat.update / chat.delete, so the
+    // v4.1.x (piece 2) — EDIT + RETRACT over chat.update / chat.delete, so the
     // placeholder-then-update pattern stops reaching into the Slack module.
     // formatForSlack on the update path is a BUG FIX, not symmetry: update is
     // the NORMAL path for routine output (the placeholder almost always posts),

@@ -498,7 +498,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
     }
   }
 
-  // v3.1.4 (Y4) — colleague-path: carry the event(s) this colleague just
+  // v3.1.4 — colleague-path: carry the event(s) this colleague just
   // requested forward by event_id, from the requests spine (the requester-link
   // row written on a colleague booking). Pre-fix, a colleague who booked then
   // said "add Eli / rename it" sent Maelle to get_calendar, which returned 0
@@ -535,7 +535,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
     }
   }
 
-  // v3.4.2 (F1) — owner-path equivalent of colleagueBookingBlock: the events
+  // v3.4.2 — owner-path equivalent of colleagueBookingBlock: the events
   // the owner created/edited THIS thread, by full event_id (from the in-memory
   // thread ledger). Lets a later "rename it / add Chris / make it Weekly" edit
   // by id instead of re-searching by name — which lagged after a write AND
@@ -566,7 +566,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         const parts: string[] = [];
         if (evs.length > 0) {
           const lines = evs.slice(-10).map(e => `  - "${e.subject}" — event_id=${e.eventId}`);
-          // v3.4.2 (F2) — active-window anchor for bare day references. Pure
+          // v3.4.2 — active-window anchor for bare day references. Pure
           // conversation signal (the dates booked this session) — NO travel/marker
           // needed, so it works for a plain "plan my July" thread. Resolves the
           // "Thursday → wrong calendar week" drift (booked Jul 2, then reverted to
@@ -618,7 +618,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // When mode === 'none' this is empty and has no effect on the prompt.
   const socialDirectiveBlock = formatDirectiveForPromptBlock(socialDirective);
 
-  // v2.6.1 (D4) — recent-outbound context block. Populated by the Slack
+  // v2.6.1 — recent-outbound context block. Populated by the Slack
   // connector at inbound-DM time when a colleague's reply lands within a
   // recent outbound's window (≤10min deterministic, 10min-24h LLM-classified,
   // or thread-reply on the outbound's ts). Pinned NEAR THE TOP of the
@@ -719,8 +719,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // week silently). Coord stored offers on its job row; this is the same
   // protection for the direct path. Same injection rail as the pre-check.
   let offeredSlotsBlock = '';
-  // v4.3.0 (#24 E7) — also the email leg. Its turns always carry senderRole
-  // 'owner' (E4's sender gate), but the owner is only relaying an external's
+  // v4.3.0 (#24) — also the email leg. Its turns always carry senderRole
+  // 'owner' (the email sender gate), but the owner is only relaying an external's
   // pick from a forwarded chain — the exact "bind, don't re-derive" problem
   // the colleague path already solves. offeredSlotsStash gives the email key
   // its own longer TTL by key prefix; this gate only needs to widen so the
@@ -797,7 +797,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
           const meetingsHh = Math.floor(totalMin / 60);
           const meetingsMm = totalMin % 60;
           const meetingsStr = meetingsHh > 0 ? `${meetingsHh}h${meetingsMm > 0 ? `${String(meetingsMm).padStart(2, '0')}m` : ''}` : `${meetingsMm}m`;
-          // D6 — an all-day OOO zeroes freeMin upstream (ops/analysis.ts:499),
+          // An all-day OOO zeroes freeMin upstream (ops/analysis.ts:499),
           // so the numeric line renders "0m free / 0m in meetings across 0
           // meetings" and reads as packed solid — the opposite of "he's away".
           // Same second-person idiom the validator already uses for this state
@@ -826,7 +826,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     }
   }
 
-  // v3.1.2 (B2) — recently-surfaced calendar issues. When the calendar_health
+  // v3.1.2 — recently-surfaced calendar issues. When the calendar_health
   // routine (or the brief) tells the owner about a duplicate / overlap /
   // OOF-conflict and the owner replies "delete it" / "fix it" minutes later,
   // the next-turn search-by-subject was losing the event_id the routine
@@ -1051,7 +1051,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     });
   }
 
-  // v3.1.6 (L3) — don't re-fire a mutation on a bare acknowledgment of a
+  // v3.1.6 — don't re-fire a mutation on a bare acknowledgment of a
   // just-completed action. Real bug: "Done, renamed to X" → owner says
   // "Perfect, thanks" → Sonnet re-ran update_meeting and DOWNGRADED the title.
   // Guard fires only when BOTH hold:

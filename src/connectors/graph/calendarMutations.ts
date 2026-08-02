@@ -6,7 +6,7 @@ import { getClient } from './graphClient';
 import { verifyEventDeleted } from './calendarReads';
 import type { CreateMeetingParams, CreatedMeeting, UpdateMeetingParams } from './calendarTypes';
 
-// #52 (O3) — this layer only ever carries `userEmail`, never a slack id, so
+// #52 (piece 3) — this layer only ever carries `userEmail`, never a slack id, so
 // every audit_log write here needs a lookup. Resolves via the profile
 // cache (see getProfileByEmail); returns '' (never guesses/defaults to the
 // first-loaded profile) when no profile matches, which is the safe failure
@@ -71,7 +71,7 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
     }));
   }
 
-  // v3.1.2 (B1) — capture every field this PATCH actually changed so the
+  // v3.1.2 — capture every field this PATCH actually changed so the
   // audit row tells us WHAT updated, not just that something did. Pre-fix
   // the audit only carried { subject, start } — when a PATCH changed only
   // end/categories/body/location/isOnline/attendees, the row serialized to

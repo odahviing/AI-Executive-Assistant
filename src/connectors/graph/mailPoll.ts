@@ -1,12 +1,12 @@
 /**
- * Mailbox poll timer (#24 E2).
+ * Mailbox poll timer (#24).
  *
  * The email channel gets its OWN ~30s inbound cadence — deliberately NOT the
  * 5-minute task tick in core/background.ts. That tick exists for DUE work
  * (reminders, routines, request expiry); the owner explicitly rejected
  * imposing its latency on a live email conversation whose next step is a
- * human reading a reply (see startMailPollTimer's gating below and #24 E2's
- * productDecision for the push-vs-poll tradeoff — no public HTTPS ingress
+ * human reading a reply (see startMailPollTimer's gating below; the
+ * push-vs-poll tradeoff was settled in #24 — no public HTTPS ingress
  * exists for Graph change notifications, and IMAP IDLE isn't worth the
  * machinery for this).
  *
@@ -21,7 +21,7 @@
  *
  * A THIRD, per-tick gate: a front-door handler (mailInboundRegistry) must be
  * registered for the profile. The front door (participant extraction /
- * sender gate / tool scoping — #24 E3/E4) is separate work. Until it
+ * sender gate / tool scoping — #24) is separate work. Until it
  * registers, this module fetches NOTHING for that profile — /messages/delta
  * is at-least-once and consuming it advances the durable watermark, so
  * calling it with no one to hand the messages to would silently drop mail

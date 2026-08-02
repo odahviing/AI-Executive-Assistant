@@ -1,7 +1,7 @@
 /**
  * weekdayGuard (#135b) — deterministic weekday-vs-resolved-date sanity check.
  *
- * The F2 "wrong-week / wrong-day" class: the owner names a weekday ("move it
+ * The "wrong-week / wrong-day" class: the owner names a weekday ("move it
  * back to Thursday"), the model resolves it to a date, and sometimes resolves
  * to the WRONG date — e.g. "Thursday" written as Friday 26 Jun. There was no
  * code backstop comparing the named weekday to the resolved date, so the wrong

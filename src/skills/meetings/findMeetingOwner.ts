@@ -2,7 +2,7 @@
  * findMeetingOwner (v2.7.0) — single lookup for "who's the meeting's
  * requester / organizer?"
  *
- * Per Q3 the chain is:
+ * The chain is:
  *   1. requests table — find a request whose outcome_external_event_id
  *      matches this Graph event. ALL states (open + resolved + cancelled +
  *      expired) — a booked coord is state=resolved by now, still relevant.
@@ -11,8 +11,8 @@
  *
  * Used by `delete_meeting` / `move_meeting` to decide:
  *   - asker == requester/organizer → just do it
- *   - asker != requester/organizer → decline owner-side + DM organizer
- *     (per D3/Q1=B), or refuse for move (per D4).
+ *   - asker != requester/organizer → decline owner-side + DM organizer,
+ *     or refuse for move.
  */
 
 import { getDb } from '../../db/client';
@@ -40,7 +40,7 @@ export interface MeetingOwnerInfo {
  * closed (resolved) coords too since booking sets state=resolved.
  */
 function findRequestByEventId(ownerUserId: string, eventId: string): RequestRow | null {
-  // v3.1.4 (Y3) — prefer a row that actually NAMES a requester over a bare
+  // v3.1.4 — prefer a row that actually NAMES a requester over a bare
   // in-flight tracking row. A single event can have both: the
   // requester-link written on a colleague's direct booking (carries
   // requester_slack_id) AND a maybeOpenInFlightMeetingRequest follow_up

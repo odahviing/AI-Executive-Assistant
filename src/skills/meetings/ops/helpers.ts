@@ -32,9 +32,9 @@ export function openQuestionsField(
 }
 
 /**
- * D3 (owner, 2026-07-26: "if he asked thursday, its thursday. if no options you
+ * Owner, 2026-07-26: "if he asked thursday, its thursday. if no options you
  * can suggest to wide the search and offer more.. but thursday ask is
- * thursday"). The three shapes a proposed-alternatives payload can take, in the
+ * thursday". The three shapes a proposed-alternatives payload can take, in the
  * order the reply must present them. The split lives in the DATA — two separate
  * arrays on the tool result, filled by planMeeting — and this only tells the
  * model what the two arrays mean, so a widening is never narrated as if it were
@@ -56,7 +56,7 @@ export function alternativesNote(
 }
 
 /**
- * D8 (owner, 2026-07-26: *"ok record"*) — a proposed alternative IS an offer, so
+ * Owner, 2026-07-26 (*"ok record"*) — a proposed alternative IS an offer, so
  * it goes into the same per-turn offered-slot stash the search path writes.
  *
  * `propose_alternative` never recorded, so times Maelle said out loud existed

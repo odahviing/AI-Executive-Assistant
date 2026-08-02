@@ -256,7 +256,7 @@ export function registerDmHandler(ctx: SlackAppContext): void {
       // above (:137): both owner and colleague DM images reach
       // processImageFileShare, which applies the injection guard by the
       // sender's TRUE role (owner proceeds; suspicious colleague images are
-      // refused) and, since v4.3.x (#144, T2), forwards a clean colleague
+      // refused) and, since v4.3.x (#144), forwards a clean colleague
       // image to the owner's shadow DM so it isn't invisible to him.
       const hasImage = files?.some((f: any) =>
         typeof f.mimetype === 'string' && f.mimetype.startsWith('image/'),
@@ -569,7 +569,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
 
     // v2.6.1 — log event.ts + thread_ts + bot-mention presence so we can
     // correlate this handler with the parallel `app_mention` handler when
-    // both fire for the same user message (D2 investigation, 2026-05-06).
+    // both fire for the same user message (investigated 2026-05-06).
     // If both handlers log the SAME ts, markProcessed dedup should catch
     // the second; if they log DIFFERENT ts values for the same user input,
     // the dedup key needs to widen.
@@ -752,10 +752,10 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
   });
 }
 
-  // ── Handler 2.5: emoji reactions on outbound DMs (v2.6.1 D4 + v2.6.2 emoji)
+  // ── Handler 2.5: emoji reactions on outbound DMs (v2.6.1 + v2.6.2 emoji)
   //
   // Three things this handler does, in order:
-  //   1. Close D4 followup tracker for the matched outreach_jobs row (so
+  //   1. Close the followup tracker for the matched outreach_jobs row (so
   //      subsequent inbound DMs from this colleague aren't falsely matched
   //      against an already-acked outbound).
   //   2. v2.6.2 — Shadow-DM the owner with the colleague's emoji ack so he
@@ -819,7 +819,7 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
 
       // ── Path 3: approval-via-emoji ──────────────────────────────────────
       // v2.7.0 — matches against requests.terminal_dm_msg_ts (the spine).
-      // Per Q3: only the terminal-question DM stamps that field, so ✅ on
+      // Only the terminal-question DM stamps that field, so ✅ on
       // a midpoint reminder is a no-op.
       try {
         const { getRequestByTerminalMsgTs } = await import('../../../db/requests');
@@ -917,7 +917,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
     if (!('user' in event) || !event.user) return;
 
     // v2.6.1 — log event.ts so we can correlate against the MPIM `message`
-    // handler when both fire for the same user @-mention in an MPIM (D2).
+    // handler when both fire for the same user @-mention in an MPIM.
     logger.info('Channel @mention received', {
       senderId: event.user,
       channelId: event.channel,
@@ -1097,8 +1097,8 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       // pulled into an existing thread she wasn't part of. NOT for MPIMs (group
       // DMs use the owner-in-group authority model) and NOT for a start-of-
       // thread mention (threadTs === event.ts → engages like an MPIM, existing
-      // behavior). His presence in the thread IS the authorization (invariant 1
-      // / T2): if the owner never posted here, Maelle does nothing — she's his
+      // behavior). His presence in the thread IS the authorization (invariant
+      // 1): if the owner never posted here, Maelle does nothing — she's his
       // EA, and a colleague can't drive her in a thread he isn't part of.
       // Reading the thread for this is ephemeral — no capture/people/interaction
       // writes (invariant 9); those drops live in the `message` handler.
@@ -1219,7 +1219,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
 
           // Images → injection-guarded blocks (cap 4, same as the DM path).
           // Shared loop with processImageFileShare (fileIngestion.ts) — see
-          // downloadAndScanImageBatch's doc comment (D1). Channel @mention
+          // downloadAndScanImageBatch's doc comment. Channel @mention
           // never stops early on a download failure: this turn still has doc
           // text / thread directives to fold in regardless of one bad image.
           const imgFiles = mentionFiles.filter(isSlackImageFile).slice(0, 4);

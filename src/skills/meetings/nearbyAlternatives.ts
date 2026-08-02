@@ -184,7 +184,7 @@ export async function findNearbyAlternatives(params: {
 
     // Anchor mode follows how many days were actually named, and the two cases
     // are genuinely different products:
-    //   • ONE named day → 'exhaustive' on it (D3, owner 2026-07-26: "if he asked
+    //   • ONE named day → 'exhaustive' on it (owner 2026-07-26: "if he asked
     //     thursday, its thursday"). That day is drained to the budget through the
     //     full tier ladder before any other day is considered.
     //   • SEVERAL named days → no single day is "the" ask, so day-diversity

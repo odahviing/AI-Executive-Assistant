@@ -25,14 +25,14 @@
  * In-memory by design — an offer is conversational state, not durable data.
  * A restart drops open offers; the cost is one re-search, same as today.
  *
- * v4.3.0 (#24 E7) — ONE exception: the email leg. A Slack pick round-trips in
+ * v4.3.0 (#24) — ONE exception: the email leg. A Slack pick round-trips in
  * the same sitting (minutes); an email pick round-trips through a human
  * forwarding a reply, hours or overnight — sharing Slack's 2h in-memory TTL
  * would silently expire the offer mid-flight and push the picker back onto
  * re-deriving the date from quoted prose (the exact class this module exists
  * to prevent). So an offer's binding lifetime follows the conversation's
  * TEMPO, not one global constant: email-channel keys (the stable
- * `email:<conversationId>` key E4 mints) get a longer TTL AND survive a
+ * `email:<conversationId>` key the inbound handler mints) get a longer TTL AND survive a
  * process restart (a redeploy mid-flight must not drop them either).
  * Detected purely from the KEY PREFIX — no caller has to know or pass this;
  * Slack keys never start with `email:` so their behavior is byte-for-byte
@@ -65,11 +65,11 @@ interface Entry {
 const TTL_MS = 2 * 60 * 60 * 1000;
 
 /** The email leg's round trip is a human forwarding mail, not a chat reply —
- *  hours to overnight. ~48h per the owner's tempo-based call (#24 E7). */
+ *  hours to overnight. ~48h per the owner's tempo-based call (#24). */
 const EMAIL_TTL_MS = 48 * 60 * 60 * 1000;
 const EMAIL_KEY_PREFIX = 'email:';
 
-/** Every email-transport key is `email:<conversationId>` (E4) composed through
+/** Every email-transport key is `email:<conversationId>` composed through
  *  keyFor below — so a plain prefix test is a complete, caller-free signal. */
 function ttlForKey(key: string): number {
   return key.startsWith(EMAIL_KEY_PREFIX) ? EMAIL_TTL_MS : TTL_MS;
@@ -81,7 +81,7 @@ function keyFor(channelId: string, threadTs?: string): string {
   return channelId.startsWith('D') ? channelId : `${channelId}|${threadTs ?? '_none_'}`;
 }
 
-// ── Restart-survival for the email leg only (#24 E7) ────────────────────────
+// ── Restart-survival for the email leg only (#24) ───────────────────────────
 // Slack entries are never written here — losing them on restart is accepted
 // (documented above); email entries must survive one because a redeploy can
 // land mid-forward.
@@ -146,7 +146,7 @@ export function recordOfferedSlots(params: {
   // recorder — preserve-on-omit below keeps the spread fingerprint intact.
   searchFingerprint?: string;
 }): void {
-  // D8 — no per-call `slice(0, 6)`. It was a second, silent bound competing with
+  // No per-call `slice(0, 6)`. It was a second, silent bound competing with
   // MAX_OFFERED (the real cap, applied to the merged union below) and with the
   // configured offered_slot_count (M6): a profile offering 8 slots recorded 6,
   // and a proposed-alternatives payload — requested-day options THEN the widening

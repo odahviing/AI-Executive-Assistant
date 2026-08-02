@@ -1,5 +1,5 @@
 /**
- * Forwarded-header participant + stated-timezone extraction (v4.3.0, #24 E4,
+ * Forwarded-header participant + stated-timezone extraction (v4.3.0, #24,
  * hardened #24 rows 129/132/133/137).
  *
  * A forward is addressed to Maelle, so the Graph message's own `toRecipients`

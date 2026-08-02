@@ -25,14 +25,14 @@ function parseGraphDateTime(dateTimeStr: string, eventTimeZone: string, fallback
   const tz = eventTimeZone || fallbackTz;
   // If the string already has a Z or offset, parse as-is and convert
   if (clean.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(clean)) {
-    // v2.3.1 (B5 / #63) — convert to fallbackTz for display, not the event's
+    // v2.3.1 (#63) — convert to fallbackTz for display, not the event's
     // own zone. Without this, a UTC-stamped event renders as UTC in briefings
     // even when the owner is in Asia/Jerusalem. Idempotent when fallbackTz
     // matches the parsed zone.
     return DateTime.fromISO(clean).setZone(fallbackTz);
   }
   // No offset → Graph returned it in the event's timezone (via Prefer header).
-  // v2.3.1 (B5 / #63) — re-zone to fallbackTz so display is owner-local even
+  // v2.3.1 (#63) — re-zone to fallbackTz so display is owner-local even
   // when Graph honored an event-side declared zone like "UTC".
   return DateTime.fromISO(clean, { zone: tz }).setZone(fallbackTz);
 }
@@ -251,7 +251,7 @@ interface DayAnalysis {
   dayType: 'office' | 'home' | 'day_off';
   isWorkDay: boolean;
   /**
-   * D6 — his own calendar carries an all-day OUT OF OFFICE for this date. Kept
+   * His own calendar carries an all-day OUT OF OFFICE for this date. Kept
    * separate from `isWorkDay` (which is the yaml/override answer and cannot see
    * the calendar) so the `oof_with_meetings` issue still fires exactly as before;
    * what it changes is the free-time maths below, which counted the whole
@@ -370,7 +370,7 @@ export function analyzeCalendar(
 
     // Check for OOF event
     const oofEvent = myEvents.find(e => e.showAs === 'oof');
-    // D6 — an ALL-DAY OOF means the day is gone, whatever the yaml says about it
+    // An ALL-DAY OOF means the day is gone, whatever the yaml says about it
     // being a work day. Not merged into `isWorkDay`: that would swap the
     // `oof_with_meetings` issue for `work_on_day_off` and rewrite issue classes
     // #146 depends on. It only gates the free-time maths at the end.
@@ -506,7 +506,7 @@ export function analyzeCalendar(
       if (trailing >= minChunk) freeMin += trailing;
     }
 
-    // D6 — on an all-day-OOF day there is no free time to report: the hours are
+    // On an all-day-OOF day there is no free time to report: the hours are
     // not his to spend, so counting the untouched work window as focus time made
     // "how packed is tomorrow?" answer "8h free" on a vacation day, and the
     // free-time-floor issue below would be measuring a day that isn't happening.

@@ -1,6 +1,6 @@
 # Agent-loop report
 
-**Empty — v4.3.8 wrapped. 0 rows await you.** Standing backlog: **33 open rows** across 33 bugs · 25 still-real · 6 need a re-read · 2 cite no file (`node scripts/ledger-stats.cjs --open`).
+**Empty — v4.4.2 wrapped. 0 rows await you.** Standing backlog: **30 open rows** across 30 bugs · 25 still-real · 4 need a re-read · 1 cites no file (`node scripts/ledger-stats.cjs --open`). Of those, **10 are queued and drain themselves on the next run**, and 6 carry no recommendation — the usher now writes a verb for those during its backlog pass.
 
 That is not the same claim as nothing being owed. Every open row lives in the ledger with a recommendation; this file holds only what a run put in front of you, and it was emptied at the wrap after every row was appended.
 

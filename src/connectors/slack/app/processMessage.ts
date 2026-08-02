@@ -553,12 +553,12 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // failure handler at the bottom of this closure.
           let delivered = false;
           try {
-            // v2.6.1 (D4) — recent-outbound context lookup for colleague 1:1 DMs.
+            // v2.6.1 — recent-outbound context lookup for colleague 1:1 DMs.
             // When a colleague replies to Maelle in their DM (top-level OR thread
             // reply on a Maelle-sent message), check for an open outbound from
             // her to them within 24h. Attach as priorOutboundContext so the
             // orchestrator sees "RECENT OUTBOUND TO THIS COLLEAGUE" before
-            // drafting. Closes the D4 amnesia (Isaac's "Ok" 2 min after Maelle's
+            // drafting. Closes the amnesia (Isaac's "Ok" 2 min after Maelle's
             // heads-up landing as "Hey, what can I help you with?"). Skipped
             // for owner DMs, MPIMs, channels, and owner-in-group contexts —
             // those have their own continuity surfaces.
@@ -698,7 +698,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               // The person's own words — NOT framedText. Step 4.6 mirrors this
               // string to the owner as `X said: "…"` (GH #150).
               userMessage: text,
-              // v4.3.x (#144, T0) — the Haiku vision description already
+              // v4.3.x (#144) — the Haiku vision description already
               // computed above (zero new LLM calls) so the Step 4.6 shadow
               // receipt reports what the picture showed, not just the raw
               // caption placeholder. undefined when there was no image (or
@@ -754,7 +754,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // slot in his DM and Maelle never said a word.
             //
             // An ABORT is not a failure — the queue killed this turn on purpose
-            // to merge a message that landed while we were thinking (T8), and a
+            // to merge a message that landed while we were thinking (S8), and a
             // superseded turn apologising would be a brand-new bug. Re-throw so
             // the queue's abort branch restarts the debounce exactly as before.
             if (isMergeAbort(err, signal)) throw err;

@@ -253,7 +253,7 @@ export async function findAvailableSlots(params: {
     const windowTo = currentTo.toISO()!;
 
     const fbDiag: { unresolved?: string[]; notChecked?: string[] } = {};
-    // D4 — this call always carries the OWNER's own row (busyFilterEmails is
+    // This call always carries the OWNER's own row (busyFilterEmails is
     // [owner, ...attendees]) and getSchedule is one POST for all of them: a
     // per-person failure comes back as a per-schedule `error` entry, so a THROW
     // here means the whole read died, the owner's busy time with it. It already
@@ -400,7 +400,7 @@ export async function findAvailableSlots(params: {
     // injection below, so fetch whenever a profile is available, not only
     // when floating blocks are configured.
     //
-    // D4 — this read is NOT non-fatal, and used to be. It feeds checkSlot (the
+    // This read is NOT non-fatal, and used to be. It feeds checkSlot (the
     // ONE validator) on every candidate, so an empty list on failure meant every
     // slot was validated against an EMPTY CALENDAR and came back free — a Graph
     // fault rendered as a wide-open day. The `getFreeBusy` call at the top of
@@ -474,7 +474,7 @@ export async function findAvailableSlots(params: {
       }
     }
 
-    // D6 — the dates his own calendar marks as an all-day OUT OF OFFICE. Built
+    // The dates his own calendar marks as an all-day OUT OF OFFICE. Built
     // once here from the same owner events checkSlot validates against, through
     // the one shared predicate, so "is he out that day" has exactly one answer in
     // the subsystem. Span-aware (a multi-day vacation covers every day it spans).
@@ -867,8 +867,8 @@ export async function findAvailableSlots(params: {
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
-      // D6 (owner 2026-07-26: "my calendar really block OOO for that entire day,
-      // it should be blocked anyway") — an all-day out-of-office on HIS OWN
+      // Owner 2026-07-26: "my calendar really block OOO for that entire day,
+      // it should be blocked anyway" — an all-day out-of-office on HIS OWN
       // calendar takes the day out, straight off the calendar, with no per-date
       // schedule override needed.
       //
@@ -950,7 +950,7 @@ export async function findAvailableSlots(params: {
         continue;
       }
       // ── (b) NO PROFILE — the lead-time floor with nowhere else to live ─────
-      // #128 / D5 (owner 2026-07-26: "we need to have priority of reasons") — for
+      // #128 (owner 2026-07-26: "we need to have priority of reasons") — for
       // every real caller the booking lead time is checkSlot rule 0b, decided
       // THERE, inside the validator's own ladder, where a real commitment (rule 8)
       // outranks it. It used to run out here ahead of checkSlot, deliberately —

@@ -2,6 +2,29 @@
 
 ---
 
+## 4.4.2 — the queue reaches the builders, and the feature door gets its own agent
+
+No behavioural `src/` change — every `src/` edit in this release is a comment. The subject is the loop that fixes Maelle: work he had already approved was sitting in a queue nothing opened.
+
+**A run now builds what is owed, not only what it just found.** `run` and `build` were mutually exclusive doors: `run` went looking for work, `build` took pre-approved items, and passing both threw. So a row he had ruled on waited for a second, hand-typed command that never happens at 1am. A run now merges three sources after the usher returns — what it found, the queued rows, and the backlog rows the usher re-reads and marks `build` — through one dedupe, one severity sort, one cap. The manifest keeps them as separate counts, because a merged total cannot tell him which source produced the night. The guard that made the doors exclusive is intact: `args.issues` is still the preset door and still throws, because *that* is what would silently skip the log review.
+
+**The feature door had three agents with no charter.** `feature.js` was dispatching intake, recon and decompose with no `agentType` at all — reading a product item, checking its premise against the code, and splitting it across lanes, governed by nothing. Nine rules were already written for that work, as prose inside the engine's own prompt strings. They became **framer** (tag `F`), the agent that frames a product item and hands pieces to the builders; the `usher` stays the bug door. Three of the nine invert the usher's rules outright — *split by capability, not by root cause* against *one root, one issue* — which is why the track got an agent rather than a caveat.
+
+**Two renames finish the outside/inside seam.** `slacker` → **slackmaster** (`S` unchanged) and `exchanger` → **diplomat** (`E` → `D`). Diplomat is not the mail agent renamed; its subject is *everyone outside the workspace*, which is where WhatsApp and iMessage land the day they open to a non-owner. The measurement that settled it: seven of its rules name an outsider, only two name a mail provider. Slack is the one channel where identity comes from org membership rather than a claim — `collectCoreInfo` and the workspace directory exist nowhere else — so the seam is authority, not transport.
+
+**The cleaner stops reading half-written work.** Its default scope was the uncommitted tree, which is the bouncer's territory and, during a wave, the builders' live output — a helper whose caller is not written yet reads exactly like a dead export. It now scopes to `git log <state.lastCleanSha>..HEAD`: everything on the first run, only what changed since its own last run after that. A sha, not a timestamp, because `--since` reads commit date and skips across a rebase.
+
+### Fixed
+- **A lane with no `EFFORT` entry dispatched silently.** `bugger.js` and `feature.js` did `agentType: lane, effort: EFFORT[lane]` with no assertion, so a rename that updated `CODE_LANES` and missed the map two lines below sent work to an agent type that does not exist, at the default tier, and the run read as normal. `charter-audit.js` had the guard; the two engines that actually build did not. Both now throw at load — verified by simulating this release's own rename.
+- **The usher was told the opposite of what the engine does.** Its prompt still said a re-read row emits no issue and waits for `build <ids>`, while the engine had started acting on its verb.
+- **`SKILL.md` gave two answers for a promoted backlog row's `ref`** — the report id or the original slug. The slug is the identity; writing the id leaves the row open, so it rebuilds every run. Live for the first time now that promotion runs unattended.
+- **Reasoning effort, owner-set:** usher `medium` → `xhigh` (it made the most consequential call in the run at the lowest tier), slackmaster and diplomat `xhigh` → `high`. Bouncer and usher moved out of hardcoded call sites into the one map.
+
+### Removed
+- **The last dirty lane letter.** All 12 `O[0-9]` tokens in `src/` were spent ticket piece-ids, none mapped to a real Outrider rule, and all three collided with its live `O1`–`O8`. Reworded in comments; `O` joins `D`, `E`, `F` and `W` at zero, so a tag in a comment can only mean a charter rule.
+
+---
+
 ## 4.4.1 — every agent now names a job, and the mail channel got its own
 
 No `src/` change. This is the squad: five identities moved, one agent added, and the rules each of them is held to.

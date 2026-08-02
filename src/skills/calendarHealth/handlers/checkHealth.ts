@@ -116,12 +116,12 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             ? args.mode
             : (profile.behavior.calendar_health_mode ?? 'passive');
 
-        // P24 / D4 — through the SHARED owner-event read (one fresh retry, then a
+        // P24 — through the SHARED owner-event read (one fresh retry, then a
         // typed `CalendarOfflineError` for an outage-shaped fault only), and with no
         // local catch. This scan decides autonomous auto-moves and tells the owner
         // his day is clean, so an unreadable calendar is the same blind spot the
-        // search and write paths have and it gets the same answer: the skill's D4
-        // wrapper (skills/calendarHealth.ts → meetings/calendarOffline) turns it
+        // search and write paths have and it gets the same answer: the skill's
+        // offline wrapper (skills/calendarHealth.ts → meetings/calendarOffline) turns it
         // into "his calendar is offline". The old local catch swallowed EVERY fault
         // into `Failed to fetch calendar events.` — a mechanical non-answer with no
         // cause, no retry and no instruction (M11), competing with the written
@@ -437,7 +437,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           }
 
           // ── OOF conflicts ──────────────────────────────────────────────────
-          // v2.3.1 (B16) — trust showAs only. Owner pushed back on keyword
+          // v2.3.1 — trust showAs only. Owner pushed back on keyword
           // matching: if an event is marked SHOW AS FREE in Outlook, it's
           // free regardless of subject text. Previous logic let an all-day
           // event with subject containing "vacation"/"oof"/"holiday"/"pto"
@@ -1082,7 +1082,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             }
           }
 
-          // v2.3.1 (B12 / #67) — busy_day DM removed per owner direction.
+          // v2.3.1 (#67) — busy_day DM removed per owner direction.
           // He never asked for "rough day" alerts and they were firing
           // unsolicited. Active mode now only handles conflict / OOF /
           // missing-block / buffer issues.

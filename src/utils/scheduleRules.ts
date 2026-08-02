@@ -53,7 +53,7 @@
  *     function that turns `args.relaxed` into an override, it grants only on
  *     `senderRole === 'owner'` (the authenticated sender, post-clamp), and every
  *     path — normalized or not — reads it. Two grants used to exist and both are
- *     gone: owner-in-MPIM-proposed (D7 — the group-DM clamp keeps his senderRole
+ *     gone: owner-in-MPIM-proposed (the group-DM clamp keeps his senderRole
  *     'colleague', so it waived eight rules on colleague authority with the owner
  *     heads-up unreachable) and deferred-replay (unreachable flag; a replay runs
  *     on a synthetic OWNER context, deferredActionReplay.ts, so the owner branch
@@ -306,7 +306,7 @@ export interface RuleCheckResult {
     attendeeCount: number;
     window: string;
     /**
-     * D6 — the commitment is an all-day OUT OF OFFICE, i.e. the whole day is
+     * The commitment is an all-day OUT OF OFFICE, i.e. the whole day is
      * gone, not this hour. Same tier and same rank (it is still a real
      * commitment); a structured fact rather than a new violation kind, so no
      * consumer that branches on `owner_busy_collision` silently stops firing.
@@ -347,7 +347,7 @@ export function bookingLeadTimeHours(
 /**
  * THE lead-time predicate. checkSlot rule 0b is THE caller for every search and
  * every write, so the label's rank comes from the one ladder — below a real
- * commitment, above the soft own-day rules (D5). The slot walker calls it only
+ * commitment, above the soft own-day rules. The slot walker calls it only
  * on its no-UserProfile fallback path, which never reaches checkSlot.
  */
 export function isWithinBookingLeadTime(
@@ -464,7 +464,7 @@ export type OccupancyRole = 'ignore' | 'optional' | 'commitment';
 
 /**
  * isAllDayOutOfOffice — THE predicate for "his own calendar says he is OUT for
- * this whole day". D6, owner 2026-07-26: *"it doesn't [need] the
+ * this whole day". Owner 2026-07-26: *"it doesn't [need] the
  * owner_schedule_overrides. my calendar really block OOO for that entire day,
  * it should be blocked anyway"* — the fact lives on the calendar and is honoured
  * from there, with no per-date override required.
@@ -661,7 +661,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     return {
       passes: false,
       violation_kind: 'owner_busy_collision',
-      // D6 — an all-day OOF is the same hard collision, but it is a day OFF, not
+      // An all-day OOF is the same hard collision, but it is a day OFF, not
       // a clash: "already busy at this time" invites "then what about 30 min
       // later", which has the same answer all day.
       violation_label: overCommitment.allDayOutOfOffice

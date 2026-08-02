@@ -1,5 +1,5 @@
 /**
- * Shared attendee email resolver (v3.1.4 — Y2).
+ * Shared attendee email resolver (v3.1.4).
  *
  * Single source of truth for "I have a name (and maybe a slack_id) — what's
  * the email?" Pre-this, the lookup chain (slack_id → people_memory, then

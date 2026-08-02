@@ -15,8 +15,8 @@
  * in-memory, for that turn, no capture pass / people-memory / interaction
  * writes from the read (invariant 9).
  *
- * Phase T1 (this commit): gate + intent classify, observable in logs. The
- * book / follow_up / other action flows (T3–T5) build on top.
+ * First phase: gate + intent classify, observable in logs. The book /
+ * follow_up / other action flows build on top.
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
@@ -110,7 +110,7 @@ ${threadContext.slice(0, 4000)}`;
   return 'other';
 }
 
-// ── Roster + action directive (T3/T4/T5) ─────────────────────────────────────
+// ── Roster + action directive ────────────────────────────────────────────────
 // CODE owns the deterministic pieces: who's in the thread, who's a VIP (their
 // calendar always gates the time), who's invite-only (annotated, never gating).
 // The booking judgment / warm voice / citation is encoded as a directive the

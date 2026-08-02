@@ -224,7 +224,7 @@ function detectClaimedEmail(opts: {
 }
 
 /**
- * v3.1.7 (Levana L1/L2/L4) — the precision layer. `detectClaimedEmail` is a
+ * v3.1.7 (Levana) — the precision layer. `detectClaimedEmail` is a
  * cheap structured pre-filter; it CANNOT tell "I'm Ysrael, here's his email"
  * (impersonation) from "add ysrael@… to the meeting" (a normal EA request) —
  * and for an assistant that books meetings, the benign reference is the COMMON
@@ -465,7 +465,7 @@ export async function filterColleagueReply(opts: {
       recentUserMessages: opts.recentUserMessages,
     });
     if (claimedEmail) {
-      // v3.1.7 (Levana L1/L2/L4) — a same-domain-email hit is a CANDIDATE, not
+      // v3.1.7 (Levana) — a same-domain-email hit is a CANDIDATE, not
       // a verdict. Judge intent before doing anything destructive: a colleague
       // referencing a coworker's email (adding them to a meeting) is benign and
       // its reply must survive untouched; only an actual impersonation claim

@@ -112,7 +112,7 @@ export function hardBlockClassPhrase(
   opts: { ownerFirst: string; allDayOutOfOffice?: boolean },
 ): string | null {
   // The all-day case first: it is the same hard collision, but "busy at that
-  // time" invites "an hour later then?", which has the same answer all day (D6).
+  // time" invites "an hour later then?", which has the same answer all day.
   if (opts.allDayOutOfOffice) return `${opts.ownerFirst} is away that whole day`;
   switch (kind) {
     case 'owner_busy_collision':
@@ -398,7 +398,7 @@ type SlotTreatment = 'presented_available' | 'presented_blocked' | 'not_mentione
  * this guard exists for. The instruction below says so explicitly, and the
  * rewriter's own keep-veto is the second layer.
  *
- * WHERE THE HARM LINE IS (W1) — being told a taken slot is free, not the word
+ * WHERE THE HARM LINE IS — being told a taken slot is free, not the word
  * "push". So a draft that STATES the clash and then asks whether to book over it
  * anyway is `presented_blocked`: that is the M3 one-step book-through, the owner is
  * entitled to override his own calendar, and rewriting his confirmation question

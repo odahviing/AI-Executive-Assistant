@@ -72,7 +72,7 @@ const BOT_DOMAIN_FRAGMENTS = [
   'recall.ai', 'avoma.com', 'tldv.io', 'sembly.ai', 'fellow.app',
   'resource.calendar.google.com',
 ];
-// Exported — reused by the email inbound path (#24 E6) so the "is this a
+// Exported — reused by the email inbound path (#24) so the "is this a
 // real human" filter has one definition, not a second bot-domain list.
 export function isNonHumanAttendee(email: string): boolean {
   const e = email.toLowerCase();

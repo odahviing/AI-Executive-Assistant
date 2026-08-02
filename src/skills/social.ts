@@ -164,7 +164,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         // v3.2.0 — resolve via the person store (ONE route). Owner-path
         // supports a pure-email external; colleague-path is forced to the
         // requester's slack_id by the gate, so it resolves internally. The
-        // social-moment recording below stays internal-only (Q4 — the social
+        // social-moment recording below stays internal-only (the social
         // engine is slack-keyed for now), but the note + timeline land on the
         // external's row.
         // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -1,5 +1,5 @@
 /**
- * Per-thread event ledger (v3.4.2 — F1).
+ * Per-thread event ledger (v3.4.2).
  *
  * Remembers the full Graph event_id of every meeting created/edited within a
  * Slack thread, so a later "rename it / add Chris / make it Weekly / move it"
@@ -109,7 +109,7 @@ export function forgetThreadEvent(threadTs: string, eventId: string): void {
 }
 
 /**
- * v3.4.2 (F2) — the active planning window for this thread: the date span of
+ * v3.4.2 — the active planning window for this thread: the date span of
  * the events booked/edited this session. This is the TRAVEL-INDEPENDENT anchor
  * for bare day references ("Thursday", "the 1st") — once the owner has booked
  * for the week of Jun 28, "Thursday" means Jul 2, not the nearest calendar

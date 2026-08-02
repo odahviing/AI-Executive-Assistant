@@ -1,9 +1,9 @@
 /**
- * Mail inbound-handler registry (#24 E2).
+ * Mail inbound-handler registry (#24).
  *
  * Mirrors connectors/slack/inboundReplayRegistry.ts: the poll timer
  * (mailPoll.ts) must NOT know how to extract participants, check the sender
- * gate, or scope tools for the email turn — that's the front door (#24 E3/E4,
+ * gate, or scope tools for the email turn — that's the front door (#24,
  * separate work). Instead the front door registers ONE handler per profile
  * once it exists, and the poller just hands it each new message.
  *

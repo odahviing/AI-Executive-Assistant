@@ -39,7 +39,7 @@
  *     rewriter, on both legs, because it is the only check whose subject
  *     (a weekday word) a REWRITER can introduce.
  *
- * `ctx.transport === 'email'` (gh#24 E5) skips both axes entirely and takes a
+ * `ctx.transport === 'email'` (gh#24) skips both axes entirely and takes a
  * dedicated THIRD leg, runEmailLegGates below — not because email is a third
  * axis value, but because it has exactly one reader-frame ('external') by
  * construction, so there is nothing for an axis test to derive. See that
@@ -105,10 +105,10 @@ export interface OutputGateContext {
   /**
    * Which delivery leg this draft is headed for. Defaults to 'slack' — every
    * existing caller predates this field and stays byte-identical. 'email'
-   * (gh#24 E5) takes the dedicated EMAIL LEG below instead of the two-axis
+   * (gh#24) takes the dedicated EMAIL LEG below instead of the two-axis
    * Slack policy: the reader is always external (the owner forwards the
    * reply verbatim), so the frame follows the READER, not the fact that the
-   * only live recipient is the owner's own inbox (E3's one-address cap).
+   * only live recipient is the owner's own inbox (the one-address cap).
    * Also decides whether a gate's rewrite gets normalized through
    * `formatForSlack` mid-pipeline — see `normalizeForTransport` below for why
    * the email leg deliberately does NOT get an equivalent mid-pipeline call.
@@ -149,11 +149,11 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   } = ctx;
   let cleanReply = draft;
 
-  // ── EMAIL LEG — a forwarded reply, gated in the READER's frame (gh#24 E5) ──
+  // ── EMAIL LEG — a forwarded reply, gated in the READER's frame (gh#24) ─────
   // Bypasses the Slack two-axis policy below entirely: there is no
   // owner-vs-colleague reader split to derive here, because the email leg has
   // exactly ONE possible reader-frame — 'external' — regardless of who typed
-  // the forward (E4's sender gate already restricts that to the owner + his
+  // the forward (the sender gate already restricts that to the owner + his
   // configured aliases). See runEmailLegGates' own doc comment for what runs
   // and, as importantly, what does NOT.
   if (ctx.transport === 'email') {
@@ -512,14 +512,14 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
 }
 
 /**
- * The EMAIL LEG (gh#24 E5). A non-Slack entry into the same gate stack, so a
+ * The EMAIL LEG (gh#24). A non-Slack entry into the same gate stack, so a
  * transport that isn't `postReply` still gets gated at all — today this is
  * the only path `runOutputGates` is reachable from besides Slack.
  *
  * Three checks, same relative order the owner-private Slack leg already uses
  * (claim → humanGate → date-verify):
  *
- *  - claimChecker always runs (no `ownerIsActing` gate needed): E4's sender
+ *  - claimChecker always runs (no `ownerIsActing` gate needed): the inbound sender
  *    authorization already restricts this whole leg to the owner + his
  *    configured aliases (connectors/email/inbound.ts), so every draft here
  *    IS the owner's own turn. A phantom "I've booked it" reaching externals
@@ -828,7 +828,7 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
         actionType: verdict.action_type,
         targetName: verdict.target_name,
         ownerFirstName: profile.user.name.split(' ')[0],
-        // v3.7.x (#B2) — the rewriter must verify against the same tool activity
+        // v3.7.x — the rewriter must verify against the same tool activity
         // the checker read, so it can't invert a true completed action it can't see.
         toolSummaries: result.toolSummaries ?? [],
       });
@@ -872,11 +872,12 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
  * Then ONE Haiku classification, and a Sonnet rewrite only on a flag. Fails open at
  * every step — any error, any veto, any keep verdict ships the draft it was handed.
  *
- * W2 — and the entries are RENDERED for this turn's reader before either LLM sees
- * them. The ledger is keyed by owner and read across threads, so it stores the owner's
- * clock only; "the same instant where THEY are" is a fact about whoever is being
- * answered right now, and baking it in at record time listed a Brussels clock to a
- * colleague in New York — as a number the rewriter is explicitly told to preserve.
+ * STORED OWNER-LOCAL, RENDERED PER READER — the entries are rendered for this turn's
+ * reader before either LLM sees them. The ledger is keyed by owner and read across
+ * threads, so it stores the owner's clock only; "the same instant where THEY are"
+ * is a fact about whoever is being answered right now, and baking it in at record
+ * time listed a Brussels clock to a colleague in New York — as a number the
+ * rewriter is explicitly told to preserve.
  */
 async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
   const { profile, result } = ctx;
@@ -893,7 +894,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
 
     const tape = (result.toolSummaries ?? []).join(' ');
     if (result.bookingOccurred === true || tape.includes('mutated=book')) {
-      // B1 — CLEAR, don't merely stand down. Standing down protected this turn and
+      // CLEAR, don't merely stand down. Standing down protected this turn and
       // left every entry armed for the next one, so "move that clash to 15:00" →
       // (next turn) "so 11:30 is open now?" came back as a confident false refusal.
       // A move vacates one slot and fills another, so no entry survives a completed

@@ -25,7 +25,7 @@ export type ConnectionId = 'slack' | 'email' | 'whatsapp' | string;
 
 /**
  * Outcome of a send. Every Connection returns this shape so callers handle
- * success/failure uniformly. `attachments_failed` (v4.3.x, #144 T1) counts
+ * success/failure uniformly. `attachments_failed` (v4.3.x, #144) counts
  * how many of SendOptions.attachments failed to upload even though the send
  * itself succeeded (ok:true) — a swallowed upload used to be invisible: the
  * text landed and the file silently didn't. Omitted (or 0) means every
@@ -57,7 +57,7 @@ export interface SendOptions {
    * v2.2.7 — Optional file attachments. Transport-specific shape: each
    * attachment carries a transport-native locator (e.g. Slack permalink or
    * url_private) the Connection knows how to fetch + re-upload. Other
-   * transports may interpret or ignore. v4.3.x (#144, T1) — SlackConnection
+   * transports may interpret or ignore. v4.3.x (#144) — SlackConnection
    * implements this on BOTH `sendDirect` and `postToChannel`, sharing one
    * upload primitive (connections/slack/messaging.ts's `uploadAttachments`)
    * rather than one verb carrying it while another silently drops it — see
@@ -213,7 +213,7 @@ export interface Connection {
   reactToMessage?(channelRef: string, messageTs: string, emojiName: string): Promise<void>;
 
   /**
-   * v4.1.x (O2) — EDIT and RETRACT a message this Connection already sent.
+   * v4.1.x (piece 2) — EDIT and RETRACT a message this Connection already sent.
    * Optional on the same terms as reactToMessage: a transport with no edit /
    * delete primitive (email, SMS) simply doesn't implement, and callers check
    * before invoking.

@@ -179,7 +179,7 @@ async function main(): Promise<void> {
   }
 
   // ── Phase 4b: start the email transport (optional, per-profile, gated) ───
-  // v4.3.0 (#24 E3/E4). startEmailChannel is a synchronous no-op when
+  // v4.3.0 (#24). startEmailChannel is a synchronous no-op when
   // channels.email is absent or enabled:false — no Connection registered, no
   // poll started, byte-identical to today. Wrapped defensively so a bad
   // profile can never take down the rest of startup.
@@ -233,7 +233,7 @@ async function main(): Promise<void> {
   // Background timer — runs every 5 minutes
   startBackgroundTimer(runningApps, profiles);
 
-  // Mailbox poll (#24 E2) — its OWN ~30s cadence, separate from the 5-min
+  // Mailbox poll (#24) — its OWN ~30s cadence, separate from the 5-min
   // task tick above. No-ops entirely unless a profile has channels.email
   // configured (see mailPoll.ts's gating doc).
   startMailPollTimer(profiles);

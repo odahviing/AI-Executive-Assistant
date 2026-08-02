@@ -212,7 +212,7 @@ function initSchema(db: Database.Database): void {
     // into the same DM conversation instead of creating fresh top-level DMs.
     `ALTER TABLE outreach_jobs ADD COLUMN dm_message_ts TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN dm_channel_id TEXT`,
-    // v2.6.1 (D4) — independent follow-up tracking, separate from `status`.
+    // v2.6.1 — independent follow-up tracking, separate from `status`.
     // The existing `status` field churns on a 5-min auto-close path
     // (closeFireAndForgetOutreach) for await_reply=false rows, which left
     // colleague replies arriving 2+ min later with no recoverable
@@ -224,7 +224,7 @@ function initSchema(db: Database.Database): void {
     // classified-as-response 10min-24h), or 24h elapsed.
     `ALTER TABLE outreach_jobs ADD COLUMN followup_closed_at TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN followup_close_reason TEXT`,
-    // #52 (O3) — audit_log was the only stateful table with no owner scope;
+    // #52 (piece 3) — audit_log was the only stateful table with no owner scope;
     // its reader (recentAuditEntries, called from the owner-DM calendar-recall
     // block) filtered action+outcome+timestamp only, so a second profile's
     // get_calendar could narrate THIS owner's audit trail. Column added here
@@ -235,7 +235,7 @@ function initSchema(db: Database.Database): void {
     try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
   }
 
-  // #52 (O3) — now that owner_user_id exists on every audit_log row (fresh
+  // #52 (piece 3) — now that owner_user_id exists on every audit_log row (fresh
   // install via CREATE TABLE, upgrade via the ALTER TABLE above), the index
   // can be created safely, and any row still carrying the '' placeholder
   // (pre-existing rows on an upgraded DB) gets backfilled. Only backfill when
@@ -898,7 +898,7 @@ function initSchema(db: Database.Database): void {
 // ── Audit log helper ─────────────────────────────────────────────────────────
 
 export function auditLog(params: {
-  // #52 (O3) — required, not optional: audit_log was the one stateful table
+  // #52 (piece 3) — required, not optional: audit_log was the one stateful table
   // with no owner scope, and a defaulted/omitted value here would silently
   // recreate the leak it closes. Every one of the 12 call sites must supply
   // the ACTUAL owner this action belongs to — never the first-loaded profile.
@@ -935,7 +935,7 @@ export function auditLog(params: {
  * match on whatever fields they need (subject, event_start_iso, etc.).
  * Typically 0–10 rows in a normal window — no need to scan further.
  *
- * #52 (O3) — ownerUserId is required. Pre-fix this filtered only on
+ * #52 (piece 3) — ownerUserId is required. Pre-fix this filtered only on
  * action+outcome+timestamp, so with a second profile configured, this
  * owner's get_calendar could narrate another owner's cancelled/created
  * meetings — the one caller (calendarReads.ts) renders these audit entries

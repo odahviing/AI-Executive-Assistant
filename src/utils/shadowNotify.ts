@@ -69,10 +69,10 @@ export async function shadowNotify(
      */
     icon?: string;
     /**
-     * v4.3.x (#144, O1) — optional file attachments, forwarded as-is to
+     * v4.3.x (#144, piece 1) — optional file attachments, forwarded as-is to
      * whichever Connection send verb this call resolves to (postToChannel
-     * or sendDirect). Reuses SendOptions.attachments end-to-end; T1 gave
-     * both verbs the upload primitive, so no branching is needed here.
+     * or sendDirect). Reuses SendOptions.attachments end-to-end; both verbs
+     * already have the upload primitive, so no branching is needed here.
      */
     attachments?: SendOptions['attachments'];
   }

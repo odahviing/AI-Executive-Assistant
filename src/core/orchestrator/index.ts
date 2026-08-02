@@ -58,7 +58,7 @@ export interface OrchestratorInput {
    */
   proseOnly?: boolean;
   /**
-   * v2.6.1 (D4) — recent-outbound context block for inbound colleague DMs.
+   * v2.6.1 — recent-outbound context block for inbound colleague DMs.
    * Populated by the Slack connector when a colleague's inbound DM lands
    * within 24h of a Maelle-originated message_colleague to that colleague,
    * AND either (a) the inbound is within 10min of the outbound (deterministic
@@ -67,7 +67,7 @@ export interface OrchestratorInput {
    *
    * Rendered into the system prompt as a "RECENT OUTBOUND TO THIS COLLEAGUE"
    * block. Soft-framed: Sonnet treats it as the strong default but can pivot
-   * if the inbound clearly switches topic. Closes the D4 amnesia where a
+   * if the inbound clearly switches topic. Closes the amnesia where a
    * colleague's "Ok" reply 2 minutes after Maelle's heads-up DM produced
    * "Hey, what can I help you with?" because conversation history was empty.
    */
@@ -713,7 +713,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       }
 
       // Track whether a real booking occurred this turn — used by the
-      // post-hoc hallucination backstop in app.ts (D2). Only count
+      // post-hoc hallucination backstop in app.ts. Only count
       // explicit success returns from the authoritative booking tools.
       if (
         result &&
@@ -738,7 +738,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             clearOfferedSlots(input.channelId, input.threadTs);
           } catch { /* non-fatal */ }
         }
-        // v3.4.2 (F1) — owner-path event ledger: remember events created/edited
+        // v3.4.2 — owner-path event ledger: remember events created/edited
         // THIS thread by full event_id, so a later "rename it / add Chris / make
         // it Weekly" edits by id instead of re-searching by name — which lagged
         // right after a write AND re-resolved the date to the wrong week (the
@@ -752,7 +752,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             const inp = (toolUse.input ?? {}) as Record<string, unknown>;
             const evId = (r.meetingId ?? r.id ?? r.eventId ?? inp.meeting_id) as string | undefined;
             const subj = (inp.new_subject ?? inp.subject ?? inp.meeting_subject) as string | undefined;
-            // Event start date in the owner's TZ — the F2 active-window anchor.
+            // Event start date in the owner's TZ — the active-window anchor.
             const startStr = (inp.start ?? inp.new_start) as string | undefined;
             let dateIso = '';
             if (typeof startStr === 'string') {

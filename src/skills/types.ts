@@ -48,7 +48,7 @@ export interface Skill {
    * append the owner's private free-text preference block (the style layer);
    * those prefs must NEVER render on a colleague turn.
    *
-   * `channel` (v4.3.0, E9, #24, gh#24 row 121) — the turn's inbound transport.
+   * `channel` (v4.3.0, gh#24 row 121) — the turn's inbound transport.
    * Only relevant to a skill that internally re-derives a shipped-tool check
    * (search.ts: whether web_research ships, to decide if its prose paragraph
    * should render) — pass it through so that check agrees with the actual

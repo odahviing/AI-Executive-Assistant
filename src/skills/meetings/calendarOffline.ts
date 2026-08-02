@@ -1,5 +1,5 @@
 /**
- * D4 — the ONE place a "his calendar is unreadable" fault becomes an answer.
+ * The ONE place a "his calendar is unreadable" fault becomes an answer.
  *
  * The refusal used to be inlined in `MeetingsSkill.executeToolCall`, which is
  * every meeting tool the model can call — but NOT the calendar-health tools
@@ -15,7 +15,8 @@
  *
  * So it lives here, as a wrapper both dispatchers call: one message, one log line,
  * one taxonomy. Not a second outage voice — the SAME voice, reachable from the
- * second dispatcher (P24: "D4 already owns the outage-refusal voice — ride it").
+ * second dispatcher (P24 — this file already owns the outage-refusal voice, so
+ * ride it rather than writing a second one).
  *
  * Deliberately NOT a catch-all for Graph errors. Only the typed
  * `CalendarOfflineError` is answered, and that is minted in exactly two places,

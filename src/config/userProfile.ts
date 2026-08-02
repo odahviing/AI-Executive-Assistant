@@ -485,7 +485,7 @@ const UserProfileSchema = z.object({
     }),
     email: z.object({
       enabled: z.boolean(),
-      // v4.3.0 (#24, E1) — the mailbox Maelle signs into via DELEGATED OAuth
+      // v4.3.0 (#24) — the mailbox Maelle signs into via DELEGATED OAuth
       // (a separate auth mode from the app-only ClientSecretCredential path
       // src/connectors/graph/graphClient.ts uses for calendar — that one
       // stays untouched). Required once enabled:true; optional at the
@@ -502,7 +502,7 @@ const UserProfileSchema = z.object({
       // touch this field directly — it exists for parity with the Slack
       // token pattern and as an explicit-env-injection option.
       refresh_token: z.string().optional(),
-      // v4.3.0 (#24, E3/E4) — additional addresses that count as "the owner"
+      // v4.3.0 (#24) — additional addresses that count as "the owner"
       // for BOTH directions: the inbound sender gate (front door) and the
       // outbound one-address send cap (EmailConnection.sendDirect). Owner
       // decision: he may forward from more than one address (e.g. a personal
@@ -554,7 +554,7 @@ function applySlackTokenEnvOverrides(raw: unknown): void {
   if (signing) r.assistant.slack.signing_secret = signing;
 }
 
-// v4.3.0 (#24, E1) — same env-wins precedent as Slack tokens above, for the
+// v4.3.0 (#24) — same env-wins precedent as Slack tokens above, for the
 // email channel's refresh-token SEED. Only applied when the yaml already has
 // a `channels.email` block (enabled or not) — this never synthesizes the
 // email channel into existence out of an env var alone; `enabled` must be an
@@ -688,7 +688,7 @@ export function loadUserProfile(profileName: string): UserProfile {
   return parsed.data as unknown as UserProfile;
 }
 
-// #52 (O3) — the Graph calendar-mutation layer (calendarMutations.ts) only
+// #52 (piece 3) — the Graph calendar-mutation layer (calendarMutations.ts) only
 // carries `userEmail`, never a slack id, so its audit_log writes need a
 // email → owner lookup. Scans profileCache (populated by loadUserProfile,
 // which loadAllProfiles calls for every profile at boot) rather than
