@@ -1,8 +1,9 @@
 # Approval-spine chat — charter + current state
 
 **Starter for the dedicated approval chat. Read this whole file first.**
-Supersedes `.claude/APPROVAL_SPINE_HANDOFF.md` (that described the PRE-collapse
-patch-on-patch state; the collapse shipped in 3.4.6 — keep it only as history).
+Supersedes the pre-collapse "approval spine rethink" handoff (patch-on-patch
+state before the collapse shipped in 3.4.6; that handoff's job is done and it
+has been removed — git history holds it).
 
 ## What this chat owns
 
@@ -17,7 +18,7 @@ NOT this chat:
   the WE timezone spine → **meeting chat**.
 - **Orchestrator system prompt + tool-selection guidance** (which tool Sonnet
   reaches for) → **prompt chat**.
-- **Output guards** (claim-checker, date-verifier, coordGuard, humanGate) →
+- **Output guards** (claim-checker, date-verifier, humanGate) →
   **guard chat**.
 
 At wrap, several chats share the tree — reconcile via `git` working-tree diff.

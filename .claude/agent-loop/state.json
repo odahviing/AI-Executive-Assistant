@@ -1,57 +1,183 @@
 {
   "_thisFileNote": "CURRENT STATE ONLY, and that is the rule this file lost: the keys documented in .claude/skills/manager/SKILL.md 'State you own', ONE operating note each, and the run in progress or the last one (its `note` = what went in, `_resultNote` = what came out). Everything older is HISTORY and history is ledger.jsonl, which is append-only and queryable. Reduced 2026-07-31 from 114 KB / 44 prose keys against 7 documented ones; every ruling in those 44 was verified to be a ledger row already before a byte was deleted. A `_previousRun*` key, a second note on one field, or a note about a run that has ended means it is regrowing - move it to the ledger and delete it. The wrap is where this is checked.",
-  "lastSeenIso": "2026-08-03T01:02:00+0300",
-  "_lastSeenIsoNote": "Set to the run's START, not its end. wf_e2b7aeeb-325 ran 2026-08-03T01:02 -> ~02:04 (duration_ms 3817652); anything said during that hour is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
+  "lastSeenIso": "2026-08-03T12:20:00+0300",
+  "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
-  "lastWrapIso": "2026-08-03T12:12:10+03:00",
-  "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. null means NO cleaner run has completed, and the next one does a FULL sweep of src/ — that is run one, not a fallback. Advance it ONLY after a run that COMPLETED, to the HEAD sha the sweep actually read, so an aborted pass never skips a window; the cleaner cannot write state, so the dispatching chat sets it in the same turn the verdicts come back, alongside the X120 row-writing. ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C10; the 2026-08-03 scoped-run history is in ledger.jsonl.",
-  "lastCleanSha": null,
+  "lastWrapIso": "2026-08-03T12:13:10+03:00",
+  "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C10.",
+  "lastCleanSha": "aeab9630b5e9874a425511e6e70dce98034f7f58",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
-  "nextReportId": 195,
+  "nextReportId": 203,
   "_inFlightNote": "Nine items held by engine run wf_6e41a1e4-f2c. EMPTY THIS IN THE SAME TURN IT RETURNS — a stale entry is the STOP 1 lock and refuses the next run.",
   "inFlight": [],
-  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. DRAINED 2026-08-03 by wf_a964b44c-dc9: all 3 prior entries (decisiveness check, hebrew stopwords, hebrew proclitic match) carried in and built clean. REPLACED with wf_a964b44c-dc9's 2 new discoveries: owner-facing asides (attendee-busy/location-mode notes) have no channel scope, so it's undecided whether they leak into a forwarded client email or get silently dropped on the email leg (directly relevant given tonight's 'email = forwardable text only' ruling); and the just-fixed Hebrew stopword filter still misses PREFIXED forms since it doesn't share the proclitic-stripping the whole-word matcher now does.",
+  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. EXPANDED 2026-08-03 by two hand-dispatched bouncer passes (uncommitted-tree + retroactive v4.4.3 audit): email-optional-subject-leak-findavailableslots REFRAMED, then BUILT by wf_ad941677-935 (owner said fix now) — removed from this list. securitygate-dedup-narrowed-coord-trigger also BUILT by the same run (bounced once, cleared on retry) — removed from this list. That run's verify added 2 new discoveries in its place: a broader non-private-subject email leak (SubjectViewer has no external tier) and a PRIVATE_MASK token that can leak as literal text.",
   "pendingOverflow": [
     {
-      "id": "multi-outbound-fix-adds-sonnet-call-per-candidate",
-      "lane": "slackmaster",
-      "severity": "medium",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "The earlier multiple-open-outbound fix now runs a Sonnet classifier call per open candidate (up to 10), serially — a quick ack that used to cost 0 LLM calls now costs at least 1.",
-      "evidence": "src/connectors/slack/recentOutboundContext.ts — the most-recent-first loop calls classifyResponseVsNewTopic per candidate instead of asking once across all of them."
-    },
-    {
-      "id": "tasktype-removal-vs-live-db-rows",
+      "id": "events-table-defined-twice-in-client-ts",
       "lane": "handyman",
       "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "o#192 removed 4 TaskType union members but live DB rows still carry those values (27 coordination, 14 follow_up, 7 reminder) — type-only today, a future exhaustive switch would silently believe those rows can't exist.",
-      "evidence": "src/tasks/types.ts (narrowed union) vs live tasks table rows."
+      "symptom": "The events table is created twice in the same file — byte-identical CREATE TABLE IF NOT EXISTS events + CREATE INDEX blocks.",
+      "evidence": "src/db/client.ts:138 and :310 — delete the second (dead) definition; both are IF NOT EXISTS so harmless today but real duplication."
     },
     {
-      "id": "email-aside-leak-no-channel-scope",
+      "id": "session-starter-stale-line-runoutputgates-215",
+      "lane": "architect",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "SESSION_STARTER.md cites runOutputGates.ts:215 for the ownerIsActing check; the actual (and correct) line is 210.",
+      "evidence": "SESSION_STARTER.md — one-line citation fix, architect/owner territory."
+    },
+    {
+      "id": "email-viewer-no-external-tier-for-nonprivate-subjects",
       "lane": "matchmaker",
       "severity": "medium",
       "clarity": "clear",
       "source": "verify",
       "invariant": "payload-scoped-to-caller",
-      "symptom": "An owner-facing aside written for Slack (e.g. 'this lands on a home day for you, so I switched it to online') could land inside a client email the owner forwards verbatim — or the mirror failure, silently dropped on the email leg where it was actually needed. Nothing in code decides which instruction wins.",
-      "evidence": "src/skills/meetings/ops/handlers/moveMeeting.ts:1579 (_attendee_busy_note) and :1584 (_location_mode_note) are added with no channel/transport scope, while systemPrompt.ts:874-882 now tells an email turn to compose only the forwardable text."
+      "symptom": "On an email-driven slot search, non-private internal meeting subjects and owner trade-off narration (\"over your optional <subject>\", \"his day is loaded around then\") still ride into the client-forwarded reply — SubjectViewer only has owner|other, no external tier, so 'other' (designed for internal colleagues) is still granted on the email leg for anything not marked private.",
+      "evidence": "src/utils/displaySubject.ts (SubjectViewer type) vs src/skills/meetings/ops/handlers/findAvailableSlots.ts:1696-1741 (the _*_note family, none channel-scoped). Needs a design call: a real external/other split, or channel-scope the _*_note family the way ops.ts:90-93 already does."
     },
     {
-      "id": "hebrew-stopword-prefixed-forms-not-filtered",
-      "lane": "registrar",
-      "severity": "medium",
+      "id": "private-mask-token-can-leak-as-literal-text",
+      "lane": "matchmaker",
+      "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "invariant": "guard-filter-narrower-than-what-it-gates",
-      "symptom": "The Hebrew stopword filter added this wave is exact Set membership; the whole-word-match function (also fixed this wave) now peels the definite article/preposition prefix, so a stopword like 'פגישה' is filtered but its prefixed forms ('הפגישה'/'לפגישה'/'בפגישה') still pass as distinctive tokens.",
-      "evidence": "src/utils/closeLoopOnOwnerHandled.ts:163 — exact-Set filter, doesn't share the proclitic-stripping logic."
+      "symptom": "A masked \"[Private]\" placeholder token can appear as literal text in a client-facing email because scheduleRules.ts:592's fallback catches an empty subject but not the PRIVATE_MASK token itself.",
+      "evidence": "src/utils/scheduleRules.ts:592 — extend the fallback to also catch PRIVATE_MASK."
+    },
+    {
+      "id": "stranded-coordination-tasks-render-as-active",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "4 abandoned 'coordination'-type tasks (May-June 2026, a type removed in 3.5.0) sit in pending_colleague with due_at NULL and still render as 'ACTIVE IN THIS THREAD — you already committed to these' if the owner ever replies in one of those old threads, though no dispatcher can execute that type.",
+      "evidence": "src/tasks/index.ts:101 (no staleness/live-type bound on the pending_colleague filter) and buildTurnContext.ts:479-482 (renders them)."
+    },
+    {
+      "id": "auto-expired-24h-close-reason-never-written",
+      "lane": "slackmaster",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "The 'auto_expired_24h' outreach-job close reason can never fire — the query feeding that branch already filters to the identical 24h cutoff, so it's dead code and followup_closed_at accumulates NULL forever on old rows. Independently confirmed by the retroactive v4.4.3 bouncer pass too.",
+      "evidence": "src/connectors/slack/recentOutboundContext.ts:321 (the dead branch) vs the query's own cutoff at :115/:122."
+    },
+    {
+      "id": "db-schema-resurrection:src/db/client.ts:initSchema",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "audit",
+      "symptom": "initSchema unconditionally CREATE TABLE IF NOT EXISTS known_contacts on every boot; the one-time migration meant to drop it no-ops on every boot (production is already migrated), so the drop never runs again — an empty, zero-reader/zero-writer table is silently resurrected forever.",
+      "evidence": "src/db/client.ts:initSchema (~line 79) vs db/migrations/v3_2_0_person_store.ts:71. Confirmed live via node scripts/db-query.cjs: table present, 0 rows. Independently named already in .claude/agents/profiler.md as a handyman cleanup, not yet actioned."
+    },
+    {
+      "id": "tonight-wave-introduced-small-defects-ops",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "ops.ts:77's comment cites gh#189, a GitHub issue that doesn't exist (collides with report row o#189) — should read email-aside-leak-no-channel-scope. ops.ts:92 deletes _attendee_busy_note, which can never execute since move_meeting is absent from CHANNEL_TOOL_CLAMP.email — dead code shipped despite the lane's own verifiedClean note flagging it as inert.",
+      "evidence": "src/skills/meetings/ops.ts:77,92."
+    },
+    {
+      "id": "tonight-wave-introduced-small-defects-outbound",
+      "lane": "slackmaster",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "recentOutboundContext.ts:24-28/:41-44 header comment still describes the OLD per-candidate binary-RESPONSE mechanism after tonight's fix replaced it with one discriminative call across all candidates.",
+      "evidence": "src/connectors/slack/recentOutboundContext.ts:24-28,41-44."
+    },
+    {
+      "id": "reserve-slot-project-doc-deleted-with-live-inbound-citations",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "Tonight's cleaner sweep deleted .claude/RESERVE_SLOT_PROJECT.md, but two live src/ comments still cite it — the slot_holds schema's storage-analysis rationale is now unrecoverable except from git.",
+      "evidence": "src/db/client.ts:527, src/db/slotHolds.ts:10 — replace the dead doc pointer with the actual rationale inline."
+    },
+    {
+      "id": "verbmap-still-incomplete-after-cleanup",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "verbMap still has ~9 dead keys of the same class the cleaner removed one of (edit_task, cancel_task, get_calendar_issues, update_calendar_issue, get_company_knowledge, create_routine, get_routines, update_routine, delete_routine) and is missing four LIVE tool names (manage_calendar_issue, manage_routine, manage_knowledge, update_task) — a turn whose only mutation is one of those four renders a vague fallback instead of a grounded verb.",
+      "evidence": "src/core/orchestrator/index.ts (verbMap)."
+    },
+    {
+      "id": "hardblock-ledger-sixth-invalidation-class",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "availabilityGate.ts:371-382's citations to forgetHardBlockedSlot are stale again — cites runOutputGates.ts :1035/:1061, real calls are at :999/:1025 (off by 36 lines, from a since-reverted gatekeeper branch shifting them back). Third occurrence of this citation-drift class in one wave.",
+      "evidence": "src/utils/availabilityGate.ts:371-382 vs src/utils/guards/runOutputGates.ts:999,1025."
+    },
+    {
+      "id": "workinghoursdefault-utils-imports-config-upward",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "invariant": "structural-fact-read-through-any",
+      "symptom": "workingHoursDefault.ts:56 adds a new utils -> config runtime require, in the same wave whose sibling fix (cloneable-default) was specifically about not letting utils depend upward on tenant config.",
+      "evidence": "src/utils/workingHoursDefault.ts:56 — restructure so config is passed in rather than required from utils."
+    },
+    {
+      "id": "claimchecker-dedup-not-actually-deduplicated",
+      "lane": "gatekeeper",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "o#186's fix claimed the confirmed/checked exemption was reduced to a cross-reference between claimChecker.ts:200 and :251, but both sites still state the exemption and its exclusion list in full.",
+      "evidence": "src/utils/claimChecker.ts:200,251 — collapse to one canonical statement plus a cross-reference, per the original intent."
+    },
+    {
+      "id": "findavailableslots-presentation-zone-expr-duplicated",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "The same presentation-zone expression is duplicated character-for-character at findAvailableSlots.ts:1402 and :1565 — must change together, and the fix's own comment names the copy instead of sharing it.",
+      "evidence": "src/skills/meetings/ops/handlers/findAvailableSlots.ts:1402,1565 — extract to one shared helper."
+    },
+    {
+      "id": "venues-dead-residue-from-reverted-175b",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "isTeamsPlaceholderLocation in db/venues.ts:365 is extraction residue left behind by the gh#175-b revert — one caller, where the code already was inline before extraction.",
+      "evidence": "src/db/venues.ts:365."
+    },
+    {
+      "id": "getawaitingownerrequests-parent-id-filter-gap",
+      "lane": "registrar",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "getAwaitingOwnerRequests filters parent_request_id IS NULL, so gh#169-a's new uniqueness check only sees top-level approvals — unproven whether an awaiting_owner CHILD request can exist and be missed.",
+      "evidence": "src/db/requests.ts (getAwaitingOwnerRequests query) — confirm whether child rows are reachable in practice; if so extend the uniqueness scan."
+    },
+    {
+      "id": "dead-script-measure-prompt-ts",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "scripts/measure-prompt.ts is dead/broken beside the working scripts/measure-prompts.cjs.",
+      "evidence": "scripts/measure-prompt.ts — delete on next scripts/ touch."
     }
   ],
-  "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-03 after wf_a964b44c-dc9: dropped 1 (engine-flagged — the email-gate split-branch claim, invalidated by gh#175-a's removal of the whole two-part mechanism). Kept 49, added 9 new claims from this build's verify. Now 58 entries.",
+  "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-03 after wf_386bf586-bf1: dropped 0, kept all 66, added 12 new claims from this build's verify. UPDATED AGAIN same day after a hand-dispatched bouncer pass on the uncommitted tree (owner asked for two findings-only bouncer passes to confirm the new Q1/Q1b charter questions ran): added 4 more claims that pass established beyond what the original verify checked (the second consumer of messageReferencesRequest, the verbMap dead-key confirmation, the 20-of-21 clean doc-deletion count). Now 82 entries. NOTE: this run's `priorClean` arg only carried a 14-entry subset (context-compaction artifact) rather than the full prior list — priorCleanDropped came back 0 regardless since verify only re-checks the wave's own changed files, so nothing was silently re-audited, but pass the FULL array next time.",
   "verifiedClean": [
     "o#178 masking cannot fail open for want of a Graph field: isEventPrivate (src/utils/displaySubject.ts:90-101) consults ONLY event.sensitivity and event.categories, and getEventEndInstant's .select now carries both. There is no third field to add.",
     "violation_kind 'owner_busy_collision' is emitted by scheduleRules rule 8 alone, and allowRelaxed makes rule 8 pass — so gh#165-d's new strict-reject stamp and the pre-existing relaxed-pass stamp are mutually exclusive per slot, and first-hit-wins is preserved by stampConflictingEvent's early return.",
@@ -118,14 +244,30 @@
     "PRE-WRAP FINAL VERIFY: runOutputGates' new live re-check cannot false-clear on an outage: getOwnerEventsForDecision throws, the inner catch sets confirmed=true.",
     "PRE-WRAP FINAL VERIFY: the PRESERVE cross-reuse claim for gh#175-b holds regardless of the isOnline-signal defect — predictor and planMeeting source priorStartIso/existingLocation/existingIsOnline from the same Graph fields, so a same-day-type candidate hits preserve_existing in both and emits nothing.",
     "PRE-WRAP FINAL VERIFY: gh#175-b's email gate is real: connectors/email/inbound.ts:308 sets channel:'email', the same field the pre-existing email slot-stash keys on.",
-    "PRE-WRAP FINAL VERIFY: `npx tsc --noEmit` is clean across the FULL accumulated tree (all 5 waves + the direct gh#175-b re-fix), exit 0."
+    "PRE-WRAP FINAL VERIFY: `npx tsc --noEmit` is clean across the FULL accumulated tree (all 5 waves + the direct gh#175-b re-fix), exit 0.",
+    "wf_386bf586-bf1 VERIFY: the ops.ts:90-93 email strip is live, not a dead branch: SkillContext.channel is assigned from input.channel (orchestrator/index.ts:416), connectors/email/inbound.ts:308 passes 'email', and create_meeting is in CHANNEL_TOOL_CLAMP.email (registry.ts:277-279) — so override_notice from createMeeting.ts:1753 genuinely reaches that delete.",
+    "wf_386bf586-bf1 VERIFY: deleting override_notice / _attendee_busy_note breaks no consumer: each has exactly one writer (createMeeting.ts:1753, moveMeeting.ts:1577) and zero readers anywhere in src or scripts, and no output gate reads either key.",
+    "wf_386bf586-bf1 VERIFY: move_meeting cannot execute on an email turn — absent from CHANNEL_TOOL_CLAMP.email and refused at both shipping (filterToolsByScope, registry.ts:310) and dispatch (registry.ts:675-681) — so the _attendee_busy_note half of the strip is an inert no-op, not a behaviour change on any channel.",
+    "wf_386bf586-bf1 VERIFY: deferredActionReplay is not a second path for an owner-facing aside to reach an email reply: it hardcodes channel:'slack' (deferredActionReplay.ts:79) and only inspects the returned object for error/success:false/ok:false sentinels (:114-124) — it never narrates the payload.",
+    "wf_386bf586-bf1 VERIFY: isSubjectStopword fails in the safe direction: over-filtering can only empty `tokens`, and with no token and no counterpart match messageReferencesRequest returns false (closeLoopOnOwnerHandled.ts:193), which blocks a close and leaves the row for tomorrow's brief.",
+    "wf_386bf586-bf1 VERIFY: the Hebrew proclitic set is declared exactly once (closeLoopOnOwnerHandled.ts:128) and read by both hasWholeWordMatch and isSubjectStopword, and SUBJECT_STOPWORDS has exactly one filter call site — no parallel list, no second spelling to drift.",
+    "wf_386bf586-bf1 VERIFY: the prefixed-stopword filter was reachable before the fix, so it is not a fix to a non-problem: a 6-char token like \"הפגישה\" passes the `lower.length >= 4` test at closeLoopOnOwnerHandled.ts:186 and was returned as a distinctive anchor.",
+    "wf_386bf586-bf1 VERIFY: the batched classifier's \"number 1 = most recent\" prompt and its fail-open are both correct: findOpenOutboundsForColleague orders `datetime(sent_at) DESC` (recentOutboundContext.ts:123) and `eligible` is built in iteration order, so candidates[0] is the newest open outbound.",
+    "wf_386bf586-bf1 VERIFY: the batched classifier preserves the old fail-open semantics exactly: a throw, a non-numeric reply and an out-of-range number all resolve to candidates[0], which is the row the old per-candidate loop matched first via `return true`.",
+    "wf_386bf586-bf1 VERIFY: no row of any TaskType o#192 removed can reach a dispatcher lookup: live DB shows reminder and follow_up only in cancelled/informed and research/briefing absent entirely, so getTasksDueNow's `status IN ('new','pending_colleague') AND due_at IS NOT NULL` (tasks/index.ts:124-125) matches none of them.",
+    "wf_386bf586-bf1 VERIFY: `npx tsc --noEmit -p tsconfig.json` is clean across the whole working tree with all three of this wave's edits on disk, exit 0.",
+    "wf_386bf586-bf1 VERIFY: this wave adds no new part to the system: no new file, table, column, tool, skill, spine, output-path guard or background job. The one signature change (classifyResponseVsNewTopic) is on a module-private function with a single caller, and the one new function (isSubjectStopword) is a private helper over an existing set.",
+    "BOUNCER (uncommitted-tree pass): owner_override_not_applied is not a third owner-facing aside reaching an email reply — clampedRelaxedNotice (bookingRequest.ts:526-532) requires isMpim===true AND senderRole==='colleague'; the email leg is always senderRole:'owner', never MPIM.",
+    "BOUNCER (uncommitted-tree pass): the Hebrew stopword over-filtering fails safe at BOTH consumers of messageReferencesRequest, not just the one this wave's own verify checked — refuse-close at closeLoopOnOwnerHandled.ts:269, and 'Not anchored' at tasks/skill.ts:1411. No path where an empty token list causes an incorrect close or bind.",
+    "BOUNCER (uncommitted-tree pass): manage_working_elsewhere (the verbMap key the cleaner removed) had zero references anywhere in src, scripts or config — genuinely dead, not a fix to a non-problem.",
+    "BOUNCER (uncommitted-tree pass): of the 21 .claude/*.md docs the cleaner deleted, only RESERVE_SLOT_PROJECT.md has live inbound citations from src/ comments (db/client.ts:527, db/slotHolds.ts:10, already flagged as its own row) — the other 20 are referenced nowhere in .claude, src, scripts or CLAUDE.md."
   ],
   "_inFlightClearedNote": "FULLY EMPTIED 2026-08-03: 7 of 8 cleared when wf_e2fd1caf-c84 returned; the 8th (173abc, direct slackmaster dispatch) cleared when it returned separately — verdict already-fixed, nothing to build.",
   "lastRun": {
-    "id": "wf_a964b44c-dc9",
+    "id": "wf_ad941677-935",
     "status": "complete",
-    "startedAt": "2026-08-03T05:00:00+0300",
-    "note": "WRAPPED AS v4.4.3. Final wave of a long night (6 GitHub tickets + log review, 5 build rounds): gh#175-b (day-move mode disclosure) was bounced twice by verify (wrong trigger point, then an inverted onsite/online signal) and DECLINED by the owner — reverted cleanly from the tree rather than shipped broken. Everything else built clean. Tickets closed/commented at this wrap per WRAP_UP.md step 12.",
+    "startedAt": "2026-08-03T13:10:00+0300",
+    "note": "Owner-ordered build, 2 named issues, both built clean. Privacy leak (matchmaker) fixed at root — subjectViewerFor now channel-aware. Security regex (gatekeeper) BOUNCED ONCE — attempt 1 was a patch (comment claiming parity), attempt 2 fixed root (deleted duplicate regex, imported canonical) and cleared. 2 new discoveries queued. gh#154 partial-progress noted (email viewer split landed; the 3 Slack clamp surfaces #154 actually asks about are untouched).",
     "notBuilt": []
   }
 }

@@ -60,10 +60,10 @@ projects (Person Store, search rebuild) — not ours.
    hint; `get_person_memory` was extended to return the ★notes + recent ↳history
    so the data loads on demand. Dynamic 8.9K → 2.9K. (`db/people.ts`, `assistant.ts`)
 2. **Tool scoping (Module G).** `ALWAYS_ON` slimmed 22 → 12. New scopes:
-   `coord` (rare multi-party — `coordinate_meeting` et al., barely fires),
    `calendar` (review/health), `people` (person-writes). Rare/expensive tools
    demoted off the every-turn surface. Gated by `behavior.intent_aware_tools`.
-   (`skills/registry.ts`, `core/social/classifyTurn.ts`)
+   (`skills/registry.ts`, `core/social/classifyTurn.ts`) (The `coord` scope
+   named here was retired with the coord subsystem in 3.5.0.)
 3. **Prose lazy-loading.** Coordination ROUTE-1 details, SUMMARIES, KNOWLEDGE
    BASE, EXTERNAL VENUES, and CALENDAR-HEALTH prose render only when their scope
    is active. `scopes` is plumbed through `buildSystemPromptParts` → each skill's

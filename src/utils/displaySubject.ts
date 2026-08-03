@@ -42,9 +42,24 @@
  * `'owner'` means the owner in a surface only he can read. Owner-in-MPIM is
  * deliberately NOT owner here — colleagues read that transcript — which is the
  * same posture as the `isOwnerDm` audit gate in the get_calendar handler.
+ *
+ * Email is the SAME kind of exception, for a different reason (v4.4.x). Every
+ * inbound email turn is stamped `senderRole:'owner'` (there's no other sender
+ * to authenticate against — see connectors/email/inbound.ts), but the reply
+ * Maelle drafts is text the owner forwards on VERBATIM to whoever is on the
+ * other end of that email chain — an external party, not the owner reading a
+ * private surface. `runOutputGates` already treats the email leg as the
+ * EXTERNAL frame for exactly this reason (see runEmailLegGates's doc comment:
+ * "the gate follows the eventual READER, not the addressee"). The viewer
+ * predicate has to agree, or a private meeting's real subject rides into the
+ * one payload (`over_optional` / `attendee_conflicts` in
+ * connectors/graph/findAvailableSlots.ts) that gets echoed straight into an
+ * externally-forwarded reply. So `channel === 'email'` forces `'other'` even
+ * though `senderRole` reads `'owner'`.
  */
 
 import type { UserProfile } from '../config/userProfile';
+import type { ChannelId } from '../skills/types';
 
 interface SubjectableEvent {
   subject?: string | null;
@@ -63,9 +78,11 @@ const PRIVATE_MASK = '[Private]';
  * only so `utils` doesn't take a dependency on SkillContext.
  */
 export function subjectViewerFor(
-  caller: { senderRole?: 'owner' | 'colleague'; isMpim?: boolean } | undefined,
+  caller: { senderRole?: 'owner' | 'colleague'; isMpim?: boolean; channel?: ChannelId } | undefined,
 ): SubjectViewer {
-  return caller?.senderRole === 'owner' && caller.isMpim !== true ? 'owner' : 'other';
+  return caller?.senderRole === 'owner' && caller.isMpim !== true && caller.channel !== 'email'
+    ? 'owner'
+    : 'other';
 }
 
 /**

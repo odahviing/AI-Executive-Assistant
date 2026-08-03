@@ -53,7 +53,7 @@ import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
-import { RAW_SLACK_ID_RE } from './textScrubber';
+import { RAW_SLACK_ID_RE, INTERNAL_WORK_ITEM_ID_RE } from './textScrubber';
 
 const anthropic = getAnthropicClient();
 
@@ -256,7 +256,7 @@ ${aud.refusalExamples}
 
 Same rule in Hebrew, French, etc. — never expose mechanism in any language.
 
-RAW IDENTIFIERS ARE MACHINE-VOICE — BUT A PROPER MENTION IS NOT. Slack renders "<@U…>" as a person's @name and "<#C…>" as a #channel: those are the CORRECT way to address someone or point at a channel. ALWAYS leave a "<@…>" or "<#…>" mention exactly as written — it is not a leak, and stripping it breaks the addressing (the reader stops getting tagged). What IS machine-voice is a RAW id shown as literal text: an unwrapped account id ("U0ARK5814PQ"), or an internal request/task id ("req_…", "task_…", "coord_…"). A human EA never reads a raw account or request id aloud — if ${assistantName} can't resolve who's meant she asks ("who should I loop in?"), she never reads out the id. Narrating a RAW id (NOT a rendered "<@…>"/"<#…>" mention) is ok=false.
+RAW IDENTIFIERS ARE MACHINE-VOICE — BUT A PROPER MENTION IS NOT. Slack renders "<@U…>" as a person's @name and "<#C…>" as a #channel: those are the CORRECT way to address someone or point at a channel. ALWAYS leave a "<@…>" or "<#…>" mention exactly as written — it is not a leak, and stripping it breaks the addressing (the reader stops getting tagged). What IS machine-voice is a RAW id shown as literal text: an unwrapped account id ("U0ARK5814PQ"), or an internal request/task id ("req_…", "task_…"). A human EA never reads a raw account or request id aloud — if ${assistantName} can't resolve who's meant she asks ("who should I loop in?"), she never reads out the id. Narrating a RAW id (NOT a rendered "<@…>"/"<#…>" mention) is ok=false.
 
 IMAGE / DOCUMENT HANDLING IS INTERNAL — never narrate its fidelity. ${assistantName} looked at whatever was shared; she does NOT tell the reader she "only has the gist", "doesn't have the actual image content", "just has a description", "can't see the image itself", or is "under a bit of doubt" about what reached her. That exposes her ingestion pipeline — a person who glanced at a screenshot doesn't say that. If the shared image/doc is genuinely unclear, she ASKS like a person; she never editorializes about the fidelity of what she received. This is ok=false (rewrite to a plain question).
 - ❌ "Under a bit of doubt here — I don't have the actual image content, just the gist"
@@ -418,13 +418,17 @@ function draftLooksLeaky(draft: string): boolean {
     || /\bactual image content\b|\b(?:just|only) the gist\b|\bdon'?t have the (?:actual )?image\b/i.test(draft)
     // Proper "<@U…>" / "<#C…>" mentions are NOT leaks — Slack renders them as a
     // name/channel and they must survive (rewriteDroppedAFact enforces it too).
-    // Only a RAW unwrapped account id or a structured req_/task_/coord_ id is a
-    // tell. v4.1.x (G2): the account-id half is textScrubber's RAW_SLACK_ID_RE —
-    // ONE definition of the token, imported, not re-typed here. Three components
-    // each keeping their own copy is what let securityGate start flagging the very
-    // mentions this gate protects (2026-07-21).
+    // Only a RAW unwrapped account id or a structured req_/task_/out_/ci_ id is a
+    // tell. v4.1.x (G2): both halves are textScrubber's own exports —
+    // RAW_SLACK_ID_RE and INTERNAL_WORK_ITEM_ID_RE — imported, not re-typed here.
+    // Three components each keeping their own copy is what let securityGate start
+    // flagging the very mentions this gate protects (2026-07-21), and is exactly
+    // how this fallback's own copy silently drifted narrower than the canonical
+    // (dropped `coord_` without noticing, since `coord_` was removed in v3.4.0 —
+    // db/client.ts:171-174 — and nothing mints one anymore). There is no second
+    // copy left here to drift.
     || RAW_SLACK_ID_RE.test(draft)
-    || /\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i.test(draft);
+    || INTERNAL_WORK_ITEM_ID_RE.test(draft);
 }
 
 function safeFallback(draft: string, audience: HumanGateAudience, reason: string): HumanGateResult {

@@ -1,11 +1,23 @@
 # WhatsApp transport — build spec
 
+> **⚠ OUTDATED (flagged 2026-08-03, spec otherwise left as-is — the project
+> itself is still paused).** This spec's plan for Steps 3-6 leans on two
+> mechanisms that no longer exist in the codebase: **`coordGuard`** and the
+> **`coordinate_meeting`** tool were both removed in **v3.5.0** when the
+> multi-party coordination subsystem was deleted (confirmed by grep: zero hits
+> for either in `src/` today). The ~6 references below (the colleague-inbound
+> trust gate, S2/S3 scenarios, the build-order step-5 note) all assume they
+> still exist and will need a different mechanism when this resumes — the
+> current equivalents are the output-gate stack (`utils/guards/runOutputGates.ts`)
+> for the security-gate half and the requests spine / `planMeeting` pipeline
+> for the coordination half. Everything else here (routes, phases, identity
+> design, invariants) has not been re-verified against the current tree.
+>
 > Status: ⏸ PAUSED (2026-06-08) — Steps 1-2 built. **BLOCKER: buy a dedicated
 > WhatsApp phone number for Maelle.** Route is DECIDED: stay on whatsapp-web.js
 > (owner mostly replies → 24h-window of official API barely applies; local-now
 > hosting favors the port-less unofficial lib; later official migration only
 > swaps the thin transport layer). Resume Steps 3-6 once the number exists.
-> Shape mirrors `.claude/PERSON_STORE_PROJECT.md` / `.claude/WORKING_ELSEWHERE_MODE.md`.
 
 ### Build status (2026-06-08)
 

@@ -2,6 +2,38 @@
 
 ---
 
+## 4.4.4 — the bouncer starts asking "did it actually fix it", and a real privacy leak closes
+
+A fresh post-wrap bug-loop run plus a full hygiene sweep, then two owner-directed fixes once the bouncer's new outcome-tracing questions surfaced them. Alongside this: another session's larger framework upgrade to the bouncer and the bug-loop engine, bundled into this same patch per standing order.
+
+**The bouncer now asks whether a fix actually reached the reported symptom, and whether two lanes touched one bug the same way.** Two new questions were added to its charter: trace every fix back from the symptom it claims to close (not just review the diff), and when a bug spans two lanes, walk the combined change as one path instead of trusting each lane's own trace. Retroactively applied to the previous release, this caught a fix that had shipped incomplete (already closed by this release's own work) and a stale line citation, and confirmed — checked twice, found zero times — that no two lanes have shipped conflicting fixes for one bug. The bug-loop engine gained a matching `Bounce` phase that sends an overturned fix back to its lane once, automatically, and a joint-fix trace for multi-lane rows.
+
+**A real privacy leak in email-driven scheduling is fixed at its root.** On an email-driven slot search, Maelle could write a private meeting's real subject into the reply the owner forwards verbatim to a client — because the internal "who may see this" predicate never accounted for the email channel being an external-facing surface. Fixed by teaching that predicate about channel, not by chasing each downstream field that carried the leak.
+
+### Fixed (high-impact)
+- Owner-facing scheduling asides (attendee-busy notes, override notices) could reach an email reply the owner forwards to a client — now scoped off the email channel at its one chokepoint.
+- The email-driven slot-search privacy leak above (`subjectViewerFor` is now channel-aware).
+- A duplicated, silently-drifted copy of the internal work-item id pattern let `humanGate`'s leak check disagree with the canonical security regex — collapsed to one definition.
+- Hebrew approval-subject matching: prefixed forms (with the definite article) now filter as stopwords, matching how whole-word matching already handled them.
+- A colleague with multiple open outbound threads was classified with one Sonnet call per open thread instead of one call total — restored to the cheaper shape while keeping the correctness fix that caused the regression.
+
+### Fixed (small)
+- A dead tool-narration key removed from the orchestrator's fallback verb map.
+- A dead config key (`connections.default_routing`) removed — nothing in the code has ever read it.
+- 21 fully-superseded internal handoff documents deleted; 8 more corrected where they cited renamed or moved code.
+- Two core architecture reference documents, badly stale since roughly v3.0.7, rewritten against the current tree.
+
+### Framework (bundled from a concurrent session)
+- The bouncer's charter gained the outcome-trace and joint-fix-trace questions described above, plus a documented standard for judging whether an agent is strong enough at its position rather than merely justified in existing.
+- The bug-loop engine (`bugger.js`) gained the matching `Bounce` phase (one automatic retry per overturned fix, then it goes to the owner) and joint-trace bookkeeping, plus corresponding checks in the report-arithmetic script.
+- Instructor and slackmaster charters gained rules on single-language replies per message and on thread continuity applying to every path that posts into a thread, including automated ones (approval replays, reminders) — two live gaps in that second rule were named for a future pass, not fixed here.
+
+### Not changed
+- A thread-context investigation opened by tonight's approval-binding complaints is on the owner's desk, not built: giving Maelle situational awareness of a conversation thread does not, by itself, fix the underlying issue, because the deterministic approval-close check deliberately ignores conversational inference — by design, following two earlier false-close incidents. A structural (not inferential) fix is proposed and awaiting sign-off.
+- Three low-priority findings from tonight's verify passes, queued for a future run rather than built now: a broader version of the email-privacy leak on non-private meeting subjects (needs a design call), a masked-subject placeholder that can leak as literal text, and a handful of small dead-code/stale-citation items surfaced by the hygiene sweep.
+
+---
+
 ## 4.4.3 — a night of bug fixes across six tickets, and the loop learns to bounce once and stop
 
 One long bug wave: the six open GitHub `Bug` tickets plus a log review since the last watermark, triaged and built in five rounds with a combined verify after each. Bundled alongside it are another session's framework changes to the bug loop itself.

@@ -1,266 +1,205 @@
 ---
 name: Maelle Architecture
-description: Four-layer model, skills system, orchestrator loop, task pipeline, state machines, security layers
+description: Deep architecture reference — directory layout, orchestrator loop, requests spine, output gates, transports, DB schema
 type: project
 ---
 
-Architecture reference for Maelle **v3.0.7**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
+Deep architecture reference for Maelle, rewritten 2026-08-03 against the code on disk (current shipped version: the `version` field in `package.json`; `CHANGELOG.md` is the canonical version-by-version history, not duplicated here). `src/` is 199 files, ~73.5k lines (measured directly, not carried over).
 
-**v3.3.10 — recovery decoupled from startup.** On-restart catch-up no longer depends on the `assistant_threads` registry (which could hold a stale thread_ts → missed a colleague's panel backlog): `discoverThreadParents` reads each DM's recent Slack history (a panel parent is a top-level msg) and checks its replies — registry-free. Recovery is scoped to a persisted **socket-alive watermark** (`data/socket-watermark.json`, stamped ONLY on real inbound + socket-connect, never the bare 5-min timer — so a dead-socket zombie's watermark freezes and its gap is fully recovered). NO watermark (first run) → `oldest=now` → replays nothing pre-existing ("what's gone is gone" — never blast the backlog). A **socket watchdog** (`startSocketWatchdog`, app.ts) polls `client.connected`: reconnect-after-gap → one gap-scoped `catchUpMissedMessages`; dead socket >3min with API reachable → `exit(1)` → PM2 restart → startup catch-up (auth.test gate avoids restart-storm in a Slack outage; fail-safe disables the watchdog if Bolt's client isn't reachable rather than false-exit). The replay tail (inboundReplayRegistry, markProcessed dedup, ≤1 reply/surface) is unchanged. **Language inbound/outbound split:** stored `language_preference` removed from the colleague-path (inbound) social block and surfaced on the owner-path contact line as `language_pref` (outbound only); `detectMessageLanguage` re-stamps Latin inbound too. Inbound mirrors the message; outbound uses the pref.
+**Where this sits relative to the other two references:** `.claude/SESSION_STARTER.md` is the day-to-day orientation — the agent framework, the lane roster, open bugs, operational rules. `.claude/ARCHITECTURE_MAP.md` is a one-page diagram-level map with a mermaid flowchart. This file is the deep layer underneath both: real file paths, real function/table names, all grep/Read-verified against the current tree rather than assumed from an earlier version. It does not repeat any lane charter's rules (`.claude/agents/*.md` are authoritative for those) — it describes what the code does, not which agent owns fixing it.
 
-**v3.3.8 — conversation-state invariants + coord demoted.** (1) **Colleagues cannot trigger coords** — `coordinate_meeting` is out of COLLEAGUE_ALLOWED_TOOLS (data: 0 booked since mid-May; direct path did all real bookings). Direct path = THE colleague booking journey for any attendee count. Future: external transports (WhatsApp/email) re-enable coords for THEIR requesters — gate is calendar-visibility, not role (note in registry.ts). (2) **Offers are state**: colleague-path `find_available_slots` results are stashed per conversation (`utils/offeredSlotsStash.ts`, keyed like inboundQueue, 2h TTL, cleared on booking) and injected as binding instants — a pick ("Tuesday 20:30") binds to the offered ISO, never re-derives the date. (3) **Travel TZ is per-day**: `getTravelRecord` (raw, future trips included) + `travelWindow` on availability entries + `attendeeTzForDay` — the work-hours clip and per-slot display resolve the attendee's TZ for the SEARCHED day, not for today (`getCurrentTravel` keeps now-semantics for narration). (4) Content-dedup TTL is 5s (mirror guard only — 90s ate repeated legitimate "yes" answers). (5) Coord DMs to a colleague-initiated requester thread into their origin conversation; recorded `dm_thread_ts` = origin root.
+## Directory layout — verify before assuming "four layers"
 
-**v3.3.7 — colleague-availability invariants.** (1) **One validator**: any verdict about a NAMED time (availabilityPreCheck) runs `scheduleRules.checkSlot` — the same function the booking path runs — against the slot's full week; verdict and booking cannot disagree. (2) **Busy subtraction = carve, never exact-match**: `carveRangeFromBusy` in `connectors/graph/calendar.ts` is THE mechanism for excluding floating blocks + moving events from the busy pool (Graph free/busy is MERGED — exact-bounds matching silently fails on packed days). (3) **Colleague `get_calendar` is scoped to shared meetings** — colleague-path Sonnet physically cannot see (or eyeball availability from) the owner's full day; availability comes only from the slot tools. (4) Soft-rule rejections (`focus_time_floor`/`floating_block_overlap`) on the colleague path → "day too loaded" + insist→`create_approval(policy_exception)`, never flat refusal. (5) `getFreeBusy` surfaces per-address resolution errors (`diagnostics.unresolved`) — a nonexistent internal mailbox must never read as free. (6) `Connection.resolveDirectChannelId` (optional method) + `getRecentChannelMessages` give `recall_interactions` a verbatim `recent_exchange`; owner-scoped (non-owner callers only see their own). (7) Claim-checker own-the-miss rewriter (Sonnet) verifies before rewriting — `UNCHANGED` veto keeps the original draft on classifier false-positives.
+The repo is NOT literally four top-level directories. `src/` has twelve: `config/ connections/ connectors/ core/ db/ llm/ memory/ skills/ tasks/ utils/ vision/ voice/`, plus `index.ts`. The "four-layer model" earlier docs described is a MENTAL GROUPING that still holds if you sort those twelve into it:
 
-**v3.2.5 — proactive social is ONE engine, ONE surface.** The cold-open hourly tick (`social_outreach_tick` dispatcher) was DELETED — Maelle no longer DMs colleagues out of the blue. Proactive social now happens ONLY as an **in-conversation coda** riding a live turn: the picker (`stateMachine.directiveForProactiveSlot`, 3-active-category progression) is the single topic-decision engine. On a **work/scheduling** turn the coda fires at the **end of the process** (work resolved, or handed off to coord/approval/outreach — a lull), and is suppressed mid-exchange (awaiting the interlocutor's decision, or a tool failed) via the `turnLeftWorkPending` guard in the orchestrator tool loop (option A, owner direction). Safety net: the `claimChecker` coda-validator drops invented-fact / off-base codas. Vestigial after this: `people_memory.proactive_pending` (set/read nowhere now). Deferred: coda RANK scoring is still asymmetric (only −1, never +1) + work-vs-social mis-classification at the capture pass — both flagged in CHANGELOG 3.2.5.
+- **Core (always-on engine):** `core/` (orchestrator, requests spine, background tick, social state machine, thread actions), `tasks/` (the task ledger + dispatchers + routines), `db/` (schema + per-table helpers), `memory/` (person-memory capture + booking record), `llm/` (model/client selection).
+- **Skills (togglable capability modules):** `skills/` — one class per capability, loaded via YAML toggle.
+- **Connections + connectors (transport):** `connections/` (outbound `Connection` interface + registry + per-transport senders), `connectors/` (inbound handlers + non-messaging adapters: Slack Bolt app, email poll, Microsoft Graph).
+- **Utils (cross-cutting):** `utils/` (output gates, scheduling rules, formatters, rate limiting), plus the two I/O adapters `voice/` and `vision/` which don't fit any of the other three.
 
-**v3.0.7 — slot-finder rule consistency + close-loop via requests spine.** The slot finder's per-slot floating-block feasibility check now uses the SAME longest-contiguous-free logic as `scheduleRules.checkSlot` (the rule engine used by planMeeting). Pre-fix the slot finder used only the quarter-aligned check from `findAlignedSlotForBlock` — more lenient than the rule engine, leading to slot finder offering candidates that planMeeting then escalated. Both layers now agree at every decision point. Plus: `closeMeetingArtifacts` cascade now fires a close-loop DM to the colleague-requester (when `requester_slack_id` is set and ≠ owner) BEFORE closing the matched request, and closes positive bookings as `state='resolved'` (was `cancelled`). Subject-match fallback broadened from `subkind='in_flight_action'` only to any open colleague-initiated request — catches the "owner amends approval, books new slot via direct create_meeting" path that bypassed the resolver's notify hook.
-
-Architecture reference for Maelle **v3.0.5**. Living document of the four-layer model + invariants that survive across patches. Version-specific changelog is in `CHANGELOG.md`; this file describes the STRUCTURE.
-
-**v3.0.5 — three structural additions worth knowing here.**
-
-(1) **Approval IDs no longer carry `#` prefix in the prompt.** `core/orchestrator/systemPrompt.ts:185/225/227` render bare `req_xxxx`. `tasks/skill.ts:resolve_approval` strips a leading `#` defensively in case the prompt cache or a future caller prepends it. `core/requests/resolver.ts` logs `warn` on `getRequest` not-found early-return (previously silent — broke daily but only the v2.4.2 owner-said-done scanner cleaned up). Plus `APPROVAL_BOUND_TOOLS` in `core/orchestrator/index.ts:798` widened to include `message_colleague` so owner-says-"tell him"-in-approval-thread actually pings.
-
-(2) **Booking auto-writes attendee memory** (`src/memory/recordBooking.ts` — new). Fire-and-forget after `createMeeting` success in `skills/meetings/ops.ts` (direct path) and `skills/meetings/coord/booking.ts` (coord path). For each non-owner internal attendee with a `people_memory` row, appends `- [YYYY-MM-DD] Booked "<subject>" at <location> for <when>` to "What we've discussed". Externals without a row are skipped (future improvement: external-contacts store). The existing `capturePass` only runs on colleague DM threads; this hook covers owner-DM-initiated bookings that capturePass misses entirely.
-
-(3) **`manage_calendar_issue(approve)` accepts preemptive `(date, block_name)` path** (`skills/calendarHealth.ts`). When owner waives a floating-block gap in conversation ("no lunch tomorrow — Natan meeting covers it"), Maelle can dismiss WITHOUT first running `check_calendar_health` to materialize the row. Handler synthesizes the same event_id the detector would mint (`${idx+1}-${MMDDYYYY}-${HHMM}` per `calendarHealth.ts:1339-1347`) and inserts a terminal row directly. Tomorrow's detection sees the suppressor via `upsertCluster.action='suppressed'`. Closes the "endless ask" pattern on conversation-noticed gaps.
-
-**v3.0.4 — identity-spoof guard folded into `securityGate.ts`.** New `detectIdentitySpoof()` runs BEFORE the leak scan on every colleague-path reply. Pure regex+comparison (no LLM judge — owner direction: "prompt vs prompt is just LLM fight"). Three signals on last 5 inbound user messages: identity-denial (`"I'm not <verifiedFirst>"`), identity-flip (`"I'm <Other>"` / `"this is <Other>"` / `"my name is <Other>"` with a stop-list), owner-domain email mismatch (any `@<ownerDomain>` mention that's neither the verified sender's nor the owner's). On spoof: short-circuit with canned refusal *"Your Slack account shows you as `<firstName>`. If you need something for someone else, have them message me directly."* — skips the rewriter entirely. Verified sender email sourced from `people_memory` (written at message-arrival in `app.ts`). Closes the Ysrael→Yael leak (2026-05-24 night-test where Ysrael got Maelle to list Idan's week of meetings by claiming to be Yael). Folded into security gate, NOT a new gate — gate roster stays at seven.
-
-**Message flow:** Slack → `connectors/slack/app.ts` (inbound) → `inboundQueue.enqueueMessage` (debounce + mutex + abort-if-safe) → `runOrchestrator()` wrapped in `withTurnCache` (AsyncLocalStorage) → Claude tool loop → skills execute (via `Connection` for any outbound messaging) → `postReply.ts` (normalize → claim-check → date-verify with deterministic correction → humanGate → securityGate → send) → reply.
-
-**Decision functions (single source of truth per concern):**
-- **`planMeeting`** (`skills/meetings/planMeeting.ts`) — every scheduling intent (book / move / cancel / find) flows through one function. Six plan actions: `book`, `find_slots`, `confirm_override`, `escalate_approval`, `decline_and_relay`, `refuse_not_owners`, `ask_location_mode`, `room_unavailable_large`. v2.8.2.
-- **`resolveLocation`** (`utils/resolveLocation.ts`) — deterministic location decision tree (day-type + party shape + owner-explicit hints). Verdicts: `resolved`, `preserve_existing`, `ask_owner_online_or_physical`, `skip_stamp`. Categories no longer drive location. v2.8.2 rewrite.
-- **`checkSlot`** (`utils/scheduleRules.ts`) — single rule engine for the slot finder + colleague-path narrow checks.
-- **`requests` spine** (`db/requests.ts`) — work-item layer for every async owner-facing thing (approvals, outreach, reminders, follow-ups, coord). Single closure API `closeRequest`; lifecycle timers on the row.
-
-**Key cross-cutting state primitives:**
-- **Per-thread inbound queue** (`connectors/slack/inboundQueue.ts`) — 1.5s debounce, per-thread mutex, abort-if-safe before any write tool fires. `WRITE_TOOLS` set defines what counts as a write.
-- **Per-turn cache** (`utils/turnCache.ts`) — AsyncLocalStorage scope. `memoize(key, fetch)` dedups concurrent same-turn reads. `getCalendarEvents` opts in.
-- **Action tape** (`summarizeToolCall` in `orchestrator/index.ts`) — outcome-aware mutation summaries feed the claim-checker and the verbMap fallback.
+Treat this as a lens, not a literal directory contract — `config/` (profile loader) doesn't fit any of the four cleanly either, and that's fine.
 
 ---
 
-## Runtime + deploy pipeline (v3.3.9)
+## The orchestrator turn loop
 
-**Runs under PM2 on the GCP VM `maelle-agent-vm` (europe-west4-b), NOT the laptop** (cutover 2026-07-31). Two processes in `ecosystem.config.js`:
+`src/core/orchestrator/index.ts` — `runOrchestrator()` (line 190) wraps everything in a per-turn `AsyncLocalStorage` cache (`withTurnCache`, `utils/turnCache.ts`) and delegates to `runOrchestratorImpl` (line 202), which:
 
-- `maelle` — main bot, `dist/index.js`, `exec_mode: 'fork'` pinned (single stateful process: one Slack socket, in-memory dedup/queues, one SQLite — never cluster). Startup logs a build stamp (version + git SHA); read it via `scripts/vm-logs.ps1` to confirm which build is live.
-- `maelle-deploy-watcher` — polls origin/master every 120s and AUTO-DEPLOYS: `git pull --ff-only` → typecheck gate → build → `pm2 restart maelle`. A `git push` to master goes live in ~2 min. Its `npm ci` skips the puppeteer Chromium download (WhatsApp off; the download fails on the small VM boot disk).
+1. Calls `buildTurnContext(input)` (`core/orchestrator/buildTurnContext.ts:17`) to assemble the system prompt (`systemPrompt.ts`), the scope-filtered tool list, the model, and the social directive.
+2. Runs a `while (iteration < MAX_ITERATIONS)` loop (`MAX_ITERATIONS = 10`, line 287) calling Claude (`callClaude`, `turnHelpers.ts`) with `thinking: { type: 'adaptive' }, output_config: { effort: 'high' }` (line 325-326) — the Sonnet-5 "adaptive thinking" retry that restored tool-reaching after the thinking-disabled regression (see `llm/models.ts` below).
+3. For each `tool_use` block, dispatches through `executeSkillTool` (`skills/registry.ts`), with several deterministic, code-level guards sitting IN the loop, not in a gate afterward:
+   - **Same-turn idempotency**: `message_colleague` twice to the same colleague (line 458-478) and `delete_meeting` twice on the same event id (line 511-532) are both short-circuited with an explicit `_note` so the model narrates honestly instead of claiming a second action.
+   - **Reverse-order double-notify guard** (v3.4.7): if `resolve_approval` already relayed an outcome to a requester this turn, a later `message_colleague` to that same person is suppressed (`relayedRequestersThisTurn`, line 479-503).
+   - **Colleague rate limiting** (line 535+): `utils/rateLimit.ts` checks `colleague_any_tool` per `userId:threadTs`; over budget → the tool call is deflected with a synthetic "let me check with the owner" result, never a throw.
+   - **Universal tool-call cache** (line 649-688): `utils/toolCallCache.ts` — a write within 60s or a read within 5s of an identical call (same owner+thread+tool+args) returns the cached result instead of re-firing.
+   - **`deferred_action_hint` capture** (line 915-931): when a meeting tool returns a `rule_violation`, the hint is stashed and auto-attached to the next `create_approval(kind=policy_exception)` payload this turn — the "redirect-token" pattern that lets the resolver replay the exact original booking call on owner approve.
+   - **Mutation tape** (`mutationActions`, line 900-913) and **coda-pending flag** (`turnLeftWorkPending`, line 955-986) both feed downstream consumers: the claim-checker's retry hint and the end-of-turn social coda's "is this turn still mid-exchange" check, respectively.
+   - **`maybeOpenInFlightMeetingRequest`** (line 995-1011, `core/requests/maybeOpenInFlightMeetingRequest.ts`) — opens a request-spine row when owner-initiated meeting work spills past the current turn (a rule violation, an unresolved pick), purely an orchestrator-level tracking hook, no new tool.
+4. No LLM "recovery pass" exists any more (deleted v2.8.1) — an empty `finalReply` after real tool activity falls through to a deterministic verb-mapped confirmation (`toolCallSummaries`), never a second speculative Sonnet call.
 
-App + node_modules + SQLite + config live on a 20G persistent disk at `/mnt/disks/maelle` (repo at `/mnt/disks/maelle/app`; `data/` + `config/users` symlinked there). Reboot-persistent via `pm2 startup systemd`. Deploys are AUTOMATIC (push) — **NEVER `npm run deploy` / restart a local Maelle** (a second Slack socket = `too_many_connections`). SSH: `gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap`.
-
-**Auto-triage + auto-build (GitHub Actions, v1.8.2 propose-only flow):**
-
-1. **Issue opens with `Bug` label** (or added later) → `.github/workflows/auto-triage-bug.yml` fires → `scripts/auto-triage-bug.mjs`:
-   - Reads issue title + body + ALL comments (so Revise re-reads owner's feedback)
-   - Downloads every GitHub user-attachments image URL using `GH_TOKEN` to `/tmp/triage-<issue>/img-N.<ext>` — agent uses Read tool on them
-   - Invokes Sonnet with NO pre-injected repo context (anti-recency-bias)
-   - Five anti-recency guardrails: no SESSION_STARTER pre-injection, no pattern-matching recent changelog, root cause must name file+line+function+mechanism, single-keyword causes require a second signal, post-verdict sanity-check pass
-   - Outputs strict JSON. Never edits files. NOT_A_BUG → auto-close. BUG → posts plan as comment + labels `Proposed`.
-2. **Owner labels `Revise` + comments** → triage re-fires with full comment thread.
-3. **Owner labels `Approved`** → `auto-build.yml` fires → `scripts/auto-build.mjs`: collects plan + follow-ups, invokes Sonnet to implement (`acceptEdits`, Read/Grep/Glob/Edit/Write/Bash). Safety floors: typecheck passes, 200-line cap, forbidden-path allowlist, JSON output. Violation → revert + post reason + `Failed`. Success → commit under `Maelle Auto-Triage`, push, close with fixed-in-SHA comment.
-
-**Labels:** `Proposed` / `Approved` / `Revise` / `Failed` / `Triaged`.
+`OrchestratorInput` (line 13-121) and `OrchestratorOutput` (line 128-183) are the two shapes every caller (Slack, email, the requests-spine research runner, the background brief) constructs and consumes — this is the one entry point into "have Maelle think about something," system-generated calls included (`interactive: false` suppresses the social coda for a one-way report).
 
 ---
 
-## Layer 1 — Core (always on)
+## Multi-tenancy
 
-`CORE_MODULES` in `skills/registry.ts`: `[AssistantSkill, OutreachCoreSkill, TasksSkill, CronsSkill]`. Note: OutreachCoreSkill's file moved to `src/skills/outreach.ts` in v1.8.11 but it's still in CORE_MODULES (code layout convenience; not togglable).
+One deployment can host several executives. Each tenant is a YAML file at `config/users/<name>.yaml`, validated against `UserProfileSchema` in `src/config/userProfile.ts:79` (zod). Required fields: `user.name` (a real first+last name, regex-enforced), `user.email`, `user.timezone`, `user.slack_user_id` (`^U[A-Z0-9]+$`), and `assistant.slack.{bot_token,app_token,signing_secret}` — one Slack **app** per assistant identity, not one app serving several bots. Everything else (`schedule`, `meetings`, `categories`, `behavior`, `skills`, `channels`, `advanced`) has a default, so a ~15-line profile boots.
 
-### Skill-interface core modules
-- `src/core/assistant.ts` — MemorySkill (class `AssistantSkill`, scope is memory-only). Tools: `manage_preference` (set/forget/recall, v2.8.3 merged), `recall_interactions`, `update_person_profile`, `update_person_memory`, `get_person_memory`, `log_interaction`, `confirm_gender`. DB: `user_preferences`, `people_memory`. (note_about_person / note_about_self live on SocialSkill.)
-- `src/core/assistantSelf.ts` — seed + format helpers for Maelle's own people_memory row, keyed on synthetic `SELF:<ownerSlackId>`. Renders the ABOUT YOU block into owner and colleague prompts.
-- `src/core/ownerSelf.ts` — owner pre-seed in people_memory for self-tracking.
-- `src/skills/outreach.ts` — OutreachCoreSkill (moved from `core/` in 1.8.11, still in CORE_MODULES). Tools: message_colleague, find_slack_channel. Sends synchronously via Connection. DB: `outreach_jobs` + task side-effects (outreach_send / outreach_expiry).
-- `src/tasks/skill.ts` — TasksSkill. Tools: `create_task`, `update_task` (edit/cancel, v2.8.3 merged), `get_my_tasks`, `get_briefing`, `send_briefing_now`, `create_approval`, `resolve_approval`, `list_pending_approvals`. DB: `tasks`, `approvals`. (`create_task` stays separate from update because claim-checker RULE 3 references it by name as proof a promise was recorded.) Legacy `pending_requests` / `approval_queue` retired; requests spine handles the same job.
-- `src/tasks/crons.ts` — CronsSkill (Routines). Tool: `manage_routine` (create/update/delete/list, v2.8.3 merged). DB: `routines`.
-
-### Engine infra (non-Skill)
-- `src/tasks/runner.ts` — 68-line loop: pick due tasks, look up dispatcher in `dispatchers/index.ts`, call it. Each TaskType has its own dispatcher file (reminder, followUp, research, routine, outreachSend, outreachExpiry, coordNudge, coordAbandon, approvalExpiry, calendarFix, summary_action_followup).
-- `src/tasks/routineMaterializer.ts` — converts routine firings → tasks; UNIQUE(routine_id, due_at).
-- `src/tasks/lateness.ts` — cadence-based skip thresholds.
-- `src/core/orchestrator/index.ts` — Claude tool loop, system prompt assembly, rate limiting + coord guard for colleague path. Per-turn idempotency for delete_meeting.
-- `src/core/orchestrator/systemPrompt.ts` — date/time, prefs, people memory, week boundaries, persona rules, pending approvals section (v1.5), HONESTY RULES including RULE 2b (v2.0 — prior replies are commitments).
-- `src/core/background.ts` — single 5-min timer: `materializeRoutineTasks` → `runDueTasks`. Startup: ensureBriefingCron, catchUpMissedMessages (v2.0 marks ts in shared dedup before replying), orphan-approval backfill.
-- `src/core/approvals/resolver.ts` — single entry for owner decisions. Freshness re-check via `getFreeBusy` before booking. Calls registered coord booking handler (v2.0) — does not import from skills.
-- `src/core/approvals/orphanBackfill.ts` — one-time startup sweep for pre-v1.5 stuck `waiting_owner` coords.
-- `src/core/approvals/coordBookingHandler.ts` (v2.0) — registry (`registerCoordBookingHandler` / `getCoordBookingHandler`). MeetingsSkill registers on load; resolver calls through. Inverts the core→skill dependency that would otherwise break the boundary.
-
-### Persona
-Not a module — lives as data in `config/users/<name>.yaml` and assembled inline by `buildSystemPrompt()`.
+- `user.whatsapp_phone` (line 94) is optional and its presence is the on/off switch for the WhatsApp transport for that profile (see Transport layer below).
+- `channels.email` (line 486+) carries the mailbox config plus `owner_aliases` (line 511) — additional addresses that count as "the owner" for the email sender gate.
+- The **connection registry** (`connections/registry.ts`) is itself a `Map<profileId, Map<ConnectionId, Connection>>` (line 16) — every transport is registered per-profile at startup, so profile A having Slack+email and profile B being Slack-only can never collide.
+- `skills/registry.ts`'s `getActiveSkills(profile)` reads `profile.skills` per call — no shared/global skill state between tenants.
+- Per-tenant learned preferences live as `.md` files under `config/users/<name>_prefs/`, `<name>_kb/`, `<name>_news_seen.md` — free text the owner teaches, not code.
 
 ---
 
-## Layer 2 — Skills (togglable)
+## The requests spine — the async work-item state machine
 
-Loaded via `skills/registry.ts` based on YAML `skills: { meetings: true, ... }`. Legacy YAML keys auto-migrate: `scheduling`/`coordination` → `meetings`, `meeting_summaries` → `summary`, `knowledge_base` → `knowledge`, `calendar_health` → `calendar`.
+`src/core/requests/types.ts` defines the state machine; `src/db/requests.ts` is the CRUD layer; `src/core/requests/{closeRequest,resolver,runner,reconcile,deferredActionReplay,maybeOpenInFlightMeetingRequest}.ts` are the engine. One `requests` table (schema at `db/client.ts:738-788`) owns the lifecycle of every multi-step unit of work: approvals, outreach, reminders, follow-ups, research, proactive social outreach.
 
-- `src/skills/meetings.ts` — MeetingsSkill. Owns every calendar-touching tool: `get_calendar`, `analyze_calendar`, `get_free_busy`, `find_available_slots`, `create_meeting`, `move_meeting`, `update_meeting`, `delete_meeting`, `coordinate_meeting`, `get_active_coordinations`, `cancel_coordination`, `finalize_coord_meeting`, `check_join_availability`. Calendar mutations go through `planMeeting` (v2.8.2 single decision function). Delegates direct-op handlers to `skills/meetings/ops.ts`. `getSystemPromptSection` owns MEETINGS HONESTY RULES, DELETE-MEETING PROTOCOL, quarter-hour alignment, LOCATION rules, the deterministic location tree narration.
-- `src/skills/meetings/ops.ts` (v1.8.14 relocation of `_meetingsOps.ts`) — direct calendar-op case handlers + `processCalendarEvents` + `analyzeCalendar`. Class `SchedulingSkill`, not registered, used via MeetingsSkill delegation. **create_meeting is idempotent across turns (v2.0):** pre-checks Graph for existing event at same subject+start (±2 min) and returns that id instead of creating a duplicate.
-- `src/skills/meetings/coord/` (v2.0, moved from `connectors/slack/coord*`) — coord state machine, fully transport-agnostic:
-  - `utils.ts` — determineSlotLocation, interpretReplyWithAI, isCoordReplyByContext (pure, zero transport)
-  - `approval.ts` — emitWaitingOwnerApproval (resolves Slack via `getConnection` registry)
-  - `booking.ts` — bookCoordination + forceBookCoordinationByOwner (registers handler with core approvals registry at module load)
-  - `state.ts` — initiateCoordination + sendCoordDM + resolveCoordination + startPingPong + tryNextPingPongSlot + startRenegotiation + triggerRoundTwo
-  - `reply.ts` — handleCoordReply + handlePreferenceReply + parseTimePreference
-- `src/skills/calendarHealth.ts` — CalendarHealthSkill. Tools: `check_calendar_health`, `book_floating_block` (renamed from `book_lunch`, v2.3.7), `set_event_category`, `manage_calendar_issue` (list/update, v2.8.3 merged). Schedules `calendar_fix` tasks.
-- `src/skills/general.ts` — SearchSkill. Tools: web_search, web_extract (Tavily).
-- `src/skills/research.ts` — ResearchSkill. Owner-only.
-- `src/skills/knowledge.ts` — KnowledgeBaseSkill. Tool: `manage_knowledge` (get/ingest, v2.8.3 merged) + `classify_document`. Auto-discovers `.md` files in `config/users/<owner_first_name>_kb/`. Catalog injected via prompt.
-- `src/skills/venue.ts` (v2.8.3) — VenueSkill. Tools: `find_venue` (name → resolve via Tavily, OR area+type → 3 candidates), `rank_venue` (1=hidden, 2=default, 3=favorite). Auto-saves non-company locations on book via hook in `meetings/ops.ts`. DB: `venues`.
-- `src/skills/summary.ts` — SummarySkill. Tools: classify_summary_feedback, learn_summary_style, update_summary_draft, share_summary, list_speaker_unknowns. Plus `ingestTranscriptUpload` helper from Slack `file_share`. 3-stage state machine (Drafting → Iterating → Sharing) via `src/db/summarySessions.ts`.
+**`RequestKind`** (types.ts:20-26): `approval | outreach | reminder | follow_up | research | social_outreach`.
 
-### Registry machinery
-- `src/skills/registry.ts` — CORE_MODULES hardcoded (includes OutreachCoreSkill loaded from `skills/outreach.ts`), togglable skills lazy-loaded via require() under loader keys.
-- `src/skills/types.ts` — `Skill` interface, `SkillContext`, `SkillId`, `CoreModuleId`, `ChannelId`, `Channel`.
+**`RequestState`** (types.ts:34-40) — the actual state machine: `awaiting_owner → awaiting_colleague ⇄ (via amend) → resolved | cancelled | expired`. `in_flight` covers scheduled-but-not-yet-fired work (a future outreach send, a research run in progress).
 
-### COLLEAGUE_ALLOWED_TOOLS
-Technical allow-list — colleagues see only: `find_slack_user`, `get_calendar`, `get_free_busy`, `find_available_slots`, `create_task`, `create_approval`, `coordinate_meeting`, `check_join_availability`, `web_search`, `move_meeting` (v2.2.1 — rule-compliant auto-accept), `create_meeting` (v2.3.2 — same trust pattern), `update_person_profile` / `note_about_person` / `note_about_self` / `confirm_gender` / `log_interaction` (v2.5.2 self-only constraint enforced in handlers).
+**`NextCheckHandler`** (types.ts:67-74) — the row carries its OWN timer (`next_check_at` + `next_check_handler`); there is no separate dispatch table for one-shot expiries. `runner.ts`'s `sweepDueRequests()` (line 67-100) sweeps due rows on the same 5-min tick as the legacy task runner and dispatches by handler name (`dispatchHandler`, line 102-137): `expiry`, `approval_reminder`, `reminder_fire`, `research_run`, `reschedule_reask`, `outreach_expiry`, `send_scheduled_outreach`.
+
+**`closeRequest()`** (`closeRequest.ts:44-122`) is the ONLY terminal-state writer — idempotent (no-op on an already-terminal row, line 49-54), cascades to children unless `skipChildren` (depth-1 only, avoids infinite loops on nested structures), clears the row's own timer, and writes one `audit_log` row per closure. Every other closer in the codebase (the resolver, the runner's expiry handlers, a meeting-mutation cascade, an outreach reply handler) calls through this function rather than writing `state` directly — convention, not a schema constraint.
+
+**`resolveRequest()`** (`resolver.ts:190`, replacing the deleted `core/approvals/resolver.ts` — the file's own header says so at line 2) is the single entry point for an owner (or, on the amend bounce-back path, a colleague) decision. It is queued per-request-id (`resolveQueue`, line 188-203) specifically to close a check-then-act race a double-tap (an emoji ✅ landing alongside a typed reply) could otherwise hit. Verdict shapes: `approve | reject | amend | cancel`. An `amend` either relays the owner's counter to the requester (`relay_to_requester`, the default) or merges it straight into the approved action's args (`run_with_amend`) — both modes read from the universal callback table in `core/approvals/approvalCallbacks.ts` (`ToolCallback`, `on_approve`/`on_reject`/`on_amend`, line 34+), the one surviving file under `core/approvals/` after `resolver.ts`, `orphanBackfill.ts` and `coordBookingHandler.ts` were all deleted when this spine replaced them. Amend ping-pong is capped at `MAX_COUNTER_ROUNDS = 2` (resolver.ts:41) across both directions.
+
+`reconcile.ts`'s `pruneOldTerminalRequests()` (line 22-59) deletes terminal rows (and their children) older than `RETENTION_DAYS = 30` (line 15), called from the 5-min background tick — pure housekeeping, not part of the decision logic.
+
+**What no longer exists on this spine, confirmed by grep:** `coord_jobs`, `multi_coord_jobs`, `coordination_jobs` (dropped tables, `db/client.ts:173-174`), `src/core/approvals/{resolver,orphanBackfill,coordBookingHandler}.ts`, `src/skills/meetings/coord/*`, `src/utils/coordGuard.ts`, `src/skills/research.ts`, `src/connections/router.ts` — zero hits in `src/` for any of them except historical comments explaining that they were removed (e.g. `planMeeting.ts:235`, `resolver.ts:2`).
 
 ---
 
-## Layer 3 — Connections (outbound) + Connectors (inbound + external services)
+## Output-time security posture — the gate stack
 
-**v2.0 first-class split.** Before: `connectors/slack/*` handled both inbound Bolt events AND outbound messaging. Skills imported from it. After: outbound goes through a formal `Connection` interface, skills NEVER import from `connectors/`.
+`src/utils/guards/runOutputGates.ts` is where postReply's gate POLICY lives (extracted from `connectors/slack/postReply.ts`, which still owns pure delivery — history save, threading, the ack reaction). Three entry points:
 
-### Connections (outbound messaging interface, v2.0)
-- `src/connections/types.ts` — `Connection` interface: `sendDirect(userId, text, opts?)`, `sendBroadcast`, `sendGroupConversation`, `postToChannel(channelId, text, opts?)`, `findUserByName`, `findChannelByName`. `SendOptions.threadTs` flows through. `ConnectionUser`, `ConnectionChannel`, `PersonRef`, `RoutingPolicy`.
-- `src/connections/registry.ts` — per-profile `Map<profileId, Map<connectionId, Connection>>`. Skills resolve via `getConnection(ownerUserId, 'slack')`. `registerConnection` at transport startup.
-- `src/connections/router.ts` — 4-layer routing policy for future multi-transport: (1) inbound-context wins, (2) person preferred, (3) per-skill routing, (4) profile default. In place; skills will consume it as email/WhatsApp land.
-- `src/connections/slack/messaging.ts` — raw Slack primitives (`sendDM`, `sendMpim`, `postToChannel`, `findUserByName`, `findChannelByName`) with `{ threadTs }` opts.
-- `src/connections/slack/index.ts` — `SlackConnection` that implements the Connection interface over messaging.ts.
+1. **`runOutputGates(draft, ctx)`** (line 143) — the main stack.
+2. **`runCodaGates(coda, ctx)`** (line 634) — a separate, much smaller gate for the social coda (see Social engine below): detect-only, fails CLOSED (drop the coda) rather than open, and never rewrites.
+3. **`runEmailLegGates`** (line 555) — a third leg for the email transport, not a third value of the Slack two-axis test below.
 
-### Connectors (inbound + non-messaging adapters)
-- `src/connectors/slack/app.ts` — Slack Bolt app (Socket Mode), message event router, action dispatcher, security gate invocation, catchUpMissedMessages orchestrator call. Registers `SlackConnection` in the Connection registry at startup.
-- `src/connectors/slack/postReply.ts` — outgoing reply pipeline. Normalize Slack markdown → claim-check (retry with tool_choice) → date-verify (retry + **deterministic inline correction** in v2.0 if retry also fails) → security gate → send via Connection. For owner drafts.
-- `src/connectors/slack/coordinator.ts` (~668 lines) — outreach reply classifier + `handleOutreachReply`, `calcResponseDeadline`, `findSlackUser`, `findSlackChannel`, `openDM`. **Next port target** (was sub-phase E) — move classifier to `src/skills/outreach/replyHandler.ts`.
-- `src/connectors/slack/relevance.ts` — message-relevance classifier (is-this-for-Maelle).
-- `src/connectors/slack/processedDedup.ts` (v1.8.14) — process-global `Set<ts>` with 60s TTL. Live handlers + catchUpMissedMessages share it so a message catch-up replied to can't be re-processed by the live handler after Slack re-delivers post-reconnect.
-- `src/connectors/graph/calendar.ts` — Microsoft Graph (Outlook). Events CRUD, free/busy, slot rules, `createMeeting` returns Graph event id. **Not a Connection** — calendar backend, not a messaging surface.
-- `src/connectors/whatsapp.ts` — placeholder. Next concrete `Connection` implementation.
+**The gate policy is two axes, not one role check** (line 163-222, this is the load-bearing design decision documented in the file itself): `ownerIsActing` (`senderId === profile.user.slack_user_id`, line 210) decides whether the phantom-action honesty check runs; `colleagueReadable` (`role !== 'owner' || isOwnerInGroup === true`, line 211) decides whether the leak-scrub and the colleague voice frame run. They coincide in a 1:1 DM but diverge in a group DM or a channel — which is exactly the seam a single combined test used to miss (a channel had neither `role==='owner'` nor `isOwnerInGroup`, so the honesty check silently never ran there until this was fixed).
 
----
+**Owner-private leg** (a 1:1 DM only the owner reads): claim-check + `humanGate('owner')` + date-verify, probed concurrently first and falling back to the exact serial chain only if any flags (a latency optimization documented at line 268-320).
 
-## Layer 4 — Tools & Utilities
+**Colleague-readable leg** (a colleague DM, a channel, or a group DM): claim-check (only if the owner is acting) → security gate (leak filter + identity-spoof) → `humanGate('internal')` → date-verify LAST (line 322-508) — date-verify runs last on purpose because it's the only gate whose subject a REWRITER can introduce (a rewritten sentence could contain a new weekday word).
 
-- `src/voice/` — Slack audio in/out. `transcribeSlackAudio` (Whisper + ffmpeg), `textToSpeech` (gpt-4o-mini-tts), `sendAudioMessage`, `shouldRespondWithAudio`. Voice transcribes-then-discards.
-- `src/vision/` — Slack image in. `downloadSlackImage` (jpeg/png/gif/webp, 5MB cap), `buildImageBlock` (Anthropic image content block). Native multimodal. Owner-only in DM + MPIM.
-- `src/utils/logger.ts` — winston + daily-rotate-file (7 days info, 30 days error).
-- `src/utils/securityGate.ts` — narrow regex triggers + Sonnet rewriter on colleague-facing replies. Safe canned fallback on UNFIXABLE.
-- `src/utils/claimChecker.ts` — Sonnet classifier, strict JSON, OWNER path only. Detects false action claims. Retry with `tool_choice` forcing the right tool. MPIM-aware. Fails open.
-- `src/utils/dateVerifier.ts` — 14-day lookup. Regex catches "Weekday N Mon" pairs (EN + HE). v1.8.5: LLM-based bare-weekday context check. **v2.0: post-retry re-verification + deterministic inline weekday-token rewrite** when retry also produces wrong pair. Owner AND colleague paths. Fails open.
-- `src/utils/coordGuard.ts` — injection-pattern scan + Sonnet judge for `coordinate_meeting` on colleague path.
-- `src/utils/imageGuard.ts` — Sonnet image-text injection scanner. Owner path: log + shadow-notify, proceed. Designed to flip to refuse-and-notify when colleague image paths open.
-- `src/utils/workHours.ts` (v1.8.14 extracted from outreachExpiry) — `isWithinOwnerWorkHours(profile, now)` + `nextOwnerWorkdayStart(profile)`. Shared by outreach_expiry, coord_nudge, coord_abandon to defer owner DMs outside work hours.
-- `src/utils/shadowNotify.ts` (v1.8.14 ported to Connection) — resolves Slack via `getConnection(ownerId, 'slack')`. No longer takes `app: App`. Caches owner DM channel per profile. Plain-text rendering with 🔍 prefix.
-- `src/utils/rateLimit.ts` — sliding-window in-memory limits.
-- `src/utils/genderDetect.ts` — pronouns → image → Sonnet name classifier. Never overwrites `gender_confirmed=1`.
-- `src/utils/slackFormat.ts` — normalizeSlackText (`**`→`*`, strip `##`, leading `- `). Apply at every LLM→Slack post.
-- `src/utils/addresseeGate.ts` — MPIM addressing check.
-- `src/db/` — barrel + per-table helpers (client, people, preferences, conversations, jobs, events, requests, calendarIssues, approvals, summarySessions).
-- `src/config/` — profile loader (zod schema) + env.
+**Email leg** (`runEmailLegGates`, line 555): claim-check (unconditional — the sender gate upstream already restricts this whole leg to the owner) → `humanGate('external')` → date-verify (mandatory: a forwarded scheduling reply is almost entirely date claims). Deliberately skips the availability floor and the security gate — both assume Slack-specific state that doesn't exist on this leg (documented at line 537-551).
+
+**The gate primitives themselves**, each its own file under `utils/`, dynamically imported so a clean reply never loads them:
+- `claimChecker.ts` — narrow JSON classifier for false action claims ("I sent it" when no tool fired), owner-path only; remedy is a tool-less "own the miss" rewrite, never a re-run of the orchestrator.
+- `dateVerifier.ts` — language-agnostic weekday/date mismatch detection (Haiku extracts pairs, code judges against a 14-day lookup, code performs the literal swap).
+- `humanGate.ts` — voice/persona consistency (no "I have a backend issue" self-as-infrastructure framing, no mechanical refusal phrasing), runs on both owner and colleague drafts.
+- `securityGate.ts` — colleague-facing leak filter (regex triggers + Haiku rewriter) plus the identity-spoof check (is the sender claiming to be someone else).
+- `addresseeGate.ts` — MPIM "is this message even for Maelle" classifier (Haiku), fast-pathed by an explicit @-mention.
+- `imageGuard.ts` — Sonnet image-text injection scanner, owner-only today (log + shadow-notify; documented to flip to refuse-and-notify once colleague image paths open).
+- `availabilityPreCheck.ts` / `availabilityGate.ts` — the "don't eyeball free/busy" fix: a colleague-path availability question runs the SAME `checkSlot` rule engine the booking path runs, so a narrated verdict can never disagree with what booking would actually do.
+
+**Everything fails open except the leak gate**, which fails SAFE (substitutes a fixed, undraftable line rather than ship an unvetted colleague-facing reply) — the file's own header states this is deliberate and names the one place a throw used to silently eat a colleague's entire reply (fixed in v4.2.x).
+
+**Tool-level defense in depth**, in `skills/registry.ts`:
+- `COLLEAGUE_ALLOWED_TOOLS` (line 368-450) — the positive allowlist a colleague-path Sonnet ever sees.
+- `CHANNEL_TOOL_CLAMP` (line 276-280) — a transport-keyed ceiling; today only `email: [find_available_slots, create_meeting, get_person_memory, log_interaction]`, because the email sender gate is a spoofable From-header compare and this is the write-side backstop.
+- `executeSkillTool`'s chokepoint (line 642-739) re-applies BOTH allowlists at dispatch time, independent of what got shipped to the model — a defense-in-depth pairing against a scope-map gap ever shipping a tool by accident (documented via the `web_research` incident it was written to prevent).
+- `WRITE_TOOLS` (line 473-498) is the single source of "is this tool a mutation," consumed by the abort-if-safe inbound queue, the date-verifier retry's `proseOnly` strip, and the ack-guard.
 
 ---
 
-## Task pipeline (v1.6 unified, v1.6.3 split, v2.0 Connection-based)
+## Approvals / requests flow, end to end
 
-Every background activity is a typed task with a `due_at`. Background loop (core/background.ts): **`materializeRoutineTasks(profiles) → runDueTasks(app, profiles)`** every 5 min.
-
-`tasks/runner.ts` is a thin dispatch loop. Each TaskType has its own dispatcher file with a registry map in `dispatchers/index.ts`.
-
-| TaskType | Creator | Dispatcher |
-|---|---|---|
-| reminder | create_task tool | DM owner or target at due_at (via Connection) |
-| follow_up | create_task tool | DM owner |
-| research | create_task tool | Runs through orchestrator |
-| routine | materializeRoutineTasks | Runs routine prompt; skips silently if past cadence threshold |
-| outreach_send | message_colleague (future send_at) | Post DM via Connection, flip outreach_jobs sent, queue outreach_expiry |
-| outreach_expiry | outreach_send | First: follow-up + re-queue +3wh. Second: if outside owner work hours, re-queue for nextOwnerWorkdayStart. Otherwise mark no_response + notify owner via Connection. |
-| coord_nudge | initiateCoordination | **v1.8.14:** if outside owner work hours, re-queue. Otherwise DM non-responders via Connection + queue coord_abandon +4h. |
-| coord_abandon | coord_nudge dispatcher | **v1.8.14:** work-hours deferral. Otherwise abandon coord + notify owner via Connection. |
-| approval_expiry | createApproval | Expire approval, cascade task→cancelled + coord→abandoned + notify |
-| calendar_fix | manage_calendar_issue (action='update', status='to_resolve') | Re-check in 1 day; auto-resolve if gone, re-ping + re-queue if still there |
-| summary_action_followup | share_summary (Stage 3) | Sonnet composes one-line check-in DM via Connection, creates outreach_jobs row + outreach_expiry task |
-
-`tasks.skill_origin` tags each row with its creator skill.
-
-**All message-sending dispatchers (v2.0) use `getConnection(ownerId, 'slack').sendDirect/postToChannel` — no `app.client.*`.**
+1. A tool call (owner or colleague path) hits a rule and returns `rule_violation` with a `_deferred_action_hint`, OR the model calls `create_approval` directly (`tasks/skill.ts`).
+2. The orchestrator loop auto-attaches the captured hint to the approval payload (`core/orchestrator/index.ts:589-606`).
+3. `createRequest()` (`db/requests.ts:49`) inserts a `kind='approval'` row, `state='awaiting_owner'`, with `details_json.callbacks` set (or the legacy `deferred_action` shape, transparently bridged by `extractCallbacks()` in `approvalCallbacks.ts`).
+4. The owner sees it in his **owner daily decision thread** (`utils/ownerDailyThread.ts`, `owner_daily_threads` table, `db/client.ts:801-808`) — one lazily-created thread per owner per effective day, holding every approval ask that day.
+5. Owner reacts (✅/❌) or replies in chat → `resolve_approval` → `resolveRequest()` (`resolver.ts:190`).
+6. On approve with a replayable `on_approve.tool`, `runApproveCallback()` (`resolver.ts:533`) calls `runDeferredAction()` (`core/requests/deferredActionReplay.ts`) which re-invokes the exact original tool with an override flag (`relaxed: true` / `confirm_outside_window: true`) and stamps `_fulfilling_request_id` on the call so the booking-side cascade (`utils/closeMeetingArtifacts.ts`) knows to skip its own close+relay — this request already owns it.
+7. `closeRequest()` fires, the requester (if any) is notified via `notifyRequesterOfDecision()` — composed as free text by an LLM for language-correctness, with machine-decided values (times, durations) PINNED verbatim so translation can't drift a number (resolver.ts:996-1018).
+8. If nobody ever answers, `runner.ts`'s `runApprovalReminder` nags once at the midpoint (respecting the owner's work hours via `workHours.ts:workTimeBaseFromNow`), then `runExpiry` closes the row as `expired` and tells BOTH sides the truthful story of who actually went quiet (read off `state` at fire time, not off `kind` — an amended request sits on the colleague, not the owner, and the copy has to say so).
 
 ---
 
-## Approvals (v1.5+, resolver v2.0)
+## Scheduling / booking engine
 
-First-class structured decisions in `approvals` table, always under a parent task.
-
-- **Kinds:** slot_pick, duration_override, policy_exception, lunch_bump, unknown_person, calendar_conflict, freeform
-- **Statuses:** pending | approved | rejected | amended | expired | superseded | cancelled
-- **Resolver** (`core/approvals/resolver.ts`): single entry for decisions. Freshness re-check for slot_pick via `getFreeBusy`. **v2.0: calls `getCoordBookingHandler()` registry instead of importing `forceBookCoordinationByOwner` directly** — breaks the core→skill boundary violation.
-- **amend** is first-class: owner says "no but 1:30 works" → counter recorded → orchestrator relays back.
-- **No buttons.** Pending approvals injected into owner system prompt; Sonnet binds by subject/timing/thread and calls `resolve_approval`.
-- **Expiry:** driven by `approval_expiry` task, not a sweep.
-- **Idempotency:** hash(task_id + kind + payload) UNIQUE on creation; `coord_jobs.external_event_id` short-circuits double-booking.
-- **Requester loop:** `coord_jobs.requesters` JSON. On booked/expired, requesters who aren't participants get a structured DM.
+- **`skills/meetings.ts`** — `MeetingsSkill`, the single skill owning every calendar-touching tool (`get_calendar`, `find_available_slots`, `create_meeting`, `move_meeting`, `update_meeting`, `delete_meeting`, `check_join_availability`, `check_calendar_health`, `book_floating_block`, `set_event_category`, `manage_calendar_issue`, `set_work_schedule_override`, `get_work_schedule_overrides`, `hold_slot`, `revert_last_auto_move`, `find_venue` — tool list read directly from `getTools()`, `meetings.ts:36-120+`). Delegates direct-op handlers to a private `ops` instance (the former `SchedulingSkill`, `skills/meetings/ops.ts`).
+- **`skills/meetings/planMeeting.ts`** — the one pipeline every scheduling intent (`book | move | cancel | find_slots`) flows through: load state → detect/reuse category → resolve location → check rules → decide action. Returns one of a fixed set of plan actions (`book`, `find_slots`, `confirm_override`, `escalate_approval`, `decline_as_attendee`, `refuse_not_owners`) — no free-text branching inside the pipeline (header comment, planMeeting.ts:1-35).
+- **`utils/scheduleRules.ts`** — `checkSlot()` (line 524) is the ONE "is this slot OK?" validator; both the slot finder and the direct booking path call it, so they can never disagree.
+- **`utils/workHours.ts`** — `getEffectiveWorkDay()` (line 109) / `getEffectiveWorkDayForInstant()` (line 155) are the ONE work-day resolver: the YAML base schedule, overridden per-date by a row in `owner_schedule_overrides` (`db/client.ts:124-135`, `db/scheduleOverrides.ts`) when one exists, fail-safe back to YAML otherwise. This is the #143 mechanism that replaced the old full-day "Working Elsewhere" travel-marker spine (see `project_we_timezone_spine.md`).
+- **`utils/weTimeResolver.ts`** — the away-day dual-clock renderer (kept from the WE spine even though the booking mechanism itself moved to per-date overrides).
+- Supporting: `utils/floatingBlocks.ts`, `utils/rebalanceFloatingBlocks.ts`, `utils/calendarDensity.ts`, `utils/categoryRules.ts`, `utils/meetingProtection.ts`, `utils/attendeeAvailability.ts`.
+- **`connectors/graph/calendar.ts`** is a 4-line barrel (`export * from './calendarTypes' / './calendarReads' / './findAvailableSlots' / './calendarMutations'`) — the Outlook/Graph backend, not a messaging `Connection`. `calendarCache.ts` sits alongside it.
 
 ---
 
-## Coord state machine (v2.0 location: `src/skills/meetings/coord/`)
+## Transport layer — `connections/` (outbound) + `connectors/` (inbound)
 
-- Table: `coord_jobs`. Statuses: collecting | resolving | negotiating | waiting_owner | confirmed | booked | cancelled | abandoned.
-- DMs key participants with up to 3 slot options + location per slot → collect → resolve best → book. Via Connection throughout.
-- just_invite participants: added to calendar invite only, no DM, no vote.
-- Location auto-determined per slot: office day ≤3→Office+Teams, >3→Room+Teams; home day internal→Huddle, external→Teams.
-- `emitWaitingOwnerApproval` helper: every waiting_owner parking creates a structured approval + posts via `conn.postToChannel(owner_channel, askText, {threadTs})`.
-- `handleCoordReply` follow-up branch handles post-vote follow-ups without re-running resolveCoordination.
-- MPIM coord (in-group): contacted_via='group', voting in MPIM thread. Thread-boundary fast-path filters out out-of-context replies.
-- v1.8.6 dm_thread_ts: booking confirmations post back into the original coord DM thread when `dm_channel + dm_thread_ts` were recorded in sendCoordDM. Preserved through the port via `conn.postToChannel(dm_channel, text, {threadTs: dm_thread_ts})`.
-- Reschedule intent (v1.8.4): if owner asks to move an existing meeting, `message_colleague` uses `intent='meeting_reschedule'` → `skills/meetingReschedule.ts` calls `updateMeeting` on approval (doesn't create a new event via coord).
+**`connections/types.ts`** defines the `Connection` interface (line 120) every transport implements: `sendDirect`, `sendBroadcast`, `sendGroupConversation`, `postToChannel`, `findUserByName`, `findChannelByName`, plus optional `collectCoreInfo`, `getTools`/`executeToolCall` (transport-owned tools), `reactToMessage`, `updateMessage`/`deleteMessage`, `resolveDirectChannelId`/`resolveChannelCounterpart`. `SendResult` (line 35-37) is the uniform outcome shape every transport returns. Skills import ONLY from here and from `connections/registry.ts` — never from `connectors/*`.
 
----
+**`connections/registry.ts`** — a per-profile `Map<ConnectionId, Connection>` (line 16); `registerConnection` / `getConnection` / `listConnections`. There is **no `connections/router.ts`** in the current tree (zero hits — confirmed removed) — routing "which transport does a reply go out on" is handled by callers passing the turn's `inboundConnectionId` through and calling `getConnection(profileId, channel)` directly, not by a separate policy-routing file.
 
-## Security layers
+**Slack** (the primary, fully-live transport):
+- Inbound: `connectors/slack/app.ts` (Bolt Socket Mode app) + `connectors/slack/app/{context,handlers,processMessage,helpers,fileIngestion}.ts`. `processMessage.ts` derives `senderRole` from the authenticated Slack sender (`getSenderRole`) and CLAMPS it to `'colleague'` in any MPIM, any channel, or colleague-test mode (line 128-139) — this clamp is the security boundary the output gates' `ownerIsActing`/`colleagueReadable` axes are built on top of.
+- Outbound: `connections/slack/index.ts` (`SlackConnection`) + `connections/slack/messaging.ts` (raw primitives).
+- Delivery pipeline: `connectors/slack/postReply.ts` (normalize → gate stack → send → persist history once).
+- Supporting: `inboundQueue.ts` (debounce + abort-if-safe), `processedDedup.ts`, `socketWatermark.ts` (recovery watermark), `coordinator.ts` (outreach reply classification — despite the filename, this is the outreach-reply handler, not the deleted meeting-coordination subsystem).
 
-1. **COLLEAGUE_ALLOWED_TOOLS** allow-list (`skills/registry.ts`) — deterministic gate.
-2. **Rate limits** (`utils/rateLimit.ts` + orchestrator hooks) — colleague_coord 3/10min, colleague_any_tool 10/5min per sender+thread.
-3. **Coord guard injection scan** (`utils/coordGuard.ts`) — regex on last 5 user messages.
-4. **Coord guard LLM judge** (Sonnet) — subject, participant plausibility, coherence.
-5. **Owner auto-include for colleague-initiated coord** (1.4.3+) — colleague asks to coord without owner → owner silently injected.
-6. **Security gate** on outgoing colleague replies — narrow regex + Sonnet rewriter + safe canned fallback.
-7. **Claim-checker** on owner drafts — narrow Sonnet classifier, JSON output, owner-only. Retry with `tool_choice`. MPIM-aware.
-8. **Date verifier** — regex + LLM bare-weekday pass + **v2.0 deterministic inline correction** when retry still wrong.
-9. **Calendar scope rule** (prompt) — one specific event, never multi-day.
-10. **Persona rules** (prompt) — colleagues never hear AI/bot/Claude/Anthropic/"my prompt".
-11. **No internal plumbing in user-visible text** (v1.6.2+) — no `_ref:` tokens; security-gate and claim-checker diagnostics never surface in Slack.
-12. **Image guard** (v1.7.1) — Sonnet image-text injection scanner. Owner path: log + shadow-notify, proceed.
-13. **Image scope owner-only in MPIM** (v1.7.1) — colleagues' images silently dropped.
-14. **Prompt RULE 2b** (v2.0) — your prior replies are commitments; don't re-ask for info you already stated.
-15. **create_meeting cross-turn idempotency** (v2.0) — Graph pre-check for same subject+start (±2 min) before creating. Prevents duplicate events across retry loops.
-16. **Tool-grounded fallback verbMap** (v1.8.13) — 45 entries + safe generic default. Raw tool names can never leak.
-17. **Shared message dedup** (v1.8.14) — `processedDedup` Set shared between live handlers + catchUpMissedMessages. Prevents duplicate replies after reconnect.
+**Email** (v4.3.0+, live but narrow):
+- Inbound: `connectors/graph/mailPoll.ts` (the poller — delta/isRead dedup, loop-guard against Maelle's own outgoing mail) hands surviving messages to `connectors/email/inbound.ts` (`registerMailInbound`), which owns the sender-authorization gate (owner + configured aliases only), forwarded-header participant extraction (`extractParticipants.ts`), HTML→text (`htmlToText.ts`), and the orchestrator call.
+- Outbound: `connections/email/index.ts` (`createEmailConnection`) — a **one-address transport by construction**: `sendDirect` hard-caps every reachable field (`recipientRef`, `cc`, `bcc`) against `ownerEmailAddresses(profile)` (line 88-96) and REPLIES ONLY (`opts.replyToMessageId` required, no fresh-compose path — line 97-107), using Graph's native reply action (`connectors/graph/mail.ts:replyToMail`) with the validated address PATCHed onto `to` explicitly rather than trusted from Graph's own Reply-To inference (a real gap closed 2026-07-29, documented in the file's own header).
+- Gated by `CHANNEL_TOOL_CLAMP.email` in `skills/registry.ts` (see Security posture above) and by the dedicated `runEmailLegGates` output leg.
+
+**WhatsApp** (`connectors/whatsapp.ts`) — **dormant, not removed.** Its own header (line 1-27) states Steps 1-2 are built and wired: `src/index.ts` calls `startWhatsApp(profile)` at boot for every profile, but it is a no-op — byte-identical to Slack-only — unless that profile's YAML sets `user.whatsapp_phone`. No profile in this deployment sets it today. Inbound is owner-phone-only; anyone else is silently dropped before any content work. There is no `WhatsAppConnection` implementing the outbound `Connection` interface yet (Steps 3-6 of `.claude/WHATSAPP_PROJECT.md` are unbuilt) — this matches `ARCHITECTURE_MAP.md`'s "Dormant" classification.
 
 ---
 
-## Recovery / silence-prevention (v1.7.3, verbMap v1.8.13)
+## Skills registry
 
-Empty-reply path has TWO fallbacks before silence:
+`skills/registry.ts` — `CORE_MODULES` (line 19, always active regardless of YAML): `AssistantSkill` (`core/assistant.ts`, memory), `OutreachCoreSkill` (`skills/outreach.ts`), `TasksSkill` (`tasks/skill.ts`), `CronsSkill` (`tasks/crons.ts`, routines). Togglable skills (`SKILL_MAP`, built once at startup): `meetings`, `search`, `calendar` (calendar-health), `summary`, `knowledge`, `social`, `venue`, `news` — each lazy-`require`'d so a broken skill file can never crash boot (`tryLoadSkill`, line 30-37).
 
-1. **Recovery summarizer pass:** when Sonnet finishes with no text, run one more grounded Sonnet pass with the conversation + tool history, asking for a one-sentence describe-or-NO_REPLY.
+**Module G — owner-path scope filtering** (`ALWAYS_ON_TOOLS` line 142, `SCOPE_TO_TOOLS` line 157): the orchestrator's `classifyTurn` picks scopes (`meetings`, `tasks`, `knowledge`, `people`, `venue`, `news`, or the widening `general`); `filterToolsByScope()` (line 288) ships always-on tools plus every tool in a requested scope — trims the tool list to keep the cached prompt prefix small. A tool that's neither always-on nor scope-mapped ships anyway (fail open) with a once-per-process warning, so a forgotten mapping never silently vanishes a tool.
 
-2. **Tool-grounded confirmation fallback:** if recovery also empty/`NO_REPLY` AND `toolCallSummaries.length > 0`, build human-ish confirmation from mapped tool verbs (v1.8.13: 45 entries + safe default `"handled a few things"`). Only triggers when actual tool work happened.
-
-Together: owner gets feedback whenever Maelle did real work, even if Sonnet forgot to narrate. Silent-turn-with-no-tools still silences (better than fabricating).
+`getSkillTools()` (line 573) also merges in the CURRENT turn's own-transport `Connection`'s tools only (`ownConnection = getConnection(profileId, channel)`, line 605) — a fix for email/WhatsApp tools leaking onto Slack turns once those connections got registered.
 
 ---
 
-## DB imports — CRITICAL
+## Task pipeline
 
-Always use top-level ES imports: `import { getDb, appendToConversation } from '../../db'`. Never `require('../db')` inside functions — path resolution differs silently.
+`tasks/runner.ts`'s `runDueTasks()` (line 29) is now a THIN wrapper: it calls `sweepDueRequests()` (the requests spine, primary) first, then pulls due rows from the legacy `tasks` table and dispatches through `DISPATCHERS` (`tasks/dispatchers/index.ts:25-31`) — which today only holds `routine`, `calendar_fix`, `summary_action_followup`, `social_decay`, `social_ping_rank_check`. The old `reminder`/`follow_up`/`research` dispatchers are gone (dispatchers/index.ts's own comment, line 18-24): that work lives entirely on the requests spine now (`create_task` → `createRequest` with `next_check_handler = reminder_fire | research_run`). The `tasks` table survives as the owner-facing work LEDGER (the daily brief, `get_my_tasks`, thread-context injection, the ✅-completion reaction) — a deliberate two-system split, not redundancy: the spine owns lifecycle+timers, `tasks` owns visibility.
 
-## Skill boundary — CRITICAL (v2.0)
+`core/background.ts`'s `startBackgroundTimer()` (line 127) drives everything: a 5-min `setInterval` (line 155-166) runs `materializeRoutineTasks → runDueTasks → processSlotHoldsIfDue`, plus a fire-and-forget requests-spine prune and end-of-chat capture pass every tick. A separate 10-min `setInterval` (line 224+) runs a periodic catch-up safety net (`catchUpMissedMessages`, line 479) scoped to a persisted socket-alive watermark, independent of what the socket itself reports connected (the "half-dead socket" case this exists to catch).
 
-Skills import ONLY from `src/connections/types` + `src/connections/registry`. NEVER from `src/connectors/slack/*`. NEVER `app.client.*`. Task dispatchers follow the same rule. If you need a Slack-specific feature, either add it to the Connection interface or keep the code inside `src/connectors/slack/`.
+---
 
-`types.ts` and `registry.ts` are the **shared spine — no lane owns them** (owner's ruling 2026-08-01): any lane may add an OPTIONAL member, because every existing implementer stays valid; a change that binds every implementer (a signature, a return shape, a required verb) goes through each channel lane that has to satisfy it.
+## Person store / social engine
+
+- **`db/people.ts`** — one `people_memory` table for everyone (internal/external/self), keyed by `slack_id` (schema `db/client.ts:327-338`, extended with ~25 `ALTER TABLE` migrations through the file for gender, travel, VIP, core-field provenance, language). `resolvePerson()` (line 1219) is the identity chokepoint: slack_id → email → fuzzy-name, find-or-create-or-merge.
+- **`memory/capturePass.ts`** — the end-of-chat capture pass (5-min tick): for DM threads gone quiet, one Haiku call extracts deltas from the conversation against current state and writes them (profile fields + `.md` file mirrors) — the deterministic backstop for a colleague-volunteered fact the live turn's prompt didn't prompt Sonnet to save.
+- **`core/social/{classifyTurn,stateMachine,generateCoda,logEngagement}.ts`** — the social engine, gated behind `skills.social` (off by default). `stateMachine.ts`'s `chooseSocialDirective` is pure TypeScript (no LLM, no DB writes) picking ONE mode (`celebrate | engage | revive_ack | continue | raise_new | none`) per turn from the active-subjects picker; `generateCoda.ts` composes the actual line; the coda ships as its own message a beat after the real reply, gated by `runCodaGates` (see Security posture), never inline with the answer.
+
+---
+
+## LLM layer
+
+`llm/models.ts` — `MODEL_SONNET = 'claude-sonnet-5'` (line 41), bundled with `thinking: { type: 'disabled' }` as `SONNET` (line 43-46, used by every guard/classifier). The orchestrator's own agentic loop overrides this locally to `thinking: { type: 'adaptive' }, effort: 'high'` — documented in the file as a staged retry after a v4.0.0→v4.0.1 regression traced to Sonnet 5 being markedly less tool-eager with reasoning off. `MODEL_HAIKU = 'claude-haiku-4-5'` (line 64) is the cheap/fast tier for every guard and classifier.
+
+`llm/client.ts`'s `getAnthropicClient()` (line 35) returns either the direct Anthropic SDK client or (`config.LLM_PROVIDER === 'vertex'`) a lazily-`require`'d `AnthropicVertex` client — same `messages.create()` contract either way, so no call site needs to know which provider is live.
+
+---
+
+## DB schema — tables that exist today
+
+Confirmed via `CREATE TABLE` statements in `src/db/client.ts` (line numbers as of this writing; re-grep if the file has moved):
+
+`conversation_threads` (69), `known_contacts` (79), `outreach_jobs` (89, `status` column DROPPED — the linked `requests` row is the only lifecycle now), `user_preferences` (107), `owner_schedule_overrides` (124, the #143 per-date mechanism), `events` (138, the away-log, not calendar events), `audit_log` (153), `tasks` (287), `people_memory` (327), `engagement_rank_log` (428), `social_categories` (468), `social_subjects` (485), `social_topics` (508), `slot_holds` (529, the #30 tentative-hold mechanism), `routines` (559), `calendar_issues` (662), `summary_sessions` (707), `requests` (738, the spine — see above), `owner_daily_threads` (801), `venues` (814).
+
+**Dropped on every boot** (`DROP TABLE IF EXISTS`, idempotent no-op once gone): `multi_coord_jobs`, `coordination_jobs` (173-174, the removed multi-party coordination subsystem), `approvals` (181, superseded by `requests` rows of `kind='approval'`), `cron_schedules` (186, dead CRUD that was never wired — `routines` is the live path), `assistant_threads` (187, dead registry — replaced by history-based thread discovery), `social_topics_v2` / `social_engagements` (462-463), `calendar_dismissed_issues` (693).
+
+---
+
+## What surprised or needs a human call (flagged, not guessed)
+
+- `connectors/slack/coordinator.ts` is NOT the old meeting-coordination subsystem despite the name overlap with `skills/meetings/coord/` (removed) — it is the **outreach-reply classifier** (`handleOutreachReply`, `calcResponseDeadline`). Worth a rename someday, but out of scope for this rewrite.
+- `connectors/whatsapp.ts` is further along than "placeholder" — it is live-wired for the owner front door (Step 1-2 of the build spec), just inert because no profile sets `whatsapp_phone`. The WHATSAPP_PROJECT.md doc's own "paused, steps 1-2 built" framing is accurate; only its planned reuse of `coordGuard`/`coordinate_meeting` for later steps is stale (both were removed in v3.5.0 — flagged with a header note in that file).
+- **`db/client.ts` defines the `events` table TWICE** — byte-identical `CREATE TABLE IF NOT EXISTS events` + `CREATE INDEX IF NOT EXISTS idx_events_unseen` blocks at line 138 (correctly listed above) and again at line 310, sandwiched inside the `tasks` table's setup block. Harmless at runtime (`IF NOT EXISTS` makes the second a no-op) but it's dead duplication nobody's caught — a cleaner-shaped finding, not something this rewrite should silently fix by deleting code.

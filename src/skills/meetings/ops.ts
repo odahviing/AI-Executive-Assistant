@@ -73,6 +73,24 @@ export class SchedulingSkill {
     if (notice && typeof result === 'object' && result !== null && !Array.isArray(result)) {
       (result as Record<string, unknown>).owner_override_not_applied = notice;
     }
+
+    // gh#189 (verify) — `override_notice` (createMeeting.ts, sourced from
+    // planMeeting.ts's overrideNotice) and `_attendee_busy_note` (moveMeeting.ts)
+    // are second-person asides written FOR THE OWNER ("this books over your
+    // optional standup", "double-books you over 'X' with Sarah") and can embed
+    // another private meeting's SUBJECT or an attendee's busy status. Every
+    // email turn's reply IS the client-forwardable text (systemPrompt.ts's
+    // emailReplySection, gh#175a removed the owner-only FOR-YOU/cut-line split
+    // entirely) — there is no owner-facing side channel on that leg for such a
+    // note to land in instead, so if left on the payload it has nowhere to go
+    // but into the text the owner forwards verbatim to the external. Strip
+    // here, the one point every direct op returns through (same chokepoint as
+    // the notice attached just above), rather than gate each handler's attach
+    // site individually. Rule 10: when the audience is unclear, return less.
+    if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
+      delete (result as Record<string, unknown>).override_notice;
+      delete (result as Record<string, unknown>)._attendee_busy_note;
+    }
     return result;
   }
 

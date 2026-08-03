@@ -12,7 +12,7 @@ You are the **meeting-planner deterministic-core agent** for Maelle. This is you
 
 ## 0. Read these first — your constitution (non-negotiable)
 1. **`.claude/MEETING_PLANNER_AGENT.md`** — THE CHARTER: your mandate, the **11 owner rules in full**, the diagnostic discipline, the subsystem map, the recurring bug clusters. The charter is the *timeless constitution*; THIS file is the *current state*. Every diagnosis and every fix is checked against the 11 rules — read them whole.
-2. **`.claude/WE_TIMEZONE_SPINE_BUILD.md`** — the WE timezone spine (`weTimeResolver.ts` + the `stated_zone` contract). Don't re-scatter WE time.
+2. **`src/utils/weTimeResolver.ts`** — the WE timezone spine (`resolveStatedInstant`/`renderWeDualClock` + the `stated_zone` contract), now fed by the `#143` per-date `owner_schedule_overrides` subsystem (`src/utils/workHours.ts` `getEffectiveWorkDay`/`getEffectiveWorkDayForInstant`). Don't re-scatter WE time.
 3. **`CHANGELOG.md`** 3.6.2 → **3.7.1** — what's actually in the code now (canonical; not duplicated here).
 
 **coord was removed in 3.5.0** — ignore charter refs to `coord/*`.
@@ -71,7 +71,7 @@ Other standing hot zones (full list in the charter): free/busy truth + cache sta
 ## The five chats (route work; check the shared tree at wrap)
 - **Meeting (this chat)** — the deterministic core (above). NOT the approval spine.
 - **Approval** — approval→booking→close-loop (`core/requests/*`, `closeMeetingArtifacts`, relay, legacy `approvals`). Desync / relay-drop / "did the colleague get told" lives here.
-- **Guard** — the gate stack (`claimChecker`, `securityGate`, `humanGate`, `coordGuard`, `dateVerifier`, `postReply`). Honesty/leak/false-positive + the availability-honesty backstop.
+- **Guard** — the gate stack (`claimChecker`, `securityGate`, `humanGate`, `dateVerifier`, `postReply`). Honesty/leak/false-positive + the availability-honesty backstop.
 - **Prompt** — the orchestrator systemPrompt: language, scheduling narration, judgment/tone. A rule that belongs in code doesn't go here.
 - **Tenancy** — tool descriptions + per-skill prompt sections + de-tenant / learned-preference.
 

@@ -12,7 +12,7 @@ The guard roster and where they live:
 - `src/utils/claimChecker.ts` — detects "false action claims" (draft says "booked it" but no tool ran); forces a retry.
 - `src/utils/humanGate.ts` — catches Maelle framing herself as software ("the routine fired").
 - `src/utils/securityGate.ts` — rewrites colleague-facing replies that leak AI/bot identity or internal IDs.
-- `src/utils/addresseeGate.ts`, `src/utils/coordGuard.ts`, `src/utils/imageGuard.ts` — addressing, injection, and image-injection checks.
+- `src/utils/addresseeGate.ts`, `src/utils/imageGuard.ts` — addressing and image-injection checks.
 - The orchestration that runs/retries them: `src/connectors/slack/postReply.ts` (the gate stack, the retry paths, and a `matchingToolAlreadyRan` "shield" that suppresses retries when a tool already ran).
 
 Start by **reading these files** and mapping: what each guard does, whether it's LLM or deterministic, what action it takes on a flag (rewrite / retry / block), and how they're chained in `postReply.ts`.

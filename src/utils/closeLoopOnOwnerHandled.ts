@@ -144,6 +144,28 @@ function hasWholeWordMatch(haystack: string, needle: string): boolean {
   }
 }
 
+/**
+ * hebrew-stopword-prefixed-forms-not-filtered (verify finding) — SUBJECT_STOPWORDS
+ * is exact Set membership, but the same Hebrew proclitics hasWholeWordMatch above
+ * already accounts for (ה/ו/ב/כ/ל/מ/ש, glued directly onto the next word with no
+ * separator) glue onto a STOPWORD just as often as onto any other word: "הפגישה"
+ * ("the meeting"), "לפגישה" ("to/for the meeting"), "בפגישה" ("in the meeting")
+ * never equal the bare stopword "פגישה", so each survived tokenization as a
+ * "distinctive" subject token — the exact generic-vocabulary leak the stopword
+ * set exists to close, just wearing a one-letter prefix. Strip up to two leading
+ * proclitics (Hebrew stacks at most a couple, e.g. "ולפגישה" — "and to the
+ * meeting") and recheck against the same set rather than growing a second list.
+ */
+function isSubjectStopword(lower: string): boolean {
+  if (SUBJECT_STOPWORDS.has(lower)) return true;
+  let stripped = lower;
+  for (let i = 0; i < 2 && stripped.length > 1 && HEBREW_PROCLITICS.has(stripped[0]); i++) {
+    stripped = stripped.slice(1);
+    if (SUBJECT_STOPWORDS.has(stripped)) return true;
+  }
+  return false;
+}
+
 export function messageReferencesRequest(message: string, row: RequestRow): boolean {
   const msg = ` ${message.toLowerCase()} `;
   const det = parseDetails<Record<string, unknown>>(row) ?? {};
@@ -160,7 +182,7 @@ export function messageReferencesRequest(message: string, row: RequestRow): bool
   const tokens = rawTokens
     .map(raw => raw.toLowerCase())
     .filter((lower, i) => {
-      if (SUBJECT_STOPWORDS.has(lower)) return false;
+      if (isSubjectStopword(lower)) return false;
       if (lower.length >= 4) return true;
       const raw = rawTokens[i];
       // 3-char acronym/code exception: ALL-CAPS in the original text and not

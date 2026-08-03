@@ -684,6 +684,48 @@ const VERIFY_OUT = {
       description:
         'problems you found that are NOT about the fixes under review. Return an empty array if none — do NOT put them in `results`, and do NOT stay quiet about one to keep the wave clean.',
     },
+    // ── X144 · THE JOINT TRACE, question 1b, AND ITS DENOMINATOR ──────────────
+    // 1b exists for his stated fear: *"if a bug had two lanes, two agents, and for
+    // some reason they both went a different way of fixing it, we get a bug that's
+    // not working."* It was PROSE ONLY in `bouncer.md` — this schema named no
+    // field, so the pass could trace every pair, or none, and the artefacts were
+    // byte-identical. A check with no observable is indistinguishable from a check
+    // that is not there, which is the class this whole file is written against.
+    //
+    // THE ENGINE NAMES THE DENOMINATOR. It already knows every multi-lane
+    // candidate — a `>dep` chain is its own marker, a `confirmed-other-lane`
+    // verdict means a second lane was in the same place, and two lanes citing one
+    // `rootCause` file is the third case `bouncer.md` names. So the candidates are
+    // computed and handed over, and what comes back is compared against them
+    // rather than against this array merely being non-empty: a required field
+    // invites one token line per pair that proves nothing.
+    jointTraces: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          ids: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'the row ids you traced together, exactly as the candidate list names them — two or more.',
+          },
+          sharedRootCause: {
+            type: 'string',
+            description: 'the `file:line` where the two halves MEET, as the file stands at HEAD. Not each half\'s own root — the place the composed behaviour is decided.',
+          },
+          verdict: {
+            type: 'string',
+            enum: ['composes', 'disagrees', 'unproven'],
+            description:
+              '`composes` = you walked the bug once, end to end, across both diffs and the whole is what the report claims. `disagrees` = the two halves pull against each other — that is an OVERTURN AGAINST THE WAVE, not against either lane, so also return the row you want changed in `results`. `unproven` = you could not establish it; say why in `notes`.',
+          },
+          notes: { type: 'string', description: 'one line. On `disagrees` or `unproven`, what specifically does not hold.' },
+        },
+        required: ['ids', 'verdict'],
+      },
+      description:
+        'ONE ENTRY PER CANDIDATE PAIR THE BRIEF NAMES — trace the bug once across both diffs as a single path, never lane A\'s half then lane B\'s. Return an empty array ONLY when the brief named no candidates; a candidate you skip is reported as untraced.',
+    },
     // Work lands on open tickets by accident constantly: a bug fix turns out to
     // be most of an Improvement nobody scheduled, the ticket sits open for
     // months, and eventually it is built a second time. The bouncer reads the
@@ -1358,7 +1400,23 @@ let bounceRecheckRan = false
 let bounceCleared = []
 let bounceStillWrong = []
 let bounceAtLimit = []
+let bounceUnroutable = []
 let bounceDepAsks = []
+// X143 · `eligible` and `escalated` are what make a ZERO readable. `bounced: 0`
+// alone cannot tell "the bouncer overturned nothing, so the round correctly did
+// not fire" from "rows were overturned and none of them could be sent back" —
+// and those are opposite facts. `eligible` is the first pass's overturn count,
+// so `eligible:0 bounced:0` is the healthy silence and `eligible:3 bounced:0` is
+// a defect. `escalated` is what actually reached his desk after everything.
+let bounceEligible = 0
+let bounceEscalated = 0
+// X144 · question 1b's denominator and numerator. `jointCandidates` is what the
+// ENGINE derived and handed over; `jointTraced` is what came back matching one.
+// Both are recorded even at zero, for the reason X143 gives: a mechanism that
+// reports nothing when it does nothing looks exactly like one that is absent.
+let jointCandidates = []
+let jointTraces = []
+let jointUntraced = []
 let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
@@ -1430,6 +1488,55 @@ if (VERIFY) {
         `priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} at index ${priorCleanDropped.map((d) => d.i).join(',')} — this wave changed the code they described.`,
       )
 
+    // ── X144 · WHICH ROWS ARE A MULTI-LANE PAIR — derived, never asked for ────
+    // `bouncer.md` 1b names three tells and the engine can compute all three, so
+    // the pass is handed the list instead of being trusted to find it. Deriving it
+    // here also makes the denominator a FACT: `candidates: 0` is readable silence,
+    // `candidates: 3, traced: 0` is a defect, and the two used to look identical.
+    //
+    // A pair needs two DIFFERENT lanes to be worth the name — two rows the same
+    // lane built are covered by its own trace and by question 1.
+    {
+      const laneFor = (id) => (specById.get(id) || {}).lane || ''
+      const byId = new Map(results.map((r) => [r.id, r]))
+      const seen = new Set()
+      const add = (ids, why) => {
+        const u = [...new Set(ids)].filter((i) => byId.has(i))
+        if (u.length < 2) return
+        if (new Set(u.map(laneFor)).size < 2) return // one lane, one trace — question 1 covers it
+        const key = [...u].sort().join('+')
+        if (seen.has(key)) return
+        seen.add(key)
+        jointCandidates.push({ ids: u, why })
+      }
+      // 1 · a `>dep` chain: the engine's own marker that one lane handed the item on.
+      for (const r of results) {
+        const id = String(r.id || '')
+        if (!id.endsWith('>dep')) continue
+        add([id.slice(0, -'>dep'.length), id], 'a `>dep` hand-off — one lane asked, another delivered')
+      }
+      // 2 · `confirmed-other-lane`: by definition a second lane was in the same place.
+      for (const r of results) {
+        if (r.verdict !== 'confirmed-other-lane') continue
+        const file = String(r.rootCause || '').split(':')[0]
+        const partners = results.filter((o) => o.id !== r.id && file && String(o.rootCause || '').startsWith(file))
+        for (const p of partners) add([r.id, p.id], '`confirmed-other-lane` — a second lane delivered this')
+        if (!partners.length) add([r.id, r.id], '`confirmed-other-lane` with no partner found — identify the lane that built it')
+      }
+      // 3 · two lanes citing one file. The `file:line` may differ; the FILE is the seam.
+      const byFile = new Map()
+      for (const r of results) {
+        const file = String(r.rootCause || '').split(':')[0].trim()
+        if (!file || !/\.(?:ts|tsx|js|cjs|mjs)$/.test(file)) continue
+        if (!byFile.has(file)) byFile.set(file, [])
+        byFile.get(file).push(r.id)
+      }
+      for (const [file, ids] of byFile) if (ids.length > 1) add(ids, `two lanes cite \`${file}\` as the root — the seam is in that file`)
+      if (jointCandidates.length)
+        log(`Joint-fix candidates: ${jointCandidates.length} — ${jointCandidates.map((c) => c.ids.join('+')).join(', ')}. The verify must trace each ONCE across both diffs (1b).`)
+      else log(`Joint-fix candidates: 0 — no \`>dep\` chain, no \`confirmed-other-lane\`, and no file cited by two lanes. Question 1b has nothing to trace this wave.`)
+    }
+
     const check = await agent(
       // The bar, the standard, the seams-first scope, the trace sampling, the
       // budget, overturn-vs-discovery and the return contract all live in
@@ -1460,6 +1567,14 @@ if (VERIFY) {
                 : ''
             }\n${JSON.stringify(spotCheck, null, 2)}\n\n`
           : '') +
+        // X144 · 1b's denominator, handed over rather than left to be found. The
+        // count is stated in the brief so an empty `jointTraces` is visibly a
+        // refusal rather than an oversight.
+        (jointCandidates.length
+          ? `**QUESTION 1b — ${jointCandidates.length} MULTI-LANE PAIR(S). Trace each ONCE, end to end, across both diffs as a single path** (not lane A's half then lane B's — that is what their own traces already did and it is exactly what misses the seam). **Return one \`jointTraces\` entry per pair below.** A pair you leave out is reported as UNTRACED and named to the owner, so refuse it explicitly with \`verdict:"unproven"\` and a reason rather than omitting it. Where the two halves pull against each other that is an overturn against the WAVE, not against either lane:\n${jointCandidates
+              .map((c) => `  • ${c.ids.join(' + ')} — ${c.why}`)
+              .join('\n')}\n\n`
+          : `**QUESTION 1b: no multi-lane pair in this wave** — no \`>dep\` chain, no \`confirmed-other-lane\`, and no file cited as the root by two different lanes. Return \`jointTraces: []\`.\n\n`) +
         (built.length ? `FIXES IN THIS WAVE:\n${JSON.stringify(built, null, 2)}` : `**NO FIX WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
       // No `model` here either — `bouncer.md` pins Opus. Same reasoning as the
       // lanes, one rung stronger: this is the single highest-judgment step, the
@@ -1473,6 +1588,23 @@ if (VERIFY) {
     discoveries = (check && check.discoveries) || []
     ticketCoverage = (check && check.ticketCoverage) || []
     if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
+    // ── X144 · MATCHED AGAINST THE CANDIDATES, never counted on its own ────────
+    // A returned trace covers a candidate only when its `ids` contain ALL of that
+    // candidate's ids — so one line mentioning one half of a pair does not clear
+    // it. This is the whole point of the field: `traced: 3` against
+    // `candidates: 3` is coverage, and `traced: 3` against `candidates: 7` is a
+    // number that would have read as success.
+    jointTraces = ((check && check.jointTraces) || []).filter((t) => t && Array.isArray(t.ids))
+    {
+      const covers = (cand) => jointTraces.some((t) => cand.ids.every((i) => t.ids.includes(i)))
+      jointUntraced = jointCandidates.filter((c) => !covers(c))
+      const disagreed = jointTraces.filter((t) => t.verdict === 'disagrees')
+      log(`Joint traces: ${jointCandidates.length - jointUntraced.length} of ${jointCandidates.length} candidate pair(s) traced · ${disagreed.length} disagree · ${jointTraces.filter((t) => t.verdict === 'unproven').length} unproven`)
+      // A `disagrees` verdict is an overturn against the WAVE. It is surfaced here
+      // and warned about below rather than auto-flipping a row: the pass names
+      // which row it wants changed in `results`, and that is already read above.
+      disagreed.forEach((t) => log(`  ! JOINT FIX DISAGREES — ${t.ids.join(' + ')}${t.sharedRootCause ? ` at ${t.sharedRootCause}` : ''}: ${String(t.notes || '').slice(0, 120)}`))
+    }
     ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
     // The verify's OWN dependency asks were being discarded here — the overturn
     // read only `verdict` and `notes`, so when the bouncer said "this needs the
@@ -1548,9 +1680,14 @@ if (VERIFY) {
     const laneOf = (id) => (specById.get(id) || {}).lane || ''
     const bounceOf = (id) => Number((specById.get(id) || {}).bounces || 0)
     let finalOverturn = new Map(overturned)
+    // X143 · the denominator, recorded whether or not anything bounces. These
+    // three PARTITION the first pass's overturns, so `eligible` always equals
+    // `bounced + atLimit + unroutable` and a silent drop is arithmetically
+    // impossible to hide.
+    bounceEligible = overturned.size
     bounceAtLimit = [...overturned.keys()].filter((id) => bounceOf(id) >= BOUNCE_LIMIT)
     bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
-    const bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
+    bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
     if (bounceAtLimit.length)
       log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
     if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
@@ -1649,6 +1786,8 @@ if (VERIFY) {
         }.`,
       )
     }
+    // X143 · what actually reached his desk, after the bounce and the re-check.
+    bounceEscalated = finalOverturn.size
     // `finalOverturn`, not `overturned`: a row the bounce round fixed and the
     // re-check confirmed is `built` and must not reach his desk. `bounces` rides
     // out on EVERY row that was sent back, whichever way it ended, because the
@@ -1842,28 +1981,77 @@ const manifest = {
         verifiedCleanReturned: verifiedClean.length,
       }
     : { ran: false, fixesToCheck: 0 },
-  // X137 · THE BOUNCE COUNTER, and it is here so he can SEE the bouncer working
-  // rather than take the word for it. `bounced` is the figure the report headline
-  // carries; `cleared` against `toOwner` is whether sending work back is buying
-  // anything. `recheckRan:false` with `bounced` non-zero is the one shape that
-  // must never read as a clean wave — the warning below says so.
-  bounce: VERIFY
-    ? {
-        limit: BOUNCE_LIMIT,
-        bounced: bouncedIds.length,
-        refs: bouncedIds,
-        recheckRan: bounceRecheckRan,
-        cleared: bounceCleared.length,
-        clearedRefs: bounceCleared,
-        toOwner: bounceStillWrong.length,
-        toOwnerRefs: bounceStillWrong,
-        // Already spent their one bounce on an earlier run, so they went straight
-        // to him carrying both attempts. Non-zero is the counter doing its job.
-        notBouncedAtLimit: bounceAtLimit.length,
-        notBouncedAtLimitRefs: bounceAtLimit,
-        depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
-      }
-    : 'n/a (verify off)',
+  // ── X137 · THE BOUNCE COUNTER · X143 · AND IT EMITS ITS ZERO ───────────────
+  // He can SEE the bouncer sending work back rather than take the word for it.
+  // `cleared` against `toOwner` is whether bouncing buys anything;
+  // `recheckRan:false` with `bounced` non-zero is the one shape that must never
+  // read as a clean wave, and the warning below says so.
+  //
+  // X143 · ALWAYS AN OBJECT, ALWAYS WITH EXPLICIT ZEROS — never omitted, and
+  // deliberately NOT the `'n/a (…)'` string the rest of this manifest uses for a
+  // skipped mechanism. Two reasons, and the second is the load-bearing one:
+  //
+  //   1. `bounced: 0` on its own is ambiguous, so `eligible` is beside it. The
+  //      three buckets partition `eligible`, so `eligible:0 bounced:0` is the
+  //      healthy silence and `eligible:3 bounced:0` is a defect. A mechanism that
+  //      reports nothing when it does nothing is indistinguishable from one that
+  //      is not there — the exact failure class this file was written against.
+  //
+  //   2. **THIS BLOCK IS THE ENGINE MARKER FOR THIS CHANGE.** A framework edit
+  //      loads once per session, so a long-lived chat runs the OLD engine
+  //      silently, and nothing in a run's persisted artefacts records which copy
+  //      executed — measured 2026-08-03: `agent-*.meta.json` holds only
+  //      `{agentType, spawnDepth}`, the journal holds only agent results, and the
+  //      engine's own `log()` output is returned to the chat and persisted
+  //      NOWHERE. So the presence of `manifest.bounce` is the proof: the old
+  //      engine cannot emit this key. **`bounce` absent = a stale engine, not a
+  //      quiet wave.** That is a capability marker rather than a hand-kept
+  //      version number, so it cannot go stale and cannot lie.
+  bounce: {
+    verifyOff: !VERIFY, // true = the round could not have run; every count below is a structural zero
+    limit: BOUNCE_LIMIT,
+    // eligible = bounced + notBouncedAtLimit + unroutable, always.
+    eligible: bounceEligible,
+    bounced: bouncedIds.length,
+    refs: bouncedIds,
+    recheckRan: bounceRecheckRan,
+    cleared: bounceCleared.length,
+    clearedRefs: bounceCleared,
+    toOwner: bounceStillWrong.length,
+    toOwnerRefs: bounceStillWrong,
+    // Already spent their one bounce on an earlier run, so they went straight to
+    // him carrying both attempts. Non-zero is the counter doing its job.
+    notBouncedAtLimit: bounceAtLimit.length,
+    notBouncedAtLimitRefs: bounceAtLimit,
+    // Overturned with no resolvable lane — nowhere to send it, so it escalates.
+    unroutable: bounceUnroutable.length,
+    unroutableRefs: bounceUnroutable,
+    // Every overturn still standing after the bounce and the re-check: what he
+    // actually has to rule on.
+    escalated: bounceEscalated,
+    depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
+  },
+  // ── X144 · QUESTION 1b, MADE OBSERVABLE ────────────────────────────────────
+  // `candidates` is the engine's own derivation, so it is a fact rather than a
+  // claim; `traced` is what the pass returned that actually covers one. Always
+  // present, zeros written — `candidates:0 traced:0` is readable silence, and
+  // ABSENT means a stale engine, exactly as `bounce` does. `untracedPairs` names
+  // by id what nobody walked, because a count he cannot turn into a list is a
+  // number he scrolls past.
+  joint: {
+    candidates: jointCandidates.length,
+    candidatePairs: jointCandidates.map((c) => ({ ids: c.ids, why: c.why })),
+    traced: jointCandidates.length - jointUntraced.length,
+    untraced: jointUntraced.length,
+    untracedPairs: jointUntraced.map((c) => c.ids.join('+')),
+    // The verdict split. `disagrees` is an overturn against the WAVE — two halves
+    // each correct alone, pulling against each other — and it is the single defect
+    // class 1b exists for.
+    composes: jointTraces.filter((t) => t.verdict === 'composes').length,
+    disagrees: jointTraces.filter((t) => t.verdict === 'disagrees').length,
+    unproven: jointTraces.filter((t) => t.verdict === 'unproven').length,
+    disagreePairs: jointTraces.filter((t) => t.verdict === 'disagrees').map((t) => `${t.ids.join('+')}${t.sharedRootCause ? ` @ ${t.sharedRootCause}` : ''}`),
+  },
 }
 // Known-shape sanity checks. These are the exact failures already paid for.
 // Arg problems go FIRST: an input that never arrived invalidates everything
@@ -1892,6 +2080,30 @@ if (REVIEWED_LOGS && !Array.isArray(usherReport.filesRead))
 if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
   warnings.push(
     `No lane reported \`filesTouched\`, so the verify could not tell this wave from anything else uncommitted in the tree. It checked everything, which is safe but wasteful — and any overturned row may belong to work this run did not do.`,
+  )
+// ── X144 · 1b's GATE, and it compares against the DENOMINATOR ────────────────
+// Never against `jointTraces` being non-empty: a required field invites one token
+// line per pair that proves nothing, so the test is whether every candidate the
+// engine named is actually covered. This is the warning that makes 1b real — it
+// is the only thing standing between "the joint fix was traced" and prose.
+if (VERIFY && verifyRan && jointUntraced.length)
+  warnings.push(
+    `QUESTION 1b IS UNCOVERED — ${jointUntraced.length} of ${jointCandidates.length} multi-lane pair(s) were NOT traced together: ${jointUntraced
+      .map((c) => `${c.ids.join('+')} (${c.why})`)
+      .join(' · ')}. Two lanes fixing one bug two different ways is the defect this pass exists for, and nothing else in the loop looks for it. Send the verify back for these pairs before wrapping.`,
+  )
+if (VERIFY && verifyRan && manifest.joint.disagrees)
+  warnings.push(
+    `A JOINT FIX DISAGREES WITH ITSELF — ${manifest.joint.disagrees} pair(s): ${manifest.joint.disagreePairs.join(' · ')}. Each half is correct alone, which is why neither lane found it. This is an overturn against the WAVE; do not wrap on it.`,
+  )
+// X143 · the partition, asserted. `eligible` must equal the three buckets it
+// splits into; anything else means an overturn went somewhere this manifest does
+// not name, which is the silent-drop class rather than a counting slip.
+if (VERIFY && bounceEligible !== bouncedIds.length + bounceAtLimit.length + bounceUnroutable.length)
+  warnings.push(
+    `BOUNCE ACCOUNTING IS WRONG — ${bounceEligible} overturn(s) were eligible but only ${
+      bouncedIds.length + bounceAtLimit.length + bounceUnroutable.length
+    } are accounted for (${bouncedIds.length} bounced · ${bounceAtLimit.length} at the limit · ${bounceUnroutable.length} with no lane). An overturn has gone somewhere the manifest does not name.`,
   )
 // X137 · a bounce whose re-check died is the `verify.ran` failure one level in:
 // the lane re-attempted, nothing re-examined it, and without this the row would
@@ -2048,7 +2260,13 @@ log(
   `Manifest — cutoff:${(!PRESET && usherReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(usherReport.filesRead) && usherReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
-    ` bounced:${bouncedIds.length}${bouncedIds.length ? `(${bounceCleared.length}ok/${bounceStillWrong.length}owner${bounceRecheckRan ? '' : ',RECHECK-DEAD'})` : ''}${bounceAtLimit.length ? ` atLimit:${bounceAtLimit.length}` : ''}` +
+    // X143 · printed on EVERY run, zeros and all. `bounce:0/0` says the round ran
+    // and had nothing to do; the line missing entirely says a stale engine.
+    ` bounce:${bounceEligible}elig/${bouncedIds.length}sent${bouncedIds.length ? `(${bounceCleared.length}ok/${bounceStillWrong.length}owner${bounceRecheckRan ? '' : ',RECHECK-DEAD'})` : ''}` +
+    `${bounceAtLimit.length ? ` atLimit:${bounceAtLimit.length}` : ''}${bounceUnroutable.length ? ` noLane:${bounceUnroutable.length}` : ''}` +
+    // X144 · printed on EVERY run, zeros included. `joint:0/0` says there was no
+    // multi-lane pair to trace; the field missing says a stale engine.
+    ` joint:${jointCandidates.length - jointUntraced.length}/${jointCandidates.length}${manifest.joint.disagrees ? ` DISAGREE:${manifest.joint.disagrees}` : ''}${jointUntraced.length ? ` UNTRACED:${jointUntraced.length}` : ''}` +
     ` carried:${carriedIn.length}${BACKLOG ? ` backlog:${backlogReread.length}/${backlogSeen}+${backlogNoCite}nocite` : ''}` +
     `${backlogClaims.length ? ` fixedOk:${backlogConfirmed.size}/${backlogClaims.length}` : ''}` +
     ` decisions:${onHisDesk}/${DECISION_BUDGET} tickets:${ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0)}→${ticketComplaints.reduce(

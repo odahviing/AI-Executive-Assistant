@@ -33,7 +33,7 @@ flowchart TB
 ### 1. 🧵 Requests spine — *the* backbone
 `core/requests/*` · `db/requests.ts` · types in `core/requests/types.ts`
 One `requests` table owns the **lifecycle** of every multi-step unit of work (coord, outreach, approval, reminder, follow-up, research). Fields: `kind`, `state` (`awaiting_owner`/`awaiting_colleague`/`in_flight` → `resolved`/`cancelled`/`expired`), `phase`, timer (`next_check_at`/`next_check_handler`), return address (`origin_channel`/`origin_thread_ts`).
-- **Invariant:** the request row is the single source of truth for open/waiting-on/closed. Side tables (`coord_jobs`, `outreach_jobs`) are payload-only; their `status` columns are vestigial by design.
+- **Invariant:** the request row is the single source of truth for open/waiting-on/closed. The `outreach_jobs` side table is payload-only; its `status` column is vestigial by design. (`coord_jobs` no longer exists — the coord subsystem it backed was removed in 3.5.0.)
 - **`closeRequest.ts` is the ONLY terminal path** — idempotent, cascades to children, clears the timer, audit-logged. `reconcile.ts` kills orphans + prunes terminal rows >30d.
 
 ### 2. ✅ Approval flow — a `kind` of request
@@ -51,14 +51,14 @@ Every message → assemble system prompt (date, prefs, people memory, pending ap
 
 ### 5. 🚪 Reply pipeline + guards — the output spine
 `connectors/slack/postReply.ts` + 6 guards in `utils/`
-Every owner-facing reply: normalize (`slackFormat`/`textScrubber`) → **claimChecker** (false "I did it" claims) → **dateVerifier** (wrong weekday/date, deterministic correction) → **securityGate** (AI/bot self-reveal) + **humanGate** (Maelle-as-infrastructure framing). Inbound-side guards: **addresseeGate** (MPIM "is this for me") + **imageGuard** (image-text injection). Each = one concern, one stage, fails open. *(No `coordGuard` — removed.)*
+Every owner-facing reply: normalize (`formatForSlack`/`textScrubber`) → **claimChecker** (false "I did it" claims) → **dateVerifier** (wrong weekday/date, deterministic correction) → **securityGate** (AI/bot self-reveal) + **humanGate** (Maelle-as-infrastructure framing). Inbound-side guards: **addresseeGate** (MPIM "is this for me") + **imageGuard** (image-text injection). Each = one concern, one stage, fails open. *(No `coordGuard` — removed.)*
 
 ### 6. 📅 Scheduling / booking engine — the calendar backbone
 `skills/meetings.ts` → `skills/meetings/ops.ts` → `utils/scheduleRules.ts` + `utils/workHours.ts` → `connectors/graph/calendar.ts`
 Two chokepoints keep search and booking in agreement:
 - **`checkSlot`** — the ONE "is this slot OK?" validator (rules 0–9). Search, create, move, coord all call it.
 - **`getEffectiveWorkDay` / `…ForInstant`** — the ONE work-day resolver: yaml base ⊕ per-date `owner_schedule_overrides`, fail-safe to yaml.
-Supporting: `coord/*` (transport-agnostic coordination state machine), `floatingBlocks`, `categoryRules`, `meetingProtection`, `weTimeResolver` (travel dual-clock).
+Supporting: `floatingBlocks`, `categoryRules`, `meetingProtection`, `weTimeResolver` (travel dual-clock).
 
 ### 7. 👤 Person store — the identity backbone
 `db/people.ts` · `memory/peopleMemory.ts` · `core/assistant.ts`
@@ -82,7 +82,7 @@ Outbound goes through the `Connection` interface; **skills never import from `co
 | **Social engine** | `core/social/*` + `memory/capturePass` | A deterministic pre/post-pass wrapping the loop, gated on `skills.social` (off by default) — middleware, not a tool bundle |
 | **I/O adapters** | `voice/*` (Whisper/TTS), `vision/*` (image ingest) | Side channels into a turn |
 | **Task dispatcher *handlers*** | `tasks/dispatchers/{routine,calendarFix,summaryActionFollowup,socialDecay,socialPingRankCheck}.ts` | Small per-type logic plugged into the core runner (#4). `routine` is semi-core (materializes user routines) |
-| **One-off utils** | `textScrubber`, `slackFormat`, `toolStatusText`, `calendarListingFormat`, `displaySubject`, `extractJson`, `rateLimit`, `turnCache`, `toolCallCache`, `usageLog`, `logger` | Pure formatters/helpers; no state, no lifecycle |
+| **One-off utils** | `textScrubber`, `formatForSlack`, `toolStatusText`, `calendarListingFormat`, `displaySubject`, `extractJson`, `rateLimit`, `turnCache`, `toolCallCache`, `usageLog`, `logger` | Pure formatters/helpers; no state, no lifecycle |
 | **Owner scripts** | `scripts/*.cjs/.mjs/.ts` (39 files) | One-off DB/maintenance/debug tools, outside `src/`; never in the request path. Live ones: `db-query.cjs`, `auto-build.mjs`+`auto-triage-bug.mjs` (CI), `measure-prompt(s)`/`_dump-prompts` |
 | **Dormant** | `connectors/whatsapp.ts` | Inert until a WhatsApp transport is configured |
 
@@ -91,7 +91,5 @@ Outbound goes through the `Connection` interface; **skills never import from `co
 ---
 
 ## Known architectural debt / consolidation candidates
-- **Tasks table micro-cleanup** (small, safe — NOT a full-table deletion): prune 4 vestigial `TaskType` values (`coordination` / `reminder` / `follow_up` / `research`, now request kinds), retire the `social_ping_rank_check` drain once emptied, fix the stale `types.ts` header. The table itself is the live owner-facing ledger + brief substrate — the spine owns timers, tasks owns visibility; that split is deliberate (v3.1).
-- **`userProfile.ts` `connections:` block** — orphaned (its only reader, `router.ts`, was removed). Kept as multi-transport scaffolding (issue #1); remove if that work isn't coming.
+- **Tasks table micro-cleanup** (small, safe — NOT a full-table deletion): retire the `social_ping_rank_check` drain once emptied. The table itself is the live owner-facing ledger + brief substrate — the spine owns timers, tasks owns visibility; that split is deliberate (v3.1). (The 4 vestigial `TaskType` values and the stale `types.ts` header this bullet used to name were removed o#192, 2026-08-03.)
 - **Dead tables dropped** (v3.7.x cleanup): `approvals`, `cron_schedules`, `assistant_threads` — now `DROP TABLE IF EXISTS` on boot, no recreate.
-- **`scripts/`** — ~31 of 39 are spent one-shot incident/migration scripts, safe to delete (git-recoverable).

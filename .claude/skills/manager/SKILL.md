@@ -88,6 +88,18 @@ You hold the **only cross-lane view of Maelle**, so decomposition, routing, and 
 
   - **`bounces` — REQUIRED on any row the bouncer sent back, and it is the counter that stops an infinite loop** (X137). His ruling, 2026-08-03: *"we can bounce stuff once, not twice."* An **overturn** goes back to the lane that built it; a **discovery** never does. `bounces: 1` means it has had its one second attempt, so the next overturn on that item goes to **him**, not to a third try.
 
+    **`manifest.bounce` IS ALSO YOUR ENGINE MARKER, AND ITS ABSENCE IS THE ONLY THING THAT MEANS ANYTHING (X143).** A framework edit loads **once per session**, so a long-lived chat runs the OLD engine silently — and nothing a run leaves behind records which copy executed: measured 2026-08-03, `agent-*.meta.json` holds only `{agentType, spawnDepth}`, `journal.jsonl` holds only agent results, and **the engine's own log output is returned to you and persisted nowhere.** So read it this way, every run:
+    - **`bounce` present with `eligible:0 bounced:0`** → the bounce-capable engine ran and the bouncer overturned nothing. **That is the healthy silence, and it is a fact, not an assumption.**
+    - **`bounce` present with `eligible:3 bounced:0`** → rows were overturned and none went back. A defect; read `notBouncedAtLimit` and `unroutable`.
+    - **`bounce` ABSENT** → **you are on a stale engine. Say so and start a fresh chat**; the old copy cannot emit that key. Never read a missing block as a quiet wave.
+
+    **Write the zero through to his desk: `0 bounced` on the headline's `out:` line.** A zero says the bouncer had nothing to send back; silence says nothing at all, and `--report` asks for it.
+
+    **`manifest.joint` is the same three readings, for question 1b — the multi-lane joint-fix trace (X144).** His fear in his own words: *"if a bug had two lanes, two agents, and for some reason they both went a different way of fixing it, we get a bug that's not working."* The **engine derives the candidate pairs** (a `>dep` hand-off · a `confirmed-other-lane` verdict · two lanes citing one file as `rootCause`) and the bouncer fills `jointTraces`, so the denominator is a fact and the numerator is checked against it — never against the array merely being non-empty. Copy `<traced>/<candidates> joint-traced` onto the `out:` line, zeros included.
+    - **`candidates:0 traced:0`** → this wave had no multi-lane pair. Readable silence.
+    - **`untraced` non-zero** → the engine warns and names the pairs by id. **Send the verify back for those pairs; do not wrap.** A pair the bouncer skipped and a pair it walked used to look identical.
+    - **`disagrees` non-zero** → two halves each correct alone, pulling against each other. **That is an overturn against the WAVE**, not against either lane, and it is the one defect nothing else in the loop looks for.
+
     **Copy it off `manifest.bounce` and write it on the row — then CARRY IT BACK IN.** The engine reads `bounces` off each `args.issues` row, so a row he re-sends after a bounce arrives already at its limit and cannot be bounced again. Drop the field on the way to the ledger, or leave it off when you build the preset, and the counter resets silently — which is the same item bouncing every night forever. **The observable is `manifest.bounce`:** `bounced` against `cleared` and `toOwner` says whether sending work back is buying anything, and **`recheckRan:false` with `bounced` non-zero means nothing re-examined the second attempt** — the engine warns, and a wrap does not proceed on it.
 
   - **`confirmed-other-lane`** — a lane says the row is done and **another lane did it** (X66). **DO NOT WRITE A SECOND LEDGER ROW FOR IT.** The lane that built it already has one, and two rows for one change is what you were correcting by hand in `state.json` on 2026-07-30 (*"are ONE CHANGE recorded twice — do not count two fixes"*). It closes the report row; the fix count does not move. If a row does reach the ledger with this verdict, `ledger-stats` closes it and keeps it out of the shipped count.
@@ -477,7 +489,7 @@ Recognise it by the *presence of specific items*, not by the phrasing. He will n
 
 ```
 Run <id> — in: <n> tickets · <n> day(s) of logs · <n> backlog re-reads
-out: <n> built · <n> already-fixed · <n> built-with-gap · <n> bounced · <n> converted · <n> queued
+out: <n> built · <n> already-fixed · <n> built-with-gap · <n> bounced · <n>/<n> joint-traced · <n> converted · <n> queued
 board: net <±n> → <n> open rows — <n> still-real · <n> need a re-read · <n> cite no file · <n> rulable · <n> waiting on a verb   (node scripts/ledger-stats.cjs --open)
 your <n> rows await you: <n> from tonight · <n> re-surfaced · <n> found by the loop
 ```

@@ -66,10 +66,9 @@ Almost every handoff is "here's a bug, add a rule." Resist. In order:
   call; never `node -e`/`-p`.
 
 ## Open follow-ups from the last session (for the relevant chats, not necessarily you)
-- **Code (meeting chat):** rename the `focus_time_office` label — it's the free-time
-  floor, not a "focus block" — at `ops.ts:1484/2742/4144` (pasted verbatim into
-  replies). See `.claude/PROMPT_FOR_MEETING_CHAT.md`. Then sweep the residual prompt
-  refs (`meetings.ts:899/903/1067`).
+- **Done:** the `focus_time_office` label rename (free-time floor, not a "focus
+  block") shipped — `violationLabels.ts` now renders "would leave {owner} under
+  the free-time floor (office day)".
 - **Watch live (no code backstop):** "resolve WHO before WHEN" (attendee resolution)
   and cross-TZ / subject-language rules were ignored at least once with the tool
   right there — if they recur, escalate to code/placement, don't re-add.

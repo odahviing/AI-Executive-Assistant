@@ -568,10 +568,57 @@ if (argv.includes('--report')) {
   if (bounceClaim === null && bouncedRefs.length) {
     console.log(`\n  ! ${bouncedRefs.length} row(s) were BOUNCED since the last wrap and the headline says nothing: ${bouncedRefs.slice(0, 8).join(', ')}${bouncedRefs.length > 8 ? ' …' : ''}. Write \`<n> bounced\` on the \`out:\` line — that figure is how he sees the bouncer working.`);
     bad += 1;
-  } else if (bounceClaim !== null) {
+  } else if (bounceClaim === null) {
+    // X143 · `0 bounced` is information; a missing figure is not. A real bounce
+    // gone unreported fails the wrap above — this direction only nags, because
+    // red-lining every report that predates the field would be a check firing on
+    // the healthy path, which is the mistake this file is written against.
+    console.log(`\n  bounced figure: NOT WRITTEN, and no row carries \`bounces\` since the last wrap. Write \`0 bounced\` on the \`out:\` line — a zero says the bouncer had nothing to send back, where silence says nothing at all.`);
+  } else {
     const okB = bounceClaim === bouncedRefs.length;
     if (!okB) bad += 1;
     console.log(`\n  headline's bounced figure: claims ${bounceClaim} · the ledger holds ${bouncedRefs.length} row(s) with \`bounces\` since the last wrap   ${okB ? 'ok' : '! MISMATCH'}`);
+  }
+  // ── X144 · QUESTION 1b's FIGURE IS REPORTED HERE, NEVER GATED HERE ──────────
+  // The joint-trace count is a PER-RUN fact and the ledger holds no per-run field
+  // for it, so this file cannot derive the denominator honestly. It can only
+  // re-derive CANDIDATES — `>dep` refs and `confirmed-other-lane` verdicts — and
+  // that set is scoped to the last `wrap-` stamp, which X103 measured as skipped
+  // by 5 of 7 wraps. So the slice reaches back past several releases: written as a
+  // hard failure it exits 1 naming eleven `>dep` refs from waves already shipped,
+  // i.e. a check firing on the healthy path, which is the one mistake this whole
+  // file is written against. Caught on a fixture before it ever ran on his wrap.
+  //
+  // THE REAL GATE IS ONE LAYER UP AND IT ALREADY EXISTS (A7): `bugger.js` derives
+  // the candidates for the run it is executing and WARNS when any pair comes back
+  // untraced, at the moment the verify can still be sent back. This line's job is
+  // only to make sure the number reaches his desk.
+  const jointCandidateRefs = [
+    ...new Set(sinceWrap.filter((r) => /[>]dep/.test(String(r.ref || '')) || r.verdict === 'confirmed-other-lane').map((r) => r.ref || '(no ref)')),
+  ];
+  const jointClaim = (() => {
+    for (const l of lines) {
+      const m = String(l).match(/(\d+)\s*\/\s*(\d+)\s*joint[- ]traced/i);
+      if (m) return { traced: Number(m[1]), of: Number(m[2]) };
+    }
+    return null;
+  })();
+  if (jointClaim) {
+    // The one direction that IS a wrap-stopper, and it needs no derivation: the
+    // headline itself says pairs were left untraced.
+    const short = jointClaim.of - jointClaim.traced;
+    console.log(
+      `\n  headline's joint-trace figure: claims ${jointClaim.traced} of ${jointClaim.of} pair(s) traced   ${
+        short > 0 ? `! ${short} PAIR(S) UNTRACED — question 1b is uncovered, do not wrap` : 'ok'
+      }`,
+    );
+    if (short > 0) bad += 1;
+  } else {
+    console.log(
+      `\n  joint-trace figure: NOT WRITTEN. Copy \`<traced>/<candidates> joint-traced\` from \`manifest.joint\` onto the \`out:\` line, zeros included${
+        jointCandidateRefs.length ? ` — the ledger holds ${jointCandidateRefs.length} multi-lane row(s) back to the last wrap stamp, which is a hint and not this run's denominator` : ''
+      }. Not a failure: only the run's own manifest knows how many pairs it had.`,
+    );
   }
   // ── X103 · BOTH WRAP MARKERS, CHECKED AGAINST THE ONE THING THAT CANNOT DRIFT ──
   // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7

@@ -216,46 +216,61 @@ function buildContextBlock(job: OutreachJob, deltaSeconds: number): string {
 }
 
 /**
- * Sonnet classifier for the 10min-24h ambiguous window. Returns true when
- * the inbound looks like a response to the outbound; false when it looks
- * like a new topic.
+ * Sonnet classifier for the 24h ambiguous window. Takes EVERY still-open
+ * candidate (most-recent-first) in ONE call and returns the id of the one
+ * the inbound continues, or null when it matches none (NEW_TOPIC for all).
  *
- * Fails open to TRUE (treat as response) — over-attaching context costs a
- * minor "extra context for an unrelated message" risk; under-attaching
- * costs "Hey, what can I help you with?" amnesia. Owner direction is to
- * lean on continuity assumption, so failing open to true matches that.
+ * One call regardless of candidate count — a colleague can have several
+ * open outbound topics at once (see findOpenOutboundsForColleague), but the
+ * common case is exactly one, and even the rare multi-candidate case must
+ * not cost N serial round-trips: classifying candidates one at a time in a
+ * loop turned a single quick "Ok" ack into up to `LIMIT 10` sequential
+ * Sonnet calls before a reply could even reach the orchestrator. Folding
+ * every candidate into one prompt keeps the cost at exactly one call no
+ * matter how many open topics exist.
+ *
+ * Fails open to the MOST RECENT candidate (index 0) — over-attaching
+ * context costs a minor "extra context for an unrelated message" risk;
+ * under-attaching costs "Hey, what can I help you with?" amnesia. Owner
+ * direction is to lean on continuity assumption, so failing open to the
+ * newest open topic matches that.
  */
 async function classifyResponseVsNewTopic(params: {
-  outboundText: string;
+  candidates: Array<{ id: string; outboundText: string; deltaMinutes: number }>;
   inboundText: string;
-  deltaMinutes: number;
   colleagueName: string;
   ownerFirstName: string;
-}): Promise<boolean> {
+}): Promise<string | null> {
+  const { candidates } = params;
   try {
+    const listing = candidates
+      .map((c, i) => `${i + 1}. (sent ${c.deltaMinutes} min ago) "${c.outboundText.slice(0, 500)}"`)
+      .join('\n');
     const result = await anthropic.messages.create({
       ...SONNET,
       max_tokens: 12,
       system:
-        `You decide whether a Slack DM from ${params.colleagueName} is a continuation of a prior message ${params.ownerFirstName}'s assistant sent them, or a fresh new topic. ` +
-        `Reply with exactly one word: RESPONSE (it's likely a reply / acknowledgment / follow-up to the prior message) or NEW_TOPIC (it's clearly about something else). ` +
-        `When in doubt, prefer RESPONSE — short replies like "ok", "thanks", "got it", "sure", emoji-only acks, or any text that isn't an obviously different request count as RESPONSE.`,
+        `You decide whether a Slack DM from ${params.colleagueName} is a continuation of ONE of several prior messages ${params.ownerFirstName}'s assistant sent them, or a fresh new topic unrelated to all of them. ` +
+        `Reply with exactly one token: the NUMBER of the single message it continues, or NEW_TOPIC if it matches none of them. ` +
+        `When in doubt, prefer the most recent one (number 1) — short replies like "ok", "thanks", "got it", "sure", emoji-only acks, or any text that isn't an obviously different request should match message 1.`,
       messages: [{
         role: 'user',
         content:
-          `What ${params.ownerFirstName}'s assistant said (${params.deltaMinutes} min ago):\n"${params.outboundText.slice(0, 500)}"\n\n` +
+          `What ${params.ownerFirstName}'s assistant sent ${params.colleagueName} (most recent first):\n${listing}\n\n` +
           `What ${params.colleagueName} just sent now:\n"${params.inboundText.slice(0, 500)}"\n\n` +
-          `One word: RESPONSE or NEW_TOPIC.`,
+          `One token: the number of the message it continues, or NEW_TOPIC.`,
       }],
     });
     const raw = ((result.content[0] as Anthropic.TextBlock).text ?? '').trim().toUpperCase();
-    if (raw.startsWith('NEW_TOPIC') || raw.startsWith('NEW TOPIC')) return false;
-    return true;  // default to RESPONSE on anything else (incl. plain "RESPONSE")
+    if (raw.startsWith('NEW_TOPIC') || raw.startsWith('NEW TOPIC')) return null;
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= candidates.length) return candidates[n - 1].id;
+    return candidates[0].id;  // unparseable non-NEW_TOPIC reply — default to newest
   } catch (err) {
-    logger.warn('recentOutboundContext classifier failed — defaulting to RESPONSE', {
+    logger.warn('recentOutboundContext classifier failed — defaulting to most recent candidate', {
       err: String(err).slice(0, 200),
     });
-    return true;
+    return candidates[0].id;
   }
 }
 
@@ -289,15 +304,11 @@ export async function getRecentOutboundContext(params: {
     colleagueSlackId: params.colleagueSlackId,
   });
 
-  // Most-recent-first: classify each open outbound against the inbound until
-  // one matches. A plain top-level reply has no thread_ts to disambiguate
-  // which open topic it belongs to, so trying only the newest (as before)
-  // meant a reply to an OLDER open outbound was compared against the wrong
-  // message, never matched, and its own outbound stayed context-less until
-  // it silently auto-expired.
+  // Pass 1 (no LLM): drop unparseable rows and auto-expire anything over 24h
+  // — both are pure elapsed-time checks, never worth a Sonnet call.
+  const eligible: Array<{ job: OutreachJob; deltaMs: number; deltaMinutes: number }> = [];
   for (const job of jobs) {
     if (!job.sent_at) continue;
-
     const sentMs = Date.parse(job.sent_at);
     if (!Number.isFinite(sentMs)) {
       logger.warn('recentOutboundContext — outreach_jobs.sent_at unparseable, skipping', {
@@ -307,8 +318,6 @@ export async function getRecentOutboundContext(params: {
     }
     const deltaMs = Date.now() - sentMs;
     const deltaMinutes = deltaMs / 60_000;
-
-    // Over 24h — auto-expire (lazy cleanup).
     if (deltaMinutes > AUTO_EXPIRE_HOURS * 60) {
       closeFollowup(job.id, 'auto_expired_24h');
       logger.info('recentOutboundContext — auto-expired (>24h)', {
@@ -316,40 +325,48 @@ export async function getRecentOutboundContext(params: {
       });
       continue;
     }
-
-    // Within 24h — ALWAYS classify (gh#176/#177: elapsed time alone doesn't
-    // prove topic continuity — colleague identity is not topic identity, and a
-    // genuinely new topic can land within minutes of an unrelated outbound to
-    // the same person). Fails open to RESPONSE, so quick acks still attach
-    // context exactly as the old <10min bypass did.
-    const isResponse = await classifyResponseVsNewTopic({
-      outboundText: job.message,
-      inboundText: params.inboundText,
-      deltaMinutes: Math.round(deltaMinutes),
-      colleagueName: params.colleagueName,
-      ownerFirstName: params.ownerFirstName,
-    });
-
-    if (isResponse) {
-      closeFollowup(job.id, 'llm_response_match', { replyText: params.inboundText });
-      logger.info('recentOutboundContext — LLM classified as RESPONSE', {
-        jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
-      });
-      return {
-        matched: true,
-        matchedJobId: job.id,
-        contextBlock: buildContextBlock(job, deltaMs / 1000),
-        matchedVia: 'llm_classified_response',
-      };
-    }
-
-    // NEW_TOPIC against this job — leave it open, try the next candidate.
-    logger.info('recentOutboundContext — LLM classified as NEW_TOPIC, no context attached', {
-      jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
-    });
+    eligible.push({ job, deltaMs, deltaMinutes });
   }
 
-  return { matched: false, contextBlock: null };
+  if (eligible.length === 0) return { matched: false, contextBlock: null };
+
+  // Pass 2 (ONE Sonnet call, not one per candidate): a plain top-level reply
+  // has no thread_ts to disambiguate which open topic it belongs to, so a
+  // colleague can have several open outbound topics at once and any of them
+  // could be what the inbound continues (gh#176/#177: elapsed time alone
+  // doesn't prove topic continuity). Folding every eligible candidate into a
+  // single classification call — instead of looping and classifying each one
+  // serially — keeps this at exactly one Sonnet call regardless of how many
+  // topics are open, and still fails open to the most recent one.
+  const matchedId = await classifyResponseVsNewTopic({
+    candidates: eligible.map(e => ({
+      id: e.job.id,
+      outboundText: e.job.message,
+      deltaMinutes: Math.round(e.deltaMinutes),
+    })),
+    inboundText: params.inboundText,
+    colleagueName: params.colleagueName,
+    ownerFirstName: params.ownerFirstName,
+  });
+
+  if (matchedId === null) {
+    logger.info('recentOutboundContext — LLM classified as NEW_TOPIC against all open candidates', {
+      colleague: params.colleagueName, candidateCount: eligible.length,
+    });
+    return { matched: false, contextBlock: null };
+  }
+
+  const match = eligible.find(e => e.job.id === matchedId) ?? eligible[0];
+  closeFollowup(match.job.id, 'llm_response_match', { replyText: params.inboundText });
+  logger.info('recentOutboundContext — LLM classified as RESPONSE', {
+    jobId: match.job.id, colleague: params.colleagueName, deltaMinutes: Math.round(match.deltaMinutes),
+  });
+  return {
+    matched: true,
+    matchedJobId: match.job.id,
+    contextBlock: buildContextBlock(match.job, match.deltaMs / 1000),
+    matchedVia: 'llm_classified_response',
+  };
 }
 
 /**
