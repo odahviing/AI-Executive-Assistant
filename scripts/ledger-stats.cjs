@@ -53,7 +53,7 @@ const REPO = path.join(__dirname, '..');
 //
 // A row's evidence names a `file:line`, so staleness is CHECKABLE rather than a
 // judgement: if a commit touched that file AFTER the row was written, the row
-// needs one re-read before it counts as open. Same check the usher already runs
+// needs one re-read before it counts as open. Same check the editor already runs
 // outward for `alreadyBuilt` / `openKnown`, turned inward on the ledger.
 //
 // It MARKS, never closes. Most fixes touch a file without addressing every
@@ -146,7 +146,7 @@ const oldestDay = (rows) => rows.map((r) => String(r.date || '')).filter(Boolean
 //   moved       — the cited code changed after the row's latest date (X38)
 //   unexamined  — cites a file, and nobody has ever re-read it
 //   no-cite     — cites no file, so no pass can ever check it (X47) — HIS read
-// RE-READ = `moved` ∪ `unexamined`, which is the set the usher's brief takes.
+// RE-READ = `moved` ∪ `unexamined`, which is the set the editor's brief takes.
 // `unexamined` deliberately does NOT depend on git: with no history available
 // `moved` is unknowable, but "nobody has looked" is still a fact.
 const bucketOf = (s, row) => {
@@ -1161,7 +1161,7 @@ if (openOnly) {
   console.log(LEGEND_REREAD);
   // X51 · the two states read alike and are opposites. A `converted` row is CLOSED
   // and never prints here; a `deferred` row is a ONE-RUN skip and is DUE. Deriving
-  // `openKnown` from both told the usher to drop four rows the owner had ruled due.
+  // `openKnown` from both told the editor to drop four rows the owner had ruled due.
   console.log(
     `DEFERRED = a ONE-RUN skip, DUE on the next run — not parked. It never belongs in \`openKnown\`; that list is \`converted\` rows only, and those left the bug track for GitHub.\n` +
       `OVERDUE = a run has happened since and it did not come back. Put it in this run's \`pending owner\` group with its recommendation, or record \`declined\` — \`--report\` exits 1 while one stands.\n`,
@@ -1367,7 +1367,7 @@ const bothRows = bySource.get('both');
 const logTotal = (logRows ? logRows.total : 0) + (bothRows ? bothRows.total : 0);
 if (logTotal && logTotal < 6)
   console.log(`  · the log review has raised ${logTotal} — thin, but it is the only source for bugs nobody reported. Judge it on WHAT it catches, not how much.`);
-if (bothRows) console.log(`  · ${bothRows.total} row(s) merged a GitHub issue with a log moment — his words as the ask, the transcript as the proof. That merge working is the usher doing its job.`);
+if (bothRows) console.log(`  · ${bothRows.total} row(s) merged a GitHub issue with a log moment — his words as the ask, the transcript as the proof. That merge working is the editor doing its job.`);
 
 if (byRun) {
   console.log('\nBy run');

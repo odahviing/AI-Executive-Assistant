@@ -1,7 +1,7 @@
 export const meta = {
   name: 'bugger',
   description:
-    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the usher is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
+    'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the editor is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
     { title: 'Intake' },
     { title: 'Build' },
@@ -78,7 +78,7 @@ const asArray = (name, v, critical) => {
 // These are already lane-assigned, so intake and triage are skipped entirely —
 // paying to re-derive routing he has already approved is pure waste.
 // Read BEFORE `sources`, because what this holds decides what the source default
-// may be: a preset skips the usher, so it must never default a source in.
+// may be: a preset skips the editor, so it must never default a source in.
 const presetArg = asArray('issues', A.issues, true) // critical: the silent default is a full discovery pass
 const sourcesArg = asArray('sources', A.sources)
 // A discovery run does ALL THREE. Owner, 2026-07-30: *"put backlog in every run"* —
@@ -86,7 +86,7 @@ const sourcesArg = asArray('sources', A.sources)
 // bookkeeping. What makes it affordable is X38's staleness marking: only the rows
 // whose code has MOVED need re-reading, so the set is small by construction, and a
 // re-read produces a closure or a confirmation rather than a decision.
-// Empty on a preset: `args.issues` skips the usher, so a source named there could
+// Empty on a preset: `args.issues` skips the editor, so a source named there could
 // only be a source that never ran.
 const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['github', 'logs', 'backlog']
 // ── X42 · THE THIRD INPUT ────────────────────────────────────────────────────
@@ -97,9 +97,9 @@ const SOURCES = sourcesArg.length ? sourcesArg : presetArg.length ? [] : ['githu
 // rows, 28 of them flagged RE-READ once X59 widened the trigger from *the code
 // moved* to *nobody has ever looked*) and the only one with no door. So the
 // input that needs the funnel most was the one worked by hand, and a hand pass gets
-// no usher, no counts, no manifest, no `inFlight` and no report persistence.
+// no editor, no counts, no manifest, no `inFlight` and no report persistence.
 //
-// The usher ALREADY does this class of work — it matches findings against
+// The editor ALREADY does this class of work — it matches findings against
 // `alreadyBuilt` and `openKnown` and drops what is settled — so re-reading a
 // flagged row is the same skill pointed inward. One new SOURCE, not a new mode.
 //
@@ -122,11 +122,11 @@ const unknownSources = SOURCES.filter((s) => !KNOWN_SOURCES.has(s))
 if (unknownSources.length)
   throw new Error(
     `args.sources names ${unknownSources.length} unknown source(s): ${unknownSources.map((s) => `"${s}"`).join(', ')}. ` +
-      `Valid: ${[...KNOWN_SOURCES].join(', ')}. An unknown source produces a usher brief with nothing in it, so the run would find nothing and report success. Nothing has been dispatched.`,
+      `Valid: ${[...KNOWN_SOURCES].join(', ')}. An unknown source produces an editor brief with nothing in it, so the run would find nothing and report success. Nothing has been dispatched.`,
   )
 const BACKLOG = SOURCES.includes('backlog')
 const SINCE = A.sinceIso || 'the last run' // watermark for the log review
-// The watermark in UTC, so the manifest can check the usher compared against the
+// The watermark in UTC, so the manifest can check the editor compared against the
 // right instant rather than guessing from a line number. Empty when no ISO
 // watermark was passed (the first run, or a manual one).
 const WATERMARK_UTC = Number.isFinite(Date.parse(SINCE)) ? new Date(Date.parse(SINCE)).toISOString() : ''
@@ -139,14 +139,14 @@ const WATERMARK_DAY = WATERMARK_UTC ? SINCE.slice(0, 10) : '' // local day — l
 // that actually matters, and it came DOWN in the same change.
 const CAP = typeof A.capBuilds === 'number' ? A.capBuilds : 250
 // X42 · `sources` and `issues` are different doors, and `backlog` must never be
-// passed through both: a preset SKIPS the usher, so the re-read would never run
+// passed through both: a preset SKIPS the editor, so the re-read would never run
 // while `manifest.backlog` reported a backlog pass with zero rows — a mechanism
 // that did nothing and looked like success. Refused before anything spawns. Only
 // an EXPLICIT `sources:['backlog']` can reach this now — the default cannot, since
 // a preset defaults to no sources at all.
 if (BACKLOG && presetArg.length)
   throw new Error(
-    `args.sources names \`backlog\` and args.issues carries ${presetArg.length} row(s). A preset skips the usher, so the backlog re-read could not run. ` +
+    `args.sources names \`backlog\` and args.issues carries ${presetArg.length} row(s). A preset skips the editor, so the backlog re-read could not run. ` +
       `Pick one: \`sources:['backlog']\` to re-read the stale rows, or \`issues:[…]\` to build the ones he approved. Nothing has been dispatched.`,
   )
 // Bugs already FIXED but not yet in the running build. Production keeps
@@ -170,11 +170,11 @@ const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
 // next run — the only thing we need is don't do it now."* A deferral is a ONE-RUN
 // skip, and since the ledger is only appended during and after a run, every
 // `deferred` row standing when a run starts was deferred by an earlier one and is
-// due by definition. Listing it here tells the usher to drop work he asked for.
+// due by definition. Listing it here tells the editor to drop work he asked for.
 // If he never wants it, the verdict is `declined` — that is the parking state.
 // Shape: [{ref, symptom, state, note}].
 //
-// ENFORCED here, not only written in SKILL.md and usher.md. The rule that lived in
+// ENFORCED here, not only written in SKILL.md and editor.md. The rule that lived in
 // prose alone is the rule that broke: the derivation said `deferred` + `converted`,
 // the engine took whatever it was handed, and nothing could tell that a due row had
 // been listed as droppable. So a `deferred` entry is REMOVED from the drop list and
@@ -187,7 +187,7 @@ if (openKnownDeferred.length)
   argWarnings.push(
     `${openKnownDeferred.length} \`openKnown\` entr${openKnownDeferred.length === 1 ? 'y was' : 'ies were'} \`deferred\` and ${openKnownDeferred.length === 1 ? 'was' : 'were'} REMOVED from the drop list: ${openKnownDeferred
       .map((o) => o.ref || '(no ref)')
-      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the usher must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
+      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the editor must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
   )
 // X22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
@@ -207,10 +207,10 @@ const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) =
 // ledger row read FLAGGED, which looks exactly like handled.
 //
 // It carries on a BUILD invocation only. `args.issues` is what makes a run a
-// preset, so draining overflow into a discovery run would skip the usher and lose
+// preset, so draining overflow into a discovery run would skip the editor and lose
 // the log review (SKILL.md:385). Passed without `issues`, it is ignored and SAYS so.
 //
-// The drop is `openKnown` — the same list the usher drops against — because the one
+// The drop is `openKnown` — the same list the editor drops against — because the one
 // thing this route must never do is re-dispatch something he parked or declined.
 //
 // X46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
@@ -238,11 +238,11 @@ const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) 
 // for the night it is forgotten: the deferral's ledger row goes OVERDUE after one
 // run and blocks the report until it is back on his desk.
 const carriedDeferred = overflowArg.filter((i) => i && !carriedDropped.includes(i) && !carriedBuilt.includes(i) && isDeferredRow(i))
-// X128 · A DISCOVERY RUN DRAINS THE QUEUE TOO — but AFTER the usher, never
+// X128 · A DISCOVERY RUN DRAINS THE QUEUE TOO — but AFTER the editor, never
 // INSTEAD of it. The old rule ignored `pendingOverflow` on every non-preset run
 // because the only way to inject items was `args.issues`, and that flag makes a
 // run a PRESET and skips discovery. That is a property of the DOOR, not of the
-// goal: merging the queue into `buildable` once the usher has already returned
+// goal: merging the queue into `buildable` once the editor has already returned
 // loses nothing. `args.issues` is untouched and still throws on a run (:137) —
 // this ADDS a path, it does not loosen the guard.
 // Only pre-authorized rows are in here. `queued-next-run` means "found, not
@@ -274,7 +274,7 @@ if (carriedIn.length)
   log(
     presetArg.length
       ? `Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`
-      : `Queue: ${carriedIn.length} item(s) from state.pendingOverflow will MERGE into this run's buildable list AFTER the usher: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`,
+      : `Queue: ${carriedIn.length} item(s) from state.pendingOverflow will MERGE into this run's buildable list AFTER the editor: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`,
   )
 // X25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
 // shaped for a copy-paste straight back into `args.issues` — that is the whole
@@ -316,14 +316,14 @@ const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackm
 // Reasoning effort per agent (owner-set). Keys are agent names, renamed 2026-07-28.
 // The non-lane agents live here too, so every dispatch in this engine reads its
 // effort from ONE table — a hardcoded effort at the call site is invisible to
-// anyone tuning the run, which is how the usher sat at `medium` unnoticed.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+// anyone tuning the run, which is how the editor sat at `medium` unnoticed.
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
 // charter-audit.js:16-17 has had this guard since it was written; the two
 // engines that actually BUILD did not.
-const DISPATCHABLE = [...CODE_LANES, 'instructor', 'usher', 'bouncer']
+const DISPATCHABLE = [...CODE_LANES, 'instructor', 'editor', 'bouncer']
 const UNKNOWN = DISPATCHABLE.filter((l) => !EFFORT[l])
 if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — they have no effort setting and no agent, so they would dispatch to nothing.`)
 
@@ -338,7 +338,7 @@ if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — 
 // So the step REPORTS ITS OWN WORK, and the run manifest prints it. A no-op
 // stops being invisible and becomes a zero in a column where zero is obviously
 // wrong. Diagnostics only — nothing branches on them.
-const USHER = {
+const EDITOR = {
   type: 'object',
   properties: {
     filesRead: {
@@ -386,7 +386,7 @@ const USHER = {
           // X80 · X32 gave this funnel its two endpoints and no accounting between
           // them, so `emitted 1 of 3` and `emitted 1 of 3 because 2 were already
           // built` were the same return — and the unexplained two landed on no list
-          // at all, recoverable only by the Manager re-reading a ticket the usher had
+          // at all, recoverable only by the Manager re-reading a ticket the editor had
           // already read and discarded. #156 collapsed 3→0 on wf_4bbfc750-1a9 after
           // 3→3 and 3→0 on the two runs before it. Every complaint now comes back as
           // an issue OR as a named drop with its reason, so the arithmetic closes in
@@ -459,7 +459,7 @@ const USHER = {
               'REQUIRED on `still-real` and `moved`; write `fixed — no action` on a `fixed` row. One of his five verbs and ONE clause of why: `build — <why now>` · `decline — <why never>` · `defer — <what it waits on>` · `resend — <what the lane got wrong>` · `convert — <the design question>`. **X129 · `build` is now ACTED ON, not just advice** — his ruling 2026-08-02: *"everything that is able to build should be build."* A `build` verb sends this row to a lane in THIS run, so write it only when you would dispatch it; `convert` and `decline` and `defer` do not build, and a row that genuinely needs him gets no recommendation at all.',
           },
           // X129 · a backlog row that BUILDS has to be dispatchable, and the two
-          // fields a dispatch needs were never on this shape. The usher already
+          // fields a dispatch needs were never on this shape. The editor already
           // makes exactly this call on every fresh issue — same routing table,
           // same judgement, applied to a row it has just re-read.
           lane: {
@@ -473,7 +473,7 @@ const USHER = {
             description: 'REQUIRED when `recommend` starts with `build` — it orders the shared severity-first cap against this run\'s fresh findings. Judge the harm, not the age of the row.',
           },
           // X130 · which rows had no `recommend` before this run. They are the
-          // ones the usher verbed on his behalf, so they are named separately in
+          // ones the editor verbed on his behalf, so they are named separately in
           // the manifest and he can overturn any of them in one word.
           verbAdded: {
             type: 'boolean',
@@ -518,7 +518,7 @@ const USHER = {
           evidence: { type: 'string' },
           clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
           // Filled ONLY when the issue cites a code location. This was its own
-          // Haiku pass; the usher is already holding the issue, so it resolves
+          // Haiku pass; the editor is already holding the issue, so it resolves
           // the citation in the same turn instead of a second agent re-opening
           // what the first just read.
           where: {
@@ -764,7 +764,7 @@ const VERIFY_OUT = {
 const WHERE_NOTE =
   `\n\nSome issues carry \`_where\` — the cited location resolved for you, with an excerpt and its immediate neighbours. ` +
   `That is a STARTING POINT, not the truth: it is a snapshot taken before this dispatch, another lane may have moved the code since, ` +
-  `and the citation itself came from the usher and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
+  `and the citation itself came from the editor and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
@@ -874,14 +874,14 @@ const deferredDepAsks = (rs) =>
       awaitingOwner: true,
     }))
 
-// ---- 1. Usher — find the work AND shape it, in one pass -------------------
+// ---- 1. Editor — find the work AND shape it, in one pass -------------------
 // This was three agents: a GitHub pull, a log review, and a triage that routed
 // from their combined output. The split meant the agent making the run's most
 // consequential call — which lane owns this, and is it safe to dispatch at all —
 // worked from a one-line symptom and a quoted fragment, while the agent that had
 // actually read the transcript was already gone. Merging recovers that context.
 //
-// The routing and shaping DOCTRINE now lives in `.claude/agents/usher.md`, so
+// The routing and shaping DOCTRINE now lives in `.claude/agents/editor.md`, so
 // this prompt carries only the mechanics and the payload — the same split the
 // lane dispatches use, and the fix for two engines each holding their own
 // drifting copy of the lane map.
@@ -890,7 +890,7 @@ const deferredDepAsks = (rs) =>
 let allIssues = []
 let triageDropped = []
 let openKnownDropped = []
-let usherReport = {}
+let editorReport = {}
 let findingsSeen = 0
 let locationsResolved = 0
 let ticketComplaints = []
@@ -898,11 +898,11 @@ let backlogSeen = 0
 let backlogNoCite = 0
 let backlogReread = []
 if (PRESET) {
-  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the usher.`)
+  log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the editor.`)
   allIssues = PRESET
 } else {
 phase('Intake')
-const usher = await agent(
+const editor = await agent(
   `Find this run's work and shape it for the lanes. Sources: **${SOURCES.join(' + ')}**. Your charter holds the bar for a finding, the routing map, the merge rules and the \`kind\` call — this brief carries only the mechanics and the payload.\n\n` +
     (SOURCES.includes('logs')
       ? `## The log review\n\n` +
@@ -960,25 +960,25 @@ const usher = await agent(
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
-  { label: 'usher', phase: 'Intake', effort: EFFORT.usher, agentType: 'usher', schema: USHER },
+  { label: 'editor', phase: 'Intake', effort: EFFORT.editor, agentType: 'editor', schema: EDITOR },
 )
-allIssues = (usher && usher.issues) || []
-triageDropped = (usher && usher.droppedAsAlreadyBuilt) || []
-openKnownDropped = (usher && usher.droppedAsOpenKnown) || []
-findingsSeen = (usher && usher.findingsSeen) || allIssues.length
-ticketComplaints = (usher && usher.ticketComplaints) || []
-backlogSeen = (usher && typeof usher.backlogSeen === 'number' ? usher.backlogSeen : 0)
-backlogNoCite = (usher && typeof usher.backlogNoCite === 'number' ? usher.backlogNoCite : 0)
-backlogReread = (usher && usher.backlogReread) || []
-usherReport = usher || {}
-log(`Usher: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
+allIssues = (editor && editor.issues) || []
+triageDropped = (editor && editor.droppedAsAlreadyBuilt) || []
+openKnownDropped = (editor && editor.droppedAsOpenKnown) || []
+findingsSeen = (editor && editor.findingsSeen) || allIssues.length
+ticketComplaints = (editor && editor.ticketComplaints) || []
+backlogSeen = (editor && typeof editor.backlogSeen === 'number' ? editor.backlogSeen : 0)
+backlogNoCite = (editor && typeof editor.backlogNoCite === 'number' ? editor.backlogNoCite : 0)
+backlogReread = (editor && editor.backlogReread) || []
+editorReport = editor || {}
+log(`Editor: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 }
 
 // X98 · a backlog re-read that comes back `fixed` CLOSES a ledger row with no
 // diff behind it — the same no-evidence closure `already-fixed` is, arriving on
 // a different path. The X68 spot-check read lane results only, so this path was
-// checked by nothing but the usher's own sentence: measured 2026-07-31, 18 of
+// checked by nothing but the editor's own sentence: measured 2026-07-31, 18 of
 // the 33 `already-fixed` rows in ledger.jsonl carry `source:'audit'`, which is
 // this path and the largest single population of no-diff closures.
 //
@@ -1002,7 +1002,7 @@ const backlogClaims = backlogReread.filter(backlogClosable).map((b) => ({ id: `$
 const KNOWN_LANES = new Set([...CODE_LANES, 'instructor'])
 const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
 if (misrouted.length) {
-  log(`! Usher emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to handyman so they are not silently dropped.`)
+  log(`! Editor emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to handyman so they are not silently dropped.`)
   misrouted.forEach((i) => {
     i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
     i.lane = 'handyman'
@@ -1017,7 +1017,7 @@ if (misrouted.length) {
 // desk needing judgement, which is the most expensive possible order.
 // A PRESET item is exempt — he has already approved that routing by naming it.
 // X63 · `kind` DECIDES THE BUCKET; `clarity` is a property of the item, not a
-// gate on it. The two are not orthogonal in practice — a usher that judges an
+// gate on it. The two are not orthogonal in practice — an editor that judges an
 // item undecidable marks it `ambiguous` AND `needs-shaping` — so requiring
 // `clear` here put all five of wf_27f03aca-0dd's needs-shaping items in
 // `flagged`, and `mustAlsoAppear.needsShaping` reported 0 on a run where five
@@ -1069,28 +1069,28 @@ if (unshaped.length) {
   unshaped.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${(i.symptom || '').slice(0, 90)}`))
 }
 
-// ── X128 · MERGE THE QUEUE, AFTER THE USHER ─────────────────────────────────
+// ── X128 · MERGE THE QUEUE, AFTER THE EDITOR ─────────────────────────────────
 // The whole reason the old prohibition existed is a run that quietly skips
-// discovery, so the merge is gated on PROOF the usher actually ran and its
+// discovery, so the merge is gated on PROOF the editor actually ran and its
 // result is reported as its OWN number, never folded into one total.
-// `usherRan` is the observable: on a discovery run the usher block above either
+// `editorRan` is the observable: on a discovery run the editor block above either
 // produced a report or it did not, and "did not" must stop the run rather than
 // read as a quiet night with a full queue.
-const usherRan = PRESET ? null : Boolean(usherReport && Object.keys(usherReport).length)
-const fromUsher = buildable.length
+const editorRan = PRESET ? null : Boolean(editorReport && Object.keys(editorReport).length)
+const fromEditor = buildable.length
 let fromQueue = 0
 let fromBacklog = 0
 
 // ── X129 · A RE-READ BACKLOG ROW THAT SAYS `build` BUILDS ────────────────────
-// His ruling, 2026-08-02: *"usher build also need to be build. everything that
+// His ruling, 2026-08-02: *"editor build also need to be build. everything that
 // is able to build should be build. the stuff that are not to build is the ones
 // waiting for me, or the one decline/deferred/moved to github and then there are
 // there only for history."* So BUILD is the default and the exclusions are
-// explicit — the usher's `recommend` verb IS the authority, the same trust it
+// explicit — the editor's `recommend` verb IS the authority, the same trust it
 // already carries for the atomic-vs-needs-shaping call on every fresh issue.
 // Gate on the VERB, never on the display bucket: `--open` prints some rows as
 // DECIDE and some as QUEUED, and that column describes where the row sits on his
-// desk, not whether the usher would dispatch it.
+// desk, not whether the editor would dispatch it.
 const BUILD_VERB = /^\s*build\b/i
 // X130 · rows that carried no `recommend` until this run. Tracked separately so
 // the manifest can name what was decided on his behalf, whichever verb it got.
@@ -1120,7 +1120,7 @@ if (!PRESET && BACKLOG) {
     })
   }
 }
-// A row the usher told us to build and then made undispatchable is NOT a quiet
+// A row the editor told us to build and then made undispatchable is NOT a quiet
 // skip — it is the one case where its own recommendation cannot be honoured.
 if (backlogUndispatchable.length)
   argWarnings.push(
@@ -1130,9 +1130,9 @@ if (backlogUndispatchable.length)
   )
 
 if (!PRESET) {
-  if (!usherRan)
+  if (!editorRan)
     throw new Error(
-      `The usher returned nothing on a DISCOVERY run, so this run found no work of its own — and ${carriedIn.length} queued item(s) are waiting. Building only the queue here would skip the GitHub pull and the log review while reading as a normal night. Nothing has been dispatched. Re-run, or drain the queue deliberately with \`build\`.`,
+      `The editor returned nothing on a DISCOVERY run, so this run found no work of its own — and ${carriedIn.length} queued item(s) are waiting. Building only the queue here would skip the GitHub pull and the log review while reading as a normal night. Nothing has been dispatched. Re-run, or drain the queue deliberately with \`build\`.`,
     )
   // One de-dupe pass over BOTH extra sources, in order, so a row that is in the
   // queue AND was re-read from the backlog AND was independently re-found by
@@ -1154,7 +1154,7 @@ if (!PRESET) {
   fromBacklog = mergedBacklog.length
   buildable = buildable.concat(mergedQueue, mergedBacklog)
   if (fromQueue || fromBacklog)
-    log(`Merged: ${fromUsher} from the usher + ${fromQueue} from state.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
+    log(`Merged: ${fromEditor} from the editor + ${fromQueue} from state.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
 }
 
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
@@ -1218,7 +1218,7 @@ if (MODE === 'collect') {
   }
 }
 
-// ---- 2b. Locations — resolved by the usher, in the same turn ---------------
+// ---- 2b. Locations — resolved by the editor, in the same turn ---------------
 // Every builder used to open with the same hunt: grep, read a 1,400-line file,
 // read the wrong one, find the thing, then read it properly. Six lanes each
 // paying that discovery tax — ~5,300 lines across the five files the scheduling
@@ -1226,7 +1226,7 @@ if (MODE === 'collect') {
 //
 // That used to be a separate Haiku pass. It could only fire when `evidence`
 // happened to carry a file path, and when it did it re-opened from scratch the
-// very issue the router had just been holding. The usher is already there with
+// very issue the router had just been holding. The editor is already there with
 // the issue body and the transcript in hand, so it fills `where` as it goes and
 // the pass is gone.
 //
@@ -1235,7 +1235,7 @@ if (MODE === 'collect') {
 // bug at framework scale.
 buildable = buildable.map((i) => (i.where && i.where.excerpt ? { ...i, _where: i.where } : i))
 locationsResolved = buildable.filter((i) => i._where).length
-if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved by the usher — the lanes skip the hunt.`)
+if (locationsResolved) log(`Locations: ${locationsResolved} citation(s) resolved by the editor — the lanes skip the hunt.`)
 
 // ---- 3. THE BUILD LOOP — rounds until nothing is pending ------------------
 // Replaces a fixed Build → Context → single-tail sequence, which capped
@@ -1868,9 +1868,9 @@ const manifest = {
     : {
         watermarkGiven: SINCE,
         watermarkUtc: WATERMARK_UTC || '(not an ISO watermark)',
-        cutoffUtcUsed: usherReport.cutoffUtc ?? '(not reported)',
-        filesRead: usherReport.filesRead ?? '(not reported)',
-        turnsAfterCutoff: usherReport.turnsAfterCutoff ?? '(not reported)',
+        cutoffUtcUsed: editorReport.cutoffUtc ?? '(not reported)',
+        filesRead: editorReport.filesRead ?? '(not reported)',
+        turnsAfterCutoff: editorReport.turnsAfterCutoff ?? '(not reported)',
       },
   alreadyBuilt: { passedIn: ALREADY_BUILT.length, droppedByTriage: triageDropped.length, dropped: triageDropped },
   // No warning on a zero here, deliberately. Unlike `alreadyBuilt` — where
@@ -1886,15 +1886,15 @@ const manifest = {
   // `state.pendingOverflow`** — the engine cannot write state, and an entry left
   // there rides into every future run.
   // X128 · a DISCOVERY run drains it too now, so zero-while-the-field-holds-rows
-  // is a failure on BOTH doors, not just on a build. `usherRan` and the two
+  // is a failure on BOTH doors, not just on a build. `editorRan` and the two
   // source counts below are the proof that the merge did not replace discovery:
-  // `fromUsher` is what tonight's GitHub pull + log review actually found, and
+  // `fromEditor` is what tonight's GitHub pull + log review actually found, and
   // `fromQueue` is what the queue contributed, and X129's `fromBacklog` is what
   // the re-read sent to a lane. They are never summed into one number, because
-  // one total cannot show a run that skipped the usher.
+  // one total cannot show a run that skipped the editor.
   carry: {
-    usherRan,
-    fromUsher,
+    editorRan,
+    fromEditor,
     fromQueue,
     fromBacklog,
     backlogUndispatchable: backlogUndispatchable.map((r) => r.ref || '(no ref)'),
@@ -2061,21 +2061,21 @@ const REVIEWED_LOGS = !PRESET && SOURCES.includes('logs')
 // This used to ask "did the review start at line 1?" — which is the CORRECT
 // answer whenever the watermark predates today's file, i.e. every normal night.
 // So it fired on the healthy path and stayed silent on the real failure. Ask the
-// question that actually matters: did the usher compare against the right instant?
-if (REVIEWED_LOGS && WATERMARK_UTC && typeof usherReport.cutoffUtc === 'string') {
-  const got = Date.parse(usherReport.cutoffUtc)
-  if (!Number.isFinite(got)) warnings.push(`Log review reported an unparseable cutoff (\`${usherReport.cutoffUtc}\`) — its watermark cannot be verified.`)
+// question that actually matters: did the editor compare against the right instant?
+if (REVIEWED_LOGS && WATERMARK_UTC && typeof editorReport.cutoffUtc === 'string') {
+  const got = Date.parse(editorReport.cutoffUtc)
+  if (!Number.isFinite(got)) warnings.push(`Log review reported an unparseable cutoff (\`${editorReport.cutoffUtc}\`) — its watermark cannot be verified.`)
   else if (Math.abs(got - Date.parse(WATERMARK_UTC)) > 60000)
-    warnings.push(`LOG WATERMARK SLIPPED — the usher compared against ${usherReport.cutoffUtc}, but the watermark ${SINCE} is ${WATERMARK_UTC}. A timezone slip here re-reviews the whole day; it cost ~430k on 2026-07-26.`)
+    warnings.push(`LOG WATERMARK SLIPPED — the editor compared against ${editorReport.cutoffUtc}, but the watermark ${SINCE} is ${WATERMARK_UTC}. A timezone slip here re-reviews the whole day; it cost ~430k on 2026-07-26.`)
 }
-if (REVIEWED_LOGS && usherReport.cutoffUtc === undefined)
+if (REVIEWED_LOGS && editorReport.cutoffUtc === undefined)
   warnings.push('Log review did not report the instant it compared against, so its watermark cannot be verified. Treat any log finding as possibly already-reviewed.')
 // The watermark is normally ~24h back, so it lands in YESTERDAY's file. A review
 // that never opened that file skipped the previous evening — every night, in the
 // window she is actually used.
-if (REVIEWED_LOGS && WATERMARK_DAY && Array.isArray(usherReport.filesRead) && usherReport.filesRead.length && !usherReport.filesRead.some((f) => String(f).includes(WATERMARK_DAY)))
-  warnings.push(`Log review never opened the watermark's own day (${WATERMARK_DAY}); it read ${usherReport.filesRead.join(', ')}. Everything between ${SINCE} and midnight went unreviewed.`)
-if (REVIEWED_LOGS && !Array.isArray(usherReport.filesRead))
+if (REVIEWED_LOGS && WATERMARK_DAY && Array.isArray(editorReport.filesRead) && editorReport.filesRead.length && !editorReport.filesRead.some((f) => String(f).includes(WATERMARK_DAY)))
+  warnings.push(`Log review never opened the watermark's own day (${WATERMARK_DAY}); it read ${editorReport.filesRead.join(', ')}. Everything between ${SINCE} and midnight went unreviewed.`)
+if (REVIEWED_LOGS && !Array.isArray(editorReport.filesRead))
   warnings.push('Log review did not report which files it opened, so a single-file review — which skips the previous evening — cannot be ruled out.')
 if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
   warnings.push(
@@ -2157,17 +2157,17 @@ if (onHisDesk > DECISION_BUDGET)
   )
 // X32 · three complaints in, one issue out, and no drop to explain it.
 if (!PRESET && SOURCES.includes('github')) {
-  if (!ticketComplaints.length) warnings.push('The usher reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
-  // X64 · SUBTRACT THE COMPLAINTS THE USHER DELIBERATELY DROPPED. `complaintsFound
+  if (!ticketComplaints.length) warnings.push('The editor reported no `ticketComplaints`, so a ticket whose complaints were collapsed into one issue cannot be seen. Treat every ticket in this run as coverage-unknown.')
+  // X64 · SUBTRACT THE COMPLAINTS THE EDITOR DELIBERATELY DROPPED. `complaintsFound
   // > issuesEmitted` alone treats an already-built or parked complaint as an
   // unexplained gap, so the warning named 7, 8 and 8 tickets across three
   // consecutive runs when only 5, 3 and 4 had really lost one. A warning that fires
   // on the healthy path is the `startedAtLine: 1` mistake this file names at :1145.
   //
-  // X80 · IT READS THE USHER'S PER-COMPLAINT ACCOUNT, not a guess assembled from
+  // X80 · IT READS THE EDITOR'S PER-COMPLAINT ACCOUNT, not a guess assembled from
   // the engine's ticket-number drop lists. That inference could only count drops,
   // never say WHICH complaint or WHY — so a dropped complaint stayed unnamed and the
-  // recovery was the Manager re-reading a ticket the usher had already discarded.
+  // recovery was the Manager re-reading a ticket the editor had already discarded.
   // `dropped` is required in the schema and carries the reason, so the shortfall is
   // now the true one and every drop is readable in `manifest.tickets.perTicket`.
   const dropCount = (t) => (Array.isArray(t.dropped) ? t.dropped.length : 0)
@@ -2189,7 +2189,7 @@ if (!PRESET && SOURCES.includes('github')) {
     .filter((n) => n && !allIssues.some((i) => String(i.id || '').includes(n)))
   if (orphanTickets.length)
     warnings.push(
-      `${orphanTickets.length} ticket(s) named in the usher's input appear in NO issue id: ${orphanTickets.map((n) => `#${n}`).join(', ')}. ` +
+      `${orphanTickets.length} ticket(s) named in the editor's input appear in NO issue id: ${orphanTickets.map((n) => `#${n}`).join(', ')}. ` +
         `Nothing downstream can compute coverage for them — this is the gh#156 failure, where a merged row kept the log slug and dropped the ticket number.`,
     )
 }
@@ -2257,7 +2257,7 @@ if (BACKLOG) {
     )
 }
 log(
-  `Manifest — cutoff:${(!PRESET && usherReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(usherReport.filesRead) && usherReport.filesRead.length) || 0}` +
+  `Manifest — cutoff:${(!PRESET && editorReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(editorReport.filesRead) && editorReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
     // X143 · printed on EVERY run, zeros and all. `bounce:0/0` says the round ran

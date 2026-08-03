@@ -233,30 +233,43 @@ export interface CurrentTravel {
   until:  string;  // ISO yyyy-MM-dd
 }
 
-export function setCurrentTravel(slackId: string, travel: CurrentTravel): void {
+/**
+ * v4.4.x (#170) — person_id-keyed (works for externals too). This is now the
+ * ONLY writer of the column — `update_person_profile` (core/assistant.ts)
+ * applies travel by person_id for both internal and external targets, so
+ * there is no remaining slack_id-only caller to keep a thin wrapper for.
+ */
+export function setCurrentTravelById(personId: string, travel: CurrentTravel): void {
   const db = getDb();
   db.prepare(
-    `UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE slack_id = ?`
-  ).run(JSON.stringify(travel), slackId);
+    `UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE person_id = ?`
+  ).run(JSON.stringify(travel), personId);
 }
 
-export function clearCurrentTravel(slackId: string): void {
+/** v4.4.x (#170) — person_id-keyed (works for externals too); see setCurrentTravelById. */
+export function clearCurrentTravelById(personId: string): void {
   const db = getDb();
   db.prepare(
-    `UPDATE people_memory SET currently_traveling = NULL, updated_at = datetime('now') WHERE slack_id = ?`
-  ).run(slackId);
+    `UPDATE people_memory SET currently_traveling = NULL, updated_at = datetime('now') WHERE person_id = ?`
+  ).run(personId);
 }
 
 /**
  * Returns the active travel record for the person, or null if none / expired.
  * Lazy cleanup: when the window is in the past, this returns null AND clears
  * the column so the next reader sees a clean slate.
+ *
+ * v4.4.x (#170) — person_id-keyed worker (works for externals too). The
+ * slack_id-only original silently returned null for every email-only person
+ * (externals, and any colleague whose row hadn't yet had a slack_id attached)
+ * — not because they weren't traveling, but because the query couldn't reach
+ * their row at all.
  */
-export function getCurrentTravel(slackId: string): CurrentTravel | null {
+export function getCurrentTravelById(personId: string): CurrentTravel | null {
   const db = getDb();
   const row = db.prepare(
-    `SELECT currently_traveling FROM people_memory WHERE slack_id = ?`
-  ).get(slackId) as { currently_traveling?: string | null } | undefined;
+    `SELECT currently_traveling FROM people_memory WHERE person_id = ?`
+  ).get(personId) as { currently_traveling?: string | null } | undefined;
   if (!row || !row.currently_traveling) return null;
   try {
     const t = JSON.parse(row.currently_traveling) as CurrentTravel;
@@ -264,7 +277,7 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
     const today = new Date().toISOString().slice(0, 10);
     // Past trip → auto-clear and treat as not active.
     if (t.until < today) {
-      clearCurrentTravel(slackId);
+      clearCurrentTravelById(personId);
       return null;
     }
     // Future trip (saved ahead of departure) → not active yet, fall back to
@@ -275,6 +288,11 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
   } catch (_) {
     return null;
   }
+}
+
+export function getCurrentTravel(slackId: string): CurrentTravel | null {
+  const pid = personIdForSlackId(slackId);
+  return pid ? getCurrentTravelById(pid) : null;
 }
 
 /**
@@ -290,24 +308,32 @@ export function getCurrentTravel(slackId: string): CurrentTravel | null {
  * for a future trip. Consumers resolve per-day via
  * `attendeeAvailability.attendeeTzForDay`.
  */
-export function getTravelRecord(slackId: string): CurrentTravel | null {
+/** v4.4.x (#170) — person_id-keyed worker (works for externals too); see
+ *  getCurrentTravelById for why the slack_id-only original silently missed
+ *  every email-only person. */
+export function getTravelRecordById(personId: string): CurrentTravel | null {
   const db = getDb();
   const row = db.prepare(
-    `SELECT currently_traveling FROM people_memory WHERE slack_id = ?`
-  ).get(slackId) as { currently_traveling?: string | null } | undefined;
+    `SELECT currently_traveling FROM people_memory WHERE person_id = ?`
+  ).get(personId) as { currently_traveling?: string | null } | undefined;
   if (!row || !row.currently_traveling) return null;
   try {
     const t = JSON.parse(row.currently_traveling) as CurrentTravel;
     if (!t.location || !t.from || !t.until) return null;
     const today = new Date().toISOString().slice(0, 10);
     if (t.until < today) {
-      clearCurrentTravel(slackId);
+      clearCurrentTravelById(personId);
       return null;
     }
     return t;
   } catch (_) {
     return null;
   }
+}
+
+export function getTravelRecord(slackId: string): CurrentTravel | null {
+  const pid = personIdForSlackId(slackId);
+  return pid ? getTravelRecordById(pid) : null;
 }
 
 // ── v3.2.6 — VIP flag ────────────────────────────────────────────────────────
@@ -592,13 +618,27 @@ export function confirmPersonGenderById(personId: string, gender: PersonGender, 
 
 const LANG_RECENCY_DAYS = 45;
 
+/**
+ * v4.4.x (#170) — person_id-keyed worker (works for externals too). The
+ * slack_id-only original was this field's ONLY writer and could never reach
+ * an email-only row (every external, and any colleague whose row hadn't yet
+ * had a slack_id attached) — not "stale for them", genuinely unwritable, so
+ * their language signal stayed permanently NULL no matter how many turns
+ * they sent.
+ */
+export function setLastInboundLangById(personId: string, lang: string): void {
+  if (!lang || !personId) return;
+  const db = getDb();
+  db.prepare(
+    `UPDATE people_memory SET last_inbound_lang = ?, last_inbound_lang_at = datetime('now'), updated_at = datetime('now') WHERE person_id = ?`,
+  ).run(lang, personId);
+}
+
 /** Stamp the detected inbound language for a person (cheap, called per turn). */
 export function setLastInboundLang(slackId: string, lang: string): void {
   if (!lang || !slackId) return;
-  const db = getDb();
-  db.prepare(
-    `UPDATE people_memory SET last_inbound_lang = ?, last_inbound_lang_at = datetime('now'), updated_at = datetime('now') WHERE slack_id = ?`,
-  ).run(lang, slackId);
+  const pid = personIdForSlackId(slackId);
+  if (pid) setLastInboundLangById(pid, lang);
 }
 
 /**
@@ -606,11 +646,18 @@ export function setLastInboundLang(slackId: string, lang: string): void {
  *   1. recent inbound (within LANG_RECENCY_DAYS) — the live signal wins
  *   2. stored language_preference (owner pin / legacy) — fallback for contacts
  *      we haven't heard from recently
- *   3. English (default)
- * Returns a short code: 'he' | 'ru' | 'ar' | 'en' | <stored pref lowercased>.
+ * Returns a short code ('he' | 'ru' | 'ar' | 'en' | <stored pref lowercased>),
+ * or **null when nothing is known** — no live signal and no stored
+ * preference. v4.4.x (#170): this used to return 'en' for that case too, so a
+ * genuine "he writes to her in English" and a bare "we've never heard from
+ * them" were the same string and no caller could tell them apart — which
+ * mattered once the write side (setLastInboundLangById above) meant the
+ * unknown case would otherwise be indistinguishable from a confirmed one.
+ * Callers decide what "unknown" should render as (a legible default, an
+ * omission, etc.) — this function never picks a language for them.
  */
-export function resolveOutboundLanguageForPerson(person: PersonMemory | null | undefined): string {
-  if (!person) return 'en';
+export function resolveOutboundLanguageForPerson(person: PersonMemory | null | undefined): string | null {
+  if (!person) return null;
   // 1. Live signal — most recent inbound, if fresh.
   if (person.last_inbound_lang && person.last_inbound_lang_at) {
     const iso = person.last_inbound_lang_at.replace(' ', 'T') + 'Z'; // SQLite datetime() is UTC, no marker
@@ -627,9 +674,9 @@ export function resolveOutboundLanguageForPerson(person: PersonMemory | null | u
       if (pref === 'he' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) return 'he';
       return pref;
     }
-  } catch { /* fall through to default */ }
-  // 3. Default.
-  return 'en';
+  } catch { /* fall through */ }
+  // 3. Nothing known.
+  return null;
 }
 
 /**
@@ -763,16 +810,18 @@ export function appendPersonInteractionById(personId: string, interaction: Omit<
 /**
  * Record that a social moment happened with a person.
  *
- * @param slackId     - person's Slack ID
+ * @param personId    - person's surrogate id
  * @param initiatedBy - 'maelle' | 'person' — only Maelle initiations consume the daily gate
- * @returns true when the row was actually stamped; FALSE when this slack_id has
+ * @returns true when the row was actually stamped; FALSE when this person_id has
  *          no people_memory row, in which case nothing was written. The return
  *          exists because `last_initiated_at` is the once-per-day coda gate: a
  *          silent no-op here leaves that gate open, and the caller that just
  *          DELIVERED a coda (`recordCodaDelivered`) has to be able to say so.
+ *
+ * v4.4.x (#170) — person_id-keyed worker (works for externals too).
  */
-export function recordSocialMoment(
-  slackId: string,
+export function recordSocialMomentById(
+  personId: string,
   initiatedBy: 'maelle' | 'person' = 'maelle',
 ): boolean {
   // Updates last_social_at + last_initiated_at on the person row so the 24h
@@ -780,7 +829,7 @@ export function recordSocialMoment(
   // ONLY at end-of-chat in `memory/capturePass.ts:runSubjectReconciliation`
   // (v3.0.1); this helper covers the people_memory row only.
   const db = getDb();
-  const row = db.prepare('SELECT slack_id FROM people_memory WHERE slack_id = ?').get(slackId) as any;
+  const row = db.prepare('SELECT person_id FROM people_memory WHERE person_id = ?').get(personId) as any;
   if (!row) return false;
 
   const now = new Date().toISOString();
@@ -789,9 +838,18 @@ export function recordSocialMoment(
     updates.last_initiated_at = now;
   }
   const setClause = Object.keys(updates).map(k => `${k} = @${k}`).join(', ');
-  db.prepare(`UPDATE people_memory SET ${setClause}, updated_at = datetime('now') WHERE slack_id = @slack_id`)
-    .run({ ...updates, slack_id: slackId });
+  db.prepare(`UPDATE people_memory SET ${setClause}, updated_at = datetime('now') WHERE person_id = @person_id`)
+    .run({ ...updates, person_id: personId });
   return true;
+}
+
+/** Slack-keyed convenience — resolves to the surrogate id, then delegates. */
+export function recordSocialMoment(
+  slackId: string,
+  initiatedBy: 'maelle' | 'person' = 'maelle',
+): boolean {
+  const pid = personIdForSlackId(slackId);
+  return pid ? recordSocialMomentById(pid, initiatedBy) : false;
 }
 
 export function getPersonMemory(slackId: string): PersonMemory | null {
@@ -1557,7 +1615,15 @@ export function formatPeopleMemoryForPrompt(
     // recent inbound message (default English) instead of a frozen one-off
     // preference, so an English-writing colleague never gets a Hebrew DM. The
     // outbound-language prompt rule consumes this `language_pref` value.
-    const langPart = `, language_pref: ${resolveOutboundLanguageForPerson(p)}`;
+    // v4.4.x (#170) — resolveOutboundLanguageForPerson now returns null for
+    // "nothing known" instead of a bare 'en' indistinguishable from a real
+    // signal. Render that state explicitly (mirrors the tzUnconfirmed /
+    // auto-gender markers above) so Sonnet treats it as a default to speak
+    // in, not a confirmed fact about how this person writes.
+    const outboundLang = resolveOutboundLanguageForPerson(p);
+    const langPart = outboundLang
+      ? `, language_pref: ${outboundLang}`
+      : `, language_pref: unknown — no inbound message or stored preference yet; default to English but don't present it as their known language`;
     // v3.5.x — only a confirmed (person/owner) gender is authoritative; an `auto`
     // guess renders 'unknown' so it can't steer gendered Hebrew forms.
     const genderField = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
@@ -1719,9 +1785,11 @@ export function buildPersonWorkContextBlock(
  * Work competence (role, reports_to, response speed, collaboration, recent work
  * exchanges and bookings) is NOT here — see buildPersonWorkContextBlock, which
  * runs whether or not social is on. Returns '' for unknown people.
+ *
+ * v4.4.x (#170) — person_id-keyed worker (works for externals too).
  */
-export function buildSocialContextBlock(slackId: string, timezone: string, assistantName: string = 'Assistant'): string {
-  const person = getPersonMemory(slackId);
+export function buildSocialContextBlockById(personId: string, timezone: string, assistantName: string = 'Assistant'): string {
+  const person = getPersonById(personId);
   if (!person) return '';
 
   const now              = DateTime.now().setZone(timezone);
@@ -1782,4 +1850,10 @@ export function buildSocialContextBlock(slackId: string, timezone: string, assis
   }
 
   return lines.join('\n');
+}
+
+/** Slack-keyed convenience — resolves to the surrogate id, then delegates. */
+export function buildSocialContextBlock(slackId: string, timezone: string, assistantName: string = 'Assistant'): string {
+  const pid = personIdForSlackId(slackId);
+  return pid ? buildSocialContextBlockById(pid, timezone, assistantName) : '';
 }

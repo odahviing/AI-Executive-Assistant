@@ -71,7 +71,10 @@ const RENAMED = new Map([
   ['exchanger', 'diplomat'],
   ['verifier', 'bouncer'],
   ['examiner', 'bouncer'],
-  ['scout', 'usher'],
+  // `scout` → `usher` → `editor`: the chain is flattened to the CURRENT name, so
+  // one lane never prints as three rows. Renamed 2026-08-03.
+  ['scout', 'editor'],
+  ['usher', 'editor'],
   ['meeting', 'matchmaker'],
   ['requests', 'registrar'],
   ['guard', 'gatekeeper'],
@@ -223,7 +226,7 @@ for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
     } catch {
       continue
     }
-    // X69 · DID THIS RUN DIE. A run whose usher is killed leaves a journal holding
+    // X69 · DID THIS RUN DIE. A run whose editor is killed leaves a journal holding
     // one `started` line and no `result`, and it appeared on NO surface —
     // wf_e2f12e7c-6d6 ran on 2026-07-30, died, cost $1.19, and nothing in
     // report.md, state.json or ledger.jsonl records that a run began at all. The
@@ -370,7 +373,16 @@ if (ONE_DAY) {
   else if (off.length)
     console.log(
       `\n!! OFF CHARTER — ${off.length} dispatch(es) ran on a tier their charter does not declare:\n` +
-        off.map((o) => `     ${o.type}: charter says ${o.want}, ran ${o.got} (${o.turns} turns, ${usd(o.cost)})`).join('\n')
+        off.map((o) => `     ${o.type}: charter says ${o.want}, ran ${o.got} (${o.turns} turns, ${usd(o.cost)})`).join('\n') +
+        // A charter may DECLARE a default and name the dispatches that override it —
+        // `architect.md` names two (the A13 cold read, the charter review), and the
+        // whole point of a stated exception is that it is not a defect. The list is
+        // NOT copied here: a second copy of it rots at the first edit, and this
+        // reader's job is to surface the row, not to hold the policy. Without this
+        // line a deliberate override prints as a violation, which is the check
+        // firing on the healthy path and the fastest way to teach everyone to
+        // ignore it.
+        `\n     Read the agent's charter before calling one of these a defect: a charter may declare a default AND name the dispatches that override it.`
     )
   else
     console.log(`\nEvery dispatch matched its charter's declared tier — ${checked.size} chartered\nagent(s) checked against their own \`model:\` line.`)

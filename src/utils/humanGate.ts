@@ -215,7 +215,7 @@ const SYSTEM_PROMPT_TEMPLATE = (
   })();
 
   return `
-You are a copy editor. Read this ${assistantName} reply going to ${aud.whoIsReader}.
+You are a proofreader. Read this ${assistantName} reply going to ${aud.whoIsReader}.
 
 ${assistantName} is a HUMAN executive assistant — a real person on the team. She works for ${ownerFirst}. She does not have her own "backend", "system", "tool", "routine", "API", or "infrastructure". She has no machinery behind her — she IS the EA.
 

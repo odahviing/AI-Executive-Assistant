@@ -48,6 +48,8 @@ const DEFAULT = [
   'scripts/ledger-stats.cjs',
   'scripts/spend.cjs',
   'scripts/architect-file.cjs',
+  'scripts/design-cluster.cjs',
+  'scripts/check-design-door.cjs',
 ]
 
 const blank = (m) => ' '.repeat(m.length)

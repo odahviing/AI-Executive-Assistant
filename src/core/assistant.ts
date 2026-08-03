@@ -945,9 +945,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // v3.2.0 — resolve identity through the person store (ONE route).
         // Internal: hallucination-guarded slack_id → person_id. Owner-path
         // external (no slack_id): find-or-create by name → person_id. The
-        // slack-only side-effects further down (auto working-hours, engagement
-        // rank, travel) are gated on a real slack_id — they don't apply to a
-        // contact with no Slack account / calendar.
+        // side-effects further down that really are Slack-only (auto working-
+        // hours refresh, engagement_rank) are gated on a real slack_id; travel
+        // is NOT (v4.4.x #170 — applyTravel is person_id-keyed) and applies to
+        // externals too.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
         const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
@@ -964,6 +965,46 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const timezone = args.timezone as string | undefined;
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
+        // v4.4.x (#170) — travel is a person_id-keyed write (setCurrentTravelById /
+        // clearCurrentTravelById), so — unlike the auto-working-hours refresh and
+        // engagement_rank below, which really are Slack-only — it applies to
+        // externals too (P4: "I'm in Boston this week" has to land for them the
+        // same as anyone else). Parsed once here and applied by person_id so
+        // both branches below share one path instead of duplicating it.
+        const travelArg = args.currently_traveling as
+          | { location?: string; from?: string; until?: string; for_days?: number; for_weeks?: number; clear?: boolean }
+          | undefined;
+        const applyTravel = (personId: string): void => {
+          if (!travelArg || typeof travelArg !== 'object') return;
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setCurrentTravelById, clearCurrentTravelById } = require('../db') as typeof import('../db');
+          if (travelArg.clear === true) {
+            clearCurrentTravelById(personId);
+            return;
+          }
+          if (!travelArg.location || !travelArg.from) return;
+          // v2.5.2 — derive `until` from for_days / for_weeks when explicit
+          // `until` not provided. Either form is accepted; explicit `until`
+          // wins when both are passed.
+          let untilIso = travelArg.until;
+          if (!untilIso && (typeof travelArg.for_days === 'number' || typeof travelArg.for_weeks === 'number')) {
+            const days = (typeof travelArg.for_days === 'number' && travelArg.for_days > 0) ? travelArg.for_days : 0;
+            const weeks = (typeof travelArg.for_weeks === 'number' && travelArg.for_weeks > 0) ? travelArg.for_weeks : 0;
+            const totalDays = days + (weeks * 7);
+            if (totalDays > 0) {
+              // Inclusive last day: from + totalDays - 1.
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { DateTime } = require('luxon') as typeof import('luxon');
+              const fromDt = DateTime.fromISO(travelArg.from);
+              if (fromDt.isValid) {
+                untilIso = fromDt.plus({ days: totalDays - 1 }).toFormat('yyyy-MM-dd');
+              }
+            }
+          }
+          if (untilIso) {
+            setCurrentTravelById(personId, { location: travelArg.location, from: travelArg.from, until: untilIso });
+          }
+        };
         // P4 — provenance is derived from the AUTHENTICATED sender, never
         // assumed. The colleague branch above force-rewrites the target to the
         // requester's own row, so a colleague reaching here is a person stating
@@ -994,9 +1035,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         }
 
         // v3.2.0 — EXTERNAL (owner-path, no slack_id): write the core profile
-        // fields by person_id, then return. The slack-only features below
-        // (auto working-hours, engagement_rank, travel) don't apply to a
-        // contact with no Slack account / calendar.
+        // fields by person_id, then return. Auto-working-hours-refresh and
+        // engagement_rank below really are Slack/internal-only; travel is NOT
+        // (v4.4.x #170 — applyTravel above is person_id-keyed) and is applied
+        // just below instead of being silently dropped for a contact with no
+        // Slack account / calendar.
         if (!slackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setCoreFieldWithProvenanceById, updatePersonProfileById } = require('../db') as typeof import('../db');
@@ -1030,6 +1073,8 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             const { setPersonVipById } = require('../db') as typeof import('../db');
             setPersonVipById(target.personId, args.vip);
           }
+          // v4.4.x (#170) — travel (externals travel too; P4's own example).
+          applyTravel(target.personId);
           logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
           return {
@@ -1140,41 +1185,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // location/from/until. The tool description tells Sonnet to set this
         // when colleague volunteers travel info OR owner reports it. Reads
         // (slot search, pronoun-of-time-of-day) prefer travel over default
-        // tz/state when the window covers `now`.
-        const travel = args.currently_traveling as
-          | { location?: string; from?: string; until?: string; for_days?: number; for_weeks?: number; clear?: boolean }
-          | undefined;
-        if (travel && typeof travel === 'object') {
-          const { setCurrentTravel, clearCurrentTravel } = require('../db') as typeof import('../db');
-          if (travel.clear === true) {
-            clearCurrentTravel(slackId);
-          } else if (travel.location && travel.from) {
-            // v2.5.2 — derive `until` from for_days / for_weeks when explicit
-            // `until` not provided. Either form is accepted; explicit `until`
-            // wins when both are passed.
-            let untilIso = travel.until;
-            if (!untilIso && (typeof travel.for_days === 'number' || typeof travel.for_weeks === 'number')) {
-              const days = (typeof travel.for_days === 'number' && travel.for_days > 0) ? travel.for_days : 0;
-              const weeks = (typeof travel.for_weeks === 'number' && travel.for_weeks > 0) ? travel.for_weeks : 0;
-              const totalDays = days + (weeks * 7);
-              if (totalDays > 0) {
-                // Inclusive last day: from + totalDays - 1.
-                const { DateTime } = require('luxon') as typeof import('luxon');
-                const fromDt = DateTime.fromISO(travel.from);
-                if (fromDt.isValid) {
-                  untilIso = fromDt.plus({ days: totalDays - 1 }).toFormat('yyyy-MM-dd');
-                }
-              }
-            }
-            if (untilIso) {
-              setCurrentTravel(slackId, {
-                location: travel.location,
-                from: travel.from,
-                until: untilIso,
-              });
-            }
-          }
-        }
+        // tz/state when the window covers `now`. v4.4.x (#170) — shared with
+        // the external branch above; see applyTravel near the top of this case.
+        applyTravel(target.personId);
 
         const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name');
         logger.info('Person profile updated', { slackId, name, fields: fieldsWritten });

@@ -305,6 +305,8 @@ async function resolveRequestInner(
             tool,
             args: replayArgs,
             requestId: row.id,
+            originChannel: row.origin_channel,
+            originThreadTs: row.origin_thread_ts,
           });
         } catch (err) {
           logger.warn('on_reject replay threw — non-fatal', {
@@ -606,6 +608,8 @@ async function runApproveCallback(
       tool,
       args: replayArgs,
       requestId: row.id,
+      originChannel: row.origin_channel,
+      originThreadTs: row.origin_thread_ts,
     });
   } catch (err) {
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {
@@ -1038,6 +1042,27 @@ async function notifyRequesterOfDecision(
       const langRule = requesterLang === 'he'
         ? 'write in Hebrew'
         : 'match the language of their request below (English / Spanish / etc.)';
+      // S5 (2026-08-03 ruling) — threading this DM into origin_thread_ts (below)
+      // only fixes WHERE it lands; this is what fixes what it KNOWS. Bounded
+      // recent window (last 6 messages) off the same DB-backed store every other
+      // outbound path already reads (postReply.ts / coordinator.ts / briefs.ts) —
+      // one DB lookup, no Slack API call, so composing costs nothing extra over
+      // the LLM call this block already makes. Nobody recalls a whole thread
+      // verbatim; the bar is not contradicting or re-asking what's already there.
+      let threadHistoryText = '';
+      if (row.origin_thread_ts) {
+        try {
+          const { getConversationHistory } = require('../../db/conversations') as typeof import('../../db/conversations');
+          threadHistoryText = getConversationHistory(row.origin_thread_ts)
+            .slice(-6)
+            .map(m => `${m.role === 'assistant' ? assistantName : (requesterFirst ?? 'them')}: ${m.content}`)
+            .join('\n');
+        } catch { /* best-effort — never block the relay on a history read */ }
+      }
+      const historyRule = threadHistoryText
+        ? '- You are replying INTO an existing thread (history below) — read it. Do not repeat something already said or re-ask something already answered there; do not quote it back verbatim.'
+        : '';
+      const historyBlock = threadHistoryText ? `\nRecent thread so far (most recent last):\n${threadHistoryText}\n` : '';
       let sys: string;
       let usr: string;
       if (composeAmend) {
@@ -1047,8 +1072,8 @@ RULES:
 - The DECIDED VALUES below are ${ownerFirst}'s actual decision. Reproduce each value EXACTLY as written, character for character — never round it, convert it, recalculate it, spell it out in words, or restate a time or date in another format. Translate and rephrase the words AROUND them, including the label each value carries.
 - Say plainly that ${ownerFirst} can't do it exactly as asked and what he proposes instead, then ask whether that works for them. It is a proposal awaiting their yes or no, not a done deal.
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human proposal, EA-voiced and natural.
-- ONE or TWO sentences. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
-        usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''}
+- ONE or TWO sentences. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.${historyRule ? `\n${historyRule}` : ''}`;
+        usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''}
 ${ownerFirst}'s counter — DECIDED VALUES, copy each one exactly as given:
 ${amendPinned.map(p => `- ${p.key.replace(/_/g, ' ')} = ${p.value}`).join('\n')}${amendProse.length > 0 ? `\n${ownerFirst}'s own words (translate if you are writing in another language; keep the meaning): "${amendProse.join(' ')}"` : ''}
 Write the message.`;
@@ -1061,8 +1086,8 @@ RULES:
 - Language: ${langRule}.
 - Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself. If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
-- ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.`;
-        usr = `Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
+- ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.${historyRule ? `\n${historyRule}` : ''}`;
+        usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
       }
       const resp = await anthropic.messages.create({
         model: MODEL_HAIKU,

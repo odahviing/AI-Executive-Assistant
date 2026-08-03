@@ -33,6 +33,19 @@ export interface RunDeferredActionInput {
   args: Record<string, unknown>;
   /** The originating approval request id — used for audit + log tagging. */
   requestId: string;
+  /**
+   * The request's ORIGIN thread (requests.origin_channel / origin_thread_ts) —
+   * where the ask was raised and where the requester relay posts the outcome.
+   * Callers must pass the request row's own fields. NEVER read this off
+   * `args` — create_meeting / move_meeting / update_meeting / delete_meeting /
+   * book_floating_block carry no channel_id/thread_ts in their input_schema
+   * (verified 2026-08-03), so a `args.channel_id`/`args.thread_ts` fallback is
+   * not "best-effort", it is unconditionally empty. Used only for shadow
+   * notifications during replay (S5) — never for the booking's own
+   * parameters, which come from `args` alone (R3).
+   */
+  originChannel: string | null;
+  originThreadTs: string | null;
 }
 
 /**
@@ -51,7 +64,7 @@ export interface RunDeferredActionInput {
  * undefined on the no-op paths (no connection / unsupported tool).
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
-  const { ownerUserId, profile, tool, args, requestId } = input;
+  const { ownerUserId, profile, tool, args, requestId, originChannel, originThreadTs } = input;
 
   // Resolve the Slack connection so meeting handlers can shadow-DM the owner.
   const slackConn = getConnection(ownerUserId, 'slack');
@@ -64,13 +77,14 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
 
   // Build a minimal SkillContext that the tool handlers will accept. The
   // owner-path identity is what we need (planMeeting checks initiator='owner'
-  // for the override path). channelId/threadTs are best-effort — pulled from
-  // the original args if present; the meeting handlers only use them for
-  // shadow notifications, which fail gracefully.
-  const channelId = (args.channel_id as string | undefined) ?? '';
-  // SkillContext.threadTs is required string. Default to empty string when
-  // the original call didn't carry one (synthetic replay context).
-  const threadTs = (args.thread_ts as string | undefined) ?? '';
+  // for the override path). channelId/threadTs are the request's OWN origin
+  // thread (S5, 2026-08-03 ruling) — an approved action replays into the same
+  // thread the ask was raised in, not a blind void. The meeting handlers use
+  // them for shadow notifications + closeMeetingArtifacts' thread-fallback
+  // match; SkillContext.threadTs is a required string, so an owner-internal
+  // row with no origin thread still defaults to ''.
+  const channelId = originChannel ?? '';
+  const threadTs = originThreadTs ?? '';
   const context = {
     userId: ownerUserId,
     senderRole: 'owner' as const,

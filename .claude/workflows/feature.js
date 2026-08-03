@@ -59,6 +59,11 @@ if (typeof A === 'string') {
 for (const [key, want] of [
   ['items', 'array'], ['refs', 'array'], ['pieces', 'array'],
   ['priorClean', 'array'], ['recon', 'array'], ['answers', 'object'], ['constraints', 'array'],
+  // `cluster` is the design door's evidence payload, minted by
+  // `scripts/design-cluster.cjs`. Same guard as every other arg for the same
+  // reason: nine refs arriving as a stringified object would read as absent and
+  // the design pass would plan the ticket with none of its history.
+  ['cluster', 'object'],
 ]) {
   const v = A[key]
   if (v === undefined || v === null) continue
@@ -70,7 +75,52 @@ for (const [key, want] of [
 }
 const MODE = A.mode === 'build' ? 'build' : 'plan'
 const PRIORITY = A.priority || null // 'High' | 'Medium' | 'Low' — the Improvement axis
-const REFS = Array.isArray(A.refs) ? A.refs : null // explicit issue numbers, skips the label query
+const REFS_ARG = Array.isArray(A.refs) ? A.refs : null // explicit issue numbers, skips the label query
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DESIGN DOOR — `feature design gh#154`
+//
+// This engine was the FEATURE door: it handled whatever arrived through the
+// Improvement/Feature label. It is the DESIGN door — ANY item whose answer is a
+// product decision, whatever door it arrived through.
+//
+// The evidence: of the 13 rows ever `converted` in `ledger.jsonl`, NINE are the
+// same design question. `gh#154` absorbed nine refs from five lanes over eight
+// days and has never been designed. **`convert` is not an escape hatch, it is a
+// waiting room** — and nothing surfaced the waiting room as one item.
+//
+// A MODE ON THIS COMMAND, not a verb of its own and not an Editor route. The
+// plan → he rules → build path underneath is UNTOUCHED, with `A.constraints` as
+// the feedback channel. The Editor is read-only, runs mid-wave, and routing a
+// design question into a live bug wave is exactly what `needs-shaping` refuses.
+//
+// ONE DESIGN ITEM = ONE DESTINATION = ONE RECON + ONE PLAN, NEVER NINE. The
+// clustering is `scripts/design-cluster.cjs`'s job (an engine has no `require`,
+// so it cannot read the ledger); this side only refuses a shape that would fan
+// one design question back out into the nine symptoms it was raised to replace.
+const normRef = (v) => String(v || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
+const DESIGN = A.design ? normRef(A.design) : null
+if (DESIGN && !/^\d+$/.test(DESIGN))
+  throw new Error(
+    `args.design is "${A.design}", which is not a GitHub issue number. A design cluster is keyed on the ref the \`converted\` rows were routed TO — pass \`gh#154\`, \`#154\` or \`154\`.`,
+  )
+const DESIGN_REF = DESIGN ? `gh#${DESIGN}` : null
+const CLUSTER = A.cluster && typeof A.cluster === 'object' && !Array.isArray(A.cluster) ? A.cluster : null
+const CLUSTER_REFS = CLUSTER && Array.isArray(CLUSTER.refs) ? CLUSTER.refs.filter((r) => r && typeof r === 'object') : []
+// A cluster keyed on a DIFFERENT issue than the one being designed would put nine
+// other rows' history into this item's recon and read as a rich payload. Refuse.
+if (DESIGN && CLUSTER && CLUSTER.ref && normRef(CLUSTER.ref) !== DESIGN)
+  throw new Error(
+    `args.cluster is keyed on ${CLUSTER.ref} but args.design is ${DESIGN_REF} — that payload is another item's history. Re-run \`node scripts/design-cluster.cjs ${DESIGN_REF}\` and paste its ARGS block.`,
+  )
+if (DESIGN && Array.isArray(A.items) && A.items.length)
+  throw new Error(`args.design (${DESIGN_REF}) names a filed issue and args.items describes an unfiled one. Pass one or the other, never both.`)
+if (DESIGN && A.sweep === true) throw new Error(`args.design (${DESIGN_REF}) is ONE design item by definition; args.sweep surveys the whole board. Pass one or the other.`)
+if (DESIGN && REFS_ARG && !REFS_ARG.some((r) => normRef(r) === DESIGN))
+  throw new Error(`args.refs (${REFS_ARG.join(', ')}) does not include args.design (${DESIGN_REF}). Drop \`refs\` — the design door sets it.`)
+// Reuses the refs path BYTE FOR BYTE, in the spelling SKILL.md documents (`#154`),
+// so the intake command, its agent, its model and its cost are unchanged.
+const REFS = DESIGN ? [`#${DESIGN}`] : REFS_ARG
 // An idea that is NOT on GitHub yet — described straight into the engine.
 // Without this the only input was a ticket, so having an idea meant leaving the
 // conversation to run `gh issue create` and coming back, which is the friction
@@ -87,14 +137,14 @@ const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
 // I'M SAYING more." Without this flag the engine plans at most one unnamed item.
 const SWEEP = A.sweep === true
 const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'handyman']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
 // charter-audit.js:16-17 has had this guard since it was written; the two
 // engines that actually BUILD did not.
-// `framer` and not `usher`: this engine's three intake/plan dispatches are the
-// FEATURE door. bugger.js's list names `usher` instead, which is the only
+// `framer` and not `editor`: this engine's three intake/plan dispatches are the
+// FEATURE door. bugger.js's list names `editor` instead, which is the only
 // legitimate difference between the two — the EFFORT map above stays identical
 // across all three engines so one table prices every agent.
 const DISPATCHABLE = [...CODE_LANES, 'instructor', 'framer', 'bouncer']
@@ -147,8 +197,33 @@ const UNDERSTOOD = {
     alreadyExists: { type: 'boolean', description: 'true if this is already built and the issue is stale' },
     openQuestions: { type: 'array', items: { type: 'string' }, description: 'what only the owner can answer. Empty if genuinely none' },
     surfaces: { type: 'array', items: { type: 'string' }, description: 'the user-visible surfaces this touches' },
+    // THE TICKET IS THE ARTEFACT HE EXECUTES FROM MONTHS LATER, and a design
+    // question filed as "here is what is unresolved" is unbuildable by then unless
+    // the routes and their prices travel with it. `openQuestions` asks him to
+    // decide; these two give him something to decide BETWEEN. Required, because a
+    // field that is optional here is simply absent — that is what happened to
+    // `risk` on the first plan he ever read.
+    options: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          route: { type: 'string', description: 'the design, in one line — what would be true afterwards' },
+          cost: { type: 'string', description: 'what it costs: which lanes, roughly how much surface moves, what it forces elsewhere' },
+          why: { type: 'string', description: 'why this route rather than the others — or, for a rejected one, what rules it out' },
+        },
+        required: ['route', 'cost'],
+      },
+      description:
+        'the routes actually available, each with its cost. ONE entry is a legitimate answer when the code leaves one route — say so in `why`. Zero entries is not: it means the pass costed a design nobody checked (F2).',
+    },
+    recommendation: {
+      type: 'string',
+      description:
+        'which option you would take and the one reason why. NEVER blank — you read the code and he did not, so having no opinion hands the work back to him. If the choice is genuinely his, say which two options it is between and what the decision turns on.',
+    },
   },
-  required: ['ref', 'todayBehaviour', 'wantedBehaviour', 'gap', 'alreadyExists', 'openQuestions'],
+  required: ['ref', 'todayBehaviour', 'wantedBehaviour', 'gap', 'alreadyExists', 'openQuestions', 'options', 'recommendation'],
 }
 
 const PLAN = {
@@ -172,10 +247,32 @@ const PLAN = {
             description:
               'the product requirement this piece serves: the outcome it buys, one line, from the point of view of whoever gets the benefit. NOT the mechanism (that is whatChanges) and NOT the decision it embeds (that is productDecision).',
           },
+          // THE FENCE. This field asked for "what the code will do differently",
+          // which invites the violation: the framer authors the CONTRACT and the
+          // lane that owns the file chooses the implementation inside it. A piece
+          // that names its implementation has bypassed the charter meant to choose
+          // it — and the framer holds no lane's product rules, so its choice is
+          // the one nothing checks. The reuse citation stays: it is load-bearing,
+          // and "reuses X byte-for-byte" is a fact about the code, not a design.
           whatChanges: {
             type: 'string',
             description:
-              'concrete and DETAILED — the file(s), what the code will do differently, and what a person would see change. Name what it REUSES and cite file:line where you have it; "reuses X" is the most valuable thing in this field.',
+              'the FILES and the SEAM — never the solution inside them. Name the file(s), the function or boundary that moves, and what a person would see change. Name what it REUSES and cite file:line where you have it; "reuses X" is the most valuable thing in this field. **Do NOT write the implementation**: the lane that owns the file chooses that under its own charter, and a piece that names its implementation has bypassed the charter meant to choose it.',
+          },
+          // ── THE CONTRACT. The framer authors it; a lane implements it. ────────
+          // A cross-lane change does not break inside a piece, it breaks at the
+          // join — and nothing in this schema asked about the join. `gh#154` is
+          // nine refs from five lanes precisely because five lanes each patched
+          // their own side of one seam.
+          connection: {
+            type: 'string',
+            description:
+              'the SEAM: what this piece calls, what calls it, and **what it must not bypass**. The third clause is the one that matters — name the gate, guard or resolver that stays in the path, because that is where a cross-lane change actually breaks.',
+          },
+          expectation: {
+            type: 'string',
+            description:
+              'what the OTHER pieces are entitled to assume about this one once it lands — the guarantee it gives them, stated as something they may rely on. **This is the field that stops two lanes each assuming the other handled it.** It specifies up front exactly what the bouncer\'s joint-trace verifies at the end: same seam, both ends. "Nothing — no other piece depends on this" is a valid and useful answer.',
           },
           whyThisLane: { type: 'string' },
           dependsOn: { type: 'array', items: { type: 'string' }, description: 'piece ids that must land first' },
@@ -190,8 +287,22 @@ const PLAN = {
               'what could go wrong, what is still unresolved, what he should eyeball before it ships. NEVER blank — "None" is a claim worth making, and a piece with no risk named reads as unexamined.',
           },
         },
-        required: ['id', 'ref', 'lane', 'requirement', 'whatChanges', 'whyThisLane', 'dependsOn', 'risk'],
+        required: ['id', 'ref', 'lane', 'requirement', 'whatChanges', 'connection', 'expectation', 'whyThisLane', 'dependsOn', 'risk'],
       },
+    },
+    // ── WHO WRITES THE SHARED CODE. ──────────────────────────────────────────
+    // The framer is read-only PERMANENTLY — his ruling: "it authors the contract,
+    // and some lane writes the code that embodies it." So this line is the only
+    // thing in the plan that says who writes a file no single piece owns, and
+    // WITHOUT IT the answer is decided by whichever lane happens to run first.
+    //
+    // IT NAMES A FACT, NOT A CALL: the owner is whoever owns that file; a
+    // genuinely new file goes to the lane whose subsystem the rule is about; and
+    // `src/connections/{types,registry}.ts` is the shared spine nobody owns.
+    sharedPiece: {
+      type: 'string',
+      description:
+        'who writes the code no single piece owns — `<lane> — <file>`, or exactly `none`. Several go on one line separated by `;`. This is a FACT, not a choice: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about; `src/connections/{types,registry}.ts` is the shared spine nobody owns. Never blank — `none` is the answer when no piece touches shared code.',
     },
     blockingQuestions: {
       type: 'array',
@@ -204,7 +315,7 @@ const PLAN = {
       description: 'pieces you judge not worth the cost, with the reason. Saying so is a result',
     },
   },
-  required: ['pieces', 'blockingQuestions'],
+  required: ['pieces', 'blockingQuestions', 'sharedPiece'],
 }
 
 const VERDICTS = {
@@ -365,8 +476,8 @@ if (MODE === 'plan') {
       `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
         `Return each as {ref:"#<number>", title, priority:<whichever priority label it carries — High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled>, asks:<what it literally asks for, in the owner's own framing — do not reinterpret or improve it>}. ` +
         `If the list is empty return {items:[]} immediately.`,
-      // X126 · The FEATURE door is the `framer`, not the usher. Both read a
-      // backlog, but the bug usher's charter is defect-shaped end to end — a
+      // X126 · The FEATURE door is the `framer`, not the editor. Both read a
+      // backlog, but the bug editor's charter is defect-shaped end to end — a
       // very hard "obvious defect" bar, one-root-one-issue, and "a product
       // decision means do not dispatch" — and every one of those is wrong here.
       // Effort and model stay as tuned: one shell command does not need more.
@@ -377,6 +488,22 @@ if (MODE === 'plan') {
   }
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
   items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
+
+  // ONE DESIGN ITEM, and this is the line that enforces it. The whole point of
+  // clustering by destination is that nine symptoms become ONE recon and ONE plan;
+  // a design run that arrived with two items would spend two Opus recons deciding
+  // the same question twice and then hand him two half-designs to reconcile.
+  if (DESIGN && items.length !== 1)
+    throw new Error(
+      `args.design (${DESIGN_REF}) is one design item, and intake returned ${items.length}: ${items.map((i) => i.ref).join(', ')}. Nothing was planned. One design question = one destination = one recon.`,
+    )
+  if (DESIGN)
+    log(
+      `Design door: ${DESIGN_REF} — ${CLUSTER_REFS.length} converted symptom ref(s)` +
+        (CLUSTER_REFS.length ? ` from ${new Set(CLUSTER_REFS.map((r) => r.lane).filter(Boolean)).size} lane(s)` : '') +
+        ` ride in as evidence. ONE item, one recon.` +
+        (CLUSTER_REFS.length ? '' : ` No cluster passed — run \`node scripts/design-cluster.cjs ${DESIGN_REF}\` if this item has converted rows waiting on it.`),
+    )
 
   // ── X12 · ONE ITEM IS THE DEFAULT. A SWEEP MUST BE ASKED FOR. ─────────────
   // Owner, 2026-07-28: "always do 1 unless I'M SAYING more."
@@ -422,6 +549,26 @@ if (MODE === 'plan') {
   // recon's output for compliance afterwards, which is checking instead of telling.
   const CONSTRAINTS = (Array.isArray(A.constraints) ? A.constraints : []).filter((c) => typeof c === 'string' && c.trim())
 
+  // The cluster, as evidence. NINE refs from five lanes are not nine items: they
+  // are nine independent observations of ONE missing seam, which is the strongest
+  // input this pass can be given and the one it never had. Each was closed
+  // `converted` precisely to avoid a partial fix, so a per-ref patch is the one
+  // shape that is wrong — that instruction is stated, not implied, because the
+  // model's default given nine symptoms is nine remedies.
+  const CLUSTER_NOTE = CLUSTER_REFS.length
+    ? `**THIS IS A DESIGN ITEM, AND ${CLUSTER_REFS.length} BUG ROWS ARE WAITING ON IT.**\n` +
+      `Each was closed \`converted\` onto ${DESIGN_REF || 'this item'} — taken off the bug track BECAUSE the owner refused a partial fix` +
+      `${CLUSTER && CLUSTER.span && CLUSTER.span.first ? `, across ${CLUSTER.span.first}..${CLUSTER.span.last}` : ''}` +
+      ` from ${new Set(CLUSTER_REFS.map((r) => r.lane).filter(Boolean)).size} lane(s). They are not nine items; they are nine observations of ONE missing seam, and the design is what unblocks all of them.\n\n` +
+      `**Do NOT design a patch per row.** Produce ONE design and say plainly which rows it does NOT cover and why — an uncovered row named here gets ruled on; one quietly omitted gets fixed twice next month.\n\n` +
+      `Their \`rootCause\` lines are the map of the seam: where several point at the same file, that is the seam, not a coincidence.\n\n` +
+      `SYMPTOM ROWS ABSORBED BY THIS ITEM:\n${JSON.stringify(
+        CLUSTER_REFS.map((r) => ({ ref: r.ref, lane: r.lane, date: r.date, finding: r.finding, rootCause: r.rootCause, closedBecause: r.note })),
+        null,
+        2,
+      )}\n\n`
+    : ''
+
   phase('Recon')
   const recon = (
     await parallel(
@@ -432,6 +579,12 @@ if (MODE === 'plan') {
             `**Say so plainly if the gap is bigger than the issue implies** — an improvement that reads like one line and is really a subsystem is the single most useful thing you can surface here.\n\n` +
             `If it is ALREADY BUILT, set alreadyExists:true and say where. Issues go stale.\n\n` +
             `List openQuestions — things only the owner can decide. Be honest rather than tidy: an improvement is a product decision, so a short list is suspicious, not efficient. But do not manufacture questions the code already answers.\n\n` +
+            // The ticket is the artefact he executes from months later, so the
+            // routes and their prices have to be produced HERE, by the pass that
+            // read the code. `openQuestions` asks him to decide; these give him
+            // something to decide between.
+            `**Return \`options\` — the routes actually available, each with its cost — and a \`recommendation\` naming the one you would take.** You read the code and he did not, so having no opinion hands the work back to him. One option is a legitimate answer when the code leaves one route; zero is not.\n\n` +
+            CLUSTER_NOTE +
             // X20 · The `asks` are summarised from a ticket BODY, and those bodies
             // routinely pre-pick a mechanism — one names the file to create, another
             // decides "no new tool" before anyone read the code. Given a design this
@@ -464,6 +617,13 @@ if (MODE === 'plan') {
 
   // Decompose — one pass over ALL of them together, because the cross-improvement
   // view is the whole point: two improvements often want the same seam moved once.
+  // The CONTRACT bullets, in one place because the repair round below re-states
+  // exactly these and a second copy would drift on the first edit.
+  const CONTRACT_RULES =
+    `• **Every piece names its \`connection\` — what it calls, what calls it, and WHAT IT MUST NOT BYPASS.** The third clause is the one that matters: name the gate, guard or resolver that stays in the path. This is where a cross-lane change actually breaks, and nothing else in this plan asks for it.\n` +
+    `• **Every piece names its \`expectation\` — what the OTHER pieces are entitled to assume about this one once it lands.** This is the field that stops two lanes each assuming the other handled it, and it specifies up front exactly what the bouncer's joint-trace verifies at the end: same seam, both ends. "Nothing — no other piece depends on this" is a valid answer.\n` +
+    `• **\`sharedPiece\` on the plan: \`<lane> — <file>\`, or exactly \`none\`.** You are read-only and permanently so — you author the contract, a lane writes the code that embodies it — so this line is the ONLY thing saying who writes a file no single piece owns. It names a FACT, not a call: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about; \`src/connections/{types,registry}.ts\` is the shared spine nobody owns.\n`
+
   phase('Decompose')
   const plan = await agent(
     `Decompose these recon findings into per-lane pieces the owner can approve one by one.\n\n` +
@@ -473,12 +633,18 @@ if (MODE === 'plan') {
       `• Do the opposite too: where two improvements want the SAME seam moved, say so and emit ONE piece. That cross-view is why this is a single pass.\n` +
       `• **Every piece names its \`requirement\` — the product outcome it buys, in one line, from the point of view of whoever benefits.** This is the column the owner rules on. A piece described only as a mechanism is unrulable: he can tell you whether the code sounds right, but not whether he WANTS it. If you cannot state the requirement without restating the mechanism, the piece is not understood yet.\n` +
       `• **Every piece names its \`risk\`** — what could go wrong, what is unresolved, what he should eyeball before it ships. Never blank; "None" is a claim worth making, and a piece with no risk named reads as unexamined.\n` +
-      `• \`whatChanges\` is DETAILED: the file(s), what the code will do differently, what a person would see change, and above all **what it REUSES** with a \`file:line\`. "Reuses X byte-for-byte" is worth more than any other sentence in that field.\n` +
+      // THE FENCE. This bullet asked for "what the code will do differently",
+      // which invites the violation it now forbids.
+      `• \`whatChanges\` names **the files and the seam, never the solution inside them** — the file(s), the function or boundary that moves, what a person would see change, and above all **what it REUSES** with a \`file:line\`. "Reuses X byte-for-byte" is worth more than any other sentence in that field. **A piece that names its implementation has bypassed the charter meant to choose it**: the lane owns that call under its own product rules, and you hold none of them.\n` +
+      CONTRACT_RULES +
       `• Every piece names the \`productDecision\` it embeds, or empty if genuinely mechanical. If you cannot name the decision, you have not understood the piece.\n` +
       `• Where a decision should outlive this wave, write it as a \`charterRule\`. **A bug never earns a charter rule — an improvement often should.** This is the only flow that produces them, so do not skip it.\n` +
       `• \`dependsOn\` is real ordering, not preference. \`context\` always lands last.\n` +
       `• \`blockingQuestions\` are things that must be settled BEFORE building. Do NOT guess to keep the list short — a guess here becomes built code the owner never chose.\n` +
       `• If a piece is not worth its cost, put it in \`notWorthBuilding\` with the reason. Declining is a result.\n\n` +
+      (CLUSTER_REFS.length
+        ? `**THIS IS ONE DESIGN ITEM WITH ${CLUSTER_REFS.length} BUG ROWS WAITING ON IT** (${DESIGN_REF || 'see the recon'}). Decompose the RECOMMENDED design, not the symptoms — each of those rows was closed \`converted\` to avoid a partial fix, so a piece per symptom is the one shape that is wrong. Name in \`notWorthBuilding\` any absorbed row the design does not cover.\n\n`
+        : '') +
       `UNDERSTOOD:\n${JSON.stringify(live, null, 2)}`,
     // X126 · agentType framer — every bullet below is now one of its rules
     // (F5-F10), so the engine states the schema and the charter states the
@@ -487,8 +653,135 @@ if (MODE === 'plan') {
     { label: 'decompose', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
   )
 
-  const pieces = (plan && plan.pieces) || []
-  log(`Plan: ${pieces.length} piece(s) across ${new Set(pieces.map((p) => p.lane)).size} lane(s); ${((plan && plan.blockingQuestions) || []).length} blocking question(s).`)
+  let pieces = (plan && plan.pieces) || []
+  let sharedPiece = String((plan && plan.sharedPiece) || '').trim()
+
+  // ── THE CONTRACT GATE, AND WHY `required` IS NOT IT ────────────────────────
+  // A schema's `required` stops a field being ABSENT. It does not stop `""`, and
+  // that is why `risk`'s own description has carried "NEVER blank" in prose since
+  // the day it was added. A blank `connection` is worse than a missing one: the
+  // plan renders, he approves it, and the seam nobody specified is the seam two
+  // lanes each assume the other handled — which is the exact failure `gh#154`
+  // recorded nine times.
+  //
+  // ONE REPAIR ROUND, not a throw and not a warning. A throw here discards an
+  // Opus recon and the whole decompose over a field a second sonnet pass fills in;
+  // a warning is a message, and a message is not a gate (X12). The repair is sent
+  // ONLY the incomplete pieces, so it costs a fraction of the pass it fixes.
+  const blank = (p) => ['connection', 'expectation'].filter((k) => !String((p && p[k]) || '').trim())
+  const gapsOf = (list) => list.map((p) => ({ id: p && p.id, missing: blank(p) })).filter((g) => g.missing.length)
+  let contractRepaired = 0
+  let gaps = gapsOf(pieces)
+  if (gaps.length || !sharedPiece) {
+    log(`! Contract incomplete: ${gaps.length} of ${pieces.length} piece(s) blank on ${[...new Set(gaps.flatMap((g) => g.missing))].join('/') || '(none)'}${sharedPiece ? '' : ', and `sharedPiece` is blank'} — ONE repair round.`)
+    const fix = await agent(
+      `Your plan came back with an INCOMPLETE CONTRACT. Fill only what is missing — do not re-plan, do not re-split, do not change any other field.\n\n` +
+        CONTRACT_RULES +
+        `\nReturn the SAME pieces with the same \`id\`s, every field carried through unchanged, and the blank ones filled. ` +
+        (sharedPiece ? `\`sharedPiece\` is already \`${sharedPiece}\` — return it unchanged.\n\n` : `\`sharedPiece\` was blank: answer it, and \`none\` is the answer when no piece touches shared code.\n\n`) +
+        (gaps.length ? `BLANK FIELDS:\n${gaps.map((g) => `• ${g.id}: ${g.missing.join(', ')}`).join('\n')}\n\n` : '') +
+        `PIECES:\n${JSON.stringify(gaps.length ? pieces.filter((p) => blank(p).length) : [], null, 2)}\n\n` +
+        `RECON (for the seam facts):\n${JSON.stringify(live, null, 2)}`,
+      { label: 'decompose:contract', phase: 'Decompose', agentType: 'framer', effort: 'high', schema: PLAN },
+    )
+    const filled = new Map(((fix && fix.pieces) || []).filter((p) => p && p.id).map((p) => [p.id, p]))
+    pieces = pieces.map((p) => {
+      const f = filled.get(p && p.id)
+      if (!f) return p
+      const merged = { ...p }
+      for (const k of ['connection', 'expectation']) if (!String(merged[k] || '').trim() && String(f[k] || '').trim()) merged[k] = f[k]
+      if (blank(p).length && !blank(merged).length) contractRepaired += 1
+      return merged
+    })
+    if (!sharedPiece) sharedPiece = String((fix && fix.sharedPiece) || '').trim()
+    gaps = gapsOf(pieces)
+  }
+  // The observable, and it is the number he can check: `blank` must be 0 on a plan
+  // that is safe to render. A non-zero survives the repair and says so out loud.
+  const contract = { pieces: pieces.length, blank: gaps.length, repaired: contractRepaired, sharedPiece: sharedPiece || '(BLANK)' }
+  if (gaps.length)
+    log(
+      `! CONTRACT STILL INCOMPLETE after the repair round — ${gaps.map((g) => `${g.id}:${g.missing.join('+')}`).join(', ')}. Do NOT render this plan to the owner: an unspecified seam is what two lanes each assume the other handled.`,
+    )
+  if (!sharedPiece) log('! `sharedPiece` is BLANK after the repair round — nothing in this plan says who writes shared code, so the first lane to run decides it.')
+
+  log(`Plan: ${pieces.length} piece(s) across ${new Set(pieces.map((p) => p.lane)).size} lane(s); ${((plan && plan.blockingQuestions) || []).length} blocking question(s); shared code → ${sharedPiece || '(BLANK)'}.`)
+
+  // ── `needsTicket` CARRIES THE FINISHED BODY, NOT THE ASK ───────────────────
+  // It used to be `{placeholderRef, title, asks, priority}` — the ingredients —
+  // so the Manager recomposed the ticket by hand from four other fields of this
+  // return. That is fatal for one reason: **the ticket is the artefact he executes
+  // from months later.** `gh#154` is the proof — nine refs closed onto a body
+  // nobody could build from, waiting eight days. Hand over the answer.
+  //
+  // COMPOSED IN THE ENGINE, deterministically, from what the passes already
+  // produced. No extra dispatch and no extra tokens: every sentence below was
+  // already paid for by Recon or Decompose.
+  //
+  // LABELS follow his own precedent — `Improvement` + High/Medium/Low (gh#154 is
+  // Improvement+High); `Feature` + Roadmap/Next/Idea only when the capability does
+  // not exist at all, which is what choosing a Feature-track word means. An
+  // unlabelled item gets `Improvement` and NO priority guess: inventing one puts a
+  // number he never chose on the surface he prioritises from.
+  const FEATURE_AXIS = ['Roadmap', 'Next', 'Idea']
+  const IMPROVE_AXIS = ['High', 'Medium', 'Low']
+  const labelsFor = (p) => (FEATURE_AXIS.includes(p) ? ['Feature', p] : IMPROVE_AXIS.includes(p) ? ['Improvement', p] : ['Improvement'])
+  const ticketFor = (it) => {
+    const u = live.find((x) => x && x.ref === it.ref) || {}
+    const own = pieces.filter((p) => p && p.ref === it.ref)
+    const opts = Array.isArray(u.options) ? u.options : []
+    const labels = labelsFor(it.priority)
+    const body = [
+      `**His words:** ${it.asks || '(none recorded)'}`,
+      '',
+      '## What breaks today',
+      u.todayBehaviour || '(recon recorded no current behaviour — do not build from this ticket until it does)',
+      '',
+      `**Wanted:** ${u.wantedBehaviour || '(not recorded)'}`,
+      `**The honest gap:** ${u.gap || '(not recorded)'}`,
+      '',
+      '## Options, with what each costs',
+      ...(opts.length
+        ? opts.map((o, n) => `${n + 1}. **${o.route}** — ${o.cost}${o.why ? ` · ${o.why}` : ''}`)
+        : ['(recon returned none — that is a defect in the plan pass, not a design with one route)']),
+      '',
+      `## Recommendation`,
+      u.recommendation || '(none — this ticket cannot be executed until somebody names the route)',
+      '',
+      '## The contract each piece is held to',
+      ...(own.length
+        ? own.flatMap((p) => [
+            `- **${p.id} · ${p.lane}** — ${p.requirement}`,
+            `  - changes: ${p.whatChanges}`,
+            `  - connection: ${p.connection || '(BLANK)'}`,
+            `  - expectation: ${p.expectation || '(BLANK)'}`,
+            `  - risk: ${p.risk || '(BLANK)'}`,
+          ])
+        : ['(no piece was decomposed for this item)']),
+      '',
+      `**Who writes the shared code:** ${sharedPiece || '(BLANK — nothing in the plan says, so the first lane to run decides it)'}`,
+      '',
+      ...(((plan && plan.blockingQuestions) || []).length
+        ? ['## Settle before building', ...((plan && plan.blockingQuestions) || []).map((q) => `- ${q}`), '']
+        : []),
+      ...(CLUSTER_REFS.length
+        ? [
+            `## Bug rows this absorbs (${CLUSTER_REFS.length})`,
+            'Each was closed `converted` onto this item to AVOID a partial fix. They stay closed; this design is what resolves them.',
+            ...CLUSTER_REFS.map((r) => `- \`${r.ref}\` (${r.lane || '?'}, ${r.date || '?'}) — ${r.finding}${r.rootCause ? ` · ${r.rootCause}` : ''}`),
+            '',
+          ]
+        : []),
+    ].join('\n')
+    return { placeholderRef: it.ref, title: it.title, labels, priority: it.priority, body, absorbs: CLUSTER_REFS.map((r) => r.ref) }
+  }
+  // ONE TICKET PER DESIGN ITEM, NEVER PER SYMPTOM REF — `items` is the item list,
+  // and the absorbed refs are a section INSIDE one body, never a body each.
+  // Nothing is filed here: the engine cannot, and it must not. He may read the
+  // cost and decline, and a ticket for a rejected idea is litter.
+  const needsTicket = DESCRIBED ? items.map(ticketFor) : []
+  const needsPriority = needsTicket.filter((t) => t.labels.length < 2).map((t) => t.placeholderRef)
+  if (needsPriority.length) log(`! ${needsPriority.length} ticket body(ies) carry no priority label — ask him for High/Medium/Low before filing: ${needsPriority.join(', ')}`)
 
   // Deliberately returns WITHOUT building. The owner approves in chat, then the
   // Manager re-invokes with {mode:'build', pieces:[approved]}.
@@ -498,16 +791,37 @@ if (MODE === 'plan') {
     stale,
     recon: live,
     pieces,
+    // The plan-level contract, so `sharedPiece` reaches his table as its own line
+    // instead of being buried in a piece nobody owns.
+    sharedPiece,
+    contract,
+    // The design door's own record: what it absorbed, and the command that writes
+    // the decision back onto every one of those rows once he rules.
+    design: DESIGN
+      ? {
+          ref: DESIGN_REF,
+          absorbs: CLUSTER_REFS.map((r) => r.ref),
+          lanes: [...new Set(CLUSTER_REFS.map((r) => r.lane).filter(Boolean))],
+          joinBack: `node scripts/design-cluster.cjs ${DESIGN_REF} --decide "<the design he chose>"`,
+        }
+      : null,
     blockingQuestions: (plan && plan.blockingQuestions) || [],
     notWorthBuilding: (plan && plan.notWorthBuilding) || [],
     // Described items have no GitHub issue yet, and the Manager has to file one
     // ON APPROVAL — before the build, so the ledger row and the wrap have a real
     // `gh#N` to key on. Not before the plan: he may read the cost and decline,
     // and a ticket for a rejected idea is litter.
-    needsTicket: DESCRIBED ? items.map((i) => ({ placeholderRef: i.ref, title: i.title, asks: i.asks, priority: i.priority })) : [],
+    needsTicket,
+    needsPriority,
     next:
+      (contract.blank
+        ? `STOP: ${contract.blank} piece(s) have a BLANK \`connection\` or \`expectation\` after the repair round — see \`contract\`. Do not render this plan; re-invoke plan mode. An unspecified seam is what two lanes each assume the other handled. Then: `
+        : '') +
       (DESCRIBED
-        ? 'THESE ARE NOT ON GITHUB YET. If the owner approves, FILE the issue first (see `needsTicket`) — title from the item, body carrying his own words plus the decomposition below, labelled `Improvement`+priority or `Feature`+horizon — then replace the `new-N` placeholder ref on each piece with the real `gh#N` before building, so the ledger and the wrap have something to key on. If he declines, file nothing. Then: '
+        ? 'THESE ARE NOT ON GITHUB YET. If the owner approves, FILE the issue with `gh issue create --title <title> --label <each label> --body-file <temp .md>` using `needsTicket[].body` VERBATIM — it is the finished ticket, not ingredients; do not recompose it. Then replace the `new-N` placeholder ref on each piece with the real `gh#N` before building. If he declines, file nothing. Then: '
+        : '') +
+      (DESIGN
+        ? `${DESIGN_REF} IS ALREADY FILED, so nothing is filed here. When he rules, run \`design.joinBack\` — it appends his decision onto all ${CLUSTER_REFS.length} absorbed row(s) under their existing \`converted\` verdict, so they stay closed and \`grep ${DESIGN}\` shows the design beside every symptom. Then: `
         : '') +
       'Owner approves/reshapes the pieces and answers the blocking questions, then re-invoke: Workflow({scriptPath:".claude/workflows/feature.js", args:{mode:"build", pieces:[...approved], answers:{...}, recon}}). PASS `recon` BACK — it carries what each area does today with file:line, and without it every builder re-derives ground this pass already covered. The join is by `ref`, so the refs in `pieces` and `recon` must match exactly.',
   }
@@ -546,8 +860,18 @@ const approved = raw.map((p) => {
 })
 
 const answers = A.answers || {} // owner's answers to blockingQuestions, threaded to every builder
+// The plan's `sharedPiece` line. Without it here the field is one he reads and the
+// lane that must honour it never sees — which is the set-but-unread failure, and
+// the whole reason the line exists is that shared code otherwise goes to whichever
+// lane runs first.
+const SHARED_PIECE = String(A.sharedPiece || '').trim()
+// The CONTRACT reaches the builder or it was decoration. `whatChanges` names the
+// files and the seam; these two name the join, and the join is where a wave split
+// across lanes to serve one idea actually breaks.
 const describe = (p) =>
   `${p.id} [${p.ref}] ${p.whatChanges}` +
+  (p.connection ? `\n  SEAM — what it calls, what calls it, and WHAT IT MUST NOT BYPASS: ${p.connection}` : '') +
+  (p.expectation ? `\n  WHAT EVERY OTHER PIECE IS ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: ${p.expectation}` : '') +
   (p.productDecision ? `\n  OWNER DECISION THIS EMBEDS: ${p.productDecision}` : '') +
   (p.charterRule ? `\n  DURABLE RULE: ${p.charterRule}` : '')
 
@@ -566,6 +890,13 @@ const buildLane = (lane, pcs, roundNote) =>
         // was "fixed" three times by picking a different number and the path was
         // never timed once.
         `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
+      // The framer authored the contract and is read-only; you implement it. The
+      // split is deliberate: it holds no lane's product rules, so the design
+      // INSIDE your files is yours and the seam BETWEEN them is not.
+      `**A piece may carry a SEAM and an EXPECTATION. Those are the contract and they are binding — the implementation inside the named files is yours to choose under your own charter, the join is not.** "What it must not bypass" is a gate that stays in the path: if your fix would route around it, that is \`needs-owner-decision\`, never a quieter path. And whatever your piece's EXPECTATION promises, another piece is already built against — deliver exactly that, and say so in \`traced\`.\n` +
+      (SHARED_PIECE && SHARED_PIECE !== 'none'
+        ? `\n**WHO WRITES THE SHARED CODE: ${SHARED_PIECE}.** If that is not you, do not touch that file — return \`needs-dependency\` naming the lane. If it is you, other pieces are waiting on it.\n`
+        : '') +
       `Where a piece names an OWNER DECISION, that call is already made — build it, do not re-litigate it. But if building reveals a CORRECTNESS problem with what was decided, say so plainly and return \`needs-owner-decision\` rather than shipping something broken.\n` +
       `Where a piece names a DURABLE RULE, that rule is the owner's product intent — it belongs in your charter. Say in your notes that it should be written there; do not edit charter files yourself.\n` +
       `If a piece needs another lane, return \`needs-dependency\` with the exact contract — do not reach across.${roundNote || ''}\n\n` +

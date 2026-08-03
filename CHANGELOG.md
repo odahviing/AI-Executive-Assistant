@@ -2,6 +2,30 @@
 
 ---
 
+## 4.4.5 — every charter read for the first time, and the squad gets smaller
+
+Thirteen charters, roughly 130 rules, and until today nobody had ever checked whether any of them matched the code they govern. The lens that made it tractable: **for each agent, name what it is the last line of defence against, then point at the rule that covers it — no rule, or a rule with no observable, is the finding.** That test is one file against one sentence, which is why a week of waves never surfaced any of it.
+
+**The squad shrank and the survivors got bigger.** The `quartermaster` was created and deleted the same day, on an argument the architect made against itself: its defining rule was *measure wall-clock on the paths a person waits on*, and nothing in `src/` times a turn — so its first honest output was a single ticket asking someone to add timing. Its subject folded into `handyman`, which went from eight engineering invariants to twelve rules and now owns infrastructure, the cloud, the database and its migrations, cost and latency — territory `SESSION_STARTER` said in plain text that no lane owned, with 69 ledger rows scattered across all eight lanes proving it. A second agent was prevented rather than built: rescoping `diplomat` from *the mail provider* to *everyone outside the workspace* means WhatsApp never needs a lane of its own.
+
+**`usher` → `editor`.** Its own test retired the old name — *does "The X" name a job you could hire* — and an editor assigns, sets focus, and does not write the articles, which makes a read-only agent's read-onlyness the point rather than an irony. One collision had to go with it: `humanGate`'s prompt cast the model as *"a copy editor"*, the same ambiguity that retired `verifier` against `dateVerifier`.
+
+**The framer became the design door.** It was the *feature* door, gated on a label; it is now any item whose answer is a product decision, whatever door it arrived through. The evidence: **nine of the thirteen `converted` ledger rows are the same design question** — one ticket has absorbed nine refs from five lanes across eight days and nobody has designed it. `convert` was not an escape hatch, it was a waiting room. A cluster resolver takes one ticket and hands the framer **one** item instead of nine, and two new required fields carry the contract a lane builds against: `connection` (what it calls, what calls it, what it must not bypass) and `expectation` (what the other pieces may assume about this one) — the second specifies up front exactly what the bouncer's joint-fix trace verifies at the end.
+
+**The architect finishes its own work now, and pays for it.** It had been filing the other half of its own changes as new ledger rows and having them re-approved — 27% of its rows exist only to amend another, 82% were filed and built the same day. So `apply` now defaults to finishing, and `A13` is the price: **a framework change that alters behaviour ships with a before/after proof that fires on the bad input and stays silent on the good one, and a prose change gets a second architect who reads the diff cold.** Both halves earned their keep immediately — a cold read caught the wider authority granting itself `src/` before it ran, and the first fixture caught a check that hard-failed a valid wrap. Its default tier moved to Sonnet, with those two judgement passes pinned to Opus.
+
+### Fixed
+- **Twelve person-store accessors were keyed on `slack_id` alone**, so anyone known only by an email address read back empty from all of them — no error, no log, which reads exactly like *"she doesn't know them."* Worse for one field: `setLastInboundLang` was the only writer of the language signal, so **every external's language was permanently unwritable while the read returned `'en'` indistinguishable from a fact.** Seven accessors gained `person_id` paths, two slack-keyed ones had no callers left and are gone, and the read now returns `null` for *no signal* and renders it explicitly. (gh#170)
+- **An approved action replayed into a thread it could not see.** The deferred-replay context defaulted `channel_id` and `thread_ts` to empty strings and read no history — and checking all five replayable tool schemas showed none carries them, so it was not best-effort, it was **unconditionally empty in production.** It now takes the request row's already-stamped return address, and the requester relay composes against the last few messages of the thread it is answering in rather than blind.
+
+### Changed
+- **Four ownership rules retired** — `M1`, `R1`, `I1`, `D1` were verbatim copies of a shared rule counted once per lane. Deduplicated rather than removed, numbers vacant and never reused, since `M` tags alone are cited 170 times in `src/`.
+- **Nine files reassigned or split**, three of which no charter claimed at all — the catch-up driver, the retention sweep, and the output-gate orchestration, that last one 74KB of the gate stack missing from the gate lane's own file list.
+- **~25 charter citations now cite anchor strings instead of line numbers.** 21 of the framer's 22 had drifted by a uniform five lines, three of them onto *coherent but wrong* prose, so a lane that obeyed the rule and opened the line got confident false evidence. Nothing validates charter citations today — the hygiene sweep excludes `agents/*.md` by design — which is why the drift was invisible.
+- **Report legibility.** A run headline in numbers (in / out / board / whose rows), an origin label per row, and `opened / closed / net` in the ledger view. The owner had asked twice why the backlog was not zero; the answer was arithmetic nothing showed him — 39 rows written against 19 closed in one night.
+
+---
+
 ## 4.4.4 — the bouncer starts asking "did it actually fix it", and a real privacy leak closes
 
 A fresh post-wrap bug-loop run plus a full hygiene sweep, then two owner-directed fixes once the bouncer's new outcome-tracing questions surfaced them. Alongside this: another session's larger framework upgrade to the bouncer and the bug-loop engine, bundled into this same patch per standing order.
