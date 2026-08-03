@@ -62,16 +62,19 @@ cutover); never diagnose a live problem from it. There is no local Maelle proces
 (it was deleted post-cutover) — do not `npm run deploy` / `pm2 restart maelle`
 here; that is a footgun that would open a second Slack socket.
 
-Read her CURRENT logs by fetching from the VM:
-`powershell -File scripts/vm-logs.ps1 [grep-term] [lines]`
-(e.g. `scripts/vm-logs.ps1 "Yael" 300`) — tails today's winston log (filtered if
-you pass a term) + recent pm2 stderr. Needs gcloud auth live; if it errors
-"Reauthentication failed", the user runs `gcloud auth login`.
+Read her CURRENT logs:
+`powershell -File scripts/vm-logs.ps1 [grep-term] [lines] [days-back]`
+(e.g. `scripts/vm-logs.ps1 "Yael" 300`) — reads her structured logs from Google
+Cloud Logging as the read-only `maelle-logs-reader` service account (parked in its
+own `maelle-logs` gcloud config). DURABLE: the SA mints tokens from a key file, so
+it NEVER hits "Reauthentication failed" — no SSH, no `gcloud auth login` needed.
 
 Deploys are automatic: push to `master` and the VM's watcher pulls + builds +
 restarts within ~2 min. SSH in with
-`gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap`;
-the app root is `/mnt/disks/maelle/app` (DB read-only via `node scripts/db-query.cjs`).
+`gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap`
+(this SSH path — used for the DB via `node scripts/db-query.cjs` and manual pokes —
+still rides your PERSONAL gcloud login, which DOES expire; only the log tool is
+durable). App root `/mnt/disks/maelle/app`.
 
 ## Why this file exists
 
