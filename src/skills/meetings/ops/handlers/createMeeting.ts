@@ -275,36 +275,18 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // and produces a strict BookingRequest with owner-in-participants
         // invariant + snapped duration + gated sensitivity + gated relaxed +
         // minimal context (threadTs / isMpim / isOwnerInGroup).
-        const { normalizeBookingRequest, resolveDuration } = await import('../../bookingRequest');
+        const { normalizeBookingRequest, resolveDuration, gateSensitivity } = await import('../../bookingRequest');
         const { planInputFromBookingRequest } = await import('../../planMeeting');
 
-        // v2.8.6 (102a) — sensitivity gate on colleague-path. The tool schema
-        // exposes `sensitivity` so a colleague can ask "mark this private" at booking
-        // time (attendee right). But we don't trust an arbitrary colleague-
-        // path call to set sensitivity on a meeting they're NOT on — that
-        // would let a random colleague mark someone else's calendar event
-        // private. Gate handler-side: drop the arg unless the colleague's
-        // email is in args.attendees. Owner-path is trusted, no gate.
-        if (context.senderRole === 'colleague'
-            && args.sensitivity !== undefined
-            && args.sensitivity !== 'normal') {
-          let colleagueEmail: string | undefined;
-          try {
-            const { getPersonMemory } = await import('../../../../db');
-            const mem = getPersonMemory(context.userId);
-            colleagueEmail = mem?.email?.toLowerCase();
-          } catch (_) { /* fail open — treat as unknown */ }
-          const onAttendees = colleagueEmail && Array.isArray(attendees)
-            && attendees.some(a => (a.email ?? '').toLowerCase() === colleagueEmail);
-          if (!onAttendees) {
-            logger.info('create_meeting colleague-path — sensitivity dropped (colleague not on attendee list)', {
-              requester: context.userId,
-              requesterEmail: colleagueEmail,
-              requestedSensitivity: args.sensitivity,
-              attendeeEmails: Array.isArray(attendees) ? attendees.map(a => a.email) : [],
-            });
-            delete args.sensitivity;
-          }
+        // v2.8.6 (102a) / o#187 — sensitivity gate on colleague-path, handler-
+        // side (raw args.attendees, before normalization). Shared with
+        // normalizeBookingRequest's identical gate below (bookingRequest.ts,
+        // gateSensitivity) — one function now, see its doc comment. This call
+        // still runs first and deletes `args.sensitivity` when unauthorized,
+        // so the later call inside normalizeBookingRequest is a no-op here.
+        const gatedSensitivity = await gateSensitivity(args, context, attendees);
+        if (gatedSensitivity === undefined && args.sensitivity !== undefined) {
+          delete args.sensitivity;
         }
 
         // gh#165-a — DEFAULT case (requester_is_attending unset/true): the tool
@@ -314,8 +296,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // meeting. Add her deterministically. INVITE LIST ONLY: this only pushes into
         // `attendees` (the Graph invite roster).
         //
-        // 2026-08-01 overturn — moved BELOW the sensitivity gate above (and its twin
-        // `gateSensitivity` in bookingRequest.ts, reached later via
+        // 2026-08-01 overturn — moved BELOW the sensitivity gate above (the same
+        // `gateSensitivity` reached again, as a no-op, later via
         // normalizeBookingRequest below): this used to sit right after the
         // requester-identity resolution, i.e. ABOVE both gates, so "is the colleague's
         // email in attendees" always read true on this default path — a deterministic
@@ -985,6 +967,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             if (sibling) {
               const whenStr = DateTime.fromISO(sibling.start.dateTime, { zone: sibling.start.timeZone ?? timezone })
                 .setZone(timezone).toFormat('EEE d MMM HH:mm');
+              // This check runs on BOTH paths (unlike the colleague-gated block
+              // above), so a colleague-facing refusal must mask a private sibling
+              // exactly like every other subject this file hands back (M12) — same
+              // helper as :546, viewer resolved the same way.
+              const maskedSiblingSubject = displaySubject(sibling, context.profile, subjectViewerFor(context));
               logger.info('create_meeting — reschedulable sibling found; surfacing move-instead-of-create', {
                 existingEventId: sibling.id, existingWhen: whenStr, subject: args.subject,
               });
@@ -992,9 +979,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 success: false,
                 error: 'possible_reschedule',
                 existing_meeting_id: sibling.id,
-                existing_subject: sibling.subject,
+                existing_subject: maskedSiblingSubject,
                 existing_when: whenStr,
-                message: `There's already "${sibling.subject}" on ${whenStr} with the same person. If you're MOVING it, call move_meeting on meeting_id ${sibling.id} (keeps its attendees, duration, and history) — do NOT create a second one. Only if you truly want a SEPARATE additional meeting, retry create_meeting with force_new=true.`,
+                message: `There's already "${maskedSiblingSubject}" on ${whenStr} with the same person. If you're MOVING it, call move_meeting on meeting_id ${sibling.id} (keeps its attendees, duration, and history) — do NOT create a second one. Only if you truly want a SEPARATE additional meeting, retry create_meeting with force_new=true.`,
               };
             }
           } catch (err) {

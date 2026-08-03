@@ -201,6 +201,16 @@ export interface HardBlockedSlot {
   kind: string;
   /** The class phrase for narration, or null = state no reason. */
   phrase: string | null;
+  /**
+   * The exact meeting length `checkSlot` was run at to establish this block —
+   * the asked length (snapped to the profile's allowed durations) for a normal
+   * ask, or the smallest allowed duration for a gap query's "nothing fits"
+   * verdict. o#189: the live re-verification refuter (runOutputGates) must
+   * re-probe at THIS length, not an unconditional smallest-allowed-duration —
+   * a block a 50-minute ask trips over on a tail overlap is not reproduced by
+   * a 25-minute probe, and the false-clear silently forgot a real fact.
+   */
+  durationMin: number;
   expiresAt: number;
 }
 
@@ -225,7 +235,8 @@ export interface HardBlockedSlot {
  * INVALIDATION — the TTL is the LAST line, never the only one. An entry is a claim
  * about a live calendar, so anything that proves it wrong must remove it, and a
  * stale entry is not a missed catch but a FALSE REFUSAL — the one failure this guard
- * may not commit (G6). Four rules, none of which depends on the clock:
+ * may not commit (G6). Six rules. Five are grounded in a fresh calendar read; rule 5
+ * is not (see its own paragraph) and is a scope safeguard, not a calendar fact:
  *   1. A fresh verdict for that exact instant that is NOT a hard block deletes it —
  *      bookable, soft / owner-overridable, or a kind nobody has classified. Same
  *      validator, same calendar, milliseconds old: it is strictly better knowledge,
@@ -249,17 +260,43 @@ export interface HardBlockedSlot {
  *      overridable one is still an undecided frame, and arming the hard half of it is
  *      the :743 false refusal over again — with the escalation the soft reading was
  *      owed (#128) destroyed on the way. The test is `armsHardFloor` on every reading.
+ *   5. v4.3.x (gh#158) — a turn that names someone OTHER than the owner bails out of
+ *      this whole pre-check for the owner's own calendar (it has no third-party
+ *      awareness at all — see the bail's own comment in availabilityPreCheck.ts) and
+ *      forgets any stored instant the message ALSO names, via cost-free regex
+ *      extraction (`forgetNamedInstantsFromHardBlockLedger`) — NEVER a fresh
+ *      `checkSlot` call. This is the one rule not grounded in a calendar read: its
+ *      job is scope, not evidence — a stale OWNER entry must not survive to be
+ *      matched against a reply that is actually about a named colleague at the same
+ *      clock time (the wrong-subject false rewrite gh#158 fixed). Safe by
+ *      construction: it only ever deletes (`forgetHardBlockedSlot`), so a false hit
+ *      can make the floor MISS, never fabricate a block — and if a later turn really
+ *      is about the owner at that instant, its own `checkSlot` re-arms the ledger
+ *      fresh, same as every other rule here.
+ *   6. v4.4.x — immediately before the rewrite fires (runOutputGates), a live
+ *      re-verification: fresh `checkSlot`, fresh calendar read, same instant, at the
+ *      SAME duration the entry was established at (`durationMin` — o#189; an
+ *      unconditional shortest-allowed-duration probe does not reproduce a block a
+ *      longer ask tripped on a tail overlap). The other rules all invalidate off a
+ *      read that happened to occur anyway; this is the one place the floor is a
+ *      moment from ACTING, so it takes one more look first rather than trusting an
+ *      entry that can be up to TTL_MS old. Anything that no longer arms the floor is
+ *      dropped and forgotten WITHOUT a rewrite (a safe miss, never a corrected reply
+ *      for a fact that stopped being true) — but a re-check that CANNOT run (a
+ *      throw — Graph outage, etc.) is not evidence the slot cleared, so it is treated
+ *      as still confirmed rather than silently forgotten (o#189: a throw is "could
+ *      not check", never "proof it's clear").
  * Plus one bound that is not invalidation but membership: the ledger holds FUTURE
  * instants only (freshHardBlockedSlots), so an entry can never outlive the moment it
  * describes.
  *
- * What is left is genuinely narrow and one-directional: an event cancelled or moved
- * BY SOMEONE ELSE inside the window while Maelle is mid-conversation about that exact
- * instant, or a SHORTER meeting proven to fit at that start by some other tool with
- * no fresh point-check to clear the entry. The ledger deliberately does not key on
- * duration: the entry answers the length that was actually proposed, and gating the
- * fire on a length the detector would have to supply would disarm the real catch (a
- * 60-minute ask refused by a tail overlap, then sold as "11:30 works").
+ * What is left, now that rule 6 closes the "moved/cancelled by someone else, no
+ * Maelle mutation" gap at the one moment it matters (immediately before the
+ * rewrite): the narrow window between rule 6's live re-check and the rewrite
+ * actually landing. The ledger DOES key on duration (`durationMin`, o#189) precisely
+ * so rule 6's probe reproduces the length that was actually proposed rather than
+ * disarming the real catch (a 60-minute ask refused by a tail overlap, then sold
+ * as "11:30 works").
  */
 const TTL_MS = 45 * 60 * 1000;
 const MAX_PER_OWNER = 8;
@@ -277,6 +314,8 @@ export function recordHardBlockedSlot(params: {
   display: string;
   kind: string | undefined;
   allDayOutOfOffice?: boolean;
+  /** The length `checkSlot` was run at to reach this verdict (see HardBlockedSlot). */
+  durationMin: number;
 }): void {
   if (!armsHardFloor(params.kind)) return;
   const key = params.ownerEmail.toLowerCase();
@@ -292,6 +331,7 @@ export function recordHardBlockedSlot(params: {
       ownerFirst: params.ownerFirst,
       allDayOutOfOffice: params.allDayOutOfOffice,
     }),
+    durationMin: params.durationMin,
     expiresAt: now + TTL_MS,
   });
   ledger.set(key, kept.slice(-MAX_PER_OWNER));
@@ -326,10 +366,23 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
 }
 
 /**
- * Drop one instant. Two callers, both cases of "this entry is no longer the best
- * knowledge": a rewrite landed on it (the correction is already in the text the
- * reader gets), or the point-check has just re-verified that exact instant as
- * BOOKABLE, which makes the entry wrong rather than old.
+ * Drop one instant. Call sites (verified by grep), all cases of "this entry
+ * is no longer the best knowledge":
+ *   - availabilityPreCheck.ts:954 — a fresh verdict for that exact instant is NOT
+ *     a hard block (invalidation rules 1 and 4 both resolve through this one line:
+ *     "not every reading arms" is true whether there was one reading or two).
+ *   - availabilityPreCheck.ts:1183 / :1189 — `forgetNamedInstantsFromHardBlockLedger`,
+ *     the named-attendee bail's text-matched forget (invalidation rule 5) — a
+ *     DIFFERENT mechanism from the two lines above: no `checkSlot` call, a scope
+ *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;
+ *     it is not — rule 4 is the undecided-frame case at :954, and this is its own
+ *     rule, corrected 2026-08 (o#190).
+ *   - runOutputGates.ts:1035 — the pre-rewrite live re-check found this instant no
+ *     longer hard-blocked (invalidation rule 6); dropped WITHOUT a rewrite.
+ *   - runOutputGates.ts:1061 — a rewrite landed on it (invalidation rule 3).
+ * A caller adding another should update this list AND the ledger's own
+ * INVALIDATION doc above in the same change — this file's own header undercounted
+ * its callers once already.
  */
 export function forgetHardBlockedSlot(ownerEmail: string, instantIso: string): void {
   const key = ownerEmail.toLowerCase();

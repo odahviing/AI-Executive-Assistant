@@ -437,6 +437,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // participants; find_available_slots unions them so a known attendee is
       // never dropped. Per-turn (rebuilt each response round with the turn's set).
       resolvedMeetingAttendees,
+      // v4.4.x (GH#169 revisit) — the raw current-turn message, forwarded so
+      // resolve_approval's anchor gate (tasks/skill.ts) can ground its
+      // unanchored-but-named fallback on what the sender actually typed,
+      // never on the model's own `reason` tool argument. Deliberately the
+      // unaugmented `userMessage`, not `effectiveUserMessage` — a claim-
+      // checker retry's appended [SYSTEM NOTE …] is not something the owner
+      // said and must never satisfy a "did the owner name this" check.
+      currentUserMessage: userMessage,
     };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];

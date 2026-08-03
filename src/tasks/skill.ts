@@ -17,6 +17,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
 import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
+import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
 import {
   getUnseenEvents,
   markEventsSeen,
@@ -94,6 +95,56 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
       err: String(err).slice(0, 200),
     });
     return 'unsure';  // fail-to-ask: an error must never silently let a calendar change ride freeform
+  }
+}
+
+/**
+ * approval-gate-no-decisiveness-check (verify finding, gh#169-a second half) —
+ * messageReferencesRequest is a REFERENT check only: does the owner's message
+ * name this row's subject or counterpart. It says nothing about whether he
+ * actually decided anything — "how's the ANF thing going?" names the approval
+ * exactly as surely as "ANF already done" does, so gating on namedMatch alone
+ * would bind a bare mention or a QUESTION as if it resolved the approval.
+ * Meaning classification (decided vs. merely mentioned/asked/discussed), not a
+ * keyword list — Maelle is multilingual and "yes"/"go ahead"/"reject" have no
+ * closed per-language word set (Rule 4). Same three-way shape as
+ * classifyFreeformCalendarChange above: 'unsure' fails toward the SAME
+ * needs_clarification refusal the anchor gate already returns below, never a
+ * silent bind.
+ */
+async function classifyOwnerAssertsDecision(message: string): Promise<'decided' | 'not_decided' | 'unsure'> {
+  const text = message.trim().slice(0, 500);
+  if (!text) return 'not_decided';
+  try {
+    const resp = await anthropic.messages.create({
+      model: MODEL_HAIKU,
+      max_tokens: 20,
+      system: `Classify a Slack message from someone who has an approval pending. Does THIS message itself assert that they have made a decision on it — an approve/go-ahead, a reject/decline, or a specific counter-proposal/change?
+- 'decided' — it clearly states a decision, in any language: "yes, do it", "reject that", "no, book 3pm instead", "already approved it", "drop it".
+- 'not_decided' — it clearly does NOT: a question, a status check, a topic mention with no verdict, a vague acknowledgement ("ok", "thanks", "got it"), a future-tense plan ("I'll look at it").
+- 'unsure' — genuinely ambiguous.
+Judge by meaning, not by keyword-matching. Bias to 'unsure' over guessing — an unsure verdict just asks for clarification; a wrongly-guessed 'decided' silently books/rejects something the sender never actually decided. Answer via the classify tool only.`,
+      tools: [{
+        name: 'classify',
+        description: 'Classify whether the message asserts an actual decision.',
+        input_schema: {
+          type: 'object' as const,
+          properties: { verdict: { type: 'string', enum: ['decided', 'not_decided', 'unsure'] } },
+          required: ['verdict'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'classify' },
+      messages: [{ role: 'user', content: text }],
+    });
+    logLlmUsage('approval_bare_ack_decisiveness', MODEL_HAIKU, resp);
+    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
+    const v = (toolUse?.input as { verdict?: string } | undefined)?.verdict;
+    return (v === 'decided' || v === 'not_decided') ? v : 'unsure';
+  } catch (err) {
+    logger.warn('resolve_approval — decisiveness classifier threw; routing to UNSURE (ask, not a silent bind)', {
+      err: String(err).slice(0, 200),
+    });
+    return 'unsure';  // fail-to-ask: an error must never silently let a bare mention bind an approval
   }
 }
 
@@ -349,7 +400,7 @@ Verdicts:
 - reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
 - amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
 
-Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject; the tool refuses an unanchored bare ack.`,
+Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject. Outside the anchor thread, a bare yes/no is refused UNLESS the owner's own message names this approval by subject or counterpart ("ANF already done", "reject the Erez sync") — that's detected automatically from what he actually typed, not from anything you pass in \`reason\`. If it's refused, tell him which open approvals exist and ask him to confirm in the approval's own thread, the daily thread, or by naming which one he means.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -357,7 +408,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             verdict: { type: 'string', enum: ['approve', 'reject', 'amend'] },
             data: { type: 'object' },
             counter: { type: 'object' },
-            reason: { type: 'string' },
+            reason: { type: 'string', description: 'Owner\'s own words, when relevant — relayed to the requester on reject/amend to explain the decision. Does NOT unlock resolving outside the approval\'s anchor thread; that\'s checked automatically against what the owner actually typed, not against this argument.' },
           },
           required: ['approval_id', 'verdict'],
         },
@@ -1296,16 +1347,85 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             const anchored = !!context.threadTs
               && (context.threadTs === ownerRow.terminal_dm_msg_ts
                 || context.threadTs === ownerRow.owner_dm_thread_ts);
-            if (!anchored) {
+            // v4.4.x (GH#169/#176, REVISITED per owner ruling — the first cut
+            // wasn't trusted and was sent back) — a reply outside the anchor
+            // thread still binds when the OWNER'S OWN message this turn
+            // (context.currentUserMessage — the raw Slack text, plumbed from
+            // orchestrator/index.ts, NOT the model's tool argument) demonstrably
+            // NAMES this approval (its subject or counterpart), via the same
+            // deterministic referent check the owner-says-done scanner uses
+            // (messageReferencesRequest).
+            //
+            // The first cut grounded this on `args.reason` instead — free text
+            // the MODEL itself writes, checked against a row the model ALSO
+            // picked via approval_id. That is no independent grounding at all:
+            // nothing stops the model from mis-picking approval_id (the exact
+            // Athena failure, 2026-07-13) and then filling `reason` with a
+            // plausible subject string it read elsewhere in its own context,
+            // satisfying the very check meant to catch its mistake. Grounding on
+            // the owner's literal turn text closes that, because the model does
+            // not control what the owner actually typed. The Athena mis-bind was
+            // a CONTENTLESS "Yes" that named nothing — that still fails this
+            // check and stays refused. "ANF already done" / "reject that Sync
+            // with Erez" name the thing they mean, so they bind even though most
+            // owner replies land as plain (non-thread-clicked) DM messages,
+            // which structurally can never equal
+            // terminal_dm_msg_ts/owner_dm_thread_ts (GH#169 transcript: the
+            // owner's very next reply to Maelle's own ask was refused 3x
+            // running).
+            const ownerLiteralMessage = context.currentUserMessage ?? '';
+            let namedMatch = !anchored && ownerLiteralMessage.trim().length > 0
+              && messageReferencesRequest(ownerLiteralMessage, ownerRow);
+            // approval-gate-no-decisiveness-check — a referent match alone is not
+            // enough to bind: it only proves the message NAMES this approval, not
+            // that the owner decided anything (see classifyOwnerAssertsDecision
+            // above). Only spend the Haiku call once the cheap deterministic
+            // referent check already passed.
+            if (namedMatch) {
+              const decisiveness = await classifyOwnerAssertsDecision(ownerLiteralMessage);
+              if (decisiveness !== 'decided') {
+                logger.info('resolve_approval — message names this approval but does not assert a decision; refusing unanchored bind', {
+                  requestId, verdict, decisiveness, ownerMessage: ownerLiteralMessage.slice(0, 120),
+                });
+                namedMatch = false;
+              }
+            }
+            // gh#169-a (owner ruling: "ok build") — a topical mention must be
+            // UNIQUE among the owner's other open approvals before it can bind
+            // one unanchored. Pre-fix, a shared counterpart name or subject
+            // token let a bare reply bind whatever row `approval_id` happened
+            // to name even when a SECOND open approval matches the exact same
+            // words — the owner never said which one. Refuse (same
+            // needs_clarification shape) when 2+ open awaiting_owner approvals
+            // match this message; anchored replies are unaffected since thread
+            // position alone already disambiguates those.
+            let ambiguousNamedMatch = false;
+            if (namedMatch) {
+              const otherOpenApprovals = getAwaitingOwnerRequests(ownerRow.owner_user_id)
+                .filter(r => r.kind === 'approval' && r.id !== requestId);
+              if (otherOpenApprovals.some(r => messageReferencesRequest(ownerLiteralMessage, r))) {
+                ambiguousNamedMatch = true;
+                namedMatch = false;
+              }
+            }
+            if (!anchored && !namedMatch) {
               logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
                 requestId, verdict, threadTs: context.threadTs,
                 terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,
+                ambiguous: ambiguousNamedMatch,
               });
               return {
                 ok: false,
                 needs_clarification: true,
-                reason: `Not anchored: this reply isn't in ${requestId}'s decision thread (neither its own DM thread nor a daily approval thread), so a bare yes/no is too ambiguous to bind here — the owner may be responding to something else in this thread. Do NOT resolve it. Tell him you're not sure which approval he means, name the open ones by subject, and ask him to confirm in the approval's own thread (or the daily decision thread).`,
+                reason: ambiguousNamedMatch
+                  ? `Ambiguous: more than one of your open approvals matches what you said, so I can't tell which one you mean — reply in that specific approval's own thread (or the daily approval thread), or say something that's unique to just the one you mean.`
+                  : `Not anchored: this reply isn't in ${requestId}'s decision thread (neither its own DM thread nor a daily approval thread), so a bare yes/no is too ambiguous to bind here — the owner may be responding to something else in this thread. Do NOT resolve it. Tell him you're not sure which approval he means, name the open ones by subject, and ask him to confirm in the approval's own thread (or the daily decision thread) — or just name this one by subject/colleague in his own reply (e.g. "ANF already done"), which is recognized automatically whatever thread it lands in.`,
               };
+            }
+            if (namedMatch) {
+              logger.info('resolve_approval — unanchored but the owner\'s own message names this approval; binding', {
+                requestId, verdict, threadTs: context.threadTs, ownerMessage: ownerLiteralMessage.slice(0, 120),
+              });
             }
           }
         }
@@ -1314,6 +1434,17 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         if (verdict === 'approve') {
           decision = { verdict: 'approve', data: (args.data as Record<string, unknown>) ?? {} };
         } else if (verdict === 'reject') {
+          // reject-reason-bypasses-id-veto — `reason` is relayed to the requester
+          // verbatim, parenthesized onto the decline (resolver.ts's reject-branch
+          // reasonTail), the exact same leak surface the amend branch below already
+          // guards with textCarriesInternalWorkItemId. Same check, reused here.
+          const rejectReasonArg = typeof args.reason === 'string' ? args.reason.trim() : '';
+          if (rejectReasonArg && textCarriesInternalWorkItemId(rejectReasonArg)) {
+            return {
+              error: 'unrelayable_reason',
+              reason: 'verdict=reject can\'t carry an internal identifier to a colleague — your `reason` text holds one of our own request/task ids, which mean nothing to them. Restate it in human terms and send the reject again.',
+            };
+          }
           decision = { verdict: 'reject', reason: args.reason as string | undefined };
         } else if (verdict === 'amend') {
           const counter = (args.counter as Record<string, unknown>) ?? {};

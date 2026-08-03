@@ -2,6 +2,42 @@
 
 ---
 
+## 4.4.3 — a night of bug fixes across six tickets, and the loop learns to bounce once and stop
+
+One long bug wave: the six open GitHub `Bug` tickets plus a log review since the last watermark, triaged and built in five rounds with a combined verify after each. Bundled alongside it are another session's framework changes to the bug loop itself.
+
+**The approval gate no longer trusts what the model says about itself.** `resolve_approval`'s unanchored-reply fallback used to bind on the model's own paraphrase of what the owner meant; it now grounds on the owner's actual message text, requires that match be unique among his open approvals, and requires the message actually assert a decision rather than merely mention the topic. Three real gaps closed in sequence on the same code path, each found by the wave-verify that the previous attempt had missed.
+
+**A day-move disclosure was tried twice and declined.** The idea — tell the owner when moving a meeting would flip it onsite/online — is sound, but both attempts got the online/offline signal backwards (`isOnline` means "has a Teams link," not "is virtual," which this codebase already documents elsewhere) and the second wasn't scoped off the colleague path. Reverted cleanly rather than shipped broken; reopen if still wanted.
+
+**Framework, from elsewhere:** the bug loop now bounces an overturned fix once, automatically, before it reaches the owner's desk — a new `Bounce` phase, capped at one retry per item (`X137`, his ruling: *"we can bounce stuff once, not twice"*). `quartermaster` moved from a reserved placeholder to a real charter (runtime cost and latency, non-builder). `outrider` renamed to `handyman` (tag stays `O`).
+
+### Fixed (high-impact)
+- [#169: Approval flows can't be override outside](https://github.com/odahviing/AI-Executive-Assistant/issues/169) — bare acks now bind only on the owner's own words, uniquely, and only when they assert a real decision.
+- [#174: Approvals can't be approve](https://github.com/odahviing/AI-Executive-Assistant/issues/174) — same fix as #169 closes the reported transcript.
+- [#175: Email reply get internal answer and external answer](https://github.com/odahviing/AI-Executive-Assistant/issues/175) — the internal "FOR YOU" note is gone; an email reply is now only the forwardable text, nothing to strip before sending it on.
+- [#176: Autofix made a mistake we can't resolve](https://github.com/odahviing/AI-Executive-Assistant/issues/176) — a colleague's new topic within 10 minutes of an open outreach no longer misattaches to the wrong thread.
+- [#177: Memory context of same person got collidate](https://github.com/odahviing/AI-Executive-Assistant/issues/177) — same root as #176; a colleague with more than one open outbound topic is now matched against all of them, not just the newest.
+- The availability floor's live re-check now probes at the duration that actually established a hard block, and treats a Graph outage as "could not check" rather than "proven clear" — it could previously forget a real block or ship a confidently wrong refusal.
+- A phantom "confirmed the booking" claim could ride past the honesty gate — the informational-check exemption was scoped in one place and not the other; now consistent everywhere it appears.
+- A private meeting's real subject could still reach a colleague through a second, unfixed reschedule-conflict message.
+
+### Fixed (small)
+- `get_calendar` could report "0 events" for a real, non-empty result (the colleague-scoped and Working-Elsewhere-notes response shapes).
+- A correct weekday statement could get "corrected" into a wrong one by the date verifier.
+- Two independent copies of the colleague-sensitivity gate merged into one.
+- Hebrew/Russian/Spanish approval-subject matching: stopwords extended past English-only, and whole-word matching now handles Hebrew's prefixed definite article.
+- `defaultWorkingHoursForTz` no longer hardcodes Israel as the one non-Western special case — derives from configured tenants' own schedule.
+- `replyToMail` cleans up an orphaned Graph draft after a failure between steps.
+- A drifted, hand-maintained copy of the internal-id security regex now imports from its one canonical source.
+- Dead code removed: an unreachable @-mention-adds-attendee block, a duplicate outreach-task-close SQL statement, four dead `TaskType` members, an orphaned doc block left by an earlier import-cycle fix.
+
+### Not changed
+- Ticket #175's day-move disclosure (complaint 2) — declined after two attempts, both found unsafe. Reopen if still wanted.
+- Three low-priority findings queued for the next bug-loop run instead of built tonight: a cost regression in tonight's own outbound-classifier fix (one model call per open candidate instead of one total), dead `TaskType` rows still live in the DB, and an owner-facing move note with no channel scope yet.
+
+---
+
 ## 4.4.2 — the queue reaches the builders, and the feature door gets its own agent
 
 No behavioural `src/` change — every `src/` edit in this release is a comment. The subject is the loop that fixes Maelle: work he had already approved was sitting in a queue nothing opened.

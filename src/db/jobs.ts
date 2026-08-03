@@ -140,14 +140,18 @@ export interface OutreachJob {
   dm_channel_id?: string;
   // v2.6.1 — DM follow-up tracking, independent of the request's lifecycle.
   // Populated when the conversation around this outbound DM has closed: emoji
-  // reaction on the message, thread reply, deterministic <10min match,
-  // LLM-classified 10min-24h response, 24h auto-expiry, or a terminal transition
-  // signal ('replied' / 'cancelled' via handleOutreachReply / meetingReschedule /
-  // coordinator paths). The latter is auto-set inside updateOutreachJob below so
-  // existing call sites don't need to be touched.
+  // reaction on the message, thread reply, LLM-classified <24h response, 24h
+  // auto-expiry, or a terminal transition signal ('replied' / 'cancelled' via
+  // handleOutreachReply / meetingReschedule / coordinator paths). The latter
+  // is auto-set inside updateOutreachJob below so existing call sites don't
+  // need to be touched.
+  //
+  // v2.6.2 (gh#176/#177) — 'deterministic_match' (<10min, no classifier) is
+  // GONE: it matched on colleague identity alone, so a second unrelated topic
+  // from the same colleague inside that window misattached and closed the
+  // wrong outbound. Every <24h inbound is now classified (recentOutboundContext.ts).
   followup_closed_at?: string;
   followup_close_reason?:
-    | 'deterministic_match'
     | 'llm_response_match'
     | 'thread_reply'
     | 'emoji_ack'

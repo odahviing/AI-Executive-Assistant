@@ -189,6 +189,14 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
     // fall back to English only if it didn't provide one.
     const correctWeekday = extracted.weekdayNames[correctNum - 1] || WEEKDAY_EN_FALLBACK[correctNum - 1];
     if (!correctWeekday) continue;
+    // 2026-08-02 false-positive: the extractor's writtenWeekdayNum is a SEPARATE
+    // LLM derivation from writtenWeekdayText and can disagree with it even when
+    // the WORD is already correct (observed live: correctWeekday and
+    // writtenWeekday both 'יום שלישי' while the two numbers differed). The
+    // written TEXT is the thing that ships; if it already equals the name we'd
+    // rewrite it TO, a swap would be a no-op-in-meaning at best and a wrong
+    // rewrite off a bad number at worst. Trust the text match over the number.
+    if (correctWeekday.trim().toLowerCase() === pair.writtenWeekdayText.trim().toLowerCase()) continue;
     mismatches.push({
       writtenWeekday: pair.writtenWeekdayText,
       correctWeekday,

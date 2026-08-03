@@ -86,8 +86,8 @@ const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
 // The ONLY way to survey the whole board. Owner, 2026-07-28: "always do 1 unless
 // I'M SAYING more." Without this flag the engine plans at most one unnamed item.
 const SWEEP = A.sweep === true
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'outrider']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'handyman']
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -110,7 +110,7 @@ const LANE_MAP =
   'authority-by-authenticated-sender, the postReply delivery pipeline, Slack\'s `Connection` implementation) · ' +
   '`diplomat` OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one ' +
   '(mailbox poll, the inbound sender gate, forwarded-header extraction, the one-address send cap, reply-not-compose, ' +
-  'mail auth); WhatsApp/iMessage land here too when they open · `outrider` only where NO lane owns the subsystem ' +
+  'mail auth); WhatsApp/iMessage land here too when they open · `handyman` only where NO lane owns the subsystem ' +
   '(news, brief, routines, the Graph CLIENT layer only — calendar is matchmaker, mail is diplomat — core orchestrator, DB, health, config, scripts)'
 
 // ---- schemas ----
@@ -161,7 +161,7 @@ const PLAN = {
         properties: {
           id: { type: 'string' },
           ref: { type: 'string', description: 'the improvement this serves' },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
           // WHY this piece exists, in product terms. Added on the owner's ask
           // 2026-07-28: the first plan he read gave him lane · change · deps ·
           // size, and he could not decide from it because nothing said what any
@@ -244,7 +244,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           // X22 · same field, same words as bugger.js. It matters here because
           // `VERIFY_OUT.results` reuses this shape, so a feature wave's OVERTURN is a
@@ -290,7 +290,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · same field, same words as bugger.js' discoveries.
           invariant: {

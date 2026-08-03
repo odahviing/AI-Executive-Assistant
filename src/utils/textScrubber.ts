@@ -190,6 +190,27 @@ const BARE_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID, 'g');
  */
 export const RAW_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID);
 
+/**
+ * An internal work-item id — the inverse of the four expressions that MINT one:
+ * `req_` (db/requests.ts:51), `task_` (tasks/index.ts:13), `out_` (db/jobs.ts:164),
+ * `ci_` (db/calendarIssues.ts:372). A structured token, so regex is the allowed kind.
+ *
+ * `req_`/`task_` match loosely: neither prefix begins an English word, and a model
+ * volunteering an id-SHAPED string it made up ("req_abc123") has to be caught too.
+ * `out_`/`ci_` require the minted `<epoch>_<base36>` tail, because a loose match
+ * there swallows ordinary words ("out_of_office").
+ *
+ * Lives here (a leaf util), not in core/requests/resolver.ts where it originated,
+ * because `securityGate`'s `internal_ref_id` trigger needs the exact same pattern
+ * and utils must not import FROM core — that reversed edge is what let a future
+ * static import of securityGate from anywhere under core/requests turn into a real
+ * cycle (core/requests → securityGate → core/requests), silently leaving the
+ * trigger's pattern undefined at module-init. `core/requests/resolver.ts` imports
+ * this constant instead of defining it, matching the `RAW_SLACK_ID_RE` shape above:
+ * one canonical source in utils, every gate and core module a reader.
+ */
+export const INTERNAL_WORK_ITEM_ID_RE = /\b(?:(?:req|task)_[a-z0-9][a-z0-9_]*|(?:out|ci)_\d{10,}_[a-z0-9]+)\b/i;
+
 export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')

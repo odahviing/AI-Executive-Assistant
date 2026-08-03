@@ -505,15 +505,15 @@ export function occupancyRoleOf(
   floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
 ): OccupancyRole {
   if (ev.isCancelled) return 'ignore';
-  if ((ev as any).showAs === 'free') return 'ignore';   // free/tentative blocks don't collide
+  if (ev.showAs === 'free') return 'ignore';   // free/tentative blocks don't collide
   // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (join only if
   // free), NOT a hard commitment. This one classification is what lets the slot
   // finder TAG a slot over it as WE-soft instead of dropping it, and lets a
   // booking sit over it with no conflict flag.
-  if (!ev.isAllDay && (ev as any).showAs === 'workingElsewhere') return 'optional';
+  if (!ev.isAllDay && ev.showAs === 'workingElsewhere') return 'optional';
   // P32 — an ALL-DAY WE marker is a working day elsewhere, not a commitment and
   // not a skippable meeting. Ignored, which is what the walker always did.
-  if ((ev as any).showAs === 'workingElsewhere') return 'ignore';
+  if (ev.showAs === 'workingElsewhere') return 'ignore';
   // A movable floating block (lunch / focus / gym) is NOT a hard collision:
   // rule 6 already validated it can still fit elsewhere in its window, and
   // `rebalanceFloatingBlocksAfterMutation` slides it after the write commits.
@@ -804,7 +804,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       for (const ev of input.events) {
         if (ev.isCancelled) continue;
         if (excludeSet.has(ev.id)) continue;
-        if ((ev as any).showAs === 'free') continue;
+        if (ev.showAs === 'free') continue;
         // v3.6.4 — a timed optional-join (WE-soft) yields to a floating block:
         // the owner drops the optional to keep lunch, so it never occupies the
         // window for feasibility. Keeps this rule consistent with the search /
@@ -813,7 +813,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         // leaving it in filled the whole lunch window and would have turned every
         // slot on a WFH-marked day into `floating_block_overlap` the moment the
         // occupancy scan stopped masking it with a collision.
-        if ((ev as any).showAs === 'workingElsewhere') continue;
+        if (ev.showAs === 'workingElsewhere') continue;
         const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
         const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
         // Skip if event doesn't overlap the window.
@@ -953,8 +953,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         for (const ev of input.events) {
           if (ev.isCancelled) continue;
           if (excludeSet.has(ev.id)) continue;
-          if ((ev as any).showAs === 'free') continue;
-          if (!ev.isAllDay && (ev as any).showAs === 'workingElsewhere') continue;
+          if (ev.showAs === 'free') continue;
+          if (!ev.isAllDay && ev.showAs === 'workingElsewhere') continue;
           if (ev.isAllDay) continue;
           busyBlocks.push({
             start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),

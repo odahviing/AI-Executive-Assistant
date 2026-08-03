@@ -408,7 +408,13 @@ if (argv.includes('--report')) {
       // A blank line and a horizontal rule carry no narration and are not spent
       // against his five — firing on those would be a check that goes off on the
       // healthy path, which is the mistake this whole file is written against.
-      if (String(l).trim() && !/^\s*([-*_])\1{2,}\s*$/.test(l)) prose.push({ line: i + 1, text: String(l).trim() });
+      // X137 · A CODE-FENCE DELIMITER is the same case: ``` is punctuation, it
+      // says nothing, and the headline spec puts the four number lines in a fence
+      // precisely because four bare lines collapse into one paragraph in a
+      // markdown reader. Charging two backtick rows against his five bought
+      // nothing and cost 40% of the budget. The lines INSIDE the fence are still
+      // charged — a fence is not a place to hide a paragraph.
+      if (String(l).trim() && !/^\s*([-*_])\1{2,}\s*$/.test(l) && !/^\s*```/.test(l)) prose.push({ line: i + 1, text: String(l).trim() });
       return;
     }
     if (isSep(l)) return;
@@ -503,7 +509,10 @@ if (argv.includes('--report')) {
   // Its OWN count is checked like every other count on this surface: the line names
   // one backticked ref per item, so `(6)` is derivable from the line itself.
   const builtAt = lines.findIndex((l) => /built and uncommitted/i.test(String(l)));
-  const builtSinceWrap = (() => {
+  // ONE scan of the post-wrap slice, read by two checks — the built list below
+  // and the bounce count (X137). A second read of the same file for the second
+  // number is the drift this reader exists to prevent.
+  const sinceWrap = (() => {
     if (!fs.existsSync(LEDGER)) return [];
     const rs = [];
     for (const t of fs.readFileSync(LEDGER, 'utf8').split(/\r?\n/)) {
@@ -519,8 +528,9 @@ if (argv.includes('--report')) {
     rs.forEach((r, i) => {
       if (/^wrap-/.test(String(r.runId || ''))) from = i + 1;
     });
-    return rs.slice(from).filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
+    return rs.slice(from);
   })();
+  const builtSinceWrap = sinceWrap.filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
   if (builtAt < 0 && builtSinceWrap.length) {
     console.log(
       `\n  ! NO BUILT LIST, and the ledger holds ${builtSinceWrap.length} \`built\` row(s) since the last wrap stamp: ${builtSinceWrap
@@ -541,6 +551,27 @@ if (argv.includes('--report')) {
         okBuilt ? 'ok' : '! MISMATCH'
       }`,
     );
+  }
+  // ── X137 · THE BOUNCED FIGURE, CHECKED LIKE EVERY OTHER NUMBER ON THIS SURFACE ──
+  // The headline now carries `<n> bounced` so he can see the bouncer sending work
+  // back. An unchecked number on this file is the X27 failure with a new name, and
+  // the ledger already holds the answer — `bounces` on each row (X137). Distinct
+  // refs, because a row bounced once is one bounce however many lines it wears.
+  const bouncedRefs = [...new Set(sinceWrap.filter((r) => Number(r.bounces || 0) > 0).map((r) => r.ref || '(no ref)'))];
+  const bounceClaim = (() => {
+    for (const l of lines) {
+      const m = String(l).match(/(\d+)\s*bounced\b/i);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  })();
+  if (bounceClaim === null && bouncedRefs.length) {
+    console.log(`\n  ! ${bouncedRefs.length} row(s) were BOUNCED since the last wrap and the headline says nothing: ${bouncedRefs.slice(0, 8).join(', ')}${bouncedRefs.length > 8 ? ' …' : ''}. Write \`<n> bounced\` on the \`out:\` line — that figure is how he sees the bouncer working.`);
+    bad += 1;
+  } else if (bounceClaim !== null) {
+    const okB = bounceClaim === bouncedRefs.length;
+    if (!okB) bad += 1;
+    console.log(`\n  headline's bounced figure: claims ${bounceClaim} · the ledger holds ${bouncedRefs.length} row(s) with \`bounces\` since the last wrap   ${okB ? 'ok' : '! MISMATCH'}`);
   }
   // ── X103 · BOTH WRAP MARKERS, CHECKED AGAINST THE ONE THING THAT CANNOT DRIFT ──
   // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7
@@ -624,12 +655,6 @@ if (argv.includes('--report')) {
       console.log(`\n  wrap markers: lastWrapIso current at \`${lastRelease.v}\` (${lastRelease.sha}) · no row stamp owed — the report was already empty at ${lastRelease.sha}^   ok`);
     }
   }
-  // X83 · his bound on the narration, and the only length rule left on this file.
-  if (prose.length > 5) {
-    console.log(`\n  ! ${prose.length} lines sit OUTSIDE the table, and the format allows 5. The table is the report — anything longer belongs in the ledger \`note\`:`);
-    for (const p of prose) console.log(`      line ${String(p.line).padStart(4)}  ${p.text.slice(0, 76)}`);
-    bad += 1;
-  }
   if (!totalRows) console.log(`\n  0 table rows — an emptied report is a valid state. Its headline must still carry the ledger's open total (\`--open\`).`);
 
   // ── X72 · THE HEADLINE'S OTHER CLAIM, and it is the only one an EMPTIED report
@@ -675,7 +700,8 @@ if (argv.includes('--report')) {
   // the headline is already a checked claim, so this is one more number on the
   // line and one more comparison in the loop below.
   const rulableLine = openOut.find((l) => /^RULABLE —/.test(l)) || '';
-  const claimLine = lines.find((l) => /\d[\d,]*\s*\**\s*open rows?\b/i.test(l));
+  const claimLineAt = lines.findIndex((l) => /\d[\d,]*\s*\**\s*open rows?\b/i.test(l));
+  const claimLine = claimLineAt >= 0 ? lines[claimLineAt] : undefined;
   const num = (re, s) => { const m = String(s).match(re); return m ? Number(m[1]) : null; };
   if (!openLine) {
     console.log(`\n  ledger total: NOT CHECKED — \`--open\` produced no OPEN line (an empty ledger, or it failed).`);
@@ -719,6 +745,26 @@ if (argv.includes('--report')) {
         `      ${want['waiting on a verb']} open row(s) need his build-or-decline and carry no verb, so X77 keeps every one of them OFF the table. Silence on this line reads as nothing pending — write it, then give those rows their verb (M6b).`,
       );
     if (wrong.length) bad += 1;
+  }
+  // ── X83 · his bound on the narration · X137 · ON NARRATION, which is not the
+  // same set as "lines outside the table". A line THIS CHECK REQUIRES AND
+  // VALIDATES is not narration and is not charged: the headline's pending claim,
+  // the `board:` line carrying `--open`'s total, and the built-and-uncommitted
+  // line. It cannot demand a line and then count it as forbidden prose — and it
+  // did, so the four-line headline the same spec mandates (X136) put the file at
+  // 10 against a limit of 5 the day both shipped. His five are untouched; they
+  // now buy five lines of ACTUAL narration, which is what he set them for.
+  // Moved below the checks because the exempt set is what they produce.
+  const requiredLines = new Set([...claims.map((c) => c.line), ...(claimLineAt >= 0 ? [claimLineAt + 1] : []), ...(builtAt >= 0 ? [builtAt + 1] : [])]);
+  const narration = prose.filter((p) => !requiredLines.has(p.line));
+  if (narration.length > 5) {
+    console.log(
+      `\n  ! ${narration.length} lines of NARRATION sit outside the table, and the format allows 5 (${prose.length} prose line(s) total, ${prose.length - narration.length} of them required and checked by this run). The table is the report — anything longer belongs in the ledger \`note\`:`,
+    );
+    for (const p of narration) console.log(`      line ${String(p.line).padStart(4)}  ${p.text.slice(0, 76)}`);
+    bad += 1;
+  } else {
+    console.log(`\n  narration outside the table: ${narration.length} of 5 · ${prose.length - narration.length} required line(s) not charged   ok`);
   }
   console.log(bad ? `\n${bad} problem(s). A count the table contradicts is the defect, not the number.\n` : `\nEvery count agrees with the rows beneath it.\n`);
   process.exit(bad ? 1 : 0);
@@ -989,6 +1035,25 @@ if (openOnly) {
       'unexamined',
     )} never examined) · ${noCite.length} cite no file` + (touched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
+  // X136 · THE DELTA, because a total with no delta cannot answer "why 21 and not
+  // zero". He asked that twice. A run CLOSES rows and CREATES them, so the board
+  // moving very little is the normal, healthy outcome of a busy night — and
+  // indistinguishable, from a total alone, from a night that did nothing.
+  // Scoped to the newest runId in the file, which is the run he just read about.
+  {
+    const withRun = scoped.filter((r) => r.runId);
+    const lastRun = withRun.length ? withRun[withRun.length - 1].runId : null;
+    if (lastRun) {
+      const mine = withRun.filter((r) => r.runId === lastRun);
+      const closedByIt = mine.filter((r) => CLOSED.has(r.verdict)).length;
+      const leftOpen = mine.length - closedByIt;
+      const net = leftOpen - closedByIt;
+      console.log(
+        `LAST RUN ${lastRun} — wrote ${mine.length} row(s): ${closedByIt} closed something, ${leftOpen} left something open. ` +
+          `NET ${net >= 0 ? '+' : ''}${net} on the board. A busy run that closes as much as it opens moves this number barely at all — that is the healthy case, not a stalled one.`,
+      );
+    }
+  }
   const multiRef = [...bugs.entries()].filter(([, rs]) => rs.length > 1);
   if (multiRef.length)
     console.log(

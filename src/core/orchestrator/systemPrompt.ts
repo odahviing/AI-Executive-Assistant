@@ -855,50 +855,31 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // formal-with-a-stranger one (the owner's ruling: same personality,
   // internal and external).
   //
-  // gh#24 row 135 — split into TWO parts, proven necessary in production: the
-  // real reply that shipped ("...Which one works best for you? And should I
-  // loop in Philip Lewis, Jim Douglass, and Ali Momin on the invite?") ended
-  // by asking the OWNER two questions inside a message whose entire purpose
-  // is to be forwarded to a client verbatim — not a model slip, an impossible
-  // premise: one output string was asked to serve the stranger who reads it
-  // AND the place Maelle talks to the owner, and no wording serves both. The
-  // owner also had to ask why a 6am slot was offered — the timezone Maelle
-  // assumed was invisible in the reply, so he had no way to gate it before
-  // forwarding. PART 1 (FOR YOU) surfaces exactly what a validator needs —
-  // the zone assumed per candidate (now backed by a real per-slot field,
-  // presentation_local, so this is a fact to state, not a guess to hedge),
-  // the search window/duration, and the attendee set (now code-guaranteed
-  // clean by the shared resolvedMeetingAttendees route + owner/mailbox/
-  // assistant/non-human filter — nameable plainly, "none found" included, no
-  // qualifying) — plus any real question, so he can catch a wrong assumption
-  // BEFORE he forwards, not after he asks why. The literal cut line makes
-  // PART 2 trivial to select-and-forward. PART 2 keeps every existing voice/
-  // register/precedence rule verbatim, now correctly scoped to the part that
-  // actually ships to a stranger; the old "attendee set... so he corrects it"
-  // clause is gone from PART 2 because that validation job moved to PART 1,
-  // which is what let the owner-directed questions leak into forwardable text
-  // in the first place. Labeled lines, not a dash-prefixed list, per the
-  // PUNCTUATION rule (this file, static block) — that rule already binds
-  // every outbound message, so it isn't restated here.
+  // gh#24 row 135 (REVERSED by gh#175a, 2026-08-03) — this used to split the
+  // reply into a FOR-YOU note (PART 1) + a literal cut line + the forwardable
+  // email (PART 2), because a shipped reply once asked the OWNER a question
+  // ("...should I loop in Philip Lewis, Jim Douglass, and Ali Momin on the
+  // invite?") inside text meant to go straight to a client. The owner's
+  // explicit ruling (gh#175a) overturned that mechanism instead of patching
+  // it: he wants the email reply to be ONLY the forwardable text, zero notes,
+  // zero cut line, zero editing before he forwards it. So PART 1 and the cut
+  // line are gone entirely, not skipped-when-empty — there is no owner-facing
+  // channel on this leg anymore. An owner-directed question (e.g. which
+  // attendees to loop in) no longer has anywhere to go in this reply; the
+  // model resolves it itself (attendees already come pre-filtered from the
+  // shared resolvedMeetingAttendees route) rather than surfacing it here.
+  // Labeled lines, not a dash-prefixed list, per the PUNCTUATION rule (this
+  // file, static block) — that rule already binds every outbound message, so
+  // it isn't restated here.
   const emailReplySection = channel === 'email' ? `
 
-EMAIL REPLY — this reply is two parts in ONE message: a short FOR YOU note first, then the forwardable email, always in that order. Skip PART 1 and the cut line entirely when there's truly nothing to assume or ask, and send just the forwardable part.
-
-PART 1 — a bold "FOR YOU (delete before forwarding):" line, then these labeled lines, in order:
-Zone: the zone each candidate time is shown in — presentation_local carries it on every slot; state theirs if stated, yours if defaulted, so a wrong guess is visible here, not asked about after he forwards it.
-Search: the window you searched and the duration you used.
-Attendees: who you pulled from the chain, stated plainly — "none found" is real information now too, not a gap to cover.
-Question: a real one for him, only if you have one (e.g. "loop in these three on the invite?") — otherwise leave this line out.
-
-Then output this literal line, unchanged: **===== FORWARD ONLY BELOW THIS LINE =====**
-
-PART 2 — everything after that line: this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Keep everything addressed to ${firstName} (assumptions, questions) up in PART 1 — this part speaks only to the externals.
+EMAIL REPLY — this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Compose ONLY this forwardable text — no note to ${firstName}, no assumptions or questions addressed to him, nothing meant for anyone but the externals.
 
 OFFER THE TIMES, NOTHING ELSE — the whole reply is the slot options. No added offer to help with anything else, no commitment on ${firstName}'s behalf beyond the times themselves, no line about what happens next. Under-offering is correct here; anything more becomes a promise a stranger will hold him to.
 ✅ "Would either of these work: Tuesday 3pm your time, or Wednesday 10am?"
 ❌ "Would either of these work? Happy to help coordinate anything else you need."
 
-Complete enough to forward untouched: each candidate time in every attendee's own local zone, the duration, and the subject and context — the attendee set and anything else he needs to verify already lives in PART 1, never repeated here. The forwarded chain IS this turn's message: reply in its language (the externals' own), same as any ordinary current-turn reply.` : '';
+Complete enough to forward untouched: each candidate time in every attendee's own local zone, the duration, and the subject and context. The forwarded chain IS this turn's message: reply in its language (the externals' own), same as any ordinary current-turn reply.` : '';
 
   // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
   const dynamicContent = `Now: ${now} | Time of day: ${timeOfDay}

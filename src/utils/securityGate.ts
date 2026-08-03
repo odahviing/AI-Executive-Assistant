@@ -23,7 +23,7 @@ import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { extractFirstJsonObject } from './extractJson';
-import { RAW_SLACK_ID_RE } from './textScrubber';
+import { RAW_SLACK_ID_RE, INTERNAL_WORK_ITEM_ID_RE } from './textScrubber';
 
 const anthropic = getAnthropicClient();
 
@@ -81,7 +81,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // this token (RAW_SLACK_ID_RE, the one definition). The old pair here fired on a
   // PROPER `<@U…>` mention — the exact form the scrubber manufactures one step
   // earlier in the same pipeline (formatForSlack → scrubInternalLeakage, run at
-  // postReply.ts:359 before any gate) and the form humanGate explicitly protects.
+  // postReply.ts:425 before any gate) and the form humanGate explicitly protects.
   // So every colleague reply that @-mentioned anyone burned a Sonnet rewrite whose
   // own instructions then STRIPPED the mention: two correct replies to Alex
   // Wiggins shipped de-tagged on 2026-07-21 (log :838, :908). Dropped the
@@ -123,7 +123,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // `is_private` before the model sees the result) — shared rule 10, not a guard's job
   // and not a thing to re-add here.
   { name: 'slack_bare_id', pattern: RAW_SLACK_ID_RE, class: 'identifier' },
-  { name: 'internal_ref_id', pattern: /\b#?(?:req|task|coord|out|ci)_[a-z0-9_]+\b/i, class: 'identifier' },
+  { name: 'internal_ref_id', pattern: INTERNAL_WORK_ITEM_ID_RE, class: 'identifier' },
 
   // Role-header echoes from injection payloads
   { name: 'role_header_echo', pattern: /\[(?:This\s+)?[Mm]essage\s+(?:is\s+)?from\b/, class: 'disclosure' },

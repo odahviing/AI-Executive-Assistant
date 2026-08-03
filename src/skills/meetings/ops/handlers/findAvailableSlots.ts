@@ -432,61 +432,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
           }
 
-          // v3.1.2 (Ayala-TZ) — auto-add @-mentioned colleagues to attendeeEmails
-          // on owner-path turns. When the owner pings Maelle quoting a colleague
-          // ("@Maelle @Ayala asking if I'm free at..."), Sonnet often calls
-          // find_available_slots WITHOUT including the colleague in
-          // attendee_emails — so loadAttendeeAvailabilityForEmails below has
-          // nothing to load, work-hours clip never runs, and slots fall in the
-          // colleague's middle-of-the-night. Auto-add catches this so the
-          // v2.8.3 per_attendee_local enrichment also kicks in, giving Sonnet the
-          // dual-TZ rendering she needs.
-          //
-          // Owner-path only. Detection is structured Slack mention syntax
-          // <@Uxxx>, not freeform NL — no scaling concern.
-          if (isOwnerInitiatedSearch && context.conversationHistory && context.conversationHistory.length > 0) {
-            try {
-              const lastUserMsg = [...context.conversationHistory]
-                .reverse()
-                .find(m => m.role === 'user');
-              const mentionRe = /<@(U[A-Z0-9]+)>/g;
-              const mentionedIds = new Set<string>();
-              if (lastUserMsg) {
-                for (const m of lastUserMsg.content.matchAll(mentionRe)) {
-                  mentionedIds.add(m[1]);
-                }
-              }
-              if (mentionedIds.size > 0) {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { getPersonMemory } = require('../../../../db') as typeof import('../../../../db');
-                const ownerLower = userEmail.toLowerCase();
-                const ownerSlackId = context.profile.user.slack_user_id;
-                const existingLower = new Set(attendeeEmails.map(e => e.toLowerCase()));
-                const added: string[] = [];
-                for (const id of mentionedIds) {
-                  if (id === ownerSlackId) continue;  // skip @Maelle/@Owner-self mentions
-                  const person = getPersonMemory(id);
-                  const email = person?.email;
-                  if (!email || email.toLowerCase() === ownerLower) continue;
-                  if (existingLower.has(email.toLowerCase())) continue;
-                  attendeeEmails.push(email);
-                  existingLower.add(email.toLowerCase());
-                  added.push(email);
-                }
-                if (added.length > 0) {
-                  logger.info('find_available_slots — auto-added @-mentioned colleagues to attendees', {
-                    threadTs: context.threadTs,
-                    added,
-                  });
-                }
-              }
-            } catch (err) {
-              logger.warn('find_available_slots — @-mention auto-add threw, proceeding without', {
-                err: String(err).slice(0, 200),
-              });
-            }
-          }
-
           // v3.6.4 — union the internal colleagues the orchestrator resolved
           // from THIS turn's named participants (deterministic pre-search pass).
           // This is the guarantee that a KNOWN named colleague is in the search
@@ -1446,10 +1391,23 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                   const prefAvailable = prefSlots.length > 0;
                   const brokenRule = prefAvailable ? undefined : Object.keys(prefDiag.rejectedCounts ?? {})[0];
+                  // Same presentation-zone computation the main `slots` list uses
+                  // below (present_in_timezone, falling back to the auto-detected
+                  // single attendee zone) — this branch answers about the SAME
+                  // preferred_slot instant and must render in the same zone, or a
+                  // requester who asked "in ET" gets every offered slot in ET
+                  // except the one they specifically named.
+                  const presentTzForPreferred = (typeof args.present_in_timezone === 'string'
+                    ? args.present_in_timezone.trim()
+                    : '') || autoPresentTz;
+                  const preferredPresentationLocal = presentTzForPreferred
+                    ? renderClockInZone(preferredSlot, timezone, presentTzForPreferred)
+                    : '';
                   preferredSlotStatus = {
                     start: preferredSlot,
                     end: prefEndIso,
                     available: prefAvailable,
+                    ...(preferredPresentationLocal ? { presentation_local: preferredPresentationLocal } : {}),
                     ...(brokenRule
                       ? { broken_rule: brokenRule, broken_rule_label: humanizeViolationLabel(brokenRule, ownerFirstPref) }
                       : {}),
@@ -1708,7 +1666,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // the model to quote a field that isn't there — and a model told to name
             // a reason it cannot read is a model that invents one (M11).
             const hasBrokenRuleLabel = annotatedSlots.some((s: any) => typeof s.broken_rule_label === 'string' && s.broken_rule_label.length > 0);
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus) {
+            // `attendee_status` (per-slot, from the annotation above) ships bare on
+            // a plain colleague-initiated search. Its per-slot semantics are
+            // explained unconditionally by the system prompt (meetings.ts's
+            // "OWNER FREE, REQUESTER BUSY" paragraph) — o#186 removed the
+            // duplicate per-call `_attendee_status_note` that repeated the same
+            // instruction here. This flag's only remaining job is to force the
+            // `{slots, ...}` wrapper (below) even when no OTHER condition would,
+            // so a search whose sole distinguishing fact is attendee_status still
+            // returns the same shape as every other annotated result.
+            const hasAttendeeStatus = annotatedSlots.some(
+              (s: any) => Array.isArray(s.attendee_status) && s.attendee_status.length > 0,
+            );
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);

@@ -144,6 +144,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // because Sonnet forgot to resolve the name (Lori 07-08, Simon 07-09).
   let turnMeetingPeople: string[] = [];
   let resolvedMeetingAttendees: string[] = [];
+  // gh#158 residual — `resolvedMeetingAttendees` serves two purposes that need
+  // different scopes: WHO to auto-add to the search (everyone genuinely on the
+  // meeting, including addresses extracted from a forwarded email header below)
+  // vs WHO the pre-check's bail signal means by "this turn names someone other
+  // than the owner" (availabilityPreCheck.ts's namedAttendeeEmails contract —
+  // only names actually present in THIS message's own text). A header address is
+  // never "named" in that sense; unioning it into the same list made every
+  // forwarded-email booking turn (which almost always carries one) bail the
+  // owner's own hard-block pre-check, silently disabling the availability floor
+  // for the whole email channel. Snapshot the named-only set BEFORE the header
+  // union below extends `resolvedMeetingAttendees`, and feed the bail from this
+  // narrower list instead.
+  let namedInternalAttendeeEmails: string[] = [];
   let resolvedAttendeesBlock = '';
   // v3.2.6 (6.4) — never run the social directive/coda on a non-interactive
   // (routine/system) turn; a scheduled report isn't a conversation.
@@ -301,6 +314,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         ownerName: profile.user.name,
       });
       resolvedMeetingAttendees = resolved.map(r => r.email);
+      namedInternalAttendeeEmails = resolvedMeetingAttendees;
       if (resolved.length > 0 || unresolved.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const sections: string[] = ['## MEETING PARTICIPANTS (deterministic — use this, do not re-derive)'];
@@ -667,12 +681,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // binding block looks up `C…|<ts>` — offered, never bindable.
         channelId: input.channelId,
         threadTs: input.threadTs,
-        // gh#158 — resolvedMeetingAttendees is non-empty ONLY when the turn
+        // gh#158 — namedInternalAttendeeEmails is non-empty ONLY when the turn
         // names someone other than the owner (resolveNamedInternalAttendees
         // explicitly filters the owner out). That's exactly the signal this
         // owner-scoped pre-check needs to know it does not apply: "does Levana
         // free tomorrow at 10am?" is not a question this file can answer.
-        namedAttendeeEmails: resolvedMeetingAttendees,
+        // Deliberately NOT resolvedMeetingAttendees (the search-scoped union,
+        // widened below by forwarded-email addresses) — a header address isn't
+        // "named" in this turn's own text, and unioning it in here bailed this
+        // pre-check on nearly every forwarded-email booking turn regardless of
+        // whether the question was actually about a third party's calendar.
+        namedAttendeeEmails: namedInternalAttendeeEmails,
       });
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;

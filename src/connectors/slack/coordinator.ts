@@ -34,7 +34,6 @@ import {
   updateOutreachJob,
   getOutreachJobsByColleague,
   logEvent,
-  getDb,
   appendToConversation,
   type OutreachJob,
 } from '../../db';
@@ -330,10 +329,6 @@ export async function handleOutreachReply(
       reply_text: `[Schedule] ${decision.summary}`,
       conversation_json: JSON.stringify(conversation),
     });
-    getDb().prepare(
-      `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-       WHERE skill_ref = ? AND status IN ('new','in_progress','pending_colleague')`
-    ).run(job.id);
 
     const { preferredDay, preferredTime, subject, durationMin } = decision.details;
     const dayPart = preferredDay ? ` on ${preferredDay}` : '';
@@ -385,10 +380,6 @@ export async function handleOutreachReply(
     actor: job.colleague_name,
     refId: job.id,
   });
-  getDb().prepare(
-    `UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-     WHERE skill_ref = ? AND status IN ('pending_colleague', 'new')`
-  ).run(job.id);
 
   if (job.owner_thread_ts) {
     appendToConversation(job.owner_thread_ts, job.owner_channel, {

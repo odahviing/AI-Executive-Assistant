@@ -3,10 +3,14 @@ export const meta = {
   description:
     'Bugger — builds a set of atomic issues across SEVERAL lanes, with dependency hand-off and ONE combined verify. Pass `args.issues` (already lane-assigned, e.g. rows the owner approved from report.md) and it goes straight to work — the usher is SKIPPED. Pass `args.sources` for a run that has to FIND its work — the default is all three: `github` + `logs` find new work, and `backlog` re-reads the open rows whose code has moved and builds nothing. For ONE lane whose items are already known, do NOT use this at all — dispatch that lane directly with the Agent tool; the pipeline buys nothing and costs a full intake. Core loop: rounds of [code lanes in parallel -> context last] until no dependency asks remain, then one adversarial verify over the combined diff. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
-    { title: 'Usher' },
+    { title: 'Intake' },
     { title: 'Build' },
     { title: 'Context' },
     { title: 'Verify' },
+    // X137 · the bounce round AND its re-check live here, so the `/workflows`
+    // panel shows a second cycle as a second cycle instead of a Verify that
+    // mysteriously runs twice. Empty on a wave with no overturns.
+    { title: 'Bounce' },
   ],
 }
 
@@ -308,12 +312,12 @@ const describeBuilt = (b) =>
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
 const VERIFY = A.verify !== false // one combined bouncer pass over the wave, unless explicitly off
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'outrider'] // run in parallel; context runs LAST, separately
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'handyman'] // run in parallel; context runs LAST, separately
 // Reasoning effort per agent (owner-set). Keys are agent names, renamed 2026-07-28.
 // The non-lane agents live here too, so every dispatch in this engine reads its
 // effort from ONE table — a hardcoded effort at the call site is invisible to
 // anyone tuning the run, which is how the usher sat at `medium` unnoticed.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', outrider: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', usher: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -460,7 +464,7 @@ const USHER = {
           // same judgement, applied to a row it has just re-read.
           lane: {
             type: 'string',
-            enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'],
+            enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'],
             description: 'REQUIRED when `recommend` starts with `build` — the lane that owns the FIX, routed exactly as you route a fresh issue. Omit on any other verb. A `build` row without this cannot be dispatched and is reported as dropped.',
           },
           severity: {
@@ -494,7 +498,7 @@ const USHER = {
           // issue takes `both`; that IS the interesting case, because the
           // owner's words carry the ask and the transcript carries the proof.
           source: { type: 'string', enum: ['github', 'logs', 'both'] },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           // KIND is what drives cost, not count. 15-20 atomic items is a normal
@@ -607,7 +611,7 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
         },
@@ -663,7 +667,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'outrider'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · a DISCOVERY is the highest-value place for this tag and the only
           // one where it was ever set: you read the whole diff, so you are the pass
@@ -733,7 +737,7 @@ const INVARIANT_NOTE = KNOWN_INVARIANTS.length
 
 // X73 · A NUMBER THAT BOUNDS A DURATION IS THE ONE FIX THAT CANNOT BE SETTLED
 // FROM THE CODE. gh#166's news budget went 20s → 8s → 14s across three runs and
-// nobody ever timed the path: the outrider dispatch that changed it made ZERO
+// nobody ever timed the path: the handyman dispatch that changed it made ZERO
 // log accesses in 17 turns on an issue whose entire content is a duration, and
 // the verify escalated it saying verbatim that it had not measured a real
 // on-demand gather either. So the third number was a guess dressed as a fix.
@@ -747,7 +751,10 @@ const TIMEOUT_NOTE =
   `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
   `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
 
-const dispatch = (lane, issues) =>
+// X137 · `asBounce` is the only variation: a re-attempt shows on the `/workflows`
+// panel as `rebuild:<lane>` under the `Bounce` phase, so a second cycle reads as a
+// second cycle instead of a Build that inexplicably runs again after the verify.
+const dispatch = (lane, issues, asBounce) =>
   agent(
     `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
@@ -758,7 +765,13 @@ const dispatch = (lane, issues) =>
     // fix quality drop), and the pushback ratio in `ledger-stats` — a lane that
     // stops returning `blocked-charter` and `needs-owner-decision` has stopped
     // being governed and is just building, which would NOT announce itself.
-    { label: `build:${lane}`, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+    {
+      label: `${asBounce ? 'rebuild' : 'build'}:${lane}`,
+      phase: asBounce ? 'Bounce' : lane === 'instructor' ? 'Context' : 'Build',
+      agentType: lane,
+      effort: EFFORT[lane],
+      schema: VERDICTS,
+    },
   )
 
 // A dependency ask is real work REGARDLESS of what the lane concluded about its
@@ -846,7 +859,7 @@ if (PRESET) {
   log(`Preset: ${PRESET.length} pre-triaged issue(s) from the owner's review — skipping the usher.`)
   allIssues = PRESET
 } else {
-phase('Usher')
+phase('Intake')
 const usher = await agent(
   `Find this run's work and shape it for the lanes. Sources: **${SOURCES.join(' + ')}**. Your charter holds the bar for a finding, the routing map, the merge rules and the \`kind\` call — this brief carries only the mechanics and the payload.\n\n` +
     (SOURCES.includes('logs')
@@ -905,7 +918,7 @@ const usher = await agent(
         `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : ''),
-  { label: 'usher', phase: 'Usher', effort: EFFORT.usher, agentType: 'usher', schema: USHER },
+  { label: 'usher', phase: 'Intake', effort: EFFORT.usher, agentType: 'usher', schema: USHER },
 )
 allIssues = (usher && usher.issues) || []
 triageDropped = (usher && usher.droppedAsAlreadyBuilt) || []
@@ -942,15 +955,15 @@ const backlogClaims = backlogReread.filter(backlogClosable).map((b) => ({ id: `$
 // phase and no `context` pass either — it is silently dropped. That happened on
 // 2026-07-25: the router emitted lane `general`, which does not exist. It was
 // harmless only because that issue was flagged for the owner and never
-// dispatched. Route the unknown to `outrider` (the catch-all, by definition) and
+// dispatched. Route the unknown to `handyman` (the catch-all, by definition) and
 // SAY SO, rather than losing the issue to a typo.
 const KNOWN_LANES = new Set([...CODE_LANES, 'instructor'])
 const misrouted = allIssues.filter((i) => !KNOWN_LANES.has(i.lane))
 if (misrouted.length) {
-  log(`! Usher emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to outrider so they are not silently dropped.`)
+  log(`! Usher emitted ${misrouted.length} unknown lane(s): ${misrouted.map((i) => `${i.id}→"${i.lane}"`).join(', ')} — re-routed to handyman so they are not silently dropped.`)
   misrouted.forEach((i) => {
     i.notes = `[re-routed from unknown lane "${i.lane}"] ${i.notes || ''}`.trim()
-    i.lane = 'outrider'
+    i.lane = 'handyman'
   })
 }
 
@@ -977,8 +990,34 @@ if (misrouted.length) {
 const shapingAll = PRESET ? [] : allIssues.filter((i) => i.kind === 'needs-shaping')
 const needsShaping = shapingAll.filter((i) => String(i.shapingQuestion || '').trim().length >= 15)
 const unshaped = shapingAll.filter((i) => !needsShaping.includes(i))
+// ── X133 · A PIECE WITH NO `clarity` FELL BETWEEN THE TWO FILTERS ───────────
+// `flagged` takes `ambiguous` and `buildable` takes `clear`, so ANY other value
+// — absent, empty, a typo, `unclear` — landed in neither set, reached no lane,
+// and produced no warning. That is how an approved piece (`gh#51 I1`) vanished
+// out of `args.issues` and read as a clean run.
+// A PRESET row is normalised rather than warned about: `args.issues` is by
+// definition rows the owner already approved and routed, which is the same
+// reasoning that exempts a preset from `needs-shaping` above — his approval IS
+// the clarity signal, so a missing field cannot be a reason to drop his work.
+if (PRESET) {
+  const noClarity = allIssues.filter((i) => i.clarity !== 'clear' && i.clarity !== 'ambiguous')
+  if (noClarity.length) {
+    noClarity.forEach((i) => { i.clarity = 'clear' })
+    log(`${noClarity.length} preset piece(s) carried no usable \`clarity\` and were read as CLEAR — he approved them by naming them: ${noClarity.map((i) => i.id || i.ref || '(no id)').join(', ')}`)
+  }
+}
 const flagged = allIssues.filter((i) => i.clarity === 'ambiguous' && !shapingAll.includes(i))
 let buildable = allIssues.filter((i) => i.clarity === 'clear' && !shapingAll.includes(i))
+// The accounting that makes a silent drop impossible on EVERY path: every issue
+// must land in exactly one of the three buckets. A row in none of them has been
+// lost, and losing it quietly is the failure this whole file keeps paying for.
+const unaccounted = allIssues.filter((i) => !buildable.includes(i) && !flagged.includes(i) && !shapingAll.includes(i))
+if (unaccounted.length)
+  argWarnings.push(
+    `${unaccounted.length} issue(s) reached NO bucket — not buildable, not flagged, not needs-shaping — so they would have been dropped with no trace: ${unaccounted
+      .map((i) => `${i.id || i.ref || '(no id)'} [clarity=${JSON.stringify(i.clarity)}]`)
+      .join(', ')}. This is X133. They are NOT built; re-dispatch them with a valid \`clarity\`.`,
+  )
 if (needsShaping.length) {
   log(`${needsShaping.length} item(s) need SHAPING before anyone builds — not dispatched:`)
   needsShaping.forEach((i) => log(`  ? ${i.id} [${i.lane}] ${i.shapingQuestion}`))
@@ -1300,6 +1339,26 @@ let verifyDepAsks = []
 // the field it watches could not report it. Now it reports what happened.
 let verifyRan = false
 let verifyAttempted = 0
+// ── X137 · THE BOUNCE COUNTER ───────────────────────────────────────────────
+// His ruling, 2026-08-03: *"we can bounce stuff once, not twice."* An OVERTURN
+// now goes back to the lane that built it instead of straight to his desk — but
+// exactly once, because a second failure on one item is a signal, not something
+// to retry. `bounces` rides on the item, so a row he re-sends next run carries
+// its history in and cannot be bounced a second time.
+//
+// WHAT BOUNCES AND WHAT DOES NOT, and getting this wrong is what makes a wave
+// never terminate: an **overturn** is *"the thing we said we fixed, we did not
+// fix"* — a failed claim about THIS wave's own work, so it goes back. A
+// **discovery** is *"here is something else worth doing"* — new work, and it
+// queues for the next run exactly as before. Bouncing discoveries would make
+// every pass generate its own next round forever.
+const BOUNCE_LIMIT = 1
+let bouncedIds = []
+let bounceRecheckRan = false
+let bounceCleared = []
+let bounceStillWrong = []
+let bounceAtLimit = []
+let bounceDepAsks = []
 let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
@@ -1465,15 +1524,147 @@ if (VERIFY) {
         .map((c) => c.ref),
     )
     if (backlogClaims.length) log(`  backlog spot-check: ${backlogConfirmed.size} of ${backlogClaims.length} \`fixed\` claim(s) confirmed at HEAD — only these close.`)
-    verified = results.map((r) =>
-      overturned.has(r.id)
+
+    // ── X137 · ONE BOUNCE, THEN HIS DESK ─────────────────────────────────────
+    // Until now an overturn went straight to `needs-owner-decision`: the bouncer
+    // proved the wave had not fixed what it claimed, and the answer was to wake
+    // him up about it. Measured on wf_e2b7aeeb-325's aftermath, that is also the
+    // EXPENSIVE answer — its overturns came back the next morning as two whole
+    // extra runs (wf_e2fd1caf-c84 $53, wf_94e9e397-06a $20, both measured by
+    // `scripts/spend.cjs --runs`), each paying a fresh intake and a fresh full
+    // bouncer pass to do what one round inside the wave does.
+    //
+    // ONE round, and it is FLAT — deliberately not the `while` loop above. A
+    // dependency ask raised in here is REPORTED, never dispatched, so this can
+    // never re-enter the round machinery and multiply with `MAX_ROUNDS`. The
+    // whole ceiling is: ≤MAX_ROUNDS build rounds · 1 bouncer · 1 bounce round ·
+    // 1 scoped re-check. Nothing here can add a second bounce to anything.
+    //
+    // THE RE-CHECK IS MANDATORY AND IT FAILS CLOSED. A bounce nobody verifies is
+    // worse than no bounce, because the wave would then claim a fix that was
+    // never re-examined — which is precisely the `verify.ran` hardcoded-true
+    // failure this engine already paid for. If the re-check does not return,
+    // every bounced row goes to his desk saying so.
+    const laneOf = (id) => (specById.get(id) || {}).lane || ''
+    const bounceOf = (id) => Number((specById.get(id) || {}).bounces || 0)
+    let finalOverturn = new Map(overturned)
+    bounceAtLimit = [...overturned.keys()].filter((id) => bounceOf(id) >= BOUNCE_LIMIT)
+    bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
+    const bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
+    if (bounceAtLimit.length)
+      log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
+    if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
+    if (bouncedIds.length) {
+      phase('Bounce')
+      const bounceItems = bouncedIds.map((id) => ({
+        ...(specById.get(id) || {}),
+        id,
+        lane: laneOf(id),
+        clarity: 'clear',
+        severity: (specById.get(id) || {}).severity || 'high',
+        bounces: bounceOf(id) + 1,
+        // Named fields rather than prose, so the lane cannot read this as a
+        // fresh issue and rebuild what it already built.
+        _bouncedBack: {
+          youClaimed: claimed.get(id),
+          theBouncerRefused: overturned.get(id) || '(no note returned)',
+          thisIsAttempt: bounceOf(id) + 2,
+          andItIsTheLast: `Your work is already in the tree — read your own diff first, then fix what the bouncer named. If you believe the bouncer is wrong, say so in \`notes\` and return your evidence: that is a legitimate answer and it goes to the owner. Do NOT rebuild from scratch, and do NOT widen the scope. This item cannot be sent back again — a second refusal goes to the owner, not to a third attempt.`,
+        },
+      }))
+      bounceItems.forEach((i) => specById.set(i.id, i))
+      log(`Bounce: ${bounceItems.length} overturned row(s) go back ONCE — ${bounceItems.map((i) => `${i.id}→${i.lane}`).join(', ')}.`)
+      const bounceOut = await parallel(
+        [...new Set(bounceItems.map((i) => i.lane))].map((lane) => () => dispatch(lane, bounceItems.filter((i) => i.lane === lane), true).then((r) => (r && r.results) || [])),
+      )
+      const rebuilt = bounceOut.filter(Boolean).flat().filter((r) => r && bouncedIds.includes(r.id))
+      // The second attempt REPLACES the first — one row per item, same id, so the
+      // manifest cannot count one bug as two fixes.
+      const rebuiltIds = new Set(rebuilt.map((r) => r.id))
+      if (rebuiltIds.size) results = results.filter((r) => !rebuiltIds.has(r.id)).concat(rebuilt)
+      const silent = bouncedIds.filter((id) => !rebuiltIds.has(id))
+      if (silent.length) log(`! ${silent.length} bounced row(s) returned NOTHING from their lane: ${silent.join(', ')}. They keep the first overturn and go to the owner.`)
+
+      // Asks raised during the bounce. This round does not chain, so a
+      // DISPATCHABLE ask here would fall into neither the loop nor
+      // `deferredDepAsks` (which takes only NON-dispatchable verdicts) and
+      // vanish — the exact silent-drop class this file keeps paying for. The two
+      // filters are complements, so every ask lands in exactly one list.
+      bounceDepAsks = rebuilt
+        .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict))
+        .map((r) => ({
+          id: `${r.id}>dep`,
+          symptom: r.dependencyAsk,
+          lane: r.dependencyAgent,
+          severity: 'high',
+          clarity: 'clear',
+          from: r.id,
+          fromVerdict: r.verdict,
+          awaitingOwner: true,
+          fromBounce: true,
+        }))
+
+      // ── THE RE-CHECK — the bounced rows ONLY, never the whole diff again ────
+      const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
+      const recheck = rebuilt.length
+        ? await agent(
+            `**RE-CHECK — second and FINAL pass over ${rebuilt.length} row(s) you already overturned once.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
+              `**Scope is these rows and nothing else.** Do not re-read the rest of the wave — you passed it an hour ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
+              `For each row: **what you refused is quoted on it.** Answer the one question — is the reported problem fixed now? Trace from the symptom, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
+              `**THERE IS NO THIRD ATTEMPT.** A row you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
+              (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
+              `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
+                rebuilt.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
+                null,
+                2,
+              )}`,
+            { label: `verify:bounce(${rebuilt.length})`, phase: 'Bounce', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+          )
+        : null
+      bounceRecheckRan = !!recheck
+      const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
+      // A discovery raised by the re-check is next run's intake like any other.
+      // It NEVER bounces — that is the loop with no exit.
+      discoveries = discoveries.concat((recheck && recheck.discoveries) || [])
+      verifiedClean = verifiedClean.concat((recheck && recheck.verifiedClean) || [])
+      const answeredAgain = new Set(recheckResults.map((x) => x.id))
+      for (const id of bouncedIds) {
+        const first = overturned.get(id) || ''
+        if (!rebuiltIds.has(id)) continue // lane returned nothing — keeps its first overturn
+        if (!bounceRecheckRan)
+          finalOverturn.set(id, `${first} [BOUNCED ONCE; THE RE-CHECK DIED, so the second attempt is UNVERIFIED — do not read this as fixed]`)
+        else if (!answeredAgain.has(id))
+          finalOverturn.set(id, `${first} [BOUNCED ONCE; the re-check returned no verdict for this row, so the second attempt is UNCHECKED]`)
+        else {
+          const again = recheckResults.find((x) => x.id === id)
+          if (again.verdict !== rebuiltClaim.get(id)) finalOverturn.set(id, `${first} [ATTEMPT 2 ALSO REFUSED: ${again.notes || ''}] — two attempts, no third; this is yours to rule on.`)
+          else finalOverturn.delete(id)
+        }
+      }
+      bounceCleared = bouncedIds.filter((id) => !finalOverturn.has(id))
+      bounceStillWrong = bouncedIds.filter((id) => finalOverturn.has(id))
+      log(
+        `Bounce result: ${bounceCleared.length} cleared on the second attempt, ${bounceStillWrong.length} still wrong and going to the owner${
+          bounceRecheckRan ? '' : ' (THE RE-CHECK DID NOT RUN — every bounced row is unverified)'
+        }.`,
+      )
+    }
+    // `finalOverturn`, not `overturned`: a row the bounce round fixed and the
+    // re-check confirmed is `built` and must not reach his desk. `bounces` rides
+    // out on EVERY row that was sent back, whichever way it ended, because the
+    // Manager writes it onto the ledger row and it is what stops a second bounce
+    // on a future run.
+    verified = results.map((r) => {
+      const b = Number((specById.get(r.id) || {}).bounces || 0)
+      const row = b ? { ...r, bounces: b } : r
+      return finalOverturn.has(r.id)
         ? {
-            ...r,
+            ...row,
             verdict: 'needs-owner-decision',
-            notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim(),
+            notes: `${r.notes || ''} [wave-verify overturned: ${finalOverturn.get(r.id)}]`.trim(),
           }
-        : r,
-    )
+        : row
+    })
   }
 }
 
@@ -1485,7 +1676,11 @@ if (VERIFY) {
 // `warnings` says so in words for the ones we already know the shape of.
 //
 // Nothing here is an input to any decision — it is purely a record.
-const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks]
+// X137 · `bounceDepAsks` is the bounce round's own asks. It is a FLAT round with
+// no chaining, so a dispatchable ask raised there has nowhere else to land —
+// `deferredDepAsks` takes only NON-dispatchable verdicts, so the two filters are
+// exact complements and no ask falls out of both.
+const deferredNow = [...deferredDepAsks(verified), ...verifyDepAsks, ...bounceDepAsks]
 // Counted from what was MINTED, not from what survived. This used to read
 // `verified.filter(hasAsk).length` — but a resume deletes the row carrying the
 // ask, so every ask that CLOSED had already erased its own evidence, and a run
@@ -1647,6 +1842,28 @@ const manifest = {
         verifiedCleanReturned: verifiedClean.length,
       }
     : { ran: false, fixesToCheck: 0 },
+  // X137 · THE BOUNCE COUNTER, and it is here so he can SEE the bouncer working
+  // rather than take the word for it. `bounced` is the figure the report headline
+  // carries; `cleared` against `toOwner` is whether sending work back is buying
+  // anything. `recheckRan:false` with `bounced` non-zero is the one shape that
+  // must never read as a clean wave — the warning below says so.
+  bounce: VERIFY
+    ? {
+        limit: BOUNCE_LIMIT,
+        bounced: bouncedIds.length,
+        refs: bouncedIds,
+        recheckRan: bounceRecheckRan,
+        cleared: bounceCleared.length,
+        clearedRefs: bounceCleared,
+        toOwner: bounceStillWrong.length,
+        toOwnerRefs: bounceStillWrong,
+        // Already spent their one bounce on an earlier run, so they went straight
+        // to him carrying both attempts. Non-zero is the counter doing its job.
+        notBouncedAtLimit: bounceAtLimit.length,
+        notBouncedAtLimitRefs: bounceAtLimit,
+        depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
+      }
+    : 'n/a (verify off)',
 }
 // Known-shape sanity checks. These are the exact failures already paid for.
 // Arg problems go FIRST: an input that never arrived invalidates everything
@@ -1675,6 +1892,19 @@ if (REVIEWED_LOGS && !Array.isArray(usherReport.filesRead))
 if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
   warnings.push(
     `No lane reported \`filesTouched\`, so the verify could not tell this wave from anything else uncommitted in the tree. It checked everything, which is safe but wasteful — and any overturned row may belong to work this run did not do.`,
+  )
+// X137 · a bounce whose re-check died is the `verify.ran` failure one level in:
+// the lane re-attempted, nothing re-examined it, and without this the row would
+// read as an ordinary overturn on his desk instead of an UNVERIFIED second try.
+if (VERIFY && bouncedIds.length && !bounceRecheckRan)
+  warnings.push(
+    `THE BOUNCE RE-CHECK DID NOT RUN — ${bouncedIds.length} row(s) went back to their lane and NOTHING re-examined the second attempt: ${bouncedIds.join(', ')}. They are on your desk marked unverified. Do not wrap on this; run \`/manager verify\` by hand.`,
+  )
+if (VERIFY && bounceAtLimit.length)
+  warnings.push(
+    `${bounceAtLimit.length} row(s) were overturned having ALREADY used their one bounce, so they went straight to you with both attempts on them: ${bounceAtLimit.join(
+      ', ',
+    )}. Two failures on one item is a signal — read the item, not the diff.`,
   )
 if (VERIFY && verifyAttempted > 0 && !verifyRan)
   warnings.push(`THE VERIFY DID NOT RUN — ${verifyAttempted} built fix(es) are unchecked. \`agent()\` returns null when a subagent dies after its retries, and every read downstream is null-guarded, so this was previously indistinguishable from a clean pass. Do NOT wrap this run without \`/manager verify\`.`)
@@ -1706,7 +1936,7 @@ if (VERIFY && backlogClaims.length && backlogConfirmed.size < backlogClaims.leng
       .map((c) => c.ref)
       .join(', ')}. They are in \`keepInReport\`, not \`closeInLedger\` — do not delete them from the report.`,
   )
-if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to outrider.`)
+if (misrouted.length) warnings.push(`${misrouted.length} issue(s) carried an unknown lane and were re-routed to handyman.`)
 // X31 · say it out loud at 17:20 instead of leaving him to discover it at 23:50.
 if (onHisDesk > DECISION_BUDGET)
   warnings.push(
@@ -1818,6 +2048,7 @@ log(
   `Manifest — cutoff:${(!PRESET && usherReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(usherReport.filesRead) && usherReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
+    ` bounced:${bouncedIds.length}${bouncedIds.length ? `(${bounceCleared.length}ok/${bounceStillWrong.length}owner${bounceRecheckRan ? '' : ',RECHECK-DEAD'})` : ''}${bounceAtLimit.length ? ` atLimit:${bounceAtLimit.length}` : ''}` +
     ` carried:${carriedIn.length}${BACKLOG ? ` backlog:${backlogReread.length}/${backlogSeen}+${backlogNoCite}nocite` : ''}` +
     `${backlogClaims.length ? ` fixedOk:${backlogConfirmed.size}/${backlogClaims.length}` : ''}` +
     ` decisions:${onHisDesk}/${DECISION_BUDGET} tickets:${ticketComplaints.reduce((n, t) => n + (t.complaintsFound || 0), 0)}→${ticketComplaints.reduce(

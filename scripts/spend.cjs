@@ -78,7 +78,8 @@ const RENAMED = new Map([
   ['people', 'profiler'],
   ['context', 'instructor'],
   ['slack', 'slackmaster'],
-  ['outer', 'outrider'],
+  ['outer', 'handyman'],
+  ['outrider', 'handyman'],
 ])
 const canon = (t) => RENAMED.get(t) || t
 // Generic dispatch types: no `.claude/agents/*.md`, and the engine sets their tier

@@ -13,21 +13,17 @@
  * third work-item row per send (beside the request and the outreach_job) whose
  * only real effect was that bogus 'failed' write.
  *
+ * coordination/reminder/follow_up/research/briefing were removed o#192 (2026-08-03):
+ * create_task now creates a `requests` row (kind=reminder/follow_up/research,
+ * next_check_handler='reminder_fire'|'research_run' — see tasks/skill.ts) rather
+ * than a tasks-table row, and 'coordination'/'briefing' had no creator at all.
+ *
  * Task types:
- *   coordination  — reach out to find meeting time, book it
- *   reminder      — remind user (or someone) about something at a future time
- *   follow_up     — check back on something after X days
- *   research      — look something up, compile summary
- *   briefing      — daily briefing delivery
  *   routine       — materialized firing of a routine (v1.5.1: routines are a
  *                   thin layer that inserts tasks; no longer scheduled separately)
  */
 
 export type TaskType =
-  | 'coordination'
-  | 'reminder'
-  | 'follow_up'
-  | 'research'
   | 'routine'
   // v1.6.0 — unified sweep model: every background check is a task with a due_at.
   // These are "system" tasks (who_requested='system'); they run when their due_at

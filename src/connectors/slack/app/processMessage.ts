@@ -337,13 +337,18 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
 
         // Find messages in Slack but NOT in our DB (by timestamp)
         const dbTimestamps = new Set(dbHistory.filter(m => m.ts).map(m => m.ts));
-        const missedMessages = slackMessages
+        // v4.4.x — resolve @mentions the same way every persisted path does
+        // (handlers.ts:415/:729/:1241). This text comes straight off
+        // conversations.replies, never through the inbound handler, so without
+        // this pass a bare `<@U0ARK...>` id syntax rode into the merged history
+        // (and from there into the model / a reply) instead of a resolved name.
+        const missedMessages = await Promise.all(slackMessages
           .filter(m => !dbTimestamps.has(m.ts) && m.ts !== ts)  // exclude current message
-          .map(m => ({
+          .map(async m => ({
             role: (m.user === ctx.botUserId ? 'assistant' : 'user') as 'user' | 'assistant',
-            content: m.text as string,
+            content: await ctx.resolveSlackMentions(m.text as string),
             ts: m.ts as string,
-          }));
+          })));
 
         if (missedMessages.length > 0) {
           // Merge: combine DB history (has tool summaries) with missed Slack messages

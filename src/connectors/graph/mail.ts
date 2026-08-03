@@ -443,21 +443,46 @@ export interface ReplyToMailOptions {
  * unused send path. See that file's header for how the one-address cap is
  * validated before this function is ever called, and how `to` now carries
  * that same validated address into the actual Graph write.
+ *
+ * CLEANUP ON FAILURE — the update/send steps below are wrapped so a failure
+ * between createReply and send deletes the already-created draft rather than
+ * leaving it behind: mailPoll's delta only watches /mailFolders/inbox, so a
+ * draft left in Drafts is never revisited and would otherwise accumulate
+ * forever, one per failed send.
  */
 export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions): Promise<void> {
   const client = getMailClient(profile);
   const draft: any = await client.api(`/me/messages/${encodeURIComponent(opts.messageId)}/createReply`).post({});
   const draftId: string = draft.id;
   const existingBody: string = draft?.body?.content ?? '';
-  await client.api(`/me/messages/${encodeURIComponent(draftId)}`).update({
-    // Explicit recipient override — see the doc comment above for why this
-    // is load-bearing and not defensive redundancy: it replaces whatever
-    // Graph's own createReply would have inferred (From or Reply-To) with
-    // the address the caller already validated.
-    toRecipients: [{ emailAddress: { address: opts.to } }],
-    body: { contentType: 'HTML', content: insertReplyHtml(opts.bodyHtml, existingBody) },
-  });
-  await client.api(`/me/messages/${encodeURIComponent(draftId)}/send`).post({});
+  try {
+    await client.api(`/me/messages/${encodeURIComponent(draftId)}`).update({
+      // Explicit recipient override — see the doc comment above for why this
+      // is load-bearing and not defensive redundancy: it replaces whatever
+      // Graph's own createReply would have inferred (From or Reply-To) with
+      // the address the caller already validated.
+      toRecipients: [{ emailAddress: { address: opts.to } }],
+      body: { contentType: 'HTML', content: insertReplyHtml(opts.bodyHtml, existingBody) },
+    });
+    await client.api(`/me/messages/${encodeURIComponent(draftId)}/send`).post({});
+  } catch (err) {
+    // createReply already left a draft behind by the time update/send can
+    // fail — a bare rethrow here orphans it in the mailbox's Drafts folder
+    // forever (mailPoll only watches /mailFolders/inbox, so nothing ever
+    // revisits it). Best-effort delete so a transient Graph error doesn't
+    // accumulate dead drafts; the delete failing is logged but never
+    // swallows the original error, which is what sendDirect's catch turns
+    // into `send_failed` and inbound.ts treats as never-delivered.
+    try {
+      await client.api(`/me/messages/${encodeURIComponent(draftId)}`).delete();
+    } catch (cleanupErr) {
+      logger.warn('mail.ts:replyToMail — draft cleanup after send failure also failed, orphan draft may remain', {
+        draftId,
+        cleanupErr: String(cleanupErr).slice(0, 200),
+      });
+    }
+    throw err;
+  }
 }
 
 /**

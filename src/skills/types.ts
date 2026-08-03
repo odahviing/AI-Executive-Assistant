@@ -131,6 +131,21 @@ export interface SkillContext {
    * turns and when nothing resolved.
    */
   resolvedMeetingAttendees?: string[];
+  /**
+   * v4.4.x (GH#169 revisit) — the CURRENT turn's driving message, verbatim,
+   * before any tool call runs. Unlike conversationHistory (which holds only
+   * PRIOR turns), this is the live text. Exists so resolve_approval's
+   * cross-thread anchor gate (tasks/skill.ts) can ground its "does this
+   * reply actually name the approval" check on what was ACTUALLY said this
+   * turn, never on a tool argument the model authors itself (args.reason) —
+   * the model controls its own arguments, not this field. On a system-
+   * generated turn (scheduled routine/research, `interactive: false`) this
+   * is that run's synthetic prompt text, not a human's words — resolve_approval
+   * only reads it on the owner-typed path, so that distinction doesn't matter
+   * there, but don't repurpose this field as "the owner said X" elsewhere
+   * without checking `interactive` first.
+   */
+  currentUserMessage?: string;
 }
 
 /** All supported communication channels */

@@ -138,7 +138,7 @@ interface NormalizedSlot {
  * It used to return `instant_iso`, i.e. the MODEL did the offset arithmetic, and
  * on 2026-07-27 that put this pre-check an hour away from the search on the very
  * same phrase: "16:00 CET" reached `find_available_slots`, which converts in code
- * (`reinterpretClockInZone`, findAvailableSlots.ts:162, Europe/Brussels = CEST
+ * (`reinterpretClockInZone`, findAvailableSlots.ts:266, Europe/Brussels = CEST
  * = +02:00 in August) and correctly landed on 17:00 owner-local — while a bare
  * "16:00" from the same Brussels colleague reached here and was read as 16:00
  * OWNER-local, one hour off, `owner_busy_collision`, recorded into the hard-block
@@ -176,8 +176,8 @@ async function normalizeAvailabilitySlotsWithHaiku(
   // v4.2.x — strip the transport envelope BEFORE the 400-char cut, or the cut
   // eats the very thing this block exists to carry. A group-DM turn arrives
   // prefixed with the machine-written `<<GROUP DM — participants: … >>` preamble
-  // (handlers.ts:634, ~364 chars) and optionally `[THREAD PARTICIPANTS: …]`
-  // (handlers.ts:1050) — so on EVERY MPIM follow-up, `slice(0, 400)` returned the
+  // (handlers.ts:663, ~364 chars) and optionally `[THREAD PARTICIPANTS: …]`
+  // (handlers.ts:1082) — so on EVERY MPIM follow-up, `slice(0, 400)` returned the
   // preamble and about thirty characters of the human's actual words. Measured on
   // the 2026-07-27 incident: the earlier turn read "Bunnings next week -
   // important call- do you have a pref" and the bullet list holding "Tuesday 11
@@ -185,7 +185,7 @@ async function normalizeAvailabilitySlotsWithHaiku(
   // the pre-check queried the CURRENT week (log :208, start 2026-07-26) while the
   // conversation was about 11-13 August. Two verdicts, both for the wrong days.
   // Structural strip of a machine-generated envelope, not natural language — the
-  // same shape processMessage.ts:423 already uses for the same preamble (G7).
+  // same shape processMessage.ts:434 already uses for the same preamble (G7).
   const threadBlock = (recentThread ?? [])
     .slice(-4)
     .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${stripTransportEnvelope(m.content).slice(0, 400)}`)
@@ -419,6 +419,17 @@ interface SlotOutcome {
    * checkSlot's occupancy, never re-derived.
    */
   outOfOfficeAllDay?: true;
+  /**
+   * o#189 — the exact meeting length `checkSlot` was run at to reach this
+   * verdict: the asked length (snapped to allowed durations) for a normal ask,
+   * or the smallest allowed duration for a gap query's "nothing fits" verdict
+   * (the last, smallest probe in the descending sweep). Set only alongside
+   * `rejection_reason`, so the hard-block ledger can carry the SAME length —
+   * the live re-verification refuter (runOutputGates.ts) then re-probes at
+   * this length instead of an unconditional smallest-allowed-duration, which
+   * would not reproduce a block a longer ask tripped on a tail overlap.
+   */
+  durationMin?: number;
 }
 
 interface SlotVerdict extends SlotOutcome {
@@ -689,7 +700,7 @@ export async function precheckAvailability(params: {
   // narrow-window findAvailableSlots the paragraph above removed, and it had a
   // third hole on top of (a) and (b): `searchFrom === searchTo` is a ZERO-WIDTH
   // window, and the walker's `cursor + durationMs <= searchEnd` guard is false
-  // on entry for any non-zero duration (findAvailableSlots.ts:705). Zero
+  // on entry for any non-zero duration (findAvailableSlots.ts:850). Zero
   // iterations, every time — `maxFit` was structurally always null and EVERY
   // gap question rendered "nothing bookable there". Runtime: 5 gap pairs on
   // 2026-07-20/23/24, each preceded by 4× `getFreeBusy — zero or inverted
@@ -795,6 +806,10 @@ export async function precheckAvailability(params: {
         maxFreeMinutes: maxFit,
         ...(maxFit === null && blockedBy ? { rejection_reason: blockedBy } : {}),
         ...(maxFit === null && blockedByOoo ? { outOfOfficeAllDay: true as const } : {}),
+        // The "nothing fits" verdict was established by the LAST (smallest)
+        // probe in the descending sweep — o#189, so the ledger/refuter re-probe
+        // at that same length rather than a possibly-different smallest-allowed.
+        ...(maxFit === null && blockedBy ? { durationMin: Math.min(...allowedDurations) } : {}),
       };
     }
 
@@ -805,6 +820,7 @@ export async function precheckAvailability(params: {
       bookable: false,
       rejection_reason: check.violation_kind ?? 'unknown',
       ...(check.overCommitment?.allDayOutOfOffice ? { outOfOfficeAllDay: true as const } : {}),
+      durationMin: snappedMin,
     };
   };
 
@@ -842,7 +858,7 @@ export async function precheckAvailability(params: {
       // Single-slot failure shouldn't break the rest; log and skip. The SKIP is what
       // keeps this honest: no verdict is emitted for this pair, and if every pair
       // fails the caller injects no block at all (`verdicts.length === 0` below →
-      // `ran: false` → buildTurnContext.ts:573 adds nothing), so a blind pre-check
+      // `ran: false` → buildTurnContext.ts:696 adds nothing), so a blind pre-check
       // can never assert "bookable" or "not bookable" with no data behind it. The
       // data source is built for that too: whether it's a typed `CalendarOfflineError`
       // (v4.3.x — `eventsForWeek` now reads via `getOwnerEventsForDecision`,
@@ -952,6 +968,9 @@ export async function precheckAvailability(params: {
         display: formatSlotDisplay(r.date, r.time, tz),
         kind: r.rejection_reason,
         allDayOutOfOffice: r.outOfOfficeAllDay === true,
+        // Always set alongside rejection_reason (evaluateInstant, above) — the
+        // fallback only guards the type, it is not expected to fire.
+        durationMin: r.durationMin ?? durationMinutes,
       });
     }
   }
@@ -963,7 +982,7 @@ export async function precheckAvailability(params: {
   // question; this call site only supplies what it alone knows — the validated
   // durations and the category the verdicts were computed under (without the
   // category an alternative can break the very cap the original request broke,
-  // planMeeting.ts:661). It returns '' before any I/O when any tested slot was
+  // planMeeting.ts:625). It returns '' before any I/O when any tested slot was
   // bookable, so the common path costs nothing.
   //
   // Appended AFTER the verdict lines because the block's own text refers to them.
@@ -1139,6 +1158,10 @@ function extractRawPairs(message: string, tz: string, today: string): Pair[] {
  * are forgotten — forgetting an instant that was never armed is a harmless
  * no-op, and this function only ever DELETES ledger entries
  * (`forgetHardBlockedSlot`); it never records one.
+ *
+ * This is invalidation rule 5 in availabilityGate.ts's own ledger doc (o#190) —
+ * the one rule not grounded in a fresh `checkSlot` read; formalized there as its
+ * own numbered rule rather than left to drift as an uncounted mechanism.
  */
 function forgetNamedInstantsFromHardBlockLedger(
   message: string,

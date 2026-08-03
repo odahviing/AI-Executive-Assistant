@@ -207,7 +207,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         return `[analyze_calendar ${input.start_date}→${input.end_date}: ${days.length} days, ${totalIssues} issues]`;
       }
       case 'get_calendar': {
-        const events = Array.isArray(result) ? result : [];
+        // v4.4.x — get_calendar returns a bare array only when it has nothing else
+        // to say. The moment it needs to attach a note (WE day, optional-join
+        // event, colleague-scoped view, audit context), the handler wraps the SAME
+        // list in `{ events: [...], ... }` (calendarReads.ts ~297, ~312) — and that
+        // shape still carries real events. Reading only the bare-array case here
+        // silently summarized every one of those turns as "0 events", which is a
+        // false absence fed straight into conversation history for the NEXT turn.
+        const events = Array.isArray(result) ? result
+          : (result && typeof result === 'object' && Array.isArray((result as any).events)) ? (result as any).events
+          : [];
         return `[get_calendar ${input.start_date}→${input.end_date}: ${events.length} events]`;
       }
       case 'find_available_slots': {

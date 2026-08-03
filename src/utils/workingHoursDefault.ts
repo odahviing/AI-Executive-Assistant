@@ -1,8 +1,18 @@
 /**
- * Default working-hours derivation from a person's IANA timezone (v2.2.2, #46).
+ * Default working-hours derivation from a person's IANA timezone (v2.2.2, #46;
+ * generalized off the single hardcoded Israel case in #cloneable-default).
  *
- * Israel TZ → Sun–Thu, 09:00–18:00 (Israeli workweek).
- * Anywhere else → Mon–Fri, 09:00–17:00 (Western default).
+ * A person whose timezone matches a configured tenant's OWN timezone
+ * (`user.timezone` in `config/users/<tenant>.yaml`) gets that tenant's
+ * own workweek — the union of `office_days` + `home_days` — with generic
+ * business hours. Anywhere else → Mon–Fri, 09:00–17:00 (Western default).
+ * This used to hardcode `iana === 'Asia/Jerusalem'` → Sun–Thu, which only
+ * ever generalized for THIS deployment (Reflectiz/Israel); a clone run for
+ * a tenant on a different Sun–Thu (or any non-Western) workweek got the
+ * Western default regardless of their own configured schedule. Deriving the
+ * workday SET from config (never the exact hours — a tenant's own split
+ * shifts are a personal habit, not a regional convention) keeps this correct
+ * for whichever tenant(s) are actually configured, no code change needed.
  *
  * Persisted into `people_memory.working_hours_auto` whenever the timezone is
  * set or updated. Distinct from `PersonProfile.working_hours_structured` which
@@ -24,11 +34,13 @@ export interface WorkingHours {
   source: 'manual' | 'auto';
 }
 
-const ISRAEL_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {
-  workdays:   ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'],
-  hoursStart: '09:00',
-  hoursEnd:   '18:00',
-};
+const WEEK_ORDER: WeekDay[] =
+  ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Generic business hours applied whenever a person's timezone matches a
+// configured tenant's own — a coarse fallback (superseded the moment a real
+// value is known), never the tenant's actual (possibly split-shift) hours.
+const TENANT_MATCH_HOURS = { hoursStart: '09:00', hoursEnd: '18:00' };
 
 const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {
   workdays:   ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
@@ -38,7 +50,25 @@ const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'
 
 export function defaultWorkingHoursForTz(iana: string | null | undefined): Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> {
   if (!iana) return WESTERN_DEFAULT;
-  return iana === 'Asia/Jerusalem' ? ISRAEL_DEFAULT : WESTERN_DEFAULT;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { loadAllProfiles } = require('../config/userProfile') as typeof import('../config/userProfile');
+    for (const profile of loadAllProfiles().values()) {
+      if (profile.user.timezone !== iana) continue;
+      const workdays = WEEK_ORDER.filter(d =>
+        profile.schedule.office_days.days.includes(d) || profile.schedule.home_days.days.includes(d));
+      if (workdays.length > 0) {
+        return { workdays, ...TENANT_MATCH_HOURS };
+      }
+    }
+  } catch (err) {
+    logger.debug('defaultWorkingHoursForTz — tenant profile lookup failed, using Western default', {
+      iana, err: String(err).slice(0, 200),
+    });
+  }
+
+  return WESTERN_DEFAULT;
 }
 
 /**

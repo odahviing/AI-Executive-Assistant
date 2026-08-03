@@ -39,7 +39,7 @@ Read `.claude/SESSION_STARTER.md` **only when you need it** — version, state, 
 **How you report back — the return contract.** You return one verdict PER bug (a list if batched), each exactly one of:
 
 - **built** — root cause (`file:line`), the fix (files touched, +/− lines, plain English), typecheck green, trace 100%.
-- **needs-dependency** — your part is built (or ready) but it needs another agent (name which: Matchmaker / Registrar / Gatekeeper / Instructor / Profiler / SlackMaster / Diplomat / Outrider) and the specific ask. The orchestrator routes it and resumes you.
+- **needs-dependency** — your part is built (or ready) but it needs another agent (name which: Matchmaker / Registrar / Gatekeeper / Instructor / Profiler / SlackMaster / Diplomat / Handyman) and the specific ask. The orchestrator routes it and resumes you.
 - **blocked-charter** — the only fix you can see would bend a rule in this charter (name the rule + what the fix would require). The orchestrator surfaces it to the owner.
 - **needs-owner-decision** — root proven, but the resolution is an owner-only product judgment (state the decision, with your recommendation). The orchestrator surfaces it.
 - **already-fixed** — the reappearance check says it doesn't reproduce; say why.

@@ -2,10 +2,11 @@
  * Resolve the local-date (yyyy-MM-dd in owner timezone) of the meeting being
  * moved. Used by pickSpreadSlots to prefer same-day options on move flows.
  *
- * Called only on owner-initiated find_available_slots when moving_event_ids
- * is non-empty. Cheap because getCalendarEvents memoizes via turnCache —
- * Sonnet has typically already called get_calendar this turn, so this fetch
- * is a cache hit.
+ * Called whenever a find_available_slots search carries a non-empty
+ * moving_event_ids — owner- and colleague-initiated calls alike, the caller
+ * doesn't gate on sender role. Cheap because getCalendarEvents memoizes via
+ * turnCache — Sonnet has typically already called get_calendar this turn, so
+ * this fetch is a cache hit.
  *
  * Returns undefined when the id can't be resolved (cancelled / past the
  * lookup window / Graph error). Picker falls back to chronological order

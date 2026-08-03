@@ -46,17 +46,17 @@ Never let the merge drop his framing for a bare symptom. A lane handed *"Maelle 
 | **Registrar** | the async work-item spine — anything with a row in `requests`: approvals, outreach, reminders, follow-ups, timers and expiry, the requester close-loop. Lifecycle only; what an item *does* when it fires belongs to its domain lane |
 | **Profiler** | identity, the person store, people memory, social — including duplicate or drifting person records |
 | **SlackMaster** | INSIDE the workspace — Slack end to end — inbound routing, threading, DM/MPIM/channel posture, authority by authenticated sender, dedup and catch-up, Slack's `Connection` implementation, and the `postReply` delivery pipeline (Slack-only; the mail leg never enters it) |
-| **Diplomat** | OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one: the mailbox poll and its dedup, the inbound sender gate, forwarded-header extraction, the one-address reply, mail auth (`connectors/email/*`, `connections/email/*`, `connectors/graph/mail*.ts`, `scripts/email-auth.mjs`). **WhatsApp (`connectors/whatsapp.ts`) is its lane too, not Outrider's**, the day it opens to a non-owner |
+| **Diplomat** | OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one: the mailbox poll and its dedup, the inbound sender gate, forwarded-header extraction, the one-address reply, mail auth (`connectors/email/*`, `connections/email/*`, `connectors/graph/mail*.ts`, `scripts/email-auth.mjs`). **WhatsApp (`connectors/whatsapp.ts`) is its lane too, not Handyman's**, the day it opens to a non-owner |
 | **Gatekeeper** | the output-time gate stack itself |
 | **Instructor** | everything Maelle is *told* — system prompt, tool descriptions, learned preferences. Runs LAST |
-| **Outrider** | only what no lane above owns — news, brief, routines, the Graph CLIENT layer only (auth/tokens; calendar is Matchmaker, mail is Diplomat), the core orchestrator, the DB, health, config, scripts |
+| **Handyman** | only what no lane above owns — news, brief, routines, the Graph CLIENT layer only (auth/tokens; calendar is Matchmaker, mail is Diplomat), the core orchestrator, the DB, health, config, scripts |
 
 Three corollaries that decide most hard cases:
 
 - **`gatekeeper` and `instructor` are last-resort destinations.** A symptom being *visible in a reply* is not a reason to route there. A leak appears at output and is almost always fixed in the flow that produced the data.
 - **Anything about identity, the person store, people memory or social goes to `profiler`** — not to the lane where the symptom happened to surface.
-- **`outrider` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
-- **The transport spine — `src/connections/{types,registry}.ts` — has no owner and is not Outrider's** (owner's ruling, 2026-08-01). Route a bug there to the lane whose behaviour it breaks; every lane may edit it (their Shared rule 12).
+- **`handyman` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
+- **The transport spine — `src/connections/{types,registry}.ts` — has no owner and is not Handyman's** (owner's ruling, 2026-08-01). Route a bug there to the lane whose behaviour it breaks; every lane may edit it (their Shared rule 12).
 
 If no lane fits, say so in `whyHypothesis` rather than guessing — a wrong lane is a full dispatch spent learning it was the wrong lane.
 

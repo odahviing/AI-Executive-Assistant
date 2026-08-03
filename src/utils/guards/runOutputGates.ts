@@ -175,7 +175,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // In a 1:1 owner DM and in a colleague's DM those two answers are exact
   // negations of each other, which is why one test carried both for so long. In
   // a GROUP DM they come apart: `role` is already clamped to 'colleague'
-  // (processMessage.ts:122) precisely because every colleague in the room reads
+  // (processMessage.ts:139) precisely because every colleague in the room reads
   // the reply, while `isOwnerInGroup` says the owner is the one typing. The old
   // single test read that as "owner-facing", so the one colleague-readable
   // surface in the system shipped with NO leak gate and the wrong voice frame —
@@ -185,12 +185,12 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // Slack sender, instead of through a proxy that answered it for two surfaces out
   // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
   // CLAMPED to 'colleague' in an MPIM, in a channel, and in colleague-test mode
-  // (processMessage.ts:122) — so the old `role === 'owner' || isOwnerInGroup` pair
+  // (processMessage.ts:139) — so the old `role === 'owner' || isOwnerInGroup` pair
   // covered the DM and the group DM and silently missed the CHANNEL: the owner
   // @-mentions Maelle in a real channel, she claims she messaged someone or moved
   // something, and the phantom-action check never ran, because the group-DM fix
   // repaired the MPIM half of the clamp with `isOwnerInGroup` and there is no
-  // `isOwnerInChannel` on this side of the wire (processMessage.ts:121 computes one
+  // `isOwnerInChannel` on this side of the wire (processMessage.ts:138 computes one
   // and never passes it). Keyed on the authenticated identity in code, this covers
   // every present and future surface without a third flag to plumb or forget
   // (shared rule 10, G2). It can only ADD the honesty check, never drop it:
@@ -215,7 +215,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // merely unnecessary, it is WRONG. Its single distinguishing rule is "NEVER
   // refer to him in third person" (humanGate.ts:97) — but naming the owner to
   // the colleagues in the room is exactly what the drafting prompt asks for
-  // there (systemPrompt.ts:466 "SPEAK TO THE GROUP"), and 'internal' endorses
+  // there (systemPrompt.ts:526 "SPEAK TO THE GROUP"), and 'internal' endorses
   // that shape verbatim (humanGate.ts:171). Every other rule in the gate is
   // identical across the two frames, so on a group reply the 'owner' frame could
   // only ever rewrite correct text — a G6 corruption, not a safe miss.
@@ -370,7 +370,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // a miss. filterColleagueReply runs leak-scan-only when they are absent, so
     // withholding them is the control (shared rule 10 — scope the payload; don't
     // hand a check inputs it must not act on). Today colleagueName is undefined
-    // for an owner-in-group turn anyway (processMessage.ts:366) — this stops that
+    // for an owner-in-group turn anyway (processMessage.ts:386) — this stops that
     // cross-lane accident from being the only thing holding the branch shut.
     let verifiedSenderEmail: string | undefined;
     let recentUserMessages: string[] | undefined;
@@ -416,7 +416,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // v4.2.x — and it is CAUGHT, which it was not. Together with the db read above,
     // this was the only await in the stack outside a try, and what it cost was the
     // whole answer, on the one leg where a non-owner is reading: the throw reached the
-    // runner's catch (processMessage.ts:720) with `delivered` still false, so the
+    // runner's catch (processMessage.ts:746) with `delivered` still false, so the
     // colleague got the generic failure line instead of their reply, and nothing was
     // stored either (postReply's history write sits below this call).
     //
@@ -559,6 +559,12 @@ async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): P
 
   try {
     const { runHumanGate } = await import('../humanGate');
+    // gh#175 — the email reply used to be two audiences in one string (a
+    // PART 1 "FOR YOU" note for the owner, a literal cut line, then PART 2
+    // the forwardable text). That's gone (owner's ruling, gh#175-a-instructor):
+    // systemPrompt.ts no longer emits PART 1 or the cut line, so the whole
+    // reply IS the forwardable text — one 'external' audience, same as any
+    // other external-facing content.
     const verdict = await runHumanGate(cleanReply, ctx.profile, 'external', ctx.channelId);
     if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, verdict.rewrite);
@@ -869,8 +875,16 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
  *     (summarizeToolCall) and `bookingOccurred`, not a tool-name list (G3).
  *  3. There is a draft to check.
  *
- * Then ONE Haiku classification, and a Sonnet rewrite only on a flag. Fails open at
- * every step — any error, any veto, any keep verdict ships the draft it was handed.
+ * Then ONE Haiku classification; on a flag, a live re-verification of each
+ * affirmed slot (fresh `checkSlot`, fresh calendar read — the entry can be up to
+ * TTL_MS old) drops anything that no longer checks out, and only what survives
+ * that gets the Sonnet rewrite. Fails open at every step — any error in Haiku
+ * classification, any veto, any keep verdict ships the draft it was handed.
+ * One deliberate exception (o#189): a live re-check that CANNOT run (a throw —
+ * Graph outage, etc.) is not evidence the slot cleared, so it stays confirmed
+ * rather than being silently dropped — clearing a real established fact on a
+ * mere outage, and shipping the draft's false "available" claim uncorrected,
+ * is the worse failure this floor exists to prevent.
  *
  * STORED OWNER-LOCAL, RENDERED PER READER — the entries are rendered for this turn's
  * reader before either LLM sees them. The ledger is keyed by owner and read across
@@ -886,7 +900,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
   try {
     const {
       freshHardBlockedSlots, detectAffirmedBlockedSlots, rewriteBlockedSlotClaim,
-      forgetHardBlockedSlot, clearHardBlockedSlots, displayForAsker,
+      forgetHardBlockedSlot, clearHardBlockedSlots, displayForAsker, armsHardFloor,
     } = await import('../availabilityGate');
 
     const stored = freshHardBlockedSlots(profile.user.email);
@@ -908,7 +922,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
 
     // The asker's zone for THIS turn, off the AUTHENTICATED sender and out of the
     // same people-store field the pre-check reads when it builds the drafting block
-    // (buildTurnContext.ts:576) — so the two surfaces name a moment in the same clock.
+    // (buildTurnContext.ts:667) — so the two surfaces name a moment in the same clock.
     // Below the mutation check on purpose: a turn that already stood the floor down
     // pays for nothing. Absent zone, the owner's own turn, or an unusable value all
     // leave the stored owner-local rendering untouched.
@@ -923,25 +937,92 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
     );
     if (affirmed.length === 0) return initialReply;
 
+    // Live re-verification — the rare path (per this file's own record: 0 catches,
+    // 2 false fires ever). The ledger entry can be up to TTL_MS (45min) old, and the
+    // proven false-fire class is exactly "the fact stopped being true between record
+    // and fire, with no Maelle mutation to trigger an invalidation rule" (an event
+    // someone else moved or cancelled directly in Outlook). Re-run the SAME
+    // validator `checkSlot` that established the entry, on a FRESH live calendar
+    // read, immediately before the destructive rewrite — the last possible moment
+    // to catch a stale fact rather than ship a corrected reply that corrects nothing.
+    // Any slot the checkSlot call actually RAN and found no longer blocked is
+    // dropped and forgotten rather than rewritten (G6 — a safe miss, never a
+    // corruption of a now-true reply). A recheck that could not run at all
+    // (below) is a different case and does not drop the entry — see its catch.
+    const stillBlocked: typeof affirmed = [];
+    for (const s of affirmed) {
+      let confirmed = false;
+      try {
+        const { checkSlot, bookingLeadTimeHours } = await import('../scheduleRules');
+        const { getOwnerEventsForDecision } = await import('../../connectors/graph/calendar');
+        const datePart = s.instantIso.slice(0, 10);
+        const events = await getOwnerEventsForDecision(
+          profile.user.email, `${datePart}T00:00:00`, `${datePart}T23:59:59`, profile.user.timezone,
+        );
+        // Re-probe at the SAME length the producer used to establish this entry
+        // (`s.durationMin` — availabilityPreCheck's snapped ask, or the smallest
+        // allowed duration for a gap query's "nothing fits" verdict; see
+        // availabilityGate.ts's HardBlockedSlot doc). o#189: an unconditional
+        // smallest-allowed-duration probe does not reproduce a block a longer ask
+        // only trips on a TAIL overlap, so a 50-minute ask's established block
+        // silently cleared under a 25-minute probe.
+        const probeMinutes = s.durationMin;
+        const startMs = Date.parse(s.instantIso);
+        const verdict = checkSlot({
+          profile,
+          slotStartIso: s.instantIso,
+          slotEndIso: new Date(startMs + probeMinutes * 60000).toISOString(),
+          category: null,
+          events,
+          // Same shape the producer used to establish this entry
+          // (availabilityPreCheck.ts) — colleague lead time, masked subject.
+          leadTimeHours: bookingLeadTimeHours(profile, 'colleague'),
+          viewer: 'other',
+        });
+        confirmed = armsHardFloor(verdict.violation_kind);
+      } catch (reErr) {
+        // o#189 — a throw here (Graph outage, etc.) means we COULD NOT CHECK; it
+        // is not proof the slot cleared. Treating it as cleared would delete a
+        // real, previously-established fact off a mere outage and ship the
+        // draft's false "available" claim uncorrected — the exact failure this
+        // floor exists to prevent. So an unreadable recheck keeps the prior
+        // established fact: stay confirmed (the entry survives, and gets rewritten
+        // same as any other still-blocked slot).
+        logger.warn('Availability floor — live re-check threw; could not verify, keeping the established block rather than risk a false-clear', {
+          instantIso: s.instantIso, err: String(reErr).slice(0, 200),
+        });
+        confirmed = true;
+      }
+      if (confirmed) {
+        stillBlocked.push(s);
+      } else {
+        forgetHardBlockedSlot(profile.user.email, s.instantIso);
+        logger.info('Availability floor — live re-check found this instant no longer hard-blocked; dropped without rewriting', {
+          senderId: ctx.senderId, threadTs: ctx.threadTs, instantIso: s.instantIso, kind: s.kind,
+        });
+      }
+    }
+    if (stillBlocked.length === 0) return initialReply;
+
     logger.warn('⚠ Availability floor — the draft presents an ESTABLISHED-unavailable time as workable; rewriting', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       role: ctx.role,
       isOwnerInGroup: ctx.isOwnerInGroup === true,
-      slots: affirmed.map(s => ({ when: s.display, kind: s.kind, reasonGiven: s.phrase ?? null })),
+      slots: stillBlocked.map(s => ({ when: s.display, kind: s.kind, reasonGiven: s.phrase ?? null })),
       draftPreview: initialReply.slice(0, 300),
     });
 
     const rewritten = await rewriteBlockedSlotClaim({
       draft: initialReply,
-      slots: affirmed,
+      slots: stillBlocked,
       ownerFirstName: profile.user.name.split(' ')[0],
     });
     if (!rewritten || rewritten.trim().length === 0) return initialReply;
 
     // The correction has landed in the text the reader will get; keeping the entry
     // would re-offer the same slot for correction on every later turn in the window.
-    for (const s of affirmed) forgetHardBlockedSlot(profile.user.email, s.instantIso);
+    for (const s of stillBlocked) forgetHardBlockedSlot(profile.user.email, s.instantIso);
     return formatForSlack(rewritten);
   } catch (err) {
     logger.warn('Availability floor threw — sending the original draft', { err: String(err).slice(0, 200) });

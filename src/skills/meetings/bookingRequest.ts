@@ -335,10 +335,27 @@ function buildSlot(args: Record<string, unknown>, profile: UserProfile, initiato
   return { startIso: start, endIso: d.endIso, durationMin: d.durationMin };
 }
 
-async function gateSensitivity(
+/**
+ * THE colleague-path sensitivity gate (o#187, v4.4.x) — a colleague may set
+ * `sensitivity` on a booking ONLY when their own email is among that
+ * booking's attendees; otherwise the arg is dropped (prevents a random
+ * colleague from marking someone else's meeting private). Owner-path is
+ * always trusted, no gate.
+ *
+ * Two call sites, each at a different point in the pipeline, so each passes
+ * whatever attendee-email list it holds there: the create_meeting handler
+ * (raw args.attendees, BEFORE normalization) and normalizeBookingRequest
+ * below (resolved `participants`, AFTER). Used to be two independent
+ * copies of this same test — merged into this one function 2026-08 (o#187)
+ * without changing which site runs first: the handler still gates (and
+ * deletes `args.sensitivity` when unauthorized) before normalizeBookingRequest
+ * ever sees the args, so this second call is a no-op on that path — same
+ * effective ordering as before the merge.
+ */
+export async function gateSensitivity(
   args: Record<string, unknown>,
   context: SkillContext,
-  participants: BookingParticipant[],
+  attendees: Array<{ email?: string }>,
 ): Promise<BookingRequest['sensitivity']> {
   const raw = args.sensitivity as BookingRequest['sensitivity'] | undefined;
   if (raw === undefined || raw === 'normal') return raw;
@@ -347,22 +364,22 @@ async function gateSensitivity(
   if (context.senderRole === 'owner') return raw;
 
   // Colleague-path: honor sensitivity ONLY when the colleague's email is
-  // in participants. Prevents a random colleague from marking someone
+  // in attendees. Prevents a random colleague from marking someone
   // else's meeting private.
   let colleagueEmail: string | undefined;
   try {
     const mem = getPersonMemory(context.userId);
     colleagueEmail = mem?.email?.toLowerCase();
   } catch (_) { /* fall through */ }
-  const onAttendees = colleagueEmail && participants.some(p =>
-    p.email.toLowerCase() === colleagueEmail,
+  const onAttendees = colleagueEmail && attendees.some(a =>
+    (a.email ?? '').toLowerCase() === colleagueEmail,
   );
   if (!onAttendees) {
-    logger.info('normalizeBookingRequest: sensitivity dropped (colleague not on attendee list)', {
+    logger.info('sensitivity gate — dropped (colleague not on attendee list)', {
       requester: context.userId,
       requesterEmail: colleagueEmail,
       requestedSensitivity: raw,
-      attendeeEmails: participants.map(p => p.email),
+      attendeeEmails: attendees.map(a => a.email),
     });
     return undefined;
   }

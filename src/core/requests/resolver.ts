@@ -27,6 +27,7 @@ import {
 import { runDeferredAction } from './deferredActionReplay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
+import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
 
 /**
  * How many counter-offers a single request may carry before it is brought to a
@@ -159,7 +160,49 @@ export interface ResolveResult {
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
+// v4.4.x (backlog: concurrent-double-resolve-no-lock) — the state gate below
+// (`row.state !== 'awaiting_owner' && ...`) is a plain check-then-act: it reads
+// the row, then this function runs a long async body (Slack posts, the LLM
+// replay call, notifyRequesterOfDecision) before its own closeRequest() call
+// commits the terminal state. Two decisive reactions to the SAME request
+// arriving close together (an emoji ✅ and a typed reply; a double-tap) both
+// pass this check while the first is still mid-flight, and both then execute
+// their own booking/notify side effects — closeRequest's OWN idempotency
+// guard (closeRequest.ts:49) only catches the SECOND request-state write, not
+// the duplicated work that already happened before either call reached it.
+// Single fork process (ecosystem.config.js: exec_mode 'fork', never cluster),
+// so an in-process lock is a complete fix, not a partial one.
+//
+// A per-request FIFO queue, not just a single wait-then-retry: each call
+// chains onto whatever is CURRENTLY queued for this id (read + overwrite in
+// one synchronous statement, so two near-simultaneous callers can never both
+// read the same tail) and only starts its own resolveRequestInner once every
+// earlier call for this id has fully settled. A single wait-for-the-current-
+// holder design closes the reported 2-caller race but not a 3rd+ caller that
+// arrives while the first two are already both waiting on the same holder —
+// this queue closes it for any number of concurrent callers. A failed link
+// (`.catch(() => undefined)`) never wedges the ones behind it; each still
+// runs its own fresh state check, so a caller queued behind one that already
+// closed the request lands on the pre-existing "request is in state …"
+// rejection below, rather than re-running the side effects.
+const resolveQueue = new Map<string, Promise<unknown>>();
+
 export async function resolveRequest(
+  requestId: string,
+  verdict: ResolveVerdict,
+  ctx: ResolveContext,
+): Promise<ResolveResult> {
+  const tail = resolveQueue.get(requestId) ?? Promise.resolve();
+  const run = tail.catch(() => undefined).then(() => resolveRequestInner(requestId, verdict, ctx));
+  resolveQueue.set(requestId, run);
+  try {
+    return await run;
+  } finally {
+    if (resolveQueue.get(requestId) === run) resolveQueue.delete(requestId);
+  }
+}
+
+async function resolveRequestInner(
   requestId: string,
   verdict: ResolveVerdict,
   ctx: ResolveContext,
@@ -1249,34 +1292,22 @@ const COUNTER_KEY_PHRASING: Record<string, (v: string) => string> = {
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
 /**
- * An internal work-item id — the inverse of the four expressions that MINT one:
- * `req_` (db/requests.ts:51), `task_` (tasks/index.ts:13), `out_` (db/jobs.ts:164),
- * `ci_` (db/calendarIssues.ts:372). A structured token, so regex is the allowed kind.
- *
- * `req_`/`task_` match loosely: neither prefix begins an English word, and a model
- * volunteering an id-SHAPED string it made up ("req_abc123") has to be caught too.
- * `out_`/`ci_` require the minted `<epoch>_<base36>` tail, because a loose match
- * there swallows ordinary words ("out_of_office").
- *
- * Why the definition lives HERE. The requester relay ships via conn.sendDirect, so
- * the gate that owns this token class (securityGate's `internal_ref_id`) never sees
- * it; and the one scrubber that DOES run on every outbound (scrubInternalLeakage,
- * inside formatForSlack) has no rule for these ids — it wraps account ids into
- * rendered mentions and strips Graph ids, IANA tokens, sentinels and tool names, all
- * of which therefore need no veto here. These four prefixes are the exact residual
- * gap on this path, and they are minted by this lane. The remedy is the payload one
- * (rule 10): the value never enters the text and never enters the composer's
- * context, rather than a scrub that runs after it has been written.
- */
-const INTERNAL_WORK_ITEM_ID_RE = /\b(?:(?:req|task)_[a-z0-9][a-z0-9_]*|(?:out|ci)_\d{10,}_[a-z0-9]+)\b/i;
-
-/**
  * amend-reason-bypasses-id-veto — the id veto `renderCounter` applies to a
  * counter's rendered parts, exposed so a free-text field that isn't counter-shaped
  * (the owner's `reason` on an amend, accepted by resolve_approval and typed by him
  * about a specific meeting — the field most likely to carry one of our own ids)
  * can be checked with the identical regex instead of a second, drifting copy.
  * One spelling of the rule, two call sites.
+ *
+ * The requester relay ships via conn.sendDirect, so the gate that owns this token
+ * class (securityGate's `internal_ref_id` trigger) never sees it; and the one
+ * scrubber that DOES run on every outbound (scrubInternalLeakage, inside
+ * formatForSlack) has no rule for these ids — it wraps account ids into rendered
+ * mentions and strips Graph ids, IANA tokens, sentinels and tool names, all of
+ * which therefore need no veto here. These four prefixes (`req_`/`task_`/`out_`/
+ * `ci_`) are the exact residual gap on this path, minted by this lane. The remedy
+ * is the payload one (rule 10): the value never enters the text and never enters
+ * the composer's context, rather than a scrub that runs after it has been written.
  */
 export function textCarriesInternalWorkItemId(text: string): boolean {
   return INTERNAL_WORK_ITEM_ID_RE.test(text);

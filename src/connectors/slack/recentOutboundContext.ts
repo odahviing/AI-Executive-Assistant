@@ -19,18 +19,29 @@
  *
  * The fix (owner direction):
  *   At the Slack connector layer — BEFORE the orchestrator runs — look up
- *   recent OUTBOUND DMs to this colleague. Apply three time-windows:
+ *   recent OUTBOUND DMs to this colleague. Apply two time-windows:
  *
- *     1. ≤ 10 min from sent_at  → deterministic match. Treat the inbound
- *        as a response, attach the outbound as context. No LLM call.
+ *     1. ≤ 24 h from sent_at    → ambiguous, ALWAYS classify. Run a small
+ *        Sonnet classifier: "is this inbound a response to that outbound,
+ *        or a new topic?" If response → attach context + close the
+ *        outbound. If new topic → leave the outbound open; treat inbound
+ *        as fresh.
  *
- *     2. 10 min – 24 h          → ambiguous. Run a small Sonnet
- *        classifier: "is this inbound a response to that outbound, or a
- *        new topic?" If response → attach context + close the outbound.
- *        If new topic → leave the outbound open; treat inbound as fresh.
- *
- *     3. > 24 h                 → auto-expire the outbound (mark
+ *     2. > 24 h                 → auto-expire the outbound (mark
  *        followup_closed_at). Treat inbound as new.
+ *
+ *   v2.6.2 (gh#176/#177) — there used to be a third, EARLIER bucket: any
+ *   inbound within 10 min of the outbound was treated as a deterministic
+ *   match, no classifier, purely on elapsed time. That bypass matched by
+ *   (owner, colleague) identity ALONE — a second, unrelated topic from the
+ *   same colleague arriving inside that 10-minute window was misattached
+ *   to the open outbound AND closed it, starving the real continuation of
+ *   that outbound (which typically arrives within the same few minutes)
+ *   of any context at all. Colleague identity is not topic identity, so
+ *   every inbound within 24h is now classified — the classifier already
+ *   fails open to RESPONSE (see below), so genuine quick acks ("Ok",
+ *   "thanks") still attach context exactly as before; only a real
+ *   new-topic message now correctly leaves the outbound open.
  *
  *   Plus two explicit acknowledgment signals (any age, while open):
  *     • Emoji reaction on the outbound message → close as 'emoji_ack'.
@@ -51,9 +62,6 @@ import { config } from '../../config';
 import type { OutreachJob } from '../../db/jobs';
 
 const anthropic = getAnthropicClient();
-
-/** Minutes inside which an inbound DM is deterministically treated as a continuation. */
-const DETERMINISTIC_WINDOW_MINUTES = 10;
 
 /** Hours after which an outbound auto-expires from follow-up tracking. */
 const AUTO_EXPIRE_HOURS = 24;
@@ -77,28 +85,35 @@ export interface RecentOutboundContextResult {
    */
   contextBlock: string | null;
   /** How the match was decided (for logging / future debugging). */
-  matchedVia?: 'deterministic_under_10min' | 'llm_classified_response' | 'thread_reply';
+  matchedVia?: 'llm_classified_response' | 'thread_reply';
 }
 
 /**
- * Look up the most recent OPEN outreach_jobs row for this colleague within
- * the last 24h. "Open" here means CONVERSATIONALLY open — `followup_closed_at IS
- * NULL` — which is this module's own signal, deliberately independent of the
- * request's lifecycle. That independence is the point, not an oversight: a
- * fire-and-forget DM (`message_colleague(await_reply:false)` — the case this
- * module exists for) has a request that is already `resolved` the moment it is
- * sent (db/jobs.ts:184-185), yet the colleague's reply still needs context. So
+ * Look up EVERY OPEN outreach_jobs row for this colleague within the last
+ * 24h, most recent first. "Open" here means CONVERSATIONALLY open —
+ * `followup_closed_at IS NULL` — which is this module's own signal,
+ * deliberately independent of the request's lifecycle. That independence is
+ * the point, not an oversight: a fire-and-forget DM
+ * (`message_colleague(await_reply:false)` — the case this module exists for)
+ * has a request that is already `resolved` the moment it is sent
+ * (db/jobs.ts:184-185), yet the colleague's reply still needs context. So
  * the filter is this field, and never the request state or a status column.
  *
- * Returns the row, or null when nothing eligible exists.
+ * Returns ALL eligible rows, not just the newest — a colleague can have two
+ * open outbound topics at once, and a plain top-level DM reply (no thread_ts
+ * to disambiguate; that case is handled separately by
+ * `closeFollowupForMessageTs`) needs every candidate classified, not just
+ * whichever was sent last. Capped at 10 as a sanity bound; this is a
+ * low-volume per-colleague signal that auto-expires in 24h, so the cap is
+ * never expected to bind.
  */
-function findOpenOutboundForColleague(params: {
+function findOpenOutboundsForColleague(params: {
   ownerUserId: string;
   colleagueSlackId: string;
-}): OutreachJob | null {
+}): OutreachJob[] {
   const db = getDb();
   const cutoff = new Date(Date.now() - AUTO_EXPIRE_HOURS * 60 * 60 * 1000).toISOString();
-  const row = db.prepare(`
+  return db.prepare(`
     SELECT * FROM outreach_jobs
     WHERE owner_user_id = ?
       AND colleague_slack_id = ?
@@ -106,9 +121,8 @@ function findOpenOutboundForColleague(params: {
       AND sent_at IS NOT NULL
       AND datetime(sent_at) >= datetime(?)
     ORDER BY datetime(sent_at) DESC
-    LIMIT 1
-  `).get(params.ownerUserId, params.colleagueSlackId, cutoff) as OutreachJob | undefined;
-  return row ?? null;
+    LIMIT 10
+  `).all(params.ownerUserId, params.colleagueSlackId, cutoff) as OutreachJob[];
 }
 
 /**
@@ -251,9 +265,7 @@ async function classifyResponseVsNewTopic(params: {
  *
  * Behavior:
  *   - No open outbound found       → returns matched=false, no context.
- *   - Outbound within 10 min       → deterministic match, attach context,
- *                                    close followup as 'deterministic_match'.
- *   - Outbound 10min-24h           → Sonnet classifies. If RESPONSE: attach
+ *   - Outbound within 24h          → Sonnet classifies. If RESPONSE: attach
  *                                    context, close as 'llm_response_match'.
  *                                    If NEW_TOPIC: leave open, no context.
  *   - Outbound > 24h               → close as 'auto_expired_24h', no context.
@@ -272,73 +284,71 @@ export async function getRecentOutboundContext(params: {
   ownerFirstName: string;
   inboundText: string;
 }): Promise<RecentOutboundContextResult> {
-  const job = findOpenOutboundForColleague({
+  const jobs = findOpenOutboundsForColleague({
     ownerUserId: params.ownerUserId,
     colleagueSlackId: params.colleagueSlackId,
   });
-  if (!job || !job.sent_at) {
-    return { matched: false, contextBlock: null };
-  }
 
-  const sentMs = Date.parse(job.sent_at);
-  if (!Number.isFinite(sentMs)) {
-    logger.warn('recentOutboundContext — outreach_jobs.sent_at unparseable, skipping', {
-      jobId: job.id, sent_at: job.sent_at,
+  // Most-recent-first: classify each open outbound against the inbound until
+  // one matches. A plain top-level reply has no thread_ts to disambiguate
+  // which open topic it belongs to, so trying only the newest (as before)
+  // meant a reply to an OLDER open outbound was compared against the wrong
+  // message, never matched, and its own outbound stayed context-less until
+  // it silently auto-expired.
+  for (const job of jobs) {
+    if (!job.sent_at) continue;
+
+    const sentMs = Date.parse(job.sent_at);
+    if (!Number.isFinite(sentMs)) {
+      logger.warn('recentOutboundContext — outreach_jobs.sent_at unparseable, skipping', {
+        jobId: job.id, sent_at: job.sent_at,
+      });
+      continue;
+    }
+    const deltaMs = Date.now() - sentMs;
+    const deltaMinutes = deltaMs / 60_000;
+
+    // Over 24h — auto-expire (lazy cleanup).
+    if (deltaMinutes > AUTO_EXPIRE_HOURS * 60) {
+      closeFollowup(job.id, 'auto_expired_24h');
+      logger.info('recentOutboundContext — auto-expired (>24h)', {
+        jobId: job.id, colleague: params.colleagueName, deltaHours: Math.round(deltaMinutes / 60),
+      });
+      continue;
+    }
+
+    // Within 24h — ALWAYS classify (gh#176/#177: elapsed time alone doesn't
+    // prove topic continuity — colleague identity is not topic identity, and a
+    // genuinely new topic can land within minutes of an unrelated outbound to
+    // the same person). Fails open to RESPONSE, so quick acks still attach
+    // context exactly as the old <10min bypass did.
+    const isResponse = await classifyResponseVsNewTopic({
+      outboundText: job.message,
+      inboundText: params.inboundText,
+      deltaMinutes: Math.round(deltaMinutes),
+      colleagueName: params.colleagueName,
+      ownerFirstName: params.ownerFirstName,
     });
-    return { matched: false, contextBlock: null };
-  }
-  const deltaMs = Date.now() - sentMs;
-  const deltaMinutes = deltaMs / 60_000;
 
-  // Bucket 1 — deterministic match within 10 min.
-  if (deltaMinutes <= DETERMINISTIC_WINDOW_MINUTES) {
-    closeFollowup(job.id, 'deterministic_match', { replyText: params.inboundText });
-    logger.info('recentOutboundContext — deterministic match', {
-      jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes * 10) / 10,
-    });
-    return {
-      matched: true,
-      matchedJobId: job.id,
-      contextBlock: buildContextBlock(job, deltaMs / 1000),
-      matchedVia: 'deterministic_under_10min',
-    };
-  }
+    if (isResponse) {
+      closeFollowup(job.id, 'llm_response_match', { replyText: params.inboundText });
+      logger.info('recentOutboundContext — LLM classified as RESPONSE', {
+        jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
+      });
+      return {
+        matched: true,
+        matchedJobId: job.id,
+        contextBlock: buildContextBlock(job, deltaMs / 1000),
+        matchedVia: 'llm_classified_response',
+      };
+    }
 
-  // Bucket 3 — over 24h, auto-expire (lazy cleanup).
-  if (deltaMinutes > AUTO_EXPIRE_HOURS * 60) {
-    closeFollowup(job.id, 'auto_expired_24h');
-    logger.info('recentOutboundContext — auto-expired (>24h)', {
-      jobId: job.id, colleague: params.colleagueName, deltaHours: Math.round(deltaMinutes / 60),
-    });
-    return { matched: false, contextBlock: null };
-  }
-
-  // Bucket 2 — 10min-24h, run Sonnet classifier.
-  const isResponse = await classifyResponseVsNewTopic({
-    outboundText: job.message,
-    inboundText: params.inboundText,
-    deltaMinutes: Math.round(deltaMinutes),
-    colleagueName: params.colleagueName,
-    ownerFirstName: params.ownerFirstName,
-  });
-
-  if (isResponse) {
-    closeFollowup(job.id, 'llm_response_match', { replyText: params.inboundText });
-    logger.info('recentOutboundContext — LLM classified as RESPONSE', {
+    // NEW_TOPIC against this job — leave it open, try the next candidate.
+    logger.info('recentOutboundContext — LLM classified as NEW_TOPIC, no context attached', {
       jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
     });
-    return {
-      matched: true,
-      matchedJobId: job.id,
-      contextBlock: buildContextBlock(job, deltaMs / 1000),
-      matchedVia: 'llm_classified_response',
-    };
   }
 
-  // NEW_TOPIC — leave the outbound open (it might still get acked later).
-  logger.info('recentOutboundContext — LLM classified as NEW_TOPIC, no context attached', {
-    jobId: job.id, colleague: params.colleagueName, deltaMinutes: Math.round(deltaMinutes),
-  });
   return { matched: false, contextBlock: null };
 }
 
