@@ -2,6 +2,39 @@
 
 ---
 
+## 4.4.7 — five live-reported regressions, and a sixth caught before it shipped
+
+Every fix this release traces to a bug the owner watched happen in real time tonight — a Slack reply, a calendar screenshot, a booking — root-caused against the code on disk rather than assumed. A pre-wrap adversarial pass then caught a sixth regression inside the night's own diff: a leak-cleanup fix that had silenced a free/busy-failure honesty signal along with the leak it was removing, fixed before it ever reached a commit.
+
+**A relay's outcome stopped losing its own memory on an unthreaded reply.** #179's cross-thread tracker stamp was unconditionally minting a synthetic `requests` row on every relay, and that row's own "resolved" state could outrank the real request's when a colleague replied top-level instead of in-thread — masking a reject or a still-open amend as done. The stamp now records without minting a shadow row.
+
+**An autofix dismissal stopped being quietly undone by an unrelated write.** #180's permanent per-event dismissal (shipped last release) was being clobbered back down to a 24-hour bound by `move_meeting`'s own-change detector firing seconds later on the same event for an unrelated reason — so a rejected autofix ("Sync with Erez") kept re-firing once a day. The dismissal write is now monotonic: a later write can only raise the bound, never lower it.
+
+**An autofix's move claim now has to be true before it's said.** #180's third complaint — Maelle reporting a meeting moved when the calendar still showed it at its old time — is closed by reusing the same read-back probe `move_meeting`/`create_meeting` already call, before minting the colleague notice or the owner's shadow confirmation.
+
+**Meetings anchored to another meeting's end now land on the quarter-hour grid.** `create_meeting`'s anchor-to-event-end path inherited whatever offset the anchor event happened to end on (routinely 5 minutes short of the grid, by design, for the owner's own trailing-buffer duration presets) instead of snapping forward to the next tick.
+
+**A colleague stopped being addressed in the third person with a leaked internal id.** Maelle's own already-sent Slack replies were being silently reprocessed as fresh inbound text on thread catch-up, producing a literal `Name (slack_id: X)` disambiguation label inside her own next reply. A new scrub rule strips a fabricated id and converts a genuine one before either reaches Slack. The reprocessing itself — why her own messages get treated as unread at all — is a deeper, separate mechanism, queued next.
+
+### Fixed (high-impact)
+- [#179: Approval flows still broken](https://github.com/odahviing/AI-Executive-Assistant/issues/179) — the relay-history fix now also holds on a top-level, unthreaded colleague reply; last release's fix only covered the in-thread shape.
+- [#180: Active fix bad trigger and not working](https://github.com/odahviing/AI-Executive-Assistant/issues/180) — the permanent dismissal is now monotonic against a later, unrelated write, and the move claim now waits on a real read-back. Two of the ticket's three original complaints, both closed by this release.
+- A calendar autofix's colleague re-notify DM (on revert) was sending the real, private subject instead of the masked view — both are now computed and stored, and the revert path picks the right one per audience.
+- A colleague addressed in the third person with a leaked `(slack_id: X)` annotation in an MPIM reply — closed at the point the text reaches Slack.
+- A fourth email-leg attendee-identity field (day-level `attendee_hours_note` / `blocked_by`) missed by the previous results-branch strip, closed — plus two now-unreachable strip branches removed. **A regression caught before shipping:** the same cleanup deleted the only signal that a colleague's free/busy read had failed on the email leg, which would have made a read failure look silently confirmed-free to an external client; a name-free notice now carries that signal instead.
+
+### Fixed (small)
+- A colleague-facing "any update?" status render required the exact question phrasing; any acknowledgment in a terminal-state thread now renders it.
+
+### Not changed
+- The reported "wrong meeting duration" traced to the owner's own config (`config/users/idan.yaml`, `allowed_durations:[10,25,40,55]`) — not a regression, no code changed.
+- The reported "missed conflict" (Onn Nir) traced to the meeting Maelle herself correctly booked in response to the same request — not a missed conflict.
+- #174's duplicate-reminder-ping complaint, re-confirmed already closed by the single-process cutover (`ecosystem.config.js`, fork mode) rather than by new code.
+- #179's third complaint (a social "coda" arriving in the same message as the relay) stays deferred at the owner's own request.
+- Several sibling gaps surfaced by tonight's fixes are queued for the next run rather than built now: the same reprocessing bug that caused the MPIM leak (and separately duplicates Maelle's own replies in the model's context window), a second unresolved-attendee trigger with the same silent-confirmed-free shape as the honesty-signal regression above, and a rendering question on the scrubber's real-id branch.
+
+---
+
 ## 4.4.6 — Maelle remembers her own thread, and an unrejected reply finally binds
 
 Two waves in one night: the bug loop's first run since a heavy engine rewrite (backlog re-read, GitHub pull, log review, and the new Bounce and joint-fix-trace mechanisms all fired for real), then an owner-directed build against four open approval/scheduling tickets by name.

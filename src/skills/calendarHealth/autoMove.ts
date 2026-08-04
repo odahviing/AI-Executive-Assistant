@@ -114,7 +114,20 @@ export async function executeInternalAutoMove(params: {
   const { movable, origStart: mStart, origEnd: mEnd, durationMin, participantsRaw,
     conflictReason, moveVerb, keptEventId, issue, userEmail, ownerUserId, timezone,
     profile, context, internalActions } = params;
-  const subj = displaySubject(movable, profile) || 'Meeting';
+  // gh#180 (private-mask) — three audiences read a subject derived HERE: the
+  // owner (fix_detail / fix_error / shadowNotify — check_calendar_health's
+  // summary is an owner-only surface), the colleague notified of the move
+  // NOW (notifyColleagueOfMove's DM, M12-gated), and — via the outcomeJson
+  // this function writes below — a colleague notified again LATER if the
+  // owner reverts (handleRevertLastAutoMove, ops/handlers/calendarReads.ts,
+  // reads this same record back). displaySubject's default viewer is 'other'
+  // (mask) — right for a colleague, wrong for the owner text, which was
+  // showing him "[Private]" for his own meeting. Both views are computed and
+  // BOTH are stored in outcomeJson (`subject` = owner view, `colleague_subject`
+  // = masked view) so the revert path can pick the right one per audience
+  // instead of only having the owner's real subject to work with.
+  const subj = displaySubject(movable, profile, 'owner') || 'Meeting';
+  const colleagueSubj = displaySubject(movable, profile) || 'Meeting';
   const newStartIso = params.newStartIso;
   const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
 
@@ -158,7 +171,14 @@ export async function executeInternalAutoMove(params: {
       outcomeExternalEventId: movable.id,
       outcomeJson: {
         original_start: mStart.toISO(), original_end: mEnd.toISO(),
-        new_start: newStartIso, new_end: newEndIso, subject: subj, kept_event_id: keptEventId,
+        new_start: newStartIso, new_end: newEndIso, subject: subj,
+        // gh#180 (bounce 2) — colleague_subject is the M12-masked view, stored
+        // ALONGSIDE the owner's real `subject`. revert_last_auto_move reads
+        // this record to re-notify the SAME colleagues told about the move
+        // (calendarReads.ts's handleRevertLastAutoMove); without this field it
+        // had only the owner-view `subject` to work with and sent the real
+        // title to a colleague DM for a meeting the owner marked private.
+        colleague_subject: colleagueSubj, kept_event_id: keptEventId,
       },
       idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
       nextCheckAt: DateTime.now().plus({ hours: 12 }).toUTC().toISO()!,
@@ -169,6 +189,40 @@ export async function executeInternalAutoMove(params: {
   }
 
   await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
+
+  // gh#180-c — verify the PATCH actually landed BEFORE minting any claim that
+  // says it did (the colleague notice, the shadowNotify DM to the owner,
+  // issue.fixed). Graph can return 200 OK without the write applying (sync
+  // delay, race, or a recurring-instance id that silently rebinds) — reuses
+  // the read-back already shipped for move_meeting / create_meeting
+  // (connectors/graph/calendarReads.ts's verifyEventMoved) rather than a new one.
+  {
+    const { verifyEventMoved } = await import('../../connectors/graph/calendar');
+    const verify = await verifyEventMoved(userEmail, movable.id, newStartIso, timezone);
+    if (!verify.ok) {
+      logger.warn('auto-move verify failed — Graph accepted PATCH but readback drifted', {
+        eventId: movable.id, issueType: issue.type, reason: verify.reason,
+        expected: 'expected' in verify ? verify.expected : undefined,
+        got: 'got' in verify ? verify.got : undefined,
+      });
+      issue.fix_failed = true;
+      issue.fix_error = verify.reason === 'not_found'
+        ? `I tried to move "${subj}" but couldn't find it on the calendar afterward — left it for you to check.`
+        : `I tried to move "${subj}" but the calendar still shows it at its old time — left it for you to check.`;
+      if (autoMoveReq) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
+          closeRequest({
+            id: autoMoveReq.id, state: 'cancelled', closureReason: 'auto_move_write_did_not_land', closedBy: 'system',
+          });
+        } catch (reqErr) {
+          logger.warn('auto-move request-record close(cancelled) threw', { err: String(reqErr).slice(0, 160) });
+        }
+      }
+      return;
+    }
+  }
   try {
     const { rebalanceFloatingBlocksAfterMutation } = await import('../../utils/rebalanceFloatingBlocks');
     await rebalanceFloatingBlocksAfterMutation({ profile, affectedSlotIso: newStartIso, ownerSlackId: ownerUserId });
@@ -194,7 +248,7 @@ export async function executeInternalAutoMove(params: {
       profile, ownerChannel: context.channelId, ownerThreadTs: context.threadTs,
       colleagueSlackId: row.slack_id,
       colleagueName: a.emailAddress.name || row.name || email,
-      colleagueTz: row.timezone, meetingId: movable.id, meetingSubject: subj,
+      colleagueTz: row.timezone, meetingId: movable.id, meetingSubject: colleagueSubj,
       originalStartIso: mStart.toISO()!, originalEndIso: mEnd.toISO()!,
       newStartIso, newEndIso, conflictReason,
     });
@@ -222,6 +276,7 @@ export async function executeInternalAutoMove(params: {
         outcomeJson: {
           original_start: mStart.toISO(), original_end: mEnd.toISO(),
           new_start: newStartIso, new_end: newEndIso, subject: subj,
+          colleague_subject: colleagueSubj,
           notified_slack_ids: notifiedSlackIds, kept_event_id: keptEventId,
         },
       });

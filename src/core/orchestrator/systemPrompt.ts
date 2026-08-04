@@ -296,6 +296,12 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
   // REAL terminal state (+ an honest revive offer) so she never fabricates a pending
   // status, and can re-escalate on a yes (a fresh create_approval reaches ${firstName};
   // the terminal-prior mints a fresh row, not a silent reuse).
+  //
+  // status-facts-are-unconditional (2026-08-04) — this section is already gated on
+  // the REQUEST's terminal state, not on the colleague's wording, so the instruction
+  // inside it must fire the same way: lead with the real outcome no matter what the
+  // colleague's message is (a question, "thanks", or silence-filling ack) — a plain
+  // "thanks" is not a request for an update, but it deserves the same honest status.
   const threadRequestStatusSection = (() => {
     if (isOwner || !threadTs) return '';
     const latest = getLatestRequestForThread(user.slack_user_id, threadTs);
@@ -313,13 +319,13 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
     // composed, instead of only in the static block far above.
     const languageNote = ` Give this to the colleague fully in THEIR current-turn language — the decision happened in ${firstName}'s language and any calendar facts you cite are stored in English, neither is a language signal; translate the whole thing in, including a correction or an apology for an earlier mix-up. One language, start to finish.`;
     if (latest.state === 'resolved') {
-      return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} was RESOLVED by ${firstName}. If the colleague asks "any update?" / "did we hear back?", give them the real outcome (${firstName} decided it) — do NOT say you're "still waiting on ${firstName}."${languageNote}`;
+      return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} was RESOLVED by ${firstName}. Lead with that real outcome (${firstName} decided it) in your reply now, whatever the colleague just said — a question, "thanks", or just acknowledging all get the same honest status, not "still waiting on ${firstName}."${languageNote}`;
     }
     // expired / cancelled — the confabulation case
     const why = latest.state === 'expired'
       ? `it expired without a decision`
       : `it was cancelled`;
-    return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. If the colleague asks "any update?" / "did we hear back?", be HONEST — NEVER say "still waiting on ${firstName}" (it's dead; nothing is going to him). If they still want it, OFFER to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.${languageNote}`;
+    return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. Lead with that honest status in your reply now, whatever the colleague just said — a question, "thanks", or just acknowledging all get the same truth, never "still waiting on ${firstName}." If they still want it, offer to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.${languageNote}`;
   })();
 
   const ownerContextSection = isOwner ? `

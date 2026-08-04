@@ -162,7 +162,24 @@ export interface OutreachJob {
 }
 
 export function createOutreachJob(
-  params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'> & { status?: OutreachTransition },
+  params: Omit<OutreachJob, 'id' | 'created_at' | 'updated_at'> & {
+    status?: OutreachTransition;
+    // gh#179-b follow-up — a caller that only wants findOpenOutboundsForColleague
+    // to see this row (a connector-layer heuristic candidate, not a new work
+    // item) sets this to skip the bridge below entirely, leaving request_id
+    // NULL. Without it, EVERY outreach_jobs row mints a brand-new `requests`
+    // row, and a row stamped with the SAME origin_thread_ts as an existing
+    // request (resolver.ts's notifyRequesterOfDecision, relaying an
+    // approve/reject/amend decision back into its own thread) becomes the
+    // newest row for that thread_ts — hijacking getLatestRequestForThread
+    // (db/requests.ts) into reporting THIS row's synthetic 'resolved' state
+    // instead of the real request's (reject→'cancelled' reads as resolved;
+    // an still-open amend→'awaiting_colleague' reads as resolved too). This
+    // row never needs a lifecycle of its own — findOpenOutboundsForColleague
+    // reads owner_user_id/colleague_slack_id/followup_closed_at directly off
+    // outreach_jobs, no join, no request required.
+    skipRequestBridge?: boolean;
+  },
 ): string {
   const db = getDb();
   const id = `out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -175,8 +192,12 @@ export function createOutreachJob(
   //   - status='sent' + !await_reply → state='resolved' (informational, no reply needed)
   //   - status='cancelled'     → state='cancelled'
   // Terminal transitions in updateOutreachJob cascade to closeRequest.
+  // Skippable (see skipRequestBridge above) for a row that is pure connector-
+  // layer signal, never a work item — request_id stays NULL, and every
+  // reader that answers "is this open" for the requests spine already JOINs
+  // on request_id, so a NULL row is invisible to them by construction.
   let requestId: string | null = null;
-  try {
+  if (!params.skipRequestBridge) try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const requests = require('./requests') as typeof import('./requests');
     let reqState: 'in_flight' | 'awaiting_colleague' | 'resolved' | 'cancelled' = 'awaiting_colleague';

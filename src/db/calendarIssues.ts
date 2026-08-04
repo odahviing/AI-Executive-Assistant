@@ -714,18 +714,35 @@ export const DISMISSAL_NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
  *  end; that snapshot goes stale on a later reschedule, see the constant's own
  *  comment); the owner's conversational move of a just-auto-moved meeting (the
  *  inferred one, skills/meetings/ops/handlers/moveMeeting.ts) passes
- *  `now + OWNER_UNDO_SUPPRESSION_HOURS` when that is
- *  sooner. `eventEndMs` IS this row's expiry on both the read
- *  (`getSuppressedEventIds`) and the write (`upsertCluster`) path, so passing an
- *  earlier instant is how a caller bounds the suppression — there is no second
- *  timer and nothing to keep in sync.
+ *  `min(the moved meeting's own end, now + OWNER_UNDO_SUPPRESSION_HOURS)` — its
+ *  OWN bound, computed independently of whatever this row already holds.
+ *  `eventEndMs` IS this row's expiry on both the read (`getSuppressedEventIds`)
+ *  and the write (`upsertCluster`) path — but on an UPDATE to an EXISTING row
+ *  the two callers' bounds are MAX'd, never blindly replaced: see the
+ *  function's own comment below for why a later, smaller bound must not win.
  *
  *  v4.2.x — the lookup is PROBLEM-AXIS only (#148, QUESTION_ONLY_CLASSES): a
  *  day-shape decision must not reach over and flip an open `missing_category`
  *  question on the same event to `dismissed`, which the unscoped `event_id`-only
- *  match did — killing the question Maelle had just asked. The UPDATE now also
- *  re-stamps event_date + event_end_ms: the row speaks for the decision just
- *  taken, so it must not inherit an older row's date or a longer expiry. */
+ *  match did — killing the question Maelle had just asked. The UPDATE also
+ *  re-stamps event_date so the row speaks for the decision just taken, not an
+ *  older one's date.
+ *
+ *  event_end_ms on the UPDATE is MONOTONIC (max of existing and new),
+ *  never a blind overwrite. The two callers can fire on the SAME event id
+ *  SECONDS apart: `revert_last_auto_move` writes the STATED, permanent bound
+ *  (DISMISSAL_NEVER_EXPIRES) first, then, in the very same turn, the owner (or
+ *  a routine acting for him) moves the same event again for an unrelated
+ *  reason and `move_meeting`'s own-change detector writes its INFERRED,
+ *  OWNER_UNDO_SUPPRESSION_HOURS-bounded suppression on top of it. A blind
+ *  overwrite let the second, smaller bound silently downgrade the permanent
+ *  one — by the next sweep the "never again" dismissal had quietly expired
+ *  and the exact auto-fix the owner had already rejected fired again on the
+ *  same event, repeating once a day ("Sync with Erez", reported 4 times).
+ *  Math.max keeps a later, LARGER bound winning over a smaller stale one
+ *  (the case this comment used to describe) while making it impossible for
+ *  any write to shorten an existing one: "if I said no, it's no" can only be
+ *  reinforced by a later write, never quietly undone by a less-certain one. */
 export function dismissOverlapIssue(opts: {
   ownerUserId: string;
   eventId: string;
@@ -738,12 +755,19 @@ export function dismissOverlapIssue(opts: {
   const db = getDb();
   const questionClasses = Array.from(QUESTION_ONLY_CLASSES);
   const existing = db.prepare(`
-    SELECT id, status FROM calendar_issues
+    SELECT id, status, event_end_ms FROM calendar_issues
     WHERE owner_user_id = ? AND event_id = ?
       AND issue_class NOT IN (${questionClasses.map(() => '?').join(',')})
-  `).get(opts.ownerUserId, opts.eventId, ...questionClasses) as { id: string; status: string } | undefined;
+  `).get(opts.ownerUserId, opts.eventId, ...questionClasses) as { id: string; status: string; event_end_ms: number } | undefined;
   if (existing) {
     if (existing.status === 'approved') return;  // don't downgrade an explicit approval
+    const nextEndMs = Math.max(existing.event_end_ms, opts.eventEndMs);
+    // When this write did NOT extend the bound (a weaker, later signal landing
+    // on top of a stronger existing one), its notes describe a window that
+    // isn't what the row actually holds — keep the existing notes rather than
+    // overwrite them with a claim ("...leave it alone for 24h") the row's own
+    // event_end_ms would contradict.
+    const nextNotes = opts.eventEndMs >= existing.event_end_ms ? (opts.notes ?? null) : null;
     db.prepare(`
       UPDATE calendar_issues
       SET status = 'dismissed',
@@ -753,7 +777,7 @@ export function dismissOverlapIssue(opts: {
           notes = COALESCE(?, notes),
           updated_at = datetime('now')
       WHERE id = ?
-    `).run(opts.peerEventId ?? null, opts.eventDate, opts.eventEndMs, opts.notes ?? null, existing.id);
+    `).run(opts.peerEventId ?? null, opts.eventDate, nextEndMs, nextNotes, existing.id);
     return;
   }
   const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;

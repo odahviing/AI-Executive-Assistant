@@ -68,6 +68,7 @@ const TARGETS = [
   'both-engines',
   'SKILL.md',
   'SESSION_STARTER.md',
+  'WRAP_UP.md',
   'charter',
   'ledger',
   'scripts',

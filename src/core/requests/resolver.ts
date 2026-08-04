@@ -1173,6 +1173,58 @@ RULES:
     } catch (_) { /* best-effort — never block the relay on a history write */ }
   };
 
+  // gh#179-b — recordRelayInHistory above only helps a reply that lands back in
+  // origin_thread_ts: conversation-history lookup (buildTurnContext / the merge
+  // in processMessage.ts) is keyed purely on thread_ts. A plain, unthreaded
+  // reply — or one in a different thread/channel — mints its OWN thread_ts
+  // (handlers.ts:399, `threadTs = message.thread_ts ?? ts`), so that lookup
+  // finds nothing and gh#179's contradictory-status relay can still fire.
+  // Rather than a second thread-keyed mechanism, stamp this relay through the
+  // existing per-colleague, CROSS-THREAD, time-windowed tracker
+  // (connectors/slack/recentOutboundContext.ts) — the same `outreach_jobs` row
+  // shape `message_colleague(await_reply:false)` already writes for a
+  // fire-and-forget heads-up (skills/outreach.ts). Its own reader,
+  // findOpenOutboundsForColleague, keys ONLY on owner_user_id + colleague_slack_id
+  // and ignores thread entirely, so processMessage.ts's colleague-reply path
+  // (Path B, any thread shape) picks this up and surfaces "you just told them
+  // X" as grounding regardless of which thread the reply lands in.
+  // skipRequestBridge:true (db/jobs.ts) — this stamp must NOT mint a new
+  // `requests` row. createOutreachJob's default bridge births one paired
+  // to every row it inserts, and one stamped with THIS row's own
+  // origin_thread_ts would become the newest row for that thread_ts —
+  // hijacking getLatestRequestForThread (read by systemPrompt.ts's
+  // threadRequestStatusSection) into reporting the stamp's synthetic
+  // 'resolved' state instead of row's real one (a reject → 'cancelled'
+  // would read as resolved; a still-open amend → 'awaiting_colleague'
+  // would too) — reintroducing gh#179's contradictory-status bug on
+  // exactly the threaded shape it was fixed for. No lifecycle is needed
+  // here anyway: findOpenOutboundsForColleague reads owner_user_id /
+  // colleague_slack_id / followup_closed_at straight off outreach_jobs,
+  // no request join. 1:1 DM only (recentOutboundContext is skipped for
+  // MPIM/channel colleague replies — processMessage.ts's own guard), so
+  // this only fires off the direct-DM send below.
+  const stampRelayInOutboundTracker = (channelId: string | null): void => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createOutreachJob } = require('../../db/jobs') as typeof import('../../db/jobs');
+      createOutreachJob({
+        owner_user_id: row.owner_user_id,
+        owner_channel: channelId ?? row.origin_channel ?? '',
+        owner_thread_ts: row.origin_thread_ts ?? undefined,
+        colleague_slack_id: requesterSlackId,
+        colleague_name: requesterName ?? requesterSlackId,
+        message: body,
+        await_reply: 0,
+        sent_at: new Date().toISOString(),
+        skipRequestBridge: true,  // no new `requests` row — see comment above
+      });
+    } catch (err) {
+      logger.warn('notifyRequesterOfDecision — failed to stamp relay in recent-outbound tracker', {
+        id: row.id, err: String(err).slice(0, 200),
+      });
+    }
+  };
+
   // MPIM origin → post back in MPIM thread; else 1:1 DM.
   try {
     if (row.origin_is_mpim && row.origin_channel) {
@@ -1211,6 +1263,7 @@ RULES:
         id: row.id, requesterSlackId, verdict, threadTs: row.origin_thread_ts ?? null,
       });
       recordRelayInHistory(res.ref ?? null);
+      stampRelayInOutboundTracker(res.ref ?? null);
       stampIfTerminal();
     }
     await fireOwnerShadow();

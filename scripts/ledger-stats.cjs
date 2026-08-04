@@ -639,7 +639,17 @@ if (argv.includes('--report')) {
         const [sha, date, ...rest] = l.split('|');
         const subject = rest.join('|');
         const v = (subject.match(/^(\d+\.\d+\.\d+)\b/) || [])[1];
-        if (v) return { sha, date, v, subject };
+        // X-fix (2026-08-04) · a wrap's OWN bookkeeping commit ("4.4.6 bookkeeping:
+        // stamp the release") also starts with the version number, and `git log`
+        // is newest-first — so on every wrap this loop hit the bookkeeping commit
+        // BEFORE the real release and reported `lastWrapIso` as stale by however
+        // many seconds separate the two, forever. This was already found once and
+        // "fixed" by convention alone (db43fc0 deliberately dropped the version
+        // from its OWN subject, and said so) — a convention that regressed on the
+        // very next wrap (4414ea3) because nothing enforced it. Skip a bookkeeping
+        // subject here instead: it is the one place the loop can hold the line
+        // regardless of what a commit message happens to say.
+        if (v && !/\bbookkeeping\b/i.test(subject)) return { sha, date, v, subject };
       }
     } catch {
       /* no git history — nothing to compare against */
@@ -838,6 +848,18 @@ fs.readFileSync(LEDGER, 'utf8')
   });
 
 if (bad.length) console.error(`! ${bad.length} unparseable line(s): ${bad.slice(0, 10).join(', ')}\n`);
+
+// X-fix (2026-08-04) · a `kind:"run-manifest"` row is pure telemetry (item 1's
+// fix for "no run's manifest is durably recorded a day later") — not a finding,
+// not a dispatch, not something to decide. Every view below assumes a row is
+// one of those three, so a manifest row left in corrupts totals it was never
+// part of: proved on a fixture copy of the real ledger, it hijacked `--open`'s
+// "LAST RUN" line (claimed 1 row written, 1 closed — its own row), inflated the
+// ledger's own dispatch/run counts by one each, and minted a spurious lane
+// bucket off `source`. Filtered here, once, before `scoped` exists, so nothing
+// downstream has to know these rows exist. Still fully recoverable without this
+// script: `grep "\"kind\":\"run-manifest\"" .claude/agent-loop/ledger.jsonl`.
+for (let i = rows.length - 1; i >= 0; i--) if (rows[i] && rows[i].kind === 'run-manifest') rows.splice(i, 1);
 
 const scoped = rows.filter(
   (r) => (!since || (r.date || '') >= since) && (!laneFilter || r.lane === laneFilter),

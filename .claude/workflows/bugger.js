@@ -509,7 +509,7 @@ const EDITOR = {
             type: 'string',
             enum: ['atomic', 'needs-shaping'],
             description:
-              "`atomic` = known root, ONE lane, one edit — dispatch it. `needs-shaping` = it touches TWO OR MORE lanes, or the fix is a product decision rather than a repair, or the issue's premise does not survive contact with the code. A `needs-shaping` item is NOT dispatched: it goes to the owner with a proposed shape so he rules before a lane spends anything. Dispatching one as a bug does not fail loudly — it ping-pongs across lanes, burns the night, and still ends up needing his judgement afterwards, which is the most expensive possible order.",
+              "`atomic` = known root, ONE lane, one edit — dispatch it. `needs-shaping` = it touches TWO OR MORE lanes, or the fix is a product decision rather than a repair, or the issue's premise does not survive contact with the code. NOT knowing the call site yet is none of those three — that is ordinary root-cause tracing, the lane's job inside an atomic dispatch, not a reason to escalate (measured 2026-08-03: gh#179-a/179-b were shaped this way and each closed in one dispatch once a lane opened the logs). A `needs-shaping` item is NOT dispatched: it goes to the owner with a proposed shape so he rules before a lane spends anything. Dispatching one as a bug does not fail loudly — it ping-pongs across lanes, burns the night, and still ends up needing his judgement afterwards, which is the most expensive possible order.",
           },
           shapingQuestion: {
             type: 'string',

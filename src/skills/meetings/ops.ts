@@ -95,18 +95,22 @@ export class SchedulingSkill {
 
       // Same class of leak, find_available_slots' side: the owner-trade-off note
       // family (_over_optional_note / _attendee_conflicts_note /
-      // _attendee_busy_colleague_note / _no_all_attendee_free_note /
-      // _recovery_note, findAvailableSlots.ts:1696-1744) is second-person prose
-      // for the owner PLUS the raw per-slot data it narrates — a non-private
-      // meeting's subject (`over_optional`) and a colleague's email + busy reason
+      // _no_all_attendee_free_note / _recovery_note,
+      // findAvailableSlots.ts:1696-1744) is second-person prose for the owner
+      // PLUS the raw per-slot data it narrates — a non-private meeting's
+      // subject (`over_optional`) and a colleague's email + busy reason
       // (`attendee_conflicts`). Stripping only the notes would still leave that
       // data sitting in the model's context on a leg whose entire reply is
       // forwarded verbatim to an external party, so both the notes AND the
       // fields they describe are removed here — the same chokepoint, extended.
+      // (`_attendee_busy_colleague_note`, findAvailableSlots.ts:1708, is NOT
+      // stripped here — it's gated on `mustBe`, which requires
+      // `!isOwnerInitiatedSearch`; the email leg is always
+      // `senderRole:'owner'` so `isOwnerInitiatedSearch` is always true and the
+      // key can never be present on this leg — deleting it was dead code.)
       const r = result as Record<string, unknown>;
       delete r._over_optional_note;
       delete r._attendee_conflicts_note;
-      delete r._attendee_busy_colleague_note;
       delete r._no_all_attendee_free_note;
       delete r._recovery_note;
       // `attendee_status` (findAvailableSlots.ts's colleague-path / flexible-
@@ -144,9 +148,55 @@ export class SchedulingSkill {
       // Same family, main-branch sibling (findAvailableSlots.ts:1745-1747): a
       // second-person aside attached when no slot survived attendee filtering
       // ("these are his OWN open times — I could not confirm the other
-      // attendee(s) yet"). Owner-facing narration about an unverified colleague,
-      // same shape as _recovery_note above — stripped for the same reason.
-      delete r._attendee_unverified_note;
+      // attendee(s) yet"). NOT stripped here — it's gated on
+      // `usedColleagueOwnerOnly`, itself only ever set from
+      // `colleagueOwnerOnlySlots` (findAvailableSlots.ts:1086), which requires
+      // `!isOwnerInitiatedSearch` — always false on the email leg
+      // (senderRole:'owner' → isOwnerInitiatedSearch true) — so the key can
+      // never be present here; deleting it was dead code.
+
+      // email-siblings-not-stripped-results-branch — attendeeCheckWarnings'
+      // output (unresolved_attendee_emails / _attendee_email_warning /
+      // attendees_not_checked / _attendee_not_checked_warning) is the same
+      // class of leak: an internal colleague's raw email address, or a notice
+      // naming them. It rides BOTH attendeeCheckWarnings call sites
+      // (findAvailableSlots.ts:868 the candidate_validation branch, :950 the
+      // main slots pass) — both spread it at the TOP LEVEL of the result, so
+      // one delete here closes both branches at once.
+      //
+      // email-colleague-freebusy-failure-has-no-signal — `attendees_not_checked`
+      // /`_attendee_not_checked_warning` carry TWO facts bundled together: WHO
+      // failed to check (identity — must be stripped, same as every field
+      // above) and WHETHER a free/busy read failed at all (an honesty signal
+      // about the slots themselves, owed to whoever the reply goes to). Capture
+      // the second fact before the identity-carrying keys are deleted, and
+      // reattach it name-free — this is the ONLY leg whose reply is forwarded
+      // to an external client verbatim, so silence here reads as "confirmed
+      // free for everyone" when a colleague's calendar was never read.
+      const freeBusyReadFailed = Array.isArray(r.attendees_not_checked) && r.attendees_not_checked.length > 0;
+      delete r.unresolved_attendee_emails;
+      delete r._attendee_email_warning;
+      delete r.attendees_not_checked;
+      delete r._attendee_not_checked_warning;
+      if (freeBusyReadFailed) {
+        r._unverified_availability_notice =
+          "One or more attendees' calendars could not be read for this window, so these times are not confirmed free for everyone — say so plainly rather than presenting them as fully checked.";
+      }
+
+      // email-leg-payload-strips-attendee-identifying-fields — day_summary
+      // (attached whole at findAvailableSlots.ts:1692) carries the same two
+      // facts per DAY that are already stripped per-slot/per-result above:
+      // `blocked_by[].email` is a raw internal colleague address
+      // (findAvailableSlots.ts:661) and `attendee_hours_note` is that
+      // colleague's verbatim stated working hours (findAvailableSlots.ts:927).
+      // Neither is caught by the walks above — they live one level further
+      // out, on r.day_summary[] rather than r.results[] / r.slots[].
+      if (Array.isArray(r.day_summary)) {
+        for (const day of r.day_summary as Array<Record<string, unknown>>) {
+          delete day.blocked_by;
+          delete day.attendee_hours_note;
+        }
+      }
     }
     return result;
   }

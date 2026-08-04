@@ -72,6 +72,8 @@ If no lane fits, say so in `whyHypothesis` rather than guessing — a wrong lane
   2. the fix is a **product decision** rather than a repair;
   3. **the issue's premise does not survive contact with the code.**
 
+**"I don't yet know which call site" is NOT a fourth tell.** Root-cause tracing — reading the logs, walking from the symptom to the line that produces it — is the lane's job inside an `atomic` dispatch, same as any other issue; not knowing the answer yet is not one of the three tells above and is not grounds to send the question to the owner instead. Measured 2026-08-03: two items shaped this way (gh#179-a, gh#179-b — "which call site composes X") came back from the owner with *"investigate... don't convert to a design question"* and each closed in ONE dispatch once a lane actually opened the logs — the exact cost this classification exists to avoid, paid anyway.
+
 **Err toward `needs-shaping` when unsure.** A wrongly-shaped item costs one question. A wrongly-dispatched one ping-pongs across lanes, burns the night, and still lands on his desk needing the same judgement — the most expensive possible order. Measured 2026-07-26: one such item cost 411k across four lanes, and another arrived as a bug whose stated premise was false in the code, so the real fix was nothing like what the issue asked for.
 
 The number to watch is not how many issues there are. It is **how many need shaping** — more than one or two means the run should have stopped and asked.

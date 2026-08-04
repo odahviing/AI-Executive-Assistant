@@ -50,6 +50,17 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // and no "what time does your flight land?" for an event already on the
         // calendar. Done HERE, at the top, so the whole pipeline — travel context,
         // planMeeting, rules, confirm — sees the real start.
+        //
+        // Owner ruling (2026-08-04, verbatim): "you have to start meeting at
+        // 00:15:30:45 its from day one" — no exception for an anchored "right
+        // after X" booking. The anchor event's own end is very often 5 min
+        // short of the quarter (the 10/25/40/55 duration presets are built that
+        // way ON PURPOSE, to leave a trailing buffer) — anchoring literally onto
+        // that end (13:10) both breaks the quarter-hour rule AND defeats the
+        // buffer the anchor event's own duration was chosen to leave. Snap the
+        // anchor's end forward (never backward — never earlier than the anchor
+        // event's real end, which would silently overlap it) to the next
+        // :00/:15/:30/:45 tick, then compute end = snapped-start + duration.
         {
           const anchorId = typeof args.start_at_event_end_id === 'string' ? args.start_at_event_end_id.trim() : '';
           if (anchorId && !args.start) {
@@ -69,12 +80,16 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 message: `I couldn't load the event to anchor this block to (id ${anchorId}). Re-fetch it from the calendar and pass its current id, or give me an explicit start time.`,
               };
             }
-            args.start = anchor.end.toISO();
-            args.end = anchor.end.plus({ minutes: dur }).toISO();
-            args.start_is_explicit = true;  // land exactly at the event end — never grid-snap off it
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { alignUpQuarter } = require('../../../../utils/floatingBlocks') as typeof import('../../../../utils/floatingBlocks');
+            const snappedStartMs = alignUpQuarter(anchor.end.toMillis(), timezone);
+            const snappedStart = DateTime.fromMillis(snappedStartMs, { zone: timezone });
+            args.start = snappedStart.toISO();
+            args.end = snappedStart.plus({ minutes: dur }).toISO();
+            args.start_is_explicit = true;  // already grid-aligned above — skip the later off-grid-only snap
             delete args.start_timezone;   // start/end are now owner-tz instants — skip the reinterpret
-            logger.info('create_meeting — anchored to event end', {
-              anchorId, anchorSubject: anchor.subject, start: args.start, end: args.end, durationMinutes: dur,
+            logger.info('create_meeting — anchored to event end, snapped forward to quarter grid', {
+              anchorId, anchorSubject: anchor.subject, anchorEnd: anchor.end.toISO(), start: args.start, end: args.end, durationMinutes: dur,
             });
           }
         }

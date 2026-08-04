@@ -37,7 +37,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { subjectViewerFor } from '../../../../utils/displaySubject';
+import { subjectViewerFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -335,6 +335,14 @@ export async function handleRevertLastAutoMove(args: Record<string, unknown>, ct
         const originalEnd = typeof oc.original_end === 'string' ? oc.original_end : undefined;
         const revNewStart = typeof oc.new_start === 'string' ? oc.new_start : undefined;
         const revSubject = typeof oc.subject === 'string' ? oc.subject : 'the meeting';
+        // gh#180 (bounce 2) — the colleague-masked view of the same subject,
+        // stored alongside `subject` (owner view) by autoMove.ts specifically
+        // so THIS re-notify DM to colleagues never carries the real title of
+        // a meeting the owner marked private. Records written before this
+        // field existed (pre-deploy, within the 12h revert TTL) have no
+        // `colleague_subject` — fall back to the mask rather than the owner's
+        // real subject: M12's "permission unclear → return less" default.
+        const revColleagueSubject = typeof oc.colleague_subject === 'string' ? oc.colleague_subject : PRIVATE_MASK;
         const keptEventId = typeof oc.kept_event_id === 'string' ? oc.kept_event_id : null;
         const notifiedSlackIds = Array.isArray(oc.notified_slack_ids)
           ? (oc.notified_slack_ids as unknown[]).filter((x): x is string => typeof x === 'string')
@@ -392,7 +400,7 @@ export async function handleRevertLastAutoMove(args: Record<string, unknown>, ct
             const origLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
             for (const sid of notifiedSlackIds) {
               try {
-                await conn?.sendDirect(sid, `Quick update: "${revSubject}" is back to its original time (${origLocal}) — please disregard my earlier note about moving it.`);
+                await conn?.sendDirect(sid, `Quick update: "${revColleagueSubject}" is back to its original time (${origLocal}) — please disregard my earlier note about moving it.`);
                 reNotified++;
               } catch { /* skip one */ }
             }

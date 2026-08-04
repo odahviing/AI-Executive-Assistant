@@ -6,6 +6,8 @@
  *   - Tool names (analyze_calendar, get_free_busy, ... all 57 of them)
  *   - "- " separators (AI writing tell, see systemPrompt PUNCTUATION rule)
  *   - Leftover orphan backticks, empty lines, doubled whitespace
+ *   - The "Name (slack_id: ID)" inbound disambiguation label, if echoed back
+ *     into a reply verbatim instead of a rendered `<@id>` mention
  *
  * Transport-agnostic — applies identically to Slack, email, WhatsApp.
  * Transport-specific formatting (Slack's `*bold*` dialect, HTML for email,
@@ -191,6 +193,30 @@ const BARE_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID, 'g');
 export const RAW_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID);
 
 /**
+ * v4.4.x — the "Name (slack_id: ID)" disambiguation label is an INBOUND-only
+ * convention (`resolveSlackMentions` in connectors/slack/app/helpers.ts,
+ * and the MPIM/thread participant rosters built in connectors/slack/app/
+ * handlers.ts) that tells the model who an `<@ID>` mention resolved to. It
+ * was never meant to be reproduced — a person should be addressed with a
+ * real `<@id>` mention, never handed a copy of the internal label. Observed
+ * leaking into an MPIM reply verbatim, twice in the same thread, addressing
+ * the colleague in the third person: "Rita Kaplan Solomon (slack_id: @Rita
+ * Kaplan)" — the model imitating the convention it was shown in the
+ * participant roster rather than emitting a rendered mention, and inventing
+ * a non-id ("@Rita Kaplan") when it did.
+ *
+ * The annotation itself must never reach Slack either way, but the two
+ * cases differ in what's recoverable: when the captured value is actually
+ * SLACK_ID_SHAPE — the model had the real id and just wrapped it wrong —
+ * swap the whole annotation for the working `<@id>` mention it owed the
+ * recipient (so the push notification the instruction asked for still
+ * fires). When it isn't (a fabricated value, or a name), there is no id to
+ * recover — drop the annotation outright rather than mint a fake mention.
+ */
+const SLACK_ID_ANNOTATION_RE = /(\s*)\(slack_id:\s*([^)]*)\)/gi;
+const SLACK_ID_SHAPE_ONLY_RE = new RegExp(`^${SLACK_ID_SHAPE}$`);
+
+/**
  * An internal work-item id — the inverse of the four expressions that MINT one:
  * `req_` (db/requests.ts:51), `task_` (tasks/index.ts:13), `out_` (db/jobs.ts:164),
  * `ci_` (db/calendarIssues.ts:372). A structured token, so regex is the allowed kind.
@@ -214,6 +240,22 @@ export const INTERNAL_WORK_ITEM_ID_RE = /\b(?:(?:req|task)_[a-z0-9][a-z0-9_]*|(?
 export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
+    // Runs BEFORE the bare-id wrapper: the disambiguation label is never
+    // legitimate output. A genuine id inside becomes the real mention it
+    // should have been; a fabricated one is dropped — see the doc above.
+    //
+    // The match consumes the WHITESPACE before "(slack_id: …)" too (so a
+    // dropped/fabricated annotation doesn't leave a stray space behind — the
+    // trailing space after ")" already does that job). The valid-id branch
+    // must hand that leading whitespace back: it's the only thing separating
+    // the person's name from the mention that replaces the annotation, and
+    // dropping it glued them into one token ("Name<@U123>") — the swallowed-
+    // whitespace bug the bounce named. `lead` restores it; the drop branch
+    // stays empty on purpose (same reasoning as before: nothing to restore).
+    .replace(SLACK_ID_ANNOTATION_RE, (_m: string, lead: string, idContent: string) => {
+      const trimmed = idContent.trim();
+      return SLACK_ID_SHAPE_ONLY_RE.test(trimmed) ? `${lead}<@${trimmed}>` : '';
+    })
     // Always emits the rendered form. The stray `>` is only swallowed when a stray
     // `<` came with it — otherwise it belonged to whatever preceded the id, so it is
     // handed back untouched.
