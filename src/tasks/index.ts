@@ -1,6 +1,7 @@
 import { getDb } from '../db';
 import { getActiveOutreachForThread } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
+import { DISPATCHERS } from './dispatchers';
 import logger from '../utils/logger';
 import type { Task, TaskType, TaskStatus } from './types';
 
@@ -94,12 +95,23 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
 } {
   const db = getDb();
 
+  // Only types with a live dispatcher can ever leave these statuses — a type
+  // whose dispatcher was removed (e.g. 'coordination', retired 3.5.0) is a
+  // stranded timer: nothing will ever execute or complete it, so a row stuck
+  // in pending_colleague from before the removal would otherwise render as
+  // "ACTIVE IN THIS THREAD — you already committed to these" forever
+  // (buildTurnContext.ts). Bound the query to DISPATCHERS' keys — the same
+  // canonical live-type set the runner itself dispatches against — instead of
+  // naming retired types one at a time.
+  const liveTypes = Object.keys(DISPATCHERS);
+  const placeholders = liveTypes.map(() => '?').join(', ');
   const tasks = db.prepare(`
     SELECT * FROM tasks
     WHERE owner_user_id = ?
     AND owner_thread_ts = ?
     AND status IN ('new', 'in_progress', 'pending_owner', 'pending_colleague')
-  `).all(ownerUserId, threadTs) as Task[];
+    AND type IN (${placeholders})
+  `).all(ownerUserId, threadTs, ...liveTypes) as Task[];
 
   // #41 — "is this outreach still open?" is a question about its REQUEST, and it
   // is asked in exactly one place (db/jobs.ts). This is the most consequential

@@ -21,11 +21,12 @@
  *   At the Slack connector layer — BEFORE the orchestrator runs — look up
  *   recent OUTBOUND DMs to this colleague. Apply two time-windows:
  *
- *     1. ≤ 24 h from sent_at    → ambiguous, ALWAYS classify. Run a small
- *        Sonnet classifier: "is this inbound a response to that outbound,
- *        or a new topic?" If response → attach context + close the
- *        outbound. If new topic → leave the outbound open; treat inbound
- *        as fresh.
+ *     1. ≤ 24 h from sent_at    → ambiguous, ALWAYS classify. ONE Sonnet
+ *        call is given EVERY still-open candidate for this colleague
+ *        (most-recent-first) and returns which single one (if any) the
+ *        inbound continues. A match → attach that candidate's context +
+ *        close it. No match (NEW_TOPIC against all of them) → leave every
+ *        candidate open; treat inbound as fresh.
  *
  *     2. > 24 h                 → auto-expire the outbound (mark
  *        followup_closed_at). Treat inbound as new.
@@ -38,10 +39,16 @@
  *   to the open outbound AND closed it, starving the real continuation of
  *   that outbound (which typically arrives within the same few minutes)
  *   of any context at all. Colleague identity is not topic identity, so
- *   every inbound within 24h is now classified — the classifier already
- *   fails open to RESPONSE (see below), so genuine quick acks ("Ok",
- *   "thanks") still attach context exactly as before; only a real
- *   new-topic message now correctly leaves the outbound open.
+ *   every inbound within 24h is now classified.
+ *
+ *   v2.6.3 — the classifier used to run per-candidate (a serial loop, one
+ *   RESPONSE/NEW_TOPIC call per open job, fails open to RESPONSE). It now
+ *   takes every open candidate in ONE call and returns the id of the single
+ *   one continued (or NEW_TOPIC for all), so a colleague with several open
+ *   topics costs exactly one Sonnet call, not one per topic. Fails open to
+ *   the MOST RECENT candidate, so genuine quick acks ("Ok", "thanks") still
+ *   attach context exactly as before; only a real new-topic message now
+ *   correctly leaves every candidate open.
  *
  *   Plus two explicit acknowledgment signals (any age, while open):
  *     • Emoji reaction on the outbound message → close as 'emoji_ack'.
@@ -89,9 +96,12 @@ export interface RecentOutboundContextResult {
 }
 
 /**
- * Look up EVERY OPEN outreach_jobs row for this colleague within the last
- * 24h, most recent first. "Open" here means CONVERSATIONALLY open —
- * `followup_closed_at IS NULL` — which is this module's own signal,
+ * Look up EVERY OPEN outreach_jobs row for this colleague, most recent
+ * first — including ones already past the 24h auto-expire mark; the caller
+ * (getRecentOutboundContext) is what applies the 24h split, and it needs
+ * those stale rows in hand so it can actually close them. "Open" here means
+ * CONVERSATIONALLY open — `followup_closed_at IS NULL` — which is this
+ * module's own signal,
  * deliberately independent of the request's lifecycle. That independence is
  * the point, not an oversight: a fire-and-forget DM
  * (`message_colleague(await_reply:false)` — the case this module exists for)
@@ -112,17 +122,20 @@ function findOpenOutboundsForColleague(params: {
   colleagueSlackId: string;
 }): OutreachJob[] {
   const db = getDb();
-  const cutoff = new Date(Date.now() - AUTO_EXPIRE_HOURS * 60 * 60 * 1000).toISOString();
+  // No cutoff here on purpose — the >24h ones are exactly what pass 1 in
+  // getRecentOutboundContext below needs to see so it can actually mark them
+  // 'auto_expired_24h'. A cutoff here would starve that branch permanently:
+  // any row already older than 24h would never be fetched, so it could never
+  // be closed, and followup_closed_at would stay NULL on it forever.
   return db.prepare(`
     SELECT * FROM outreach_jobs
     WHERE owner_user_id = ?
       AND colleague_slack_id = ?
       AND followup_closed_at IS NULL
       AND sent_at IS NOT NULL
-      AND datetime(sent_at) >= datetime(?)
     ORDER BY datetime(sent_at) DESC
     LIMIT 10
-  `).all(params.ownerUserId, params.colleagueSlackId, cutoff) as OutreachJob[];
+  `).all(params.ownerUserId, params.colleagueSlackId) as OutreachJob[];
 }
 
 /**

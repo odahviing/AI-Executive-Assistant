@@ -14,6 +14,7 @@ import type { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { getRequest, updateRequest } from '../../db/requests';
+import { appendToConversation } from '../../db/conversations';
 import { closeRequest } from './closeRequest';
 import type { RequestRow } from './types';
 import { parseDetails } from './types';
@@ -1148,12 +1149,37 @@ RULES:
     return;
   }
 
+  // gh#179-a — the relay was posted into origin_thread_ts (below) but never
+  // written back into the DB-backed conversation store that same thread key
+  // indexes. A 1:1 DM never merges live Slack thread replies into
+  // the orchestrator's context (processMessage.ts — merge is channel/MPIM
+  // only, since a 1:1 DM "misses nothing" through the normal inbound path);
+  // this send is the ONE exception, since it goes out through conn.sendDirect
+  // instead of the normal reply pipeline (postReply.ts), which is what
+  // appends every other assistant turn. So the requester's very next message
+  // in the same thread ran through the orchestrator with no memory that this
+  // relay ever happened — Sonnet's last recollection was still "checking with
+  // the owner", and it answered accordingly, contradicting the relay that had
+  // just gone out (Yael, 2026-08-03: told "approved", then her own follow-up
+  // reply got "will update when Idan will update"). Appending here closes
+  // that gap the same way coordinator.ts / meetingReschedule.ts / briefs.ts
+  // already do for their own outbound relays.
+  const recordRelayInHistory = (channelId: string | null): void => {
+    if (!row.origin_thread_ts) return;  // no known thread key to index under
+    try {
+      appendToConversation(row.origin_thread_ts, channelId ?? row.origin_channel ?? '', {
+        role: 'assistant', content: body,
+      });
+    } catch (_) { /* best-effort — never block the relay on a history write */ }
+  };
+
   // MPIM origin → post back in MPIM thread; else 1:1 DM.
   try {
     if (row.origin_is_mpim && row.origin_channel) {
       const res = await conn.postToChannel(row.origin_channel, body, { threadTs: row.origin_thread_ts ?? undefined });
       if (res.ok) {
         logger.info('notifyRequesterOfDecision — posted in MPIM origin', { id: row.id, channel: row.origin_channel });
+        recordRelayInHistory(row.origin_channel);
         stampIfTerminal();
         await fireOwnerShadow();
         return;
@@ -1170,7 +1196,9 @@ RULES:
     // turn with historyLength=1 and hallucinated (2026-05-20 Yael case at
     // 10:04:17 UTC, thread `1779271297.491389`). Passing origin_thread_ts
     // keeps the relay inside the original thread; the requester's reply
-    // continues the same thread; Sonnet sees the full booking conversation.
+    // continues the same thread; Sonnet sees the full booking conversation —
+    // now genuinely true (see recordRelayInHistory above), since that thread
+    // continuation reads the DB-backed store this send writes into.
     const res = await conn.sendDirect(requesterSlackId, body, {
       threadTs: row.origin_thread_ts ?? undefined,
     });
@@ -1182,6 +1210,7 @@ RULES:
       logger.info('notifyRequesterOfDecision — direct DM sent', {
         id: row.id, requesterSlackId, verdict, threadTs: row.origin_thread_ts ?? null,
       });
+      recordRelayInHistory(res.ref ?? null);
       stampIfTerminal();
     }
     await fireOwnerShadow();

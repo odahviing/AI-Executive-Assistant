@@ -130,7 +130,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
-import { displaySubject, type SubjectViewer } from './displaySubject';
+import { displaySubject, PRIVATE_MASK, type SubjectViewer } from './displaySubject';
 import { blockAppliesOnDay, getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
 import { getEffectiveWorkDayForInstant, slotDayMinutes, type EffectiveWorkDay } from './workHours';
 
@@ -589,29 +589,35 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     if (role === 'optional') {
       if (level === 'free') {
         level = 'optional';
-        overOptional = displaySubject(ev, profile, viewer) || 'an optional meeting';
+        {
+          const subj = displaySubject(ev, profile, viewer);
+          overOptional = (subj && subj !== PRIVATE_MASK) ? subj : 'an optional meeting';
+        }
       }
       continue;
     }
     // A real commitment. Highest tier wins — stop looking.
     level = 'unfiltered';
     overOptional = undefined;
-    overCommitment = {
-      id: ev.id,
-      subject: displaySubject(ev, profile, viewer) || 'meeting',
-      attendeeCount: (ev.attendees ?? []).filter(
-        a => (a?.emailAddress?.address ?? '').toLowerCase() !== ownerEmailLower,
-      ).length,
-      // An all-day block (vacation / OOF / conference) has no clock window —
-      // rendering it as "00:00–00:00" reads like a zero-length meeting. It only
-      // became visible here once the scan started reporting all-day commitments
-      // ahead of the work-hours rule.
-      window: ev.isAllDay
-        ? 'all day'
-        : `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
-      ...(isAllDayOutOfOffice(ev) ? { allDayOutOfOffice: true as const } : {}),
-      ...(ev.isAllDay ? { isAllDay: true as const } : {}),
-    };
+    {
+      const commitSubj = displaySubject(ev, profile, viewer);
+      overCommitment = {
+        id: ev.id,
+        subject: (commitSubj && commitSubj !== PRIVATE_MASK) ? commitSubj : 'meeting',
+        attendeeCount: (ev.attendees ?? []).filter(
+          a => (a?.emailAddress?.address ?? '').toLowerCase() !== ownerEmailLower,
+        ).length,
+        // An all-day block (vacation / OOF / conference) has no clock window —
+        // rendering it as "00:00–00:00" reads like a zero-length meeting. It only
+        // became visible here once the scan started reporting all-day commitments
+        // ahead of the work-hours rule.
+        window: ev.isAllDay
+          ? 'all day'
+          : `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
+        ...(isAllDayOutOfOffice(ev) ? { allDayOutOfOffice: true as const } : {}),
+        ...(ev.isAllDay ? { isAllDay: true as const } : {}),
+      };
+    }
     break;
   }
   // The unconditional facts, spread into EVERY return below — including the ones

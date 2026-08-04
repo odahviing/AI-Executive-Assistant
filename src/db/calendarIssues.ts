@@ -568,7 +568,16 @@ export function getCalendarIssueById(id: string): CalendarIssueRow | null {
  *  QUESTION_ONLY_CLASSES). Omit it for the conflict axis, which is what every
  *  day-shape detector wants: an answered "which category?" must never silence a
  *  double-booking. Pass a question-only class to get that question's own settled
- *  set (so a dismissed category ask isn't re-narrated every run). */
+ *  set (so a dismissed category ask isn't re-narrated every run).
+ *
+ *  gh#180 — `event_end_ms` on a row is a WRITE-TIME choice, not a fixed
+ *  "meeting end": a STATED rejection (`revert_last_auto_move`) writes
+ *  `DISMISSAL_NEVER_EXPIRES` (permanent — the owner said no, period); an
+ *  INFERRED one (owner quietly moved a just-auto-moved meeting back himself,
+ *  `moveMeeting.ts`) writes a real, short bound (`OWNER_UNDO_SUPPRESSION_HOURS`)
+ *  because it's a guess at intent, not a statement. This filter has to stay —
+ *  the inferred case must actually expire — see `DISMISSAL_NEVER_EXPIRES`'s own
+ *  comment for why the stated case doesn't go stale the same way. */
 export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass): Set<string> {
   const db = getDb();
   const questionAxis = forClass !== undefined && QUESTION_ONLY_CLASSES.has(forClass);
@@ -655,8 +664,8 @@ export function dismissFloatingBlockGap(opts: {
  * a meeting an autofix had just moved is a decision read off an action, not a
  * stated one ("if i change the auto fix, don't change it again" — owner
  * 2026-07-26), so it expires; a stated one (`revert_last_auto_move`, which says
- * "I won't auto-move it again") passes the occurrence's own end and holds for its
- * life.
+ * "I won't auto-move it again") passes `DISMISSAL_NEVER_EXPIRES` and holds for
+ * its life.
  *
  * 24h, from the sweep cadence rather than a round number: active mode runs twice a
  * day — the daily brief (tasks/briefs.ts, active mode on today) and the
@@ -667,6 +676,28 @@ export function dismissFloatingBlockGap(opts: {
  * morning's. 24h covers one full cycle of BOTH sweeps and no more.
  */
 export const OWNER_UNDO_SUPPRESSION_HOURS = 24;
+
+/**
+ * gh#180 — sentinel `event_end_ms` for a STATED "don't auto-fix this event
+ * again" dismissal (`revert_last_auto_move`). Originally this passed the
+ * occurrence's OWN end (`originalEnd`) — a snapshot of where the meeting sat at
+ * the moment of rejection. That snapshot goes stale the instant the SAME event
+ * is later rescheduled to a later end (an ordinary, unrelated move): the cascade
+ * that keeps a row's `event_end_ms` fresh (`resolveCalendarIssuesForMeeting`)
+ * deliberately never touches a TERMINAL row (so it can't clobber an
+ * acknowledged decision), so the dismissal row was frozen at the old
+ * timestamp. Once "now" passed it, `getSuppressedEventIds`'s
+ * `event_end_ms > now` filter silently dropped the row, and the exact autofix
+ * the owner had already rejected fired again on the very same event id
+ * ("Sync with Erez" — rejected once, re-triggered weeks later after the
+ * meeting moved further out). A stated rejection means "this event id, don't
+ * auto-fix it again" — not "until this snapshot of its end happens to lapse" —
+ * so it's written as a value that never satisfies `event_end_ms <= now`.
+ * Event ids are unique per occurrence and never reused, so this can't leak
+ * onto an unrelated later event, and a recurring series' other occurrences
+ * already carry their own distinct ids — no recurrence-scope logic needed.
+ */
+export const DISMISSAL_NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
 
 /** v3.7.x (#139) — record that the owner REJECTED an active-mode auto-move of an
  *  overlapping meeting. Writes a terminal `dismissed` overlap row anchored on the
@@ -679,9 +710,11 @@ export const OWNER_UNDO_SUPPRESSION_HOURS = 24;
  *  `approved` waiver is left alone; anything else is ensured terminal-dismissed.
  *
  *  Two callers, two windows, one mechanism: `revert_last_auto_move` (the stated
- *  decision) passes the occurrence's end; the owner's conversational move of a
- *  just-auto-moved meeting (the inferred one, skills/meetings/ops/handlers/
- *  moveMeeting.ts) passes `now + OWNER_UNDO_SUPPRESSION_HOURS` when that is
+ *  decision) passes `DISMISSAL_NEVER_EXPIRES` (gh#180 — NOT the occurrence's own
+ *  end; that snapshot goes stale on a later reschedule, see the constant's own
+ *  comment); the owner's conversational move of a just-auto-moved meeting (the
+ *  inferred one, skills/meetings/ops/handlers/moveMeeting.ts) passes
+ *  `now + OWNER_UNDO_SUPPRESSION_HOURS` when that is
  *  sooner. `eventEndMs` IS this row's expiry on both the read
  *  (`getSuppressedEventIds`) and the write (`upsertCluster`) path, so passing an
  *  earlier instant is how a caller bounds the suppression — there is no second

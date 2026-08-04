@@ -74,12 +74,11 @@ export class SchedulingSkill {
       (result as Record<string, unknown>).owner_override_not_applied = notice;
     }
 
-    // gh#189 (verify) — `override_notice` (createMeeting.ts, sourced from
-    // planMeeting.ts's overrideNotice) and `_attendee_busy_note` (moveMeeting.ts)
-    // are second-person asides written FOR THE OWNER ("this books over your
-    // optional standup", "double-books you over 'X' with Sarah") and can embed
-    // another private meeting's SUBJECT or an attendee's busy status. Every
-    // email turn's reply IS the client-forwardable text (systemPrompt.ts's
+    // email-aside-leak-no-channel-scope — `override_notice` (createMeeting.ts,
+    // sourced from planMeeting.ts's overrideNotice) is a second-person aside
+    // written FOR THE OWNER ("this books over your optional standup") and can
+    // embed another private meeting's SUBJECT or an attendee's busy status.
+    // Every email turn's reply IS the client-forwardable text (systemPrompt.ts's
     // emailReplySection, gh#175a removed the owner-only FOR-YOU/cut-line split
     // entirely) — there is no owner-facing side channel on that leg for such a
     // note to land in instead, so if left on the payload it has nowhere to go
@@ -87,9 +86,67 @@ export class SchedulingSkill {
     // here, the one point every direct op returns through (same chokepoint as
     // the notice attached just above), rather than gate each handler's attach
     // site individually. Rule 10: when the audience is unclear, return less.
+    // (`_attendee_busy_note`, moveMeeting.ts's twin of this note, is NOT
+    // stripped here — move_meeting is absent from CHANNEL_TOOL_CLAMP.email
+    // (registry.ts), so it structurally can never reach an email-leg result;
+    // deleting a key that can never be present was dead code.)
     if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
       delete (result as Record<string, unknown>).override_notice;
-      delete (result as Record<string, unknown>)._attendee_busy_note;
+
+      // Same class of leak, find_available_slots' side: the owner-trade-off note
+      // family (_over_optional_note / _attendee_conflicts_note /
+      // _attendee_busy_colleague_note / _no_all_attendee_free_note /
+      // _recovery_note, findAvailableSlots.ts:1696-1744) is second-person prose
+      // for the owner PLUS the raw per-slot data it narrates — a non-private
+      // meeting's subject (`over_optional`) and a colleague's email + busy reason
+      // (`attendee_conflicts`). Stripping only the notes would still leave that
+      // data sitting in the model's context on a leg whose entire reply is
+      // forwarded verbatim to an external party, so both the notes AND the
+      // fields they describe are removed here — the same chokepoint, extended.
+      const r = result as Record<string, unknown>;
+      delete r._over_optional_note;
+      delete r._attendee_conflicts_note;
+      delete r._attendee_busy_colleague_note;
+      delete r._no_all_attendee_free_note;
+      delete r._recovery_note;
+      // `attendee_status` (findAvailableSlots.ts's colleague-path / flexible-
+      // requester annotation, ~line 1496) is the same shape of fact — an
+      // internal colleague's email + free/busy status per slot — and reaches
+      // an owner-initiated email turn whenever ignore_attendee_availability or
+      // a granted relaxed override is set, same as the fields above.
+      if (Array.isArray(r.slots)) {
+        for (const s of r.slots as Array<Record<string, unknown>>) {
+          delete s.over_optional;
+          delete s.attendee_conflicts;
+          delete s.attendee_status;
+        }
+      }
+      // email-siblings-not-stripped-results-branch — the SAME leak, the
+      // candidate_validation branch's shape (findAvailableSlots.ts:835-885, taken
+      // when the caller checks specific proposed times rather than searching):
+      // no top-level `slots`, so the walk above never reaches it. Each
+      // `results[]` item's `broken_rule` is the RAW per-attendee reason string
+      // (`outside_attendee_work_hours:<email>` / `attendee_busy_collision:<email>`,
+      // findAvailableSlots.ts:824-825) and `attendee_hours_note` spells out that
+      // same colleague's stated working hours verbatim (findAvailableSlots.ts:826-834,
+      // 140-142) — both left in place for the owner's own view; `broken_rule_label`
+      // is the clean, human, name-free equivalent and stays. `travelers`
+      // (findAvailableSlots.ts:1513-1519, top-level — not nested in `slots`, so the
+      // per-slot walk above never reached it either) is a colleague's email + travel
+      // location, same shape of fact as `attendee_status`.
+      if (Array.isArray(r.results)) {
+        for (const item of r.results as Array<Record<string, unknown>>) {
+          delete item.broken_rule;
+          delete item.attendee_hours_note;
+        }
+      }
+      delete r.travelers;
+      // Same family, main-branch sibling (findAvailableSlots.ts:1745-1747): a
+      // second-person aside attached when no slot survived attendee filtering
+      // ("these are his OWN open times — I could not confirm the other
+      // attendee(s) yet"). Owner-facing narration about an unverified colleague,
+      // same shape as _recovery_note above — stripped for the same reason.
+      delete r._attendee_unverified_note;
     }
     return result;
   }

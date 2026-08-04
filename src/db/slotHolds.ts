@@ -6,8 +6,9 @@
  * A hold is a flat, single-leg reservation with a hot read (the slot-finder
  * checks it on every search), so it lives in its OWN table — NOT the requests
  * spine (a hold isn't multi-step work awaiting anyone's action; forcing it onto
- * the spine would degenerate the row + overload `follow_up`). Storage analysis:
- * `.claude/RESERVE_SLOT_PROJECT.md`.
+ * the spine would degenerate the row + overload `follow_up`, and the spine's
+ * reconcile/retention/notification machinery would have to learn to ignore a
+ * row that blocks nobody).
  *
  * Lifecycle: active → (released | expired). Expiry = min(2 owner-workdays,
  * slot-start), enforced by `sweepExpiredSlotHolds` on the 5-min tick, which

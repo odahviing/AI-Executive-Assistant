@@ -377,9 +377,9 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
  *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;
  *     it is not — rule 4 is the undecided-frame case at :954, and this is its own
  *     rule, corrected 2026-08 (o#190).
- *   - runOutputGates.ts:1035 — the pre-rewrite live re-check found this instant no
+ *   - runOutputGates.ts:999 — the pre-rewrite live re-check found this instant no
  *     longer hard-blocked (invalidation rule 6); dropped WITHOUT a rewrite.
- *   - runOutputGates.ts:1061 — a rewrite landed on it (invalidation rule 3).
+ *   - runOutputGates.ts:1025 — a rewrite landed on it (invalidation rule 3).
  * A caller adding another should update this list AND the ledger's own
  * INVALIDATION doc above in the same change — this file's own header undercounted
  * its callers once already.

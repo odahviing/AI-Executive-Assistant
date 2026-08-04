@@ -304,14 +304,22 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
       return '';
     }
     const subj = latest.subject ? `"${latest.subject}"` : 'the request in this thread';
+    // gh#179-b — this is exactly the relay point that broke live (Yael,
+    // 2026-08-03): correcting a colleague with the real outcome pulls in
+    // facts that live in someone else's language (${firstName}'s decision,
+    // a calendar event's stored English fields) right next to a social
+    // coda, and that combination is what outcompeted the static current-
+    // turn-language rule. Reinforced here, where the relay is actually
+    // composed, instead of only in the static block far above.
+    const languageNote = ` Give this to the colleague fully in THEIR current-turn language — the decision happened in ${firstName}'s language and any calendar facts you cite are stored in English, neither is a language signal; translate the whole thing in, including a correction or an apology for an earlier mix-up. One language, start to finish.`;
     if (latest.state === 'resolved') {
-      return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} was RESOLVED by ${firstName}. If the colleague asks "any update?" / "did we hear back?", give them the real outcome (${firstName} decided it) — do NOT say you're "still waiting on ${firstName}."`;
+      return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} was RESOLVED by ${firstName}. If the colleague asks "any update?" / "did we hear back?", give them the real outcome (${firstName} decided it) — do NOT say you're "still waiting on ${firstName}."${languageNote}`;
     }
     // expired / cancelled — the confabulation case
     const why = latest.state === 'expired'
       ? `it expired without a decision`
       : `it was cancelled`;
-    return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. If the colleague asks "any update?" / "did we hear back?", be HONEST — NEVER say "still waiting on ${firstName}" (it's dead; nothing is going to him). If they still want it, OFFER to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.`;
+    return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. If the colleague asks "any update?" / "did we hear back?", be HONEST — NEVER say "still waiting on ${firstName}" (it's dead; nothing is going to him). If they still want it, OFFER to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.${languageNote}`;
   })();
 
   const ownerContextSection = isOwner ? `
@@ -899,7 +907,7 @@ ${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSec
 
 /**
  * Back-compat wrapper. Returns the concatenated full prompt for callers that
- * expect a single string (scripts/measure-prompt.ts). The orchestrator's hot
+ * expect a single string (scripts/measure-prompts.cjs). The orchestrator's hot
  * path uses buildSystemPromptParts directly so caching can attach.
  */
 export function buildSystemPrompt(

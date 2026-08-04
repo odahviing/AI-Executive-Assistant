@@ -368,13 +368,18 @@ export async function handleRevertLastAutoMove(args: Record<string, unknown>, ct
         // so active-mode won't re-move this pair.
         try { updateRequest(rec.id, { closureReason: 'auto_move_reverted' }); } catch { /* best-effort */ }
         try {
-          const { dismissOverlapIssue } = await import('../../../../db/calendarIssues');
+          const { dismissOverlapIssue, DISMISSAL_NEVER_EXPIRES } = await import('../../../../db/calendarIssues');
           dismissOverlapIssue({
             ownerUserId,
             eventId,
             peerEventId: keptEventId,
             eventDate: DateTime.fromISO(originalStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
-            eventEndMs: DateTime.fromISO(originalEnd, { zone: timezone }).toMillis(),
+            // gh#180 — NOT the occurrence's own end. That snapshot goes stale the
+            // moment this same event is later rescheduled further out (the
+            // terminal-row cascade skip means it's never refreshed), silently
+            // un-suppressing an autofix the owner already rejected. A stated
+            // "don't touch this event again" is permanent, by event id.
+            eventEndMs: DISMISSAL_NEVER_EXPIRES,
             notes: 'owner reverted auto-move — leave it',
           });
         } catch (e) { logger.warn('revert_last_auto_move — dismissal write failed', { err: String(e).slice(0, 160) }); }
@@ -394,6 +399,28 @@ export async function handleRevertLastAutoMove(args: Record<string, unknown>, ct
           } catch { /* messaging unavailable */ }
         }
         const restoredLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+        // gh#180 — the active-mode auto-move's shadowNotify (autoMove.ts) told the
+        // owner "I moved X to Y... say revert if you'd rather I hadn't" as a
+        // STANDALONE DM (no threadTs — see autoMove.ts's call), separate from
+        // whatever conversation the "revert" command itself arrives in. Threading
+        // this correction under context.threadTs (the revert command's OWN
+        // thread) does not put it anywhere near that original claim — it's a
+        // different thread entirely, so the stale "moved to Y" message still
+        // sits uncorrected (owner: "it just said it did it, not really did").
+        // Fix: use the SAME conversationKey (the auto-move request id) the
+        // original call tagged itself with — shadowNotify's own threading cache
+        // then replies under that exact message regardless of where THIS
+        // command came from.
+        try {
+          const { shadowNotify } = await import('../../../../utils/shadowNotify');
+          await shadowNotify(context.profile, {
+            channel: context.channelId,
+            icon: '🔧',
+            action: 'Active-mode autofix — reverted',
+            detail: `Reverted "${revSubject}" back to ${restoredLocal} — disregard my earlier note about moving it.`,
+            conversationKey: rec.id,
+          });
+        } catch (e) { logger.warn('revert_last_auto_move — owner correction shadowNotify threw', { err: String(e).slice(0, 160) }); }
         logger.info('revert_last_auto_move — done', { requestId: rec.id, eventId, restoredLocal, reNotified });
         return {
           success: true, reverted: true, subject: revSubject, restored_to: restoredLocal, re_notified: reNotified,

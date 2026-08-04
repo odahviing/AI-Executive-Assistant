@@ -70,7 +70,11 @@ interface SubjectableEvent {
 /** Who the produced text is for. 'other' = anyone who is not the owner alone. */
 export type SubjectViewer = 'owner' | 'other';
 
-const PRIVATE_MASK = '[Private]';
+// Exported so callers building a NARRATION fallback (e.g. "an optional
+// meeting" when there's nothing better to call a slot's occupant) can treat
+// the mask the same way they already treat an empty subject — see
+// scheduleRules.ts's overOptional / overCommitment.subject.
+export const PRIVATE_MASK = '[Private]';
 
 /**
  * THE viewer predicate — derived from the AUTHENTICATED sender (Slack-verified

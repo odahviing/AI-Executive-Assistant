@@ -702,6 +702,23 @@ export function getProfileByEmail(email: string): UserProfile | undefined {
   return undefined;
 }
 
+// v4.4.x — narrow, cache-only accessor for utils/workingHoursDefault.ts's
+// tenant-timezone-match default. Same posture as getProfileByEmail just above
+// (scans profileCache, never re-reads YAML): the ONE place that knows how to
+// find a configured tenant's own workdays for a given IANA zone, so a
+// non-config layer takes this single fact instead of pulling the whole
+// multi-tenant loader and re-deriving the office/home-day union itself.
+// Returns the unordered union of office_days + home_days for the first
+// tenant whose OWN timezone matches, or undefined when none do.
+export function getTenantWorkdaysForTimezone(iana: string): string[] | undefined {
+  for (const profile of profileCache.values()) {
+    if (profile.user.timezone !== iana) continue;
+    const days = new Set<string>([...profile.schedule.office_days.days, ...profile.schedule.home_days.days]);
+    if (days.size > 0) return [...days];
+  }
+  return undefined;
+}
+
 export function loadAllProfiles(): Map<string, UserProfile> {
   const usersDir = path.resolve(process.cwd(), 'config', 'users');
   if (!fs.existsSync(usersDir)) return new Map();

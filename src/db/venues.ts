@@ -352,17 +352,10 @@ export function isCompanyLocation(
     officeLabels.full_label,
   ].filter((s): s is string => typeof s === 'string' && s.length > 0).map(s => s.toLowerCase());
   if (candidates.includes(loc)) return true;
-  if (isTeamsPlaceholderLocation(loc)) return true;
+  // The exact set of strings/URL prefix Graph/Outlook write into an online
+  // meeting's location field — never a real place, so treated as "not
+  // external" (a company space, not a genuine outside venue).
+  if (loc.startsWith('https://teams.microsoft.com/')) return true;
+  if (loc === 'microsoft teams meeting' || loc === 'microsoft teams') return true;
   return false;
-}
-
-/**
- * The exact set of strings/URL prefix Graph/Outlook write into an online
- * meeting's location field — never a real place, so isCompanyLocation
- * treats a match as "not external" (a company space, not a genuine outside
- * venue). Expects an already-trimmed, lower-cased string.
- */
-function isTeamsPlaceholderLocation(loweredTrimmedLocation: string): boolean {
-  if (loweredTrimmedLocation.startsWith('https://teams.microsoft.com/')) return true;
-  return loweredTrimmedLocation === 'microsoft teams meeting' || loweredTrimmedLocation === 'microsoft teams';
 }

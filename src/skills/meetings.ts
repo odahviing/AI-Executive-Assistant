@@ -11,7 +11,7 @@ import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 import { checkSlot, occupancyRoleOf } from '../utils/scheduleRules';
-import { displaySubject, subjectViewerFor } from '../utils/displaySubject';
+import { displaySubject, subjectViewerFor, PRIVATE_MASK } from '../utils/displaySubject';
 
 /**
  * MeetingsSkill — the single skill responsible for everything about
@@ -857,11 +857,21 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // needs every overlapping event and their individual bounds
         // (`overCommitment` reports only the first one, plus its subject/window).
         if (ownerIsBusy && directConflicts.length > 0) {
-          const busyInMeeting = directConflicts.map(ev => ({
-            start: Math.max(evTime(ev.start).toMillis(), meetingStartMs),
-            end: Math.min(evTime(ev.end).toMillis(), meetingEndMs),
-            subject: displaySubject(ev, profile, joinViewer) || 'a meeting',
-          })).sort((a, b) => a.start - b.start);
+          const busyInMeeting = directConflicts.map(ev => {
+            // private-mask-leaks-in-join-check-reply — `displaySubject` returns
+            // the literal PRIVATE_MASK string ("[Private]") for a private event
+            // to a non-owner viewer; that string is truthy, so `|| 'a meeting'`
+            // never caught it and the raw mask word reached a colleague's reply
+            // (M12: a colleague gets free/busy only for a private meeting, not
+            // even the fact that it's flagged private). Same fallback fix as
+            // scheduleRules.ts's overOptional/overCommitment subjects.
+            const subj = displaySubject(ev, profile, joinViewer);
+            return {
+              start: Math.max(evTime(ev.start).toMillis(), meetingStartMs),
+              end: Math.min(evTime(ev.end).toMillis(), meetingEndMs),
+              subject: (subj && subj !== PRIVATE_MASK) ? subj : 'a meeting',
+            };
+          }).sort((a, b) => a.start - b.start);
 
           const firstBusyStart = busyInMeeting[0].start;
           const lastBusyEnd = busyInMeeting[busyInMeeting.length - 1].end;
@@ -893,7 +903,10 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           // Fully blocked by another meeting. Subjects are viewer-scoped: a
           // colleague hears the subject of a normal meeting and "[Private]" for
           // one the owner marked private — never its real title (M12).
-          const conflictNames = directConflicts.map(ev => displaySubject(ev, profile, joinViewer) || 'a meeting');
+          const conflictNames = directConflicts.map(ev => {
+            const subj = displaySubject(ev, profile, joinViewer);
+            return (subj && subj !== PRIVATE_MASK) ? subj : 'a meeting';
+          });
           return {
             can_join: false,
             reason: 'busy',

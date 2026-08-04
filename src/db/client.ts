@@ -75,16 +75,6 @@ function initSchema(db: Database.Database): void {
       request_id  TEXT                         -- linked pending_request id
     );
 
-    -- Known contacts with priority hints
-    CREATE TABLE IF NOT EXISTS known_contacts (
-      email       TEXT PRIMARY KEY,
-      name        TEXT NOT NULL,
-      priority    TEXT NOT NULL DEFAULT 'medium',
-      org         TEXT,
-      notes       TEXT,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
     -- General outreach jobs — non-scheduling messages sent to colleagues
     CREATE TABLE IF NOT EXISTS outreach_jobs (
       id              TEXT PRIMARY KEY,
@@ -185,6 +175,15 @@ function initSchema(db: Database.Database): void {
   // assistant_threads (its readers were dead; registration was write-only).
   try { db.exec(`DROP TABLE IF EXISTS cron_schedules`); } catch (_) {}
   try { db.exec(`DROP TABLE IF EXISTS assistant_threads`); } catch (_) {}
+
+  // known_contacts — scaffolded, never wired (zero readers/writers). The
+  // v3.2.0 person-store migration (db/migrations/v3_2_0_person_store.ts) drops
+  // it once, but that migration no-ops on every boot once `people_memory.person_id`
+  // exists (already the case in production), so its DROP step never runs again.
+  // The CREATE TABLE IF NOT EXISTS that used to sit above in this same file
+  // re-created the table on every single boot after that — an empty table
+  // resurrected forever. Removed that CREATE; this DROP retires what's left.
+  try { db.exec(`DROP TABLE IF EXISTS known_contacts`); } catch (_) {}
 
   const columnMigrations = [
     `ALTER TABLE outreach_jobs ADD COLUMN colleague_tz TEXT`,
@@ -306,20 +305,6 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner_user_id, status);
     CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at);
-
-    CREATE TABLE IF NOT EXISTS events (
-      id          TEXT PRIMARY KEY,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      owner_user_id TEXT NOT NULL,
-      type        TEXT NOT NULL,
-      title       TEXT NOT NULL,
-      detail      TEXT,
-      actor       TEXT,
-      ref_id      TEXT,
-      seen        INTEGER NOT NULL DEFAULT 0,
-      actioned    INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_unseen ON events(owner_user_id, seen);
   `);
 
   // People Memory — contacts encountered in the workspace, built automatically
@@ -523,8 +508,11 @@ function initSchema(db: Database.Database): void {
   // never an Outlook event. Read on the hot slot-finder path to annotate a held
   // time; expires at min(2 owner-workdays, slot-start) via the 5-min tick
   // (sweepExpiredSlotHolds → release + DM the holder). Dedicated table, NOT the
-  // requests spine: a hold is a flat single-leg reservation with a hot read, not
-  // a multi-step request — see .claude/RESERVE_SLOT_PROJECT.md storage analysis.
+  // requests spine: the spine models work awaiting someone's action (nudge,
+  // notify, close, reconcile) — a hold blocks nobody, it's a passive
+  // reservation, and forcing it onto the spine would create a degenerate row
+  // that the spine's reconcile/retention/notification machinery has to learn
+  // to ignore.
   db.exec(`
     CREATE TABLE IF NOT EXISTS slot_holds (
       id               TEXT PRIMARY KEY,
@@ -657,7 +645,11 @@ function initSchema(db: Database.Database): void {
   // cluster lookup on event_id OR peer_event_id intersection.
   //
   // event_end_ms is the freshness anchor: rows with event_end_ms < now() are
-  // filtered out at read time (past issues vanish naturally).
+  // filtered out at read time (past issues vanish naturally). Exception: a
+  // STATED "don't auto-fix this again" dismissal writes
+  // db/calendarIssues.ts's DISMISSAL_NEVER_EXPIRES sentinel instead of a real
+  // timestamp, so it can't go stale when the same event is later rescheduled
+  // (gh#180) — see that constant's comment.
   db.exec(`
     CREATE TABLE IF NOT EXISTS calendar_issues (
       id              TEXT PRIMARY KEY,

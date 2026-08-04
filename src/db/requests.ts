@@ -289,6 +289,32 @@ export function getRequestByTerminalMsgTs(msgTs: string): RequestRow | null {
   `).get(msgTs) as RequestRow | null) ?? null;
 }
 
+/**
+ * gh#174-a — does `candidateThreadTs` already anchor a DIFFERENT tracked
+ * request for this owner (its own decision thread root, or the ts of one of
+ * its posted asks)? Checked before resolve_approval's chronological fallback
+ * (tasks/skill.ts) binds an unanchored reply to the sole open approval: if the
+ * owner deliberately replied inside a thread that belongs to some OTHER
+ * request (any kind — an outreach relay, a different approval's own thread),
+ * that is a real anchor to THAT conversation and must never be reinterpreted
+ * as an answer to this one just because this one happens to be the only
+ * approval currently open.
+ */
+export function isKnownRequestThreadAnchor(
+  ownerUserId: string,
+  candidateThreadTs: string,
+  excludeRequestId: string,
+): boolean {
+  const row = getDb().prepare(`
+    SELECT 1 FROM requests
+    WHERE owner_user_id = ?
+      AND id != ?
+      AND (owner_dm_thread_ts = ? OR terminal_dm_msg_ts = ?)
+    LIMIT 1
+  `).get(ownerUserId, excludeRequestId, candidateThreadTs, candidateThreadTs);
+  return !!row;
+}
+
 /** Requests due for time-based reaction sweep. */
 export function getDueRequests(): RequestRow[] {
   return getDb().prepare(`

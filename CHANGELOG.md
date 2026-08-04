@@ -2,6 +2,39 @@
 
 ---
 
+## 4.4.6 — Maelle remembers her own thread, and an unrejected reply finally binds
+
+Two waves in one night: the bug loop's first run since a heavy engine rewrite (backlog re-read, GitHub pull, log review, and the new Bounce and joint-fix-trace mechanisms all fired for real), then an owner-directed build against four open approval/scheduling tickets by name.
+
+**A plain "yes" typed straight into the DM can now close an approval, without a second Haiku judge guessing at intent.** The gate deciding "did the owner mean to answer this?" failed structurally on the single most common reply shape — a bare confirmation with no thread click — because a plain reply's thread id can never equal the approval's own anchor, forcing a repeated "please reply in the approval's own thread" refusal loop. `chronoAnchor` closes it deterministically: it binds only when exactly one approval is open, the reply lands in the right channel, it postdates the ask, and the thread isn't already anchored to some other tracked request — reusing a timestamp already stamped elsewhere, no new column, no new persistence. A second, narrower classifier that had crept onto the same code path (an unapproved Haiku call judging whether a reply "sounds decisive") is reverted outright: it was added beyond what its own originating ticket scoped, and new LLM calls need sign-off before they ship, not after.
+
+**A calendar autofix stopped forgetting it had already been told no.** Rejecting one occurrence of an inefficient-gap autofix only suppressed it until the event's own end time passed, so a legitimately-rescheduled one-time meeting could have the same already-rejected autofix fire on it again. The dismissal is now permanent by event id.
+
+**Three more sibling leaks in the email-forwarding path close the way the first one did last release:** a masked "[Private]" placeholder riding through as literal text in two more reply shapes, and a fourth field the previous strip missed on the results branch.
+
+### Fixed (high-impact)
+- [#169: Approval flows can't be override outside](https://github.com/odahviing/AI-Executive-Assistant/issues/169) — `chronoAnchor` binds a plain top-level reply to the sole open approval deterministically; the reported refusal loop cannot recur for this shape of reply.
+- [#174: Approvals can't be approve](https://github.com/odahviing/AI-Executive-Assistant/issues/174) — same root cause as #169; the "she keeps asking after I already said it's ok" half is fixed by the same binding fix. The duplicate reminder-ping cadence it also reports is a separate mechanism and is untouched — see Not changed.
+- [#180: Active fix bad trigger and not working](https://github.com/odahviing/AI-Executive-Assistant/issues/180) — a rejected one-time autofix is now dismissed by event id permanently, not until the event's own end time passes.
+- [#179: Approval flows still broken](https://github.com/odahviing/AI-Executive-Assistant/issues/179) — the approval-outcome relay is now written into conversation history so the next turn doesn't contradict it, and a targeted language reminder was added exactly where the reply mixing Hebrew and English is composed.
+- Two more email-forwarding privacy leaks closed in the same shape as last release: a masked "[Private]" subject riding through as literal text in a join-availability reply, and a fourth field (`_attendee_unverified_note`) the previous results-branch strip missed.
+- An unapproved Haiku classifier judging approval-reply "decisiveness" is reverted — see above.
+
+### Fixed (small)
+- A colleague-outreach auto-expire branch was structurally unreachable (the feeding query already excluded every row it existed to catch) — now reaches and closes aged-out threads.
+- A stranded, unexecutable task type could still render as "you already committed to this" in a stale thread — now excluded by live dispatcher type.
+- A resurrected, empty database table (`known_contacts`) stopped being recreated on every boot.
+- A duplicated events-table definition, a duplicated presentation-timezone expression, and several stale line-citations across the availability and verb-map code, cleaned up.
+- A broken, unused script (`measure-prompt.ts`) deleted; its architecture-doc entry corrected along with the file count it had drifted from.
+
+### Not changed
+- #174's duplicate reminder-ping complaint ("we ping once and then close") — a different mechanism from the binding fix above, not touched this release.
+- #180's third complaint ("it just said it did it, but it didn't really happen") — the autofix's move-claim is still minted with no read-back verifying the calendar actually changed; flagged, not fixed.
+- #179's history fix is unproven on a top-level, non-threaded colleague reply, and its third complaint (a social "coda" arriving in the same message as the relay) stays deferred at the owner's own request.
+- Four more sibling gaps found by tonight's verify pass, queued for the next run rather than built now: a broader email-leg attendee-identity leak via `day_summary`, a third "[Private]"-as-fallback spot in the auto-move owner notice, a status-honesty rule worded too narrowly, and two now-dead strip lines.
+
+---
+
 ## 4.4.5 — every charter read for the first time, and the squad gets smaller
 
 Thirteen charters, roughly 130 rules, and until today nobody had ever checked whether any of them matched the code they govern. The lens that made it tractable: **for each agent, name what it is the last line of defence against, then point at the rule that covers it — no rule, or a rule with no observable, is the finding.** That test is one file against one sentence, which is why a week of waves never surfaced any of it.

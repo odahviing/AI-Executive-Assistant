@@ -605,6 +605,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               .filter(tz => tz && tz !== timezone),
           )];
           const autoPresentTz = nonOwnerAttendeeZones.length === 1 ? nonOwnerAttendeeZones[0] : '';
+          // The requester's explicit present_in_timezone always wins; autoPresentTz
+          // only fills the gap when they didn't name one. Computed ONCE here —
+          // the preferred_slot branch and the main slots list below both render
+          // the SAME conversation's zone choice, so a requester who asked "in ET"
+          // must get every offered instant (including preferred_slot) in ET, not
+          // just the ones each branch happened to recompute consistently.
+          const presentTzForOutput = (typeof args.present_in_timezone === 'string'
+            ? args.present_in_timezone.trim()
+            : '') || autoPresentTz;
 
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate pool,
@@ -1391,17 +1400,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                   const prefAvailable = prefSlots.length > 0;
                   const brokenRule = prefAvailable ? undefined : Object.keys(prefDiag.rejectedCounts ?? {})[0];
-                  // Same presentation-zone computation the main `slots` list uses
-                  // below (present_in_timezone, falling back to the auto-detected
-                  // single attendee zone) — this branch answers about the SAME
-                  // preferred_slot instant and must render in the same zone, or a
-                  // requester who asked "in ET" gets every offered slot in ET
+                  // Shared presentation-zone (presentTzForOutput, declared above) —
+                  // this branch answers about the SAME preferred_slot instant the
+                  // main `slots` list renders below, and must use the same zone, or
+                  // a requester who asked "in ET" gets every offered slot in ET
                   // except the one they specifically named.
-                  const presentTzForPreferred = (typeof args.present_in_timezone === 'string'
-                    ? args.present_in_timezone.trim()
-                    : '') || autoPresentTz;
-                  const preferredPresentationLocal = presentTzForPreferred
-                    ? renderClockInZone(preferredSlot, timezone, presentTzForPreferred)
+                  const preferredPresentationLocal = presentTzForOutput
+                    ? renderClockInZone(preferredSlot, timezone, presentTzForOutput)
                     : '';
                   preferredSlotStatus = {
                     start: preferredSlot,
@@ -1557,16 +1562,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // each slot in the requested zone deterministically. Ship only the
             // formatted string (with the short offset name, e.g. "EDT") — never
             // the raw IANA, to avoid the "America/New_York → New York" paste.
-            // #24 — falls back to autoPresentTz (declared above) when the caller
-            // left this unset but exactly one loaded attendee zone differs from the
-            // owner's; an explicit value here still wins.
-            const presentTz = (typeof args.present_in_timezone === 'string'
-              ? args.present_in_timezone.trim()
-              : '') || autoPresentTz;
-            if (presentTz) {
+            // #24 — presentTzForOutput (declared above) falls back to autoPresentTz
+            // when the caller left this unset but exactly one loaded attendee zone
+            // differs from the owner's; an explicit value here still wins.
+            if (presentTzForOutput) {
               // v3.4.2 (A2) — shared renderer, same string create/move echo back.
               annotatedSlots = annotatedSlots.map((s: any) => {
-                const display = renderClockInZone(s.start, timezone, presentTz);
+                const display = renderClockInZone(s.start, timezone, presentTzForOutput);
                 return display ? { ...s, presentation_local: display } : s;
               });
             }

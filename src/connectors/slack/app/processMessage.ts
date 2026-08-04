@@ -586,7 +586,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                   }
                 }
                 // Path B — top-level DM reply. Run the time-window logic
-                // (deterministic <10min / LLM 10min-24h / auto-expire >24h).
+                // (classify every open candidate <=24h / auto-expire >24h;
+                // the old <10min deterministic bypass was removed, gh#176/#177).
                 if (!priorOutboundContext) {
                   const ctx = await getRecentOutboundContext({
                     ownerUserId: profile.user.slack_user_id,

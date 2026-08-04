@@ -1116,8 +1116,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           confirm_gender: 'confirmed the pronouns',
           // Tasks / approvals
           create_task: 'created a task',
-          edit_task: 'updated a task',
-          cancel_task: 'cancelled a task',
+          update_task: 'updated a task',
           get_my_tasks: 'checked your open tasks',
           resolve_approval: 'recorded your decision',
           list_pending_approvals: 'checked pending approvals',
@@ -1136,8 +1135,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           check_calendar_health: 'reviewed calendar health',
           book_floating_block: 'blocked the slot',
           set_event_category: 'categorized the event',
-          get_calendar_issues: 'checked calendar issues',
-          update_calendar_issue: 'updated the calendar issue',
+          manage_calendar_issue: 'updated the calendar issue',
           // Outreach
           message_colleague: 'sent the message',
           find_slack_channel: 'found the channel',
@@ -1145,12 +1143,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // Search / knowledge
           web_search: 'searched the web',
           web_extract: 'pulled the page',
-          get_company_knowledge: 'read from the knowledge base',
+          manage_knowledge: 'checked the knowledge base',
           // Routines
-          create_routine: 'set up the routine',
-          get_routines: 'checked your routines',
-          update_routine: 'updated the routine',
-          delete_routine: 'removed the routine',
+          manage_routine: 'updated your routines',
           // Briefings
           get_briefing: 'pulled your briefing',
           send_briefing_now: 'sent the briefing',
@@ -1170,13 +1165,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'update_meeting',
           // Tier 2 — approvals + tasks
           'create_approval', 'resolve_approval',
-          'create_task', 'edit_task', 'cancel_task',
+          'create_task', 'update_task',
           // Tier 3 — outreach + briefings
           'message_colleague', 'send_briefing_now',
           // Tier 4 — calendar health
-          'check_calendar_health', 'set_event_category', 'update_calendar_issue',
+          'check_calendar_health', 'set_event_category', 'manage_calendar_issue',
           // Tier 5 — knowledge / routines (rarely standalone)
-          'manage_knowledge', 'create_routine', 'update_routine', 'delete_routine',
+          'manage_knowledge', 'manage_routine',
         ];
         const ranked = distinct
           .filter(n => verbMap[n] !== undefined)

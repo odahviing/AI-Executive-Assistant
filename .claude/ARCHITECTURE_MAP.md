@@ -83,7 +83,7 @@ Outbound goes through the `Connection` interface; **skills never import from `co
 | **I/O adapters** | `voice/*` (Whisper/TTS), `vision/*` (image ingest) | Side channels into a turn |
 | **Task dispatcher *handlers*** | `tasks/dispatchers/{routine,calendarFix,summaryActionFollowup,socialDecay,socialPingRankCheck}.ts` | Small per-type logic plugged into the core runner (#4). `routine` is semi-core (materializes user routines) |
 | **One-off utils** | `textScrubber`, `formatForSlack`, `toolStatusText`, `calendarListingFormat`, `displaySubject`, `extractJson`, `rateLimit`, `turnCache`, `toolCallCache`, `usageLog`, `logger` | Pure formatters/helpers; no state, no lifecycle |
-| **Owner scripts** | `scripts/*.cjs/.mjs/.ts` (39 files) | One-off DB/maintenance/debug tools, outside `src/`; never in the request path. Live ones: `db-query.cjs`, `auto-build.mjs`+`auto-triage-bug.mjs` (CI), `measure-prompt(s)`/`_dump-prompts` |
+| **Owner scripts** | `scripts/*.cjs/.mjs/.ts` (22 files) | One-off DB/maintenance/debug tools, outside `src/`; never in the request path. Live ones: `db-query.cjs`, `auto-build.mjs`+`auto-triage-bug.mjs` (CI), `measure-prompts`/`_dump-prompts` |
 | **Dormant** | `connectors/whatsapp.ts` | Inert until a WhatsApp transport is configured |
 
 **"Is it core?" test:** if removing it breaks the *lifecycle of work* (requests), the *turn* (orchestrator), the *clock* (tick), *what's said* (guards), or *when/who* a meeting is booked (scheduling / person store) → backbone. If the loop *calls* it or *uses* it as a formatter → peripheral.

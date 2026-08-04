@@ -238,6 +238,11 @@ export async function executeInternalAutoMove(params: {
       icon: '🔧',
       action: `Active-mode autofix — ${issue.type}`,
       detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
+      // gh#180 — keyed to the auto-move request record (when one was created)
+      // so a later revert can correct THIS specific claim by threading under
+      // it, wherever in the owner's DM it landed. No key when the record
+      // create failed above (best-effort) — nothing could revert it then either.
+      conversationKey: autoMoveReq?.id,
     });
   } catch (err) {
     logger.warn('shadowNotify on active-mode move threw — continuing', { err: String(err).slice(0, 200) });

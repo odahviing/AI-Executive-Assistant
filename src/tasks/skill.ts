@@ -12,6 +12,7 @@ import {
   buildIdempotencyKey,
   getRequestByIdempotencyKey,
   getRecentOutreachOwnerThread,
+  isKnownRequestThreadAnchor,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
@@ -95,56 +96,6 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
       err: String(err).slice(0, 200),
     });
     return 'unsure';  // fail-to-ask: an error must never silently let a calendar change ride freeform
-  }
-}
-
-/**
- * approval-gate-no-decisiveness-check (verify finding, gh#169-a second half) —
- * messageReferencesRequest is a REFERENT check only: does the owner's message
- * name this row's subject or counterpart. It says nothing about whether he
- * actually decided anything — "how's the ANF thing going?" names the approval
- * exactly as surely as "ANF already done" does, so gating on namedMatch alone
- * would bind a bare mention or a QUESTION as if it resolved the approval.
- * Meaning classification (decided vs. merely mentioned/asked/discussed), not a
- * keyword list — Maelle is multilingual and "yes"/"go ahead"/"reject" have no
- * closed per-language word set (Rule 4). Same three-way shape as
- * classifyFreeformCalendarChange above: 'unsure' fails toward the SAME
- * needs_clarification refusal the anchor gate already returns below, never a
- * silent bind.
- */
-async function classifyOwnerAssertsDecision(message: string): Promise<'decided' | 'not_decided' | 'unsure'> {
-  const text = message.trim().slice(0, 500);
-  if (!text) return 'not_decided';
-  try {
-    const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
-      max_tokens: 20,
-      system: `Classify a Slack message from someone who has an approval pending. Does THIS message itself assert that they have made a decision on it — an approve/go-ahead, a reject/decline, or a specific counter-proposal/change?
-- 'decided' — it clearly states a decision, in any language: "yes, do it", "reject that", "no, book 3pm instead", "already approved it", "drop it".
-- 'not_decided' — it clearly does NOT: a question, a status check, a topic mention with no verdict, a vague acknowledgement ("ok", "thanks", "got it"), a future-tense plan ("I'll look at it").
-- 'unsure' — genuinely ambiguous.
-Judge by meaning, not by keyword-matching. Bias to 'unsure' over guessing — an unsure verdict just asks for clarification; a wrongly-guessed 'decided' silently books/rejects something the sender never actually decided. Answer via the classify tool only.`,
-      tools: [{
-        name: 'classify',
-        description: 'Classify whether the message asserts an actual decision.',
-        input_schema: {
-          type: 'object' as const,
-          properties: { verdict: { type: 'string', enum: ['decided', 'not_decided', 'unsure'] } },
-          required: ['verdict'],
-        },
-      }],
-      tool_choice: { type: 'tool', name: 'classify' },
-      messages: [{ role: 'user', content: text }],
-    });
-    logLlmUsage('approval_bare_ack_decisiveness', MODEL_HAIKU, resp);
-    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const v = (toolUse?.input as { verdict?: string } | undefined)?.verdict;
-    return (v === 'decided' || v === 'not_decided') ? v : 'unsure';
-  } catch (err) {
-    logger.warn('resolve_approval — decisiveness classifier threw; routing to UNSURE (ask, not a silent bind)', {
-      err: String(err).slice(0, 200),
-    });
-    return 'unsure';  // fail-to-ask: an error must never silently let a bare mention bind an approval
   }
 }
 
@@ -1376,20 +1327,6 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             const ownerLiteralMessage = context.currentUserMessage ?? '';
             let namedMatch = !anchored && ownerLiteralMessage.trim().length > 0
               && messageReferencesRequest(ownerLiteralMessage, ownerRow);
-            // approval-gate-no-decisiveness-check — a referent match alone is not
-            // enough to bind: it only proves the message NAMES this approval, not
-            // that the owner decided anything (see classifyOwnerAssertsDecision
-            // above). Only spend the Haiku call once the cheap deterministic
-            // referent check already passed.
-            if (namedMatch) {
-              const decisiveness = await classifyOwnerAssertsDecision(ownerLiteralMessage);
-              if (decisiveness !== 'decided') {
-                logger.info('resolve_approval — message names this approval but does not assert a decision; refusing unanchored bind', {
-                  requestId, verdict, decisiveness, ownerMessage: ownerLiteralMessage.slice(0, 120),
-                });
-                namedMatch = false;
-              }
-            }
             // gh#169-a (owner ruling: "ok build") — a topical mention must be
             // UNIQUE among the owner's other open approvals before it can bind
             // one unanchored. Pre-fix, a shared counterpart name or subject
@@ -1399,16 +1336,57 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             // needs_clarification shape) when 2+ open awaiting_owner approvals
             // match this message; anchored replies are unaffected since thread
             // position alone already disambiguates those.
+            // Computed once — also feeds the chronological fallback below,
+            // which needs the same "is this the only open approval" fact.
+            const otherOpenApprovals = getAwaitingOwnerRequests(ownerRow.owner_user_id)
+              .filter(r => r.kind === 'approval' && r.id !== requestId);
             let ambiguousNamedMatch = false;
             if (namedMatch) {
-              const otherOpenApprovals = getAwaitingOwnerRequests(ownerRow.owner_user_id)
-                .filter(r => r.kind === 'approval' && r.id !== requestId);
               if (otherOpenApprovals.some(r => messageReferencesRequest(ownerLiteralMessage, r))) {
                 ambiguousNamedMatch = true;
                 namedMatch = false;
               }
             }
-            if (!anchored && !namedMatch) {
+            // gh#174-a — chronological fallback for a PLAIN top-level DM
+            // reply, the structural case anchored/namedMatch can never catch
+            // on content alone: handlers.ts collapses an un-threaded
+            // message's thread_ts to its OWN ts (correct Slack semantics for
+            // "no thread_ts field"), which can never equal
+            // terminal_dm_msg_ts/owner_dm_thread_ts, and a contentless "yes"
+            // has nothing for messageReferencesRequest to match (GH#169
+            // transcript: the owner's very next reply to Maelle's own ask was
+            // refused 3x running). Binds ONLY when every one of these holds,
+            // each closing a specific misbind this gate exists to prevent:
+            //  - this approval is the ONLY one currently awaiting the owner
+            //    (otherOpenApprovals is empty) — never guess among several
+            //    (the Athena mis-bind, 2026-07-13, had exactly one pending —
+            //    this doesn't relax that, it's the same fact);
+            //  - the reply landed in the SAME DM channel the ask was posted to;
+            //  - the reply's ts genuinely postdates the ask's ts — a reply can
+            //    only be answering something that already existed;
+            //  - the reply's thread_ts isn't itself a known anchor for some
+            //    OTHER tracked request (isKnownRequestThreadAnchor) — so a
+            //    reply the owner deliberately sent inside a different real
+            //    conversation is never stolen just because this is the only
+            //    approval open right now.
+            let chronoAnchor = false;
+            if (!anchored && !namedMatch && !ambiguousNamedMatch
+              && otherOpenApprovals.length === 0
+              && context.threadTs && ownerRow.terminal_dm_msg_ts && ownerRow.owner_dm_channel
+              && context.channelId === ownerRow.owner_dm_channel
+            ) {
+              const replyTs = parseFloat(context.threadTs);
+              const askTs = parseFloat(ownerRow.terminal_dm_msg_ts);
+              if (Number.isFinite(replyTs) && Number.isFinite(askTs) && replyTs > askTs
+                && !isKnownRequestThreadAnchor(ownerRow.owner_user_id, context.threadTs, requestId)
+              ) {
+                chronoAnchor = true;
+                logger.info('resolve_approval — unanchored but this is the sole outstanding approval and the reply postdates its ask; binding', {
+                  requestId, verdict, threadTs: context.threadTs, askTs: ownerRow.terminal_dm_msg_ts,
+                });
+              }
+            }
+            if (!anchored && !namedMatch && !chronoAnchor) {
               logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
                 requestId, verdict, threadTs: context.threadTs,
                 terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,

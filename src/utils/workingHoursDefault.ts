@@ -22,6 +22,7 @@
 
 import { getDb } from '../db/client';
 import type { PersonMemory } from '../db/people';
+import { getTenantWorkdaysForTimezone } from '../config/userProfile';
 import logger from './logger';
 
 export type WeekDay =
@@ -51,13 +52,18 @@ const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'
 export function defaultWorkingHoursForTz(iana: string | null | undefined): Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> {
   if (!iana) return WESTERN_DEFAULT;
 
+  // v4.4.x — utils no longer reaches for the raw multi-tenant loader
+  // (`loadAllProfiles`) and re-derives the office/home-day union itself; that
+  // was a utils -> config runtime dependency the wave's own sibling fix
+  // (cloneable-default) was specifically about avoiding. The one fact this
+  // needs — "does any configured tenant's own timezone match, and if so what
+  // are their workdays" — comes from a single cache-backed accessor config
+  // itself owns (getTenantWorkdaysForTimezone, same posture as
+  // getProfileByEmail), never from utils loading and scanning every profile.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { loadAllProfiles } = require('../config/userProfile') as typeof import('../config/userProfile');
-    for (const profile of loadAllProfiles().values()) {
-      if (profile.user.timezone !== iana) continue;
-      const workdays = WEEK_ORDER.filter(d =>
-        profile.schedule.office_days.days.includes(d) || profile.schedule.home_days.days.includes(d));
+    const tenantDays = getTenantWorkdaysForTimezone(iana);
+    if (tenantDays && tenantDays.length > 0) {
+      const workdays = WEEK_ORDER.filter(d => tenantDays.includes(d));
       if (workdays.length > 0) {
         return { workdays, ...TENANT_MATCH_HOURS };
       }
