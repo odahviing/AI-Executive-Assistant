@@ -8,7 +8,7 @@ Maelle is an AI executive assistant platform built in Node.js/TypeScript. She li
 
 **Mission / filter for every decision:** "would a real human EA do this?" — outranks speed, completeness, elegance.
 
-**Current shipped version: 4.4.7.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
+**Current shipped version: 4.4.8.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
 
 ## Where she runs
 
@@ -24,7 +24,7 @@ Maelle's own codebase is maintained by a set of charter-bound agents, each ownin
 
 **Eight builder lanes**, each a specialist over one product area: **Matchmaker** (the scheduling/calendar core), **Registrar** (the async requests spine — approvals, outreach, reminders, follow-ups), **Gatekeeper** (the output-time gate stack), **Profiler** (identity and the person store), **Instructor** (the system prompt and tool descriptions — runs last in every build wave), **SlackMaster** (everything inside the Slack workspace), **Diplomat** (everything reaching someone outside the workspace — mail today, WhatsApp/iMessage when they open), **Handyman** (whatever no other lane owns yet).
 
-**Non-lane agents** around them: the **Editor** finds and routes bug-shaped work (open GitHub `Bug` issues plus a log review) to the lane that owns the fix; the **Framer** does the same job for product/feature work (an `Improvement`/`Feature` issue, or an idea not filed yet), producing a decomposition the owner rules on before anything builds; the **Bouncer** is the adversarial gate before a wrap — one read over a finished wave's combined diff, asking whether it's safe to ship and whether it meets the bar; the **Cleaner** is a periodic hygiene sweep (dead code, stale comments, dead config) run by hand, not in the nightly rotation; the **Architect** owns the framework itself (the engines, the Manager skill, this file's own upkeep) and never touches product code. (A **Quartermaster** for runtime cost and latency existed for one morning on 2026-08-03 and was deleted the same day; that subject is **Handyman's**, rules H9–H12.)
+**Non-lane agents** around them: the **Editor** finds and routes bug-shaped work (open GitHub `Bug` issues plus a log review) to the lane that owns the fix; the **Framer** does the same job for product/feature work (an `Improvement`/`Feature` issue, or an idea not filed yet), producing a decomposition the owner rules on before anything builds; the **Bouncer** is the adversarial gate before a wrap — one read over a finished wave's combined diff, asking whether it's safe to ship and whether it meets the bar; the **Cleaner** is a periodic hygiene sweep (dead code, stale comments, dead config) run by hand, not in the nightly rotation; the **Architect** owns the framework itself (the engines, the Manager skill, this file's own upkeep) and never touches product code. (A **Quartermaster** for runtime cost and latency existed for one morning on 2026-08-03 and was deleted the same day; that subject is **Handyman's**, rules H4–H5 (standalone); the tier-is-his-call rule moved to the Shared charter's rule 13 on 2026-08-04.)
 
 ## How a bug reaches production
 

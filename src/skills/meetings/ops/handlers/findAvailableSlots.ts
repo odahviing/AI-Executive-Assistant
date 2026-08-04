@@ -355,17 +355,33 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // I'll handle the others" scenarios.
           let attendeeEmails = (args.attendee_emails as string[]) ?? [];
 
-          // MOVE-PATH AUTO-FILL (owner-path only): when moving_event_ids is set AND
-          // the owner is the initiator, auto-read the moving event's roster so a later
-          // call that DROPPED an attendee still checks everyone. Owner direction:
-          // "find_available_slots should just take the list of people to check" — tool
-          // reads them itself; Sonnet doesn't have to remember. Closes the Sales
-          // BiWeekly trace where Sonnet dropped Isaac and 17:00 was proposed without
-          // him. GUARDED below (#145b): the event roster is folded in ONLY when it
-          // shares an attendee with the explicit set (same meeting) or the explicit set
-          // is empty; a moving_event_id that points at a DIFFERENT meeting is ignored,
-          // never ballooned in. Colleague-path skips this — that flow uses per-attendee
-          // annotation (see v2.7.0 colleague-path block below).
+          // MOVE-PATH AUTO-FILL: when moving_event_ids is set, auto-read the moving
+          // event's real roster so a later call that DROPPED an attendee still checks
+          // everyone. Owner direction: "find_available_slots should just take the list
+          // of people to check" — tool reads them itself; Sonnet doesn't have to
+          // remember. Closes the Sales BiWeekly trace where Sonnet dropped Isaac and
+          // 17:00 was proposed without him. GUARDED below (#145b): the event roster is
+          // folded in ONLY when it shares an attendee with the explicit set (same
+          // meeting) or the explicit set is empty; a moving_event_id that points at a
+          // DIFFERENT meeting is ignored, never ballooned in.
+          // v4.4.x (Elinor Avny trace, 2026-08-04) — runs on the COLLEAGUE path too,
+          // not owner-only. A colleague asking "why 20:30? any earlier time?" about a
+          // meeting she's already on used to only ever get HER OWN calendar checked —
+          // the real co-attendees (Lori, Scott, Chris — all internal, all checkable)
+          // never entered the search, and the model covered the narrower answer with a
+          // fabricated "can't see the client attendees' calendars" excuse. Colleague path
+          // gets an EXTRA gate the owner path doesn't need (the per-id filter below):
+          // the requester must herself appear on a GIVEN id's OWN fetched roster
+          // before THAT id's attendees fold in — tested per id, never against a
+          // union of every passed id's roster (a union would let one id she's on,
+          // which passes the test, drag in a second unrelated id's attendees whose
+          // calendars she has no standing to read — bounced 2026-08-04). Otherwise
+          // an empty explicit set (she named no one) would satisfy #145b's "explicit
+          // set is empty" branch and hand her a stranger meeting's attendee list on
+          // a mismatched/guessed moving_event_id. The owner has no such gate: it's
+          // always his own calendar. Per-attendee annotation (v2.7.0 colleague-path
+          // block below) is unrelated and untouched — that's the busy/free
+          // narration layer; this is what gets INTO attendeeEmails at all.
           // v4.1.x — STRICT (post-clamp) owner path, same definition as
           // `isOwnerPath` above. It used to be `|| isOwnerInGroup === true`, and
           // this flag is not cosmetic: it decides what goes INTO the payload at
@@ -379,17 +395,39 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // were emitted into a thread other people read. Same class as the
           // get_calendar clamp; same ruling.
           const isOwnerInitiatedSearch = isOwnerPath;
-          const movingIdsForAttendees = (isOwnerInitiatedSearch && Array.isArray(args.moving_event_ids))
+          const movingIdsForAttendees = Array.isArray(args.moving_event_ids)
             ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
             : [];
           if (movingIdsForAttendees.length > 0) {
             try {
               const { resolveMovingEventAttendees } = await import('../../../../utils/movingEventAttendees');
-              const fromEvent = await resolveMovingEventAttendees(
+              const rosterById = await resolveMovingEventAttendees(
                 movingIdsForAttendees,
                 userEmail,
                 timezone,
               );
+              // v4.4.x — colleague membership gate, tested PER ID (bounced 2026-08-04:
+              // a blind union let one id she's on drag in a second, unrelated id's
+              // attendees). On the colleague path, an id only qualifies when ITS OWN
+              // roster contains the requester; a mismatched/guessed id — or a real id
+              // for a meeting she isn't on — is dropped instead of unioned in. The
+              // owner path skips this check — it is always reading his own calendar.
+              let qualifyingIds = movingIdsForAttendees;
+              if (!isOwnerInitiatedSearch) {
+                const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
+                qualifyingIds = requesterEmailLower
+                  ? movingIdsForAttendees.filter(id =>
+                      (rosterById.get(id) ?? []).some(e => e.toLowerCase() === requesterEmailLower))
+                  : [];
+                if (qualifyingIds.length < movingIdsForAttendees.length) {
+                  logger.warn('find_available_slots — dropping moving_event_id(s) not on the requester\'s own roster (likely a mismatched id, or another attendee\'s meeting)', {
+                    movingEventIds: movingIdsForAttendees,
+                    qualifyingIds,
+                    requester: requesterEmailLower || '(unresolved)',
+                  });
+                }
+              }
+              const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id) ?? []))];
               if (fromEvent.length > 0) {
                 const explicitLc = attendeeEmails.map(e => e.toLowerCase());
                 const eventLc = fromEvent.map(e => e.toLowerCase());
@@ -512,8 +550,6 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // so the attending-requester case is untouched.
           if (!isOwnerInitiatedSearch && context.userId && args.requester_is_attending === false) {
             try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getPersonMemory } = require('../../../../db') as typeof import('../../../../db');
               const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
               if (requesterEmailLower) {
                 const before = attendeeEmails.length;
@@ -1048,8 +1084,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             //       ignore_attendee_availability → offered-then-bounced" loop
             //       (Maayan+Lori, 2026-07-08): the tool hands back the annotated
             //       truth in ONE call, so Sonnet never guesses a blind 2nd search.
-            //   'colleague_owner_only' — owner-only (attendees drop to a high-
-            //       level caveat; a colleague never sees calendar detail, rule 7).
+            //   'colleague_owner_only' — owner-only for real calendar BUSY detail
+            //       (attendeeBusyEmails stays owner-only, rule 7: a colleague never
+            //       sees another attendee's actual calendar). But the per-attendee
+            //       WORK-HOURS clip (attendeeAvailability) is real, non-calendar
+            //       data (just stored/assumed hours) and is exactly what the
+            //       strict pass just rejected these slots for — nulling it here
+            //       used to check the recovered slots against ONLY the owner's own
+            //       calendar, so a slot outside every other attendee's hours came
+            //       back looking clean. Keep it live and TAGGED (attendee_conflicts)
+            //       so the truth survives into the result instead of vanishing.
             //       If the owner is himself busy, owner-only also returns 0 →
             //       honest "he's booked then."
             const recoverAttendeeBlockedSlots = (audience: 'owner_tagged' | 'colleague_owner_only') => {
@@ -1059,8 +1103,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 timezone,
                 durationMinutes: args.duration_minutes as number,
                 attendeeBusyEmails: ownerAudience ? attendeeEmails : undefined,
-                attendeeAvailability: ownerAudience ? attendeeAvailability : undefined,
-                tagAttendeeConflicts: ownerAudience,   // owner: keep his day strict, TAG attendee busy (never drop)
+                attendeeAvailability,   // both audiences — the work-hours clip is not calendar detail
+                tagAttendeeConflicts: true,   // both audiences: keep the day strict, TAG conflicts (never silently drop)
                 searchFrom: effectiveSearchFrom,
                 searchTo: effectiveSearchTo,
                 preferMorning: args.prefer_morning as boolean | undefined,
@@ -1255,7 +1299,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             //   1) owner-tagged backstop — his open times, attendee-conflicted
             //      (best: his day untouched; carries attendee_conflicts tags).
             //   2) relaxed recovery — times that break his soft rules.
-            //   3) colleague owner-only — his open times, attendees uncheckable.
+            //   3) colleague owner-only — his open times, attendee HOURS tagged
+            //      (off_hours), attendee real calendar busy stays uncheckable.
             //   4) rawSlots (the clean strict result).
             // (1) and (2) are mutually exclusive by construction — the relaxed
             // recovery is gated off when the owner-tagged backstop found slots.
@@ -1693,7 +1738,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
               if (attendeeNotCheckedWarning) Object.assign(result, attendeeNotCheckedWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
-              if (hasAttendeeConflicts && !usedOwnerAttendeeTagged) {
+              if (hasAttendeeConflicts && !usedOwnerAttendeeTagged && !usedColleagueOwnerOnly) {
                 result._attendee_conflicts_note =
                   'You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has `attendee_conflicts: [{email, reason}]`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). Never present a conflicted slot as clean. The owner can still book any of them.';
               }
@@ -1743,8 +1788,31 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   + 'A slot may ALSO carry `attendee_conflicts` — say who is busy on top of the rule. He gets the final say.';
               }
               if (usedColleagueOwnerOnly) {
+                const ownerFirstUnverified = context.profile.user.name.split(' ')[0];
+                // v4.4.7 — the strict pass rejected these slots because SOME
+                // attendee's stored/assumed working hours ruled them out, and
+                // this recovery re-checks that SAME real data (never nulled now
+                // — see recoverAttendeeBlockedSlots above), so a returned slot
+                // normally carries `attendee_conflicts: [{email, reason:'off_hours'}]`
+                // naming exactly who. That part is no longer a guess.
+                // v4.4.8 (bouncer overturn) — the colleague-path annotation at
+                // :1506 runs on every search that reaches this branch (it fires
+                // whenever !isOwnerInitiatedSearch, which usedColleagueOwnerOnly
+                // implies), and ships a REAL per-slot Graph free/busy read for
+                // every INTERNAL attendee as `attendee_status`. "No calendar
+                // access in this fallback" was false whenever an attendee is
+                // internal — the real data sits right next to the note denying
+                // it. Only an EXTERNAL attendee (or one whose status came back
+                // 'unknown') is genuinely unchecked here (rule 7 — a colleague
+                // never gets another attendee's real calendar; the annotation
+                // itself skips externals). Also: `usedColleagueOwnerOnly` always
+                // implies `hasAttendeeConflicts` — the recovery differs from the
+                // strict pass ONLY by tagging off-hours conflicts instead of
+                // dropping them, so every slot that newly surfaces here carries
+                // at least one — there is no "no conflicts at all" case on this
+                // path, so no second wording for it.
                 result._attendee_unverified_note =
-                  `No slot worked once the OTHER attendee(s)' availability was applied, so these are ${context.profile.user.name.split(' ')[0]}'s OWN open times instead — attendee free/busy is a helper, never a blocker. Offer these as options; do NOT demand an attendee's email to proceed (an external attendee can't be checked at all). Say plainly you could not confirm the other side(s) yet ("here are his open times — I'll confirm the other side once you pick"). Do NOT claim the other attendee is free. The pick routes to ${context.profile.user.name.split(' ')[0]}'s approval as usual.`;
+                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours'}]\` — that's real per-attendee working-hours data, so say plainly who's outside their hours (e.g. "Tue 10:00 — Elinor's outside her hours then"), never present a tagged slot as clean for everyone. Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: where it's 'busy' / 'tentative' / 'oof', say they already have something then (e.g. "Lori's busy then"); where it's 'free', say they're clear then. Only an EXTERNAL attendee (or one still 'unknown') can't be checked here — say you could not confirm THAT one yet. Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;
               }
               return result;
             }

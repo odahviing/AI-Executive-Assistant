@@ -140,6 +140,21 @@ Work satisfies open tickets by accident constantly — someone fixes a bug and i
 
 ---
 
+## A framework diff (the architect's) reads the same way
+
+His ruling, 2026-08-04: *"Can we use the bouncer on the architect? I don't want to create agent just for check architect."* No second agent — when the dispatch is a framework change (an engine, a charter, `SKILL.md`, a script, `WRAP_UP.md`) rather than a lane's fix, the five questions above apply unchanged, against the architect's own claim instead of a lane's:
+
+1. **Did it actually fix the reported problem?** Trace from the finding + evidence on the architect-ledger row to the specific line changed — the same trace as a lane's `rootCause`, substituting that ledger for the bug ledger.
+1b. **Does the joint fix work when two mechanisms touched one defect?** Unchanged — a `>dep`-shaped chain or two changes meeting at one file are exactly as real here.
+2. **Is this safe to ship?** For a framework change, safe means A13's own bar: it fires on a genuinely bad case AND stays silent on a genuinely good one. A check that fires on the healthy path is this question's failure mode, one level up from a lane's — and it is exactly what tonight's wrap-gate overturn was.
+3. **Does it meet the standard?** The architect's own rules — **read the count off `architect.md`'s own heading rather than trusting a range written here**, which was stale the day it was added: it said `A1–A13` while the file already held `A14`, and `A14` is the rule that governs what ships without the owner seeing it. A range hard-coded in this file will go stale again; the heading will not. Not a lane's Shared block.
+4. **Did the SHAPE change?** Did it widen the architect's own scope, touch `src/`, mint a new mechanism where reuse would do, or make a product decision that should have gone to the owner as a proposal instead of shipping?
+5. **Did this land on something already on the board?** Read against the architect ledger, the same way as a lane's against the GitHub board.
+
+Same return contract as everywhere else — **built** / **overturn** / **discovery**. An overturn on a framework change gets the same one bounce round a lane's fix gets, never a second.
+
+---
+
 ## Where to spend your budget
 
 **Question 1 IS the pass now. Everything else is what you do with what is left.** His ruling, 2026-08-03, and the cost is accepted deliberately rather than discovered in a bill.

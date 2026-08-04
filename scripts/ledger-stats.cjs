@@ -349,6 +349,72 @@ if (argOf('--wrap')) {
     console.log(`\n  "${wrapRows.length} shipped, ${verified} verified" — check the wrap summary against that pair.`);
     console.log(`\nRows:`);
     for (const r of wrapRows) console.log(`  [${String(r.verdict || '?').padEnd(20)}] ${String(r.ref || '(no ref)').padEnd(46)} ${String(r.finding || '').slice(0, 70)}`);
+    // X158 · WRAP_UP.md step 12's two new appends (a `built` ref's `state:"wrapped"`
+    // companion, and a touched ticket's GitHub<->ledger sync row) had no observable
+    // — the exact silent-skip class this whole file exists to catch, on the fix for
+    // the LAST silent skip (X152). Both are derivable from `wrapRows`, already
+    // computed above: a real skip and a clean wrap must not print the same thing.
+    //
+    // X158 · THREE FALSE POSITIVES, measured on a reproduced 3-commit wrap and fixed
+    // here rather than only in WRAP_UP.md's prose, because a prose-only fix cannot
+    // stop a future template drifting back to the same shape:
+    //   (a) this block only sees COMMITTED rows (`added` above is a git diff), but
+    //       step 12 told you to append-then-check inside the same step, before any
+    //       further commit — a flawless wrap and a skipped one printed identical
+    //       text. Fixed in WRAP_UP.md: the check now runs after the appends are
+    //       committed, not immediately after they are written.
+    //   (b) a GH-sync row for a ticket closed via THIS wrap used to carry
+    //       `verdict:"built"` (WRAP_UP.md's own former template), which put its ref
+    //       in `builtRefs` and demanded a companion nothing was ever going to mint.
+    //       Fixed in WRAP_UP.md: that row now carries `verdict:"wrapped"`, matching
+    //       what real wraps already did in practice (ledger.jsonl:876-877) — a
+    //       GitHub-sync-closed row IS its own confirmation, not a fresh built claim.
+    //   (c) a row he has not ruled on (`needs-owner-decision`, which WRAP_UP.md:224
+    //       forbids closing) still fed `ticketNums` by ref-pattern alone. Fixed
+    //       below: only rows whose verdict says something actually shipped this
+    //       wrap (`built`, `confirmed-other-lane`, `already-fixed`) contribute a
+    //       ticket number at all.
+    // And ONE shape it was silent on: a single row carrying BOTH `verdict:"built"`
+    // AND `state:"wrapped"` satisfies the by-ref count on its own — the exact
+    // mutation steps 9 and 12 both forbid (never mutate the original line; the
+    // companion is a SEPARATE row). Flagged explicitly below, not inferred from a
+    // count. And it now EXITS 1 on a real finding, matching `--report`'s own
+    // acceptance-test convention, instead of only printing and returning 0.
+    const SHIPPED_THIS_WRAP = new Set(['built', 'confirmed-other-lane', 'already-fixed']);
+    const builtRefs = [...new Set(wrapRows.filter((r) => r.verdict === 'built' && r.ref).map((r) => r.ref))];
+    // `closed` counts too — a GitHub-sync row saying the ticket is CLOSED is
+    // strictly stronger evidence of shipping than `wrapped` alone, and treating
+    // only the exact word as proof is what let a correctly-shaped row (this wrap's
+    // own template, pre-fix) read as unaccounted for.
+    const wrappedRefs = new Set(wrapRows.filter((r) => r.state === 'wrapped' || r.state === 'closed').map((r) => r.ref));
+    const missingWrapped = builtRefs.filter((ref) => !wrappedRefs.has(ref));
+    console.log(`\nBUILT -> WRAPPED — ${builtRefs.length - missingWrapped.length} of ${builtRefs.length} built ref(s) have a \`state:"wrapped"\` companion row.`);
+    if (missingWrapped.length) console.log(`  MISSING for: ${missingWrapped.join(', ')}`);
+
+    const mutatedRows = wrapRows.filter((r) => r.verdict === 'built' && r.state === 'wrapped');
+    if (mutatedRows.length)
+      console.log(
+        `  ! MUTATION-SHAPED — ${mutatedRows.length} row(s) carry BOTH \`verdict:"built"\` and \`state:"wrapped"\` on the SAME line, which answers its own check: ${mutatedRows.map((r) => r.ref || '(no ref)').join(', ')}. Steps 9 and 12 both require a separate companion row, never a mutated original.`,
+      );
+
+    const ticketNums = [
+      ...new Set(
+        wrapRows
+          .filter((r) => SHIPPED_THIS_WRAP.has(r.verdict))
+          .flatMap((r) => [...String(r.ref || '').matchAll(/gh#(\d+)/g)].map((m) => m[1])),
+      ),
+    ];
+    const syncedTickets = new Set(
+      wrapRows.filter((r) => /^gh#\d+$/.test(String(r.ref || '')) && (r.state === 'closed' || r.state === 'partial')).map((r) => r.ref.slice(3)),
+    );
+    const missingSync = ticketNums.filter((n) => !syncedTickets.has(n));
+    console.log(`\nGITHUB <-> LEDGER SYNC — ${ticketNums.length - missingSync.length} of ${ticketNums.length} ticket(s) touched have a matching \`gh#<n>\` closed/partial row.`);
+    if (missingSync.length) console.log(`  MISSING for: ${missingSync.map((n) => `gh#${n}`).join(', ')}`);
+
+    if (missingWrapped.length || missingSync.length || mutatedRows.length) {
+      console.log(`\n${missingWrapped.length + missingSync.length + mutatedRows.length} problem(s). Do not call the wrap finished.\n`);
+      process.exit(1);
+    }
   } else {
     console.log(`\nNO row is stamped \`runId: wrap-${V}\`, so the wrap's own set cannot be separated from the rest — every count above is the whole append.`);
     console.log(`Stamp \`runId: "wrap-<version>"\` on each report row at the wrap and this command names them exactly.`);
@@ -639,7 +705,7 @@ if (argv.includes('--report')) {
         const [sha, date, ...rest] = l.split('|');
         const subject = rest.join('|');
         const v = (subject.match(/^(\d+\.\d+\.\d+)\b/) || [])[1];
-        // X-fix (2026-08-04) · a wrap's OWN bookkeeping commit ("4.4.6 bookkeeping:
+        // X153 · a wrap's OWN bookkeeping commit ("4.4.6 bookkeeping:
         // stamp the release") also starts with the version number, and `git log`
         // is newest-first — so on every wrap this loop hit the bookkeeping commit
         // BEFORE the real release and reported `lastWrapIso` as stale by however
@@ -849,7 +915,7 @@ fs.readFileSync(LEDGER, 'utf8')
 
 if (bad.length) console.error(`! ${bad.length} unparseable line(s): ${bad.slice(0, 10).join(', ')}\n`);
 
-// X-fix (2026-08-04) · a `kind:"run-manifest"` row is pure telemetry (item 1's
+// X156 · a `kind:"run-manifest"` row is pure telemetry (item 1's
 // fix for "no run's manifest is durably recorded a day later") — not a finding,
 // not a dispatch, not something to decide. Every view below assumes a row is
 // one of those three, so a manifest row left in corrupts totals it was never
@@ -958,7 +1024,11 @@ if (openOnly) {
   // X66 · `confirmed-other-lane` closes a ref as firmly as `built` — the work
   // landed, another lane did it. It is deliberately NOT counted as shipped below,
   // which is the whole reason the verdict exists: one change, one fix in the count.
-  const CLOSED = new Set(['built', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
+  // X158 · `wrapped` joins the set: WRAP_UP.md step 12 now mints a `verdict:"wrapped"`
+  // row for both a built ref's shipped-companion and a GitHub-sync-closed ticket —
+  // without this, every one of those bookkeeping rows would misread as a fresh
+  // open decision the moment a wrap starts writing them.
+  const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
 
   // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
   // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked

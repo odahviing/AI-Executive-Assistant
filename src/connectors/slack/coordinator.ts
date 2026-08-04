@@ -27,6 +27,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
 import { App } from '@slack/bolt';
+import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import { updateRequest } from '../../db/requests';
@@ -303,7 +304,7 @@ export async function handleOutreachReply(
       await app.client.chat.postMessage({
         token: params.bot_token,
         channel: dmChannel,
-        text: decision.response,
+        text: formatForSlack(decision.response),
       });
     }
     conversation.push({ role: 'maelle', text: decision.response });
@@ -338,7 +339,7 @@ export async function handleOutreachReply(
       token: params.bot_token,
       channel: job.owner_channel,
       thread_ts: job.owner_thread_ts ?? undefined,
-      text: relayMsg,
+      text: formatForSlack(relayMsg),
     });
     if (job.owner_thread_ts) {
       appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: relayMsg });
@@ -370,7 +371,7 @@ export async function handleOutreachReply(
     token: params.bot_token,
     channel: job.owner_channel,
     thread_ts: job.owner_thread_ts ?? undefined,
-    text: decision.summary,
+    text: formatForSlack(decision.summary),
   });
   logEvent({
     ownerUserId: params.profile.user.slack_user_id,

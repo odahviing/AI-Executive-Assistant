@@ -156,7 +156,7 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
             await shadowNotify(profile, {
               channel: channelId,
               threadTs,
-              action: `Conversation with ${senderName}`,
+              action: 'Image forwarded',
               detail: 'sent an image',
               conversationKey: threadTs,
               conversationHeader: `Conversation with ${senderName}`,

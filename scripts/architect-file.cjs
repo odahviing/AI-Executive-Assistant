@@ -109,6 +109,30 @@ if (argv.includes('--targets')) {
   process.exit(0)
 }
 
+// X163 · ONLY AN ARCHITECT SESSION FILES OR CLOSES A ROW HERE. His words,
+// 2026-08-04: "I don't want other agents, or other chat to send messages to
+// the framework. only here." Every path below this line is a WRITE — filing,
+// closing, rechecking, merging — so the gate sits once, before any of them,
+// rather than duplicated per path where a new write path could add itself
+// without the check.
+//
+// This does not (and cannot, from a plain Node script) cryptographically prove
+// which agent is calling it — it proves the caller DECLARED itself the
+// architect. That is the honest claim to make: it stops the casual, silent
+// case this ruling is actually about (a chat that hits a framework problem
+// and files it without a second thought, the exact behaviour SESSION_STARTER.md
+// used to invite), not a determined attempt to lie about who is calling.
+if (argOf('--session') !== 'architect') {
+  console.error(`\nREFUSED — missing --session architect.\n`)
+  console.error(
+    `Owner's ruling, 2026-08-04: "I don't want other agents, or other chat to send messages to the framework. only here." ` +
+      `Filing and closing rows on this ledger is now architect-session-only. If you are running as the architect, re-invoke with ` +
+      `--session architect. If you are not, do not file this yourself — hand the finding to the architect instead (or wait for the ` +
+      `next architect session and give it to that chat directly).\n`,
+  )
+  process.exit(1)
+}
+
 const finding = argOf('--finding')
 const evidence = argOf('--evidence')
 const target = argOf('--target')

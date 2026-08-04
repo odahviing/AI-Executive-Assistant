@@ -1,14 +1,18 @@
 # Agent-loop report
 
 ```
-Wrap 4.4.7 — in: 1 ticket · 0 day(s) of logs · 0 backlog re-reads
-out: 11 built · 3 already-fixed · 0 built-with-gap · 0 bounced · 5/5 joint-traced · 0 converted · 9 queued
-board: 17 open rows — 1 still-real · 15 need a re-read · 1 cite no file · 17 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
-0 rows await you: 0 from tonight · 0 re-surfaced · 0 found by the loop
+Wrap 4.4.8 — in: 0 tickets · 0 day(s) of logs · 0 backlog re-reads
+out: 6 built · 0 already-fixed · 0 built-with-gap · 2 bounced · 0/0 joint-traced · 0 converted · 3 queued
+board: 18 open rows — 1 still-real · 16 need a re-read · 1 cite no file · 18 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+1 rows await you: 1 from tonight · 0 re-surfaced · 0 found by the loop
 ```
 
-**Built and uncommitted (0):** none — this wrap ships it all.
+### Pending owner (1)
 
-**Note:** most of this wrap's work arrived as live owner reports in chat, not through a github/logs/backlog pass — 5 bugs the owner watched happen in real time (relay-history, quarter-hour booking, the Erez autofix recurrence, the MPIM slack-id leak, plus one regression the pre-wrap bouncer pass caught inside the night's own diff before it shipped). All five traced to root cause and confirmed fixed by a dedicated bouncer pass before this wrap. Also backfilled: 8 ledger rows from the 4.4.6 wrap whose `state` field was never advanced from `built` to `wrapped` (X152) — corrected this wrap, no code change involved.
+| # · Lane · Status | The chat problem | The issue | The solution | Risk |
+|---|---|---|---|---|
+| `o#212` · slackmaster · pending owner — recommend build | — | A 4th site in `coordinator.ts:223` (multi-match disambiguation DM to a colleague) also bypasses the scrubber, same shape as the 3 already fixed | Route through `formatForSlack`, same fix as the other 3 sites | Surfaced mid-fix, outside the approved scope — not built |
 
-**`0 bounced` above is a ledger-position artifact, not the true count.** The 8 X152-correction rows just above were appended with `runId:"wrap-4.4.6"`, which the `--report` boundary scan reads as the most recent wrap stamp — pushing "since last wrap" to empty and hiding this wrap's own bounces from that one mechanical check. The real count, individually recorded on each row: **4 bounced this wrap** (`private-mask-is-not-a-narration-fallback-automove`, `relay-history-not-read-on-unthreaded-reply`, `mpim-reply-addresses-colleague-in-third-person-with-slackid`, `email-colleague-freebusy-failure-has-no-signal` — each caught and fixed on retry, none reached the owner unresolved). Self-inflicted by this wrap's own correction step; does not recur once `wrap-4.4.7`'s own stamp becomes the newest boundary.
+**Built and uncommitted (6):** `o#208` shadowNotify duplicate label · `o#209` MPIM leak always uses the colleague's name, never a Slack-id mention · `o#210` coordinator.ts's 3 approved sites now scrub · `colleague-reschedule-search-narrows-attendee-roster-and-fabricates-reason` reads the real roster now, bounced once · `colleague-owner-only-backstop-slots-have-no-provenance-note` tags real off-hours conflicts now, bounced once · `meeting-created-with-no-subject-ever-asked` asks for a subject on the colleague path instead of inventing one.
+
+**Note:** this session's work arrived entirely as live owner reports in chat, not a github/logs/backlog pass. Every fix was traced to root cause and bouncer-confirmed before landing; both bounces were caught before shipping and fixed on retry.

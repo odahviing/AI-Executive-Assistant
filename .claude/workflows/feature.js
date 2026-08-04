@@ -481,7 +481,9 @@ if (MODE === 'plan') {
       // very hard "obvious defect" bar, one-root-one-issue, and "a product
       // decision means do not dispatch" — and every one of those is wrong here.
       // Effort and model stay as tuned: one shell command does not need more.
-      { label: 'intake:backlog', phase: 'Intake', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
+      // X151 · the label names the agent first (framer, every dispatch in this
+      // file) and the task second — `Intake` already says what phase this is.
+      { label: 'framer:backlog', phase: 'Intake', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
     )
     items = (raw && raw.items) || []
     log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
@@ -605,7 +607,7 @@ if (MODE === 'plan') {
           // The explicit `model: 'opus'` STAYS and overrides framer.md's declared
           // sonnet: X15 above is an owner ruling on this specific call, and the
           // tier must not move as a side effect of giving the pass a charter.
-          { label: `recon:${it.ref}`, phase: 'Recon', agentType: 'framer', effort: 'high', model: 'opus', schema: UNDERSTOOD },
+          { label: `framer:${it.ref}`, phase: 'Recon', agentType: 'framer', effort: 'high', model: 'opus', schema: UNDERSTOOD },
         ),
       ),
     )
@@ -650,7 +652,7 @@ if (MODE === 'plan') {
     // (F5-F10), so the engine states the schema and the charter states the
     // standing duty. Effort stays xhigh; no model pin, so the tier comes from
     // the charter, which is where spend.cjs:293 says it belongs.
-    { label: 'decompose', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
+    { label: 'framer', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
   )
 
   let pieces = (plan && plan.pieces) || []
@@ -682,7 +684,7 @@ if (MODE === 'plan') {
         (gaps.length ? `BLANK FIELDS:\n${gaps.map((g) => `• ${g.id}: ${g.missing.join(', ')}`).join('\n')}\n\n` : '') +
         `PIECES:\n${JSON.stringify(gaps.length ? pieces.filter((p) => blank(p).length) : [], null, 2)}\n\n` +
         `RECON (for the seam facts):\n${JSON.stringify(live, null, 2)}`,
-      { label: 'decompose:contract', phase: 'Decompose', agentType: 'framer', effort: 'high', schema: PLAN },
+      { label: 'framer:contract', phase: 'Decompose', agentType: 'framer', effort: 'high', schema: PLAN },
     )
     const filled = new Map(((fix && fix.pieces) || []).filter((p) => p && p.id).map((p) => [p.id, p]))
     pieces = pieces.map((p) => {
@@ -903,7 +905,7 @@ const buildLane = (lane, pcs, roundNote) =>
       (Object.keys(answers).length ? `OWNER'S ANSWERS TO THE OPEN QUESTIONS:\n${JSON.stringify(answers, null, 2)}\n\n` : '') +
       `PIECES:\n${pcs.map(describe).join('\n')}\n\nFULL PAYLOAD:\n${JSON.stringify(pcs, null, 2)}`,
     // No `model` here: the tier is on the lane's charter, same as bugger.js.
-    { label: `build:${lane}`, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+    { label: lane, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
   ).then((r) => (r && r.results) || [])
 
 // Dependency-ordered waves. A piece runs only once everything it depends on has
@@ -1127,7 +1129,7 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
       (built.length ? `WHAT WAS BUILT:\n${JSON.stringify(built, null, 2)}` : `**NO PIECE WAS BUILT IN THIS WAVE** — the spot-check above is the whole job.`),
     // No `model` here: `bouncer.md` pins Opus, so neither the session model nor
     // a hand dispatch can downgrade the one agent that must not be downgraded.
-    { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+    { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
   )
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []

@@ -7,11 +7,57 @@
   "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C10.",
   "lastCleanSha": "aeab9630b5e9874a425511e6e70dce98034f7f58",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
-  "nextReportId": 207,
+  "nextReportId": 213,
   "_inFlightNote": "Nine items held by engine run wf_6e41a1e4-f2c. EMPTY THIS IN THE SAME TURN IT RETURNS — a stale entry is the STOP 1 lock and refuses the next run.",
   "inFlight": [],
   "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here.",
   "pendingOverflow": [
+    {
+      "id": "requester-is-attending-false-still-gets-narrow-roster",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "invariant": "colleague-search-checks-real-roster-not-just-requester",
+      "symptom": "The organizing-but-not-attending colleague case (e.g. an EA booking on someone else's behalf) still only gets a narrow answer after tonight's fix — she isn't on the event roster herself, so the new membership check closes and the roster never folds in for her either. Not a regression (she got nothing pre-fix either), but an unclosed sibling case.",
+      "evidence": "src/skills/meetings/ops/handlers/findAvailableSlots.ts:536-566 — the requests spine already records who asked for a meeting on someone else's behalf; that existing signal could admit this case without reopening the privacy hole tonight's bounce just closed."
+    },
+    {
+      "id": "attendee-conflicts-note-not-in-meetings-ts-1139-enumeration",
+      "lane": "matchmaker",
+      "severity": "medium",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "meetings.ts:1139's system-prompt rule (\"no conflict tag = clean for everyone\") only names attendee_status in its enumeration, not attendee_conflicts — so a slot whose only tag is attendee_conflicts (the off-hours case just fixed tonight) still reads as literally \"untagged\" under the sentence that licensed the original false \"clean option\" claim.",
+      "evidence": "src/skills/meetings.ts:1139 — add attendee_conflicts to the enumeration alongside attendee_status, one clause."
+    },
+    {
+      "id": "assumed-attendee-hours-narrated-as-fact",
+      "lane": "matchmaker",
+      "severity": "medium",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "An attendee with no stored timezone/hours is silently given the OWNER's zone and default hours (a guess), then narrated to the model as \"stated hours\" — with tonight's fix, that guess now reaches a colleague as a per-slot off_hours tag the note tells Maelle to state plainly, with no hedge that it's an assumption.",
+      "evidence": "src/utils/attendeeAvailability.ts:123-125 (default fallback) plus findAvailableSlots.ts:141 calling the result \"stated hours\" unconditionally — add an assumed flag so narration can hedge those cases."
+    },
+    {
+      "id": "unverified-note-comment-duplicates-systemprompt-and-lacks-hasattendeestatus-gate",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "The note tonight's fix shipped re-states attendee_status semantics the system prompt already teaches (and a nearby comment says a per-call note for this was deliberately removed as duplicate, now contradicted), and isn't gated on hasAttendeeStatus (low harm — guidance is per-value, absent field yields no claim).",
+      "evidence": "src/skills/meetings/ops/handlers/findAvailableSlots.ts:1716-1724 (stale comment) and :1815 (missing gate) — point the note at the existing system-prompt guidance instead of restating it, and add the hasAttendeeStatus gate."
+    },
+    {
+      "id": "moving-event-ids-subtracts-from-busy-pool-with-no-membership-check",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "moving_event_ids reaches excludeEventIds (subtracting a named event from the busy pool) on a colleague turn with no membership check at all — a colleague could name an owner event she isn't part of and have it excluded from his busy calculation, offering a slot he's actually committed to as free. Bounded at booking today (create_meeting re-checks conflicts without the moving ids), so the harm is a false offer shown, not an actual double-book.",
+      "evidence": "src/skills/meetings/ops/handlers/findAvailableSlots.ts:832,945,1112,1201,1427 — pre-existing, not introduced by tonight's fixes."
+    },
     {
       "id": "email-leg-unresolved-attendee-strip-has-same-silent-confirm-shape",
       "lane": "matchmaker",

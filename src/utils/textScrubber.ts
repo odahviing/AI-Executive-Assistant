@@ -7,7 +7,8 @@
  *   - "- " separators (AI writing tell, see systemPrompt PUNCTUATION rule)
  *   - Leftover orphan backticks, empty lines, doubled whitespace
  *   - The "Name (slack_id: ID)" inbound disambiguation label, if echoed back
- *     into a reply verbatim instead of a rendered `<@id>` mention
+ *     into a reply verbatim (dropped outright — she names people the way a
+ *     person would, never by pasting their account id)
  *
  * Transport-agnostic — applies identically to Slack, email, WhatsApp.
  * Transport-specific formatting (Slack's `*bold*` dialect, HTML for email,
@@ -197,24 +198,23 @@ export const RAW_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID);
  * convention (`resolveSlackMentions` in connectors/slack/app/helpers.ts,
  * and the MPIM/thread participant rosters built in connectors/slack/app/
  * handlers.ts) that tells the model who an `<@ID>` mention resolved to. It
- * was never meant to be reproduced — a person should be addressed with a
- * real `<@id>` mention, never handed a copy of the internal label. Observed
- * leaking into an MPIM reply verbatim, twice in the same thread, addressing
- * the colleague in the third person: "Rita Kaplan Solomon (slack_id: @Rita
- * Kaplan)" — the model imitating the convention it was shown in the
- * participant roster rather than emitting a rendered mention, and inventing
- * a non-id ("@Rita Kaplan") when it did.
+ * was never meant to be reproduced — it is internal bookkeeping, never
+ * something to hand back to the person it describes. Observed leaking into
+ * an MPIM reply verbatim, twice in the same thread, addressing the colleague
+ * in the third person: "Rita Kaplan Solomon (slack_id: @Rita Kaplan)" — the
+ * model imitating the convention it was shown in the participant roster
+ * instead of just using the name, and inventing a non-id ("@Rita Kaplan")
+ * when it did.
  *
- * The annotation itself must never reach Slack either way, but the two
- * cases differ in what's recoverable: when the captured value is actually
- * SLACK_ID_SHAPE — the model had the real id and just wrapped it wrong —
- * swap the whole annotation for the working `<@id>` mention it owed the
- * recipient (so the push notification the instruction asked for still
- * fires). When it isn't (a fabricated value, or a name), there is no id to
- * recover — drop the annotation outright rather than mint a fake mention.
+ * Owner's ruling (2026-08-04): Maelle is a person talking to other people in
+ * a group conversation — a person refers to someone by NAME, never by
+ * pasting their account id. So the annotation is always just dropped,
+ * whether the captured value is a genuine SLACK_ID_SHAPE id or a fabricated
+ * one — never converted into a `<@id>` mention either way. The name in front
+ * of the annotation is left standing on its own, exactly as a human would
+ * say it.
  */
 const SLACK_ID_ANNOTATION_RE = /(\s*)\(slack_id:\s*([^)]*)\)/gi;
-const SLACK_ID_SHAPE_ONLY_RE = new RegExp(`^${SLACK_ID_SHAPE}$`);
 
 /**
  * An internal work-item id — the inverse of the four expressions that MINT one:
@@ -241,21 +241,12 @@ export function scrubInternalLeakage(text: string): string {
   return text
     .replace(GRAPH_ID_RE, '')
     // Runs BEFORE the bare-id wrapper: the disambiguation label is never
-    // legitimate output. A genuine id inside becomes the real mention it
-    // should have been; a fabricated one is dropped — see the doc above.
-    //
-    // The match consumes the WHITESPACE before "(slack_id: …)" too (so a
-    // dropped/fabricated annotation doesn't leave a stray space behind — the
-    // trailing space after ")" already does that job). The valid-id branch
-    // must hand that leading whitespace back: it's the only thing separating
-    // the person's name from the mention that replaces the annotation, and
-    // dropping it glued them into one token ("Name<@U123>") — the swallowed-
-    // whitespace bug the bounce named. `lead` restores it; the drop branch
-    // stays empty on purpose (same reasoning as before: nothing to restore).
-    .replace(SLACK_ID_ANNOTATION_RE, (_m: string, lead: string, idContent: string) => {
-      const trimmed = idContent.trim();
-      return SLACK_ID_SHAPE_ONLY_RE.test(trimmed) ? `${lead}<@${trimmed}>` : '';
-    })
+    // legitimate output, genuine id or not — see the doc above. The match
+    // consumes the WHITESPACE before "(slack_id: …)" too, so dropping the
+    // whole match leaves the name standing alone with nothing glued to it
+    // (the trailing space after ")", if any, already does that job on the
+    // other side).
+    .replace(SLACK_ID_ANNOTATION_RE, '')
     // Always emits the rendered form. The stray `>` is only swallowed when a stray
     // `<` came with it — otherwise it belonged to whatever preceded the id, so it is
     // handed back untouched.

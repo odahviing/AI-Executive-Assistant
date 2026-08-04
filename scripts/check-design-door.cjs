@@ -78,6 +78,15 @@ const run = async (args, canned) => {
 }
 const called = (calls, label) => calls.filter((c) => c.label === label || c.label.startsWith(label))
 const promptOf = (calls, label) => (called(calls, label)[0] || {}).prompt || ''
+// X151-fix (X159) · PHASE, never a label prefix, for "did a dispatch of THIS
+// KIND happen at all" — a label is a display string with no contract behind
+// it (X151 just proved that by renaming every one), `opts.phase` is the one
+// thing the engine and this fixture cannot disagree about without a real
+// dispatch mistake. Exact labels stay below ONLY where a SPECIFIC dispatch's
+// identity matters (which lane, the repair call vs the main one) and every
+// such label is now a value the real engine can actually produce.
+const calledPhase = (calls, phase) => calls.filter((c) => c.opts && c.opts.phase === phase)
+const promptOfPhase = (calls, phase) => (calledPhase(calls, phase)[0] || {}).prompt || ''
 
 // ── canned dispatch results ─────────────────────────────────────────────────
 const INTAKE = { items: [{ ref: '#154', title: 'Owner authority across chat surfaces', priority: 'High', asks: 'decide which surfaces clamp the owner and what the clamp governs' }] }
@@ -112,7 +121,14 @@ const GOOD_PLAN = { pieces: [GOOD_PIECE], sharedPiece: 'slackmaster — src/conn
 const BAD_PLAN = { pieces: [{ ...GOOD_PIECE, connection: '   ', expectation: '' }], sharedPiece: '', blockingQuestions: [], notWorthBuilding: [] }
 const REPAIRED = { pieces: [{ id: 'p1', connection: GOOD_PIECE.connection, expectation: GOOD_PIECE.expectation }], sharedPiece: 'slackmaster — src/connections/types.ts', blockingQuestions: [] }
 const STILL_BAD = { pieces: [{ id: 'p1', connection: '', expectation: '' }], sharedPiece: '', blockingQuestions: [] }
-const GOOD = { 'intake:backlog': INTAKE, 'recon:': RECON, decompose: GOOD_PLAN }
+// X151-fix (X159) · exact keys, matching the real labels feature.js emits
+// today: `framer:backlog`, `framer:<ref>`, bare `framer` for decompose,
+// `framer:contract` for the repair round, and a bare lane name for a build
+// dispatch. `framer` is a PREFIX of the other three `framer:...` labels, so
+// this only works because `run()`'s matcher checks every key for an EXACT
+// match before it ever tries `startsWith` — every label the engine can
+// produce has its own exact entry here, so that fallback is never reached.
+const GOOD = { 'framer:backlog': INTAKE, 'framer:#154': RECON, framer: GOOD_PLAN }
 
 // The real cluster, from the real script, against the real ledger. Deriving it
 // here instead would be a second definition of the clustering rule.
@@ -129,35 +145,38 @@ const main = async () => {
   const d = await run({ ...CLUSTER_ARGS }, GOOD)
   ok('no throw', !d.err, d.err && d.err.message)
   ok(`gh#154 still holds at least 9 refs from at least 5 lanes (found ${N} from ${LANES})`, N >= 9 && LANES >= 5, { refs: N, lanes: LANES })
-  ok(`ONE recon dispatch, not ${N}`, called(d.calls, 'recon:').length === 1, d.calls.map((c) => c.label))
+  ok(`ONE recon dispatch, not ${N}`, calledPhase(d.calls, 'Recon').length === 1, d.calls.map((c) => c.label))
   ok('ONE item in the return', d.out && d.out.items && d.out.items.length === 1, d.out && d.out.items)
-  ok(`all ${N} refs reached the recon prompt`, CLUSTER_ARGS.cluster.refs.every((r) => promptOf(d.calls, 'recon:').includes(r.ref)), promptOf(d.calls, 'recon:').length)
-  ok('recon was told not to patch per row', /Do NOT design a patch per row/.test(promptOf(d.calls, 'recon:')))
+  ok(`all ${N} refs reached the recon prompt`, CLUSTER_ARGS.cluster.refs.every((r) => promptOfPhase(d.calls, 'Recon').includes(r.ref)), promptOfPhase(d.calls, 'Recon').length)
+  ok('recon was told not to patch per row', /Do NOT design a patch per row/.test(promptOfPhase(d.calls, 'Recon')))
   ok('design block records what it absorbed', d.out && d.out.design && d.out.design.absorbs.length === N, d.out && d.out.design)
   ok('the join-back command is on the return', d.out && d.out.design && /design-cluster\.cjs gh#154 --decide/.test(d.out.design.joinBack), d.out && d.out.design && d.out.design.joinBack)
 
   section('2 · A `refs:` INVOCATION IS UNCHANGED  (silent on the good path)')
   const r = await run({ mode: 'plan', refs: ['#154'] }, GOOD)
   ok('no throw', !r.err, r.err && r.err.message)
-  ok('the intake prompt is BYTE-IDENTICAL to the design run', promptOf(r.calls, 'intake:backlog') === promptOf(d.calls, 'intake:backlog'))
+  ok('the intake prompt is BYTE-IDENTICAL to the design run', promptOfPhase(r.calls, 'Intake') === promptOfPhase(d.calls, 'Intake'))
   ok('the intake dispatch options are identical', JSON.stringify(r.calls[0].opts) === JSON.stringify(d.calls[0].opts), r.calls[0].opts)
-  ok('NO cluster block in the recon prompt', !/BUG ROWS ARE WAITING/.test(promptOf(r.calls, 'recon:')))
+  ok('NO cluster block in the recon prompt', !/BUG ROWS ARE WAITING/.test(promptOfPhase(r.calls, 'Recon')))
   ok('`design` is null', r.out && r.out.design === null, r.out && r.out.design)
   ok('same dispatch count as the design run', r.calls.length === d.calls.length, { refs: r.calls.length, design: d.calls.length })
 
   section('3 · A PLAN PASS FILES NOTHING AND BUILDS NOTHING')
   ok('no dispatch mentions `gh issue create`', !d.calls.some((c) => /gh issue create/.test(c.prompt)))
-  ok('no build dispatch', !d.calls.some((c) => /^build:/.test(c.label)), d.calls.map((c) => c.label))
-  ok('no verify dispatch', !d.calls.some((c) => /^verify:/.test(c.label)))
+  // X151-fix (X159) · PHASE, not the label prefix — a label is display text
+  // (X151 renamed every one of these to a bare lane name), `opts.phase` is
+  // the actual claim "no lane build/context/verify dispatch happened here".
+  ok('no build dispatch', !d.calls.some((c) => c.opts && (c.opts.phase === 'Build' || c.opts.phase === 'Context')), d.calls.map((c) => `${c.label}[${c.opts && c.opts.phase}]`))
+  ok('no verify dispatch', !d.calls.some((c) => c.opts && c.opts.phase === 'Verify'), d.calls.map((c) => `${c.label}[${c.opts && c.opts.phase}]`))
   ok('mode is plan', d.out && d.out.mode === 'plan')
   ok('needsTicket is EMPTY on the design path (the ticket exists)', d.out && Array.isArray(d.out.needsTicket) && d.out.needsTicket.length === 0, d.out && d.out.needsTicket)
   ok('the return says nothing is filed here', d.out && /IS ALREADY FILED, so nothing is filed here/.test(d.out.next))
 
   section('4 · THE TWO NEW FIELDS ARE REQUIRED  (fires on the bad input)')
-  const bad = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, decompose: BAD_PLAN, 'decompose:contract': REPAIRED })
-  ok('the repair round FIRED', called(bad.calls, 'decompose:contract').length === 1, bad.calls.map((c) => c.label))
-  ok('the repair was sent only the incomplete piece', /"id": "p1"/.test(promptOf(bad.calls, 'decompose:contract')))
-  ok('blank fields were named to the repair', /BLANK FIELDS/.test(promptOf(bad.calls, 'decompose:contract')))
+  const bad = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, framer: BAD_PLAN, 'framer:contract': REPAIRED })
+  ok('the repair round FIRED', called(bad.calls, 'framer:contract').length === 1, bad.calls.map((c) => c.label))
+  ok('the repair was sent only the incomplete piece', /"id": "p1"/.test(promptOf(bad.calls, 'framer:contract')))
+  ok('blank fields were named to the repair', /BLANK FIELDS/.test(promptOf(bad.calls, 'framer:contract')))
   ok('the blank connection was filled', bad.out && bad.out.pieces[0].connection === GOOD_PIECE.connection, bad.out && bad.out.pieces[0].connection)
   ok('the blank expectation was filled', bad.out && bad.out.pieces[0].expectation === GOOD_PIECE.expectation, bad.out && bad.out.pieces[0].expectation)
   ok('the blank sharedPiece was filled', bad.out && bad.out.sharedPiece === GOOD_PLAN.sharedPiece, bad.out && bad.out.sharedPiece)
@@ -165,35 +184,35 @@ const main = async () => {
   ok('the loud log line fired', bad.logs.some((l) => /Contract incomplete/.test(l)), bad.logs)
 
   section('4b · A REPAIR THAT DOES NOT FIX IT STOPS THE PLAN')
-  const worse = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, decompose: BAD_PLAN, 'decompose:contract': STILL_BAD })
+  const worse = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, framer: BAD_PLAN, 'framer:contract': STILL_BAD })
   ok('contract reports the surviving gap', worse.out && worse.out.contract.blank === 1, worse.out && worse.out.contract)
   ok('`next` opens with STOP', worse.out && /^STOP:/.test(worse.out.next), worse.out && worse.out.next.slice(0, 60))
   ok('the still-incomplete log fired', worse.logs.some((l) => /CONTRACT STILL INCOMPLETE/.test(l)), worse.logs)
   ok('sharedPiece blank is reported, not hidden', worse.out && worse.out.contract.sharedPiece === '(BLANK)', worse.out && worse.out.contract)
 
   section('5 · A COMPLETE CONTRACT COSTS NOTHING EXTRA  (silent on the good input)')
-  ok('NO repair dispatch on a complete plan', called(d.calls, 'decompose:contract').length === 0, d.calls.map((c) => c.label))
+  ok('NO repair dispatch on a complete plan', called(d.calls, 'framer:contract').length === 0, d.calls.map((c) => c.label))
   ok('contract reports 0 blank, 0 repaired', d.out && d.out.contract.blank === 0 && d.out.contract.repaired === 0, d.out && d.out.contract)
   ok('sharedPiece reaches the return as its own field', d.out && d.out.sharedPiece === GOOD_PLAN.sharedPiece, d.out && d.out.sharedPiece)
   ok('`next` does NOT open with STOP', d.out && !/^STOP:/.test(d.out.next))
 
   section('6 · THE CONTRACT REACHES THE BUILDER  (or the fields are decoration)')
-  const b = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false }, { 'build:slackmaster': { results: [{ id: 'p1', verdict: 'built' }] } })
+  const b = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false }, { slackmaster: { results: [{ id: 'p1', verdict: 'built' }] } })
   ok('no throw', !b.err, b.err && b.err.message)
-  ok('the SEAM is in the build prompt', /WHAT IT MUST NOT BYPASS: called by buildTurnContext/.test(promptOf(b.calls, 'build:slackmaster')), promptOf(b.calls, 'build:slackmaster').slice(0, 200))
-  ok('the EXPECTATION is in the build prompt', /ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: every surface/.test(promptOf(b.calls, 'build:slackmaster')))
-  ok('the contract is stated as binding', /those are the contract and they are binding/i.test(promptOf(b.calls, 'build:slackmaster')))
-  ok('sharedPiece is named to the lane', /WHO WRITES THE SHARED CODE: slackmaster/.test(promptOf(b.calls, 'build:slackmaster')))
-  const b2 = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: 'none', verify: false }, { 'build:slackmaster': { results: [{ id: 'p1', verdict: 'built' }] } })
-  ok('`none` adds no shared-code line', !/WHO WRITES THE SHARED CODE/.test(promptOf(b2.calls, 'build:slackmaster')))
+  ok('the SEAM is in the build prompt', /WHAT IT MUST NOT BYPASS: called by buildTurnContext/.test(promptOf(b.calls, 'slackmaster')), promptOf(b.calls, 'slackmaster').slice(0, 200))
+  ok('the EXPECTATION is in the build prompt', /ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: every surface/.test(promptOf(b.calls, 'slackmaster')))
+  ok('the contract is stated as binding', /those are the contract and they are binding/i.test(promptOf(b.calls, 'slackmaster')))
+  ok('sharedPiece is named to the lane', /WHO WRITES THE SHARED CODE: slackmaster/.test(promptOf(b.calls, 'slackmaster')))
+  const b2 = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: 'none', verify: false }, { slackmaster: { results: [{ id: 'p1', verdict: 'built' }] } })
+  ok('`none` adds no shared-code line', !/WHO WRITES THE SHARED CODE/.test(promptOf(b2.calls, 'slackmaster')))
 
   section('7 · needsTicket CARRIES THE FINISHED BODY, NOT THE ASK')
   const desc = await run(
     { mode: 'plan', items: [{ title: 'Owner authority across chat surfaces', asks: 'decide what the clamp governs', priority: 'High' }] },
-    { 'recon:': { ...RECON, ref: 'new-1' }, decompose: { ...GOOD_PLAN, pieces: [{ ...GOOD_PIECE, ref: 'new-1' }] } },
+    { 'framer:new-1': { ...RECON, ref: 'new-1' }, framer: { ...GOOD_PLAN, pieces: [{ ...GOOD_PIECE, ref: 'new-1' }] } },
   )
   ok('no throw', !desc.err, desc.err && desc.err.message)
-  ok('no intake dispatch on a described item', called(desc.calls, 'intake:backlog').length === 0, desc.calls.map((c) => c.label))
+  ok('no intake dispatch on a described item', calledPhase(desc.calls, 'Intake').length === 0, desc.calls.map((c) => c.label))
   ok('ONE ticket, not one per ref', desc.out && desc.out.needsTicket.length === 1, desc.out && desc.out.needsTicket.length)
   const body = desc.out && desc.out.needsTicket[0] ? desc.out.needsTicket[0].body : ''
   for (const [what, re] of [
@@ -210,10 +229,10 @@ const main = async () => {
   ok('labels are Improvement + High', desc.out && JSON.stringify(desc.out.needsTicket[0].labels) === '["Improvement","High"]', desc.out && desc.out.needsTicket[0].labels)
   ok('the caller is told to use the body VERBATIM', desc.out && /VERBATIM — it is the finished ticket, not ingredients/.test(desc.out.next), desc.out && desc.out.next.slice(0, 300))
   ok('still nothing filed', !desc.calls.some((c) => /gh issue create/.test(c.prompt)))
-  const noPri = await run({ mode: 'plan', items: [{ title: 't', asks: 'a' }] }, { 'recon:': { ...RECON, ref: 'new-1' }, decompose: { ...GOOD_PLAN, pieces: [] } })
+  const noPri = await run({ mode: 'plan', items: [{ title: 't', asks: 'a' }] }, { 'framer:new-1': { ...RECON, ref: 'new-1' }, framer: { ...GOOD_PLAN, pieces: [] } })
   ok('an unlabelled item gets Improvement and NO invented priority', noPri.out && JSON.stringify(noPri.out.needsTicket[0].labels) === '["Improvement"]', noPri.out && noPri.out.needsTicket[0].labels)
   ok('and it is NAMED as needing one', noPri.out && noPri.out.needsPriority.length === 1, noPri.out && noPri.out.needsPriority)
-  const feat = await run({ mode: 'plan', items: [{ title: 't', asks: 'a', priority: 'Next' }] }, { 'recon:': { ...RECON, ref: 'new-1' }, decompose: { ...GOOD_PLAN, pieces: [] } })
+  const feat = await run({ mode: 'plan', items: [{ title: 't', asks: 'a', priority: 'Next' }] }, { 'framer:new-1': { ...RECON, ref: 'new-1' }, framer: { ...GOOD_PLAN, pieces: [] } })
   ok('a Feature-axis word takes the Feature track', feat.out && JSON.stringify(feat.out.needsTicket[0].labels) === '["Feature","Next"]', feat.out && feat.out.needsTicket[0].labels)
 
   section('8 · THE SHAPE GUARDS REFUSE, AND ONLY ON A WRONG SHAPE')
@@ -232,10 +251,10 @@ const main = async () => {
   }
   const twoItems = await run(
     { mode: 'plan', design: 'gh#154' },
-    { 'intake:backlog': { items: [INTAKE.items[0], { ref: '#155', title: 'other', priority: 'Low', asks: 'x' }] }, 'recon:': RECON, decompose: GOOD_PLAN },
+    { 'framer:backlog': { items: [INTAKE.items[0], { ref: '#155', title: 'other', priority: 'Low', asks: 'x' }] }, 'framer:#154': RECON, framer: GOOD_PLAN },
   )
   ok('refuses a design run that intake fanned out to two items', !!twoItems.err && /one design item, and intake returned 2/.test(twoItems.err.message), twoItems.err && twoItems.err.message)
-  ok('  …before any recon', called(twoItems.calls, 'recon:').length === 0, twoItems.calls.map((c) => c.label))
+  ok('  …before any recon', calledPhase(twoItems.calls, 'Recon').length === 0, twoItems.calls.map((c) => c.label))
   const bare = await run({ mode: 'plan', design: 'gh#154' }, GOOD)
   ok('a design run with NO cluster is allowed (a first-time design item)', !bare.err && bare.out.design.absorbs.length === 0, bare.err ? bare.err.message : bare.out.design)
   ok('  …and says the cluster was not passed', bare.logs.some((l) => /No cluster passed/.test(l)), bare.logs)

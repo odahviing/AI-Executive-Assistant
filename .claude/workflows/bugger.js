@@ -6,11 +6,15 @@ export const meta = {
     { title: 'Intake' },
     { title: 'Build' },
     { title: 'Context' },
+    // X151 · the bounce round and its re-check live INSIDE Verify, not a fifth
+    // box of their own — they are the same stage (the gate reads, sends back,
+    // re-reads), and a separate 'Bounce' title read as an empty box on every
+    // clean run, which looks like a run that did not finish. What still needs
+    // to be readable once they share a box: `rebuild:<lane>` names a lane's
+    // second attempt, `bouncer:wave(N)` the first pass, `bouncer:recheck(N)`
+    // the second — three distinct labels, so nothing here is ambiguous with a
+    // first-time `Build`-phase dispatch, which a bare lane name still means.
     { title: 'Verify' },
-    // X137 · the bounce round AND its re-check live here, so the `/workflows`
-    // panel shows a second cycle as a second cycle instead of a Verify that
-    // mysteriously runs twice. Empty on a wave with no overturns.
-    { title: 'Bounce' },
   ],
 }
 
@@ -34,7 +38,18 @@ let A = args || {}
 if (typeof A === 'string') {
   try {
     A = JSON.parse(A)
-    argWarnings.push('`args` arrived as a JSON STRING rather than an object — recovered by parsing it. Pass args as an actual JSON value in the tool call, not an encoded string.')
+    // X147 · NOT a warning. Two separate real Workflow invocations (wf_386bf586-bf1,
+    // wf_ad941677-935) both hit this path despite the Manager passing a normal
+    // object in the tool call each time — the TOP-LEVEL `args` container arrives
+    // pre-serialized on this specific boundary, which the caller cannot avoid by
+    // writing the call differently. A warning that fires on every dispatch
+    // regardless of what the caller does is not diagnostic, it is noise — and
+    // noise trains the reader to stop reading the channel it rides on. Recovery
+    // stays (this container really can be malformed, and that case still throws
+    // below); only the "you did something wrong" framing is gone. Contrast the
+    // PER-KEY case in `asArray` below, which stays a warning: a caller CAN
+    // stringify one array while leaving the rest of the object normal, so that
+    // one distinguishes a real mistake from a structural harness behaviour.
   } catch (e) {
     throw new Error(`args arrived as a string and is not valid JSON, so nothing it named could be honoured: ${String((e && e.message) || e)}`)
   }
@@ -794,8 +809,11 @@ const TIMEOUT_NOTE =
   `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
 
 // X137 · `asBounce` is the only variation: a re-attempt shows on the `/workflows`
-// panel as `rebuild:<lane>` under the `Bounce` phase, so a second cycle reads as a
-// second cycle instead of a Build that inexplicably runs again after the verify.
+// panel as `rebuild:<lane>` inside the `Verify` phase (X151 collapsed the old
+// separate `Bounce` box into it), so a second cycle reads as a second cycle —
+// the `rebuild:` prefix, not the phase, is what tells it apart from a first
+// `Build`-phase attempt by the same lane, so it is kept even though `Build`
+// itself no longer needs a matching `build:` prefix.
 const dispatch = (lane, issues, asBounce) =>
   agent(
     `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
@@ -808,8 +826,12 @@ const dispatch = (lane, issues, asBounce) =>
     // stops returning `blocked-charter` and `needs-owner-decision` has stopped
     // being governed and is just building, which would NOT announce itself.
     {
-      label: `${asBounce ? 'rebuild' : 'build'}:${lane}`,
-      phase: asBounce ? 'Bounce' : lane === 'instructor' ? 'Context' : 'Build',
+      // X151 · the label's job is to name the agent. `Build`/`Context` already
+      // say what stage this is, so a bare lane name is enough there; `Verify`
+      // does not say "this is a rebuild", so that prefix stays — see the
+      // comment above `dispatch`.
+      label: asBounce ? `rebuild:${lane}` : lane,
+      phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
       agentType: lane,
       effort: EFFORT[lane],
       schema: VERDICTS,
@@ -1581,7 +1603,7 @@ if (VERIFY) {
       // only pass that sees the whole diff, and the backstop for Sonnet lanes'
       // traces. Pinning it on the charter means neither the session model nor a
       // hand dispatch can downgrade the one agent that must not be downgraded.
-      { label: `verify:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+      { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
     )
     verifyRan = !!check
     verifiedClean = (check && check.verifiedClean) || []
@@ -1692,7 +1714,8 @@ if (VERIFY) {
       log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
     if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
     if (bouncedIds.length) {
-      phase('Bounce')
+      // X151 · no `phase('Bounce')` here anymore — the round runs inside the
+      // same `Verify` phase entered above; there is no box to transition into.
       const bounceItems = bouncedIds.map((id) => ({
         ...(specById.get(id) || {}),
         id,
@@ -1741,6 +1764,18 @@ if (VERIFY) {
           fromBounce: true,
         }))
 
+      // ── X149 · A PENDING DEP-ASK ON A BOUNCED LANE GETS RE-ASKED HERE ────────
+      // `verifyDepAsks` was frozen before this round ran, so it cannot know the
+      // round's own rebuild happened to satisfy the exact gap it named. Observed
+      // 2026-08-03: a pending ask for gatekeeper to import a canonical regex was
+      // satisfied by that same round's gatekeeper rebuild (for an unrelated
+      // overturn), confirmed only by a human reading the recheck's own
+      // `verifiedClean` line — the ask itself still rode to the owner's desk as
+      // unresolved. Scoped to asks whose target lane is ALSO bounced this round:
+      // the only case where the bouncer is already looking at the right files.
+      const bouncedLanes = new Set(bounceItems.map((i) => i.lane))
+      const askedDuringBounce = verifyDepAsks.filter((a) => bouncedLanes.has(a.lane))
+
       // ── THE RE-CHECK — the bounced rows ONLY, never the whole diff again ────
       const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
       const recheck = rebuilt.length
@@ -1750,12 +1785,15 @@ if (VERIFY) {
               `For each row: **what you refused is quoted on it.** Answer the one question — is the reported problem fixed now? Trace from the symptom, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
               `**THERE IS NO THIRD ATTEMPT.** A row you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
               (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
+              (askedDuringBounce.length
+                ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by an earlier pass and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.symptom}`).join('\n')}\n\n`
+                : '') +
               `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
                 rebuilt.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
                 null,
                 2,
               )}`,
-            { label: `verify:bounce(${rebuilt.length})`, phase: 'Bounce', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+            { label: `bouncer:recheck(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
           )
         : null
       bounceRecheckRan = !!recheck
@@ -1764,6 +1802,17 @@ if (VERIFY) {
       // It NEVER bounces — that is the loop with no exit.
       discoveries = discoveries.concat((recheck && recheck.discoveries) || [])
       verifiedClean = verifiedClean.concat((recheck && recheck.verifiedClean) || [])
+      if (askedDuringBounce.length) {
+        const resolvedIds = new Set(
+          ((recheck && recheck.results) || [])
+            .filter((x) => x && x.verdict === 'already-fixed' && askedDuringBounce.some((a) => a.id === x.id))
+            .map((x) => x.id),
+        )
+        if (resolvedIds.size) {
+          log(`Bounce re-check also closed ${resolvedIds.size} pending dependency ask(s), satisfied by this round's own rebuild: ${[...resolvedIds].join(', ')}.`)
+          verifyDepAsks = verifyDepAsks.filter((a) => !resolvedIds.has(a.id))
+        }
+      }
       const answeredAgain = new Set(recheckResults.map((x) => x.id))
       for (const id of bouncedIds) {
         const first = overturned.get(id) || ''

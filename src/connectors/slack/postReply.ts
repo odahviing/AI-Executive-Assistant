@@ -615,7 +615,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       await shadowNotify(profile, {
         channel: channelId,
         threadTs,
-        action: `Conversation with ${who}`,
+        action: 'Reply',
         detail: combinedDetail,
         conversationKey: threadTs,
         conversationHeader: `Conversation with ${who}`,

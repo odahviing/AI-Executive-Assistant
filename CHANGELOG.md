@@ -2,6 +2,34 @@
 
 ---
 
+## 4.4.8 — a colleague's timezone finally counts as much as the owner's
+
+A colleague booking a meeting with mixed-timezone attendees was getting answers checked against only one calendar — sometimes just her own, sometimes just the owner's — while Maelle described the result as a verified "clean option." Three fixes trace one thread: a colleague's own scheduling questions now get the same rigor an owner's does, and Maelle stops asserting things she can't back up.
+
+**A colleague asking about a shared meeting now gets everyone's calendar checked, not just her own.** Reported live: Elinor Avny asked why a slot was so late, and Maelle checked only Elinor's calendar — the other three attendees were never read — then covered the gap with an invented excuse ("I can't see the client attendees' calendars"), when all four are internal colleagues she can and does check for the owner. The real-roster lookup that already ran for owner-initiated searches now runs for colleague-initiated ones too, gated so a colleague still can't pull in a stranger meeting's attendee list (closed after a bounce: the first attempt could be bypassed by naming two meetings, one she's on and one she isn't).
+
+**A slot presented as "clean" is now actually checked against everyone's hours, or says so.** Reported live: Chris Kelley was offered "1:30pm ET (8:30pm Idan's time)" as one of two clean options for a 6-person meeting including Elinor (Israel timezone, so also her time) — the search had just rejected every slot that day for being outside attendee hours, and a fallback silently re-offered one anyway, checked against only the owner's own calendar. The fallback now reuses the existing off-hours tagging so the model gets real grounds instead of inventing "clean" (closed after a bounce: the first attempt's note falsely told the model it had no calendar access, when the same path already reads real per-attendee busy/free status).
+
+**A colleague setting up a new meeting is now asked for a subject instead of getting one invented.** Reported live: Chris asked Maelle to set up a meeting, got it booked under an invented placeholder ("Team Sync"), then had to explicitly remind her which meeting he meant before a rename landed. The permissive "internal bookings may use a working title" rule is now scoped to the owner's own path only.
+
+**Three small Slack-side fixes, owner-approved:** a duplicated conversation-header label in two shadow-notify call sites; the MPIM slack-id leak fix (last release) now always renders the colleague's plain name, never a `<@U...>` mention, on either branch; three more sites in the Slack coordinator now route through the leak-scrubber like the registry path already does.
+
+### Fixed (high-impact)
+- Colleague-initiated availability searches now check the real attendee roster instead of just the requester's own calendar, closing both the narrow-check gap and the fabricated-capability-claim it produced.
+- The owner-only fallback search (fires when a colleague's strict search returns zero slots) now tags real off-hours conflicts instead of silently dropping the check — a slot presented as clean is checked, or is no longer called clean.
+- A colleague requesting a new meeting is now asked for a subject rather than having one invented.
+
+### Fixed (small)
+- shadowNotify's duplicated "Conversation with X" label (two sites) now uses a distinct action label.
+- The MPIM slack-id leak fix always drops to the colleague's plain name now, on both the fabricated and genuine-id branches — never a Slack mention.
+- Three more sites in the Slack coordinator route through the leak-scrubber, matching the registry path.
+
+### Not changed
+- A 4th scrubber-bypass site in the Slack coordinator, surfaced mid-fix, stays open pending the owner's word.
+- Several smaller gaps this session's fixes surfaced are queued for the next run: an EA-booking-on-someone's-behalf case that still gets a narrow check, an assumed-hours case that isn't hedged as an assumption, a system-prompt enumeration that doesn't yet name the new conflict-tag field, and a couple of one-line cleanups.
+
+---
+
 ## 4.4.7 — five live-reported regressions, and a sixth caught before it shipped
 
 Every fix this release traces to a bug the owner watched happen in real time tonight — a Slack reply, a calendar screenshot, a booking — root-caused against the code on disk rather than assumed. A pre-wrap adversarial pass then caught a sixth regression inside the night's own diff: a leak-cleanup fix that had silenced a free/busy-failure honesty signal along with the leak it was removing, fixed before it ever reached a commit.
