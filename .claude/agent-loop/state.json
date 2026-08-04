@@ -3,7 +3,7 @@
   "lastSeenIso": "2026-08-03T22:20:00+0300",
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
-  "lastWrapIso": "2026-08-04T07:20:05+03:00",
+  "lastWrapIso": "2026-08-04T07:20:29+03:00",
   "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C10.",
   "lastCleanSha": "aeab9630b5e9874a425511e6e70dce98034f7f58",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
@@ -60,6 +60,24 @@
       "source": "verify",
       "symptom": "Two deletes in the email strip block can never remove anything — the comments beside them assert a reachability that does not exist on the email channel.",
       "evidence": "src/skills/meetings/ops.ts:149 (_attendee_unverified_note, unreachable) and src/skills/meetings/ops.ts:109 (_attendee_busy_colleague_note, unreachable) — delete both dead lines and correct their comments."
+    },
+    {
+      "id": "gh#174-b",
+      "lane": "registrar",
+      "severity": "medium",
+      "clarity": "ambiguous",
+      "source": "github",
+      "symptom": "gh#174 complaint 1, still open: Maelle sent two identical approval-reminder pings 24 minutes apart instead of nagging once then closing.",
+      "evidence": "src/core/requests/runner.ts:229-320 (runApprovalReminder) — reads as a nag-once design (re-arms to 'expiry' after sending); the double-fire doesn't match either coded path on inspection. Trace via live logs/DB first (two next_check firings for one request_id) — root cause unconfirmed, do not guess a fix from code reading alone."
+    },
+    {
+      "id": "gh#180-c",
+      "lane": "matchmaker",
+      "severity": "high",
+      "clarity": "clear",
+      "source": "github",
+      "symptom": "gh#180 complaint 3, still open: the active-mode autofix DM can be minted and sent without the calendar write having actually taken effect — a false \"I did it\" claim.",
+      "evidence": "src/skills/calendarHealth/autoMove.ts:171 mints the shadowNotify claim right after updateMeeting with no read-back. Add a post-PATCH read-back before minting the claim, reusing the existing probe at calendarReads.ts:352-357 (~6 lines, no new part)."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-03 after wf_1866d179-744 (the full-array pass): passed the full 81-entry list this time; dropped 13 whose code this wave touched (o#178's masking claim, and 12 wave-specific VERIFY claims re gh#24/o#189/o#188/the @-mention removal/the ops.ts email strip/the batched-classifier ordering/o#192's TaskType removal/the 21-doc cleaner-deletion count — all superseded by tonight's own fixes to those same files), kept 68, added 20 new claims from this run's verify. Now 88 entries.",
