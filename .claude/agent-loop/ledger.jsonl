@@ -1238,3 +1238,23 @@
 {"date":"2026-08-06","runId":"invariant-backfill-2026-08-06","kind":"invariant-backfill","ref":"gh#157-no-history-with-colleague","invariant":"a-restriction-is-not-an-absence"}
 {"date":"2026-08-06","runId":"invariant-backfill-2026-08-06","kind":"invariant-backfill","ref":"gh#51 (profiler)"}
 {"date":"2026-08-06","runId":"invariant-backfill-2026-08-06","kind":"invariant-backfill","ref":"gh#157-b","invariant":"a-restriction-is-not-an-absence"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"automove-revert-mid-sweep-unique-constraint-abort","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"auto-move-reoccurs-after-revert-when-open-category-question-exists","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"sibling-notes-narrate-off-hours-without-assumed-hedge","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"find-slack-user-breadcrumb-jumps-history-order","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"coordinator-fourth-scrubber-bypass-site","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"availability-narration-exposes-search-mechanism","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"assumed-attendee-hours-narrated-as-fact","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"email-leg-unresolved-attendee-strip-has-same-silent-confirm-shape","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"requester-is-attending-false-still-gets-narrow-roster","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"moving-event-ids-subtracts-from-busy-pool-with-no-membership-check","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"automove-revert-message-asserts-unread-state","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"defrag-path-swaps-failure-reason-silently","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"claimchecker-comment-overstates-tentative-handling","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"quarter-hour-grid-duplicated-across-two-files","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"createoutreachjob-idempotency-collision","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"anchored-booking-start-not-snapped-to-quarter-hour","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"bot-own-messages-reingested-in-thread-merge","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"bot-own-reply-duplicated-in-model-context-window","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"unverified-note-comment-duplicates-systemprompt-and-lacks-hasattendeestatus-gate","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
+{"date":"2026-08-05","runId":"wrap-4.4.9","ref":"dismissal-row-select-has-no-order-by","verdict":"wrapped","state":"wrapped","note":"shipped in 3e839d6"}
