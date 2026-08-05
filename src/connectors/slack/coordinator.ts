@@ -223,7 +223,7 @@ export async function handleOutreachReply(
     await app.client.chat.postMessage({
       token: params.bot_token,
       channel: dmChannel,
-      text: `I have a couple of open threads with you — which one is this about?\n${lines}`,
+      text: formatForSlack(`I have a couple of open threads with you — which one is this about?\n${lines}`),
     });
     logger.info('Outreach classifier — multiple matches, asked to disambiguate', {
       senderId: params.senderId,

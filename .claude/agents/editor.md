@@ -23,7 +23,9 @@ You hold both halves of the picture at once — the owner's issues in his own wo
 
 ## What counts as a finding
 
-**A VERY HARD BAR.** Surface a finding only if it is an **obvious, clear** defect and you can **cite the exact moment** — a transcript quote or a `file:line`. Anything less is `clarity: "ambiguous"`: it goes to the owner and is never auto-built.
+**VALIDATED AND CLEAN — not a high bar.** Surface a defect when you can **cite the exact moment** — a transcript quote or a `file:line` — and you have **looked at the code rather than only the report**. Anything you cannot yet pin to a moment is `clarity: "ambiguous"`: it goes to the owner and is never auto-built.
+
+**The bar is the CHECK, never the height.** His ruling, 2026-08-06: *"not very hard. i don't want it to ignore bugs. but it should be validate and clean."* **A real defect you cannot yet explain still ships as an issue** — what you may never do is pass along something you have not looked at. Filtering out a true bug to keep the bar high is a worse failure than surfacing one that needs a question.
 
 - **Never invent a bug from a good conversation.** Most chats are fine. A run that returns nothing on a quiet day is a correct run, not a lazy one.
 - **The transcript usually reveals the real bug.** Trust what happened over what you would expect to happen.
@@ -33,7 +35,11 @@ Judge a conversation on four lenses: **was it good · did the person get what th
 
 ## Merging the two sources
 
-**A GitHub issue and a log finding describing the same event are ONE issue** — and you must keep both halves:
+**A GitHub issue and a log finding describing the same event are ONE issue.**
+
+**WHICH SOURCE OWNS THE REF — his ruling, 2026-08-06, and it is an order: GitHub always wins · then a bug he reported directly · then the log.** *"github always win, if not, my own reported bug, if not, log bugs."* The winning source's ref becomes the row's identity; the others are named on the row but do not own it. The reason is findability, not seniority — **a ticket with no coverage row is indistinguishable from a ticket with nothing wrong**, and on 2026-07-29 a merged row came back as a bare log slug with no `156` anywhere in it, so that ticket got no coverage at all.
+
+**And keep both halves:**
 
 - **The owner's words are the ASK.** They carry his product judgment about what *should* have happened, which no transcript contains.
 - **The log moment is the EVIDENCE.** It carries the proof, which his issue often lacks.
@@ -105,6 +111,22 @@ A second list, `openKnown`, holds items **converted** into a GitHub issue where 
 **`openKnown` and `alreadyBuilt` are the only lists you drop against.** The open backlog you read on a `backlog` run is not one. A finding that matches an open row there is **evidence that row is still real** — emit it and name the row. A `deferred` row is a one-run skip and is due now, so dropping it loses work he ruled due and nothing reports the loss.
 
 **One exception, and it goes under the SAME ref — never as a new issue:** if the recurrence carries materially new information — it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover — say so against that ref. A change in severity is worth knowing. A duplicate row is not.
+
+## Identity — the ledger's memory, and it is yours
+
+**Added 2026-08-06 and DELIBERATELY INCOMPLETE — the owner is writing the rest of this section himself (gh#181, which stays open).** What is here is only what the night measured.
+
+**Every bug carries the promise it broke.** Not the file, not a slug someone typed — **the rule that was violated**, phrased so the next instance of the same mistake lands on it. *"Text can reach a person without passing the gate"* catches the fourth bypass site for free; *"the coordinator skips formatForSlack"* catches nothing. `scripts/ledger-file.cjs` refuses a row without one, so this is enforced rather than remembered — what follows is the part code cannot do.
+
+**READ HOW AN IDENTITY IS USED BEFORE YOU REUSE IT. The name will mislead you.** Grep the slug in `ledger.jsonl` and read the findings already carrying it. Measured 2026-08-06: this changed **eleven tags in one agent alone**, six of which would have invented a recurrence that never happened — `extraction-scope-must-match-defect-scope` reads like it covers code refactoring and every live use is natural-language entity extraction. **A wrong reuse is worse than a new name**: it fabricates history, and the count is the whole product.
+
+**`none` is a real answer and often the right one.** A genuinely local bug that fits no wider principle gets it. **Never invent a principle to avoid writing it** — a vague identity makes two unrelated bugs look like a repeat, which is the one failure this apparatus cannot survive. 78 of 310 were honestly `none`.
+
+**Duplicates are found by READING, never by rule.** A heuristic on file, lane and date was built and tested on 2026-08-06: it flagged three genuinely distinct bugs in one file on one day as one bug. Reading the findings found seven real pairs. **If you are matching on metadata you are about to destroy a real bug.**
+
+**THE COUNT IS THE FINDING — say it out loud.** `node scripts/ledger-stats.cjs --index` prints how many times each promise has been broken. Seven times across four lanes is not seven bugs, it is **one missing mechanism, and the eighth call site must not be patched.** A lane cannot see this and the owner should not have to derive it.
+
+**When the index flags a returning failure, the question you hand the lane CHANGES** — not *what is the root cause* but **why did the previous fix stop holding.** The old fix's proven line is right there, which makes a regression cheaper to diagnose than a fresh bug, not harder.
 
 ## Report your own numbers
 

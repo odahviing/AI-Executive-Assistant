@@ -16,11 +16,14 @@
  * Everything is gated on meetings.packing_preference === 'dense' at each
  * consumer; a tenant on 'spread' (the default) sees none of this.
  *
- * Pure — no DB / profile / Graph. Shared by the slot finder's ranking,
+ * Pure (deterministic given a timezone string — no DB / profile / Graph
+ * lookups). Shared by the slot finder's ranking,
  * create_meeting's counter-offer, and calendar-health's defragment pass so the
  * three surfaces can never disagree on what "efficient" means (same discipline
  * as scheduleRules.checkSlot / computeDayQualityFreeMinutes).
  */
+
+import { DateTime } from 'luxon';
 
 export type GapKind = 'connective' | 'dead' | 'break';
 
@@ -124,10 +127,22 @@ export function findDeadGaps(commitments: Interval[], cfg: DensityConfig): DeadG
   return out;
 }
 
-/** Align a ms timestamp UP to the next :00/:15/:30/:45 quarter grid point. */
-function alignUpQuarter(ms: number): number {
-  const q = 15 * 60000;
-  return Math.ceil(ms / q) * q;
+/**
+ * Round a millis timestamp UP to the next :00/:15/:30/:45 quarter-hour in the
+ * given timezone. THE single implementation of the owner's quarter grid rule —
+ * re-exported (not duplicated) by floatingBlocks.ts, which used to keep its
+ * own copy; a naive UTC-ms version lived here instead until v4.4.x.
+ */
+export function alignUpQuarter(ms: number, timezone: string): number {
+  const dt = DateTime.fromMillis(ms).setZone(timezone);
+  const minute = dt.minute;
+  const remainder = minute % 15;
+  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
+  const bumpMin = 15 - remainder;
+  return dt
+    .plus({ minutes: bumpMin })
+    .set({ second: 0, millisecond: 0 })
+    .toMillis();
 }
 
 /**
@@ -146,6 +161,7 @@ export function earlierConnectiveStart(
   requestedEnd: number,
   commitments: Interval[],
   cfg: DensityConfig,
+  timezone: string,
 ): number | null {
   const reqScore = scoreSlotDensity(requestedStart, requestedEnd, commitments, cfg);
   if (!reqScore.createsDeadGap) return null;          // already efficient — never nag
@@ -153,7 +169,7 @@ export function earlierConnectiveStart(
   let leftEnd = -Infinity;                            // nearest commitment ending at/before the request
   for (const c of commitments) if (c.end <= requestedStart && c.end > leftEnd) leftEnd = c.end;
   if (leftEnd === -Infinity) return null;             // nothing earlier to pack against
-  const candidate = alignUpQuarter(leftEnd);
+  const candidate = alignUpQuarter(leftEnd, timezone);
   if (candidate >= requestedStart) return null;        // not actually earlier
   if ((candidate - leftEnd) / 60000 > cfg.bufferMinutes) return null;  // grid can't make it connective
   const candScore = scoreSlotDensity(candidate, candidate + durationMs, commitments, cfg);

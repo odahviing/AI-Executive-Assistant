@@ -342,10 +342,24 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // conversations.replies, never through the inbound handler, so without
         // this pass a bare `<@U0ARK...>` id syntax rode into the merged history
         // (and from there into the model / a reply) instead of a resolved name.
+        //
+        // v4.4.9 — exclude Maelle's OWN messages (m.user === ctx.botUserId) from
+        // "missed" reconciliation entirely. This block's whole premise (see the
+        // comment above, v3.5.x) is recovering INBOUND messages the addressee
+        // gate filtered before she ever saw them — that concept doesn't apply to
+        // her own replies, she always knows what she said. But assistant rows
+        // written by appendToConversation (postReply.ts Step 3b) never carry a
+        // ts (they're persisted before the Slack send returns one), so every one
+        // of her own past replies failed the `dbTimestamps.has(m.ts)` check and
+        // was funneled back in here as a "missed" message: reprocessed through
+        // resolveSlackMentions (meant for fresh inbound text, not her own
+        // already-resolved output) and duplicated alongside the identical
+        // content already sitting in dbHistory — doubling every one of her own
+        // replies in the model's context on every channel/MPIM catch-up merge.
         const missedMessages = await Promise.all(slackMessages
-          .filter(m => !dbTimestamps.has(m.ts) && m.ts !== ts)  // exclude current message
+          .filter(m => m.user !== ctx.botUserId && !dbTimestamps.has(m.ts) && m.ts !== ts)  // exclude current message + her own replies
           .map(async m => ({
-            role: (m.user === ctx.botUserId ? 'assistant' : 'user') as 'user' | 'assistant',
+            role: 'user' as const,
             content: await ctx.resolveSlackMentions(m.text as string),
             ts: m.ts as string,
           })));
@@ -735,6 +749,16 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                       content: users.length > 0
                         ? `Found: ${users.map((u: any) => `${u.real_name} (ID: ${u.id}, tz: ${u.tz})`).join(', ')}`
                         : `No Slack user found matching "${action.name}". Ask the user to @mention them.`,
+                      // v4.4.10 — same class of fix as postReply.ts Step 3b: this
+                      // breadcrumb has no real Slack ts (it's a synthetic history
+                      // row, not a posted message), so without a stamp it parses to
+                      // 0 in the catch-up merge's `parseFloat(m.ts || '0')` sort
+                      // above (line 370) and jumps to the front of every merged
+                      // history — ahead of every real message, and the first row
+                      // the `.slice(-20)` trim drops. Wall-clock at write time, in
+                      // Slack ts format, sorts it correctly relative to the
+                      // messages around it instead.
+                      ts: (Date.now() / 1000).toFixed(6),
                     });
                   } catch (err) {
                     logger.error('Slack action failed', { err, action: action.action });

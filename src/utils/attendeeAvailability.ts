@@ -54,6 +54,16 @@ export interface AttendeeAvailabilityEntry {
     timezone: string;    // IANA of the travel location
     location: string;
   };
+  /**
+   * True when this entry has NO stored people_memory timezone and was built
+   * from `fallbackTimezone` + `defaultWorkingHoursForTz` (#M3) — a GUESS, not
+   * data the attendee or owner ever stated. Callers that narrate this entry's
+   * hours to the model (e.g. the day_summary grounding note) must say
+   * "assumed", never "stated", when this is true — otherwise a guess reads as
+   * a fact. Cleared back to false by a conversational owner override
+   * (attendee_hours in find_available_slots), which IS a real statement.
+   */
+  assumed?: boolean;
 }
 
 /**
@@ -169,6 +179,10 @@ export function loadAttendeeAvailabilityForEmails(
         homeTimezone: resolvedTz,
         ...(travelMeta ? { travel: travelMeta } : {}),
         ...(travelWindow ? { travelWindow } : {}),
+        // #M3 — no stored person.timezone means resolvedTz came from the
+        // fallback (requester's frame) and wh came from the generic zone
+        // default, not this attendee's own profile. A GUESS, flag it.
+        ...(person?.timezone ? {} : { assumed: true }),
       });
     }
 

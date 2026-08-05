@@ -2,6 +2,32 @@
 
 ---
 
+## 4.4.9 — tell her to leave a meeting alone and it stays left alone
+
+The owner reverts an auto-move and says don't do that again. Until now that instruction could be quietly erased by the calendar-health sweep that came a few hours later — and the fix for the *reported* symptom turned out to erase it faster. Two rounds were needed, and the second one is the release. Alongside it, the framework's bug history learned to recognise itself: four hundred past bugs now record which promise they broke, so a returning failure identifies itself instead of arriving as a stranger.
+
+**A permanent "never auto-move this again" now survives every sweep.** The reported bug was narrower — after the owner moved a meeting the autofix had just moved, the health pass hit a unique-constraint violation and aborted mid-sweep, so everything after it in that pass silently didn't run. The first fix cleared the abort and, in doing so, let the next sweep overwrite the owner's standing dismissal within hours, reopening the original complaint through a different door. The second fix guards the approved status, bounds the event window monotonically, and refuses cross-axis overwrites; the dismissal now holds indefinitely.
+
+**One bounded trade-off, accepted deliberately:** while a permanent overlap dismissal occupies an event, a "what category is this?" question can't hold its own row for the same event, so Maelle asks each sweep rather than remembering the question. Never a false suppression and never a crash — the schema change that would cost nothing is a migration, and it's queued for its own session rather than smuggled into a patch.
+
+**Two smaller ones from the same run:** two more sibling-meeting notes now carry the assumed-hours hedge instead of narrating off-hours times as if they were confirmed, and the `find_slack_user` breadcrumb now carries a timestamp — without one it jumped ahead of every real message in the next catch-up merge and was the first row dropped by the history trim.
+
+### Added — the bug ledger can now recognise a repeat
+
+- **Every bug records the promise it broke**, not just where it broke. 310 previously untagged bugs were backfilled, taking identity coverage from 22% to 80%.
+- **`node scripts/ledger-stats.cjs --index`** — one line per recurring failure, sorted by how often it has happened. 929 rows of history collapse to a ~50-line view that holds at any size.
+- **`scripts/ledger-file.cjs`** — the bug ledger's first writer. Every row in it had been hand-composed JSON until now, which is why identity coverage was 22%; it refuses a row that declares no identity, and suggests a close existing match before accepting a new one.
+- **A returning failure is now derived, not noticed.** An identity that was closed and is open again is a regression by definition — two were found immediately, neither previously flagged.
+
+### Changed
+- The Editor's charter gains the ledger as territory, and its finding bar is now stated as validation rather than height — a real defect it cannot yet explain still ships, and filtering out a true bug to keep the bar high is the worse failure. Source precedence is now explicit: a merged item takes the GitHub ref, then an owner-reported one, then the log.
+
+### Not changed
+- The `calendar_issues` unique key still has no axis column, which is the root behind both dismissal bugs. Queued, not urgent: a schema migration is the only fix that loses nothing.
+- The Editor's charter is **deliberately incomplete** — the owner is writing the rest (gh#181 stays open).
+
+---
+
 ## 4.4.8 — a colleague's timezone finally counts as much as the owner's
 
 A colleague booking a meeting with mixed-timezone attendees was getting answers checked against only one calendar — sometimes just her own, sometimes just the owner's — while Maelle described the result as a verified "clean option." Three fixes trace one thread: a colleague's own scheduling questions now get the same rigor an owner's does, and Maelle stops asserting things she can't back up.

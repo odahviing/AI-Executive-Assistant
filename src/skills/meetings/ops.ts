@@ -173,7 +173,17 @@ export class SchedulingSkill {
       // reattach it name-free — this is the ONLY leg whose reply is forwarded
       // to an external client verbatim, so silence here reads as "confirmed
       // free for everyone" when a colleague's calendar was never read.
-      const freeBusyReadFailed = Array.isArray(r.attendees_not_checked) && r.attendees_not_checked.length > 0;
+      // v4.4.x — `unresolved_attendee_emails` carries the SAME honesty gap as
+      // `attendees_not_checked`: its own warning text says outright "their
+      // availability was NOT checked (a nonexistent mailbox reads as fully
+      // free)" (findAvailableSlots.ts:83), yet this flag used to key off
+      // `attendees_not_checked` alone — a search whose ONLY trigger was an
+      // unresolved address (attendees_not_checked empty) silently fell through
+      // with no notice, reading as fully verified on the one leg forwarded
+      // to an external client verbatim.
+      const freeBusyReadFailed =
+        (Array.isArray(r.attendees_not_checked) && r.attendees_not_checked.length > 0)
+        || (Array.isArray(r.unresolved_attendee_emails) && r.unresolved_attendee_emails.length > 0);
       delete r.unresolved_attendee_emails;
       delete r._attendee_email_warning;
       delete r.attendees_not_checked;

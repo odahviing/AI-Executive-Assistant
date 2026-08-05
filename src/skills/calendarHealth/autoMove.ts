@@ -208,7 +208,14 @@ export async function executeInternalAutoMove(params: {
       issue.fix_failed = true;
       issue.fix_error = verify.reason === 'not_found'
         ? `I tried to move "${subj}" but couldn't find it on the calendar afterward — left it for you to check.`
-        : `I tried to move "${subj}" but the calendar still shows it at its old time — left it for you to check.`;
+        // gh#180-c follow-up — `verify.got` is what the read-back actually
+        // showed, which is not necessarily the OLD time (sync delay, race, or
+        // a recurring-instance id silently rebinding can all land somewhere
+        // else entirely). Quote the real read-back instead of asserting the
+        // old time as fact.
+        : verify.got
+          ? `I tried to move "${subj}" but the calendar now shows it at ${verify.got}, not the new time — left it for you to check.`
+          : `I tried to move "${subj}" but a read-back after the move didn't match what I expected — left it for you to check.`;
       if (autoMoveReq) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports

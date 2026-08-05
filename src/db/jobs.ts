@@ -235,6 +235,21 @@ export function createOutreachJob(
       subject_keyword: params.subject_keyword,
     };
     const subjectPreview = params.message.slice(0, 80).replace(/\s+/g, ' ').trim();
+    // Explicit idempotency key, keyed on THIS job's own id — not the default
+    // content-hash `buildIdempotencyKey` would derive from ownerUserId + kind +
+    // normalizeSubject(subjectPreview). Every outreach_jobs row gets exactly one
+    // paired request (1:1, no dedup semantic here — the caller, not this bridge,
+    // owns "is this a genuine new send"), so there is nothing to collide on. The
+    // default hash ignored the target colleague entirely and truncated the
+    // message to 80 chars, so two REAL, distinct sends (e.g. two separate
+    // meeting-move notices whose templated opening line is identical past
+    // char 80) hashed to the same key, the second INSERT threw
+    // SqliteError(UNIQUE idempotency_key), and the bridge silently degraded to
+    // legacy-row-only (see catch below) — that outreach never got a requests row
+    // at all. Same fix shape already used by calendarHealth/autoMove.ts
+    // (`idempotencyKey: auto_move:${id}:${Date.now()}`) for the same reason: a
+    // caller with its own unique per-event id builds its own key instead of
+    // going through the content-hash meant for de-duplicating repeated asks.
     const row = requests.createRequest({
       ownerUserId: params.owner_user_id,
       initiatedBy: params.owner_user_id,
@@ -252,12 +267,18 @@ export function createOutreachJob(
       originThreadTs: params.owner_thread_ts ?? undefined,
       nextCheckAt,
       nextCheckHandler,
+      idempotencyKey: `outreach:${id}`,
       details,
     });
     requestId = row.id;
   } catch (err) {
     // Bridge failure is non-fatal. Legacy row still writes; brief will miss
     // this one until next deploy. Log loudly so we catch the regression.
+    // The idempotency_key collision that used to land here routinely (two
+    // real sends whose templated message hashed to the same content-derived
+    // key) can't happen any more — the key above is per-job-id, not
+    // content-derived — so a throw here now means a genuine DB error, not a
+    // benign duplicate.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const logger = require('../utils/logger').default;
     logger.warn('createOutreachJob — requests bridge threw, legacy row only', {

@@ -103,8 +103,10 @@ function attendeeCheckWarnings(params: {
 
 /**
  * gh#168-a — for a day rejected on `outside_attendee_work_hours`, compute the
- * blocked attendee's STATED hours converted into the owner's zone for that
- * exact date, as a self-instructing string Sonnet can quote verbatim. Same
+ * blocked attendee's hours (STATED when `entry.assumed` is falsy, or an
+ * ASSUMED default — no profile on file — when it's true; #M3) converted into
+ * the owner's zone for that exact date, as a self-instructing string Sonnet
+ * can quote verbatim. Same
  * "grounded string" pattern as `_requested_time_local` above
  * (reinterpretClockInZone + luxon format, never left to Sonnet's own head) —
  * applied to the DAY-level narration this time. Without it, a follow-up ("why
@@ -137,8 +139,15 @@ function attendeeHoursGroundingNotes(
       const startOwner = DateTime.fromISO(startOwnerIso, { zone: ownerTz });
       const endOwner = DateTime.fromISO(endOwnerIso, { zone: ownerTz });
       if (!startOwner.isValid || !endOwner.isValid) continue;
+      // #M3 / v4.4.x — an attendee with no stored profile timezone gets a
+      // GUESS (requester's zone + standard hours), not a fact. Saying
+      // "stated hours" unconditionally told Sonnet to present a guess as
+      // something the attendee actually said.
+      const hoursLabel = entry.assumed
+        ? 'assumed hours (no profile on file for this attendee — a default, not confirmed)'
+        : 'stated hours';
       notes.push(
-        `${b.email}'s stated hours ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded; do NOT recompute the conversion yourself.`,
+        `${b.email}'s ${hoursLabel} ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded${entry.assumed ? ', but say plainly these are ASSUMED, not confirmed, if asked' : ''}; do NOT recompute the conversion yourself.`,
       );
     } catch {
       // best-effort grounding note — day_summary still has top_reasons/blocked_by without it
@@ -398,6 +407,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           const movingIdsForAttendees = Array.isArray(args.moving_event_ids)
             ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
             : [];
+          // v4.4.x — the SAME per-id membership-checked list also gates
+          // `excludeEventIds` at every downstream findAvailableSlots call in
+          // this handler (five sites: candidate validation, the main pass,
+          // both recovery passes, and the preferred-slot re-check). Before
+          // this, each site re-filtered the RAW args.moving_event_ids straight
+          // into excludeEventIds with NO membership check at all — a colleague
+          // could name an owner event she isn't part of and have it excluded
+          // from his busy calculation just by passing its id, even though the
+          // fold-into-attendeeEmails logic below already gated that same id
+          // for a different purpose. One list, one gate, both consumers.
+          // Owner path stays ungated — it's always his own calendar.
+          let excludeEventIdsForSearch: string[] | undefined =
+            isOwnerInitiatedSearch && movingIdsForAttendees.length > 0 ? movingIdsForAttendees : undefined;
           if (movingIdsForAttendees.length > 0) {
             try {
               const { resolveMovingEventAttendees } = await import('../../../../utils/movingEventAttendees');
@@ -415,10 +437,38 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               let qualifyingIds = movingIdsForAttendees;
               if (!isOwnerInitiatedSearch) {
                 const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
-                qualifyingIds = requesterEmailLower
-                  ? movingIdsForAttendees.filter(id =>
-                      (rosterById.get(id) ?? []).some(e => e.toLowerCase() === requesterEmailLower))
-                  : [];
+                const onOwnRoster = (id: string) => !!requesterEmailLower
+                  && (rosterById.get(id) ?? []).some(e => e.toLowerCase() === requesterEmailLower);
+                qualifyingIds = [];
+                for (const id of movingIdsForAttendees) {
+                  if (onOwnRoster(id)) { qualifyingIds.push(id); continue; }
+                  // Organizing-not-attending (e.g. an EA booking for the owner):
+                  // she is never on the event's own roster, so the containment
+                  // test above always fails for her. Admit the id only when the
+                  // REQUESTS SPINE (a verified DB fact — who actually initiated
+                  // the booking that produced this event, written for every
+                  // colleague direct booking at createMeeting.ts:1715-1734) names
+                  // her as its requester. Never trust the model's self-declared
+                  // requester_is_attending flag alone for this — any colleague
+                  // could set it on a guessed id and reopen the exact roster leak
+                  // #145b/2026-08-04 closed; this checks a durable record instead
+                  // of a claim.
+                  if (args.requester_is_attending === false) {
+                    try {
+                      const { findMeetingOwner } = await import('../../findMeetingOwner');
+                      const info = await findMeetingOwner({
+                        ownerUserId: context.profile.user.slack_user_id,
+                        ownerEmail: userEmail,
+                        eventId: id,
+                      });
+                      if (info.requesterSlackId === context.userId) qualifyingIds.push(id);
+                    } catch (err) {
+                      logger.warn('find_available_slots — findMeetingOwner organizing-not-attending check threw', {
+                        err: String(err).slice(0, 200),
+                      });
+                    }
+                  }
+                }
                 if (qualifyingIds.length < movingIdsForAttendees.length) {
                   logger.warn('find_available_slots — dropping moving_event_id(s) not on the requester\'s own roster (likely a mismatched id, or another attendee\'s meeting)', {
                     movingEventIds: movingIdsForAttendees,
@@ -426,6 +476,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     requester: requesterEmailLower || '(unresolved)',
                   });
                 }
+                excludeEventIdsForSearch = qualifyingIds.length > 0 ? qualifyingIds : undefined;
               }
               const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id) ?? []))];
               if (fromEvent.length > 0) {
@@ -612,6 +663,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 entry.homeTimezone = ov.tz.trim();
                 entry.travelWindow = undefined;
               }
+              // A conversational override IS a real statement (the owner said
+              // it) — clear the #M3 assumed-default flag so downstream
+              // narration says "stated", never "assumed", for this entry.
+              entry.assumed = false;
               logger.info('find_available_slots — attendee hours override applied', {
                 email: entry.email, hoursStart: entry.hoursStart, hoursEnd: entry.hoursEnd, tz: entry.timezone,
               });
@@ -831,9 +886,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   profile: context.profile,
                   category: args.category as string | undefined,
                   relaxed: relaxedGranted,
-                  excludeEventIds: Array.isArray(args.moving_event_ids)
-                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                    : undefined,
+                  excludeEventIds: excludeEventIdsForSearch,
                   autoExpand: false,
                   minBufferHours: leadHours,
                   viewer,
@@ -944,9 +997,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // being moved are subtracted from busy AND forbidden as
               // candidates. See findAvailableSlots.excludeEventIds for the full
               // semantics.
-              excludeEventIds: Array.isArray(args.moving_event_ids)
-                ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                : undefined,
+              excludeEventIds: excludeEventIdsForSearch,
               // v2.6 — category scheduling rules. When set, slot loop filters
               // out slots that would violate the category's day_type / per_day /
               // per_week limits.
@@ -1119,9 +1170,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 viewer,
                 profile: context.profile,
                 relaxed: false,
-                excludeEventIds: Array.isArray(args.moving_event_ids)
-                  ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                  : undefined,
+                excludeEventIds: excludeEventIdsForSearch,
                 category: args.category as string | undefined,
               });
             };
@@ -1208,9 +1257,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // surfaces go to the OWNER as approval candidates anyway.)
                   relaxed: true,       // bypass focus / lunch / category — his soft day-load rules
                   keepWorkHours: true, // …but relaxing a soft block is not extending his day
-                  excludeEventIds: Array.isArray(args.moving_event_ids)
-                    ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                    : undefined,
+                  excludeEventIds: excludeEventIdsForSearch,
                   category: args.category as string | undefined,
                   autoExpand: false,  // recovery stays inside the user's window
                 });
@@ -1435,9 +1482,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     profile: context.profile,
                     category: args.category as string | undefined,
                     relaxed: relaxedGranted,
-                    excludeEventIds: Array.isArray(args.moving_event_ids)
-                      ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-                      : undefined,
+                    excludeEventIds: excludeEventIdsForSearch,
                     autoExpand: false,
                     minBufferHours: leadHours,
                     viewer,
@@ -1739,8 +1784,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (attendeeNotCheckedWarning) Object.assign(result, attendeeNotCheckedWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
               if (hasAttendeeConflicts && !usedOwnerAttendeeTagged && !usedColleagueOwnerOnly) {
+                // o#213 sibling — same hedge-when-assumed treatment as
+                // `_attendee_unverified_note` below: an `off_hours` entry can
+                // come from a GUESSED default (#M3, no stored profile) rather
+                // than real stored hours, tagged `assumed: true` on the
+                // conflict entry in connectors/graph/findAvailableSlots.ts.
                 result._attendee_conflicts_note =
-                  'You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has `attendee_conflicts: [{email, reason}]`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). Never present a conflicted slot as clean. The owner can still book any of them.';
+                  `You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has \`attendee_conflicts: [{email, reason, assumed?}]\`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). For an \`off_hours\` entry, when \`assumed\` is missing or false that's real stored working-hours data — say it plainly; when it carries \`assumed: true\` those hours are a GUESSED default (no profile on file for that attendee, never confirmed), so hedge instead (e.g. "Tue 10:00 — probably outside Anna's hours, though I'm not certain of her actual schedule"). Never present a conflicted slot as clean. The owner can still book any of them.`;
               }
               if (usedOwnerAttendeeTagged) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
@@ -1756,8 +1806,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // Owner-tagged backstop: no slot was clean for everyone, so these are his
                   // genuinely open times with each attendee conflict tagged. Honest framing:
                   // "nothing works for all, here's who can't + widen?".
+                  // o#213 sibling — same hedge-when-assumed treatment as
+                  // `_attendee_unverified_note` below: an `off_hours` entry can
+                  // come from a GUESSED default (#M3, no stored profile) rather
+                  // than real stored hours, tagged `assumed: true` on the
+                  // conflict entry in connectors/graph/findAvailableSlots.ts.
                   result._no_all_attendee_free_note =
-                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason, assumed?}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). For an \`off_hours\` entry, when \`assumed\` is missing or false that's real stored working-hours data — say it plainly; when it carries \`assumed: true\` those hours are a GUESSED default (no profile on file, never confirmed), so hedge instead (e.g. "Tue 16:15 — probably outside Maayan's hours, though I'm not certain of her actual schedule"). #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
                 }
               }
               if (hasOverOptional) {
@@ -1811,8 +1866,49 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // dropping them, so every slot that newly surfaces here carries
                 // at least one — there is no "no conflicts at all" case on this
                 // path, so no second wording for it.
+                // v4.4.x — the `attendee_status` clause used to ship
+                // unconditionally, telling Sonnet to look for a field that
+                // isn't there on a search whose slots carry no
+                // `attendee_status` at all (all-external attendees). Gated
+                // on `hasAttendeeStatus` now, matching the sibling flag
+                // above. Kept the concrete per-value mapping rather than
+                // pointing at the system prompt's "OWNER FREE, REQUESTER
+                // BUSY" paragraph (meetings.ts:1138) — that paragraph covers
+                // a different scenario (owner free, REQUESTER busy) and
+                // nowhere states what 'busy'/'tentative'/'oof' vs 'free'
+                // actually mean; claiming it "already covers" this would
+                // strip the only guidance Sonnet has for narrating these
+                // values, on the one path (the attendee-conflict fallback)
+                // where getting that narration right matters most.
+                // o#213 — the "external/unknown attendee can't be checked
+                // here" sentence used to live INSIDE the `hasAttendeeStatus`
+                // ternary, so it vanished whenever no slot carried a
+                // non-empty `attendee_status` (e.g. the colleague-path
+                // annotation above threw, or — in the all-external,
+                // no-internal-attendee case this closes — attendee_status
+                // simply never got attached). The fact it states is true
+                // EITHER WAY: an external or still-'unknown' attendee is
+                // uncheckable here regardless of whether `attendee_status`
+                // shipped at all. Ships unconditionally now; only the
+                // INTERNAL 'busy'/'tentative'/'oof'/'free' teaching sentence
+                // stays gated on `hasAttendeeStatus`.
+                // o#213 — the off-hours sentence also used to assert every
+                // `attendee_conflicts[].reason:'off_hours'` as real data
+                // unconditionally, but `loadAttendeeAvailabilityForEmails`
+                // (utils/attendeeAvailability.ts) can build an entry from a
+                // GUESSED default (#M3, no stored profile) tagged
+                // `assumed: true` — carried straight onto the conflict entry
+                // in connectors/graph/findAvailableSlots.ts. That's the other
+                // still-open half of `assumed-attendee-hours-narrated-as-fact`
+                // (the day_summary grounding note already hedged; this one
+                // didn't). Hedges per-entry now when `assumed` is true.
                 result._attendee_unverified_note =
-                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours'}]\` — that's real per-attendee working-hours data, so say plainly who's outside their hours (e.g. "Tue 10:00 — Elinor's outside her hours then"), never present a tagged slot as clean for everyone. Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: where it's 'busy' / 'tentative' / 'oof', say they already have something then (e.g. "Lori's busy then"); where it's 'free', say they're clear then. Only an EXTERNAL attendee (or one still 'unknown') can't be checked here — say you could not confirm THAT one yet. Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;
+                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours', assumed?}]\` — when an entry has no \`assumed\` flag (or it's false) that's real stored working-hours data, so say plainly who's outside their hours (e.g. "Tue 10:00 — Elinor's outside her hours then"); when an entry carries \`assumed: true\` those hours are a GUESSED default (no profile on file for that attendee, never confirmed), so hedge instead (e.g. "Tue 10:00 — probably outside Elinor's hours, though I'm not certain of her actual schedule"). Never present a tagged slot as clean for everyone.`
+                  + (hasAttendeeStatus
+                    ? ` Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: 'busy' / 'tentative' / 'oof' means they already have something then (e.g. "Lori's busy then"); 'free' means they're clear.`
+                    : '')
+                  + ` Only an EXTERNAL attendee (or one still 'unknown') can't be checked here — say you could not confirm THAT one yet.`
+                  + ` Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;
               }
               return result;
             }

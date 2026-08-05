@@ -514,6 +514,21 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     content: result.toolSummaries?.length
       ? `${result.toolSummaries.join(' ')}\n${cleanReply}`
       : cleanReply,
+    // v4.4.10 — stamp a synthetic ts even though the real Slack ts isn't known
+    // yet (chat.postMessage hasn't run — that's Step 5, below). Wall-clock at
+    // write time, in Slack ts format (unix seconds, 6-decimal fraction).
+    //
+    // processMessage.ts's channel/MPIM catch-up merge sorts
+    // `[...dbHistory, ...missedMessages]` by `parseFloat(m.ts || '0')`. An
+    // un-stamped assistant row parses to 0 and the sort puts EVERY one of
+    // Maelle's own past replies at the very front of the merged history,
+    // ahead of every real message — scrambling the order the model sees on
+    // every catch-up merge, independent of (and in addition to) the
+    // duplication bug the `m.user !== ctx.botUserId` exclusion above already
+    // closed (processMessage.ts:360). This write runs strictly after the
+    // user's message ts and strictly before this turn's real Slack post, so
+    // the synthetic value sorts correctly relative to both.
+    ts: (Date.now() / 1000).toFixed(6),
   });
 
   // Step 4.5 (v2.6.2) — ack-class emoji replacement. When the cleaned reply

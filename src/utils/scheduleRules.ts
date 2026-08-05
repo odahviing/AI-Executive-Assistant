@@ -505,7 +505,7 @@ export function occupancyRoleOf(
   floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
 ): OccupancyRole {
   if (ev.isCancelled) return 'ignore';
-  if (ev.showAs === 'free') return 'ignore';   // free/tentative blocks don't collide
+  if (ev.showAs === 'free') return 'ignore';   // only 'free' is a non-collision; 'tentative' falls through to 'commitment' below and DOES collide
   // v3.6.4 — a TIMED workingElsewhere event is an OPTIONAL-join (join only if
   // free), NOT a hard commitment. This one classification is what lets the slot
   // finder TAG a slot over it as WE-soft instead of dropping it, and lets a

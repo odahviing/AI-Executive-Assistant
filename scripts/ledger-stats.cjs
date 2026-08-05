@@ -30,6 +30,7 @@
  *   node scripts/ledger-stats.cjs --lane matchmaker   # one lane, with its findings
  *   node scripts/ledger-stats.cjs --runs          # per-run summary
  *   node scripts/ledger-stats.cjs --by-invariant  # one PRINCIPLE, however many places broke it
+ *   node scripts/ledger-stats.cjs --index         # one line per identity — recurrence, regressions, coverage
  *
  * `--open` exists because the backlog IS the ledger — every row whose verdict is
  * not `built` is still open, so a separate backlog file is a second copy that
@@ -167,6 +168,7 @@ const since = argOf('--since');
 const laneFilter = argOf('--lane');
 const byRun = argv.includes('--runs');
 const byInvariant = argv.includes('--by-invariant');
+const showIndex = argv.includes('--index');
 const openOnly = argv.includes('--open');
 
 // --architect reads the OTHER ledger: `.claude/agent-loop/architect-ledger.jsonl`,
@@ -925,7 +927,35 @@ if (bad.length) console.error(`! ${bad.length} unparseable line(s): ${bad.slice(
 // bucket off `source`. Filtered here, once, before `scoped` exists, so nothing
 // downstream has to know these rows exist. Still fully recoverable without this
 // script: `grep "\"kind\":\"run-manifest\"" .claude/agent-loop/ledger.jsonl`.
-for (let i = rows.length - 1; i >= 0; i--) if (rows[i] && rows[i].kind === 'run-manifest') rows.splice(i, 1);
+//
+// X166 · `kind:"invariant-backfill"` is the SAME class — a tag-only append with
+// no verdict, no lane, no `date` that means anything about when the bug was
+// found — but it is not thrown away the way `run-manifest` is: `--index` reads
+// it to attach an identity to an existing ref (that is its entire purpose). So
+// it is pulled OUT of `rows` here (every other view must never see it — a
+// backfill row has no `lane`, and 310 of them would inflate the "(none)" bucket
+// in the default per-lane table the moment they exist) and INTO its own array,
+// which only `--index` consumes.
+const backfillTags = [];
+for (let i = rows.length - 1; i >= 0; i--) {
+  if (!rows[i]) continue;
+  if (rows[i].kind === 'run-manifest') rows.splice(i, 1);
+  else if (rows[i].kind === 'invariant-backfill') backfillTags.push(...rows.splice(i, 1));
+}
+
+// X166 · the invariant ALIAS map — three of the pre-backfill 43 invariants are
+// duplicates of three others, flagged independently by different agents during
+// the 2026-08-06 backfill. Applied at READ TIME ONLY, never by rewriting a row
+// — the same precedent `spend.cjs`'s own rename map sets (X113: read history
+// through a rename, never mutate it). A row written under the old name five
+// months ago is still evidence of what happened then; only the LABEL used to
+// group it is canonicalized.
+const INVARIANT_ALIAS = {
+  'one-rule-two-implementations': 'single-implementation-of-a-shared-rule',
+  'nested-timeout-must-derive-from-inner-budget': 'outer-budget-exceeds-inner',
+  'occupancy-derived-once': 'one-fact-one-derivation',
+};
+const canonInvariant = (inv) => INVARIANT_ALIAS[inv] || inv;
 
 const scoped = rows.filter(
   (r) => (!since || (r.date || '') >= since) && (!laneFilter || r.lane === laneFilter),
@@ -1001,35 +1031,40 @@ const verdictOf = (r) => RETIRED[r.verdict] || r.verdict || '';
 const FINDINGS_ONLY = new Set(['queued-next-run', 'confirmed-other-lane', 'audit', 'declined', 'converted']);
 const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'queued-next-run'];
 
+// `audit` is a record that a findings-only pass RAN — not something to decide.
+// Six such rows sat in the open list on 2026-07-26 under `flagged-for-owner`,
+// inflating a 25-item backlog to 31 and burying the real decisions. A verdict
+// that means "this happened" must never appear in a list that means "act".
+// `declined` closes a row as firmly as `built` does. On 2026-07-26 the owner
+// declined 24 items and the decline was recorded as PROSE in report.md — "not
+// to be re-raised" — in a file nothing parses. So --open kept surfacing them
+// and would have re-raised every one tomorrow, which is precisely what that
+// sentence was trying to prevent. A decision is only durable once it is a row.
+//
+// `converted` closes a row that LEFT the bug track: a bug that turned out to be
+// a design question and became a GitHub Improvement/Feature issue, or one
+// handed to another chat. Added 2026-07-27 because there was no honest way to
+// close one — it either sat open here forever, or got logged `declined`, which
+// reads as a decision the owner made AGAINST it. Neither was true.
+// Its `note` MUST name the destination; see the check below.
+// X66 · `confirmed-other-lane` closes a ref as firmly as `built` — the work
+// landed, another lane did it. It is deliberately NOT counted as shipped below,
+// which is the whole reason the verdict exists: one change, one fix in the count.
+// X158 · `wrapped` joins the set: WRAP_UP.md step 12 now mints a `verdict:"wrapped"`
+// row for both a built ref's shipped-companion and a GitHub-sync-closed ticket —
+// without this, every one of those bookkeeping rows would misread as a fresh
+// open decision the moment a wrap starts writing them.
+//
+// HOISTED to module scope (was local to `--open` alone) so `--index` reads the
+// SAME set — a second, independently-typed copy is exactly how a prototype's
+// `CLOSED` silently dropped `confirmed-other-lane` and `audit` and over-counted
+// "open" refs that were actually already closed.
+const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
+
 // ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
 // A row is open unless it was built or proven already-fixed. Grouped by lane so
 // he can hand one lane its whole list in a single dispatch.
 if (openOnly) {
-  // `audit` is a record that a findings-only pass RAN — not something to decide.
-  // Six such rows sat in the open list on 2026-07-26 under `flagged-for-owner`,
-  // inflating a 25-item backlog to 31 and burying the real decisions. A verdict
-  // that means "this happened" must never appear in a list that means "act".
-  // `declined` closes a row as firmly as `built` does. On 2026-07-26 the owner
-  // declined 24 items and the decline was recorded as PROSE in report.md — "not
-  // to be re-raised" — in a file nothing parses. So --open kept surfacing them
-  // and would have re-raised every one tomorrow, which is precisely what that
-  // sentence was trying to prevent. A decision is only durable once it is a row.
-  //
-  // `converted` closes a row that LEFT the bug track: a bug that turned out to be
-  // a design question and became a GitHub Improvement/Feature issue, or one
-  // handed to another chat. Added 2026-07-27 because there was no honest way to
-  // close one — it either sat open here forever, or got logged `declined`, which
-  // reads as a decision the owner made AGAINST it. Neither was true.
-  // Its `note` MUST name the destination; see the check below.
-  // X66 · `confirmed-other-lane` closes a ref as firmly as `built` — the work
-  // landed, another lane did it. It is deliberately NOT counted as shipped below,
-  // which is the whole reason the verdict exists: one change, one fix in the count.
-  // X158 · `wrapped` joins the set: WRAP_UP.md step 12 now mints a `verdict:"wrapped"`
-  // row for both a built ref's shipped-companion and a GitHub-sync-closed ticket —
-  // without this, every one of those bookkeeping rows would misread as a fresh
-  // open decision the moment a wrap starts writing them.
-  const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
-
   // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
   // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
   // on Monday, built on Tuesday. Filtering row-by-row therefore reported items as
@@ -1490,6 +1525,124 @@ if (byRun) {
     const split = days.length > 1 ? `  [${days.map((d) => `${d.slice(5)}:${s.days.get(d)}`).join(' ')}]` : '';
     console.log(`  ${pad(when, 17)} ${pad(k, 28)} ${lpad(s.total, 4)} dispatches · ${lpad(s.built, 3)} built · ${lpad(s.push, 3)} pushback${split}`);
   }
+}
+
+// ── --index: ONE LINE PER IDENTITY — how many times a PROMISE has been broken,
+// not how many rows exist. `--by-invariant` already lists every ROW under a
+// principle; this collapses further, to one entry per identity, because at
+// ledger scale nobody reads rows — his own words: "once time it's going to grow
+// more and more, and when you have thousands of findings there, it's going to
+// slow or kill the agent or make them do a lot of mistakes." Measured against the
+// real ledger (2026-08-05): 924 rows / 416 refs collapse to a 43-line index —
+// ~4 KB regardless of how large the ledger itself grows, because the index is
+// keyed by IDENTITY, never by ROW.
+//
+// TWO COLLAPSES, both load-bearing:
+//   1. A `>dep` ref is a dependency LEG of its parent, never a separate bug —
+//      folded into the parent's own entry (same key, stripped suffix), not
+//      merely excluded, so its lane/file/date evidence is not thrown away.
+//   2. Per ref, only the LATEST verdict counts (append-only ledger — later rows
+//      for one ref supersede earlier ones), reusing `verdictOf`/`CLOSED` exactly
+//      as `--open` does, not a second, independently-typed copy of either.
+if (showIndex) {
+  const parentRef = (ref) => String(ref || '').replace(/(>dep)+$/, '');
+  // `CITED` matches a bare `scheduleRules.ts` and a qualified `src/utils/scheduleRules.ts`
+  // as two DIFFERENT strings for the same file, depending only on how a lane happened
+  // to write the citation — a plain `Set` shows both. Keyed by basename instead,
+  // keeping whichever form is longer (more path-qualified) when both appear.
+  const addFile = (map, raw) => {
+    const base = raw.split('/').pop();
+    if (!map.has(base) || raw.length > map.get(base).length) map.set(base, raw);
+  };
+  const byRef = new Map();
+  for (const r of scoped) {
+    if (!r.ref) continue;
+    const key = parentRef(r.ref);
+    const e = byRef.get(key) || { ref: key, invariants: new Set(), files: new Map(), lanes: new Set(), dates: [], verdict: '' };
+    if (r.invariant) e.invariants.add(canonInvariant(r.invariant));
+    for (const f of new Set(String(r.rootCause || '').match(CITED) || [])) addFile(e.files, f);
+    if (r.lane) e.lanes.add(r.lane);
+    if (r.date) e.dates.push(r.date);
+    if (r.verdict) e.verdict = verdictOf(r); // last row wins — append order
+    byRef.set(key, e);
+  }
+  // X166 · the backfill tags — merged onto an EXISTING ref only. Deliberately
+  // does not create a phantom entry for a ref that isn't already in `byRef`
+  // (its `date` also does not touch `e.dates`: a backfill row records when the
+  // tag was WRITTEN, not when the bug last recurred, and folding it in would
+  // make every backfilled identity's `last` read as the backfill date itself).
+  //
+  // A backfill row with NO `invariant` key is a DECLARED-LOCAL bug — reviewed on
+  // purpose and found to fit no wider principle (78 of 310 in the 2026-08-06
+  // pass). It must not become a phantom identity literally named "none": it
+  // contributes nothing to `.invariants` and is counted in its own bucket, so
+  // "read" always equals "tagged + declared-local + matched-nothing" exactly.
+  const unmatchedBackfill = [];
+  let declaredLocal = 0;
+  for (const t of backfillTags) {
+    if (!t.ref) continue;
+    const key = parentRef(t.ref);
+    const e = byRef.get(key);
+    if (!e) {
+      unmatchedBackfill.push(t.ref);
+      continue;
+    }
+    if (t.invariant) e.invariants.add(canonInvariant(t.invariant));
+    else declaredLocal += 1;
+  }
+  for (const e of byRef.values()) {
+    e.dates.sort();
+    e.first = e.dates[0] || '';
+    e.last = e.dates[e.dates.length - 1] || '';
+    e.open = !CLOSED.has(e.verdict);
+  }
+
+  const idx = new Map();
+  for (const e of byRef.values()) {
+    for (const inv of e.invariants) {
+      const cur = idx.get(inv) || { inv, refs: new Set(), lanes: new Set(), files: new Map(), first: '', last: '', open: 0, closed: 0 };
+      cur.refs.add(e.ref);
+      for (const l of e.lanes) cur.lanes.add(l);
+      for (const f of e.files.values()) addFile(cur.files, f);
+      if (!cur.first || (e.first && e.first < cur.first)) cur.first = e.first;
+      if (!cur.last || (e.last && e.last > cur.last)) cur.last = e.last;
+      e.open ? cur.open++ : cur.closed++;
+      idx.set(inv, cur);
+    }
+  }
+  const sorted = [...idx.values()].sort((a, b) => b.refs.size - a.refs.size);
+  // A regression is DERIVED, never tagged: an identity carrying both an open and
+  // a closed ref right now means the promise was kept somewhere and broken again
+  // somewhere else (or the same place, later) — nobody has to remember to flag it,
+  // the index states it every time it is read. This is the operational definition
+  // (aggregate open>0 AND closed>0 within one identity), not a per-ref reopen
+  // trace — simple on purpose, so it holds at any ledger size the same way the
+  // rest of this view does.
+  const regressions = sorted.filter((c) => c.open > 0 && c.closed > 0);
+
+  console.log(`\nIdentity index — ${idx.size} distinct invariant(s) · ${sorted.filter((c) => c.refs.size > 1).length} broken MORE THAN ONCE · ${regressions.length} closed-and-open-again (regression)`);
+  console.log('Sorted by recurrence — the count is the finding, not any one row in it.\n');
+  for (const c of sorted) {
+    console.log(`  ${String(c.refs.size).padStart(2)}x  ${c.inv}${c.open > 0 && c.closed > 0 ? '  [REGRESSION]' : ''}`);
+    console.log(`      ${c.first || '?'}→${c.last || '?'} · lanes ${[...c.lanes].join(',') || '(none)'} · ${c.open} open / ${c.closed} closed`);
+    console.log(`      refs: ${[...c.refs].join(' | ')}`);
+    if (c.files.size) console.log(`      files: ${[...c.files.values()].slice(0, 6).join(' ')}`);
+  }
+  // A5: the view that indexes 23% of the ledger while looking complete IS the
+  // failure this whole file is written against — same discipline as
+  // `--by-invariant`'s own coverage line, stated the same way.
+  const totalRefs = byRef.size;
+  const tagged = [...byRef.values()].filter((e) => e.invariants.size).length;
+  if (backfillTags.length) {
+    const taggedByBackfill = backfillTags.length - unmatchedBackfill.length - declaredLocal;
+    console.log(
+      `\n  backfill: ${backfillTags.length} tag row(s) read (kind:"invariant-backfill") · ${taggedByBackfill} tagged an existing ref · ${declaredLocal} declared local (no principle, correctly not indexed)` +
+        (unmatchedBackfill.length ? ` · ${unmatchedBackfill.length} matched NOTHING: ${unmatchedBackfill.slice(0, 8).join(', ')}` : ' · 0 matched nothing'),
+    );
+  }
+  console.log(
+    `\n  ${tagged} of ${totalRefs} distinct ref(s) (${totalRefs ? Math.round((tagged / totalRefs) * 100) : 0}%) carry an \`invariant\` tag. This index sees only what was tagged — the rest is invisible here, not absent from the ledger.`,
+  );
 }
 
 if (byInvariant) {

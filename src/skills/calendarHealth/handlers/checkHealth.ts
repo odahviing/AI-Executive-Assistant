@@ -1049,6 +1049,19 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                         const keptProt = protection.isProtected(kept, profile);
                         if (!keptProt.protected && !keptProt.reasons.includes('has external attendee')
                             && !dismissedEventIds.has(kept.id) && !recentlyAutoMovedIds.has(kept.id)) {
+                          // v4.4.x — the pull attempt's own failure reason (set
+                          // by executeInternalAutoMove / pullInternalMeetingToAbut
+                          // above) must be reset before the push retry so a PUSH
+                          // SUCCESS doesn't leave a stale fix_failed=true/fix_error
+                          // sitting alongside issue.fixed=true (success never
+                          // clears these itself). But the push retry unconditionally
+                          // sets its OWN reason on ITS OWN failure — so if push
+                          // ALSO fails, the pull's reason (which can be the more
+                          // serious "calendar write did not land" case, not a mere
+                          // "no slot" case) would otherwise be silently discarded
+                          // with no trace. Capture it and restore it alongside
+                          // push's own reason when both attempts failed.
+                          const pullFailureReason = issue.fix_error;
                           issue.fix_failed = false;
                           issue.fix_error = undefined;
                           const laterStart = parseGraphDt(movable.start.dateTime, movable.start.timeZone, timezone);
@@ -1059,6 +1072,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                             dayEventsForBusy: events, issue,
                             userEmail, ownerUserId, timezone, profile, context, internalActions,
                           });
+                          if (!issue.fixed && issue.fix_failed && pullFailureReason && issue.fix_error !== pullFailureReason) {
+                            issue.fix_error = `${pullFailureReason} Then tried the other direction: ${issue.fix_error}`;
+                          }
                         }
                       }
                       if (issue.fixed) fixesApplied += 1;

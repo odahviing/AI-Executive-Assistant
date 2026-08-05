@@ -23,7 +23,11 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
-import { findDeadGaps, type DensityConfig } from './calendarDensity';
+import { findDeadGaps, alignUpQuarter, type DensityConfig } from './calendarDensity';
+// Re-exported — callers requiring `utils/floatingBlocks` (e.g.
+// createMeeting.ts) used to get their own copy; calendarDensity.ts is now the
+// single implementation (#invariant single-implementation-of-a-shared-rule).
+export { alignUpQuarter };
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday'
@@ -176,21 +180,8 @@ export function windowMsForDay(
   return DateTime.fromISO(`${dayDate}T${hhmm}`, { zone: timezone }).toMillis();
 }
 
-/**
- * Round a millis timestamp UP to the next quarter-hour in the given timezone.
- * Shared with book_floating_block so the same alignment logic applies everywhere.
- */
-export function alignUpQuarter(ms: number, timezone: string): number {
-  const dt = DateTime.fromMillis(ms).setZone(timezone);
-  const minute = dt.minute;
-  const remainder = minute % 15;
-  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
-  const bumpMin = 15 - remainder;
-  return dt
-    .plus({ minutes: bumpMin })
-    .set({ second: 0, millisecond: 0 })
-    .toMillis();
-}
+// alignUpQuarter moved to calendarDensity.ts (single implementation, v4.4.x) —
+// imported + re-exported above so existing requires of this module still work.
 
 /**
  * Round a millis timestamp to the NEAREST quarter-hour in the given timezone.

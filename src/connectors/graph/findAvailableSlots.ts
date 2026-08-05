@@ -27,7 +27,11 @@ type SlotCandidate = {
    * colleague must never see.
    */
   broken_rule_label?: string;
-  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours' }>;
+  // `assumed` mirrors AttendeeAvailabilityEntry.assumed (utils/attendeeAvailability.ts)
+  // onto an 'off_hours' conflict — true when the underlying hours came from a
+  // GUESSED default (#M3, no stored profile), never confirmed. Only ever set
+  // on 'off_hours' entries; a 'busy' entry is a real calendar read, not a guess.
+  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }>;
 };
 
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
@@ -78,6 +82,10 @@ export async function findAvailableSlots(params: {
     // travelWindow [from, until] → its timezone; outside → homeTimezone.
     homeTimezone?: string;     // stored profile IANA
     travelWindow?: { from: string; until: string; timezone: string; location: string };
+    // #M3 — true when this entry has no stored profile and was built from a
+    // GUESSED default (loadAttendeeAvailabilityForEmails). Carried onto an
+    // 'off_hours' conflict below so callers can hedge instead of asserting it.
+    assumed?: boolean;
   }>;
   // Rule 6 — attendee free/busy is a HELPER, never a blocker. When true, a slot
   // where an attendee is busy / off-hours is KEPT and TAGGED (attendee_conflicts)
@@ -995,7 +1003,7 @@ export async function findAvailableSlots(params: {
       // is TOLD (rule 7) — never silently dropped. The OWNER's busy is owned by
       // checkSlot below, off his CalendarEvents. ──
       const keepAttendeeConflicts = params.relaxed || params.tagAttendeeConflicts;
-      const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours' }> = [];
+      const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }> = [];
       {
         // v2.7.6 — attendee busy (free/busy pool), attributed by email.
         // v3.7.x (1.1/1.2) — TAG mode records EVERY conflicting attendee, not just
@@ -1077,7 +1085,7 @@ export async function findAvailableSlots(params: {
             for (const att of params.attendeeAvailability) {
               if (!attendeeOutsideHours(att)) continue;
               if (attendeeConflicts.some(c => c.email === att.email)) continue;
-              attendeeConflicts.push({ email: att.email, reason: 'off_hours' });
+              attendeeConflicts.push({ email: att.email, reason: 'off_hours', ...(att.assumed ? { assumed: true } : {}) });
             }
           } else {
             const blockingAttendee = params.attendeeAvailability.find(attendeeOutsideHours);

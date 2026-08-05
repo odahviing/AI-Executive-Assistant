@@ -1178,7 +1178,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? tzc }).toMillis(),
                   }));
                 const cfg = density.densityConfigFromProfile(context.profile.meetings);
-                const cand = density.earlierConnectiveStart(rs.toMillis(), re.toMillis(), ownerBusy, cfg);
+                const cand = density.earlierConnectiveStart(rs.toMillis(), re.toMillis(), ownerBusy, cfg, tzc);
                 if (cand !== null) {
                   const durMs = re.toMillis() - rs.toMillis();
                   const candStartIso = DateTime.fromMillis(cand, { zone: tzc }).toISO()!;
