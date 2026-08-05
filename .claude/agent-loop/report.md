@@ -1,13 +1,6 @@
 # Agent-loop report
 
-```
-Run wf_5c89df46-081 — in: 1 ticket · 2 day(s) of logs · 15 backlog re-reads
-out: 22 built · 1 already-fixed · 0 built-with-gap · 6 bounced · 3/3 joint-traced · 0 converted · 2 queued
-board: 5 open rows — 1 still-real · 3 need a re-read · 1 cite no file · 5 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
-0 rows await you: 0 from tonight · 0 re-surfaced · 0 found by the loop
-```
-
-**Empty — v4.4.9 wrapped. 0 rows await you.** Two of the five open rows are QUEUED for the next build and drain themselves.
+**Empty — v4.4.9 wrapped. 0 rows await you.** Standing backlog: **5 open rows** across 5 bugs · 1 still-real · 3 need a re-read · 1 cite no file · **5 rulable · 0 waiting on a verb** · 2 are QUEUED for the next build and drain themselves (`node scripts/ledger-stats.cjs --open`). The wave that shipped here is behind the wrap stamp; its own figures are in the CHANGELOG and the ledger.
 
 **Built and uncommitted — this is what a wrap ships (20):** `automove-revert-mid-sweep-unique-constraint-abort` dismissal survives every sweep, bounced once · `auto-move-reoccurs-after-revert-when-open-category-question-exists` same pair, same fix · `sibling-notes-narrate-off-hours-without-assumed-hedge` two more notes hedged · `find-slack-user-breadcrumb-jumps-history-order` ts-stamp added · `coordinator-fourth-scrubber-bypass-site` · `availability-narration-exposes-search-mechanism` · `assumed-attendee-hours-narrated-as-fact` · `email-leg-unresolved-attendee-strip-has-same-silent-confirm-shape` · `requester-is-attending-false-still-gets-narrow-roster` · `moving-event-ids-subtracts-from-busy-pool-with-no-membership-check` · `automove-revert-message-asserts-unread-state` · `defrag-path-swaps-failure-reason-silently` · `claimchecker-comment-overstates-tentative-handling` · `quarter-hour-grid-duplicated-across-two-files` · `createoutreachjob-idempotency-collision` · `anchored-booking-start-not-snapped-to-quarter-hour` · `bot-own-messages-reingested-in-thread-merge` · `bot-own-reply-duplicated-in-model-context-window` · `unverified-note-comment-duplicates-systemprompt-and-lacks-hasattendeestatus-gate` · `dismissal-row-select-has-no-order-by` · plus their dependency legs.
 
