@@ -73,7 +73,7 @@ async function reattachRecentThreadImage(
   // ── Shared message processor ──────────────────────────────────────────────
   // Single function handles all contexts — DM, group DM, channel mention
 export async function processMessage(ctx: SlackAppContext, params: ProcessMessageParams): Promise<void> {
-  const { app, profile, colleagueTestThreads, getSenderRole } = ctx;
+  const { app, profile, getSenderRole } = ctx;
   const { assistant, user } = profile;
     const { senderId, text, framing, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
     const rawRole = getSenderRole(senderId);
@@ -106,22 +106,6 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       stampSocketAlive(user.slack_user_id);
     } catch { /* non-fatal */ }
 
-    // ── Colleague-mode testing (owner only, DMs only) ────────────────────────
-    if (rawRole === 'owner' && !isChannel && !isMpim) {
-      const lowerText = text.toLowerCase().trim();
-      if (/\btest\s+as\s+colleague\b/.test(lowerText)) {
-        colleagueTestThreads.add(threadTs);
-        await say({ text: `Colleague test mode ON for this thread. I'll treat you as a colleague now — try asking me to book a meeting. Say "stop testing" to exit.`, thread_ts: threadTs });
-        return;
-      }
-      if (colleagueTestThreads.has(threadTs) && /\b(stop\s+test|back\s+to\s+normal|exit\s+test)\b/.test(lowerText)) {
-        colleagueTestThreads.delete(threadTs);
-        await say({ text: `Back to normal — you're the owner again in this thread.`, thread_ts: threadTs });
-        return;
-      }
-    }
-    const isColleagueTest = rawRole === 'owner' && colleagueTestThreads.has(threadTs);
-
     // MPIM security: everyone gets colleague context in group DMs — including the owner.
     // The owner can ask direct questions (e.g. "am I free?") but gets colleague-level tools
     // and a privacy-conscious system prompt so nothing leaks to other participants.
@@ -133,15 +117,31 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     // (get_free_busy, recall_preferences, get_person_memory, news/web_research, …)
     // and owner-level narration, so his private calendar / owner-only data never
     // lands in a channel. Like owner-in-group he also skips the colleague funnel
-    // (self-upsert / rate-limit / outreach-reply intercept). Colleague-test mode is
-    // DM-only (isChannel is false there), so it is unaffected.
+    // (self-upsert / rate-limit / outreach-reply intercept).
     const isOwnerInChannel = isChannel === true && rawRole === 'owner';
-    const role: SenderRole = (isMpim || isChannel || isColleagueTest) ? 'colleague' : rawRole;
+    const role: SenderRole = (isMpim || isChannel) ? 'colleague' : rawRole;
+
+    // v4.4.x (#154) — the turn's authenticated authority and surface, resolved
+    // ONCE, here, at the Slack transport boundary. `authority` is rawRole
+    // itself — the authenticated Slack sender (app.ts:95-97's getSenderRole),
+    // NEVER clamped by surface — so a gate that needs to know "is this
+    // genuinely the owner typing" never has to reconstruct it from
+    // isMpim/isChannel/isOwnerInGroup and risk disagreeing with `role`.
+    // `surface` is WHERE the turn is happening; channel and MPIM are the same
+    // surface ('room') per the owner's ruling that a channel is just an MPIM
+    // with an unbounded, unknowable membership.
+    const authority: 'owner' | 'colleague' = rawRole;
+    const surface: 'owner_dm' | 'colleague_dm' | 'room' = (isMpim || isChannel)
+      ? 'room'
+      : (rawRole === 'owner' ? 'owner_dm' : 'colleague_dm');
+
     logger.info('processMessage — role determined', {
       senderId,
       channelId,
       rawRole,
       effectiveRole: role,
+      authority,
+      surface,
       isChannel,
       isMpim: isMpim ?? false,
       isOwnerInGroup,
@@ -564,9 +564,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // they have genuine parallel conversations.
         isOneOnOneDm: !isChannel && !isMpim,
         text: framedText,
+        senderId,
         senderName: colleagueName,
         meta: {},
-        runner: async ({ mergedText, signal, markWrite }) => {
+        runner: async ({ mergedText, signal, markWrite, spansMultipleSenders }) => {
           // Did anything from this turn actually reach the person? Set by the
           // delivery pipeline (postReply's onDelivered), read only by the
           // failure handler at the bottom of this closure.
@@ -671,7 +672,20 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               }
             }
 
-            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext });
+            // gh#F1 — a batch that merged more than one authenticated sender
+            // (a colleague's message + the owner's, landing in the same room
+            // thread within the debounce window) must never run with THIS
+            // runner's captured `authority` if that would be 'owner': the
+            // merged text can contain another sender's instruction, and
+            // authority is what gates delete_meeting / resolve_approval
+            // (registry.ts OWNER_ROOM_ACTION_TOOLS). Clamp to the safe floor.
+            const effectiveAuthority: 'owner' | 'colleague' = spansMultipleSenders ? 'colleague' : authority;
+            if (spansMultipleSenders && authority === 'owner') {
+              logger.warn('Merged batch spanned multiple senders — clamping owner authority to colleague for this turn', {
+                senderId, channelId, threadTs,
+              });
+            }
+            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext, spansMultipleSenders });
             const result = await runOrchestrator({
               userMessage: mergedText,
               conversationHistory: history,
@@ -679,6 +693,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               channelId,
               userId: senderId,
               senderRole: role,
+              authority: effectiveAuthority,
+              surface,
               senderName: colleagueName,
               channel: 'slack' as ChannelId,
               profile,

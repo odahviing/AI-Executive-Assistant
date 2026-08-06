@@ -204,408 +204,40 @@ function gateApprovalAsk(
   return null;
 }
 
-export class TasksSkill implements Skill {
-  id = 'tasks' as const;
-  name = 'Tasks';
-  description = 'Creates and manages async tasks — reminders, follow-ups, pending work, briefings';
+/**
+ * createApprovalRequest — the `create_approval` TOOL's full logic, extracted
+ * (o#223>dep) and exported so it is directly CODE-callable by a domain
+ * handler that has already proven a deviation itself and must not depend on
+ * the model choosing to call the tool this turn. Every other escalation in
+ * the meeting subsystem returns a `_note`/`suggested_ask_text` and trusts
+ * Sonnet to place the follow-up `create_approval` call; that is fine for an
+ * ordinary escalation, but the owner ruled (v4.4.x #154) that a room
+ * rule-bend must reach his private approval thread deterministically. This
+ * function is the primitive that lets a handler do that — e.g. planMeeting's
+ * `ownerRoomBend`/`escalate_approval` path (create_meeting / move_meeting)
+ * calling it directly instead of returning a note and hoping. Wiring that
+ * specific call site is matchmaker's (skills/meetings/*); this file only owns
+ * making the raise itself reachable without a model tool-call in the loop.
+ *
+ * `args` is exactly the `create_approval` tool's own input shape (kind /
+ * payload / ask_text / expires_in_workdays / expires_in_hours); `context` is
+ * the caller's own SkillContext (a meeting handler already carries one via
+ * `OpCtx.context`). Same return shape the tool returns: `{ ok, approval_id,
+ * created, expires_at, kind, reused_existing }` on success, `{ error, reason }`
+ * (or the more specific gate refusals) on refusal — a direct caller must
+ * check `ok`/`error` exactly like the tool-dispatch path does.
+ *
+ * The `case 'create_approval'` tool dispatch below is now a thin wrapper
+ * around this — one lifecycle, reachable from a model tool call OR straight
+ * from code, never two.
+ */
+export async function createApprovalRequest(
+  args: Record<string, unknown>,
+  context: SkillContext,
+): Promise<unknown> {
+  const { profile, channelId, threadTs } = context;
+  const ownerUserId = profile.user.slack_user_id;
 
-  getTools(_profile: UserProfile): Anthropic.Tool[] {
-    return [
-      {
-        name: 'create_task',
-        description: `Create a task for Maelle to handle asynchronously.
-Use when asked to:
-- "Remind me about X tomorrow"
-- "Follow up with Anna in 3 days if she doesn't respond"
-- "Check back with Ben next week"
-- "Remind Cara about the board prep on Tuesday"
-- Any future action that shouldn't happen right now
-
-Task types:
-- reminder: remind the owner (or someone else) about something at a specific time
-- follow_up: check back on an ongoing situation after X days
-- research: research a topic, compile summary (runs through the full agent)
-- coordination: handled automatically when initiating meeting booking
-- outreach: handled automatically when sending messages to colleagues`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'] },
-            title: { type: 'string', description: 'Plain English title of what Maelle is doing.' },
-            description: { type: 'string', description: 'More detail if needed' },
-            due_at: { type: 'string', description: 'ISO 8601 datetime when to execute this task.' },
-            target_slack_id: { type: 'string', description: 'If reminding someone else, their Slack user ID' },
-            target_name: { type: 'string', description: 'Display name of the target person' },
-            message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
-          },
-          required: ['type', 'title', 'due_at'],
-        },
-      },
-      {
-        // v2.9 — merged edit_task + cancel_task. create_task and get_my_tasks
-        // stay separate (claim-checker honesty rules reference create_task by
-        // name; get_my_tasks is a read with optional filter).
-        name: 'update_task',
-        description: `Update an existing task. Two actions:
-
-action='edit' — change a task's title, description, due_at, message, or type. Required: task_id. Pass any subset of mutable fields.
-
-action='cancel' — cancel a pending task. Required: task_id.
-
-For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_tasks\`.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            action: { type: 'string', enum: ['edit', 'cancel'], description: 'edit or cancel.' },
-            task_id: { type: 'string', description: 'REQUIRED for both actions.' },
-            title: { type: 'string', description: 'edit: optional.' },
-            description: { type: 'string', description: 'edit: optional.' },
-            due_at: { type: 'string', description: 'edit: optional ISO 8601 datetime.' },
-            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'], description: 'edit: optional task type.' },
-            message: { type: 'string', description: 'edit: optional message body.' },
-          },
-          required: ['action', 'task_id'],
-        },
-      },
-      {
-        name: 'get_my_tasks',
-        description: `Get all open tasks Maelle is currently working on or waiting on. Call this when the user asks "what tasks do you have?" or "what's pending?" or "what are you working on?"
-
-Optional with_person filter: pass a Slack user ID to scope results to tasks involving that person. Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.
-
-ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do my LinkedIn post?", "did the briefing run?", "weekly review this morning?").`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            with_person: { type: 'string', description: 'Optional Slack user ID to filter by counterpart.' },
-          },
-          required: [],
-        },
-      },
-      {
-        name: 'get_briefing',
-        description: `Get a summary of everything that happened since the user was last active.`,
-        input_schema: { type: 'object', properties: {}, required: [] },
-      },
-      {
-        name: 'send_briefing_now',
-        description: `Send the morning briefing immediately, posted in the current thread.`,
-        input_schema: { type: 'object', properties: {}, required: [] },
-      },
-      {
-        name: 'create_approval',
-        description: `Ask the owner for a decision. ALWAYS use this when you need the owner to decide something instead of just DMing them a question. The owner is the only one who can bypass scheduling rules — colleagues asking for something that breaks the rules MUST go through this tool. Maelle never overrides on her own.
-
-AUTHORITY MODEL:
-- If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed.
-- If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
-- RELAY IT AS AN APPROVAL IN FLIGHT, NOT A DEAD END, AND NEVER AS DONE. When you raise this for a colleague, tell the requester plainly that you've SENT it to the owner (by name) to decide — nothing is confirmed yet, so never open with completion language ("you're all set", "done", "sorted", "added") that reads as if the change already happened. If a colleague who did NOT request this meeting asks to be added to it, say so plainly ("I've sent your request to join the meeting to Idan to decide — I'll let you know as soon as he does"), not "you can join — I've sent it to the owner to approve" and never "you're all set, added you to the ask I've sent Idan" (unclear what "the ask" refers to and reads as already-confirmed). NEVER frame it as "the owner must make the change themselves" or "you can't change this."
-
-Kinds:
-- duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
-- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. RUN THE ACTION'S TOOL FIRST: the handler refuses with \`no_verified_deviation\` unless the action rode in from a tool that actually blocked it, because with nothing blocked there is nothing to override and nothing to replay on approve. So call create_meeting / move_meeting / update_meeting / book_floating_block for the real time and attendees — it either just happens (allowed, and the owner is never interrupted) or it comes back refused WITH the exact reason and the action attached for this approval. If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE running anything. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
-- unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
-- freeform: a NON-CALENDAR yes/no/amend ask ONLY — flag an out-of-scope request for the owner, content review, a private judgment call ("OK to share my number with X?"). Payload: { question, context, subject }. NEVER for a CALENDAR CHANGE — booking, moving/rescheduling, adding/removing attendees, or CANCELLING a meeting (a cancel is a calendar change too). The handler REFUSES a calendar-shaped freeform (\`freeform_calendar_change\`): it carries no action, so on approve NOTHING would happen and the change silently dies. Any calendar change goes through its tool FIRST — create_meeting / move_meeting / update_meeting / delete_meeting (any attendee count); if it needs sign-off the colleague-path gate raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval.
-
-DEFERRED ACTION (auto-execute on approve) — v2.8.6:
-When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
-
-Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
-Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
-
-Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=policy_exception) — NOT freeform — with an explicit:
-  payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
-The handler skips the booking-field check for a delete deferred_action; the resolver calls delete_meeting the instant the owner ✅'s the DM — no second turn needed.
-
-For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
-
-EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
-
-Behavior:
-- DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
-- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.
-- When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
-            payload: { type: 'object', description: 'Kind-specific payload (see tool description).' },
-            ask_text: { type: 'string', description: 'The exact text to DM the owner as the approval ask.' },
-            expires_in_workdays: { type: 'number', description: 'Owner-workdays until expiry. Default 2.' },
-            expires_in_hours: { type: 'number', description: 'Sub-workday escape hatch.' },
-          },
-          required: ['kind', 'payload', 'ask_text'],
-        },
-      },
-      {
-        name: 'resolve_approval',
-        description: `Record the owner's decision on a pending approval. Call this when the owner replies to an approval ask in DM.
-
-Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending approval are auto-resolved BEFORE the orchestrator runs (Module D). Call this tool only when:
-- the owner AMENDED ("not as asked, but try X"),
-- the owner referenced a specific approval id token,
-- or you need to act on an approval from a different thread.
-
-Verdicts:
-- approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
-- reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
-- amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
-
-Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject. Outside the anchor thread, a bare yes/no is refused UNLESS the owner's own message names this approval by subject or counterpart ("ANF already done", "reject the Erez sync") — that's detected automatically from what he actually typed, not from anything you pass in \`reason\`. If it's refused, tell him which open approvals exist and ask him to confirm in the approval's own thread, the daily thread, or by naming which one he means.`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            approval_id: { type: 'string' },
-            verdict: { type: 'string', enum: ['approve', 'reject', 'amend'] },
-            data: { type: 'object' },
-            counter: { type: 'object' },
-            reason: { type: 'string', description: 'Owner\'s own words, when relevant — relayed to the requester on reject/amend to explain the decision. Does NOT unlock resolving outside the approval\'s anchor thread; that\'s checked automatically against what the owner actually typed, not against this argument.' },
-          },
-          required: ['approval_id', 'verdict'],
-        },
-      },
-      {
-        name: 'list_pending_approvals',
-        description: 'List approvals currently waiting on the owner.',
-        input_schema: { type: 'object', properties: {}, required: [] },
-      },
-    ];
-  }
-
-  async executeToolCall(
-    toolName: string,
-    args: Record<string, unknown>,
-    context: SkillContext,
-  ): Promise<unknown | null> {
-    const { profile, channelId, threadTs } = context;
-    const ownerUserId = profile.user.slack_user_id;
-
-    // v2.9 — narrow merge: update_task dispatches into edit_task or cancel_task.
-    // create_task and get_my_tasks stay separate (claim-checker honesty rule
-    // references create_task by name; get_my_tasks is a read with optional filter).
-    if (toolName === 'update_task') {
-      const action = String(args.action ?? '').toLowerCase();
-      if (action === 'edit')         toolName = 'edit_task';
-      else if (action === 'cancel')  toolName = 'cancel_task';
-      else return { error: 'bad_action', message: `update_task action must be 'edit' | 'cancel', got "${action}".` };
-    }
-
-    switch (toolName) {
-
-      case 'create_task': {
-        const taskType = args.type as CreateTaskType;
-        const title = args.title as string;
-        // #149 — anchor the due time to a UTC instant HERE, the boundary where a
-        // model-authored wall-clock becomes a spine timer and the only place the
-        // owner's zone is in hand. Pre-fix `due_at` went onto next_check_at
-        // verbatim, so a bare "2026-07-27T10:32:00" only satisfied the sweep's
-        // `datetime(next_check_at) <= datetime('now')` (UTC) three hours later.
-        const dueAtRaw = args.due_at as string;
-        const dueAt = toTimerInstant(dueAtRaw, profile.user.timezone);
-        if (!dueAt) {
-          return {
-            error: 'bad_due_at',
-            message: `due_at "${dueAtRaw}" isn't a parseable ISO 8601 datetime. Pass an owner-local wall-clock ("2026-07-27T10:32:00") or an explicit offset — I won't create a task whose timer can never fire.`,
-          };
-        }
-        const description = args.description as string | undefined;
-        const targetSlackId = args.target_slack_id as string | undefined;
-        const targetName = args.target_name as string | undefined;
-        const message = args.message as string | undefined;
-
-        // Kind mapping: create_task is owner-initiated autonomous work.
-        const kind: RequestKind = taskType === 'research' ? 'research' : taskType;
-
-        // Owner-initiated → informed=1, state=in_flight (Maelle is working on it).
-        // Reminders/follow-ups fire via next_check_at + handler='reminder_fire'.
-        // Research uses 'research_run' — runs the full agent loop at due_at and
-        // DMs the result. Both fire on the ONE spine sweep (sweepDueRequests);
-        // the old tasks-table dispatchers were the duplicate path, now deleted.
-        const nextCheckHandler = taskType === 'research' ? 'research_run' : 'reminder_fire';
-        const row = createRequest({
-          ownerUserId,
-          initiatedBy: context.userId,
-          initiatedByRole: 'owner',
-          kind,
-          subject: title,
-          description,
-          state: 'in_flight',
-          informed: 1,
-          // The reminder is an activity OWNED BY its requester (the owner
-          // here — create_task is owner-path). runReminderFire reads this to
-          // frame third-party reminders ("<requester> asked me to remind you").
-          requesterSlackId: context.userId,
-          targetSlackId,
-          targetName,
-          originChannel: channelId,
-          originThreadTs: threadTs,
-          originIsMpim: !!context.isMpim,
-          expiresAt: undefined,
-          nextCheckAt: dueAt,
-          nextCheckHandler,
-          details: { message, due_at: dueAt },
-        });
-
-        const dueDt = DateTime.fromISO(dueAt).setZone(profile.user.timezone);
-        logger.info('Task created via skill', { id: row.id, type: taskType, due: dueAt });
-        return {
-          created: true,
-          task_id: row.id,
-          due: dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm'),
-        };
-      }
-
-      case 'edit_task': {
-        const id = args.task_id as string;
-        const row = getRequest(id);
-        if (!row) return { error: 'Task not found' };
-
-        const detailsCurrent = parseDetails(row) ?? {};
-        const patch: Parameters<typeof updateRequest>[1] = {};
-        if (typeof args.title === 'string') patch.subject = args.title;
-        if (typeof args.description === 'string') patch.description = args.description;
-        // #149 — same UTC anchoring as create_task, so a rescheduled reminder
-        // can't re-acquire the naive-clock delay.
-        let dueAtNormalized: string | null = null;
-        if (typeof args.due_at === 'string') {
-          dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
-          if (!dueAtNormalized) {
-            return {
-              error: 'bad_due_at',
-              message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
-            };
-          }
-          patch.nextCheckAt = dueAtNormalized;
-          patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
-        }
-        if (typeof args.message === 'string') {
-          patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
-        }
-        if (Object.keys(patch).length === 0) return { updated: false, message: 'Nothing to update' };
-        updateRequest(id, patch);
-        logger.info('Task edited via skill', { id, fields: Object.keys(patch) });
-        const result: Record<string, unknown> = { updated: true, task_id: id };
-        if (dueAtNormalized) {
-          const dueDt = DateTime.fromISO(dueAtNormalized).setZone(profile.user.timezone);
-          result.new_due = dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm');
-        }
-        return result;
-      }
-
-      case 'get_my_tasks': {
-        const withPerson = typeof args.with_person === 'string' && args.with_person.trim() ? args.with_person.trim() : null;
-        const all = getOpenRequestsForOwner(ownerUserId);
-        const filtered = withPerson
-          ? all.filter(r => r.target_slack_id === withPerson || r.requester_slack_id === withPerson)
-          : all;
-
-        const hydrate = (r: RequestRow): Record<string, unknown> => {
-          const det = parseDetails(r) ?? {};
-          const base: Record<string, unknown> = {
-            task_id: r.id,
-            kind: r.kind,
-            subkind: r.subkind,
-            state: r.state,
-            subject: r.subject,
-            description: r.description,
-            // #149 — next_check_at is a UTC instant (see toTimerInstant). Hand the
-            // model the OWNER-LOCAL offset ISO so "due to fire today at 10:32"
-            // can't come out as 07:32; still an unambiguous instant for date math.
-            due_at: r.next_check_at
-              ? (DateTime.fromISO(r.next_check_at).setZone(profile.user.timezone).toISO() ?? r.next_check_at)
-              : null,
-            requester_name: r.requester_name,
-            target_name: r.target_name,
-          };
-          if (r.kind === 'outreach' || r.kind === 'social_outreach') {
-            base.outreach = {
-              colleague: r.target_name,
-              colleague_slack_id: r.target_slack_id,
-              message_sent: det.message ?? r.description,
-              sent_at: det.sent_at ?? null,
-              reply: det.reply_text ?? null,
-            };
-          } else if (r.kind === 'approval') {
-            base.approval = {
-              kind: r.subkind,
-              subject: det.subject ?? r.subject,
-              expires_at: r.expires_at,
-            };
-          }
-          return base;
-        };
-
-        const awaitingOwner = filtered.filter(r => r.state === 'awaiting_owner').map(hydrate);
-        const awaitingColleague = filtered.filter(r => r.state === 'awaiting_colleague').map(hydrate);
-        const inFlight = filtered.filter(r => r.state === 'in_flight').map(hydrate);
-
-        const totalOpen = awaitingOwner.length + awaitingColleague.length + inFlight.length;
-        return {
-          summary: {
-            total: totalOpen,
-            pending_your_input_count: awaitingOwner.length,
-            waiting_on_others_count: awaitingColleague.length,
-            active_count: inFlight.length,
-            recently_done_count: 0,
-          },
-          pending_your_input: awaitingOwner,
-          pending_approvals: awaitingOwner.filter(r => (r as any).kind === 'approval'),
-          waiting_on_others: awaitingColleague,
-          active_tasks: inFlight,
-          recently_done: [],
-          count: totalOpen,
-          _note: 'Describe these to the owner USING ONLY the fields in this response. Do NOT add subjects or context remembered from past conversations or people_memory.',
-        };
-      }
-
-      case 'cancel_task': {
-        const id = args.task_id as string;
-        const row = getRequest(id);
-        if (!row) return { error: 'Task not found' };
-        closeRequest({
-          id,
-          state: 'cancelled',
-          closureReason: 'owner_cancel_task_tool',
-          closedBy: 'owner',
-        });
-        return { cancelled: true, title: row.subject };
-      }
-
-      case 'get_briefing': {
-        const events = getUnseenEvents(ownerUserId);
-        const open = getOpenRequestsForOwner(ownerUserId);
-        markEventsSeen(ownerUserId);
-        const grouped: Record<string, MaelleEvent[]> = {};
-        for (const evt of events) {
-          if (!grouped[evt.type]) grouped[evt.type] = [];
-          grouped[evt.type].push(evt);
-        }
-        logger.info('Briefing generated', { userId: ownerUserId, eventCount: events.length, openRequests: open.length });
-        return {
-          events,
-          grouped,
-          open_tasks: open,
-          completed_tasks: [],
-          event_count: events.length,
-          task_count: open.length,
-          completed_count: 0,
-          nothing_new: events.length === 0 && open.length === 0,
-        };
-      }
-
-      case 'send_briefing_now': {
-        const app = context.app;
-        if (!app) return { ok: false, reason: 'No Slack app available in this context.' };
-        try {
-          await sendMorningBriefing(app, context.profile, context.channelId, true, context.threadTs);
-          return { ok: true };
-        } catch (err) {
-          logger.error('send_briefing_now failed', { err });
-          return { ok: false, reason: String(err) };
-        }
-      }
-
-      case 'create_approval': {
         const subkind = args.kind as ApprovalSubkind;
         const payload = (args.payload as Record<string, unknown>) ?? {};
         const askText = args.ask_text as string;
@@ -660,10 +292,13 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           }
         }
 
-        // Capture MPIM origin so the resolver can post back to the right place.
+        // Capture room origin (MPIM or real channel) so the resolver can post
+        // back to the right place. #154 — widened from MPIM-only to any room
+        // surface via context.surface, which is required and re-derived per
+        // turn (never absent).
         if (typeof payload.origin_channel !== 'string' && channelId) payload.origin_channel = channelId;
         if (typeof payload.origin_thread_ts !== 'string' && threadTs) payload.origin_thread_ts = threadTs;
-        if (payload.origin_is_mpim === undefined && context.isMpim !== undefined) payload.origin_is_mpim = context.isMpim;
+        if (payload.origin_is_mpim === undefined) payload.origin_is_mpim = context.surface === 'room';
 
         // #142c — `honest_hard_reason` is the line that LEADS his decision surface,
         // so it is CODE-authored or absent: only the checkSlot re-derivation below
@@ -782,9 +417,18 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
               kind: subkind, missing,
             });
             return {
+              // W4>dep (2026-08-06) — `reason`, not `message`: every other
+              // gate refusal in this function (gateApprovalAsk's
+              // unknown_kind / no_verified_deviation / missing_reason, plus
+              // freeform_calendar_change / freeform_needs_clarification
+              // above) returns `{ error, reason }`, and both direct-call
+              // sites (createMeeting.ts / moveMeeting.ts's ownerRoomBend
+              // branches) type the result as `{ error?, reason? }` and log
+              // `approval.reason` uniformly. A `message`-only shape here
+              // silently read back as `reason: undefined`.
               error: 'missing_required_field',
               missing,
-              message: `policy_exception is a meeting-booking approval — payload must include the same fields create_meeting requires: ${missing.join(', ')}. Ask the requester for what's missing (e.g. "how long do you need?" for duration) before retrying. Same shape as a regular booking — owner will approve the exact booking that fires on yes.`,
+              reason: `policy_exception is a meeting-booking approval — payload must include the same fields create_meeting requires: ${missing.join(', ')}. Ask the requester for what's missing (e.g. "how long do you need?" for duration) before retrying. Same shape as a regular booking — owner will approve the exact booking that fires on yes.`,
             };
           }
 
@@ -1095,7 +739,9 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             requesterName,
             originChannel: channelId,
             originThreadTs: threadTs,
-            originIsMpim: !!context.isMpim,
+            // #154 — any room surface (MPIM or real channel), not MPIM-only.
+            // See create_task above for the same widening and why.
+            originIsMpim: context.surface === 'room',
             ownerDmChannel: relayOwner?.owner_dm_channel,
             ownerDmThreadTs: relayOwner?.owner_dm_thread_ts,
             expiresAt,
@@ -1231,7 +877,425 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           kind: subkind,
           reused_existing: false,
         };
+}
+
+export class TasksSkill implements Skill {
+  id = 'tasks' as const;
+  name = 'Tasks';
+  description = 'Creates and manages async tasks — reminders, follow-ups, pending work, briefings';
+
+  getTools(_profile: UserProfile): Anthropic.Tool[] {
+    return [
+      {
+        name: 'create_task',
+        description: `Create a task for Maelle to handle asynchronously.
+Use when asked to:
+- "Remind me about X tomorrow"
+- "Follow up with Anna in 3 days if she doesn't respond"
+- "Check back with Ben next week"
+- "Remind Cara about the board prep on Tuesday"
+- Any future action that shouldn't happen right now
+
+Task types:
+- reminder: remind the owner (or someone else) about something at a specific time
+- follow_up: check back on an ongoing situation after X days
+- research: research a topic, compile summary (runs through the full agent)
+- coordination: handled automatically when initiating meeting booking
+- outreach: handled automatically when sending messages to colleagues`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'] },
+            title: { type: 'string', description: 'Plain English title of what Maelle is doing.' },
+            description: { type: 'string', description: 'More detail if needed' },
+            due_at: { type: 'string', description: 'ISO 8601 datetime when to execute this task.' },
+            target_slack_id: { type: 'string', description: 'If reminding someone else, their Slack user ID' },
+            target_name: { type: 'string', description: 'Display name of the target person' },
+            message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
+          },
+          required: ['type', 'title', 'due_at'],
+        },
+      },
+      {
+        // v2.9 — merged edit_task + cancel_task. create_task and get_my_tasks
+        // stay separate (claim-checker honesty rules reference create_task by
+        // name; get_my_tasks is a read with optional filter).
+        name: 'update_task',
+        description: `Update an existing task. Two actions:
+
+action='edit' — change a task's title, description, due_at, message, or type. Required: task_id. Pass any subset of mutable fields.
+
+action='cancel' — cancel a pending task. Required: task_id.
+
+For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_tasks\`.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['edit', 'cancel'], description: 'edit or cancel.' },
+            task_id: { type: 'string', description: 'REQUIRED for both actions.' },
+            title: { type: 'string', description: 'edit: optional.' },
+            description: { type: 'string', description: 'edit: optional.' },
+            due_at: { type: 'string', description: 'edit: optional ISO 8601 datetime.' },
+            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'], description: 'edit: optional task type.' },
+            message: { type: 'string', description: 'edit: optional message body.' },
+          },
+          required: ['action', 'task_id'],
+        },
+      },
+      {
+        name: 'get_my_tasks',
+        description: `Get all open tasks Maelle is currently working on or waiting on. Call this when the user asks "what tasks do you have?" or "what's pending?" or "what are you working on?"
+
+Optional with_person filter: pass a Slack user ID to scope results to tasks involving that person. Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.
+
+ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do my LinkedIn post?", "did the briefing run?", "weekly review this morning?").`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            with_person: { type: 'string', description: 'Optional Slack user ID to filter by counterpart.' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'get_briefing',
+        description: `Get a summary of everything that happened since the user was last active.`,
+        input_schema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        name: 'send_briefing_now',
+        description: `Send the morning briefing immediately, posted in the current thread.`,
+        input_schema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        name: 'create_approval',
+        description: `Ask the owner for a decision. ALWAYS use this when you need the owner to decide something instead of just DMing them a question. The owner is the only one who can bypass scheduling rules — colleagues asking for something that breaks the rules MUST go through this tool. Maelle never overrides on her own.
+
+AUTHORITY MODEL:
+- If the owner tells Maelle directly to do something (even when it breaks a rule), that IS the approval — just do it, no approval needed.
+- If a colleague asks for something that breaks a rule or needs an owner-only judgment, create_approval — the owner must decide.
+- RELAY IT AS AN APPROVAL IN FLIGHT, NOT A DEAD END, AND NEVER AS DONE. When you raise this for a colleague, tell the requester plainly that you've SENT it to the owner (by name) to decide — nothing is confirmed yet, so never open with completion language ("you're all set", "done", "sorted", "added") that reads as if the change already happened. If a colleague who did NOT request this meeting asks to be added to it, say so plainly ("I've sent your request to join the meeting to Idan to decide — I'll let you know as soon as he does"), not "you can join — I've sent it to the owner to approve" and never "you're all set, added you to the ask I've sent Idan" (unclear what "the ask" refers to and reads as already-confirmed). NEVER frame it as "the owner must make the change themselves" or "you can't change this."
+
+Kinds:
+- duration_override: approve a non-standard meeting length. Payload: { subject, duration_min, reason }.
+- policy_exception: override a scheduling rule (back-to-back, off-hours, no-lunch, protected meeting, floating-block out-of-window move). Payload: { rule, context, subject, start, end, attendees, category?, is_online?, location?, body?, requester_slack_id, requester_name }. ALL the create_meeting required fields (subject, start, end, attendees) must be present in payload — the handler validates and refuses with \`missing_required_field\` if any are missing. RUN THE ACTION'S TOOL FIRST: the handler refuses with \`no_verified_deviation\` unless the action rode in from a tool that actually blocked it, because with nothing blocked there is nothing to override and nothing to replay on approve. So call create_meeting / move_meeting / update_meeting / book_floating_block for the real time and attendees — it either just happens (allowed, and the owner is never interrupted) or it comes back refused WITH the exact reason and the action attached for this approval. If you don't have a required field yet (most commonly: duration → start/end), ask the requester BEFORE running anything. HONESTY: write ask_text plainly. If the booked time hits a meeting already on the owner's calendar, NAME it ("you already have 'X' at 13:00 — book over it?") — a hard double-book is his call, but state it AS one; NEVER dress it as a soft free-time / buffer / focus-time rule. (The handler re-derives the real reason from the live calendar and leads the DM with it, so don't guess the reason from aggregate rejection lists.)
+- unknown_person: book with someone we don't have full contact info for. Payload: { name, known_fields, missing_fields }.
+- freeform: a NON-CALENDAR yes/no/amend ask ONLY — flag an out-of-scope request for the owner, content review, a private judgment call ("OK to share my number with X?"). Payload: { question, context, subject }. NEVER for a CALENDAR CHANGE — booking, moving/rescheduling, adding/removing attendees, or CANCELLING a meeting (a cancel is a calendar change too). The handler REFUSES a calendar-shaped freeform (\`freeform_calendar_change\`): it carries no action, so on approve NOTHING would happen and the change silently dies. Any calendar change goes through its tool FIRST — create_meeting / move_meeting / update_meeting / delete_meeting (any attendee count); if it needs sign-off the colleague-path gate raises a policy_exception with a replayable deferred_action (subject + attendees + time preserved). policy_exception is the ONLY kind whose deferred_action auto-attaches and replays — NEVER meeting_reschedule / meeting_change for a create_approval.
+
+DEFERRED ACTION (auto-execute on approve) — v2.8.6:
+When the approval is asking permission for a SPECIFIC tool call (e.g. "should I cancel Dirk's meeting?", "OK to book this off-hours?"), include payload.deferred_action so the resolver fires the action when the owner approves — instead of you having to call the tool yourself in a follow-up turn. Without this, "approved but never executed" turns happen (root of the 2026-05-18 Dirk incident).
+
+Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
+Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
+
+Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=policy_exception) — NOT freeform — with an explicit:
+  payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }
+The handler skips the booking-field check for a delete deferred_action; the resolver calls delete_meeting the instant the owner ✅'s the DM — no second turn needed.
+
+For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
+
+EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
+
+Behavior:
+- DMs the owner immediately with ask_text. LLM-judged dedup against open requests for this (owner, requester) — if the same logical ask is already open, returns the existing one.
+- Default expiry is 2 owner-workdays (Fri/Sat skipped for this profile). Owner-silent past expiry → request closes as expired + owner gets a tombstone DM.
+- When approval has a colleague-originated context, include requester_slack_id in the payload so the resolver can DM the requester back with the owner's decision.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
+            payload: { type: 'object', description: 'Kind-specific payload (see tool description).' },
+            ask_text: { type: 'string', description: 'The exact text to DM the owner as the approval ask.' },
+            expires_in_workdays: { type: 'number', description: 'Owner-workdays until expiry. Default 2.' },
+            expires_in_hours: { type: 'number', description: 'Sub-workday escape hatch.' },
+          },
+          required: ['kind', 'payload', 'ask_text'],
+        },
+      },
+      {
+        name: 'resolve_approval',
+        description: `Record the owner's decision on a pending approval. Call this when the owner replies to an approval ask in DM.
+
+Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending approval are auto-resolved BEFORE the orchestrator runs (Module D). Call this tool only when:
+- the owner AMENDED ("not as asked, but try X"),
+- the owner referenced a specific approval id token,
+- or you need to act on an approval from a different thread.
+
+Verdicts:
+- approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
+- reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
+- amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
+
+Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject. Outside the anchor thread, a bare yes/no is refused UNLESS the owner's own message names this approval by subject or counterpart ("ANF already done", "reject the Erez sync") — that's detected automatically from what he actually typed, not from anything you pass in \`reason\`. If it's refused, tell him which open approvals exist and ask him to confirm in the approval's own thread, the daily thread, or by naming which one he means.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            approval_id: { type: 'string' },
+            verdict: { type: 'string', enum: ['approve', 'reject', 'amend'] },
+            data: { type: 'object' },
+            counter: { type: 'object' },
+            reason: { type: 'string', description: 'Owner\'s own words, when relevant — relayed to the requester on reject/amend to explain the decision. Does NOT unlock resolving outside the approval\'s anchor thread; that\'s checked automatically against what the owner actually typed, not against this argument.' },
+          },
+          required: ['approval_id', 'verdict'],
+        },
+      },
+      {
+        name: 'list_pending_approvals',
+        description: 'List approvals currently waiting on the owner.',
+        input_schema: { type: 'object', properties: {}, required: [] },
+      },
+    ];
+  }
+
+  async executeToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    context: SkillContext,
+  ): Promise<unknown | null> {
+    const { profile, channelId, threadTs } = context;
+    const ownerUserId = profile.user.slack_user_id;
+
+    // v2.9 — narrow merge: update_task dispatches into edit_task or cancel_task.
+    // create_task and get_my_tasks stay separate (claim-checker honesty rule
+    // references create_task by name; get_my_tasks is a read with optional filter).
+    if (toolName === 'update_task') {
+      const action = String(args.action ?? '').toLowerCase();
+      if (action === 'edit')         toolName = 'edit_task';
+      else if (action === 'cancel')  toolName = 'cancel_task';
+      else return { error: 'bad_action', message: `update_task action must be 'edit' | 'cancel', got "${action}".` };
+    }
+
+    switch (toolName) {
+
+      case 'create_task': {
+        const taskType = args.type as CreateTaskType;
+        const title = args.title as string;
+        // #149 — anchor the due time to a UTC instant HERE, the boundary where a
+        // model-authored wall-clock becomes a spine timer and the only place the
+        // owner's zone is in hand. Pre-fix `due_at` went onto next_check_at
+        // verbatim, so a bare "2026-07-27T10:32:00" only satisfied the sweep's
+        // `datetime(next_check_at) <= datetime('now')` (UTC) three hours later.
+        const dueAtRaw = args.due_at as string;
+        const dueAt = toTimerInstant(dueAtRaw, profile.user.timezone);
+        if (!dueAt) {
+          return {
+            error: 'bad_due_at',
+            message: `due_at "${dueAtRaw}" isn't a parseable ISO 8601 datetime. Pass an owner-local wall-clock ("2026-07-27T10:32:00") or an explicit offset — I won't create a task whose timer can never fire.`,
+          };
+        }
+        const description = args.description as string | undefined;
+        const targetSlackId = args.target_slack_id as string | undefined;
+        const targetName = args.target_name as string | undefined;
+        const message = args.message as string | undefined;
+
+        // Kind mapping: 'research' collapses to the research kind; every
+        // other taskType maps straight onto its own RequestKind.
+        const kind: RequestKind = taskType === 'research' ? 'research' : taskType;
+
+        // state=in_flight (Maelle is working on it); informed=1 regardless of
+        // who raised it — the owner sees it in the daily brief either way.
+        // Reminders/follow-ups fire via next_check_at + handler='reminder_fire'.
+        // Research uses 'research_run' — runs the full agent loop at due_at and
+        // DMs the result. Both fire on the ONE spine sweep (sweepDueRequests);
+        // the old tasks-table dispatchers were the duplicate path, now deleted.
+        const nextCheckHandler = taskType === 'research' ? 'research_run' : 'reminder_fire';
+        const row = createRequest({
+          ownerUserId,
+          initiatedBy: context.userId,
+          // o#219 — create_task IS colleague-reachable (registry.ts's
+          // COLLEAGUE_ALLOWED_TOOLS has no authority/senderRole gate on it), so
+          // stamp the role that actually created it — same pattern as
+          // create_approval below — never hardcode 'owner'. runner.ts's
+          // runResearchRun derives its senderRole/authority off `initiated_by`
+          // itself (not this field), so a colleague-raised research row no
+          // longer replays with full owner tool access into a shared room.
+          initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
+          kind,
+          subject: title,
+          description,
+          state: 'in_flight',
+          informed: 1,
+          // The reminder is an activity OWNED BY its requester (owner or
+          // colleague — create_task is colleague-reachable too). runReminderFire
+          // reads this to frame third-party reminders ("<requester> asked me to
+          // remind you").
+          requesterSlackId: context.userId,
+          targetSlackId,
+          targetName,
+          originChannel: channelId,
+          originThreadTs: threadTs,
+          // #154 — any room surface (MPIM or real channel), not MPIM-only. The
+          // return-leg readers (resolver.ts/runner.ts/briefs.ts/
+          // closeMeetingArtifacts.ts) already gate on `origin_is_mpim &&
+          // origin_channel`; this is what feeds that boolean.
+          originIsMpim: context.surface === 'room',
+          expiresAt: undefined,
+          nextCheckAt: dueAt,
+          nextCheckHandler,
+          details: { message, due_at: dueAt },
+        });
+
+        const dueDt = DateTime.fromISO(dueAt).setZone(profile.user.timezone);
+        logger.info('Task created via skill', { id: row.id, type: taskType, due: dueAt });
+        return {
+          created: true,
+          task_id: row.id,
+          due: dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm'),
+        };
       }
+
+      case 'edit_task': {
+        const id = args.task_id as string;
+        const row = getRequest(id);
+        if (!row) return { error: 'Task not found' };
+
+        const detailsCurrent = parseDetails(row) ?? {};
+        const patch: Parameters<typeof updateRequest>[1] = {};
+        if (typeof args.title === 'string') patch.subject = args.title;
+        if (typeof args.description === 'string') patch.description = args.description;
+        // #149 — same UTC anchoring as create_task, so a rescheduled reminder
+        // can't re-acquire the naive-clock delay.
+        let dueAtNormalized: string | null = null;
+        if (typeof args.due_at === 'string') {
+          dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
+          if (!dueAtNormalized) {
+            return {
+              error: 'bad_due_at',
+              message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
+            };
+          }
+          patch.nextCheckAt = dueAtNormalized;
+          patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
+        }
+        if (typeof args.message === 'string') {
+          patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
+        }
+        if (Object.keys(patch).length === 0) return { updated: false, message: 'Nothing to update' };
+        updateRequest(id, patch);
+        logger.info('Task edited via skill', { id, fields: Object.keys(patch) });
+        const result: Record<string, unknown> = { updated: true, task_id: id };
+        if (dueAtNormalized) {
+          const dueDt = DateTime.fromISO(dueAtNormalized).setZone(profile.user.timezone);
+          result.new_due = dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm');
+        }
+        return result;
+      }
+
+      case 'get_my_tasks': {
+        const withPerson = typeof args.with_person === 'string' && args.with_person.trim() ? args.with_person.trim() : null;
+        const all = getOpenRequestsForOwner(ownerUserId);
+        const filtered = withPerson
+          ? all.filter(r => r.target_slack_id === withPerson || r.requester_slack_id === withPerson)
+          : all;
+
+        const hydrate = (r: RequestRow): Record<string, unknown> => {
+          const det = parseDetails(r) ?? {};
+          const base: Record<string, unknown> = {
+            task_id: r.id,
+            kind: r.kind,
+            subkind: r.subkind,
+            state: r.state,
+            subject: r.subject,
+            description: r.description,
+            // #149 — next_check_at is a UTC instant (see toTimerInstant). Hand the
+            // model the OWNER-LOCAL offset ISO so "due to fire today at 10:32"
+            // can't come out as 07:32; still an unambiguous instant for date math.
+            due_at: r.next_check_at
+              ? (DateTime.fromISO(r.next_check_at).setZone(profile.user.timezone).toISO() ?? r.next_check_at)
+              : null,
+            requester_name: r.requester_name,
+            target_name: r.target_name,
+          };
+          if (r.kind === 'outreach' || r.kind === 'social_outreach') {
+            base.outreach = {
+              colleague: r.target_name,
+              colleague_slack_id: r.target_slack_id,
+              message_sent: det.message ?? r.description,
+              sent_at: det.sent_at ?? null,
+              reply: det.reply_text ?? null,
+            };
+          } else if (r.kind === 'approval') {
+            base.approval = {
+              kind: r.subkind,
+              subject: det.subject ?? r.subject,
+              expires_at: r.expires_at,
+            };
+          }
+          return base;
+        };
+
+        const awaitingOwner = filtered.filter(r => r.state === 'awaiting_owner').map(hydrate);
+        const awaitingColleague = filtered.filter(r => r.state === 'awaiting_colleague').map(hydrate);
+        const inFlight = filtered.filter(r => r.state === 'in_flight').map(hydrate);
+
+        const totalOpen = awaitingOwner.length + awaitingColleague.length + inFlight.length;
+        return {
+          summary: {
+            total: totalOpen,
+            pending_your_input_count: awaitingOwner.length,
+            waiting_on_others_count: awaitingColleague.length,
+            active_count: inFlight.length,
+            recently_done_count: 0,
+          },
+          pending_your_input: awaitingOwner,
+          pending_approvals: awaitingOwner.filter(r => (r as any).kind === 'approval'),
+          waiting_on_others: awaitingColleague,
+          active_tasks: inFlight,
+          recently_done: [],
+          count: totalOpen,
+          _note: 'Describe these to the owner USING ONLY the fields in this response. Do NOT add subjects or context remembered from past conversations or people_memory.',
+        };
+      }
+
+      case 'cancel_task': {
+        const id = args.task_id as string;
+        const row = getRequest(id);
+        if (!row) return { error: 'Task not found' };
+        closeRequest({
+          id,
+          state: 'cancelled',
+          closureReason: 'owner_cancel_task_tool',
+          closedBy: 'owner',
+        });
+        return { cancelled: true, title: row.subject };
+      }
+
+      case 'get_briefing': {
+        const events = getUnseenEvents(ownerUserId);
+        const open = getOpenRequestsForOwner(ownerUserId);
+        markEventsSeen(ownerUserId);
+        const grouped: Record<string, MaelleEvent[]> = {};
+        for (const evt of events) {
+          if (!grouped[evt.type]) grouped[evt.type] = [];
+          grouped[evt.type].push(evt);
+        }
+        logger.info('Briefing generated', { userId: ownerUserId, eventCount: events.length, openRequests: open.length });
+        return {
+          events,
+          grouped,
+          open_tasks: open,
+          completed_tasks: [],
+          event_count: events.length,
+          task_count: open.length,
+          completed_count: 0,
+          nothing_new: events.length === 0 && open.length === 0,
+        };
+      }
+
+      case 'send_briefing_now': {
+        const app = context.app;
+        if (!app) return { ok: false, reason: 'No Slack app available in this context.' };
+        try {
+          await sendMorningBriefing(app, context.profile, context.channelId, true, context.threadTs);
+          return { ok: true };
+        } catch (err) {
+          logger.error('send_briefing_now failed', { err });
+          return { ok: false, reason: String(err) };
+        }
+      }
+
+      case 'create_approval':
+        return createApprovalRequest(args, context);
 
       case 'resolve_approval': {
         // v3.0.5 — strip leading `#` defensively. Prompt no longer prefixes
@@ -1247,7 +1311,16 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // is in state=awaiting_colleague (an amending approval where Maelle
         // relayed owner's counter back to the requester). Any other case is
         // owner-only.
-        if (context.senderRole !== 'owner') {
+        // v4.4.x (#154-tool-split) — gated on `authority`, not `senderRole`.
+        // senderRole reads 'colleague' both for a real colleague AND for the
+        // owner clamped into a room (OWNER_ROOM_ACTION_TOOLS ships/dispatches
+        // resolve_approval to him there); authority is who is AUTHENTICATED
+        // as acting and stays 'owner' on every surface. Gating this on
+        // senderRole left the room-clamped owner's own "approve" inert — he'd
+        // fall into the colleague branch below, which requires him to be the
+        // amending row's own requester, and get refused with "Only the
+        // original requester can respond to an amending approval."
+        if (context.authority !== 'owner') {
           const probe = getRequest(requestId);
           if (!probe) {
             return { error: 'not_found', reason: `Request ${requestId} not found.` };
@@ -1292,7 +1365,12 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // thread-lock both correctly declined on the mismatch; this is the same
         // gate at the tool chokepoint, where Sonnet's free-bind lands. `amend`
         // carries a specific counter (never a stray ack) and is exempt.
-        if (context.senderRole === 'owner' && verdict !== 'amend') {
+        // v4.4.x (#154-tool-split) — gated on `authority`, matching the entry
+        // gate above: the owner clamped into a room can never anchor to his
+        // own DM thread (different channel entirely), so this correctly falls
+        // through to the namedMatch check — an unnamed bare ack from a room
+        // still refuses to bind, same protection the DM path gets.
+        if (context.authority === 'owner' && verdict !== 'amend') {
           const ownerRow = getRequest(requestId);
           if (ownerRow) {
             const anchored = !!context.threadTs
@@ -1472,10 +1550,15 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           const result = await resolveRequest(requestId, decision, {
             app: context.app,
             profile: context.profile,
-            // v3.1.3 — the colleague-path (senderRole !== 'owner') is permitted
-            // only for amending approvals; that's the one case where a reject/
-            // amend should bounce back to the owner. An OWNER reject must close.
-            resolvedByColleague: context.senderRole !== 'owner',
+            // v3.1.3 — the colleague-path is permitted only for amending
+            // approvals; that's the one case where a reject/amend should
+            // bounce back to the owner. An OWNER reject must close.
+            // v4.4.x (#154-tool-split) — gated on `authority`, not
+            // `senderRole`: the room-clamped owner (senderRole reads
+            // 'colleague' there) is still the owner, so his reject/amend on
+            // an awaiting_colleague row must close, not bounce back to
+            // himself as if a real colleague had answered.
+            resolvedByColleague: context.authority !== 'owner',
             // v3.4.7 — reverse-order double-notify guard: if Sonnet already
             // successfully message_colleague'd the requester this turn, the
             // resolver skips its own relay (they were already told).

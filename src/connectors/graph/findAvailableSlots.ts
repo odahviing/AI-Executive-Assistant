@@ -142,6 +142,11 @@ export async function findAvailableSlots(params: {
   // optional event would otherwise name itself to a colleague. Threaded into
   // checkSlot, which does the masking at the producer. Default (omitted) masks.
   viewer?: import('../../utils/displaySubject').SubjectViewer;
+  // v4.4.9 (#154) — the requesting colleague's own email (via
+  // `viewerEmailFor`), threaded to checkSlot alongside `viewer` so a
+  // non-attendee colleague never sees the `over_optional` subject either,
+  // private or not. Omitted → checkSlot's old private-flag-only mask.
+  viewerEmail?: string | null;
   // v2.4.1 — events to treat as "the meeting(s) being moved." Each id is
   // matched against the owner's calendar events for the search range and
   // produces TWO behaviors:
@@ -1126,6 +1131,8 @@ export async function findAvailableSlots(params: {
           // v4.1.x (M12) — masks a private optional event's subject before it
           // can reach a colleague-facing `over_optional` tag.
           viewer: params.viewer,
+          // v4.4.9 (#154) — the attendee-aware half of that same mask.
+          viewerEmail: params.viewerEmail,
           // v3.7.x (#143) — the SAME effective day the walker gated on, so search
           // and book evaluate work-hours / floor in the same windows + timezone.
           effectiveDay: effectiveDay ?? undefined,

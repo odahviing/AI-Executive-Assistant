@@ -52,6 +52,13 @@ const DEBOUNCE_MS = 1500;
 interface PendingMessage {
   text: string;
   arrivedAt: number;
+  /**
+   * The authenticated Slack sender id (S7) — never a claim in the text.
+   * Tracked per-message so scheduleRun can tell whether a batch mixes two
+   * different people before it lets ANY one of their runners' authority
+   * apply to the merged text. See `spansMultipleSenders` below.
+   */
+  senderId: string;
   senderName?: string;
   /** Optional metadata the runner needs (channel, ts, etc.) — opaque to the queue. */
   meta: Record<string, unknown>;
@@ -152,12 +159,23 @@ export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
  * a turn must be caught, judged and answered THERE. A throw that escapes to
  * `scheduleRun` is a bug in the runner, not a supported path — see the catch
  * down there for what it does with one.
+ *
+ * `spansMultipleSenders` — gh#F1. The runner is always the LAST message's
+ * closure (freshest context — see scheduleRun), so its captured `authority`
+ * is THAT sender's, authenticated (S7). When the batch merged more than one
+ * distinct sender's text (an MPIM/channel where a colleague's message and
+ * the owner's landed in the same debounce window), that authority must NOT
+ * govern the whole merged turn — a colleague's instruction would otherwise
+ * execute under owner authority (delete_meeting, resolve_approval) merely
+ * because the owner happened to type something else moments later. The
+ * runner MUST clamp its own authority to 'colleague' when this is true.
  */
 export type TurnRunner = (params: {
   mergedText: string;
   meta: Record<string, unknown>;
   signal: AbortSignal;
   markWrite: () => void;
+  spansMultipleSenders: boolean;
 }) => Promise<void>;
 
 /**
@@ -180,6 +198,8 @@ export function enqueueMessage(params: {
   /** True for 1:1 DMs (owner ↔ Maelle, colleague ↔ Maelle). False for MPIMs and channel mentions. */
   isOneOnOneDm: boolean;
   text: string;
+  /** The authenticated Slack sender id (S7). Never derived from the text. */
+  senderId: string;
   senderName?: string;
   meta: Record<string, unknown>;
   runner: TurnRunner;
@@ -211,6 +231,7 @@ export function enqueueMessage(params: {
   const msg: PendingMessage = {
     text: params.text,
     arrivedAt: Date.now(),
+    senderId: params.senderId,
     senderName: params.senderName,
     meta: params.meta,
     runner: params.runner,
@@ -289,6 +310,21 @@ async function scheduleRun(key: string): Promise<void> {
   const meta = last.meta;
   const runner = last.runner;
 
+  // gh#F1 — does this batch mix more than one authenticated sender? Room
+  // surfaces (MPIM/channel) key on channelId|threadTs only, never on sender,
+  // so a colleague's message and the owner's can land in the same debounce
+  // window and merge here. The runner we're about to invoke is whichever
+  // sender arrived LAST, and its captured `authority` must not be allowed to
+  // govern text that includes an EARLIER, different sender's words — that is
+  // exactly how a colleague's instruction could execute with owner authority.
+  const distinctSenders = new Set(batch.map(m => m.senderId));
+  const spansMultipleSenders = distinctSenders.size > 1;
+  if (spansMultipleSenders) {
+    logger.warn('inboundQueue — batch spans multiple senders, clamping authority for merged turn', {
+      key, batchSize: batch.length, senderCount: distinctSenders.size,
+    });
+  }
+
   const controller = new AbortController();
   state.inFlight = controller;
   state.hasWriteFired = false;
@@ -298,12 +334,14 @@ async function scheduleRun(key: string): Promise<void> {
       key,
       batchSize: batch.length,
       mergedPreview: mergedText.slice(0, 100),
+      spansMultipleSenders,
     });
     await runner({
       mergedText,
       meta,
       signal: controller.signal,
       markWrite: () => { state.hasWriteFired = true; },
+      spansMultipleSenders,
     });
   } catch (err: any) {
     if (isMergeAbort(err, controller.signal)) {

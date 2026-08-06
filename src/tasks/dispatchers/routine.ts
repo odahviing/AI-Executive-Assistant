@@ -183,6 +183,11 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       channelId: routine.owner_channel,
       userId: routine.owner_user_id,
       senderRole: 'owner',
+      // v4.4.x (#154) — a scheduled routine firing is always a private
+      // owner-alone run, never a live conversation. Declared explicitly now
+      // that the fields are required (core/orchestrator/index.ts OrchestratorInput).
+      authority: 'owner',
+      surface: 'owner_dm',
       channel: 'slack',
       interactive: false,  // v3.2.6 (6.4) — scheduled report, not a conversation: no social coda
       profile,

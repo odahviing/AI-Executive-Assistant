@@ -37,7 +37,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { subjectViewerFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
+import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -280,6 +280,15 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         // the top of this handler — there is no scoped view that means anything
         // for him, since every event is "his".)
         if (isSharedSurface) {
+          // R1 (owner ruling 2026-08-06, verbatim: "o#230 - is revert and
+          // then do trace only for that, as this is a core security item.")
+          // — o#230 widened this branch to list EVERY meeting on the
+          // calendar (existence + time + attendee names) with only the
+          // subject gated to attendance. REVERTED to the pre-o#230 scope: a
+          // colleague sees ONLY the meetings they are themselves an
+          // attendee or organizer of. The wider capability (existence + time
+          // + attendee names for meetings they're not on) is NOT preserved
+          // here in any partial form — it returns later as its own item.
           let colleagueEmailLower = '';
           try {
             colleagueEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
@@ -710,22 +719,56 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         let preDeleteStartIso: string | undefined;
         let preDeleteStartTz: string | undefined;
         let preDeleteSubject: string | undefined;
+        // R2 (2026-08-06) — the masked (display) version of preDeleteSubject,
+        // authoritative because it comes from the probe, never from
+        // args.meeting_subject (model-supplied, can carry the real title from
+        // earlier context regardless of THIS turn's surface).
+        let preDeleteSubjectMasked: string | undefined;
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, meetingId);
           if (probe?.type === 'seriesMaster') {
+            // o#216 — same mask as update_meeting/move_meeting's seriesMaster
+            // refusals (moveMeeting.ts). delete_meeting became newly reachable
+            // from a room this wave (OWNER_ROOM_ACTION_TOOLS, registry.ts) —
+            // this is the leak that wave widened, since the raw probe.subject
+            // would otherwise render into a room full of colleagues.
+            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // viewerEmailFor now (surface==='room' → null); call it directly
+            // — a blanket ?? null here also masked the email leg's subjects.
+            const maskedSubject = displaySubject(
+              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+              context.profile,
+              subjectViewerFor(context),
+              viewerEmailFor(context),
+            );
             logger.info('delete_meeting refused on recurring seriesMaster', {
               meetingId, subject: probe.subject,
             });
             return {
               error: 'recurring_series_master',
-              meeting_subject: probe.subject,
-              message: `"${probe.subject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
+              meeting_subject: maskedSubject,
+              message: `"${maskedSubject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
             };
           }
           preDeleteStartIso = probe?.startDateTime;
           preDeleteStartTz = probe?.startTimeZone;
           preDeleteSubject = probe?.subject;
+          // R2 (2026-08-06) — the SAME mask, computed here (the one place
+          // that has the raw probe) and carried through to the SUCCESS
+          // narration below (`cancelledSubject`). Pre-fix only the refusal
+          // branch above was masked; the success path shipped probe.subject
+          // raw all the way to `cancelled_label` / `action_summary` — the
+          // exact leak the refusal fix was supposed to close for this
+          // room-reachable tool (o#216).
+          preDeleteSubjectMasked = probe
+            ? displaySubject(
+                { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+                context.profile,
+                subjectViewerFor(context),
+                viewerEmailFor(context),
+              )
+            : undefined;
         } catch (err: any) {
           // #147.2 — a STALE id (already cancelled earlier in the thread, or a
           // dead id from an injected ledger block) must come back as "it isn't
@@ -974,7 +1017,13 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // rebuilt the date list itself from truncated subjects and got it wrong
         // (12 deletes narrated as "all 11 declined … Aug 13, 14, 17, 18, 19, 20,
         // 21, 24, 25, 26, 28" — Aug 27 was cancelled and never mentioned).
-        const cancelledSubject = (args.meeting_subject ?? preDeleteSubject ?? 'the meeting') as string;
+        // R2 (2026-08-06) — the masked, probe-derived subject wins over
+        // args.meeting_subject: the model's own argument can carry the real
+        // title (e.g. recalled from earlier owner-DM context) even when THIS
+        // narration is read in a room. Only fall back to args when the probe
+        // never captured anything (event_not_found already returned earlier;
+        // this is the "preflight threw, proceeding" case).
+        const cancelledSubject = (preDeleteSubjectMasked ?? args.meeting_subject ?? preDeleteSubject ?? 'the meeting') as string;
         const whenLabel = preDeleteStart?.isValid ? preDeleteStart.toFormat('EEE d MMM HH:mm') : null;
         const cancelledLabel = whenLabel ? `${cancelledSubject} — ${whenLabel}` : cancelledSubject;
 

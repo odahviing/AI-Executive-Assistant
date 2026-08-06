@@ -63,6 +63,7 @@ import {
   getRecentTopicBeats,
   createSubject,
   recordTopicBeat,
+  type SubjectToucher,
 } from '../db/socialSubjects';
 
 const SILENCE_MINUTES = 30;
@@ -862,6 +863,14 @@ async function runSubjectReconciliation(
     })();
 
     const ownerUserId = profile.user.slack_user_id;
+    // Who actually said this, in this leg: the owner-DM leg reconciles the
+    // owner's own subjects (owner is the source), the colleague-DM leg
+    // reconciles the colleague's subjects (the colleague is the source).
+    // Stamping both legs 'owner' (pre-o#228) made every colleague-taught
+    // subject/beat indistinguishable from an owner-authored note about that
+    // colleague, so buildSocialContextBlockById's created_by !== 'owner'
+    // filter (people.ts) dropped them all.
+    const toucher: SubjectToucher = personSlackId === ownerUserId ? 'owner' : 'colleague';
     const systemPrompt = SUBJECT_RECONCILE_PROMPT_TEMPLATE(FIXED_CATEGORIES.join(', '));
     const userMsg = [
       `Person being reconciled: ${personName}`,
@@ -953,7 +962,7 @@ async function runSubjectReconciliation(
           personSlackId,
           categoryId: category.id,
           label: d.subject_label,
-          createdBy: 'owner',
+          createdBy: toucher,
         });
         subjectId = created.id;
         createdCount++;
@@ -972,7 +981,7 @@ async function runSubjectReconciliation(
               subjectId,
               label: beat,
               sentiment: d.sentiment,
-              createdBy: 'owner',
+              createdBy: toucher,
             });
             beatsRecorded++;
           } catch (err) {

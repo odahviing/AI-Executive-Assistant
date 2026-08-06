@@ -210,6 +210,48 @@ export function parseDetails<T = Record<string, unknown>>(row: RequestRow): T | 
 }
 
 /**
+ * v4.4.x (#154-replay-surface) — derive the turn `surface` for a SYNTHETIC
+ * re-entry into the skill/orchestrator layer (deferred-action replay, a
+ * scheduled research run) FROM THE REQUEST ROW's own origin fields — never
+ * guessed, never defaulted to 'owner_dm'. Mirrors the live-turn formula at
+ * connectors/slack/app/processMessage.ts (`(isMpim || isChannel) ? 'room' :
+ * (rawRole === 'owner' ? 'owner_dm' : 'colleague_dm')`):
+ *   - `origin_is_mpim` already collapses MPIM + a real channel into one "room"
+ *     bit (#154-origin-room; see tasks/skill.ts's `originIsMpim: context.
+ *     surface === 'room'` stamp) — true here means the ask was raised in a room.
+ *   - `initiated_by_role` stands in for the live turn's authenticated
+ *     `authority`/`rawRole` ONLY in the non-room case: a genuine 1:1 DM never
+ *     clamps `senderRole` (processMessage.ts: "a genuine 1:1 DM, never
+ *     clamped"), and `initiated_by_role` is stamped straight off `senderRole`
+ *     at creation (tasks/skill.ts's create_task / create_approval), so the two
+ *     agree exactly in the one case where there is no room to clamp them apart.
+ *
+ * A falsy `origin_is_mpim` with `initiated_by_role !== 'colleague'` reads as
+ * 'owner_dm' — correct for the owner's own un-clamped DM, for EITHER an
+ * approval or a research/reminder row. (Corrected 2026-08 / o#219:
+ * research/reminder rows are NOT "owner-only by construction" — create_task
+ * is COLLEAGUE-reachable via registry.ts's COLLEAGUE_ALLOWED_TOOLS, exactly
+ * like create_approval, so `initiated_by_role` is genuinely stamped either
+ * way on both kinds now.) A colleague-raised row's `initiated_by_role` is
+ * 'colleague' by that same construction, so it reads 'colleague_dm' instead.
+ * For an approval, the replay still executes with owner authority regardless
+ * (grantRelaxed's senderRole==='owner' fast path — resolving an approval is
+ * always the owner's act), so only the narrated SURFACE varies here. For
+ * research, the EXECUTING authority itself must track the true raiser, and
+ * `initiated_by_role` alone can't do that (it's surface-clamped to
+ * 'colleague' for anyone — owner included — raised from inside a room) — see
+ * runner.ts's runResearchRun, which re-derives authority from `initiated_by`
+ * against the owner's own id instead. This function only ever supplies the
+ * narration surface, never the tool-access floor.
+ */
+export function deriveOriginSurface(
+  row: Pick<RequestRow, 'origin_is_mpim' | 'initiated_by_role'>,
+): 'owner_dm' | 'colleague_dm' | 'room' {
+  if (row.origin_is_mpim) return 'room';
+  return row.initiated_by_role === 'colleague' ? 'colleague_dm' : 'owner_dm';
+}
+
+/**
  * Anchor an EXTERNALLY-SUPPLIED timer time and return it as a UTC instant.
  *
  * `next_check_at` / `expires_at` are UTC instants — `getDueRequests()` selects on

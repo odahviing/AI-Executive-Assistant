@@ -39,7 +39,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getOwnerEventsForDecision, getFreeBusyForDecision, type CalendarEvent } from '../../connectors/graph/calendar';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
-import type { SubjectViewer } from '../../utils/displaySubject';
+import { subjectViewerFor, type SubjectViewer } from '../../utils/displaySubject';
 import { profileDualClock } from '../../utils/weTimeResolver';
 import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
 import { detectCategory } from './detectCategory';
@@ -112,6 +112,19 @@ export interface PlanMeetingInput {
   // directly from `args.relaxed`. The normalizer's `relaxed` post-gate value
   // is the authoritative input.
   allowRelaxed?: boolean;
+  /**
+   * v4.4.x (#154) — true when the AUTHENTICATED owner asked for a rule-bend
+   * from a clamped surface (MPIM/channel) — `grantRelaxed` held `allowRelaxed`
+   * at false for exactly this case (a rule-bend never self-grants from a
+   * room; see its doc). This is NOT a second override and never changes
+   * whether `checkSlot` passes. It only tells `decideAction` that a violation
+   * on this slot is already the owner's own explicit insistence, not a
+   * colleague's first ask — so the nearby-alternatives offer is skipped and
+   * the violation escalates straight to `escalate_approval`, guaranteeing
+   * Sonnet calls create_approval(kind=policy_exception) for the EXACT slot he
+   * asked for instead of silently substituting other times.
+   */
+  ownerRoomBend?: boolean;
 
   // Floating-block booking path (lunch / focus / gym). Skips the owner_busy_collision
   // rule — floating blocks are signals, not competing time. See scheduleRules.checkSlot.
@@ -128,6 +141,14 @@ export interface PlanMeetingInput {
    * model context. Scoped here, at the producer. Omitted → masked.
    */
   viewer?: SubjectViewer;
+  /**
+   * v4.4.9 (#154) — the requesting colleague's own email (via
+   * `viewerEmailFor`), carried alongside `viewer` into checkSlot AND the
+   * nearby-alternatives search so a non-attendee colleague never sees the
+   * colliding/optional event's subject either, private or not. Omitted →
+   * displaySubject's old private-flag-only mask.
+   */
+  viewerEmail?: string | null;
 }
 
 /**
@@ -168,12 +189,25 @@ export function planInputFromBookingRequest(
     priorSlotStartIso: req.priorSlotStartIso,
     priorSlotEndIso: req.priorSlotEndIso,
     allowRelaxed: req.relaxed,
+    // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
+    ownerRoomBend: req.relaxedReason === 'owner_room_bend',
     isFloatingBlock: req.isFloatingBlock,
     preloadedEvents: extra?.preloadedEvents,
-    // Owner alone → he sees everything (M12). Owner in an MPIM is NOT alone:
-    // colleagues read that transcript, so it masks like any colleague turn —
-    // the same posture as the isOwnerDm gate on get_calendar's audit context.
-    viewer: req.initiator === 'owner' && !req.context.isMpim ? 'owner' : 'other',
+    // o#218 — delegates to the ONE canonical predicate instead of a sixth
+    // hand-rolled duplicate (the exact duplication gh#154 hoisted the others
+    // away from). The old `initiator === 'owner' && !isMpim` check drifted
+    // from `subjectViewerFor`: a colleague-DM-origin deferred replay carries
+    // `senderRole:'owner'` (deferredActionReplay.ts hardcodes it for every
+    // replay) — so `req.initiator` reads 'owner' — and `isMpim` is false for
+    // that surface (`colleague_dm`), so the old check returned 'owner' where
+    // `subjectViewerFor` (keyed on the replay's real surface) correctly
+    // returns 'other'. Owner alone, in his own DM → he sees everything
+    // (M12); owner in an MPIM/room, or any replay not actually surfaced back
+    // to his own DM, masks like any colleague turn.
+    viewer: subjectViewerFor({ senderRole: req.initiator, surface: req.context.surface, channel: req.context.channel }),
+    // v4.4.9 (#154) — the attendee-aware half of that same mask, resolved
+    // once by the normalizer (buildContext) and carried through here.
+    viewerEmail: req.context.viewerEmail,
   };
 }
 
@@ -504,6 +538,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       leadTimeHours: bookingLeadTimeHours(profile, initiator),
       // v4.1.x (M12) — the owner_busy label embeds the colliding subject.
       viewer: input.viewer,
+      // v4.4.9 (#154) — the attendee-aware half of that same mask.
+      viewerEmail: input.viewerEmail,
     });
     // M3 — the tier this slot sits on, whatever the rule verdict was.
     bookingLevel = ruleResult.level;
@@ -605,7 +641,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // unresolved location just re-asks), so alternatives computed here would
       // be discarded — a Graph round-trip for nothing. The combined ask still
       // tells the colleague the rule is broken; the options come next round.
-      if (!gates.some(g => g.kind === 'location')) {
+      //
+      // Also skipped for `ownerRoomBend` (v4.4.x #154): this isn't a
+      // colleague's FIRST ask, it's the authenticated owner's explicit "book
+      // it anyway" from a clamped surface — he already insisted on THIS slot,
+      // so offering other times here would silently substitute a different
+      // answer for the one he asked for. Leaving `ruleAlternatives` /
+      // `widenedAlternatives` empty routes the combined return straight to
+      // `escalate_approval` below.
+      if (!gates.some(g => g.kind === 'location') && !input.ownerRoomBend) {
         const dayIso = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone })
           .toFormat('yyyy-MM-dd');
         const durMin = input.durationMin
@@ -625,6 +669,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           category,
           ...(input.existingEventId ? { excludeEventIds: [input.existingEventId] } : {}),
           viewer: input.viewer,
+          viewerEmail: input.viewerEmail,
         });
         if (alt.onAnchorDays.length + alt.beyond.length > 0) {
           // Narrow to the THREE fields this payload DECLARES (:221 / the two

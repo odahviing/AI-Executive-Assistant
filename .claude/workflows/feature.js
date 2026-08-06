@@ -286,6 +286,16 @@ const PLAN = {
             description:
               'what could go wrong, what is still unresolved, what he should eyeball before it ships. NEVER blank — "None" is a claim worth making, and a piece with no risk named reads as unexamined.',
           },
+          // BUILD 2 · THE CENSUS. Optional — most pieces are genuinely single-site.
+          // When a fix IS a re-keying or a repeated shape, this is the ONLY thing
+          // that turns "how many sites" from per-lane diligence into a fact checked
+          // once, before any lane starts. Filled by the SAME Decompose pass; the
+          // grep itself runs after, in the decompose-check dispatch below.
+          patternQuery: {
+            type: 'string',
+            description:
+              "if this piece's fix is a RE-KEYING or a pattern that plausibly repeats across files — the exact search string or short regex a grep would use to find every site. Empty string when this is genuinely single-site. A census runs on every non-blank value before any lane is dispatched.",
+          },
         },
         required: ['id', 'ref', 'lane', 'requirement', 'whatChanges', 'connection', 'expectation', 'whyThisLane', 'dependsOn', 'risk'],
       },
@@ -316,6 +326,58 @@ const PLAN = {
     },
   },
   required: ['pieces', 'blockingQuestions', 'sharedPiece'],
+}
+
+// ── BUILD 1 + BUILD 2 · THE DECOMPOSE CHECK ─────────────────────────────────
+// `connection` names the seam a piece must not bypass; nothing ever verified the
+// route it names was REACHABLE. o#223's escalation sat entirely behind a
+// pre-existing `if (context.authority !== 'owner')` return (createMeeting.ts:462,
+// and its sibling at moveMeeting.ts:526,710) and no pass caught it before a lane
+// built dead code. This is a STATIC check in the compiler sense — it reads the
+// code as it stands, executes nothing, and dispatches to no lane: a piece that
+// fails it does not go to a lane, it goes back into the plan.
+//
+// The SAME dispatch runs the CENSUS: any piece naming a `patternQuery` gets a
+// real grep across the whole repo, whichever lane owns each site — reading
+// crosses no lane boundary, it always could. `gh#154`'s nine refs were nine
+// pieces that each thought it was the only site.
+const DECOMPOSE_CHECK = {
+  type: 'object',
+  properties: {
+    reachability: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          reachable: {
+            type: 'boolean',
+            description:
+              "false if a pre-existing early return, guard or condition sits between the entry point `connection` names and the code `whatChanges` proposes to add, such that the piece's own trigger could never reach it",
+          },
+          blockingGate: { type: 'string', description: 'file:line of that gate — empty string when reachable' },
+        },
+        required: ['id', 'reachable', 'blockingGate'],
+      },
+      description: 'one entry per piece, always — a piece with no entry here reads as unconfirmed, not as cleared.',
+    },
+    census: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          sites: {
+            type: 'array',
+            items: { type: 'object', properties: { file: { type: 'string' }, lane: { type: 'string' } }, required: ['file', 'lane'] },
+          },
+        },
+        required: ['query', 'sites'],
+      },
+      description: 'one entry per non-blank `patternQuery` on any piece — the COMPLETE grep result, every site, whichever lane owns it. Empty array if no piece named a pattern.',
+    },
+  },
+  required: ['reachability', 'census'],
 }
 
 const VERDICTS = {
@@ -635,6 +697,7 @@ if (MODE === 'plan') {
       `• Do the opposite too: where two improvements want the SAME seam moved, say so and emit ONE piece. That cross-view is why this is a single pass.\n` +
       `• **Every piece names its \`requirement\` — the product outcome it buys, in one line, from the point of view of whoever benefits.** This is the column the owner rules on. A piece described only as a mechanism is unrulable: he can tell you whether the code sounds right, but not whether he WANTS it. If you cannot state the requirement without restating the mechanism, the piece is not understood yet.\n` +
       `• **Every piece names its \`risk\`** — what could go wrong, what is unresolved, what he should eyeball before it ships. Never blank; "None" is a claim worth making, and a piece with no risk named reads as unexamined.\n` +
+      `• If a piece's fix is a RE-KEYING or a shape that plausibly repeats elsewhere — the same bug in more than one file, a copy-pasted check — name the exact search string in \`patternQuery\`. A census runs on it before any lane is dispatched, so the count is a fact and not per-lane diligence. Leave it empty when the fix is genuinely single-site.\n` +
       // THE FENCE. This bullet asked for "what the code will do differently",
       // which invites the violation it now forbids.
       `• \`whatChanges\` names **the files and the seam, never the solution inside them** — the file(s), the function or boundary that moves, what a person would see change, and above all **what it REUSES** with a \`file:line\`. "Reuses X byte-for-byte" is worth more than any other sentence in that field. **A piece that names its implementation has bypassed the charter meant to choose it**: the lane owns that call under its own product rules, and you hold none of them.\n` +
@@ -698,16 +761,76 @@ if (MODE === 'plan') {
     if (!sharedPiece) sharedPiece = String((fix && fix.sharedPiece) || '').trim()
     gaps = gapsOf(pieces)
   }
-  // The observable, and it is the number he can check: `blank` must be 0 on a plan
-  // that is safe to render. A non-zero survives the repair and says so out loud.
-  const contract = { pieces: pieces.length, blank: gaps.length, repaired: contractRepaired, sharedPiece: sharedPiece || '(BLANK)' }
+
+  // ── BUILD 1 + BUILD 2 · ONE read-only dispatch, AFTER the repair round ─────
+  // (so it checks the FINAL connection/whatChanges, not a draft the repair round
+  // may have rewritten). See DECOMPOSE_CHECK above for the full reasoning.
+  const patternQueries = [...new Set(pieces.map((p) => String((p && p.patternQuery) || '').trim()).filter(Boolean))]
+  let unreachable = []
+  let censusByQuery = new Map()
+  let decomposeCheckRan = false
+  if (pieces.length) {
+    const check = await agent(
+      `Two READ-ONLY checks on this decomposition. Build nothing, write nothing, run nothing — you are reading the code as it stands.\n\n` +
+        `**1. REACHABILITY.** For EVERY piece below, open the file(s) its \`whatChanges\` and \`connection\` name. Confirm no pre-existing early return, guard or condition sits between the entry point \`connection\` names and the code \`whatChanges\` proposes to add, such that the piece could never run for its own stated trigger. A piece can be entirely correct on its own and still be dead code because of what already runs before it — that is the exact failure this check exists to catch. Set \`reachable:false\` and cite the \`file:line\` of that gate in \`blockingGate\` when one exists; \`reachable:true\` and empty \`blockingGate\` otherwise. Return one result per piece id, always.\n\n` +
+        (patternQueries.length
+          ? `**2. CENSUS.** ${patternQueries.length} pattern(s) below plausibly repeat across files. For EACH, \`grep\` the WHOLE repo (read-only) and return every site with its file and which lane owns it — ${LANE_MAP}\n\nQUERIES:\n${patternQueries.map((q) => `  • ${q}`).join('\n')}\n\n`
+          : '**2. CENSUS.** No piece named a pattern to search for — return `census: []`.\n\n') +
+        `PIECES:\n${JSON.stringify(pieces.map((p) => ({ id: p.id, lane: p.lane, whatChanges: p.whatChanges, connection: p.connection, patternQuery: p.patternQuery || '' })), null, 2)}`,
+      { label: 'framer:decomposeCheck', phase: 'Decompose', agentType: 'framer', effort: 'high', schema: DECOMPOSE_CHECK },
+    )
+    decomposeCheckRan = !!check
+    unreachable = ((check && check.reachability) || []).filter((r) => r && r.reachable === false && String(r.blockingGate || '').trim())
+    censusByQuery = new Map(((check && check.census) || []).filter((c) => c && c.query).map((c) => [c.query, Array.isArray(c.sites) ? c.sites : []]))
+  }
+  if (pieces.length && !decomposeCheckRan)
+    log('! DECOMPOSE CHECK DID NOT RUN — reachability and census are UNCONFIRMED for every piece. Not a block (this check did not exist before today), but nothing has verified the route is real.')
+
+  // A failed reachability check FLAGS the piece, never drops it — the plan is
+  // where he sees it and the framer redesigns around the named gate, not a lane.
+  const unreachableById = new Map(unreachable.map((r) => [r.id, r.blockingGate]))
+  pieces = pieces.map((p) => (unreachableById.has(p.id) ? { ...p, unreachable: true, blockingGate: unreachableById.get(p.id) } : p))
+  if (unreachable.length)
+    log(`! UNREACHABLE: ${unreachable.length} piece(s) name a route a pre-existing gate blocks — ${unreachable.map((r) => `${r.id}:${r.blockingGate}`).join(', ')}. They do NOT go to a lane; they go back into the plan.`)
+
+  // The census total, as PLAIN TEXT on the piece — never a new structured field.
+  // Owner-approved follow-ups leave the feature track and get built by bugger.js,
+  // which has never heard of `expectation` or `connection`. Prose in a field
+  // that already survives into a ticket body (`census`, rendered in `ticketFor`
+  // exactly like `risk` below) is what reaches whatever engine builds it next.
+  pieces = pieces.map((p) => {
+    const q = String(p.patternQuery || '').trim()
+    if (!q) return p
+    const sites = censusByQuery.get(q) || []
+    const mine = sites.filter((s) => s.lane === p.lane)
+    const otherLanes = [...new Set(sites.filter((s) => s.lane !== p.lane).map((s) => s.lane).filter(Boolean))]
+    return {
+      ...p,
+      census:
+        `pattern "${q}" has ${sites.length} site(s) across ${new Set(sites.map((s) => s.lane).filter(Boolean)).size} lane(s)${otherLanes.length ? ` (also: ${otherLanes.join(', ')})` : ''}. ` +
+        `${mine.length} of them are yours: ${mine.map((s) => s.file).join(', ') || '(none)'}. This piece is not done until all ${mine.length} are closed.`,
+    }
+  })
+  if (censusByQuery.size) log(`Census: ${censusByQuery.size} pattern(s) — ${[...censusByQuery.entries()].map(([q, s]) => `"${q}":${s.length}`).join(', ')}.`)
+
+  // The observable, and it is the number he can check: `blank` must be 0 and
+  // `unreachable` must be 0 on a plan that is safe to render. Either surviving
+  // the repair round says so out loud.
+  const contract = {
+    pieces: pieces.length,
+    blank: gaps.length,
+    repaired: contractRepaired,
+    sharedPiece: sharedPiece || '(BLANK)',
+    unreachable: unreachable.length,
+    checked: decomposeCheckRan,
+  }
   if (gaps.length)
     log(
       `! CONTRACT STILL INCOMPLETE after the repair round — ${gaps.map((g) => `${g.id}:${g.missing.join('+')}`).join(', ')}. Do NOT render this plan to the owner: an unspecified seam is what two lanes each assume the other handled.`,
     )
   if (!sharedPiece) log('! `sharedPiece` is BLANK after the repair round — nothing in this plan says who writes shared code, so the first lane to run decides it.')
 
-  log(`Plan: ${pieces.length} piece(s) across ${new Set(pieces.map((p) => p.lane)).size} lane(s); ${((plan && plan.blockingQuestions) || []).length} blocking question(s); shared code → ${sharedPiece || '(BLANK)'}.`)
+  log(`Plan: ${pieces.length} piece(s) across ${new Set(pieces.map((p) => p.lane)).size} lane(s); ${((plan && plan.blockingQuestions) || []).length} blocking question(s); ${unreachable.length} unreachable; ${censusByQuery.size} pattern census(es); shared code → ${sharedPiece || '(BLANK)'}.`)
 
   // ── `needsTicket` CARRIES THE FINISHED BODY, NOT THE ASK ───────────────────
   // It used to be `{placeholderRef, title, asks, priority}` — the ingredients —
@@ -758,6 +881,7 @@ if (MODE === 'plan') {
             `  - connection: ${p.connection || '(BLANK)'}`,
             `  - expectation: ${p.expectation || '(BLANK)'}`,
             `  - risk: ${p.risk || '(BLANK)'}`,
+            ...(p.census ? [`  - census: ${p.census}`] : []),
           ])
         : ['(no piece was decomposed for this item)']),
       '',
@@ -819,6 +943,9 @@ if (MODE === 'plan') {
       (contract.blank
         ? `STOP: ${contract.blank} piece(s) have a BLANK \`connection\` or \`expectation\` after the repair round — see \`contract\`. Do not render this plan; re-invoke plan mode. An unspecified seam is what two lanes each assume the other handled. Then: `
         : '') +
+      (contract.unreachable
+        ? `STOP: ${contract.unreachable} piece(s) name a route a pre-existing gate makes unreachable — see \`pieces[].blockingGate\`. Do not approve these as written; they need a different route around the named gate. Then: `
+        : '') +
       (DESCRIBED
         ? 'THESE ARE NOT ON GITHUB YET. If the owner approves, FILE the issue with `gh issue create --title <title> --label <each label> --body-file <temp .md>` using `needsTicket[].body` VERBATIM — it is the finished ticket, not ingredients; do not recompose it. Then replace the `new-N` placeholder ref on each piece with the real `gh#N` before building. If he declines, file nothing. Then: '
         : '') +
@@ -874,6 +1001,8 @@ const describe = (p) =>
   `${p.id} [${p.ref}] ${p.whatChanges}` +
   (p.connection ? `\n  SEAM — what it calls, what calls it, and WHAT IT MUST NOT BYPASS: ${p.connection}` : '') +
   (p.expectation ? `\n  WHAT EVERY OTHER PIECE IS ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: ${p.expectation}` : '') +
+  // BUILD 2 · the census travels to the lane too — its own files, but the total.
+  (p.census ? `\n  CENSUS: ${p.census}` : '') +
   (p.productDecision ? `\n  OWNER DECISION THIS EMBEDS: ${p.productDecision}` : '') +
   (p.charterRule ? `\n  DURABLE RULE: ${p.charterRule}` : '')
 
@@ -883,8 +1012,19 @@ const WHERE_NOTE =
   `and the planning pass can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive it from the code before you build on it — ` +
   `if \`_where\` disagrees with what you find, the file wins and say so in your notes. What this saves you is hunting for the location, not verifying it.`
 
-const buildLane = (lane, pcs, roundNote) =>
-  agent(
+// X168-parity · same fix as bugger.js, same reason: the panel showed a bare
+// lane name and nothing else, so a chained wave — here, EITHER a `dependsOn`
+// split across build waves or a cross-lane dependency ask — left the owner
+// guessing why a lane came back a second time. `dispatchedLanesOnce` makes
+// "second dispatch of this lane" checkable instead of inferred from wave or
+// dep-round numbering, and it is shared across BOTH loops below because from
+// the panel they are the same box: a lane appearing twice in `Build` is a
+// dependency round regardless of which of the two mechanisms produced it.
+const dispatchedLanesOnce = new Set()
+const buildLane = (lane, pcs, roundNote, asBounce) => {
+  const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
+  if (!asBounce) dispatchedLanesOnce.add(lane)
+  return agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
       `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%, and **list every file you edited in \`filesTouched\`** so the verify can tell your change from work already sitting in the tree.` +
         // X73 · a number that bounds a duration is the one change that cannot be
@@ -905,8 +1045,23 @@ const buildLane = (lane, pcs, roundNote) =>
       (Object.keys(answers).length ? `OWNER'S ANSWERS TO THE OPEN QUESTIONS:\n${JSON.stringify(answers, null, 2)}\n\n` : '') +
       `PIECES:\n${pcs.map(describe).join('\n')}\n\nFULL PAYLOAD:\n${JSON.stringify(pcs, null, 2)}`,
     // No `model` here: the tier is on the lane's charter, same as bugger.js.
-    { label: lane, phase: lane === 'instructor' ? 'Context' : 'Build', agentType: lane, effort: EFFORT[lane], schema: VERDICTS },
+    // X137-parity · a bounced re-attempt is `rebuild:<lane>(N)` inside THIS
+    // SAME Verify phase — bugger.js removed the separate `Bounce` box (X151),
+    // so there is no second box to add here either. The prefix, not the
+    // phase, is what tells a rebuild apart from a first Build-phase dispatch
+    // by the same lane; a bare lane name must never appear under Verify.
+    // X168-parity · every other label carries its count, and `·dep` marks any
+    // dispatch that is not this lane's first in the run — see the comment
+    // above this function.
+    {
+      label: asBounce ? `rebuild:${lane}(${pcs.length})` : `${lane}(${pcs.length}${isDepRound ? '·dep' : ''})`,
+      phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
+      agentType: lane,
+      effort: EFFORT[lane],
+      schema: VERDICTS,
+    },
   ).then((r) => (r && r.results) || [])
+}
 
 // Dependency-ordered waves. A piece runs only once everything it depends on has
 // landed — computed, not assumed, so the plan's own ordering is what executes.
@@ -961,6 +1116,10 @@ const DISPATCHABLE_DEP = new Set(['built', 'confirmed-other-lane', 'needs-depend
 // never resumed and reads blocked for the rest of the run.
 const DELIVERED_DEP = new Set(['built', 'confirmed-other-lane', 'already-fixed'])
 const hasAsk = (r) => r.dependencyAgent && String(r.dependencyAsk || '').trim().length > 0
+// Same set bugger.js keeps under this name — a lane outside it has nowhere to
+// bounce to, so the bounce round below routes on it instead of re-deriving the
+// inline check the dependency-round filter already uses.
+const KNOWN_LANES = new Set([...CODE_LANES, 'instructor'])
 
 // ---- Dependency rounds — the SAME loop bugger.js runs, for the same reasons ---
 // This block previously had two bugs that only a real run would have shown, and
@@ -1088,6 +1247,30 @@ const built = results.filter((r) => r.verdict === 'built')
 // as bugger.js: one read of the cited code per row, no trace, no budget.
 const claimedFixed = results.filter((r) => r.verdict === 'already-fixed')
 let spotCheckUnanswered = []
+// ── X137-PARITY · THE BOUNCE COUNTER, stolen from bugger.js (X137/X143/X149),
+// not reinvented. His ruling, 2026-08-03, is not engine-specific: "we can
+// bounce stuff once, not twice." Here an OVERTURN is a piece whose own
+// `expectation` was not met — the seam it promised the other pieces — and it
+// goes back to the lane that built it ONCE before it reaches the owner. A
+// DISCOVERY (something else worth doing, unrelated to this piece's own
+// contract) never bounces — see `discoveries` above; that is what stops the
+// wave recursing. `bounce` in the manifest is also the ENGINE MARKER for this
+// change, same reasoning as bugger.js: a long-lived chat holding the old
+// compiled engine cannot emit this key, so its absence means a stale engine,
+// never a quiet wave.
+const BOUNCE_LIMIT = 1
+let bouncedIds = []
+let bounceRecheckRan = false
+let bounceCleared = []
+let bounceStillWrong = []
+let bounceAtLimit = []
+let bounceUnroutable = []
+let bounceDepAsks = []
+// `eligible` and `escalated` make a ZERO readable: `bounced:0` alone cannot
+// tell "nothing was overturned" from "rows were overturned and none could be
+// sent back" — opposite facts. `eligible` is the first pass's overturn count.
+let bounceEligible = 0
+let bounceEscalated = 0
 if ((built.length || claimedFixed.length) && A.verify !== false) {
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
   // Same two mechanisms as bugger.js, same reasoning — the tree holds more than
@@ -1114,14 +1297,14 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
     // `.claude/agents/bouncer.md`. Only the payload and the ONE thing that
     // differs from a bug wave stay here.
     `Verify this FEATURE wave's COMBINED change before the owner wraps it — ${built.length} piece(s). **Your charter holds the bar, the standard, the budget and the return contract.**\n\n` +
-      `**One thing differs from a bug wave: also ask whether it DELIVERS WHAT WAS APPROVED.** A feature can be perfectly safe and still not do the thing. Check the built pieces against the intent below, not only against the code. And these pieces were split across lanes to serve ONE idea, so the joins are where they are most likely to disagree.\n\n` +
+      `**One thing differs from a bug wave: also ask whether it DELIVERS WHAT WAS APPROVED.** A feature can be perfectly safe and still not do the thing. Check the built pieces against the intent below, not only against the code. Each piece named its own \`connection\` (what it must not bypass) and \`expectation\` (what the OTHER pieces are entitled to assume of it) at plan time. **A piece whose own \`expectation\` is not met is an OVERTURN** — change its verdict in \`results\` and it goes back to the lane that built it. **Something else worth doing, unrelated to this piece's own contract, is a \`discovery\`** — it never bounces. These pieces were split across lanes to serve ONE idea, so the seams named in \`connection\`/\`expectation\` are where they are most likely to disagree.\n\n` +
       (priorCleanKept.length
         ? `**ALREADY PROVEN by earlier passes — settled, do not re-audit.** Anything an earlier pass proved about code THIS wave changed has already been removed from this list:\n${priorCleanKept.map((c) => `  • ${c}`).join('\n')}\n\n`
         : '') +
       (waveFiles.length
         ? `**THIS WAVE'S FILES. Everything else in the diff is the environment:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n`
         : `**No lane reported which files it touched, so the whole diff is in scope.** Say in your return that you could not separate this wave from work already in the tree.\n\n`) +
-      `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, productDecision: p.productDecision })), null, 2)}\n\n` +
+      `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, connection: p.connection, expectation: p.expectation, productDecision: p.productDecision })), null, 2)}\n\n` +
       // X68 · one line, not a second pass.
       (claimedFixed.length
         ? `**SPOT-CHECK — ${claimedFixed.length} piece(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually there at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(claimedFixed, null, 2)}\n\n`
@@ -1171,9 +1354,144 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
   const overturned = new Map(
     ((check && check.results) || []).filter((x) => x.verdict && claimed.has(x.id) && x.verdict !== claimed.get(x.id)).map((x) => [x.id, x.notes || '']),
   )
-  verified = results.map((r) =>
-    overturned.has(r.id) ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${overturned.get(r.id)}]`.trim() } : r,
-  )
+
+  // ── X137-PARITY · ONE BOUNCE, THEN HIS DESK ──────────────────────────────
+  // Same shape as bugger.js: ONE round, flat — an ask raised in here is
+  // reported, never dispatched, so it cannot re-enter the build-time
+  // dependency loop above and multiply with MAX_DEP_ROUNDS. THE RE-CHECK IS
+  // MANDATORY AND FAILS CLOSED: a bounce nobody verifies is worse than none,
+  // because the wave would then claim a fix that was never re-examined.
+  const laneOf = (id) => (specById.get(id) || {}).lane || ''
+  const bounceOf = (id) => Number((specById.get(id) || {}).bounces || 0)
+  let finalOverturn = new Map(overturned)
+  bounceEligible = overturned.size
+  bounceAtLimit = [...overturned.keys()].filter((id) => bounceOf(id) >= BOUNCE_LIMIT)
+  bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
+  bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
+  if (bounceAtLimit.length)
+    log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
+  if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
+  if (bouncedIds.length) {
+    const bounceItems = bouncedIds.map((id) => ({
+      ...(specById.get(id) || {}),
+      id,
+      lane: laneOf(id),
+      bounces: bounceOf(id) + 1,
+      _bouncedBack: {
+        youClaimed: claimed.get(id),
+        theBouncerRefused: overturned.get(id) || '(no note returned)',
+        thisIsAttempt: bounceOf(id) + 2,
+        andItIsTheLast: `Your work is already in the tree — read your own diff first, then fix what the bouncer named. If you believe the bouncer is wrong, say so in \`notes\` and return your evidence: that is a legitimate answer and it goes to the owner. Do NOT rebuild from scratch, and do NOT widen the scope. This piece cannot be sent back again — a second refusal goes to the owner, not to a third attempt.`,
+      },
+    }))
+    bounceItems.forEach((p) => specById.set(p.id, p))
+    log(`Bounce: ${bounceItems.length} overturned piece(s) go back ONCE — ${bounceItems.map((p) => `${p.id}→${p.lane}`).join(', ')}.`)
+    const bounceOut = await parallel(
+      [...new Set(bounceItems.map((p) => p.lane))].map((lane) => () => buildLane(lane, bounceItems.filter((p) => p.lane === lane), '', true)),
+    )
+    const rebuilt = bounceOut.flat().filter((r) => r && bouncedIds.includes(r.id))
+    const rebuiltIds = new Set(rebuilt.map((r) => r.id))
+    if (rebuiltIds.size) results = results.filter((r) => !rebuiltIds.has(r.id)).concat(rebuilt)
+    const silent = bouncedIds.filter((id) => !rebuiltIds.has(id))
+    if (silent.length) log(`! ${silent.length} bounced piece(s) returned NOTHING from their lane: ${silent.join(', ')}. They keep the first overturn and go to the owner.`)
+
+    // Asks raised during the bounce. This round does not chain, so a
+    // dispatchable ask here has nowhere else to land — folded into
+    // `deferredDepAsks` below, same complement bugger.js keeps.
+    bounceDepAsks = rebuilt
+      .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict))
+      .map((r) => ({
+        id: `${r.id}>dep`,
+        ref: '',
+        lane: r.dependencyAgent,
+        whatChanges: r.dependencyAsk,
+        whyThisLane: 'raised during the bounce round',
+        dependsOn: [],
+        risk: '',
+        from: r.id,
+        fromVerdict: r.verdict,
+        awaitingOwner: true,
+        fromBounce: true,
+      }))
+
+    // X149-PARITY · a pending dep-ask on a lane ALSO bounced this round may be
+    // satisfied by that same rebuild — the only case where the bouncer is
+    // already looking at the right files. Scoped exactly as bugger.js scopes it.
+    const bouncedLanes = new Set(bounceItems.map((p) => p.lane))
+    const askedDuringBounce = deferredDepAsks.filter((a) => bouncedLanes.has(a.lane))
+
+    // ── THE RE-CHECK — the bounced pieces ONLY, never the whole wave again ──
+    const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
+    const recheck = rebuilt.length
+      ? await agent(
+          `**RE-CHECK — second and FINAL pass over ${rebuilt.length} piece(s) you already overturned once.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
+            `**Scope is these pieces and nothing else.** Do not re-read the rest of the wave — you passed it moments ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
+            `For each piece: **what you refused is quoted on it.** Answer the one question — is its own \`expectation\` met now? Trace from the seam, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
+            `**THERE IS NO THIRD ATTEMPT.** A piece you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
+            (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
+            (askedDuringBounce.length
+              ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by the wave check above and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.whatChanges}`).join('\n')}\n\n`
+              : '') +
+            `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
+              rebuilt.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
+              null,
+              2,
+            )}`,
+          { label: `bouncer:recheck(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+        )
+      : null
+    bounceRecheckRan = !!recheck
+    const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
+    // A discovery raised by the re-check is next run's intake like any other —
+    // it NEVER bounces.
+    discoveries = discoveries.concat((recheck && recheck.discoveries) || [])
+    verifiedClean = verifiedClean.concat((recheck && recheck.verifiedClean) || [])
+    if (askedDuringBounce.length) {
+      const resolvedIds = new Set(
+        ((recheck && recheck.results) || [])
+          .filter((x) => x && x.verdict === 'already-fixed' && askedDuringBounce.some((a) => a.id === x.id))
+          .map((x) => x.id),
+      )
+      if (resolvedIds.size) {
+        log(`Bounce re-check also closed ${resolvedIds.size} pending dependency ask(s), satisfied by this round's own rebuild: ${[...resolvedIds].join(', ')}.`)
+        deferredDepAsks = deferredDepAsks.filter((a) => !resolvedIds.has(a.id))
+      }
+    }
+    const answeredAgain = new Set(recheckResults.map((x) => x.id))
+    for (const id of bouncedIds) {
+      const first = overturned.get(id) || ''
+      if (!rebuiltIds.has(id)) continue // lane returned nothing — keeps its first overturn
+      if (!bounceRecheckRan)
+        finalOverturn.set(id, `${first} [BOUNCED ONCE; THE RE-CHECK DIED, so the second attempt is UNVERIFIED — do not read this as fixed]`)
+      else if (!answeredAgain.has(id))
+        finalOverturn.set(id, `${first} [BOUNCED ONCE; the re-check returned no verdict for this piece, so the second attempt is UNCHECKED]`)
+      else {
+        const again = recheckResults.find((x) => x.id === id)
+        if (again.verdict !== rebuiltClaim.get(id)) finalOverturn.set(id, `${first} [ATTEMPT 2 ALSO REFUSED: ${again.notes || ''}] — two attempts, no third; this is yours to rule on.`)
+        else finalOverturn.delete(id)
+      }
+    }
+    bounceCleared = bouncedIds.filter((id) => !finalOverturn.has(id))
+    bounceStillWrong = bouncedIds.filter((id) => finalOverturn.has(id))
+    log(
+      `Bounce result: ${bounceCleared.length} cleared on the second attempt, ${bounceStillWrong.length} still wrong and going to the owner${
+        bounceRecheckRan ? '' : ' (THE RE-CHECK DID NOT RUN — every bounced piece is unverified)'
+      }.`,
+    )
+  }
+  // Every overturn still standing after the bounce and the re-check: what he
+  // actually has to rule on. `finalOverturn`, not `overturned` — a piece the
+  // bounce round fixed and the re-check confirmed is `built` and must not
+  // reach his desk.
+  bounceEscalated = finalOverturn.size
+  deferredDepAsks = deferredDepAsks.concat(bounceDepAsks)
+  verified = results.map((r) => {
+    const b = Number((specById.get(r.id) || {}).bounces || 0)
+    const row = b ? { ...r, bounces: b } : r
+    return finalOverturn.has(r.id)
+      ? { ...row, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${finalOverturn.get(r.id)}]`.trim() }
+      : row
+  })
 }
 
 // Charter rules the wave earned — surfaced, never written by an agent. The owner
@@ -1228,6 +1546,30 @@ const featureManifest = {
           overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length,
           verifiedCleanReturned: verifiedClean.length,
         },
+  // X137-PARITY · same shape as bugger.js's `manifest.bounce`, ALWAYS an
+  // object with explicit zeros — never omitted. `eligible` beside `bounced`
+  // is what makes a zero readable: `eligible:0 bounced:0` is healthy silence,
+  // `eligible:3 bounced:0` is a defect. This block's presence is also the
+  // engine marker for this change — an old compiled copy of this file cannot
+  // emit it, so absent means a stale engine, never a quiet wave.
+  bounce: {
+    verifyOff: A.verify === false,
+    limit: BOUNCE_LIMIT,
+    eligible: bounceEligible,
+    bounced: bouncedIds.length,
+    refs: bouncedIds,
+    recheckRan: bounceRecheckRan,
+    cleared: bounceCleared.length,
+    clearedRefs: bounceCleared,
+    toOwner: bounceStillWrong.length,
+    toOwnerRefs: bounceStillWrong,
+    notBouncedAtLimit: bounceAtLimit.length,
+    notBouncedAtLimitRefs: bounceAtLimit,
+    unroutable: bounceUnroutable.length,
+    unroutableRefs: bounceUnroutable,
+    escalated: bounceEscalated,
+    depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
+  },
 }
 const featureWarnings = []
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
@@ -1263,6 +1605,23 @@ if (spotCheckUnanswered.length)
 if (discoveries.filter((d) => !/:\d+/.test(String(d.evidence || ''))).length)
   featureWarnings.push(
     `${discoveries.filter((d) => !/:\d+/.test(String(d.evidence || ''))).length} of ${discoveries.length} discovery(ies) cite no \`file:line\` at HEAD. A log line shows the symptom happened, not that the code is still wrong — do NOT carry them into the next run's intake without opening the file first.`,
+  )
+// X137-PARITY · same three bounce warnings bugger.js carries, for the same
+// reasons — a re-check that died is the `verify.ran` failure one level in, and
+// the partition assertion makes a silent drop arithmetically impossible to hide.
+if (bouncedIds.length && !bounceRecheckRan)
+  featureWarnings.push(
+    `THE BOUNCE RE-CHECK DID NOT RUN — ${bouncedIds.length} piece(s) went back to their lane and NOTHING re-examined the second attempt: ${bouncedIds.join(', ')}. They are on your desk marked unverified. Do not wrap on this; run \`/manager verify\` by hand.`,
+  )
+if (bounceAtLimit.length)
+  featureWarnings.push(
+    `${bounceAtLimit.length} piece(s) were overturned having ALREADY used their one bounce, so they went straight to you with both attempts on them: ${bounceAtLimit.join(', ')}. Two failures on one item is a signal — read the item, not the diff.`,
+  )
+if (bounceEligible !== bouncedIds.length + bounceAtLimit.length + bounceUnroutable.length)
+  featureWarnings.push(
+    `BOUNCE ACCOUNTING IS WRONG — ${bounceEligible} overturn(s) were eligible but only ${
+      bouncedIds.length + bounceAtLimit.length + bounceUnroutable.length
+    } are accounted for (${bouncedIds.length} bounced · ${bounceAtLimit.length} at the limit · ${bounceUnroutable.length} with no lane). An overturn has gone somewhere this manifest does not name.`,
   )
 featureWarnings.forEach((w) => log(`! ${w}`))
 

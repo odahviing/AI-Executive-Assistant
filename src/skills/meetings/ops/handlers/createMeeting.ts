@@ -38,11 +38,22 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { displaySubject, subjectViewerFor } from '../../../../utils/displaySubject';
+import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
+import { createApprovalRequest } from '../../../../tasks/skill';
 import type { OpCtx } from './context';
 
 export async function handleCreateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+  // v4.4.9 (#154) — resolved once per call, mirroring subjectViewerFor(context)
+  // below: the attendee-aware half of the subject mask, for every occupancy
+  // scan / conflict message this handler produces on the colleague path.
+  // W5/R4 (2026-08-06) — the room-tightening (a room can never be more
+  // permissive than a 1:1 DM) lives inside viewerEmailFor now, keyed on
+  // surface==='room'; call it directly. The old `?? null` coercion here also
+  // caught the EMAIL leg's `undefined`, masking every forwarded subject
+  // instead of only private ones — owner ruled email out of scope for this
+  // build; see viewerEmailFor's doc comment in utils/displaySubject.ts.
+  const viewerEmail = viewerEmailFor(context);
         // v3.5.x — anchor-to-event-end ("a 2h block after my flight"). When the
         // model passes start_at_event_end_id + duration_minutes and no explicit
         // start, resolve start = that event's END instant (read once, tz-correct)
@@ -440,7 +451,22 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         //   - on success, auto shadow-DM the owner + post-booking heads-up
         //     DMs to non-self internal attendees ("Oran asked, I checked
         //     your calendar, booked Tue 14:00")
-        if (context.senderRole === 'colleague') {
+        //
+        // o#223 — gated on AUTHORITY, not senderRole (same fix as
+        // move_meeting's o#221/o#223 gate, moveMeeting.ts). senderRole reads
+        // 'colleague' both for a genuine colleague AND for the AUTHENTICATED
+        // owner clamped into a room, so this whole ad hoc "can this asker
+        // book on their own" gate (Guards A/B below) used to intercept the
+        // owner's own room-clamped create_meeting too — returning its own
+        // narrow not_rule_compliant refusal (a note asking Sonnet to call
+        // create_approval) before planMeeting, and the ownerRoomBend-aware
+        // escalate_approval path built specifically for this case
+        // (planMeeting.ts's PlanMeetingInput.ownerRoomBend / the alternatives
+        // skip / the escalate_approval return), ever ran — making that route
+        // unreachable dead code. Only a genuine colleague needs Guards A/B;
+        // the owner keeps his authority on every surface (M10) and falls
+        // through to the ONE rule check (planMeeting/checkSlot, M2) below.
+        if (context.authority !== 'owner') {
           // v2.6 Bug 4 — early idempotency probe BEFORE Guards A and B. When a
           // colleague's continuing chat causes Sonnet to re-attempt create_meeting after the
           // first attempt already succeeded, Guard B's rule-compliance check can
@@ -540,7 +566,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // leak into a colleague-facing refusal message. Mask it with the
                     // same displaySubject helper Guard B already uses below (v4.3.4) —
                     // one masking path, not a second one invented for this branch.
-                    const maskedSubject = displaySubject(match, context.profile, subjectViewerFor(context));
+                    const maskedSubject = displaySubject(match, context.profile, subjectViewerFor(context), viewerEmail);
                     logger.info('create_meeting colleague-path refused — existing recurring occurrence in same week', {
                       requester: context.userId,
                       category: cat.name,
@@ -636,6 +662,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   // 'other' default, which happens to agree here but should
                   // not depend on happening to agree.
                   viewer: subjectViewerFor(context),
+                  viewerEmail,
                   diagnosticsOut: diagnostics,
                   // v3.0.6 — single-slot yes/no validation. The window is
                   // exactly [start, end], so findAvailableSlots returns ≤1 slot →
@@ -818,7 +845,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // path (the requester need not be the owner), so the predecessor's
                 // RAW subject must not leak if it's marked private. Same masking
                 // helper Guard B already uses (:431) — one path, not a second.
-                const predecessorSubject = displaySubject(predecessor, context.profile, subjectViewerFor(context));
+                const predecessorSubject = displaySubject(predecessor, context.profile, subjectViewerFor(context), viewerEmail);
                 logger.info('create_meeting refused — must_be_after_event_id ordering violated', {
                   predecessorId: mustBeAfterId,
                   predecessorEnd: predecessor.end.toISO(),
@@ -986,7 +1013,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // above), so a colleague-facing refusal must mask a private sibling
               // exactly like every other subject this file hands back (M12) — same
               // helper as :546, viewer resolved the same way.
-              const maskedSiblingSubject = displaySubject(sibling, context.profile, subjectViewerFor(context));
+              const maskedSiblingSubject = displaySubject(sibling, context.profile, subjectViewerFor(context), viewerEmail);
               logger.info('create_meeting — reschedulable sibling found; surfacing move-instead-of-create', {
                 existingEventId: sibling.id, existingWhen: whenStr, subject: args.subject,
               });
@@ -1046,6 +1073,69 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         }
         // Early-return on non-book plans:
         if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
+          // v4.4.x (#154) / o#223>dep — a ROOM rule-bend (the authenticated
+          // owner insisting on this EXACT slot from a clamped MPIM/channel
+          // surface) must reach his private approval thread deterministically
+          // — never depend on Sonnet placing the create_approval follow-up
+          // call this turn. Raise it here, in code, via the same primitive the
+          // create_approval TOOL itself calls (tasks/skill.ts's
+          // createApprovalRequest) — identical gate, identical refusal shape —
+          // instead of returning a `_note` and hoping.
+          if (plan.action === 'escalate_approval' && bookingRequest.relaxedReason === 'owner_room_bend') {
+            const approval = await createApprovalRequest({
+              kind: 'policy_exception',
+              payload: {
+                rule: plan.violationLabel,
+                context: `${context.profile.user.name.split(' ')[0]} asked to book this exact slot anyway from a room, bending one of his own scheduling rules — needs his sign-off in DM, not a room self-grant.`,
+                subject: args.subject,
+                start: args.start,
+                end: args.end,
+                attendees: args.attendees,
+                deferred_action: { tool: 'create_meeting', args: { ...args } },
+              },
+              ask_text: plan.suggestedAskText,
+            }, context) as { ok?: boolean; error?: string; reason?: string; approval_id?: string };
+            if (approval.ok) {
+              logger.info('create_meeting — ownerRoomBend escalated to create_approval directly (code path)', {
+                approvalId: approval.approval_id, subject: args.subject, start: args.start,
+              });
+              return {
+                success: false,
+                error: 'escalated_to_owner',
+                violation_label: plan.violationLabel,
+                approval_id: approval.approval_id,
+                category: plan.category,
+                // R11 (owner ruling, verbatim: "she dont need to write in the
+                // room ... she doesnt need to write anything. its person to
+                // person ... still will get back after hour and approved.") —
+                // this is meta-instruction for the model, NEVER a sentence to
+                // say. The approval is already raised in code above; the room
+                // must not learn a rule was bent or that anything is pending.
+                _note: `Already escalated to ${context.profile.user.name.split(' ')[0]}'s private approval DM in code — do NOT call create_approval yourself for this. Do NOT tell this room that anything was escalated, sent for approval, needs sign-off, or bent a rule — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); the resolver posts the outcome back in this thread once he responds, on his own time.`,
+              };
+            }
+            logger.warn('create_meeting — ownerRoomBend direct create_approval call refused', {
+              error: approval.error, reason: approval.reason, subject: args.subject, start: args.start,
+            });
+            return {
+              success: false,
+              error: approval.error ?? 'internal_error',
+              violation_label: plan.violationLabel,
+              // W4 (2026-08-06) — the SAME silence rule as the success branch
+              // above applies here too: whether the private-DM raise
+              // SUCCEEDED or — here — FAILED internally, the room must never
+              // learn a rule-bend was even attempted. `approval.reason` is
+              // written to instruct the MODEL on a retry (gateApprovalAsk),
+              // never to be read aloud, so it does NOT belong in a spoken
+              // `message`. Falling through to the generic (non-room-bend)
+              // escalate_approval return below would be wrong here — that
+              // path is written for a genuine colleague ask, where saying
+              // "I'll check with him" is the correct, expected answer (M9);
+              // this is the owner bending his own rule from a room, where he
+              // must never learn it was even tried, success or failure.
+              _note: `Raising this in ${context.profile.user.name.split(' ')[0]}'s private approval DM failed internally — do NOT call create_approval yourself for this, and do NOT tell this room that anything was escalated, sent for approval, needs sign-off, bent a rule, or failed — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); try the request again in a bit.`,
+            };
+          }
           return {
             success: false,
             error: 'rule_violation',

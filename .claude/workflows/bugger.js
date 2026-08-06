@@ -10,10 +10,13 @@ export const meta = {
     // box of their own — they are the same stage (the gate reads, sends back,
     // re-reads), and a separate 'Bounce' title read as an empty box on every
     // clean run, which looks like a run that did not finish. What still needs
-    // to be readable once they share a box: `rebuild:<lane>` names a lane's
+    // to be readable once they share a box: `rebuild:<lane>(N)` names a lane's
     // second attempt, `bouncer:wave(N)` the first pass, `bouncer:recheck(N)`
-    // the second — three distinct labels, so nothing here is ambiguous with a
-    // first-time `Build`-phase dispatch, which a bare lane name still means.
+    // the second — distinct from a first-time `Build`/`Context` dispatch,
+    // which (X168) carries its own item count and a `·dep` suffix on any
+    // round after the first: `matchmaker(5)` is fresh, `matchmaker(2·dep)` is
+    // the same lane answering a dependency round, never guessed at from the
+    // panel.
     { title: 'Verify' },
   ],
 }
@@ -808,14 +811,28 @@ const TIMEOUT_NOTE =
   `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
   `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
 
-// X137 · `asBounce` is the only variation: a re-attempt shows on the `/workflows`
-// panel as `rebuild:<lane>` inside the `Verify` phase (X151 collapsed the old
-// separate `Bounce` box into it), so a second cycle reads as a second cycle —
-// the `rebuild:` prefix, not the phase, is what tells it apart from a first
-// `Build`-phase attempt by the same lane, so it is kept even though `Build`
-// itself no longer needs a matching `build:` prefix.
-const dispatch = (lane, issues, asBounce) =>
-  agent(
+// X168 · his ask, 2026-08-05: the panel showed a bare lane name and nothing
+// else, so a chained run had no way to tell "matchmaker(5), fresh" from
+// "matchmaker again, and here's why" without asking. Every label below now
+// carries its item count, and any SECOND dispatch of a lane already seen this
+// run gets `·dep` — because by construction that can only be a dependency
+// round: `buildable` is queued whole in round 1, so nothing fresh reaches a
+// lane a second time. `dispatchedLanesOnce` is the one bit of state that
+// makes "second" checkable instead of inferred from which round number we
+// happen to be in — it stays correct whether the second dispatch is a raised
+// ask or a resumed originator, without either case being named specially.
+const dispatchedLanesOnce = new Set()
+// X137 · `asBounce` is the other variation: a re-attempt shows on the
+// `/workflows` panel as `rebuild:<lane>(N)` inside the `Verify` phase (X151
+// collapsed the old separate `Bounce` box into it), so a second cycle reads
+// as a second cycle — the `rebuild:` prefix, not the phase, is what tells it
+// apart from a first `Build`-phase attempt by the same lane. A bounce never
+// touches `dispatchedLanesOnce`: it already carries its own marker and must
+// never also read as a dependency round.
+const dispatch = (lane, issues, asBounce) => {
+  const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
+  if (!asBounce) dispatchedLanesOnce.add(lane)
+  return agent(
     `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
     // hand-dispatched lane gets it too. Setting it in the engine only made it
@@ -826,17 +843,20 @@ const dispatch = (lane, issues, asBounce) =>
     // stops returning `blocked-charter` and `needs-owner-decision` has stopped
     // being governed and is just building, which would NOT announce itself.
     {
-      // X151 · the label's job is to name the agent. `Build`/`Context` already
-      // say what stage this is, so a bare lane name is enough there; `Verify`
-      // does not say "this is a rebuild", so that prefix stays — see the
-      // comment above `dispatch`.
-      label: asBounce ? `rebuild:${lane}` : lane,
+      // X151/X168 · the label's job is to name the agent AND how much work it
+      // was handed. `Build`/`Context` already say what stage this is, so a
+      // bare lane name would be enough there; the count is what the round
+      // comment above explains, and `·dep` is the reason a repeat is never
+      // fresh work. `Verify` does not say "this is a rebuild", so that prefix
+      // stays — see the comment above `dispatch`.
+      label: asBounce ? `rebuild:${lane}(${issues.length})` : `${lane}(${issues.length}${isDepRound ? '·dep' : ''})`,
       phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
       agentType: lane,
       effort: EFFORT[lane],
       schema: VERDICTS,
     },
   )
+}
 
 // A dependency ask is real work REGARDLESS of what the lane concluded about its
 // own issue. This filter used to require `verdict === 'needs-dependency'`, which

@@ -17,7 +17,7 @@ import { getRequest, updateRequest } from '../../db/requests';
 import { appendToConversation } from '../../db/conversations';
 import { closeRequest } from './closeRequest';
 import type { RequestRow } from './types';
-import { parseDetails } from './types';
+import { parseDetails, deriveOriginSurface } from './types';
 import {
   composeOwnerAskText,
   extractCallbacks,
@@ -308,6 +308,7 @@ async function resolveRequestInner(
             requestId: row.id,
             originChannel: row.origin_channel,
             originThreadTs: row.origin_thread_ts,
+            surface: deriveOriginSurface(row),
           });
         } catch (err) {
           logger.warn('on_reject replay threw — non-fatal', {
@@ -611,6 +612,7 @@ async function runApproveCallback(
       requestId: row.id,
       originChannel: row.origin_channel,
       originThreadTs: row.origin_thread_ts,
+      surface: deriveOriginSurface(row),
     });
   } catch (err) {
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {

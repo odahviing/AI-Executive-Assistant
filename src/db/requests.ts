@@ -269,6 +269,59 @@ export function getLatestRequestForThread(ownerUserId: string, threadTs: string)
   return row ?? null;
 }
 
+/**
+ * o#224 — ground truth for the room-approval honesty check (claimChecker's
+ * approvalGrantContext) needs more than "the single newest request in this
+ * thread": 12 of 47 live request-carrying threads hold 2+ rows, and when an
+ * OLDER row was approved while a NEWER one is still pending,
+ * getLatestRequestForThread's newest-row state alone made a TRUTHFUL "he
+ * approved it" claim about the older row look false and get rewritten away —
+ * inverting a correct reply, the one failure G6 forbids outright. Until the
+ * checker can bind a claim to the SPECIFIC request row a sentence is about
+ * (real NLP work, not a query), the safe ground truth is "was ANY request in
+ * this thread EVER resolved" — a true grant anywhere in the thread's history
+ * makes a "he approved it" claim plausible and must never be inverted. This
+ * only under-catches the rarer case of a false claim about a *different*,
+ * still-pending request in the same thread, which is a safe MISS (G6), not a
+ * corrupted reply.
+ */
+export function anyRequestResolvedForThread(ownerUserId: string, threadTs: string): boolean {
+  const row = getDb().prepare(`
+    SELECT 1 FROM requests
+    WHERE owner_user_id = ?
+      AND origin_thread_ts = ?
+      AND state = 'resolved'
+    LIMIT 1
+  `).get(ownerUserId, threadTs);
+  return !!row;
+}
+
+/**
+ * R6 (2026-08-06), narrowed by R7 (2026-08-06) — ground truth for whether a
+ * decision is genuinely outstanding RIGHT NOW (`awaiting_owner`), as opposed
+ * to merely "a request row exists somewhere in this thread's history". This
+ * answers ONE of the two questions the room-approval honesty check needs —
+ * "is a decision still pending" — not "is a fabricated grant claim still a
+ * risk on this thread". The caller (runOutputGates.ts) combines this with
+ * `anyRequestResolvedForThread`: a thread that resolved stops being a risk
+ * (a "he approved it" claim there is plausibly true), but a thread whose only
+ * requests went CANCELLED or EXPIRED (never resolved) reads `isResolved=false`
+ * PERMANENTLY — and that is exactly the standing risk, not a false positive:
+ * a "he approved it" claim on a cancelled thread is provably false for as
+ * long as the thread stays active. Do not use this function alone to decide
+ * whether the honesty check should run at all — see the call site.
+ */
+export function anyRequestPendingForThread(ownerUserId: string, threadTs: string): boolean {
+  const row = getDb().prepare(`
+    SELECT 1 FROM requests
+    WHERE owner_user_id = ?
+      AND origin_thread_ts = ?
+      AND state = 'awaiting_owner'
+    LIMIT 1
+  `).get(ownerUserId, threadTs);
+  return !!row;
+}
+
 export function getChildRequests(parentId: string): RequestRow[] {
   return getDb().prepare(
     `SELECT * FROM requests WHERE parent_request_id = ? ORDER BY created_at ASC`

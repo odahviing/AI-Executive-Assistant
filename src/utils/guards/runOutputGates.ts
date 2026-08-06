@@ -32,9 +32,10 @@
  *     humanGate('owner') + date-verify, probed concurrently, exact serial chain
  *     on any flag.
  *   COLLEAGUE-READABLE (a colleague DM, a channel, or the owner in a group DM):
- *     claim-check (only when the owner is the one acting) → security gate →
- *     humanGate('internal') → date-verify. The leak scrub runs after every
- *     rewriter that could emit an internal token, voice after every rewriter
+ *     claim-check (when the owner is the one acting, OR this thread carries a
+ *     tracked request row — v4.4.x #154's room-approval honesty check) →
+ *     security gate → humanGate('internal') → date-verify. The leak scrub
+ *     runs after every rewriter that could emit an internal token, voice after every rewriter
  *     that could write like a machine, and date-verify LAST — after every
  *     rewriter, on both legs, because it is the only check whose subject
  *     (a weekday word) a REWRITER can introduce.
@@ -184,22 +185,18 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // v4.2.x — ownerIsActing now asks its question DIRECTLY, of the authenticated
   // Slack sender, instead of through a proxy that answered it for two surfaces out
   // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
-  // CLAMPED to 'colleague' in an MPIM, in a channel, and in colleague-test mode
-  // (processMessage.ts:139) — so the old `role === 'owner' || isOwnerInGroup` pair
-  // covered the DM and the group DM and silently missed the CHANNEL: the owner
-  // @-mentions Maelle in a real channel, she claims she messaged someone or moved
-  // something, and the phantom-action check never ran, because the group-DM fix
-  // repaired the MPIM half of the clamp with `isOwnerInGroup` and there is no
-  // `isOwnerInChannel` on this side of the wire (processMessage.ts:138 computes one
-  // and never passes it). Keyed on the authenticated identity in code, this covers
-  // every present and future surface without a third flag to plumb or forget
-  // (shared rule 10, G2). It can only ADD the honesty check, never drop it:
-  // `role === 'owner'` and `isOwnerInGroup` both already imply senderId is the
-  // owner's, so this predicate is a strict superset of the pair it replaces.
-  //
-  // The one surface it newly covers besides the channel is colleague-test mode,
-  // and that is correct rather than incidental: the reader there IS the owner, so
-  // he is exactly the person the check exists to inform.
+  // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:139) —
+  // so the old `role === 'owner' || isOwnerInGroup` pair covered the DM and the
+  // group DM and silently missed the CHANNEL: the owner @-mentions Maelle in a
+  // real channel, she claims she messaged someone or moved something, and the
+  // phantom-action check never ran, because the group-DM fix repaired the MPIM
+  // half of the clamp with `isOwnerInGroup` and there is no `isOwnerInChannel`
+  // on this side of the wire (processMessage.ts:138 computes one and never
+  // passes it). Keyed on the authenticated identity in code, this covers every
+  // present and future surface without a third flag to plumb or forget (shared
+  // rule 10, G2). It can only ADD the honesty check, never drop it: `role ===
+  // 'owner'` and `isOwnerInGroup` both already imply senderId is the owner's,
+  // so this predicate is a strict superset of the pair it replaces.
   //
   // colleagueReadable keys on `role` — the clamp's own answer to "who can see
   // this" — which keeps it fail-closed for a future 'unknown' sender too. The
@@ -323,10 +320,11 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // Everything here is decided by the reader, not the sender, with one
     // exception: the honesty check, which is decided by who is acting.
     //
-    // claim-check (owner acting only) → security gate → humanGate('internal') →
-    // date-verify. The leak scrub runs after every rewriter that could emit an
-    // internal token, voice after every rewriter that could write like a machine,
-    // and date-verify LAST — see the note at its call below.
+    // claim-check (owner acting, OR this thread carries a request row —
+    // v4.4.x #154) → security gate → humanGate('internal') → date-verify.
+    // The leak scrub runs after every rewriter that could emit an internal
+    // token, voice after every rewriter that could write like a machine, and
+    // date-verify LAST — see the note at its call below.
 
     // The phantom-action honesty check, kept for the owner's own turn in a
     // shared room. A straight "route the group DM to the colleague leg" would
@@ -341,8 +339,65 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // with its own keep-veto, so a wrong fire is a safe miss (G4/G6). Running it
     // FIRST also means its Sonnet-written prose is scrubbed and voice-checked by
     // the two gates below, which the owner-private leg cannot offer it.
-    if (ownerIsActing) {
-      cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
+    // v4.4.x (#154) — the room-approval honesty check. Owner ruling: she
+    // announces nothing while a rule-bend escalation waits in the private
+    // approval thread, so the only fabricable claim on that path is a room
+    // reply asserting the decision already came back when it hasn't — INCLUDING
+    // a decision that came back NEGATIVE (cancelled/expired), which is the same
+    // fabrication in different clothes. Cheap, deterministic pre-filter (G8):
+    // the vast majority of colleague turns carry no request at all in this
+    // thread, ever, and those never reach the checker (getLatestRequestForThread
+    // returns null on the first, single-query check below). Runs regardless of
+    // who is acting (a real colleague asking "did he say yes?" is exactly the
+    // risk surface; ownerIsActing alone would miss it).
+    let approvalGrantContext: { isResolved: boolean } | undefined;
+    try {
+      const { anyRequestResolvedForThread, anyRequestPendingForThread, getLatestRequestForThread } = await import('../../db/requests');
+      // R7 (2026-08-06) — R6 gated construction on hasLivePending ALONE
+      // (state='awaiting_owner' right now). That correctly stopped the
+      // paid-forever case on a RESOLVED thread (isResolved permanently true,
+      // nothing left to falsely announce), but it also silently stopped the
+      // check on a thread whose request(s) went cancelled/expired and were
+      // NEVER resolved — isResolved reads false there FOREVER too, which is
+      // exactly the shape of a genuine, standing risk ("he approved it" on a
+      // thread that was in fact cancelled), not a cost-free non-event.
+      // Measured 2026-08-06: 10 of 47 request-carrying threads are fully
+      // terminal with zero resolved rows ever (9 cancelled, 1 expired) — under
+      // R6 NONE of them could ever reach the catch below, because
+      // approvalGrantContext was never built for them. Gate is now
+      // `hasLivePending || (thread ever carried a request && !isResolved)`:
+      // a thread that resolved still goes quiet the moment isResolved flips
+      // true (R6's actual cost win, untouched — 37 of 47 threads), a thread
+      // that never carried a request stays untouched at one cheap query
+      // (the vast majority), and only the narrow terminal-never-resolved
+      // slice (plus the one currently-live thread) keeps paying — which is
+      // the same shape req_1783847332015_bgs91 had pre-R6, except now it's
+      // the genuine risk surface instead of an accidental blanket check.
+      const latestRow = getLatestRequestForThread(profile.user.slack_user_id, threadTs);
+      if (latestRow) {
+        const hasLivePending = anyRequestPendingForThread(profile.user.slack_user_id, threadTs);
+        // isResolved is "was ANY request in this thread ever resolved", not
+        // just the newest row's state (see anyRequestResolvedForThread's doc
+        // comment): a thread can carry 2+ requests, and gating on the latest
+        // row alone inverted a TRUE "he approved it" about an OLDER,
+        // already-resolved row into a rewritten false "that hasn't come
+        // through yet" whenever a newer, unrelated request was still
+        // pending. Passed through so the checker doesn't flag a true claim
+        // about that older, already-granted row while the newer one is
+        // still live.
+        const isResolved = anyRequestResolvedForThread(profile.user.slack_user_id, threadTs);
+        if (hasLivePending || !isResolved) {
+          approvalGrantContext = { isResolved };
+        }
+      }
+    } catch (err) {
+      logger.warn('approval-grant-context lookup threw — skipping the room-approval honesty check', {
+        threadTs, err: String(err).slice(0, 200),
+      });
+    }
+
+    if (ownerIsActing || approvalGrantContext) {
+      cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply, approvalGrantContext);
     }
 
     // Security gate (leak filter + identity-spoof). This is the gate a group DM
@@ -686,7 +741,11 @@ export async function runCodaGates(
  * Fails open: verifier errors, JSON parse errors, rewrite errors — all leave
  * the original draft in place. Never blocks a reply.
  */
-async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
+async function runClaimCheckAndMaybeRewrite(
+  ctx: OutputGateContext,
+  initialReply: string,
+  approvalGrantContext?: { isResolved: boolean },
+): Promise<string> {
   const { profile, result } = ctx;
   let cleanReply = initialReply;
 
@@ -707,6 +766,11 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
       mpimContext: ctx.isMpim
         ? { isMpim: true, participantSlackIds: ctx.mpimMemberIds ?? [] }
         : undefined,
+      // v4.4.x (#154) — deterministic ground truth for the approval-granted
+      // claim (see runOutputGates.ts caller + claimChecker.ts). Undefined on
+      // every pre-existing call site (the owner-private leg's probe/serial
+      // chain never pass it) — byte-identical there.
+      approvalGrantContext,
     });
 
     // v3.0.6 — Module F + E booleans were fully removed from the checker
@@ -810,6 +874,67 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
       });
     }
 
+    // o#224 / R5 — permission_granted's ground truth (anyRequestResolvedForThread)
+    // is thread-scoped, not bound to the SPECIFIC request row a sentence is
+    // about — a thread carrying 2+ requests can have an approved OLDER request
+    // and a still-pending NEWER one, and nothing here can tell which one a
+    // given claim refers to. That is exactly why "any request in this thread
+    // was EVER resolved" (not the latest row's state alone) is the binding: a
+    // true grant about an older resolved row must never be inverted, so when
+    // isResolved is true we NEVER rewrite here, full stop — a safe miss if the
+    // checker somehow still flagged it, never a corrupted reply (G6).
+    // Only when isResolved is false (no request in this thread was EVER
+    // resolved — the claim can only be describing a still-open or rejected
+    // escalation) is a declarative "he approved it" provably false, and the
+    // catch is restored: route through the same tool-less own-the-miss
+    // rewrite every other false-action claim uses (owner ruling 2026-08-06).
+    if (verdict.action_type === 'permission_granted') {
+      // Defensive: this action_type is only meant to fire when the checker was
+      // handed ground truth (approvalGrantContext), since its prompt's whole
+      // CRITICAL section is conditioned on the APPROVAL STATUS block being
+      // present. An undefined context here means either that block was absent
+      // (the model mis-classified) or the ground truth couldn't be read — in
+      // both cases we have no thread-scoped truth to bind a rewrite to, so
+      // stay on the pre-existing detect-and-log-only behavior: a safe miss,
+      // never a guess.
+      if (!approvalGrantContext || approvalGrantContext.isResolved) {
+        logger.warn('Claim-checker flagged a permission_granted claim with no safe ground truth to rewrite against — safe-miss, keeping draft', {
+          senderId: ctx.senderId,
+          threadTs: ctx.threadTs,
+          target_name: verdict.target_name,
+          action_summary: verdict.action_summary,
+          hadApprovalGrantContext: !!approvalGrantContext,
+        });
+        return cleanReply;
+      }
+
+      logger.warn('Claim-checker: false permission_granted claim on a thread with no resolved request — rewriting to own the miss (no tool re-fire)', {
+        senderId: ctx.senderId,
+        threadTs: ctx.threadTs,
+        target_name: verdict.target_name,
+        action_summary: verdict.action_summary,
+      });
+      try {
+        const { rewriteOwningTheMiss } = await import('../claimChecker');
+        const rewritten = await rewriteOwningTheMiss({
+          draft: cleanReply,
+          actionSummary: verdict.action_summary,
+          actionType: verdict.action_type,
+          targetName: verdict.target_name,
+          ownerFirstName: profile.user.name.split(' ')[0],
+          toolSummaries: result.toolSummaries ?? [],
+        });
+        if (rewritten && rewritten.trim().length > 0) {
+          return formatForSlack(rewritten);
+        }
+      } catch (err) {
+        logger.warn('rewriteOwningTheMiss threw for a permission_granted claim — keeping original draft', {
+          senderId: ctx.senderId, threadTs: ctx.threadTs, err: String(err).slice(0, 200),
+        });
+      }
+      return cleanReply;
+    }
+
     // v3.4 — confirmed false claim. DO NOT re-run the orchestrator or re-fire
     // a tool. The old retry (with forceToolOnFirstTurn=message_colleague)
     // auto-sent on a possibly-wrong verdict and caused the Amazia duplicate
@@ -836,6 +961,8 @@ async function runClaimCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply
         ownerFirstName: profile.user.name.split(' ')[0],
         // v3.7.x — the rewriter must verify against the same tool activity
         // the checker read, so it can't invert a true completed action it can't see.
+        // o#224 — no approvalGrantContext here: permission_granted claims
+        // return above and never reach this call (see the block above).
         toolSummaries: result.toolSummaries ?? [],
       });
       // v4.2.x — no history write here any more. This used to append the honest

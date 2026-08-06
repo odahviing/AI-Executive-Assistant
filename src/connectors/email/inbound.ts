@@ -305,6 +305,14 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     channelId: channelKey,
     userId: profile.user.slack_user_id,
     senderRole: 'owner',
+    // v4.4.x (#154) — the sender gate above (ownerEmailAddresses) is the ONLY
+    // party that can reach this call: an authenticated single-owner sender,
+    // no colleague and no room. `owner_dm` reproduces today's behaviour
+    // byte-for-byte (matches the other owner-only synthetic callers —
+    // briefs.ts, routine.ts) and is never more trusting than that gate: email
+    // has no multi-party concept, so there is no 'room' surface to map to.
+    authority: 'owner',
+    surface: 'owner_dm',
     channel: 'email',
     profile,
     interactive: true,

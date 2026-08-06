@@ -24,7 +24,7 @@ import { getOutreachJobByRequestId } from '../../db/jobs';
 import { workTimeBaseFromNow } from '../../utils/workHours';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
-import { parseDetails } from './types';
+import { parseDetails, deriveOriginSurface } from './types';
 import { getConnection } from '../../connections/registry';
 import logger from '../../utils/logger';
 
@@ -385,13 +385,41 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
   try {
     // Dynamic import avoids a load-time cycle (orchestrator → skills → spine).
     const { runOrchestrator } = await import('../orchestrator');
+    // v4.4.x (#154-replay-surface; corrected by o#219) — create_task is
+    // COLLEAGUE-reachable (skills/registry.ts's COLLEAGUE_ALLOWED_TOOLS has no
+    // authority/senderRole gate on it), so a research/reminder row is NOT
+    // owner-only by construction — any colleague can raise one. Hardcoding
+    // 'owner' here shipped the FULL owner tool set (get_calendar, etc.) plus
+    // the OWNER_ROOM_ACTION_TOOLS room-action floor to a colleague-raised run,
+    // whatever origin_channel it then posted the reply into.
+    //
+    // `row.initiated_by` is the raiser's raw, never-clamped Slack id (stamped
+    // straight off context.userId at creation, tasks/skill.ts's create_task) —
+    // comparing it to the owner's own id re-derives TRUE authority exactly
+    // like the Slack front door's getSenderRole(senderId), rather than
+    // trusting `initiated_by_role` for this: that field (like the live turn's
+    // `senderRole`) is surface-clamped to 'colleague' for ANYONE — owner
+    // included — raised from inside a room, so it can't alone tell an
+    // owner-in-a-room from a genuine colleague.
+    const rawRole: 'owner' | 'colleague' = row.initiated_by === profile.user.slack_user_id ? 'owner' : 'colleague';
+    // `surface`/`isMpim` stay row-derived (unchanged from #154-replay-surface)
+    // so every tool call this run makes reads subjectViewerFor/viewerEmailFor
+    // honestly instead of as a fully private owner DM.
+    const surface = deriveOriginSurface(row);
+    // Mirrors the live-turn clamp at connectors/slack/app/processMessage.ts:
+    // senderRole reads 'colleague' on any room surface no matter who raised
+    // it; authority (the actual privilege floor) is never clamped by surface.
+    const senderRole: 'owner' | 'colleague' = surface === 'room' ? 'colleague' : rawRole;
     const result = await runOrchestrator({
       userMessage: researchPrompt,
       conversationHistory: [],
       threadTs: `research_${row.id}_${Date.now()}`,
       channelId,
-      userId: row.owner_user_id,
-      senderRole: 'owner',
+      userId: row.initiated_by,
+      senderRole,
+      authority: rawRole,
+      surface,
+      isMpim: surface === 'room',
       channel: 'slack',
       interactive: false,  // scheduled research run, not a conversation: no social coda
       profile,

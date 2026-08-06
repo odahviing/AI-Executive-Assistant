@@ -47,6 +47,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext } from '../types';
 import { getPersonMemory, searchPeopleMemory } from '../../db/people';
+import { viewerEmailFor } from '../../utils/displaySubject';
 import logger from '../../utils/logger';
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -96,7 +97,15 @@ export interface BookingRequest {
   // Owner-explicit override path, already gated on the authenticated sender.
   // Handlers NEVER set this from raw args — they call `grantRelaxed` (P22).
   relaxed: boolean;
-  relaxedReason: 'owner_direct' | 'none';
+  /**
+   * v4.4.x (#154) — 'owner_room_bend' added. The authenticated owner asked
+   * to bend a rule from a clamped surface (MPIM/channel): `relaxed` stays
+   * false (never a self-grant from a room), but this tells
+   * `planInputFromBookingRequest` → `planMeeting` that the violation is
+   * already his own explicit insistence, not a colleague's first ask — see
+   * `grantRelaxed`'s doc.
+   */
+  relaxedReason: 'owner_direct' | 'owner_room_bend' | 'none';
 
   // Cross-cutting signals the downstream pipeline needs. Computed once
   // here so individual rule checks / detectors don't each re-load them.
@@ -104,6 +113,22 @@ export interface BookingRequest {
     threadTs?: string;
     isMpim: boolean;
     isOwnerInGroup: boolean;
+    /**
+     * v4.4.9 (#154) — the requesting colleague's own email (via
+     * `viewerEmailFor`), so planInputFromBookingRequest can thread it
+     * alongside `viewer` into checkSlot's attendee-aware subject mask.
+     * `undefined` for an owner turn (subjectViewerFor already reads 'owner'
+     * there); `null` for a genuine colleague whose email didn't resolve.
+     */
+    viewerEmail?: string | null;
+    /**
+     * o#218 — the turn's `surface`/`channel` (SkillContext), carried through
+     * so `planInputFromBookingRequest` can compute `viewer` via the ONE
+     * canonical `subjectViewerFor` predicate instead of a hand-rolled
+     * duplicate. Required on SkillContext, so always populated here.
+     */
+    surface: SkillContext['surface'];
+    channel: SkillContext['channel'];
   };
 
   // Diagnostic-only — never used as logic. Original Sonnet args + tool name
@@ -407,132 +432,80 @@ export async function gateSensitivity(
  * could trust the invariant while a counter-example sat in the tree. One
  * function, so there is nothing left to drift.
  *
- * Owner-authenticated direct is now the ONLY grant. `senderRole` is the
+ * Owner-authenticated direct is the full grant. `senderRole` is the
  * authenticated sender post-clamp — never a claim from the message.
  *
- * The two grants that used to exist and why neither survives:
+ * The grant that used to exist and why it doesn't survive:
  *   • OWNER-IN-MPIM PROPOSED (owner 2026-07-26: *"yes, if i want to do
  *     something wrong in group chat, raise for approval or at least tell me"*).
  *     Silent by construction: the group-DM clamp (processMessage) makes his
  *     `senderRole` 'colleague', so planMeeting's one-step owner heads-up
  *     (`initiator === 'owner'`) could never fire while `allowRelaxed` waved
  *     eight rules through — his override waived eight rules and told him about
- *     none of them. Approval is the right half, and it is what the clamp already
- *     decided: the clamp is an anti-cheat boundary across ALL tools, and his
- *     flag-and-override in his own group DM is delivered through the approval
- *     flow, not by re-granting in-group authority. A "here's what I waived"
- *     notice instead would leave the booking on colleague-level authority and
- *     make the notice the only control — a wish, not a control. The mechanism
- *     also deserved to go on its own merits: it keyed on the literal string
- *     "sender: <owner name>" appearing in message CONTENT — an authorization
- *     decision made on a claim inside a message rather than on the authenticated
- *     sender — and read that claim with an English/Hebrew regex phrase list, so
- *     the same override was unavailable to him in Russian or Spanish and
- *     available to anyone whose message happened to contain the string.
+ *     none of them. The mechanism also deserved to go on its own merits: it
+ *     keyed on the literal string "sender: <owner name>" appearing in message
+ *     CONTENT — an authorization decision made on a claim inside a message
+ *     rather than on the authenticated sender — and read that claim with an
+ *     English/Hebrew regex phrase list, so the same override was unavailable
+ *     to him in Russian or Spanish and available to anyone whose message
+ *     happened to contain the string.
  *   • DEFERRED REPLAY — removed here as unreachable, not as a policy change. It
  *     was gated on a `NormalizeOptions.isDeferredReplay` flag that no call site
  *     ever passed, and it did not need to: a replay runs on a synthetic context
  *     with `senderRole: 'owner'` (deferredActionReplay.ts), so it is granted by
  *     the owner branch below. A replay's relaxed still survives, exactly as it
  *     did before.
+ *
+ * v4.4.x (#154) — THREE outcomes now, not two, because `context.authority`
+ * (the turn's AUTHENTICATED identity, resolved once at the transport's own
+ * front door — never derived here, never a claim from message content) makes
+ * "the owner is typing" and "senderRole reads colleague" separable for the
+ * first time:
+ *   1. `senderRole === 'owner'` (a genuine 1:1 DM, never clamped) — GRANTED,
+ *      one step, exactly as before ('owner_direct'). Unchanged.
+ *   2. `senderRole !== 'owner'` but `authority === 'owner'` (the owner,
+ *      authenticated, typing in an MPIM/channel) — NOT granted.
+ *      `allowRelaxed` stays false and checkSlot enforces every rule exactly
+ *      as it would for a colleague — the clamp is an anti-cheat boundary
+ *      across every tool and authority never decides WHICH rules apply, only
+ *      how a bend is HANDLED. This finally delivers the 2026-07-26 quote
+ *      above correctly: his own explicit ask to bend a rule is not silently
+ *      discarded either. `relaxedReason: 'owner_room_bend'` tells
+ *      `planMeeting` this is already his insistence, not a colleague's first
+ *      ask, so `decideAction` skips the nearby-alternatives offer and
+ *      escalates straight to `escalate_approval` — guaranteeing Sonnet calls
+ *      create_approval(kind=policy_exception) for the EXACT slot he asked
+ *      for. The approval flow is the delivery mechanism, never a re-grant of
+ *      in-room authority (.claude/SESSION_STARTER.md:144; owner ruling
+ *      2026-08: *"if I'm asking something that breaking my rules, its ok to
+ *      go to my approval flow and ask"*).
+ *   3. Anything else (a genuine colleague, `authority === 'colleague'`) —
+ *      DENIED, 'none', same as always. A colleague's own "book it anyway" has
+ *      no bend to route anywhere; only the AUTHENTICATED owner's does.
  */
 export function grantRelaxed(
   args: Record<string, unknown>,
   context: SkillContext,
 ): { relaxed: boolean; relaxedReason: BookingRequest['relaxedReason'] } {
   const rawRelaxed = args.relaxed === true;
+  if (!rawRelaxed) return { relaxed: false, relaxedReason: 'none' };
 
-  if (context.senderRole === 'owner' && rawRelaxed) {
+  if (context.senderRole === 'owner') {
     return { relaxed: true, relaxedReason: 'owner_direct' };
   }
 
-  if (rawRelaxed) {
-    logger.info('grantRelaxed — relaxed requested on a non-owner context, DENIED', {
+  if (context.authority === 'owner') {
+    logger.info('grantRelaxed — owner rule-bend from a clamped surface, routing to the approval flow', {
       requester: context.userId, isMpim: context.isMpim === true,
-      isOwnerInGroup: context.isOwnerInGroup === true,
     });
+    return { relaxed: false, relaxedReason: 'owner_room_bend' };
   }
+
+  logger.info('grantRelaxed — relaxed requested on a non-owner context, DENIED', {
+    requester: context.userId, isMpim: context.isMpim === true,
+    isOwnerInGroup: context.isOwnerInGroup === true,
+  });
   return { relaxed: false, relaxedReason: 'none' };
-}
-
-/**
- * The tools whose behavior `grantRelaxed` actually decides — the three schemas
- * that expose `relaxed` (meetings.ts). A stray `relaxed` arg anywhere else
- * changes nothing, so telling the owner an override "didn't apply" there would
- * be a false reason (M11).
- */
-const RELAXED_AWARE_TOOLS = new Set(['find_available_slots', 'create_meeting', 'move_meeting']);
-
-/**
- * The DISCLOSURE half of `grantRelaxed` (owner, 2026-07-27).
- *
- * `grantRelaxed` refuses relaxed on every non-owner context, and on a shared
- * surface the owner IS a non-owner context: processMessage.ts:139 clamps his
- * `senderRole` to 'colleague' for leak-safety. That refusal is correct and stays
- * exactly as it is — the clamp is the anti-cheat boundary across all tools and
- * nothing here re-grants clamped authority.
- *
- * What was wrong is that the refusal was SILENT. It went to the log line above
- * and nowhere else, and `relaxedReason: 'none'` reads identically whether an
- * override was never asked for or asked for and dropped — so no tool result
- * could tell him. He asks to bend one of his own rules, the bend is discarded,
- * and Maelle answers the un-relaxed question as though it had landed: he asked
- * for one thing, a different thing happened, and he had no way to know.
- *
- * This returns the owner-facing disclosure; ops.ts attaches it to whatever the
- * tool returns, so it rides the booked / refused / rule_violation branches
- * alike from ONE site.
- *
- * WAS HIS AUTHORITY CLAMPED — decided from the authenticated identity, which is
- * how `rawRole` itself is decided (slack/app.ts:95-97, the one definition) and
- * how postReply already tells the clamped owner from a real colleague
- * (postReply.ts:356, :568). Deliberately NOT `isOwnerInGroup`: that flag is one
- * clamp surface of three and is OPTIONAL on SkillContext, so an absent flag
- * read as "not clamped" is precisely how the channel surface stayed silent
- * after the MPIM one was fixed. `userId` and `profile` are both REQUIRED, so
- * this half cannot be lost by an incomplete context and cannot miss a surface
- * added later. It is also the exact complement of the grant: `relaxed`
- * requested while `senderRole !== 'owner'` IS the denied branch above, so this
- * can never contradict an override that was granted.
- *
- * WHICH SURFACE — needed separately, because the disclosure must carry a true
- * reason AND a true remedy (M11), and the remedy differs per surface. The three
- * are ruled on individually, since a single conjunction that only happened to
- * cover one of them is how the gap existed:
- *   • MPIM — DISCLOSE. `isMpim` is on SkillContext, so "not in a group chat,
- *     tell me in our DM" is both true and actionable.
- *   • CHANNEL — SHOULD disclose, CANNOT yet. `isChannel` / `isOwnerInChannel`
- *     (processMessage.ts:138) never reach SkillContext, and from here a
- *     clamped-owner turn that is not an MPIM is INDISTINGUISHABLE from
- *     colleague-test. Firing the group-chat wording would state a false reason
- *     in colleague-test, and M11 makes a confident wrong reason worse than
- *     silence — so it waits on the surface being plumbed. A named dependency,
- *     not an oversight.
- *   • COLLEAGUE-TEST (processMessage.ts:123) — DO NOT disclose, by decision.
- *     He deliberately asked to be treated as a colleague in that thread to see
- *     what colleagues experience; an owner-only notice injected into the reply
- *     corrupts the very behaviour under test, and its remedy would be a lie —
- *     he IS in a 1:1 DM there, so "tell me in our DM" is false.
- *
- * A 1:1 DM keeps `senderRole === 'owner'`, so the override genuinely works and
- * this stays silent; no `relaxed` in the args means no override was attempted,
- * so an ordinary shared-surface turn is never narrated at.
- */
-export function clampedRelaxedNotice(
-  toolName: string,
-  args: Record<string, unknown>,
-  context: SkillContext,
-): string | undefined {
-  if (args.relaxed !== true) return undefined;
-  if (!RELAXED_AWARE_TOOLS.has(toolName)) return undefined;
-
-  const ownerClamped = context.senderRole === 'colleague'
-    && context.userId === context.profile.user.slack_user_id;
-  if (!ownerClamped) return undefined;
-  if (context.isMpim !== true) return undefined;
-
-  const ownerFirst = context.profile.user.name.split(' ')[0];
-  return `${ownerFirst} asked to bend one of his OWN scheduling rules here ("it can be tight" / "book it anyway" / "go ahead"), and that override did NOT take effect: a rule-bend counts only when he says it in your 1:1 DM with him, never in a group chat. So this result is the UN-overridden one — every one of his rules was still enforced. SAY THAT TO HIM in this reply, in one clause: his override didn't apply, what he's looking at is the strict answer, and if he wants it applied he should tell you in your DM. NEVER narrate as though it landed ("you're OK pushing through", "since you said it can be tight"), and never present these times as already bent to fit. It's for HIM — the others in this chat need no explanation of it.`;
 }
 
 function buildContext(
@@ -544,5 +517,16 @@ function buildContext(
     threadTs: context.threadTs,
     isMpim: context.isMpim === true,
     isOwnerInGroup: context.isOwnerInGroup === true,
+    // W5/R4 (2026-08-06) — the room-tightening lives inside viewerEmailFor
+    // now (surface==='room' → null); call it directly. A blanket `?? null`
+    // here also forced the EMAIL leg's correct `undefined` into `null`,
+    // masking every forwarded subject instead of only private ones — see
+    // viewerEmailFor's doc comment.
+    viewerEmail: viewerEmailFor(context),
+    // o#218 — carried through so planInputFromBookingRequest can compute
+    // `viewer` via subjectViewerFor instead of re-deriving it from
+    // initiator/isMpim.
+    surface: context.surface,
+    channel: context.channel,
   };
 }

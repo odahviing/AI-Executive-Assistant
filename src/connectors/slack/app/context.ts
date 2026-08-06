@@ -3,10 +3,10 @@
  *
  * app.ts (createSlackAppForProfile) builds ONE SlackAppContext and threads it
  * to the extracted helpers / message processor / handlers. Everything that used
- * to be a closure over the factory body (profile, app, the live botUserId, the
- * colleague-test Set, and the cross-referencing helper fns) is reached through
- * this object. botUserId is a LIVE getter — it is set asynchronously by the
- * startup auth.test and must never be snapshotted.
+ * to be a closure over the factory body (profile, app, the live botUserId, and
+ * the cross-referencing helper fns) is reached through this object. botUserId
+ * is a LIVE getter — it is set asynchronously by the startup auth.test and
+ * must never be snapshotted.
  */
 
 import type { App } from '@slack/bolt';
@@ -105,13 +105,12 @@ export interface ScanAndPrepareImageParams {
 
 /**
  * The threading scaffold passed to every extracted function. The factory owns
- * the mutable state (colleagueTestThreads, the live botUserId) and binds the
- * cross-referencing helpers as methods so moved bodies keep calling them by name.
+ * the mutable state (the live botUserId) and binds the cross-referencing
+ * helpers as methods so moved bodies keep calling them by name.
  */
 export interface SlackAppContext {
   profile: UserProfile;
   app: App;
-  colleagueTestThreads: Set<string>;
   /** LIVE — set asynchronously by the startup auth.test; never snapshot. */
   readonly botUserId: string | null;
   getSenderRole(senderId: string): SenderRole;

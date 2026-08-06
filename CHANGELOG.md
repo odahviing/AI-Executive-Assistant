@@ -2,6 +2,49 @@
 
 ---
 
+## 4.5.0 — one flag decided who may read and who may act; now two fields do
+
+Maelle had a single value, `senderRole`, answering two unrelated questions: *who else can see this turn*, and *whose word carries the owner's authority*. Because a group DM or a channel clamps that value to `colleague`, the owner lost his own authority the moment he stepped into a room — and five files had each invented a private workaround for it, disagreeing with one another. This release splits it: **`authority`**, derived from the authenticated Slack sender id and gating actions only, and **`surface`** (`owner_dm` / `colleague_dm` / `room`). Both are required, so no future transport can default into "unclamped". `senderRole` keeps its old meaning as data scope, so the two tool chokepoints that are the real privacy floor never moved.
+
+**The owner keeps his actions in a room; he never gets his data there.** Booking, moving, cancelling and approving now work wherever he is authenticated. Person memory, preferences and private meeting subjects stay blocked on a shared surface even when he is the one asking — his ruling, and the tool wall enforces it rather than an output filter.
+
+**A rule-bend in a room reaches his private approval thread in code, and the room is never told.** Previously the override was silently dropped. Now `create_approval` is raised deterministically by the handler rather than depending on the model choosing to call it; the room sees no escalation, no sign-off request, and no explanation of his rules to the other people present.
+
+**Two live privacy leaks closed.** His own memory file and verified-sender block were rendering into any channel he posted in. A colleague could read the subject of a meeting he was not on wherever a narration path bypassed the masking helper — including three handlers whose Graph projection made masking impossible until it was widened.
+
+### Added
+- `authority` and `surface` as required fields on `OrchestratorInput` and `SkillContext`, resolved once per turn at each transport front door.
+- `OWNER_ROOM_ACTION_TOOLS` — the owner's action set in a room, built as a superset of the colleague set so the data tools cannot ride along.
+- `createApprovalRequest()` — `create_approval`'s logic extracted and exported, so a handler that has already proven a deviation can raise the approval itself instead of trusting the model to.
+- A `permission_granted` claim class: a reply asserting a permission was granted is checked against whether a request for that thread actually resolved.
+- `src/db/migrations/v4_4_9_social_provenance_backfill.ts` — restamps social rows written on a colleague leg, which had all been recorded as owner-created.
+
+### Changed
+- An MPIM and a channel are now the same thing for security and privacy. The honest-refusal rule, the room-rules block and the authority paragraph all key on surface, so a channel inherits every protection a group DM had.
+- Subject masking is attendee-aware, and a private event hides its attendee names as well as its subject.
+- A deferred replay reconstructs the surface the request originated on instead of running as a blanket owner.
+- An approval raised in a channel now returns to that channel's thread.
+- On a colleague's own DM, Maelle keeps what she learned from talking with him and the owner's structured notes about him — the owner ruled that content is instruction, not gossip — but a room gets none of it.
+
+### Removed
+- Colleague-test mode, and the second membership-based clamp in `buildTurnContext`. One clamp site remains.
+- `clampedRelaxedNotice` and `RELAXED_AWARE_TOOLS` — an override that now escalates has nothing to disclose.
+
+### Fixed
+- A colleague could rename, relocate and re-categorize a meeting he could not see, using an event id the conflict refusal handed him: the requester gate sat inside a field-change conditional and never ran for a subject-only change.
+- Two messages from different people inside the debounce window merged into one turn running under the last sender's identity — a colleague's instruction could execute with owner authority. A batch spanning senders now runs as `colleague`.
+- A scheduled research run paired owner tools with a room surface and was reachable by any colleague through `create_task`.
+- The owner's morning brief masked his own personal events' attendees.
+
+### Not changed
+- **Email and WhatsApp were explicitly out of scope** and are byte-identical apart from declaring the two new fields. One round broke that accidentally; it was restored.
+- The two `registry.ts` tool chokepoints and `assistant.ts`'s owner-only hard block — the actual data wall — are untouched by design.
+
+### The cost, recorded because it should inform the next one
+Five build rounds and roughly 9.7M tokens against a normal night's 150–250k. The work was dispatched as one thirteen-piece wave across seven lanes, all landing on the privacy perimeter at once; each round's repairs repeatedly hollowed out another round's, and only full-diff adversarial passes could see it — per-item verification structurally cannot. A change of this shape should have shipped as the two live leaks first, then the fields alone, then one consumer at a time.
+
+---
+
 ## 4.4.9 — tell her to leave a meeting alone and it stays left alone
 
 The owner reverts an auto-move and says don't do that again. Until now that instruction could be quietly erased by the calendar-health sweep that came a few hours later — and the fix for the *reported* symptom turned out to erase it faster. Two rounds were needed, and the second one is the release. Alongside it, the framework's bug history learned to recognise itself: four hundred past bugs now record which promise they broke, so a returning failure identifies itself instead of arriving as a stranger.

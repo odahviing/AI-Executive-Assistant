@@ -52,12 +52,12 @@
  *     construction, not by inspection: `bookingRequest.grantRelaxed` is the ONE
  *     function that turns `args.relaxed` into an override, it grants only on
  *     `senderRole === 'owner'` (the authenticated sender, post-clamp), and every
- *     path — normalized or not — reads it. Two grants used to exist and both are
- *     gone: owner-in-MPIM-proposed (the group-DM clamp keeps his senderRole
- *     'colleague', so it waived eight rules on colleague authority with the owner
- *     heads-up unreachable) and deferred-replay (unreachable flag; a replay runs
- *     on a synthetic OWNER context, deferredActionReplay.ts, so the owner branch
- *     covers it). So `allowRelaxed` implies the owner.
+ *     path — normalized or not — reads it. So `allowRelaxed` implies the owner,
+ *     still true after v4.4.x (#154): a rule-bend from the AUTHENTICATED owner
+ *     on a clamped surface (MPIM/channel) does NOT grant `allowRelaxed` either
+ *     — it routes to `escalate_approval` instead (`relaxedReason:
+ *     'owner_room_bend'`, planMeeting.ts), never to a self-grant. Authority
+ *     decides how a bend is HANDLED, never which rules apply.
  *   • SEARCH — unaffected either way: the walker's own workday gate skips
  *     off-days before checkSlot is ever called, relaxed or not, so the two
  *     cannot disagree (M2).
@@ -249,6 +249,15 @@ export interface RuleCheckInput {
    * (omitted) is the safe one: mask.
    */
   viewer?: SubjectViewer;
+  /**
+   * v4.4.9 (#154) — the requesting colleague's own email (via
+   * `viewerEmailFor`), threaded alongside `viewer` so the occupancy scan's
+   * subject can apply the attendee-aware test: a colleague who isn't on the
+   * conflicting/optional event never sees its subject, private or not.
+   * Omitted → `displaySubject`'s old private-flag-only behaviour (an owner
+   * viewer, or a caller that hasn't resolved a specific colleague's identity).
+   */
+  viewerEmail?: string | null;
   /**
    * v4.1.x (M2) — booking lead time in hours for THIS caller
    * (bookingLeadTimeHours: owner vs colleague). Pre-fix this rule lived ONLY in
@@ -537,6 +546,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // date. Rules 1/5/9 read workday-ness, windows, location + timezone from it.
   const effectiveDay = input.effectiveDay ?? getEffectiveWorkDayForInstant(input.slotStartIso, profile);
   const viewer: SubjectViewer = input.viewer ?? 'other';
+  // v4.4.9 (#154) — see the field doc on RuleCheckInput.viewerEmail.
+  const viewerEmail = input.viewerEmail;
   const ownerFirst = profile.user.name.split(' ')[0];
   // M11 — WHO reads the label this validator produces. The owner reads his own
   // heads-up (planMeeting's one-step `overrideNotice`), a colleague reads about
@@ -590,7 +601,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       if (level === 'free') {
         level = 'optional';
         {
-          const subj = displaySubject(ev, profile, viewer);
+          const subj = displaySubject(ev, profile, viewer, viewerEmail);
           overOptional = (subj && subj !== PRIVATE_MASK) ? subj : 'an optional meeting';
         }
       }
@@ -600,7 +611,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     level = 'unfiltered';
     overOptional = undefined;
     {
-      const commitSubj = displaySubject(ev, profile, viewer);
+      const commitSubj = displaySubject(ev, profile, viewer, viewerEmail);
       overCommitment = {
         id: ev.id,
         subject: (commitSubj && commitSubj !== PRIVATE_MASK) ? commitSubj : 'meeting',

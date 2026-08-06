@@ -1,6 +1,8 @@
 import { getDb } from './client';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
+import { getActiveSubjectsForPerson, getRecentTopicBeats } from './socialSubjects';
+import { isCurrentRankOwnerAuthored } from './engagementRank';
 
 // ── People Memory ─────────────────────────────────────────────────────────────
 // Persistent contact directory — auto-populated when people are mentioned or
@@ -66,6 +68,18 @@ export interface PersonProfile {
   // When this profile was last meaningfully updated
   updated_at?: string;
 }
+
+// profile_json fields the OWNER curates about a person: an assessment SHE
+// forms of them, not something the person stated about themselves
+// (engagement_level, communication_style, role_summary, reports_to,
+// response_speed, collaboration_notes). Mirrors, from the WRITE side,
+// `COLLEAGUE_SELF_WRITABLE_FIELDS` in `core/assistant.ts` — a colleague may
+// only self-write timezone / state / working_hours / language_preference /
+// name_he / currently_traveling; these owner-curated fields are dropped there
+// so the colleague cannot overwrite the owner's own assessment of them. (They
+// ARE rendered back to that same person's own DM by `buildPersonWorkContextBlock`
+// below — OWNER RULING 2026-08-06 — this comment is about write-authority
+// only.) Keep the two lists in sync.
 
 /**
  * A single entry in the interaction timeline for a person.
@@ -1701,15 +1715,15 @@ export function formatPeopleMemoryForPrompt(
 
 // Owner-side topic management lives in the Social Engine
 // (`src/core/social/` + `src/db/socialSubjects.ts`). The colleague context
-// block below surfaces profile + notes + interactions without any
+// block below surfaces the activity timeline + subjects/topics without any
 // stale/cooldown machinery.
 
 /** Timeline entries that belong to the SOCIAL layer, not the work layer. */
 const SOCIAL_INTERACTION_TYPES = new Set(['social_chat', 'social_ping']);
 
 /**
- * WORK context about the colleague Maelle is talking to — who they are on the
- * org chart, how they work, what she and they last did together.
+ * WORK context about the colleague Maelle is talking to — the recent work
+ * she and they last did together.
  *
  * Split out of buildSocialContextBlock (which was gated entirely on the optional
  * `skills.social` toggle) because none of this is social: role, reports_to,
@@ -1719,20 +1733,27 @@ const SOCIAL_INTERACTION_TYPES = new Set(['social_chat', 'social_ping']);
  * of it as collateral. This block is unconditional on a colleague turn; the
  * social half below is what the toggle governs.
  *
+ * v4.5.x (#154) briefly stripped the "Profile:" line (communication_style,
+ * response_speed, role_summary, reports_to, collaboration_notes) on the theory
+ * that it relayed the owner's own editorial content about a person back to
+ * that same person. OWNER RULING 2026-08-06 (gh wave): reverted — "get her the
+ * data." The same material was already reaching this exact turn anyway via
+ * `systemPrompt.ts`'s speakerMemoryBlock, which renders the person's full
+ * `.md` file (capturePass.ts mirrors four of these five fields into it), so
+ * the strip closed nothing while making Maelle measurably less competent
+ * about people whose `.md` has no mirror at all. The line is back.
+ *
  * Scope note (P9): this is built for the AUTHENTICATED speaker, about
  * themselves — tier 2, they may read everything about themselves. It is never
- * built for a third party. `sharedSurface` says the answer will be read by more
- * than that one person (MPIM / channel), and the booking tail is withheld there:
+ * built for a third party. The caller (buildTurnContext.ts) never invokes this
+ * on a room surface (MPIM / channel) at all — v4.5.x (#154) moved the old
+ * per-field `sharedSurface` trim to a wholesale suppression one level up, since
  * a meeting's subject, venue and time is the speaker's own business, and the
- * others in the room may not be on it. Withholding is the default when a
- * reader's entitlement is unclear.
+ * others in the room may not be on it.
  *
  * Returns '' for unknown people or when nothing is on file.
  */
-export function buildPersonWorkContextBlock(
-  slackId: string,
-  opts?: { sharedSurface?: boolean },
-): string {
+export function buildPersonWorkContextBlock(slackId: string): string {
   const person = getPersonMemory(slackId);
   if (!person) return '';
 
@@ -1768,7 +1789,7 @@ export function buildPersonWorkContextBlock(
   if (workExchanges.length > 0) {
     lines.push(`Recent work exchanges:\n${workExchanges.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
   }
-  if (recentBookings.length > 0 && !opts?.sharedSurface) {
+  if (recentBookings.length > 0) {
     lines.push(`Recent bookings with them (${BOOKING_SNAPSHOT_FRAME}):\n${recentBookings.slice(-5).map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
   }
 
@@ -1779,14 +1800,23 @@ export function buildPersonWorkContextBlock(
 /**
  * The SOCIAL half of the per-person block, injected on COLLEAGUE turns only when
  * `skills.social` is on (owner turns use the Social Engine directive instead).
- * Engagement rank, the initiation cadence gate, and personal notes — the parts
- * that genuinely belong to the optional friend-of-the-team layer.
+ * The initiation cadence gate, recent social moments, and the subjects/topics
+ * Maelle built up from talking WITH this person directly — the parts that
+ * genuinely belong to the optional friend-of-the-team layer.
  *
- * Work competence (role, reports_to, response speed, collaboration, recent work
- * exchanges and bookings) is NOT here — see buildPersonWorkContextBlock, which
- * runs whether or not social is on. Returns '' for unknown people.
+ * Work competence (recent work exchanges and bookings) is NOT here — see
+ * buildPersonWorkContextBlock, which runs whether or not social is on.
+ * Returns '' for unknown people.
  *
  * v4.4.x (#170) — person_id-keyed worker (works for externals too).
+ * v4.5.x (#154, corrected o#229) — raw personal notes no longer render (see
+ * the inline comment at PersonNote) — they carry an owner-authored value this
+ * same person must never read back, and PersonNote has no author field to
+ * tell that apart. Subjects/topics with created_by='owner' are filtered out
+ * for the identical reason. Engagement rank's tone line DOES still render,
+ * but only when `engagement_rank_log`'s latest reason for this person shows
+ * the value is Maelle's own auto-derived signal, not an owner override (see
+ * the inline comment at the read site).
  */
 export function buildSocialContextBlockById(personId: string, timezone: string, assistantName: string = 'Assistant'): string {
   const person = getPersonById(personId);
@@ -1797,26 +1827,42 @@ export function buildSocialContextBlockById(personId: string, timezone: string, 
   const hoursAgoInit     = lastInitiatedAt ? now.diff(lastInitiatedAt, 'hours').hours : Infinity;
   const canMaelleInitiate = hoursAgoInit >= 24;
 
-  const notes: PersonNote[] = (() => {
-    try { return JSON.parse(person.notes || '[]'); } catch { return []; }
-  })();
+  // v4.5.x (#154, corrected o#229) — numeric engagement rank is read here to
+  // GATE behavior always. Whether it's also narrated as a tone line depends
+  // on provenance: `engagement_rank_log` DOES record which reason produced
+  // the current value (`isCurrentRankOwnerAuthored` reads the latest row) —
+  // 'owner_directive' / 'manual' / 'migration_from_legacy' means the OWNER set
+  // this number as an editorial call about the person — migration carries
+  // forward the legacy `profile_json.engagement_level`, itself an
+  // owner-curated field, so it is owner-authored too even though no owner
+  // action fired the MIGRATION step itself — which must not be relayed back
+  // to that same person (P9); every other reason (reply_engaged,
+  // revival_retry, colleague_initiated, or no log row at all) is Maelle's own
+  // auto-derived signal and is safe to narrate as tone guidance. The rank-0
+  // opt-out gate is unconditional either way — P11 forbids Maelle-initiated
+  // social with this person regardless of who set the rank.
+  const rank = (person as any).engagement_rank as number | undefined;
+  const rankValue = typeof rank === 'number' ? rank : 2;
+  const rankIsOwnerAuthored = person.slack_id ? isCurrentRankOwnerAuthored(person.slack_id) : false;
 
   const lines: string[] = [`SOCIAL CONTEXT — ${person.name}`];
 
-  // v2.2 — numeric engagement rank 0..3. Replaces the legacy string enum.
-  // Auto-adjusts based on ping response signal (engagementRank.ts).
-  const rank = (person as any).engagement_rank as number | undefined;
-  const rankValue = typeof rank === 'number' ? rank : 2;
   if (rankValue === 0) {
-    lines.push(`Engagement rank: 0 — this person has signalled they don't want social exchanges with you. Do NOT initiate social chat. Stay strictly professional. If THEY bring something personal up, respond warmly and briefly — don't milk it.`);
+    lines.push(`This person has signalled they don't want social exchanges with you. Do NOT initiate social chat. Stay strictly professional. If THEY bring something personal up, respond warmly and briefly — don't milk it.`);
     return lines.join('\n');
   }
-  if (rankValue === 1) {
-    lines.push(`Engagement rank: 1/3 — minimal. They reply when pinged but don't lean in. Keep social moments very light and short; don't push.`);
-  } else if (rankValue === 2) {
-    lines.push(`Engagement rank: 2/3 — open / neutral. Normal social cadence works.`);
-  } else if (rankValue === 3) {
-    lines.push(`Engagement rank: 3/3 — loves to chat. Be warm and reciprocate their energy; they'll carry the conversation.`);
+  // No numeral in these lines — this block reaches a colleague-facing prompt
+  // (see the function comment above) and textScrubber has no rank term to
+  // catch a leaked "3/3", so the tone guidance must never carry the raw
+  // number; only the qualitative guidance is safe to narrate.
+  if (!rankIsOwnerAuthored) {
+    if (rankValue === 1) {
+      lines.push(`Engagement level: minimal. They reply when pinged but don't lean in. Keep social moments very light and short; don't push.`);
+    } else if (rankValue === 2) {
+      lines.push(`Engagement level: open / neutral. Normal social cadence works.`);
+    } else if (rankValue === 3) {
+      lines.push(`Engagement level: loves to chat. Be warm and reciprocate their energy; they'll carry the conversation.`);
+    }
   }
 
   if (canMaelleInitiate) {
@@ -1835,16 +1881,29 @@ export function buildSocialContextBlockById(personId: string, timezone: string, 
     lines.push(`Recent social moments:\n${socialMoments.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
   }
 
-  // Personal/relationship notes
-  const recentNotes = notes.slice(-8);
-  if (recentNotes.length > 0) {
-    lines.push(`Personal notes:\n${recentNotes.map(n => `  [${n.date}] ${n.note}`).join('\n')}`);
-  } else {
-    lines.push(`Personal notes: none yet — good opportunity to learn something`);
+  // v4.5.x (#154) — raw personal notes (PersonNote[]) are EXCLUDED entirely,
+  // replacing the old "Personal notes: ..." rendering below. PersonNote is
+  // {date, note} with NO author field (see the interface above), so a note
+  // the OWNER wrote about this person cannot be distinguished from anything
+  // else in the array — and this block renders while Maelle is talking to
+  // the very person the notes are about. What replaces it: subjects/topics
+  // she built up from talking WITH them directly (created_by != 'owner'),
+  // real safe material instead of a blanket "none yet."
+  if (person.slack_id) {
+    const subjects = getActiveSubjectsForPerson(person.slack_id).filter(s => s.created_by !== 'owner');
+    if (subjects.length > 0) {
+      const subjectLines = subjects.slice(0, 5).map(s => {
+        const beats = getRecentTopicBeats(s.id, 3)
+          .filter(b => b.created_by !== 'owner')
+          .map(b => b.label);
+        return beats.length > 0 ? `  ${s.label} (${beats.join(', ')})` : `  ${s.label}`;
+      });
+      lines.push(`Things you've talked about together:\n${subjectLines.join('\n')}`);
+    }
   }
 
   if (canMaelleInitiate) {
-    lines.push(`→ Find ONE natural moment to check in after the work is done. One short human question, not pushy. Engagement-level avoidant → DO NOT initiate; engagement-level minimal → keep it very light.`);
+    lines.push(`→ Find ONE natural moment to check in after the work is done. One short human question, not pushy.`);
   } else {
     lines.push(`→ If they bring up something personal, respond warmly. Do NOT start a social topic yourself on this turn — you already initiated recently.`);
   }

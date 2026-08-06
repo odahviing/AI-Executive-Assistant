@@ -10,7 +10,11 @@
  *                       carries `engagement_score` (0..5), `status` (active|dormant),
  *                       `last_touched_at`, `last_assistant_initiated_at`. One subject =
  *                       one durable subject of conversation ("Clair Obscur Expedition 33").
- *                       Person-initiated creation: score 3. Assistant-initiated: score 2.
+ *                       Always created at score 3 (SCORE_ON_CREATE_PERSON) — creation only
+ *                       ever happens via end-of-chat reconciliation, credited to whichever
+ *                       person's leg produced the match/create decision (owner or
+ *                       colleague); the assistant never creates a subject unilaterally, so
+ *                       there is no lower "assistant-initiated" starting score to apply.
  *                       Cap 5; floor 0 → status='dormant'.
  *
  *   social_topics     — per-subject. Lightweight beats with no rank — concrete things
@@ -106,13 +110,12 @@ export const SCORE_FLOOR = 0;
 export const DORMANT_THRESHOLD = 0;
 export const DECAY_DAYS = 7;
 
-// Creation values per the redesign:
-//   person-initiated (owner / colleague): start at 3 (mid)
-//   assistant-initiated:                  start at 2 (lower; needs engagement to grow)
-// A subject grows toward the 5 cap on engagement and decays to 0 (dormant) on
-// neglect — 5 is the ceiling reached by repeated engagement, never a start.
+// Creation value per the redesign: every subject is created from a
+// person-credited reconciliation decision (owner or colleague leg) — start
+// at 3 (mid). A subject grows toward the 5 cap on engagement and decays to 0
+// (dormant) on neglect — 5 is the ceiling reached by repeated engagement,
+// never a start.
 export const SCORE_ON_CREATE_PERSON = 3;
-export const SCORE_ON_CREATE_ASSISTANT = 2;
 
 // Caps per the redesign.
 export const MAX_ACTIVE_SUBJECTS_PER_CATEGORY = 5;
@@ -178,7 +181,7 @@ export function createSubject(params: {
 }): SocialSubject {
   const db = getDb();
   const id = `subj_${params.personSlackId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const score = params.createdBy === 'assistant' ? SCORE_ON_CREATE_ASSISTANT : SCORE_ON_CREATE_PERSON;
+  const score = SCORE_ON_CREATE_PERSON;
 
   // Cap enforcement: at most MAX_ACTIVE_SUBJECTS_PER_CATEGORY active rows per
   // (person, category). When at cap, evict the lowest-score active subject

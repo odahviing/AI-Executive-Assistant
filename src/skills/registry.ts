@@ -450,6 +450,31 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
 ]);
 
 /**
+ * v4.4.x (#154) — the room-authority ACTION floor. `senderRole` (above) is
+ * the DATA gate: it reads 'colleague' both for a real colleague AND for the
+ * owner typing inside a room (MPIM/channel), because his data access is
+ * clamped there like anyone else's. `authority`, by contrast, is who is
+ * AUTHENTICATED as acting — resolved once at the Slack front door from the
+ * sender id, never clamped by surface — so it is the ACTION gate. The owner
+ * keeps his booking/moving/cancelling/approving power on every surface (his
+ * ruling: "action only, as any data extracting tools is problem by privacy
+ * nature") while a real colleague still gets only COLLEAGUE_ALLOWED_TOOLS.
+ * Built as that SAME set plus the two owner-only writes a colleague may never
+ * reach — cancelling an existing meeting, approving/declining a pending
+ * request — never a parallel list to keep in sync. Owner data tools
+ * (get_person_memory, manage_preference, update_my_preferences,
+ * update_person_memory — the merged learn/forget/recall_preferences) are
+ * deliberately NOT added here: they stay unreachable in a room regardless of
+ * authority, both because they're absent from this set and because
+ * core/assistant.ts:430's hard-block keys on senderRole, not authority.
+ */
+const OWNER_ROOM_ACTION_TOOLS = new Set<string>([
+  ...COLLEAGUE_ALLOWED_TOOLS,
+  'delete_meeting',
+  'resolve_approval',
+]);
+
+/**
  * The tools that MUTATE something outside this process — send a message,
  * create/modify a calendar event, raise an approval, write durable state.
  * Everything else (get_calendar, find_available_slots, find_slack_user,
@@ -569,12 +594,20 @@ export function getActiveSkills(profile: UserProfile): Skill[] {
  * get_person_memory, log_interaction only — see CHANNEL_TOOL_CLAMP above).
  * Defaults to 'slack' — every existing call site that doesn't pass a channel
  * keeps today's behavior byte-for-byte.
+ *
+ * v4.4.x (#154) — `authority` is optional and additive: when senderRole is
+ * 'colleague' (a real colleague, OR the owner clamped to colleague-context
+ * inside a room), authority==='owner' widens the shipped set from
+ * COLLEAGUE_ALLOWED_TOOLS to OWNER_ROOM_ACTION_TOOLS (see that set's comment)
+ * — never past it, and never touching the owner-path branch below. Omitted
+ * (every pre-existing call site) behaves byte-for-byte as before.
  */
 export function getSkillTools(
   profile: UserProfile,
   senderRole: 'owner' | 'colleague' = 'owner',
   scopes?: string[],
   channel: ChannelId = 'slack',
+  authority?: 'owner' | 'colleague',
 ): Anthropic.Tool[] {
   // Always include assistant and coordination skill tools regardless of config
   const assistantTools = CORE_MODULES.flatMap(s => s.getTools(profile));
@@ -624,8 +657,15 @@ export function getSkillTools(
   // Scope filter does NOT apply on the colleague path (the static allowlist is
   // the hard limit; scope would be redundant). The channel clamp still does —
   // a colleague turn on a clamped channel gets the intersection of both.
+  //
+  // v4.4.x (#154) — `authority` splits this branch's floor: a real colleague
+  // (authority !== 'owner') keeps COLLEAGUE_ALLOWED_TOOLS unchanged; the
+  // owner clamped into a room (authority === 'owner') gets the wider
+  // OWNER_ROOM_ACTION_TOOLS action floor instead. Data-only tools stay out of
+  // BOTH sets, so a room never ships them regardless of who's typing.
   if (senderRole === 'colleague') {
-    const colleagueTools = deduped.filter(t => COLLEAGUE_ALLOWED_TOOLS.has(t.name));
+    const actionFloor = authority === 'owner' ? OWNER_ROOM_ACTION_TOOLS : COLLEAGUE_ALLOWED_TOOLS;
+    const colleagueTools = deduped.filter(t => actionFloor.has(t.name));
     const clamp = CHANNEL_TOOL_CLAMP[channel];
     return clamp ? colleagueTools.filter(t => clamp.has(t.name)) : colleagueTools;
   }
@@ -650,19 +690,33 @@ export async function executeSkillTool(
   //       owner-only tools from the catalog Sonnet sees on a colleague turn.
   //       Sonnet "can't call what it can't see" → the practical wall.
   //   (2) Hard-block at HANDLE — a small `ownerOnlyTools` Set in
-  //       `core/assistant.ts:380` refuses 5 names if a colleague somehow
-  //       names them.
+  //       `core/assistant.ts` (executeToolCall) refuses 4 names if a
+  //       colleague-context turn somehow names them, keyed on senderRole
+  //       (not authority) so it stays absolute in a room regardless of who
+  //       is authenticated as acting.
   // Problem: (1) covers ~20 owner-only tools, (2) only 5. If (1) ever ships
   // a tool by accident (Module G coverage map gap — exactly how `web_research`
   // shipped to every owner turn pre-v3.3.0), the colleague path has no second
   // wall. This chokepoint re-applies (1)'s allowlist at the dispatch boundary:
-  // a colleague turn cannot reach any skill handler with a tool outside
-  // COLLEAGUE_ALLOWED_TOOLS, regardless of how it got into args.
-  if (context.senderRole === 'colleague' && !COLLEAGUE_ALLOWED_TOOLS.has(toolName)) {
-    logger.warn('executeSkillTool: colleague-path tool blocked at chokepoint', {
-      tool: toolName, requesterId: context.userId,
-    });
-    return { error: 'not_permitted', reason: `Tool "${toolName}" is owner-only.` };
+  // a colleague-context turn cannot reach any skill handler with a tool
+  // outside its floor, regardless of how it got into args.
+  //
+  // v4.4.x (#154) — same authority split as getSkillTools above: the owner
+  // clamped into a room (context.authority === 'owner') dispatches against
+  // OWNER_ROOM_ACTION_TOOLS (book/move/cancel/approve); a real colleague
+  // still dispatches against COLLEAGUE_ALLOWED_TOOLS unchanged. Data-only
+  // tools (get_person_memory, manage_preference, update_my_preferences,
+  // update_person_memory) are in neither set, so this chokepoint blocks them
+  // regardless of authority — core/assistant.ts:430's hard-block is a second,
+  // independent wall behind it.
+  if (context.senderRole === 'colleague') {
+    const actionFloor = context.authority === 'owner' ? OWNER_ROOM_ACTION_TOOLS : COLLEAGUE_ALLOWED_TOOLS;
+    if (!actionFloor.has(toolName)) {
+      logger.warn('executeSkillTool: colleague-path tool blocked at chokepoint', {
+        tool: toolName, requesterId: context.userId, authority: context.authority,
+      });
+      return { error: 'not_permitted', reason: `Tool "${toolName}" is owner-only.` };
+    }
   }
 
   // v4.3.0 (#24) — same defense-in-depth pattern, keyed on CHANNEL instead

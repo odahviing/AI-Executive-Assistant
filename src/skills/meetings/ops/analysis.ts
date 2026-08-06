@@ -8,7 +8,7 @@ import logger from '../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../../config/userProfile';
 import type { CalendarEvent } from '../../../connectors/graph/calendar';
-import { displaySubject, type SubjectViewer } from '../../../utils/displaySubject';
+import { displaySubject, isEventPrivate, type SubjectViewer } from '../../../utils/displaySubject';
 import { searchPeopleMemory } from '../../../db';
 
 // ── Calendar event processing ─────────────────────────────────────────────────
@@ -187,10 +187,28 @@ export function processCalendarEvents(
       viewer,
     );
 
-    const attendeeNames = (ev.attendees ?? [])
-      .map(a => a.emailAddress.name)
-      .filter(n => n && n.toLowerCase() !== ownerName.toLowerCase())
-      .slice(0, 10);
+    // o#230 — attendee-name visibility is gated on the event's OWN privacy
+    // flag (`isEventPrivate`), NOT on whether `subject` got masked. Those used
+    // to be the same fact (`subject === PRIVATE_MASK`) back when the only way
+    // to mask a subject was privacy-flagging — but `displaySubject` (utils/
+    // displaySubject.ts) can ALSO mask via its opt-in attendee-aware
+    // `viewerEmail` test, used by callers that resolve a specific colleague's
+    // identity (moveMeeting.ts, createMeeting.ts, calendarReads.ts). This file
+    // never threads a `viewerEmail` through (`processCalendarEvents` takes
+    // `viewer` only — see above), so that branch never fires HERE, but
+    // attendeeNames is still tested directly against `isEventPrivate` rather
+    // than piggybacking on `subject === PRIVATE_MASK`, so it can't silently
+    // start following a masking reason unrelated to privacy if this function's
+    // signature ever changes again. Owner ruling: existence + time + attendee
+    // names are fine for ANY meeting; only the subject needs the stricter
+    // test. A genuinely private/sensitivity-flagged event still hides names
+    // for anyone but the owner ("private is private").
+    const attendeeNames = (viewer !== 'owner' && isEventPrivate({ subject: ev.subject, sensitivity, categories: ev.categories }, profile))
+      ? []
+      : (ev.attendees ?? [])
+        .map(a => a.emailAddress.name)
+        .filter(n => n && n.toLowerCase() !== ownerName.toLowerCase())
+        .slice(0, 10);
 
     result.push({
       id: ev.id,

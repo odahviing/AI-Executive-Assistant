@@ -46,6 +46,24 @@ export interface RunDeferredActionInput {
    */
   originChannel: string | null;
   originThreadTs: string | null;
+  /**
+   * v4.4.x (#154-replay-surface) — the request row's own origin surface,
+   * from `deriveOriginSurface(row)` (core/requests/types.ts) — NEVER guessed,
+   * NEVER defaulted to 'owner_dm'. The replay always executes with
+   * `authority: 'owner'` (the approved action runs with owner privilege
+   * regardless of who raised the original ask — grantRelaxed's
+   * `senderRole === 'owner'` fast path is untouched by this), but a room- or
+   * colleague-DM-originated ask still narrates back into that same surface
+   * (S5): she always speaks, the restriction is at the tool layer, never
+   * silence (owner ruling). Also feeds `isMpim` on the synthetic SkillContext
+   * below, so `subjectViewerFor`/`viewerEmailFor` (utils/displaySubject.ts —
+   * which key off `isMpim`, not this field directly) stop reading EVERY
+   * replay as a fully private owner DM regardless of where the ask actually
+   * came from. That isMpim-always-false mismatch was the #137b-shaped bypass
+   * for this leg: a room-originated approval could replay a rule-bend and
+   * have the tool handlers render its real subject as if to the owner alone.
+   */
+  surface: 'owner_dm' | 'colleague_dm' | 'room';
 }
 
 /**
@@ -64,7 +82,7 @@ export interface RunDeferredActionInput {
  * undefined on the no-op paths (no connection / unsupported tool).
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
-  const { ownerUserId, profile, tool, args, requestId, originChannel, originThreadTs } = input;
+  const { ownerUserId, profile, tool, args, requestId, originChannel, originThreadTs, surface } = input;
 
   // Resolve the Slack connection so meeting handlers can shadow-DM the owner.
   const slackConn = getConnection(ownerUserId, 'slack');
@@ -88,11 +106,22 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   const context = {
     userId: ownerUserId,
     senderRole: 'owner' as const,
+    // v4.4.x (#154-replay-surface) — the ACTION always runs as the
+    // authenticated owner (unchanged); `surface` is the SEPARATE, row-derived
+    // question of where this narrates back to, and is never inferred from
+    // authority.
+    authority: 'owner' as const,
+    surface,
     channelId,
     threadTs,
     channel: 'slack' as const,
     profile,
-    isMpim: false,
+    // isMpim mirrors `surface` (both cover the 'room' case — MPIM or a real
+    // channel, per the owner's "channel = MPIM" ruling) so
+    // subjectViewerFor/viewerEmailFor keep clamping a room-originated replay
+    // exactly as they would a live room turn, instead of the hardcoded
+    // `false` that made every replay read as a private owner DM.
+    isMpim: surface === 'room',
     isOwnerInGroup: false,
   };
 

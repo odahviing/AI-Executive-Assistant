@@ -19,6 +19,15 @@ export interface OrchestratorInput {
   senderRole: 'owner' | 'colleague';
   senderName?: string;   // colleague's display name — injected into system prompt
   channel: ChannelId;
+  /**
+   * v4.4.x (#154) — the turn's authenticated authority and surface. Populated
+   * by each transport's own front door (Slack) or synthetic caller (replay,
+   * scheduled routines, email keepalive) — NEVER derived inside the
+   * orchestrator itself. REQUIRED: see SkillContext (skills/types.ts) for the
+   * full rationale. Passed through byte-for-byte into SkillContext below.
+   */
+  authority: 'owner' | 'colleague';
+  surface: 'owner_dm' | 'colleague_dm' | 'room';
   profile: UserProfile;
   app?: import('@slack/bolt').App;
   // v3.2.6 (6.4) — false for SYSTEM-generated turns (scheduled routines,
@@ -414,6 +423,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       userId: input.userId,
       senderRole: input.senderRole,
       channel: input.channel,
+      authority: input.authority,
+      surface: input.surface,
       app: input.app,
       isMpim: input.isMpim,
       isOwnerInGroup: input.isOwnerInGroup,

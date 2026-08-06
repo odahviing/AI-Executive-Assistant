@@ -86,12 +86,6 @@ export function createSlackAppForProfile(profile: UserProfile): App {
     registerConnection(user.slack_user_id, createSlackConnection(app, assistant.slack.bot_token, profile));
   }
 
-  // ── Colleague-mode testing ────────────────────────────────────────────────
-  // Owner can say "test as colleague" to simulate the colleague experience.
-  // Persists per-thread so follow-up messages in the same thread stay in colleague mode.
-  // Owner says "stop testing" or "back to normal" to exit.
-  const colleagueTestThreads = new Set<string>();
-
   function getSenderRole(senderId: string): SenderRole {
     return senderId === user.slack_user_id ? 'owner' : 'colleague';
   }
@@ -104,12 +98,11 @@ export function createSlackAppForProfile(profile: UserProfile): App {
 
   // ── Shared context ──────────────────────────────────────
   // ONE object threads the factory-owned state (profile, app, the live
-  // botUserId, the colleague-test Set) + the cross-referencing helper fns to
-  // the extracted modules. botUserId is a LIVE getter — never snapshot it.
+  // botUserId) + the cross-referencing helper fns to the extracted modules.
+  // botUserId is a LIVE getter — never snapshot it.
   const ctx: SlackAppContext = {
     profile,
     app,
-    colleagueTestThreads,
     getSenderRole,
     get botUserId() { return botUserId; },
     resolveSlackMentions: (text) => resolveSlackMentions(ctx, text),

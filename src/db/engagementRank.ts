@@ -45,6 +45,43 @@ export type RankChangeReason =
   | 'revival_retry'
   | 'manual';
 
+// Reasons that record an OWNER-authored change to the rank — an editorial
+// call the owner made about this person — versus every other reason, which is
+// Maelle's own auto-derived signal (a reply, a revival, a ping timeout).
+// 'migration_from_legacy' belongs on THIS side, not the auto side: it carries
+// forward `profile_json.engagement_level`, which was itself an owner-curated
+// field (assistant.ts's colleague-self field filter names it alongside
+// engagement_rank as something only the owner edits) — the migration just
+// changes its representation, not its authorship. MEASURED 2026-08-05: six
+// people (Alex Wiggins, Dirk Clemens, Michal Schwartz, Oran Frenkel, Shayan
+// Memari, Yael Aharon) carry this as their latest reason; before this fix
+// their tone line relayed the owner's own editorial call back to them.
+const OWNER_AUTHORED_REASONS: ReadonlySet<RankChangeReason> = new Set([
+  'owner_directive', 'manual', 'migration_from_legacy',
+]);
+
+/**
+ * Was the CURRENT engagement_rank value produced by an owner override
+ * (`owner_directive` / `manual`), or by Maelle's own auto-derived signal?
+ * Reads the most recent `engagement_rank_log` row for this person — that IS
+ * the provenance record (o#229): the log always names the reason for every
+ * write (`setEngagementRank` / `adjustEngagementRank` both call
+ * `logRankChange`), so the latest row's reason tells the current value's
+ * origin. No log row (rank never touched, still at default) counts as
+ * auto — nothing owner-authored to withhold.
+ */
+export function isCurrentRankOwnerAuthored(slackId: string): boolean {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT reason FROM engagement_rank_log
+    WHERE slack_id = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `).get(slackId) as { reason?: RankChangeReason } | undefined;
+  if (!row?.reason) return false;
+  return OWNER_AUTHORED_REASONS.has(row.reason);
+}
+
 function clamp(rank: number): EngagementRank {
   if (rank < RANK_MIN) return RANK_MIN;
   if (rank > RANK_MAX) return RANK_MAX;

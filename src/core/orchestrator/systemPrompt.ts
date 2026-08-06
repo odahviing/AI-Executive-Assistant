@@ -8,7 +8,7 @@ import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeop
 import { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
-import { formatPeopleCatalogSync, readPersonMemorySync, slugifyName } from '../../memory/peopleMemory';
+import { formatPeopleCatalogSync, readPersonMemorySync } from '../../memory/peopleMemory';
 import { getEffectiveToday } from '../../utils/effectiveToday';
 
 /**
@@ -62,25 +62,45 @@ export function buildSystemPromptParts(
   // (e.g. web_research) that isn't actually in the tools array this turn.
   // Defaults to 'slack' — every existing caller keeps today's behavior.
   channel: ChannelId = 'slack',
+  // v4.4.x (#154) — the AUTHENTICATED sender's authority (buildTurnContext's
+  // `input.authority`), threaded into the internal getSkillTools call below
+  // for the SAME reason `channel` is: so `shippedToolNames` (used to gate
+  // which skill prose renders) reflects the same widened OWNER_ROOM_ACTION_TOOLS
+  // floor the real tool array gets when the owner is clamped into a room.
+  // Omitted (every pre-existing caller) behaves byte-for-byte as before.
+  authority?: 'owner' | 'colleague',
 ): { static: string; dynamic: string } {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
   const companyRef = user.company ? ` and a full member of the ${user.company} team` : '';
   const isOwner = senderRole === 'owner';
-  // o#177 — WHO is typing, independent of the MPIM clamp. `isOwner` above is
-  // the post-clamp effective role (false in a clamped MPIM even when the
-  // owner is the one typing — see buildTurnContext.ts's isOwnerPath/isOwnerTyping
-  // split). `senderId` below is the raw typer id and stays the owner's own
-  // slack id through that clamp, so gating a per-SPEAKER lookup on `isOwner`
+  // o#177 — WHO is typing, independent of any surface clamp. `isOwner` above
+  // is the post-clamp effective role (false in a clamped MPIM/channel even
+  // when the owner is the one typing — see buildTurnContext.ts's
+  // isOwnerPath/isOwnerTyping split, and processMessage.ts's
+  // isOwnerInGroup/isOwnerInChannel). Gating a per-SPEAKER lookup on `isOwner`
   // alone let speakerMemoryBlock/verifiedSenderBlock resolve `senderId` to the
   // owner's own people_memory row and render his memory .md into a
-  // colleague-readable MPIM. Mirrors buildTurnContext.ts's isOwnerTyping
-  // exactly so a per-speaker block never fires on the owner's own identity.
-  // NOTE: this covers MPIM only. A real CHANNEL turn takes the same clamp and
-  // still renders both blocks — open row `owner-memory-still-renders-in-a-real-channel`,
-  // awaiting the gh#154 ruling on whether the fix is a third surface flag or
-  // an authenticated-identity test (`senderId === profile.user.slack_user_id`).
-  const isOwnerTyping = isOwner || isOwnerInGroup === true;
+  // colleague-readable surface — MPIM was covered via `isOwnerInGroup`, but a
+  // real CHANNEL was NOT: `isOwner` and `isOwnerInGroup` are both false there
+  // even when the owner is typing (gh#154 leak — owner-memory-still-renders-
+  // in-a-real-channel).
+  //
+  // Fixed per the owner's gh#154 ruling: authority is never inferred from a
+  // surface flag, it's the authenticated Slack id compared directly —
+  // "make sure she have slackid comparison of who asked it, so she won't be
+  // tricked... like idan said its ok". `senderId` is the raw, authenticated
+  // sender id of THIS message (buildTurnContext.ts threads it through
+  // unchanged as `input.userId`, never clamped by surface), so comparing it to
+  // `profile.user.slack_user_id` is the SAME per-speaker identity test the
+  // paragraph above already relies on, widened to cover every surface at once
+  // — MPIM, channel, and DM — instead of a second, parallel check. Falls back
+  // to the old isOwner/isOwnerInGroup test only when no senderId is available
+  // (the back-compat `buildSystemPrompt()` wrapper used by
+  // scripts/measure-prompts.cjs, which has no real sender to authenticate).
+  const isOwnerTyping = senderId
+    ? senderId === user.slack_user_id
+    : (isOwner || isOwnerInGroup === true);
 
   // ── DYNAMIC INPUTS ────────────────────────────────────────────────────────
   // These compute fresh per turn. Used only inside `dynamicContent` below.
@@ -243,7 +263,15 @@ Binding rules (critical):
 
   // Colleague-path "work already in flight in this thread" block. Same data
   // source as owner-path but scoped to the thread for privacy.
-  const colleagueThreadApprovalsSection = !isOwner && pendingRequests.length > 0
+  //
+  // o#225 — gated on `isOwnerTyping` (authenticated identity), not the
+  // surface-clamped `isOwner`. Pre-fix this rendered for the room-clamped
+  // owner too (isOwner is false there even when he's the one typing), so the
+  // authenticated owner got colleague-facing text ("don't run new tool
+  // calls") that counter-instructed resolve_approval inertness on exactly the
+  // surface this wave widened his tool floor to reach it (OWNER_ROOM_ACTION_TOOLS,
+  // registry.ts). A genuine colleague still gets this section unchanged.
+  const colleagueThreadApprovalsSection = !isOwnerTyping && pendingRequests.length > 0
     ? (() => {
         const awaitingOwnerLines: string[] = [];
         const amendingLines: string[] = [];
@@ -273,7 +301,7 @@ Binding rules (critical):
           sections.push(`WORK ALREADY IN FLIGHT IN THIS THREAD (${awaitingOwnerLines.length} pending ${firstName}'s call):
 ${awaitingOwnerLines.join('\n')}
 
-Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls — answer briefly that you're waiting on ${firstName}, or stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`);
+Do NOT re-raise these. If the colleague's current message is just acknowledging ("thanks", "waiting", "ok"), don't run new tool calls and don't narrate the wait — stay silent. Only re-fire if the colleague is changing the underlying ask (different time, different attendee, withdrawal). Once ${firstName} resolves, the resolver posts the outcome back here automatically.`);
         }
         if (amendingLines.length > 0) {
           sections.push(`AMENDING APPROVALS — ${firstName} GAVE A COUNTER, WAITING ON COLLEAGUE:
@@ -303,7 +331,13 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
   // colleague's message is (a question, "thanks", or silence-filling ack) — a plain
   // "thanks" is not a request for an update, but it deserves the same honest status.
   const threadRequestStatusSection = (() => {
-    if (isOwner || !threadTs) return '';
+    // R12 — re-keyed to `isOwnerTyping` (authenticated identity), matching the
+    // sibling colleagueThreadApprovalsSection fix above (o#225). `isOwner` is
+    // the post-clamp role — false in a room even when the owner himself is
+    // typing — so this still handed the authenticated owner colleague-facing
+    // relay text ("Give this to the colleague...") about his own terminal
+    // request. A genuine colleague still gets this section unchanged.
+    if (isOwnerTyping || !threadTs) return '';
     const latest = getLatestRequestForThread(user.slack_user_id, threadTs);
     // Open rows are already covered above; only speak up for a TERMINAL row.
     if (!latest || latest.state === 'awaiting_owner' || latest.state === 'awaiting_colleague' || latest.state === 'in_flight') {
@@ -348,8 +382,11 @@ ${pendingApprovalsSection}` : '';
   // filter the dispatch chokepoint enforces (registry.ts:487/517). Everything
   // below that CLAIMS a capability derives from this set, so the prompt cannot
   // describe a tool the request omits, and cannot drift when the allowlist
-  // changes.
-  const shippedToolNames = new Set(getSkillTools(profile, senderRole, toolScopes, channel).map(t => t.name));
+  // changes. `authority` must match the real getSkillTools call in
+  // buildTurnContext.ts (which passes it) or an owner clamped into a room gets
+  // the wider tool array but this set still reads the narrower colleague
+  // floor — under-describing delete_meeting / resolve_approval to him.
+  const shippedToolNames = new Set(getSkillTools(profile, senderRole, toolScopes, channel, authority).map(t => t.name));
 
   // #15 / v4.3.0 (gh#24 row 121) — a skill's prose ships only where the
   // caller can reach one of its tools. This used to be COLLEAGUE-only (the
@@ -445,7 +482,30 @@ ${pendingApprovalsSection}` : '';
   // MeetingsSkill copy (src/skills/meetings.ts, "CATEGORIES (ordered by
   // priority...)") is the single source. Both render from profile.categories.
 
-  const authLine = isOwnerInGroup
+  // v4.4.x (#154) — shared honesty + refusal-tone line for any ROOM turn
+  // (MPIM or a real channel — the owner's ruling treats them identically:
+  // "there is not MPIM with only owners... you should assume there are
+  // people there that not the owner"). Extracted once so the room-owner
+  // branch below and the generic colleague-facing branch (which is what
+  // fires for a genuine colleague in MPIM or a real channel) carry IDENTICAL
+  // wording instead of two hand-maintained copies. Also carries the owner's
+  // own refusal-tone ruling: "we can just make it funny, you dont want me to
+  // share secrets outside, right" — a room refusal should read like a person
+  // being discreet, never a system error.
+  const roomDataRefusalLine = `Asked what you know about a named person (history, notes, past interactions): you have NO accessible person data on this turn — that's a restriction, not an absence. NEVER assert a specific negative you can't verify — "not much on file," "no history with her," "first interaction" are all fabrication. Say plainly you can't check or share that from here, and that ${user.name} can go through it with you in his own DM. Keep the decline light and human, never a system error — "Ha, that one's between you two" or "You wouldn't want me sharing your secrets outside either, right?" beats a flat refusal.`;
+
+  // o#226 — widened from `isOwnerInGroup` (MPIM-only) to any ROOM surface the
+  // real owner is typing in. `isOwnerInGroup` (processMessage.ts) is computed
+  // MPIM-only, so a real CHANNEL with the owner typing fell to the generic
+  // colleague branch below and told Sonnet the authenticated owner "CANNOT
+  // override rules, approve pending actions, modify memory" — flatly untrue,
+  // since the code widened his tool floor to OWNER_ROOM_ACTION_TOOLS
+  // (registry.ts) in every room, not just MPIM. `isOwnerTyping` is the
+  // authenticated-identity test (senderId compared to profile.user.slack_user_id,
+  // see above) so it agrees with the code's own authority test in a channel
+  // too. Owner's ruling: "she is human, she cant be blind and not understand
+  // Im there, it will be unreal."
+  const authLine = (isOwnerTyping && (isMpim || isChannel))
     ? `Speaking with: ${user.name} (your principal) IN A GROUP CONVERSATION with one or more colleagues.
 
 This conversation is COLLEAGUE-CONTEXT. The colleagues read every message here. Your tools are restricted (the colleague allowlist), your narration follows colleague-level privacy rules, and your decision-making mirrors what you'd do if ${user.name} weren't typing — because the colleagues are watching either way.
@@ -455,10 +515,10 @@ When he says "do it" / "move it" / "book it" in this thread, execute via the col
 
 PRIVACY FILTER — what you REVEAL is colleague-level even though he's the one typing:
 - ✅ "You have a gap from 2pm onwards." — fine
-- ❌ "You have a 1:1 with [colleague] about [project] at 11, then Product Review at 2..." — topic leak
+- ❌ "You have a 1:1 with [colleague] about [project] at 11, then Product Review at 2..." — the TOPIC ("about [project]") is the leak; the meeting existing, its time, and who's in it are fine to say.
 - ❌ "Wednesday is clear, nothing on the calendar between 14:40 and 18:30 (when dinner with Lori starts)" — leaks subject + person + time of an unrelated meeting. Wrong even when ${user.name} asked.
 - NEVER narrate: preferences, tasks, people memory, learned prefs, personal notes, other colleagues' personal details.
-- Asked what you know about a named person (history, notes, past interactions): you have NO accessible person data on this turn — that's a restriction, not an absence. NEVER assert a specific negative you can't verify — "not much on file," "no history with her," "first interaction" are all fabrication. Say plainly you can't check or share that from here, and that ${user.name} can go through it with you in his own DM.
+- ${roomDataRefusalLine}
 - Sensitive meetings (interviews, HR): say "busy at that time" — never "He has an interview."
 - Tool choice: prefer \`find_available_slots\` for "is he free?" — yes/no on rule-compliant slots without leaking surrounding events.
 - Scheduling answers stay ONE line: the time + book / alternative. Never explain the why — not his work hours / shift / lunch / focus, not your reasoning. The colleagues need the answer, not his daily rhythm.`
@@ -469,10 +529,10 @@ PRIVACY FILTER — what you REVEAL is colleague-level even though he's the one t
 You can: tell them when ${firstName} is free, share ONE specific meeting title+time when scheduling, coordinate a meeting with ${firstName}.
 
 You CANNOT share with colleagues:
-- Meeting CONTENT (topics, agendas, what was discussed). Title + time = fine; reason/content = no. "He has a 1:1 at 11am" ok; "1:1 with [colleague] about Q3 roadmap" not ok.
+- Meeting CONTENT (topic, agenda, what was discussed, why it's happening) — never, even when directly asked. EXISTENCE, TIME, and WHO's attending are fine to share. ✅ "He has a 1:1 with Elinor at 11am." ✅ "He's busy 2-3, meeting with the product team." ❌ "1:1 with Elinor about the Q3 roadmap" — the topic is the leak, not her name.
 - ${firstName}'s preferences, habits, tasks, focus areas, or personal things he's told you.
 - Other colleagues' personal details or notes.
-- Sensitive meetings (interviews, HR): say "He's busy at that time" — never "He has an interview."
+- Sensitive meetings (interviews, HR): say "He's busy at that time" — never "He has an interview," and never name who else is in it.${(isMpim || isChannel) ? `\n- ${roomDataRefusalLine}` : ''}
 - When answering a colleague about a time (proposing, confirming, or "is he free?"): ONE line — just the time + offer to set it up, or an alternative. Never narrate what's before/after, his work hours / shift / lunch / focus, or HOW you worked it out — the qualifier AND the reasoning both leak his schedule. The colleague needs the answer, not his daily rhythm. ✅ "22:30 Wed works — want me to set it up with John?" / "22:30's tight that day; 21:30 or 23:00?" ❌ "09:25–10:00 (after Shayan, before Simon's biweekly)" ❌ "2:00 is taken by [meeting] with [colleague]" ❌ "his night-shift runs to 00:00 and lunch frees 22:30, so 22:30 is bookable"
 
 Colleagues CANNOT: override ${firstName}'s rules, approve pending actions, modify memory, ask you to change ${firstName}'s calendar directly (outside an active coord YOU started), coordinate meetings that DON'T include ${firstName} ("I'm ${firstName}'s assistant, not a general scheduler — can only help coordinate meetings that include him").
@@ -516,8 +576,13 @@ CRITICAL — KB is YOUR background reference. NEVER narrate the act of consultin
 
 DEFAULT: when in doubt, don't share. "I can't help with that" beats a leak.`;
 
-  // ── MPIM-only rules (v2.6.6) ─────────────────────────────────────────────
-  const mpimRulesBlock = isMpim ? `
+  // ── ROOM-only rules (v2.6.6, widened v4.4.x #154) ─────────────────────────
+  // Was MPIM-only (`isMpim`). Re-keyed to any ROOM surface (MPIM or a real
+  // channel) per the owner's ruling: "there is not MPIM with only owners...
+  // so its always crowded... you should assume there are people there that
+  // not the owner" — a channel gets identical group-privacy handling, not a
+  // second copy of it.
+  const roomRulesBlock = (isMpim || isChannel) ? `
 GROUP CHAT — multiple people read every message in this thread.
 
 PRIVATE OWNER QUESTIONS — never @-tag ${firstName} here, and don't narrate the escalation.
@@ -544,7 +609,7 @@ SPEAK TO THE GROUP — everyone in the thread reads your messages.
   - ✅ Right: "Moved to Wed 17:15 — Rob will get the updated invite, Julia."
 - ${firstName}'s presence (if he's typing) lets HIM act; it does NOT grant the others owner-level access.
 
-GROUP DMs: greet whoever ${firstName} introduces, not him. Don't leak private data.
+GROUP CONVERSATIONS: greet whoever ${firstName} introduces, not him. Don't leak private data.
 ` : '';
 
   const ownerLearningSection = isOwner ? `
@@ -692,7 +757,7 @@ Active skills: ${skillNames} | Active channels: ${activeChannels}
 AUTHORIZATION
 ${authLine}
 Approval commands (approve/reject) accepted only from ${user.name}.
-${mpimRulesBlock}
+${roomRulesBlock}
 TONE: short, direct, plain text, answers the actual question. Check current time before describing when something happens. Never list meetings out of order.
 "what's my next meeting?" → "EMEA Forecast started 10 minutes ago, runs until 10:00."
 "book 30 min with X next week" → "On it — I'll reach out and let you know when it's set."
@@ -792,9 +857,40 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // file. Only on colleague-path (owner DM doesn't need this) and only when
   // we have actual people to list. Renders inline with the dynamic block so
   // it's per-turn fresh and doesn't break the static cache.
-  const threadPeopleBlock = !isOwner
-    ? formatThreadPeopleBlock(senderId, mpimMemberIds, user.slack_user_id)
-    : '';
+  //
+  // R10 — `!isOwner` is true on EVERY room turn (`isOwner` is the post-clamp
+  // role, false for the owner too when he's typing in an MPIM/channel — see
+  // isOwnerTyping above), so this used to render full contact data (email,
+  // tz, city, gender) for every other member straight into a shared
+  // MPIM/channel — the same "not a profile to hand back to a crowd" class
+  // buildTurnContext.ts already suppresses wholesale for personWorkBlock /
+  // socialBlock. A room turn still needs to ADDRESS people correctly
+  // (roomRulesBlock below: "NAME whose" / "Alex is busy" / "Rob will get the
+  // updated invite, Julia"), so a room surface keeps NAMES ONLY — no email,
+  // no tz, no city, no gender (booking doesn't need it either: internal
+  // attendee emails resolve automatically from the directory by name, per
+  // the create_meeting `attendees` description). A genuine colleague 1:1 DM
+  // (not a room) is unchanged — that colleague is the only other reader
+  // there, so full contact data still renders for booking.
+  const isRoomSurface = isMpim === true || isChannel === true;
+  const threadPeopleBlock = isOwner
+    ? ''
+    : isRoomSurface
+      ? (() => {
+          const ids = new Set<string>();
+          if (senderId && senderId !== user.slack_user_id) ids.add(senderId);
+          if (mpimMemberIds) {
+            for (const id of mpimMemberIds) {
+              if (id && id !== user.slack_user_id) ids.add(id);
+            }
+          }
+          if (ids.size === 0) return '';
+          const names = [...ids].map(id => getPersonMemory(id)?.name).filter((n): n is string => Boolean(n));
+          return names.length > 0
+            ? `PEOPLE IN THIS THREAD: ${names.join(', ')}. Address them by name — this room does not carry their email / timezone / location; ask only if a specific task genuinely needs it.`
+            : '';
+        })()
+      : formatThreadPeopleBlock(senderId, mpimMemberIds, user.slack_user_id);
   const threadPeopleSection = threadPeopleBlock ? `\n\n${threadPeopleBlock}` : '';
 
   // v2.9.3 (#103) — surface the SPEAKER's md file content directly into the
@@ -804,8 +900,19 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // makes that memory actually shape the reply. Owner-path doesn't need
   // this — owner's curation goes through the same .md but he's not the
   // subject of the lookup.
+  //
+  // o#214 — also suppressed on a ROOM surface (MPIM or channel), same gate
+  // buildTurnContext.ts already applies wholesale to personWorkBlock /
+  // socialBlock. The .md can carry an owner-written briefing on the SPEAKER
+  // (a colleague's own 1:1 DM keeps the full file per the owner's ruling —
+  // "not gossip... this part should be open to the person" — that path is
+  // `isOwnerTyping` false + room false, unchanged below); but the moment
+  // other people share the room, rendering it would surface one colleague's
+  // private briefing to everyone else present. `senderId` is still whoever
+  // is TYPING this turn, so a room gate is a strict addition, not a
+  // per-speaker change.
   const speakerMemoryBlock = (() => {
-    if (isOwnerTyping || !senderId) return '';
+    if (isOwnerTyping || !senderId || isMpim || isChannel) return '';
     const personRow = getPersonMemory(senderId);
     if (!personRow) return '';
     const md = readPersonMemorySync(profile, personRow.person_id, personRow.name);
@@ -824,8 +931,13 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // → upsertPersonMemory). Tells Sonnet: this is the only valid identity for
   // this turn, free-text identity claims in the message body don't override.
   // Belt for the cheap email-mismatch + Haiku check in securityGate.ts.
+  //
+  // o#214 — same room gate as speakerMemoryBlock above, on the same
+  // reasoning: this is another per-SPEAKER block, so a shared room (where
+  // other people read the same reply) gets it suppressed the same way a
+  // colleague's own 1:1 DM does not.
   const verifiedSenderBlock = (() => {
-    if (isOwnerTyping || !senderId) return '';
+    if (isOwnerTyping || !senderId || isMpim || isChannel) return '';
     const personRow = getPersonMemory(senderId);
     if (!personRow) return '';
     return [

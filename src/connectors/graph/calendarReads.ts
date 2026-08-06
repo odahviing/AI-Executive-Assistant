@@ -1228,11 +1228,20 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   // supply (or re-ask for) a length it already knows.
   endDateTime?: string;
   endTimeZone?: string;
+  // o#216 — sensitivity/categories/organizer/attendees ride along so a caller
+  // that surfaces THIS subject to someone other than the owner-in-his-own-DM
+  // (the seriesMaster refusal messages in update_meeting/move_meeting/
+  // delete_meeting) can mask it through displaySubject, same as o#178 did for
+  // getEventEndInstant's subject above.
+  sensitivity?: string;
+  categories?: string[];
+  organizer?: { emailAddress?: { address?: string | null; name?: string | null } | null } | null;
+  attendees?: Array<{ emailAddress?: { address?: string | null; name?: string | null } | null } | null> | null;
 }> {
   const client = getClient();
   const event = await client
     .api(`/users/${userEmail}/events/${meetingId}`)
-    .select('id,type,subject,seriesMasterId,start,end')
+    .select('id,type,subject,seriesMasterId,start,end,sensitivity,categories,organizer,attendees')
     .get();
   return {
     type: event?.type,
@@ -1242,6 +1251,10 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     startTimeZone: event?.start?.timeZone,
     endDateTime: event?.end?.dateTime,
     endTimeZone: event?.end?.timeZone,
+    sensitivity: event?.sensitivity,
+    categories: event?.categories,
+    organizer: event?.organizer,
+    attendees: event?.attendees,
   };
 }
 

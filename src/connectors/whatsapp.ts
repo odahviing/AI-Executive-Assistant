@@ -345,6 +345,15 @@ async function handleWhatsAppMessage(
       channelId,
       userId: profile.user.slack_user_id,
       senderRole: 'owner',
+      // v4.4.x (#154) — the trust gate above (senderPhone !== ownerPhone) is
+      // the ONLY party that can reach this call today: owner-phone-only,
+      // everyone else dropped silently before this point (no colleague path,
+      // no room). `owner_dm` reproduces today's behaviour byte-for-byte and
+      // matches the other owner-only synthetic callers (briefs.ts,
+      // routine.ts, email inbound). Out of scope for redesign per this wave
+      // — WhatsApp stays dormant and untouched otherwise.
+      authority: 'owner',
+      surface: 'owner_dm',
       channel: 'whatsapp',
       inboundConnectionId: 'whatsapp',
       profile,

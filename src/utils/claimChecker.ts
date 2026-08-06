@@ -22,9 +22,25 @@
  * Scoped to turns the OWNER is acting on — his 1:1 DM, and his own turns in a
  * group DM (where it runs alongside securityGate, not instead of it: honesty and
  * leak-filtering are different concerns and a group reply needs both). A
- * colleague's own turn doesn't run it: the check exists so the person who can go
- * and chase an un-done action finds out it didn't happen, and that person is the
- * owner. The MPIM branch below (mpimContext) serves exactly the group case.
+ * colleague's own turn otherwise doesn't run it: the RULE-A phantom-action check
+ * exists so the person who can go and chase an un-done action finds out it
+ * didn't happen, and that person is the owner. The MPIM branch below
+ * (mpimContext) serves exactly the group case.
+ *
+ * v4.4.x (#154) — ONE exception to "colleague's own turn doesn't run it": the
+ * room-approval honesty check (approvalGrantContext). It runs on a real
+ * colleague's own turn too, because the risk it guards is the opposite of RULE
+ * A's — not "did the owner's claimed action really happen" but "does this room
+ * reply falsely tell the COLLEAGUE a decision came back (including a decision
+ * that came back NEGATIVE)". The caller (runOutputGates.ts) gates it
+ * deterministically — R7 (2026-08-06): a request row must have EVER existed
+ * for this thread (getLatestRequestForThread), and then EITHER a request is
+ * genuinely `awaiting_owner` right now OR no request in the thread was ever
+ * resolved — so it never runs on an ordinary colleague turn with no request
+ * at all, and a thread whose request(s) resolved stops costing anything once
+ * resolved, but a thread that only ever went cancelled/expired keeps paying
+ * for as long as it stays active, because that is exactly where a false
+ * "he approved it" claim is provably false.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -50,6 +66,41 @@ export interface ClaimCheckInput {
     isMpim: boolean;
     participantSlackIds: string[];   // all non-bot member IDs in the MPIM
   };
+  /**
+   * v4.4.x (#154) — deterministic ground truth for an approval-granted claim
+   * on a room surface. Owner ruling: she announces nothing while a rule-bend
+   * escalation waits in the private approval thread, so the only fabricable
+   * claim on that path is a room reply asserting the decision already came
+   * back. Present ONLY when the caller (runOutputGates.ts) found a request
+   * row tied to THIS thread (getLatestRequestForThread) — the cheap,
+   * deterministic pre-filter that keeps this from costing anything on the
+   * vast majority of colleague turns that never carried an escalation.
+   * `isResolved` is `anyRequestResolvedForThread(...)` (o#224) — TRUE when
+   * ANY request row in this thread was ever resolved, not just the newest
+   * one. A thread can carry 2+ requests, and gating on the latest row's
+   * state alone inverted a TRUE "he approved it" about an OLDER, resolved
+   * row into a false claim whenever a newer, unrelated request was still
+   * pending — corrupting a correct reply (G6). 'resolved' is the ONLY
+   * state an owner APPROVE produces (a reject sets 'cancelled', never
+   * 'resolved'; see core/requests/resolver.ts), so it is a reliable
+   * "granted somewhere in this thread" signal. Absent/undefined → the new
+   * instruction block below is skipped entirely and behavior is
+   * byte-identical to before this field existed.
+   *
+   * The caller (runOutputGates.ts) builds this context whenever a request row
+   * has EVER existed for the thread AND EITHER a request is genuinely
+   * `awaiting_owner` right now OR no request in the thread was ever resolved
+   * (R7, 2026-08-06) — so a thread whose only requests ever went
+   * `cancelled`/`expired` (never resolved) still gets a context object, and
+   * keeps paying for as long as it stays active, because a "he approved it"
+   * claim there is a GENUINE standing risk, not a cost-free non-event
+   * (measured: req_1783847332015_bgs91, cancelled 2026-07-13, colleague still
+   * active in the thread on 2026-07-30). A RESOLVED thread is the one that
+   * stops costing anything the moment nothing new is pending.
+   */
+  approvalGrantContext?: {
+    isResolved: boolean;
+  };
   // v2.3.2 (2B) — second mode. Default 'action' = existing behavior (false
   // action claims). 'coda' = check a generated social coda for invented facts
   // or gossipy commentary about a third party. Same JSON shape; caller checks
@@ -65,7 +116,7 @@ export interface ClaimCheckInput {
   };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'other' | 'invented_fact' | 'gossipy' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -75,8 +126,9 @@ export interface ClaimCheckResult {
   action_summary?: string | null;
   /**
    * v2.6.1 — distinguishes "did the action happen at all" overclaims (false →
-   * the safety-net shield in postReply.ts can correctly suppress when a
-   * matching tool ran) from "the SPECIFIC change claimed wasn't actually
+   * the safety-net shield in runOutputGates.ts (the matchingToolAlreadyRan
+   * check) can correctly suppress when a matching tool ran) from "the SPECIFIC
+   * change claimed wasn't actually
    * performed by the tool that ran" overclaims (true → shield should NOT
    * suppress, the LLM has named a real specifics mismatch). Example of the
    * latter: draft says "updated to 25 min" but only `move_meeting` ran —
@@ -94,6 +146,28 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // v2.3.2 (2B) — coda mode always checks. Codas are SHORT by design but
   // every word matters; the "shares my name" hallucination was 9 words.
   if (input.mode === 'coda') return true;
+  // v4.4.x (#154) / o#227, tightened R6, widened R7 (2026-08-06), floor
+  // hole closed R8 (2026-08-06) — approvalGrantContext is only ever
+  // CONSTRUCTED by the caller (runOutputGates.ts) when a request row has
+  // EVER existed for this thread AND (some request is genuinely
+  // `awaiting_owner` right now OR no request in the thread was ever
+  // resolved). A thread that never carried a request never gets a context
+  // object at all, so it never reaches this function with one; a thread
+  // whose request(s) resolved stops getting one too, the moment nothing new
+  // is pending — that pair is what stops the paid-forever case (36 of 47
+  // request-carrying threads build no context and pay nothing). Gating the
+  // floor-skip on `hasLivePending` alone (R7) missed the OTHER population the
+  // caller already narrowed down to: the terminal-never-resolved threads
+  // (10 of 47, measured 2026-08-06) get a context object too (`!isResolved`),
+  // but hasLivePending reads false for them BY CONSTRUCTION, so the 30-char
+  // floor below still applied and dropped exactly the short claim this
+  // exists to catch — the exemplar "all good, we can continue" is 25 chars.
+  // Keying on PRESENCE instead of the hasLivePending field closes that hole
+  // without widening the paid population at all: the caller's own gate is
+  // already the expensive filter (11 of 47 threads ever get a context
+  // object), this just stops re-applying an English-phrase-shaped length
+  // floor on top of it for that already-narrow set.
+  if (input.approvalGrantContext) return true;
   // bookingOccurred is NOT a blanket skip (v3.8.x): a booking success proves only
   // the BOOKING claim, but the same reply can ALSO carry a phantom send ("Booked
   // Tue 2pm and pinged Yael" with only create_meeting) that must still be checked.
@@ -133,6 +207,14 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
     ? `\nMPIM CONTEXT (the reply was drafted in a Slack group thread):\n  Participants in this group thread: ${input.mpimContext.participantSlackIds.length > 0
         ? input.mpimContext.participantSlackIds.map(id => `<@${id}>`).join(', ')
         : '(none listed)'}\n  Inline mentions of these participants in the reply are LEGITIMATE addressing (greeting/directing them in the shared room). Do NOT treat them as phantom sends.\n`
+    : '';
+
+  // v4.4.x (#154) — approval-status ground truth. Only present when the
+  // caller found a request row tied to THIS thread.
+  const approvalBlock = input.approvalGrantContext
+    ? `\nAPPROVAL STATUS FOR THIS THREAD (ground truth — this thread has a tracked owner decision request): ${input.approvalGrantContext.isResolved
+        ? 'RESOLVED — the owner has decided and the request is granted.'
+        : 'NOT RESOLVED — no owner decision has come back for this thread yet.'}\n`
     : '';
 
   // v2.3.2 (2B) — coda mode prompt. Same JSON shape as action mode (so
@@ -188,7 +270,7 @@ You audit draft replies from an executive assistant for honesty violations befor
 
 TOOL ACTIVITY THIS TURN:
 ${toolBlock}
-${mpimBlock}${bookingNote}
+${mpimBlock}${bookingNote}${approvalBlock}
 DRAFT REPLY:
 """
 ${input.reply}
@@ -206,6 +288,13 @@ CRITICAL — tool-aware honesty:
 If TOOL ACTIVITY shows the matching tool already ran this turn — e.g. \`[message_colleague: <name>]\` for a "sent X" claim about that name, \`[create_meeting: ...]\` for a booking claim, \`[create_approval: ...]\` or \`[create_task: ...]\` for a "flagged it" claim — the claim is HONEST regardless of the verb tense or phrasing used. "On its way", "sending now", "I've reached out", "sent", "the message is going out", "on it — I'll send now" are ALL valid when the matching tool ran. Do NOT flag these.
 
 The whole point of these tools is to queue an action; the model is allowed to narrate the queued action as if it's happening. ONLY flag when the claim is about an action whose matching tool did NOT run this turn.
+
+CRITICAL — approval/permission-granted claim on a room thread (v4.4.x):
+The draft can assert that ${input.ownerFirstName} granted a permission, approved a rule-bend, or that something previously blocked is now clear to proceed — "all good, we can continue", "he said yes, let's go ahead", "that's approved now", "we're clear", in ANY language, tense, or phrasing. ${input.ownerFirstName} never announces this kind of escalation mid-wait, so a room reply never truthfully asserts a grant while a decision is still pending.
+- If APPROVAL STATUS FOR THIS THREAD above says RESOLVED, such a claim is HONEST — do NOT flag.
+- If APPROVAL STATUS FOR THIS THREAD above says NOT RESOLVED, a declarative claim that the grant already came back is FALSE — flag claimed_action=true, action_type="permission_granted".
+- When the APPROVAL STATUS block is absent entirely, this rule does not apply — judge the draft under the other rules only.
+- An in-progress line ("still checking with him", "let me get back to you on that", "waiting to hear back") is NEVER a false claim under this rule — only a DECLARATIVE assertion that the decision already came back counts.
 
 CRITICAL — resolve_approval relays to the requester ITSELF:
 When the owner resolves a colleague-initiated approval (verdict approve / amend / reject), \`resolve_approval\` ALSO DMs the original requester the decision — an internal relay sent by the system, NOT a \`message_colleague\` call. So a draft saying "the requester will get the details" / "I'll let <name> know" / "they can confirm from there" / "<name> will get the adjusted details" is HONEST when \`[resolve_approval: ...]\` appears in TOOL ACTIVITY this turn. The matching mechanism for "told the requester" after an approval decision is \`resolve_approval\`, not \`message_colleague\`. Do NOT flag these as a phantom message — forcing a message_colleague would DOUBLE-DM the requester (one from the resolver, one from the send).
@@ -266,6 +355,7 @@ IS a false claim:
 - The reply contains a \`<@USERID>\` Slack ping intended to notify someone OUTSIDE the current room, but no message_colleague targeting them is in TOOL ACTIVITY THIS TURN. (For people NOT in the room, inline pings are not how to message them — message_colleague is.)
 - IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.
 - A claim that a file/image is attached HERE / delivered to the reader in THIS message ("here's the image", "see attached", "with the image attached") when NO file/image-send tool ran this turn — the text reply carries no attachment unless a send tool fired (see "file / image delivery" above).
+- A declarative claim that ${input.ownerFirstName} granted a permission / approved a rule-bend / cleared something previously blocked ("all good, we can continue", "he said yes") when APPROVAL STATUS FOR THIS THREAD above says NOT RESOLVED — see the approval/permission-granted CRITICAL section above.
 
 ═════════════════════════════════════════════════════════════════════════════
 OUTPUT SCHEMA
@@ -273,7 +363,7 @@ OUTPUT SCHEMA
 
 {
   "claimed_action": boolean,
-  "action_type": "message" | "book" | "task" | "deliver_file" | "other" | null,
+  "action_type": "message" | "book" | "task" | "deliver_file" | "permission_granted" | "other" | null,
   "claim_specifics_mismatch": boolean,
   "target_name": string | null,
   "action_summary": string | null
@@ -300,7 +390,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       // threadBoundApprovalAutoResolve). Post-B the checker has
       // ONE job (RULE A: action claim vs tool history) — pattern matching
       // against a structured list, exactly what Haiku is for. The
-      // matchingToolAlreadyRan shield in postReply already absorbs
+      // matchingToolAlreadyRan shield in runOutputGates.ts already absorbs
       // false-positives from whichever model runs here, so the safety net
       // is unchanged. Coda mode also runs on Haiku — owner direction
       // 2026-05-26 "ship it and move all to haiku also the coda".
@@ -443,6 +533,15 @@ export async function rewriteOwningTheMiss(opts: {
   // tool, so it inverted a TRUE "added meeting@reflectiz.com" into "not done,
   // confirm the address". Hand it the same ground truth the first checker reads.
   toolSummaries?: string[];
+  // v4.4.x (#154) added an approvalGrantContext param here for the
+  // permission-granted claim class; removed in o#224 when the class went
+  // detect-and-log only, then RESTORED in R5 (2026-08-06) — but the binding
+  // that makes it safe lives at the CALL SITE (runOutputGates.ts), not here:
+  // the caller never routes a permission_granted claim into this rewrite
+  // unless anyRequestResolvedForThread is false for the thread (no request
+  // here was EVER resolved), so a possibly-true grant about an older
+  // resolved row never reaches this function at all — no approvalGrantContext
+  // param is needed on this side of the call.
 }): Promise<string | null> {
   const what = opts.actionSummary
     || (opts.actionType === 'message'
@@ -457,7 +556,6 @@ export async function rewriteOwningTheMiss(opts: {
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
-
 STEP 1 — Call verdict="keep" (leave message empty) if ANY of these hold:
 - The draft only PROPOSES / OFFERS an action ("Want me to move Michal to Wed?", "I can book that", "Should I reach out to her?"), OR
 - it reports a completed action AND, in the same reply, OFFERS a follow-up as a QUESTION ("Moved it to 13:45 — Oran, Onn and Daniel are all busy then, want me to let them know?"). A trailing interrogative offer to notify ("want me to tell / notify / let them know?") is a PROPOSAL, never a completed send — EVEN when it names those people. (Only a declarative-past "I've let them know" with no message tool is a false send.), OR

@@ -364,9 +364,9 @@ function scheduleSocialCoda(opts: {
         // coda as a labelled line inside it. Labelled 'Social coda' because
         // telling it apart from the reply at a glance is the whole point of the
         // request. Colleague-facing only — the owner doesn't need his own DM
-        // mirrored back, and the senderId check also excludes him in
-        // colleague-test mode. (No isOwnerInGroup check: the coda is 1:1-DM-only,
-        // asserted above, and that clamp only exists inside an MPIM.)
+        // mirrored back, and the senderId check excludes him. (No isOwnerInGroup
+        // check: the coda is 1:1-DM-only, asserted above, and that clamp only
+        // exists inside an MPIM.)
         if (role === 'colleague' && senderId !== profile.user.slack_user_id) {
           const who = colleagueName ?? senderId;
           const { shadowNotify } = await import('../../utils/shadowNotify');

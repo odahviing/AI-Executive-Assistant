@@ -37,7 +37,7 @@ import {
   handleDeleteMeeting,
 } from './ops/handlers/calendarReads';
 import type { OpCtx } from './ops/handlers/context';
-import { clampedRelaxedNotice } from './bookingRequest';
+import { grantRelaxed } from './bookingRequest';
 
 /**
  * Internal ops helper. Not a registered skill (see file header). MeetingsSkill
@@ -58,21 +58,36 @@ export class SchedulingSkill {
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
-    const result = await this.dispatch(toolName, args, context);
+    // R3 (2026-08-06) — computed ONCE here, for find_available_slots only,
+    // and threaded into the handler via OpCtx.relaxedGrant (context.ts) so
+    // `handleFindAvailableSlots`'s own internal `grantRelaxed(args, context)`
+    // call (findAvailableSlots.ts:183 — needed mid-search for the real
+    // rule-bypass decision, not just this disclosure) reads the SAME result
+    // instead of calling it a second time and logging its decision twice.
+    const relaxedGrant = toolName === 'find_available_slots' ? grantRelaxed(args, context) : undefined;
+    const result = await this.dispatch(toolName, args, context, relaxedGrant);
 
-    // The owner's relaxed override, dropped by the group-DM clamp, used to be
-    // visible only in a log line — so he was answered un-relaxed and told
-    // nothing (2026-07-27; see clampedRelaxedNotice). Attached HERE, the one
-    // point every direct op returns through, so the disclosure rides EVERY
-    // branch of every relaxed-aware tool — booked, refused, rule_violation,
-    // needs_owner_approval — instead of three handlers each having to remember
-    // it at each of their own return sites. Mutated rather than spread so the
-    // result keeps its identity for downstream consumers; the array exclusion
-    // matters because JSON.stringify would drop a non-index key.
-    const notice = clampedRelaxedNotice(toolName, args, context);
-    if (notice && typeof result === 'object' && result !== null && !Array.isArray(result)) {
-      (result as Record<string, unknown>).owner_override_not_applied = notice;
-    }
+    // o#222 / G2 (2026-08-06, owner ruling: "stay quiet ... its long strange
+    // that she explains other people why I cant meet with them") — a
+    // room-clamped rule-bend on find_available_slots (relaxedReason ===
+    // 'owner_room_bend') used to attach `owner_override_not_applied`, a
+    // notice telling Sonnet to say plainly in the room that his override
+    // didn't land. That is exactly the room-narration the owner ruled out:
+    // explaining HIS constraints to the other people in the chat while he is
+    // sitting right there. Removed — no field, no narration.
+    //
+    // No replacement owner-facing signal is needed on this path, unlike
+    // create_meeting/move_meeting's room-bend case (createMeeting.ts:1084,
+    // moveMeeting.ts:1234): those call createApprovalRequest and the owner
+    // learns the outcome through his own private approval DM thread, so the
+    // room can stay silent AND he still finds out. find_available_slots is
+    // read-only — no booking is pending and nothing needs his sign-off — so
+    // there is no decision to deliver to him at all. The STRICT results
+    // returned here are honest on their own (real, rule-compliant slots);
+    // presenting them without commentary misleads no one. If he wants the
+    // override actually applied he asks in a genuine 1:1 DM (owner_direct,
+    // granted immediately) or calls create_meeting/move_meeting with
+    // relaxed=true, which already routes correctly and quietly.
 
     // email-aside-leak-no-channel-scope — `override_notice` (createMeeting.ts,
     // sourced from planMeeting.ts's overrideNotice) is a second-person aside
@@ -83,9 +98,9 @@ export class SchedulingSkill {
     // entirely) — there is no owner-facing side channel on that leg for such a
     // note to land in instead, so if left on the payload it has nowhere to go
     // but into the text the owner forwards verbatim to the external. Strip
-    // here, the one point every direct op returns through (same chokepoint as
-    // the notice attached just above), rather than gate each handler's attach
-    // site individually. Rule 10: when the audience is unclear, return less.
+    // here, the one point every direct op returns through, rather than gate
+    // each handler's attach site individually. Rule 10: when the audience is
+    // unclear, return less.
     // (`_attendee_busy_note`, moveMeeting.ts's twin of this note, is NOT
     // stripped here — move_meeting is absent from CHANNEL_TOOL_CLAMP.email
     // (registry.ts), so it structurally can never reach an email-leg result;
@@ -215,9 +230,10 @@ export class SchedulingSkill {
     toolName: string,
     args: Record<string, unknown>,
     context: SkillContext,
+    relaxedGrant?: OpCtx['relaxedGrant'],
   ): Promise<unknown | null> {
     const { email: userEmail, timezone } = context.profile.user;
-    const opCtx: OpCtx = { context, userEmail, timezone };
+    const opCtx: OpCtx = { context, userEmail, timezone, relaxedGrant };
 
     switch (toolName) {
       case 'hold_slot':

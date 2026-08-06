@@ -17,29 +17,25 @@ const anthropic = getAnthropicClient();
 export async function buildTurnContext(input: OrchestratorInput) {
   const { userMessage, conversationHistory, threadTs, profile } = input;
 
+  // v4.4.9 (R9) / W3 fix — "who else can read the answer" (surface). Computed
+  // once, up top, so every wholesale room-suppression site (the proactive
+  // raise-stamp below, personWorkBlock/socialBlock/socialDirectiveBlock
+  // further down) reads the SAME value. A room turn never renders a proactive
+  // subject, so it must never MARK one raised either — the two have to stay
+  // paired or the re-raise defer / decay / initiation gate (socialSubjects.ts)
+  // key off a stamp that no render ever produced.
+  const isRoom = input.isMpim === true || input.isChannel === true;
+
   // v2.5.4 Bug 3 — MPIM with non-owner members forces colleague-context.
-  // Pre-v2.5.4 the prompt unlocked owner-level rules whenever isOwnerInGroup
-  // was true. That leaked subjects / attendees / project names into
-  // colleague-readable threads when owner asked things like "am I free?".
-  // Owner direction (Calendly / Julia thread, 2026-05-05): in any MPIM with
-  // non-owner members, treat the conversation as colleague-shaped — tools
-  // restricted, narration sanitized, even when owner is the typer. Owner
-  // retains AUTH (his typed asks still execute via the colleague-allowed
-  // tools that have rule-compliance gates). For owner-only data (memory,
-  // preferences, full calendar narration) he asks in his private DM.
-  // isOwnerInGroup stays true so social classification + people-memory
-  // path still recognizes "owner is typing"; the override here only
-  // affects tool gating + prompt framing + handler senderRole.
-  const mpimWithOthers = !!(input.isMpim && input.mpimMemberIds &&
-    input.mpimMemberIds.some(id => id !== profile.user.slack_user_id));
-  if (mpimWithOthers && input.senderRole === 'owner') {
-    logger.info('orchestrator — MPIM with non-owner: forcing colleague-context', {
-      actualTyper: input.userId,
-      mpimMembers: input.mpimMemberIds,
-      threadTs: input.threadTs,
-    });
-    input.senderRole = 'colleague';
-  }
+  // Removed 2026-08 (#154): there is no MPIM without non-owner members —
+  // Maelle has exactly one owner, so any MPIM she's in is by definition
+  // crowded, and this branch's own condition (mpimWithOthers && senderRole
+  // === 'owner') could never come out false. `role`/`senderRole` is now
+  // clamped to 'colleague' in every MPIM at the single front door
+  // (processMessage.ts:139) before the orchestrator is ever called, so
+  // there is nothing left for a second clamp here to reconcile.
+  // isOwnerInGroup still carries "the owner is the one typing" through to
+  // social classification + people-memory unchanged.
 
   logger.info('Orchestrator invoked', {
     user: profile.user.name,
@@ -272,7 +268,12 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // marking, so every subject sat at last_assistant_initiated_at=NULL and
         // the whole rotation/decay machinery was dead. (raise_new has no
         // subject yet — it's stamped when reconciliation creates the subject.)
-        if (socialDirective.mode === 'continue' && socialDirective.subjectId) {
+        // W3 fix — gated on `!isRoom` to match `socialDirectiveBlock` below,
+        // which suppresses the render wholesale on any room surface. Before
+        // this the stamp ran unconditionally, so a room turn recorded a
+        // "raise" that was never actually rendered — corrupting the re-raise
+        // defer, the decay and the initiation gate, all keyed on this stamp.
+        if (!isRoom && socialDirective.mode === 'continue' && socialDirective.subjectId) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { markSubjectRaised } = require('../../db/socialSubjects') as
@@ -438,7 +439,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel, input.authority);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.
@@ -606,31 +607,41 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
   // Per-person context on COLLEAGUE turns (owner turns use the Social Engine
   // directive below instead). TWO blocks, gated differently:
-  //   - WORK context (role, reports_to, response speed, collaboration, recent
-  //     work exchanges + bookings) — ALWAYS on. It is what makes Maelle
-  //     competent with this person; P6 forbids gating work-competence behind
-  //     the optional social skill, and pre-split `skills.social: false` cost a
-  //     tenant all of it as collateral.
+  //   - WORK context (recent work exchanges + bookings) — on for a colleague's
+  //     OWN 1:1 DM. It is what makes Maelle competent with this person; P6
+  //     forbids gating work-competence behind the optional social skill.
   //   - SOCIAL context (engagement rank, initiation cadence, personal notes) —
   //     gated on the toggle (v2.2.3 #3), which is what the toggle is for.
-  // Both keyed on isOwnerTyping ON PURPOSE — that's the "who is the human"
-  // question, not a data gate. In a clamped MPIM input.userId is the OWNER's id,
-  // so falling to the colleague branch would build a per-person block out of the
-  // owner's own row and inject it into the group thread.
-  const personWorkBlock = isOwnerTyping
+  // v4.5.x (#154) — both ALSO suppressed wholesale on a room surface (MPIM or
+  // channel), never only trimmed. `isOwnerTyping` answers "who is the human on
+  // this turn" (identity), `isRoom` answers "who else can read the answer"
+  // (surface) — a colleague's own work/social memory is his to read in his own
+  // DM, but the moment other people share the room it is provenance the owner
+  // gathered on this person for MAELLE's use, not a profile to hand back to a
+  // crowd. (This replaces the narrower `sharedSurface` trim that used to run
+  // inside buildPersonWorkContextBlock — see its own history there.) `isRoom`
+  // itself is computed once, at the top of this function — see there.
+  const personWorkBlock = (isOwnerTyping || isRoom)
     ? ''
-    : buildPersonWorkContextBlock(input.userId, {
-        // MPIM / channel: the answer is read by people other than the speaker,
-        // so the block drops the parts only the speaker is entitled to.
-        sharedSurface: input.isMpim === true || input.isChannel === true,
-      });
-  const socialBlock = (isOwnerTyping || !socialActive)
+    : buildPersonWorkContextBlock(input.userId);
+  const socialBlock = (isOwnerTyping || isRoom || !socialActive)
     ? ''
     : buildSocialContextBlock(input.userId, input.profile.user.timezone, input.profile.assistant.name);
 
   // v2.2 — Social Directive block. Populated by the pre-pass above.
   // When mode === 'none' this is empty and has no effect on the prompt.
-  const socialDirectiveBlock = formatDirectiveForPromptBlock(socialDirective);
+  // v4.4.9 (R9) — same wholesale room suppression as personWorkBlock/socialBlock
+  // above. The directive is built from `turnPersonSlackId`, which on an
+  // owner-in-room turn (isOwnerTyping) IS the owner's own id — so the picker
+  // (directiveForProactiveSlot) surfaces the OWNER's own private subjects
+  // ("Zoe the mini pincher", a trip, etc.) and prints them straight into the
+  // shared-room prompt via `Subject: <label>`, with no provenance filter at
+  // all. This is the same leak buildSocialContextBlockById's created_by
+  // filter closes for a colleague's subjects — but socialDirectiveBlock isn't
+  // routed through that filter, it's a raw label. Suppressing wholesale on
+  // any room surface (MPIM or channel) is correct here too: a proactive
+  // social nudge is for a 1:1, never for an audience.
+  const socialDirectiveBlock = isRoom ? '' : formatDirectiveForPromptBlock(socialDirective);
 
   // v2.6.1 — recent-outbound context block. Populated by the Slack
   // connector at inbound-DM time when a colleague's reply lands within a
@@ -649,7 +660,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // the booking flow will accept later. Fails open: regex doesn't match
   // → block empty → normal flow.
   let availabilityPrecheckBlock = '';
-  if (input.senderRole === 'colleague' && userMessage && userMessage.trim().length > 0) {
+  // v4.4.x (#154) — gated on `authority`, not the surface-clamped `senderRole`.
+  // This precheck's own rendered text names the asker "this colleague's
+  // question" (availabilityPreCheck.ts) — true for a genuine colleague, false
+  // for the AUTHENTICATED owner typing in an MPIM/channel (where senderRole
+  // reads 'colleague' by clamp design but authority still reads 'owner').
+  // Running it for him addressed him as a colleague in his own turn; now it
+  // simply doesn't run for him, which costs him nothing he actually needs —
+  // the owner keeps direct tool access even in a room, so Sonnet calls
+  // find_available_slots itself rather than leaning on this eyeball-mismatch
+  // guard the way a colleague's more restricted tool access does.
+  if (input.authority === 'colleague' && userMessage && userMessage.trim().length > 0) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { precheckAvailability } = require('../../utils/availabilityPreCheck') as
@@ -800,6 +821,11 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
         profile.user.name,
         tz,
         profile,
+        // Gated on isOwnerPath (senderRole === 'owner'), which — per
+        // processMessage.ts's room clamp — only ever holds for the owner's own
+        // DM, never a room a colleague can read. 'owner' matches that
+        // guarantee (mirrors the isOwnerDm callers in calendarReads.ts).
+        'owner',
       );
       const days = ops.analyzeCalendar(processed, todayStr, tomorrowStr, profile);
       if (days.length > 0) {
@@ -1055,7 +1081,11 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // Tools are collected from active skills — filtered by sender role and
   // (when Module G is on) by the classifier-picked scope set.
   // Colleagues get the static restricted subset; owner gets scope-filtered.
-  let tools = getSkillTools(profile, input.senderRole, toolScopes, input.channel);
+  // v4.4.x (#154) — `input.authority` widens a colleague-context (room)
+  // turn's floor to OWNER_ROOM_ACTION_TOOLS when the AUTHENTICATED sender is
+  // the owner, so his book/move/cancel/approve authority survives the room
+  // clamp even though his DATA access does not (registry.ts getSkillTools).
+  let tools = getSkillTools(profile, input.senderRole, toolScopes, input.channel, input.authority);
 
   // v2.8.6 — prose-only mode strips every write tool. Used by the
   // dateVerifier retry path so a date-typo retry can't fire a fresh

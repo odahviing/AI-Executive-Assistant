@@ -39,7 +39,7 @@ import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/tim
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { bookingLeadTimeHours, offeredSlotCount } from '../../../../utils/scheduleRules';
-import { subjectViewerFor } from '../../../../utils/displaySubject';
+import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
@@ -180,9 +180,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // exactly one function (bookingRequest.grantRelaxed) and every path reads it.
   // Resolving it here rather than per-site also means the DENIED log fires once
   // per tool call, not once per internal search.
-  const relaxedGranted = grantRelaxed(args, context).relaxed;
+  //
+  // R3 (2026-08-06) — read off `ctx.relaxedGrant`, computed ONCE by
+  // `SchedulingSkill.executeToolCall` (ops.ts) before dispatch, rather than
+  // calling `grantRelaxed` again here — that second call was harmless but
+  // logged the same DENIED/owner_room_bend decision a second time per turn.
+  // The `?? grantRelaxed(...)` fallback only matters if this handler is ever
+  // invoked outside that one dispatch path (it currently isn't).
+  const relaxedGranted = ctx.relaxedGrant?.relaxed ?? grantRelaxed(args, context).relaxed;
   const leadHours = bookingLeadTimeHours(context.profile, isOwnerPath ? 'owner' : 'colleague');
   const viewer = subjectViewerFor(context);
+  // v4.4.9 (#154) — the attendee-aware half of that same mask, threaded
+  // alongside `viewer` into every findAvailableSlots call below.
+  // W5/R4 (2026-08-06) — room-tightening lives inside viewerEmailFor now
+  // (surface==='room' → null); call it directly — a blanket ?? null here
+  // also masked the email leg's forwarded subjects unconditionally.
+  const viewerEmail = viewerEmailFor(context);
   const offerCount = offeredSlotCount(context.profile);
         // v1.6.4 — meeting_mode is required from the LLM. Let findAvailableSlots
         // scope the workDays per mode (in_person → office only, else both). Do
@@ -890,6 +903,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   autoExpand: false,
                   minBufferHours: leadHours,
                   viewer,
+                  viewerEmail,
                   diagnosticsOut: diag,
                 });
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
@@ -989,6 +1003,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               autoExpand: !userNamedNarrowWindow,
               minBufferHours: leadHours,
               viewer,
+              viewerEmail,
               profile: context.profile,
               // v2.3.2 (2A) — relaxed mode opt-in (owner-only). Bypasses
               // focus / lunch / work-hours; keeps the 5-min between-meeting buffer.
@@ -1168,6 +1183,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   ? bookingLeadTimeHours(context.profile, 'owner')
                   : leadHours,
                 viewer,
+                viewerEmail,
                 profile: context.profile,
                 relaxed: false,
                 excludeEventIds: excludeEventIdsForSearch,
@@ -1247,6 +1263,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
                   attendeeAvailability,
                   viewer,
+                  viewerEmail,
                   profile: context.profile,
                   // No `minBufferHours` — it would be set-but-never-read. `relaxed`
                   // is a TOTAL owner override in both places that consume the lead
@@ -1486,6 +1503,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     autoExpand: false,
                     minBufferHours: leadHours,
                     viewer,
+                    viewerEmail,
                     diagnosticsOut: prefDiag,
                   });
                   const prefAvailable = prefSlots.length > 0;

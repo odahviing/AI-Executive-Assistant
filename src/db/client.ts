@@ -7,6 +7,7 @@ import { loadAllProfiles } from '../config/userProfile';
 import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requests';
 import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
 import { runDedupePeopleByEmail } from './migrations/v4_0_4_dedupe_people_email';
+import { runSocialProvenanceBackfill } from './migrations/v4_4_9_social_provenance_backfill';
 
 let db: Database.Database;
 
@@ -52,6 +53,14 @@ export function getDb(): Database.Database {
       runDedupePeopleByEmail(db, config.DB_PATH);
     } catch (err) {
       logger.error('v4.0.4 people-dedupe migration threw — continuing', { err: String(err) });
+    }
+    // v4.4.9 — backfill social_subjects/social_topics rows mis-stamped
+    // created_by='owner' by the pre-cc7d4ce reconciliation writer (R7). Runs
+    // AFTER the tables exist (initSchema, above); idempotent, no-ops once clean.
+    try {
+      runSocialProvenanceBackfill(db);
+    } catch (err) {
+      logger.error('v4.4.9 social-provenance backfill threw — continuing', { err: String(err) });
     }
     logger.info('Database initialized', { path: config.DB_PATH });
   }

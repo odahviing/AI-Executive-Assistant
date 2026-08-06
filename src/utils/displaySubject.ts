@@ -43,6 +43,19 @@
  * deliberately NOT owner here — colleagues read that transcript — which is the
  * same posture as the `isOwnerDm` audit gate in the get_calendar handler.
  *
+ * ── ATTENDEE-AWARE, not just private-aware (v4.4.9 — #154) ──────────────────
+ * `viewer` alone only ever asked "owner or not" — so a genuine colleague got
+ * the raw subject of ANY non-private event, including one he isn't on at all
+ * (a stranger's 1:1, the CFO's review). `displaySubject`'s optional 4th param,
+ * `viewerEmail` — resolved by `viewerEmailFor` — adds the second test: a
+ * colleague who is not an attendee (or organizer) of THIS event never sees its
+ * subject, private or not. Existence, time and attendee NAMES stay visible
+ * either way (owner ruling: "he can know who is attending that meeting,
+ * nothing else") — only the subject text goes through this stricter gate.
+ * Opt-in on purpose: a caller that hasn't resolved a specific colleague's
+ * identity (or has already scoped the event list to only that colleague's own
+ * meetings) keeps the original private-flag-only behaviour.
+ *
  * Email is the SAME kind of exception, for a different reason (v4.4.x). Every
  * inbound email turn is stamped `senderRole:'owner'` (there's no other sender
  * to authenticate against — see connectors/email/inbound.ts), but the reply
@@ -60,11 +73,17 @@
 
 import type { UserProfile } from '../config/userProfile';
 import type { ChannelId } from '../skills/types';
+import { getPersonMemory } from '../db';
 
 interface SubjectableEvent {
   subject?: string | null;
   sensitivity?: string;
   categories?: unknown;
+  // v4.4.9 (#154) — feeds the attendee-aware half of the mask below. Optional
+  // and loosely typed (a subset of Graph's real shape) so every existing
+  // caller that never had attendee data to pass keeps compiling unchanged.
+  organizer?: { emailAddress?: { address?: string | null } | null } | null;
+  attendees?: Array<{ emailAddress?: { address?: string | null } | null } | null> | null;
 }
 
 /** Who the produced text is for. 'other' = anyone who is not the owner alone. */
@@ -80,35 +99,139 @@ export const PRIVATE_MASK = '[Private]';
  * THE viewer predicate — derived from the AUTHENTICATED sender (Slack-verified
  * `senderRole`), never from anything claimed in a message. Structural fields
  * only so `utils` doesn't take a dependency on SkillContext.
+ *
+ * Keys off `surface` (the turn's 3-way room/owner_dm/colleague_dm location —
+ * `skills/types.ts`'s `SkillContext.surface`, v4.4.x #154), not `isMpim`.
+ * For every LIVE turn the two were already equivalent (processMessage.ts
+ * clamps `senderRole` to 'colleague' for both isMpim AND isChannel before it
+ * ever reaches here, so senderRole==='owner' already implied surface===
+ * 'owner_dm'). The gap `isMpim` alone left open was replay: deferredAction
+ * Replay.ts hardcodes `senderRole:'owner'` for every replay (the approved
+ * action always executes with owner privilege) but sets `isMpim` to true
+ * only for a 'room'-origin request — a colleague-DM-origin replay
+ * (surface:'colleague_dm', isMpim:false) still read as the full 'owner'
+ * viewer, so a replayed create_meeting/move_meeting could narrate a
+ * conflicting PRIVATE event's real subject back into that colleague's own
+ * DM (#154-replay-surface). Checking `surface === 'owner_dm'` directly closes
+ * it: that colleague-DM replay now correctly reads as 'other'.
  */
 export function subjectViewerFor(
-  caller: { senderRole?: 'owner' | 'colleague'; isMpim?: boolean; channel?: ChannelId } | undefined,
+  caller: { senderRole?: 'owner' | 'colleague'; surface?: 'owner_dm' | 'colleague_dm' | 'room'; channel?: ChannelId } | undefined,
 ): SubjectViewer {
-  return caller?.senderRole === 'owner' && caller.isMpim !== true && caller.channel !== 'email'
+  return caller?.senderRole === 'owner' && caller.surface === 'owner_dm' && caller.channel !== 'email'
     ? 'owner'
     : 'other';
 }
 
 /**
+ * v4.4.9 (#154) — the requesting COLLEAGUE's own email, resolved from their
+ * authenticated Slack id, for `displaySubject`'s attendee-aware test below.
+ * Returns `undefined` for anyone this doesn't apply to (displaySubject keeps
+ * its old, private-flag-only behaviour, so every caller that never opts in is
+ * unaffected); `null` for a genuine colleague whose email didn't resolve —
+ * M12's default, unclear identity means return less, so that reads as "mask
+ * unconditionally", not "skip the check".
+ *
+ * o#217 — gated on BOTH `senderRole === 'colleague'` AND
+ * `surface === 'colleague_dm'`. `senderRole` alone used to be the whole gate,
+ * on the theory that it "never fires for the owner-in-a-group case" — false:
+ * processMessage.ts:122 clamps `senderRole` to 'colleague' for the owner too,
+ * whenever he's in a room (MPIM/channel), and his `userId` is NOT clamped —
+ * it's still his own real Slack id. So the old gate resolved the OWNER's own
+ * email via `getPersonMemory`, which trivially passes the attendee test on
+ * nearly every event on his own calendar — unmasking a private subject into a
+ * room full of colleagues, exactly what this branch exists to keep masked.
+ * Requiring `surface === 'colleague_dm'` restricts the unmask to a genuine
+ * 1:1 colleague DM, where the asker really is the whole audience.
+ *
+ * This does NOT reopen the replay gap `subjectViewerFor` closed
+ * (#154-replay-surface): a colleague-DM-origin replay's synthetic context
+ * carries `senderRole: 'owner'` (deferredActionReplay.ts hardcodes it for
+ * every replay) and `userId: ownerUserId`, never the original requester's own
+ * slack id — so the (still-present) `senderRole === 'colleague'` half of this
+ * gate excludes every replay regardless of `surface`, and there is no correct
+ * email to resolve here. `surface` is deliberately an ADDITIONAL restriction,
+ * never a replacement for the `senderRole` check.
+ *
+ * W5/R4 (2026-08-06) — a Slack ROOM turn (MPIM/channel) has no single
+ * identifiable colleague either, yet must mask at least as strictly as a 1:1
+ * DM (owner ruling: a room is never MORE permissive than a DM). That
+ * tightening now lives HERE, keyed on `surface === 'room'` → `null` (opts
+ * into the strict test with nobody able to pass it), rather than as a
+ * `?? null` coerced onto this function's result at each of its 9 call sites —
+ * which is what R4 originally shipped, and which flattened EVERY `undefined`
+ * into `null` regardless of why it was returned, including the EMAIL leg
+ * (`senderRole` reads `'owner'` there, so this function already opts out
+ * above `?? null` just reasserted `null` anyway) — masking every forwarded
+ * meeting subject in an email reply, not only the private ones, on a channel
+ * the owner ruled out of scope for this build entirely. Scoping the room
+ * tightening to inside this one function restores every other surface's
+ * (`owner_dm`, `email`) original opt-out, and removes the need for any call
+ * site to know a surface exists at all — call `viewerEmailFor(context)`
+ * directly, never `?? null`.
+ */
+export function viewerEmailFor(
+  caller: { senderRole?: 'owner' | 'colleague'; surface?: 'owner_dm' | 'colleague_dm' | 'room'; userId?: string } | undefined,
+): string | null | undefined {
+  if (!caller || caller.senderRole !== 'colleague') return undefined;
+  if (caller.surface === 'colleague_dm') return getPersonMemory(caller.userId ?? '')?.email?.toLowerCase() ?? null;
+  if (caller.surface === 'room') return null;
+  return undefined;
+}
+
+/**
+ * Is `viewerEmailLower` on this event — as an attendee or its organizer?
+ * Internal to displaySubject's attendee-aware test.
+ */
+function isEventAttendee(event: SubjectableEvent, viewerEmailLower: string): boolean {
+  const organizerEmail = event.organizer?.emailAddress?.address?.toLowerCase();
+  if (organizerEmail === viewerEmailLower) return true;
+  const attendees = Array.isArray(event.attendees) ? event.attendees : [];
+  return attendees.some(a => (a?.emailAddress?.address ?? '').toLowerCase() === viewerEmailLower);
+}
+
+/**
  * Returns the privacy-aware subject for display in any user-visible text.
  * Pass the event, the owner's profile (so the category-flag check can consult
- * the yaml), and WHO is going to read it. Owner → always the raw subject.
- * Anyone else → `[Private]` when the event qualifies, else the raw subject
- * (M12: a colleague sees the subject by default; only a private one is hidden).
+ * the yaml), WHO is going to read it, and — for a genuine colleague ask —
+ * that colleague's own email. Owner → always the raw subject. A private /
+ * private-category event → always `[Private]` for anyone else, whether or
+ * not they're on it ("private is private").
+ *
+ * `viewerEmail` is the v4.4.9 (#154) attendee-aware half, and it is OPT-IN:
+ *   - omitted (`undefined`) → today's behaviour: mask only when the event is
+ *     privacy-flagged, else the raw subject (M12's original default — used by
+ *     callers that have already scoped the event list to this viewer's own
+ *     meetings, or that aren't colleague-facing at all).
+ *   - passed (a colleague's email, or `null` when it didn't resolve) → a
+ *     non-attendee never sees the subject, private or not. Owner ruling: "he
+ *     can know who is attending that meeting, nothing else" for an event he
+ *     isn't on — so the subject itself is the one thing that stays masked.
  */
 export function displaySubject(
   event: SubjectableEvent,
   profile: UserProfile,
   viewer: SubjectViewer = 'other',
+  viewerEmail?: string | null,
 ): string {
-  if (viewer !== 'owner' && isEventPrivate(event, profile)) return PRIVATE_MASK;
-  return event.subject ?? '';
+  if (viewer === 'owner') return event.subject ?? '';
+  if (isEventPrivate(event, profile)) return PRIVATE_MASK;
+  if (viewerEmail === undefined) return event.subject ?? '';
+  if (viewerEmail && isEventAttendee(event, viewerEmail)) return event.subject ?? '';
+  return PRIVATE_MASK;
 }
 
 /**
- * Boolean predicate for "is this event private?". Internal to displaySubject.
+ * Boolean predicate for "is this event private?" — Graph sensitivity flag or
+ * a yaml category with `sets_sensitivity_private`. Exported (o#230) so a
+ * caller that shows attendee NAMES independent of the subject (a non-attendee
+ * colleague may see who's on an ordinary meeting, just not its title — owner
+ * ruling, o#230) can gate name-visibility on the event's OWN privacy flag
+ * rather than on `displaySubject`'s per-viewer result, which also masks for
+ * reasons that have nothing to do with the event being private (e.g. the
+ * attendee-aware test above).
  */
-function isEventPrivate(event: SubjectableEvent, profile: UserProfile): boolean {
+export function isEventPrivate(event: SubjectableEvent, profile: UserProfile): boolean {
   const sensitivity = event.sensitivity;
   if (sensitivity === 'private' || sensitivity === 'personal') return true;
   const cats = Array.isArray(event.categories) ? (event.categories as string[]) : [];

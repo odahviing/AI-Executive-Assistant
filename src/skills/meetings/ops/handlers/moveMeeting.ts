@@ -38,40 +38,49 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { subjectViewerFor } from '../../../../utils/displaySubject';
+import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
+import { createApprovalRequest } from '../../../../tasks/skill';
 import type { OpCtx } from './context';
 
 export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+        // v2.7.0 — ownership via findMeetingOwner, fetched ONCE and reused by
+        // BOTH the attendee-only (not_organizer) guard directly below and the
+        // requester-controls gate further down. W1 bounce (2026-08-06): the
+        // two gates used to each call findMeetingOwner separately with the
+        // identical {ownerUserId, ownerEmail, eventId} — two Graph
+        // getEventOrganizer round trips per colleague update_meeting call.
+        // One lookup, shared result.
+        let ownerInfo: import('../../findMeetingOwner').MeetingOwnerInfo | undefined;
+        try {
+          const { findMeetingOwner } = await import('../../findMeetingOwner');
+          ownerInfo = await findMeetingOwner({
+            ownerUserId: context.profile.user.slack_user_id,
+            ownerEmail: userEmail,
+            eventId: args.meeting_id as string,
+          });
+        } catch (err) {
+          logger.warn('update_meeting — findMeetingOwner threw', { err: String(err) });
+        }
+
         // v2.1.4 — attendee-only guard. If the event's organizer is not the
         // owner, the owner is an ATTENDEE on someone else's meeting. Graph
         // rejects PATCH from non-organizers, but the error message is unhelpful;
         // refuse early with a clear human message so Maelle doesn't offer a fake
         // "I'll add the location" then silently fail.
-        try {
-          // v2.7.0 — ownership via findMeetingOwner.
-          const { findMeetingOwner } = await import('../../findMeetingOwner');
-          const ownerInfo = await findMeetingOwner({
-            ownerUserId: context.profile.user.slack_user_id,
-            ownerEmail: userEmail,
-            eventId: args.meeting_id as string,
+        if (ownerInfo && !ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
+          const ownerFirst = context.profile.user.name.split(' ')[0];
+          const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
+          logger.info('update_meeting refused — owner is attendee, not organizer', {
+            meetingId: args.meeting_id, organizer: ownerInfo.organizerEmail,
           });
-          if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
-            const ownerFirst = context.profile.user.name.split(' ')[0];
-            const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
-            logger.info('update_meeting refused — owner is attendee, not organizer', {
-              meetingId: args.meeting_id, organizer: ownerInfo.organizerEmail,
-            });
-            return {
-              error: 'not_organizer',
-              meeting_subject: args.meeting_subject,
-              organizer_name: orgName,
-              organizer_email: ownerInfo.organizerEmail,
-              message: `Can't change "${args.meeting_subject}" — ${orgName} organized that one, not ${ownerFirst}. Only the organizer can change the subject, location, or body. Want me to flag it to ${ownerFirst}?`,
-            };
-          }
-        } catch (err) {
-          logger.warn('update_meeting attendee-only guard threw — proceeding', { err: String(err) });
+          return {
+            error: 'not_organizer',
+            meeting_subject: args.meeting_subject,
+            organizer_name: orgName,
+            organizer_email: ownerInfo.organizerEmail,
+            message: `Can't change "${args.meeting_subject}" — ${orgName} organized that one, not ${ownerFirst}. Only the organizer can change the subject, location, or body. Want me to flag it to ${ownerFirst}?`,
+          };
         }
 
         // v1.8.8 — block series-level mutations on recurring meetings. If the
@@ -84,18 +93,82 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
           if (probe?.type === 'seriesMaster') {
+            // o#216 — probe.subject is the RAW Graph subject. Mask it through
+            // the same viewer test every other subject-bearing payload in this
+            // file uses, instead of shipping a private series' real title to
+            // whoever triggered this refusal (update_meeting is
+            // colleague-allowed, and the owner-organizer gate above this probe
+            // passes for the owner's own private recurring series too).
+            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // viewerEmailFor now (surface==='room' → null); call directly —
+            // a blanket ?? null here also masked the email leg's subjects.
+            const maskedSubject = displaySubject(
+              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+              context.profile,
+              subjectViewerFor(context),
+              viewerEmailFor(context),
+            );
             logger.info('update_meeting refused on recurring seriesMaster', {
               meetingId: args.meeting_id,
               subject: probe.subject,
             });
             return {
               error: 'recurring_series_master',
-              meeting_subject: probe.subject,
-              message: `"${probe.subject}" is a recurring series. Updating the series here would change every occurrence — that's not safe to do automatically. The owner should update the series directly in the calendar. For a SINGLE occurrence, call update_meeting with that occurrence's meeting_id (get it from get_calendar for that specific date) — the system will create an exception for that one date only.`,
+              meeting_subject: maskedSubject,
+              message: `"${maskedSubject}" is a recurring series. Updating the series here would change every occurrence — that's not safe to do automatically. The owner should update the series directly in the calendar. For a SINGLE occurrence, call update_meeting with that occurrence's meeting_id (get it from get_calendar for that specific date) — the system will create an exception for that one date only.`,
             };
           }
         } catch (err) {
           logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
+        }
+
+        // W1 (2026-08-06) — requester-controls gate, moved OUT of the
+        // attendee/venue-change conditional below and made UNCONDITIONAL for
+        // every colleague-path update_meeting call. Previously this only ran
+        // when `hasAttendeeChange || venueChangeRequested` was true, so a
+        // call carrying just new_subject / category / location satisfied
+        // neither predicate and reached the Graph write untouched — a
+        // colleague holding a leaked event id (e.g. from create_meeting's
+        // conflict steer — createMeeting.ts's `existing_event_id`) could
+        // rename, relocate or re-categorize a private meeting they cannot
+        // see and aren't on. Mirrors move_meeting's own unconditional
+        // colleague gate below (`context.authority !== 'owner'` block):
+        // whoever REQUESTED a meeting controls it; any other colleague is
+        // routed to the owner's approval instead, for ANY field, not just
+        // attendees.
+        if (context.authority !== 'owner') {
+          const ownerFirst = context.profile.user.name.split(' ')[0];
+          // Reuse the ownerInfo fetched once above (same event, same call) —
+          // no second findMeetingOwner round trip. A failed fetch above
+          // (ownerInfo undefined) is treated as non-requester, same as the
+          // old per-gate catch did.
+          const isRequester = !!ownerInfo && ownerInfo.requesterSlackId === context.userId;
+          if (!isRequester) {
+            logger.info('update_meeting — non-requester colleague update → escalate', {
+              meetingId: args.meeting_id,
+              requester: context.userId,
+              fields: Object.keys(args).filter(k => k !== 'meeting_id' && k !== 'meeting_subject'),
+            });
+            return {
+              error: 'colleague_not_requester',
+              meeting_subject: args.meeting_subject,
+              // v3.7.x #2.1b — framing seed. NOT "only <owner> can change" (which
+              // reads as "he must do it himself"): this change needs his sign-off, so
+              // it's being SENT to him to approve. Requester-facing wording is #2.1a
+              // (prompt chat); this is just the tool text that seeds it.
+              message: `Changing "${args.meeting_subject}" needs ${ownerFirst}'s sign-off, so I'll send it to him to approve. Call create_approval(kind=policy_exception) with a short ask_text (what's changing and who's asking), and I'll apply the change the moment he approves.`,
+              // v3.7.x #2.1b — replay path. Stamp the update_meeting deferred_action
+              // (mirrors the create_meeting rule-violation branches) so owner-approve
+              // REPLAYS the exact edit instead of resolving with nothing to apply.
+              // Spread the RAW args verbatim (mirrors move_meeting's
+              // `{ tool: 'move_meeting', args: { ...args } }` shape) — replay
+              // always executes with senderRole:'owner' (deferredActionReplay.ts),
+              // so this same gate is skipped on replay and the attendee
+              // resolution / shape logic below runs exactly as it would on a
+              // first-pass owner call.
+              _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+            };
+          }
         }
 
         // v2.9.1 — attendee add/remove path. When `add_attendees` or
@@ -127,7 +200,6 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         let newIsOnlineFromShape: boolean | undefined;
 
         if (hasAttendeeChange || venueChangeRequested) {
-          const ownerFirst = context.profile.user.name.split(' ')[0];
           // v3.1.4 — resolve name-only adds to emails from the directory
           // BEFORE the missing-email filter, via the shared resolver every
           // booking path uses. Without this, "add Eli Feldman" (no email) gets
@@ -152,63 +224,6 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               meeting_subject: args.meeting_subject,
               message: `Can't add attendees without emails — at least one entry in add_attendees had no email. Pass each as { email: "...", name: "..." }.`,
             };
-          }
-
-          // v3.1.4 — requester-controls gate (replaces the old self-only
-          // gate). Owner direction: whoever REQUESTED a meeting controls it —
-          // they can add anyone, rename, change location, even if they're not on
-          // it. A non-requester colleague editing the owner's meeting → escalate
-          // to ONE approval. The requester is resolved from the requests spine
-          // via findMeetingOwner (coord bookings + the v3.1.4 colleague-booking
-          // requester-link both populate it).
-          if (context.senderRole === 'colleague') {
-            let isRequester = false;
-            try {
-              const { findMeetingOwner } = await import('../../findMeetingOwner');
-              const ownerInfo = await findMeetingOwner({
-                ownerUserId: context.profile.user.slack_user_id,
-                ownerEmail: userEmail,
-                eventId: args.meeting_id as string,
-              });
-              isRequester = ownerInfo.requesterSlackId === context.userId;
-            } catch (err) {
-              logger.warn('update_meeting requester gate — findMeetingOwner threw, treating as non-requester', {
-                err: String(err).slice(0, 200),
-              });
-            }
-            if (!isRequester) {
-              logger.info('update_meeting — non-requester colleague attendee change → escalate', {
-                meetingId: args.meeting_id,
-                requester: context.userId,
-                adds: addList.map(a => a.email),
-                removes: removeList,
-              });
-              return {
-                error: 'colleague_not_requester',
-                meeting_subject: args.meeting_subject,
-                // (1) v3.7.x #2.1b — framing seed. NOT "only <owner> can change" (which
-                // reads as "he must do it himself"): this change needs his sign-off, so
-                // it's being SENT to him to approve. Requester-facing wording is #2.1a
-                // (prompt chat); this is just the tool text that seeds it.
-                message: `Changing who's on "${args.meeting_subject}" needs ${ownerFirst}'s sign-off, so I'll send it to him to approve. Call create_approval(kind=policy_exception) with a short ask_text (who wants to add/remove whom), and I'll apply the change the moment he approves.`,
-                // (2) v3.7.x #2.1b — replay path. Stamp the update_meeting deferred_action
-                // (mirrors the create_meeting rule-violation branches) so owner-approve
-                // REPLAYS the exact attendee edit instead of resolving with nothing to
-                // apply. The orchestrator auto-attaches this onto the policy_exception
-                // payload; the resolver replays update_meeting (owner-path → the
-                // requester gate is skipped → the add/remove lands). update_meeting is
-                // already in RESOLVER_REPLAY_TOOLS.
-                _deferred_action_hint: {
-                  tool: 'update_meeting',
-                  args: {
-                    meeting_id: args.meeting_id,
-                    meeting_subject: args.meeting_subject,
-                    ...(addList.length > 0 ? { add_attendees: addList.map(a => ({ email: a.email, ...(a.name ? { name: a.name } : {}) })) } : {}),
-                    ...(removeList.length > 0 ? { remove_attendees: removeList } : {}),
-                  },
-                },
-              };
-            }
           }
 
           // Load existing event for current attendees + shape signals.
@@ -523,7 +538,24 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // Sonnet raises create_approval(kind=policy_exception), the orchestrator
         // stamps the deferred move, and owner-approve replays it. Owner-path callers
         // skip this check (owner override IS the approval).
-        if (context.senderRole === 'colleague') {
+        //
+        // o#221/o#223 — gated on AUTHORITY, not senderRole. senderRole reads
+        // 'colleague' both for a genuine colleague AND for the AUTHENTICATED
+        // owner clamped into a room (processMessage.ts:122), so this whole
+        // "can this asker move THIS meeting" gate — built for a colleague's
+        // own move request — used to fire for the owner's move-in-room too.
+        // He is never a required Graph attendee of his own meetings
+        // (createMeeting.ts strips the owner from the attendee list) and is
+        // rarely his own meeting's "requester", so the gate fell through to
+        // requester_move_needs_owner — asking him to raise an approval to
+        // himself. Worse, it returned before planMove (below) ever ran, so
+        // the ownerRoomBend-aware escalate_approval path built for exactly
+        // this case (planMeeting.ts's PlanMeetingInput.ownerRoomBend) never
+        // executed either. Same fix as resolve_approval's authority gate
+        // (tasks/skill.ts:1278): the owner keeps his move authority on every
+        // surface (M10); only a genuine colleague needs this membership/rule
+        // check.
+        if (context.authority !== 'owner') {
           // v3.5.x — colleague-requested move gate (replaces the v3.1.4
           // requester-controls gate). Maelle organizes every meeting, so the old
           // "is the asker the REQUESTER?" test resolved to the owner ~every time
@@ -829,14 +861,27 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
           if (probe?.type === 'seriesMaster') {
+            // o#216 — same mask as update_meeting's seriesMaster refusal
+            // above; move_meeting is colleague-allowed too, and delete_meeting
+            // (the third of these three) became newly reachable from a room
+            // this wave (OWNER_ROOM_ACTION_TOOLS).
+            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // viewerEmailFor now (surface==='room' → null); call directly —
+            // a blanket ?? null here also masked the email leg's subjects.
+            const maskedSubject = displaySubject(
+              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+              context.profile,
+              subjectViewerFor(context),
+              viewerEmailFor(context),
+            );
             logger.info('move_meeting refused on recurring seriesMaster', {
               meetingId: args.meeting_id,
               subject: probe.subject,
             });
             return {
               error: 'recurring_series_master',
-              meeting_subject: probe.subject,
-              message: `"${probe.subject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
+              meeting_subject: maskedSubject,
+              message: `"${maskedSubject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
             };
           }
           preMoveStartIso = probe?.startDateTime;
@@ -1102,6 +1147,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           const existingLocation = movingEvent?.location;
           const existingIsOnline = movingEvent?.isOnline;
           const moveAttendees = movingEvent?.attendees ?? [];
+          // v4.4.x (#154) — resolved ONCE; both allowRelaxed and ownerRoomBend
+          // below read this same grant so they can never disagree.
+          const moveRelaxedGrant = grantRelaxed(args, context);
           const movePlan = await planMove({
             profile: context.profile,
             intent: 'move',
@@ -1132,10 +1180,16 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // practice (the colleague gate above validates the destination
             // STRICTLY and returns needs_owner_approval before this call), but
             // an invariant with a live counter-example is not an invariant.
-            allowRelaxed: grantRelaxed(args, context).relaxed,
+            allowRelaxed: moveRelaxedGrant.relaxed,
+            // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
+            ownerRoomBend: moveRelaxedGrant.relaxedReason === 'owner_room_bend',
             // v4.1.x (M12) — the owner alone sees the real subject of whatever
             // he'd be colliding with; a colleague-path move never does.
             viewer: subjectViewerFor(context),
+            // v4.4.9 (#154) — the attendee-aware half of that same mask.
+            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // viewerEmailFor now; call it directly (no blanket ?? null).
+            viewerEmail: viewerEmailFor(context),
           });
           logger.info('move_meeting — planMeeting verdict', {
             action: movePlan.action, meetingId: args.meeting_id,
@@ -1172,6 +1226,66 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             };
           }
           if (movePlan.action === 'confirm_override' || movePlan.action === 'escalate_approval') {
+            // v4.4.x (#154) / o#223>dep — see the parallel branch in
+            // createMeeting.ts: a ROOM rule-bend must reach the owner's
+            // private approval thread deterministically, not depend on
+            // Sonnet placing the create_approval follow-up. Raise it here via
+            // the same primitive the create_approval TOOL calls.
+            if (movePlan.action === 'escalate_approval' && moveRelaxedGrant.relaxedReason === 'owner_room_bend') {
+              const approval = await createApprovalRequest({
+                kind: 'policy_exception',
+                payload: {
+                  rule: movePlan.violationLabel,
+                  context: `${context.profile.user.name.split(' ')[0]} asked to move this meeting to this exact slot anyway from a room, bending one of his own scheduling rules — needs his sign-off in DM, not a room self-grant.`,
+                  subject: args.meeting_subject,
+                  deferred_action: { tool: 'move_meeting', args: { ...args } },
+                },
+                ask_text: movePlan.suggestedAskText,
+              }, context) as { ok?: boolean; error?: string; reason?: string; approval_id?: string };
+              if (approval.ok) {
+                logger.info('move_meeting — ownerRoomBend escalated to create_approval directly (code path)', {
+                  approvalId: approval.approval_id, meetingId: args.meeting_id,
+                });
+                return {
+                  success: false,
+                  error: 'escalated_to_owner',
+                  meeting_subject: args.meeting_subject,
+                  violation_label: movePlan.violationLabel,
+                  approval_id: approval.approval_id,
+                  category: movePlan.category,
+                  // R11 (owner ruling, verbatim: "she dont need to write in
+                  // the room ... she doesnt need to write anything. its
+                  // person to person ... still will get back after hour and
+                  // approved.") — meta-instruction for the model, NEVER a
+                  // sentence to say. The approval is already raised in code
+                  // above; the room must not learn a rule was bent or that
+                  // anything is pending.
+                  _note: `Already escalated to ${context.profile.user.name.split(' ')[0]}'s private approval DM in code — do NOT call create_approval yourself for this. Do NOT tell this room that anything was escalated, sent for approval, needs sign-off, or bent a rule — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); the resolver posts the outcome back in this thread once he responds, on his own time.`,
+                };
+              }
+              logger.warn('move_meeting — ownerRoomBend direct create_approval call refused', {
+                error: approval.error, reason: approval.reason, meetingId: args.meeting_id,
+              });
+              return {
+                success: false,
+                error: approval.error ?? 'internal_error',
+                meeting_subject: args.meeting_subject,
+                violation_label: movePlan.violationLabel,
+                // W4 (2026-08-06) — the SAME silence rule as the success
+                // branch above applies here too: whether the private-DM raise
+                // SUCCEEDED or — here — FAILED internally, the room must
+                // never learn a rule-bend was even attempted. `approval.reason`
+                // is written to instruct the MODEL on a retry (gateApprovalAsk),
+                // never to be read aloud, so it does NOT belong in a spoken
+                // `message`. Falling through to the generic (non-room-bend)
+                // escalate_approval return below would be wrong here — that
+                // path is written for a genuine colleague ask, where saying
+                // "I'll check with him" is the correct, expected answer (M9);
+                // this is the owner bending his own rule from a room, where
+                // he must never learn it was even tried, success or failure.
+                _note: `Raising this in ${context.profile.user.name.split(' ')[0]}'s private approval DM failed internally — do NOT call create_approval yourself for this, and do NOT tell this room that anything was escalated, sent for approval, needs sign-off, bent a rule, or failed — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); try the request again in a bit.`,
+              };
+            }
             return {
               success: false,
               error: 'rule_violation',

@@ -351,6 +351,14 @@ async function collectBriefingData(
         profile.user.name,
         timezone,
         profile,
+        // The morning brief is an owner-only DM surface — sendMorningBriefing's
+        // 'send_briefing_now' tool path is unreachable in a room (the tool is
+        // absent from both COLLEAGUE_ALLOWED_TOOLS and OWNER_ROOM_ACTION_TOOLS,
+        // skills/registry.ts) and the scheduled cron always targets
+        // routine.owner_channel. Defaulting to 'other' here (pre-fix) rendered
+        // the owner's own Personal-category events as [Private] with no
+        // attendees in his own brief.
+        'owner',
       );
       const todayLocal = DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
       const tomorrowLocal = DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('yyyy-MM-dd');
@@ -775,6 +783,12 @@ export async function sendMorningBriefing(
         channelId: ownerChannel,
         userId: ownerUserId,
         senderRole: 'owner' as const,
+        // v4.4.x (#154) — this is the scheduled morning brief's own
+        // today-scoped health pass: always a private owner-alone run, never
+        // a live conversation. Declared explicitly now that the fields are
+        // required (skills/types.ts SkillContext).
+        authority: 'owner' as const,
+        surface: 'owner_dm' as const,
         channel: 'slack' as const,
         app,
       };

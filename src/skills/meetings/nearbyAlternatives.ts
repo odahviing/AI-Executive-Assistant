@@ -91,8 +91,10 @@ export interface NearbyAlternative {
    * commitment is treated as optional. It is bookable, but it is the fallback
    * tier: Free first, Optional only when there is no Free. Carried so a narrating
    * surface can order and mark it; `checkSlot` masks a private subject before it
-   * can reach this string (findAvailableSlots.ts:1093 — viewer default is the
-   * colleague-safe one, and this search never overrides it).
+   * can reach this string (findAvailableSlots.ts — viewer default is the
+   * colleague-safe one, and this search never overrides it) and, since v4.4.9
+   * (#154), masks it just the same for a non-attendee colleague even when it
+   * ISN'T private, via `viewerEmail` above.
    */
   overOptional?: string;
 }
@@ -134,6 +136,13 @@ export async function findNearbyAlternatives(params: {
   excludeEventIds?: string[];
   /** FRAMING of the rendered label only — never forwarded to the search. */
   viewer?: SubjectViewer;
+  /**
+   * v4.4.9 (#154) — UNLIKE `viewer` above, this DOES reach the search: it's
+   * the attendee-aware half of the mask on `over_optional`'s subject (a
+   * non-attendee colleague must never see it, private or not), and that mask
+   * is applied at the producer (checkSlot), not in this file's rendering.
+   */
+  viewerEmail?: string | null;
 }): Promise<NearbyAlternativesResult> {
   const { profile, durationMin, initiator } = params;
   const tz = profile.user.timezone;
@@ -180,6 +189,11 @@ export async function findNearbyAlternatives(params: {
       searchFrom: `${firstDay}T00:00:00`,
       searchTo: `${lastDay.toFormat('yyyy-MM-dd')}T23:59:59`,
       autoExpand: false,
+      // v4.4.9 (#154) — see the field doc above: `viewer` itself stays
+      // colleague-safe by default (never forwarded), but this attendee-aware
+      // half still needs to reach checkSlot so `over_optional` masks correctly
+      // for a non-attendee colleague.
+      viewerEmail: params.viewerEmail,
     });
 
     // Anchor mode follows how many days were actually named, and the two cases

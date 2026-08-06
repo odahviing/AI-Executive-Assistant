@@ -11,7 +11,7 @@ import logger from '../utils/logger';
 import { DateTime } from 'luxon';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 import { checkSlot, occupancyRoleOf } from '../utils/scheduleRules';
-import { displaySubject, subjectViewerFor, PRIVATE_MASK } from '../utils/displaySubject';
+import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../utils/displaySubject';
 
 /**
  * MeetingsSkill — the single skill responsible for everything about
@@ -599,6 +599,16 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // v4.1.x (M12) — this tool exists for COLLEAGUE asks, so every subject it
         // echoes back is masked unless the owner himself is asking in his own DM.
         const joinViewer = subjectViewerFor(context);
+        // v4.4.9 (#154) — the attendee-aware half of that same mask: the
+        // colleague asking to join is very often NOT on whatever owns the
+        // slot, so that event's subject must stay masked whether or not it's
+        // privacy-flagged.
+        // W5/R4 (2026-08-06) — the room-vs-DM tightening now lives inside
+        // viewerEmailFor itself (surface==='room' → null); call it directly.
+        // A blanket `?? null` here also flattened the EMAIL leg's correct
+        // `undefined` into `null`, masking every forwarded subject instead of
+        // only private ones — see viewerEmailFor's doc comment.
+        const joinViewerEmail = viewerEmailFor(context);
 
         // Fetch owner's calendar. Category rules count per-day AND per-ISO-week,
         // and the focus-time floor is measured across the day, so the validator
@@ -662,6 +672,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           category: null,   // joining someone else's meeting — no category is being created
           events,
           viewer: joinViewer,
+          viewerEmail: joinViewerEmail,
         });
         // The TIMED overlaps, for the partial-join carve below. Classified by the
         // validator's OWN predicate (occupancyRoleOf) rather than a local copy of
@@ -865,7 +876,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             // (M12: a colleague gets free/busy only for a private meeting, not
             // even the fact that it's flagged private). Same fallback fix as
             // scheduleRules.ts's overOptional/overCommitment subjects.
-            const subj = displaySubject(ev, profile, joinViewer);
+            const subj = displaySubject(ev, profile, joinViewer, joinViewerEmail);
             return {
               start: Math.max(evTime(ev.start).toMillis(), meetingStartMs),
               end: Math.min(evTime(ev.end).toMillis(), meetingEndMs),
@@ -900,11 +911,14 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             };
           }
 
-          // Fully blocked by another meeting. Subjects are viewer-scoped: a
-          // colleague hears the subject of a normal meeting and "[Private]" for
-          // one the owner marked private — never its real title (M12).
+          // Fully blocked by another meeting. Subjects are viewer-scoped: in
+          // a colleague's own 1:1 DM, a normal meeting they're confirmed on
+          // shows its real subject; anything they're not confirmed on, or
+          // ANY meeting mentioned in a room (unbounded audience — R4,
+          // 2026-08-06), reads "[Private]"/"a meeting" instead — never the
+          // real title for someone who isn't verifiably the sole reader (M12).
           const conflictNames = directConflicts.map(ev => {
-            const subj = displaySubject(ev, profile, joinViewer);
+            const subj = displaySubject(ev, profile, joinViewer, joinViewerEmail);
             return (subj && subj !== PRIVATE_MASK) ? subj : 'a meeting';
           });
           return {

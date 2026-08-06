@@ -121,6 +121,12 @@ const GOOD_PLAN = { pieces: [GOOD_PIECE], sharedPiece: 'slackmaster — src/conn
 const BAD_PLAN = { pieces: [{ ...GOOD_PIECE, connection: '   ', expectation: '' }], sharedPiece: '', blockingQuestions: [], notWorthBuilding: [] }
 const REPAIRED = { pieces: [{ id: 'p1', connection: GOOD_PIECE.connection, expectation: GOOD_PIECE.expectation }], sharedPiece: 'slackmaster — src/connections/types.ts', blockingQuestions: [] }
 const STILL_BAD = { pieces: [{ id: 'p1', connection: '', expectation: '' }], sharedPiece: '', blockingQuestions: [] }
+// BUILD 1 + BUILD 2 · the decompose-check canned responses. `GOOD_REACHABLE` is
+// what a clean plan gets back — reachable, no pattern — and is folded into every
+// `GOOD`-keyed run below so the new dispatch behaves exactly like the rest of a
+// healthy wave rather than relying on the harness's null-fallback.
+const GOOD_REACHABLE = { reachability: [{ id: 'p1', reachable: true, blockingGate: '' }], census: [] }
+const BAD_REACHABLE = { reachability: [{ id: 'p1', reachable: false, blockingGate: 'src/connectors/slack/app/createMeeting.ts:462' }], census: [] }
 // X151-fix (X159) · exact keys, matching the real labels feature.js emits
 // today: `framer:backlog`, `framer:<ref>`, bare `framer` for decompose,
 // `framer:contract` for the repair round, and a bare lane name for a build
@@ -128,7 +134,7 @@ const STILL_BAD = { pieces: [{ id: 'p1', connection: '', expectation: '' }], sha
 // this only works because `run()`'s matcher checks every key for an EXACT
 // match before it ever tries `startsWith` — every label the engine can
 // produce has its own exact entry here, so that fallback is never reached.
-const GOOD = { 'framer:backlog': INTAKE, 'framer:#154': RECON, framer: GOOD_PLAN }
+const GOOD = { 'framer:backlog': INTAKE, 'framer:#154': RECON, framer: GOOD_PLAN, 'framer:decomposeCheck': GOOD_REACHABLE }
 
 // The real cluster, from the real script, against the real ledger. Deriving it
 // here instead would be a second definition of the clustering rule.
@@ -203,6 +209,9 @@ const main = async () => {
   ok('the EXPECTATION is in the build prompt', /ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: every surface/.test(promptOf(b.calls, 'slackmaster')))
   ok('the contract is stated as binding', /those are the contract and they are binding/i.test(promptOf(b.calls, 'slackmaster')))
   ok('sharedPiece is named to the lane', /WHO WRITES THE SHARED CODE: slackmaster/.test(promptOf(b.calls, 'slackmaster')))
+  // X168 · a single, ordinary dispatch is silent on the good path: the count
+  // is there, the `·dep` marker is not.
+  ok('the label carries its item count and no dep marker', b.calls.some((c) => c.label === 'slackmaster(1)'), b.calls.map((c) => c.label))
   const b2 = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: 'none', verify: false }, { slackmaster: { results: [{ id: 'p1', verdict: 'built' }] } })
   ok('`none` adds no shared-code line', !/WHO WRITES THE SHARED CODE/.test(promptOf(b2.calls, 'slackmaster')))
 
@@ -261,8 +270,31 @@ const main = async () => {
 
   section('9 · THE JOIN-BACK — against a COPY of the ledger, never the live one')
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'design-door-')), 'ledger.jsonl')
-  fs.copyFileSync(LEDGER, tmp)
-  const before = fs.readFileSync(tmp, 'utf8').split(/\r?\n/).filter(Boolean).length
+  // STRIP any join-back gh#154 ALREADY carries in the LIVE ledger before copying.
+  // This section tests the WRITE path itself and must stay provable even after
+  // the real wave is decided for real — which it now is, dated 2026-08-05. Without
+  // this the fixture depends on gh#154 staying forever undecided in production, and
+  // it silently goes stale the day he actually rules on it: a checker whose
+  // correctness depends on a SINGLE production ref never reaching its natural next
+  // state is exactly the "reads live ledger state, cannot tell the code broke from
+  // the world moving" fragility this file's own docstring warns a framework
+  // checker against. Any OTHER `converted`/`gh#154` row is kept — only the rows
+  // that already carry the join-back mark are dropped, so the copy reflects
+  // "converted, not yet decided" regardless of what the live ledger has since done.
+  const DECIDED_MARK = 'DESIGN SETTLED for gh#154'
+  const undecidedLines = fs
+    .readFileSync(LEDGER, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .filter((l) => {
+      try {
+        return !String(JSON.parse(l).note || '').includes(DECIDED_MARK)
+      } catch {
+        return true
+      }
+    })
+  fs.writeFileSync(tmp, undecidedLines.join('\n') + '\n')
+  const before = undecidedLines.length
   const out1 = execFileSync(process.execPath, [CLUSTERER, 'gh#154', '--decide', 'one authority resolver', '--ledger', tmp], { encoding: 'utf8' })
   const rowsAfter = fs.readFileSync(tmp, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l))
   const appended = rowsAfter.slice(before)
@@ -308,6 +340,193 @@ const main = async () => {
   ok(`none of the ${N} absorbed refs is an OPEN row`, leaked.length === 0, leaked)
   ok('`converted` is in the reader\'s CLOSED set', /const CLOSED = new Set\(\[[^\]]*'converted'/.test(fs.readFileSync(STATS, 'utf8')))
   console.log(`        (so a row appended with verdict \`converted\` stays hidden — both halves of the claim)`)
+
+  // ── THE BOUNCE ROUND — build-mode Verify, stolen from bugger.js (X137/X143) ──
+  const BUILT_ONCE = {
+    results: [{ id: 'p1', verdict: 'built', filesTouched: ['src/connectors/slack/app/processMessage.ts'], traced: 'the resolver call site', notes: 'moved the clamp behind grantRelaxed' }],
+  }
+  const OVERTURN_ONCE = {
+    results: [{ id: 'p1', verdict: 'needs-owner-decision', notes: 'expectation not met — gatekeeper still re-derives senderRole on its own' }],
+    discoveries: [],
+    ticketCoverage: [],
+    verifiedClean: [],
+  }
+  const REBUILT_OK = {
+    results: [{ id: 'p1', verdict: 'built', filesTouched: ['src/connectors/slack/app/processMessage.ts', 'src/connections/gatekeeper.ts'], notes: 'gatekeeper now reads the resolver' }],
+  }
+  const RECHECK_OK = { results: [{ id: 'p1', verdict: 'built' }], discoveries: [], verifiedClean: [] }
+
+  section('11 · THE BOUNCE ROUND — an unmet `expectation` sends a piece back ONCE  (fires on the bad input)')
+  const bounce = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    { slackmaster: BUILT_ONCE, 'bouncer:wave(1)': OVERTURN_ONCE, 'rebuild:slackmaster(1)': REBUILT_OK, 'bouncer:recheck(1)': RECHECK_OK },
+  )
+  ok('no throw', !bounce.err, bounce.err && bounce.err.message)
+  ok('no separate Bounce phase box (X151-parity — it lives inside Verify)', !bounce.phases.includes('Bounce'), bounce.phases)
+  // X168 · the rebuild label now carries the count of pieces bounced back —
+  // exact match, not startsWith, so a label that DROPPED the count would fail
+  // this the same way it would fail the canned-response lookup for real.
+  ok('the rebuild dispatch FIRED, under Verify, carrying its count', calledPhase(bounce.calls, 'Verify').some((c) => c.label === 'rebuild:slackmaster(1)'), bounce.calls.map((c) => `${c.label}[${c.opts && c.opts.phase}]`))
+  ok('the mandatory re-check FIRED', called(bounce.calls, 'bouncer:recheck(1)').length === 1, bounce.calls.map((c) => c.label))
+  ok(
+    'no bare lane label appears under Verify (X151-parity)',
+    !calledPhase(bounce.calls, 'Verify').some((c) => c.label === 'slackmaster' || c.label === 'instructor'),
+    calledPhase(bounce.calls, 'Verify').map((c) => c.label),
+  )
+  ok('the rebuild payload carries what the bouncer refused', /expectation not met/.test(promptOf(bounce.calls, 'rebuild:slackmaster')), promptOf(bounce.calls, 'rebuild:slackmaster').slice(0, 400))
+  ok('the rebuild payload says it cannot be sent back again', /cannot be sent back again/.test(promptOf(bounce.calls, 'rebuild:slackmaster')))
+  ok('the piece cleared — final verdict is built', bounce.out && bounce.out.results.find((r) => r.id === 'p1').verdict === 'built', bounce.out && bounce.out.results)
+  ok('the row carries its bounce count', bounce.out && bounce.out.results.find((r) => r.id === 'p1').bounces === 1, bounce.out && bounce.out.results)
+  ok(
+    'manifest.bounce: 1 eligible, 1 bounced, 1 cleared, 0 to owner',
+    bounce.out && bounce.out.manifest.bounce.eligible === 1 && bounce.out.manifest.bounce.bounced === 1 && bounce.out.manifest.bounce.cleared === 1 && bounce.out.manifest.bounce.toOwner === 0,
+    bounce.out && bounce.out.manifest.bounce,
+  )
+  ok('manifest.bounce.recheckRan is true', bounce.out && bounce.out.manifest.bounce.recheckRan === true)
+  ok('no needsOwner in the final counts', bounce.out && bounce.out.counts.needsOwner === 0, bounce.out && bounce.out.counts)
+
+  section('12 · A CLEAN WAVE NEVER BOUNCES  (silent on the good input)')
+  const clean = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    { slackmaster: BUILT_ONCE, 'bouncer:wave(1)': { results: [{ id: 'p1', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: ["p1 delivers its own expectation"] } },
+  )
+  ok('no throw', !clean.err, clean.err && clean.err.message)
+  ok('NO rebuild dispatch on a clean wave', !clean.calls.some((c) => String(c.label).startsWith('rebuild:')), clean.calls.map((c) => c.label))
+  ok('NO re-check dispatch on a clean wave', !clean.calls.some((c) => String(c.label).startsWith('bouncer:recheck')), clean.calls.map((c) => c.label))
+  ok(
+    'manifest.bounce: 0 eligible, 0 bounced',
+    clean.out && clean.out.manifest.bounce.eligible === 0 && clean.out.manifest.bounce.bounced === 0,
+    clean.out && clean.out.manifest.bounce,
+  )
+  ok('the bounce block is present with explicit zeros, never omitted', clean.out && clean.out.manifest.bounce && typeof clean.out.manifest.bounce.eligible === 'number', clean.out && clean.out.manifest.bounce)
+
+  section("13 · THE BOUNCE LIMIT — a piece already bounced once goes straight to the owner, never a third attempt")
+  const atLimit = await run(
+    { mode: 'build', pieces: [{ ...GOOD_PIECE, bounces: 1 }], sharedPiece: GOOD_PLAN.sharedPiece },
+    { slackmaster: BUILT_ONCE, 'bouncer:wave(1)': OVERTURN_ONCE },
+  )
+  ok('no throw', !atLimit.err, atLimit.err && atLimit.err.message)
+  ok('NO rebuild dispatch — already at the limit', !atLimit.calls.some((c) => String(c.label).startsWith('rebuild:')), atLimit.calls.map((c) => c.label))
+  ok('NO re-check dispatch either', !atLimit.calls.some((c) => String(c.label).startsWith('bouncer:recheck')), atLimit.calls.map((c) => c.label))
+  ok(
+    'manifest.bounce: 1 eligible, 0 bounced, 1 at the limit',
+    atLimit.out && atLimit.out.manifest.bounce.eligible === 1 && atLimit.out.manifest.bounce.bounced === 0 && atLimit.out.manifest.bounce.notBouncedAtLimit === 1,
+    atLimit.out && atLimit.out.manifest.bounce,
+  )
+  ok('the piece goes to the owner', atLimit.out && atLimit.out.results.find((r) => r.id === 'p1').verdict === 'needs-owner-decision', atLimit.out && atLimit.out.results)
+  ok('the at-limit warning fired', atLimit.out && atLimit.out.warnings.some((w) => /ALREADY used their one bounce/.test(w)), atLimit.out && atLimit.out.warnings)
+
+  section('14 · BUILD 1 — REACHABILITY  (fires on the bad input, silent on the good one)')
+  const reachBad = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, 'framer:decomposeCheck': BAD_REACHABLE })
+  ok('no throw', !reachBad.err, reachBad.err && reachBad.err.message)
+  ok('the decompose-check dispatch fired under Decompose', calledPhase(reachBad.calls, 'Decompose').some((c) => c.label === 'framer:decomposeCheck'), calledPhase(reachBad.calls, 'Decompose').map((c) => c.label))
+  ok('contract reports 1 unreachable', reachBad.out && reachBad.out.contract.unreachable === 1, reachBad.out && reachBad.out.contract)
+  ok('the piece is FLAGGED, never dropped', reachBad.out && reachBad.out.pieces.length === 1 && reachBad.out.pieces[0].unreachable === true, reachBad.out && reachBad.out.pieces)
+  ok('the blocking gate is named on the piece', reachBad.out && reachBad.out.pieces[0].blockingGate === BAD_REACHABLE.reachability[0].blockingGate, reachBad.out && reachBad.out.pieces[0].blockingGate)
+  ok('`next` opens with STOP naming the gate', reachBad.out && /^STOP: 1 piece\(s\) name a route a pre-existing gate makes unreachable/.test(reachBad.out.next), reachBad.out && reachBad.out.next.slice(0, 140))
+  ok('the loud UNREACHABLE log line fired', reachBad.logs.some((l) => /UNREACHABLE/.test(l)), reachBad.logs)
+  ok(
+    'it never reaches a lane — plan mode dispatches no Build/Context/Verify regardless',
+    !reachBad.calls.some((c) => c.opts && ['Build', 'Context', 'Verify'].includes(c.opts.phase)),
+    reachBad.calls.map((c) => `${c.label}[${c.opts && c.opts.phase}]`),
+  )
+  const reachGood = await run({ mode: 'plan', refs: ['#154'] }, GOOD)
+  ok('a reachable piece reports 0 unreachable', reachGood.out && reachGood.out.contract.unreachable === 0, reachGood.out && reachGood.out.contract)
+  ok('the piece carries no `unreachable` flag', reachGood.out && !reachGood.out.pieces[0].unreachable, reachGood.out && reachGood.out.pieces[0])
+  ok('`next` does NOT open with a reachability STOP', reachGood.out && !/^STOP: \d+ piece\(s\) name a route/.test(reachGood.out.next))
+  ok('no UNREACHABLE log line on a clean plan', !reachGood.logs.some((l) => /UNREACHABLE/.test(l)))
+  // `null`, not a deleted key: `run()`'s matcher tries EXACT match first, but
+  // deleting the key would fall through to the `startsWith('framer')` branch and
+  // hit the bare `framer` (Decompose) entry instead — the exact collision X159's
+  // own comment warns about. An exact key mapped to `null` simulates "the
+  // dispatch died" (agent() really does return null after a subagent's retries
+  // exhaust) without ever reaching that fallback.
+  const GOOD_NO_CHECK = { ...GOOD, 'framer:decomposeCheck': null }
+  const noCheck = await run({ mode: 'plan', refs: ['#154'] }, GOOD_NO_CHECK)
+  ok('a dead decompose-check dispatch WARNS, never blocks', noCheck.out && !/^STOP:/.test(noCheck.out.next), noCheck.out && noCheck.out.next.slice(0, 80))
+  ok('  …and says so', noCheck.logs.some((l) => /DECOMPOSE CHECK DID NOT RUN/.test(l)), noCheck.logs)
+  ok('  …and contract.checked is false', noCheck.out && noCheck.out.contract.checked === false, noCheck.out && noCheck.out.contract)
+
+  section('15 · BUILD 2 — THE CENSUS  (fires when a piece names a pattern, silent when none do)')
+  const PATTERN_PIECE = { ...GOOD_PIECE, id: 'p2', patternQuery: 'senderRole' }
+  const PATTERN_PLAN = { pieces: [PATTERN_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, blockingQuestions: [], notWorthBuilding: [] }
+  const CENSUS_RESULT = {
+    reachability: [{ id: 'p2', reachable: true, blockingGate: '' }],
+    census: [
+      {
+        query: 'senderRole',
+        sites: [
+          { file: 'src/connectors/slack/app/processMessage.ts', lane: 'slackmaster' },
+          { file: 'src/connections/gatekeeper.ts', lane: 'gatekeeper' },
+          { file: 'src/skills/meetings.ts', lane: 'matchmaker' },
+        ],
+      },
+    ],
+  }
+  const withPattern = await run({ mode: 'plan', refs: ['#154'] }, { ...GOOD, framer: PATTERN_PLAN, 'framer:decomposeCheck': CENSUS_RESULT })
+  ok('no throw', !withPattern.err, withPattern.err && withPattern.err.message)
+  ok('the census dispatch was told the query', /senderRole/.test(promptOf(withPattern.calls, 'framer:decomposeCheck')), promptOf(withPattern.calls, 'framer:decomposeCheck').slice(0, 300))
+  const p2 = withPattern.out && withPattern.out.pieces.find((p) => p.id === 'p2')
+  ok('the piece carries a `census` field', !!(p2 && p2.census), p2)
+  ok('it names the total across ALL lanes, not just its own', p2 && /has 3 site\(s\) across 3 lane\(s\)/.test(p2.census), p2 && p2.census)
+  ok('it says which of the total are THIS piece\'s own', p2 && /1 of them are yours/.test(p2.census), p2 && p2.census)
+  ok('it names the piece as unfinished until its own share is closed', p2 && /not done until all 1 are closed/.test(p2.census), p2 && p2.census)
+  ok('the Census log line fired', withPattern.logs.some((l) => /Census: 1 pattern\(s\) — "senderRole":3/.test(l)), withPattern.logs)
+  const noPattern = await run({ mode: 'plan', refs: ['#154'] }, GOOD)
+  ok('no piece named a pattern → no `census` field anywhere', !noPattern.out.pieces.some((p) => p.census), noPattern.out.pieces)
+  ok('the dispatch was told no pattern was named', /No piece named a pattern/.test(promptOf(noPattern.calls, 'framer:decomposeCheck')))
+  ok('no Census log line on a plan with no pattern', !noPattern.logs.some((l) => /^Census:/.test(l)))
+  // The count reaches a ticket body (survives into whatever engine builds it next
+  // — bugger.js has never heard of `expectation`, but it reads an issue's prose).
+  const descPattern = await run(
+    { mode: 'plan', items: [{ title: 'Owner authority across chat surfaces', asks: 'decide what the clamp governs', priority: 'High' }] },
+    { 'framer:new-1': { ...RECON, ref: 'new-1' }, framer: { ...PATTERN_PLAN, pieces: [{ ...PATTERN_PIECE, ref: 'new-1' }] }, 'framer:decomposeCheck': CENSUS_RESULT },
+  )
+  const ticketBody = descPattern.out && descPattern.out.needsTicket[0] ? descPattern.out.needsTicket[0].body : ''
+  ok('the ticket body carries the census line', /- census: pattern "senderRole" has 3 site\(s\)/.test(ticketBody), ticketBody)
+  // And it reaches the LANE at build time — its own files, but the total.
+  const censusBuild = await run(
+    { mode: 'build', pieces: [{ ...GOOD_PIECE, census: p2.census }], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'built' }] } },
+  )
+  ok('the CENSUS line reaches the build prompt', /CENSUS: pattern "senderRole" has 3 site\(s\)/.test(promptOf(censusBuild.calls, 'slackmaster')), promptOf(censusBuild.calls, 'slackmaster').slice(0, 300))
+
+  section('16 · A SECOND DISPATCH OF THE SAME LANE SAYS WHY  (fires on the bad input, silent on the good one)')
+  // 16a — the WAVE split: two pieces, same lane, the second `dependsOn` the
+  // first. Both land in the SAME `Build` box (feature.js sets `phase('Build')`
+  // once, outside the wave loop) — this is his exact example: "if we have two
+  // matchmaker in the same stage". Distinct exact canned keys so each wave's
+  // response is provably matched by ITS OWN label, not a lucky startsWith.
+  const waveSplit = await run(
+    { mode: 'build', pieces: [{ ...GOOD_PIECE, id: 'p1' }, { ...GOOD_PIECE, id: 'p2', dependsOn: ['p1'] }], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { 'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] }, 'slackmaster(1·dep)': { results: [{ id: 'p2', verdict: 'built' }] } },
+  )
+  ok('no throw', !waveSplit.err, waveSplit.err && waveSplit.err.message)
+  const waveLabels = calledPhase(waveSplit.calls, 'Build').map((c) => c.label)
+  ok('slackmaster dispatched twice in the SAME Build box', waveLabels.filter((l) => l.startsWith('slackmaster')).length === 2, waveLabels)
+  ok('the FIRST dispatch carries its count, no dep marker', waveLabels.includes('slackmaster(1)'), waveLabels)
+  ok('the SECOND — same lane, this run — says WHY', waveLabels.includes('slackmaster(1·dep)'), waveLabels)
+  ok('both waves actually landed (the labels were matched, not guessed)', waveSplit.out && waveSplit.out.results.filter((r) => r.verdict === 'built').length === 2, waveSplit.out && waveSplit.out.results)
+
+  // 16b — the ASK round: slackmaster asks gatekeeper for something, gatekeeper
+  // builds it, slackmaster is RESUMED. gatekeeper's dispatch is its lane's
+  // FIRST this run (no marker) even though it happens in a later round;
+  // slackmaster's resume is its SECOND (marked) even though the mechanism is
+  // "resumed", not "asked" — proving the marker reads off the lane, not off
+  // which of the two dependency mechanisms produced the repeat.
+  const askRound = await run(
+    { mode: 'build', pieces: [{ ...GOOD_PIECE, id: 'p1' }], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    {
+      'slackmaster(1)': { results: [{ id: 'p1', verdict: 'needs-dependency', dependencyAgent: 'gatekeeper', dependencyAsk: 'add the seam', fix: 'nothing yet' }] },
+      'gatekeeper(1)': { results: [{ id: 'p1>dep', verdict: 'built', fix: 'added the seam' }] },
+      'slackmaster(1·dep)': { results: [{ id: 'p1', verdict: 'built' }] },
+    },
+  )
+  ok('no throw', !askRound.err, askRound.err && askRound.err.message)
+  const askLabels = calledPhase(askRound.calls, 'Build').map((c) => c.label)
+  ok('the lane ASKED for the first time carries no dep marker', askLabels.includes('gatekeeper(1)'), askLabels)
+  ok('the originator RESUMED in a later round IS marked — same lane, second dispatch', askLabels.includes('slackmaster(1·dep)'), askLabels)
+  ok('the resume actually ran — final verdict is built, not still needs-dependency', askRound.out && askRound.out.results.some((r) => r.id === 'p1' && r.verdict === 'built'), askRound.out && askRound.out.results)
 }
 
 main().then(

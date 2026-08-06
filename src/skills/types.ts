@@ -92,6 +92,18 @@ export interface SkillContext {
   userId: string;
   senderRole: 'owner' | 'colleague';  // who is making this request
   channel: ChannelId;
+  /**
+   * v4.4.x (#154) — the turn's authenticated authority and surface, resolved
+   * ONCE per turn by the transport's own front door (never derived here).
+   * `authority` is who is ACTING (from the authenticated sender id, never
+   * message content); `surface` is WHERE the turn is happening. REQUIRED
+   * deliberately — an optional flag reading as "not clamped" when absent is
+   * the exact bug class this field pair exists to close. Replaces the old
+   * pattern of re-deriving one from isMpim/isChannel/isOwnerInGroup at each
+   * of ~25 call sites and disagreeing.
+   */
+  authority: 'owner' | 'colleague';
+  surface: 'owner_dm' | 'colleague_dm' | 'room';
   app?: import('@slack/bolt').App;  // available for skills that need to send Slack messages
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
