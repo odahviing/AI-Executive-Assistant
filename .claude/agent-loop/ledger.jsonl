@@ -1343,3 +1343,51 @@
 {"date":"2026-08-06","runId":"wrap-4.5.0","lane":"profiler","source":"owner","ref":"profile-line-strip-reverted","finding":"the structured Profile line was stripped from a colleague's own DM on a premise the owner then reversed, closing nothing and costing real competence data","rootCause":"src/db/people.ts:1749-1767","verdict":"built","state":"built","note":"OWNER RULING, verbatim: 'revert -> get her the data'. After his 'its not gossip' ruling the strip removed nothing a reader could not already see through the same turn's .md, while losing communication_style on 12 of 55 slack-linked people - including people whose .md section is EMPTY, where the loss was total with no mirror at all."}
 {"date":"2026-08-06","runId":"wrap-4.5.0","lane":"matchmaker","source":"owner","ref":"room-bend-disclosure-contradicted-itself","finding":"two opposite instructions about the same event shipped in one round - one file told Maelle to say plainly that the owner bent a rule, another told her to say nothing at all","rootCause":"src/skills/meetings/ops.ts:83-99","verdict":"built","state":"built","note":"OWNER RULING, verbatim: 'stay quiet, if I'm in the room, its long strange that she explains other people why I can't meet with them.' The point is not process-secrecy but that explaining HIS constraints to other people while he is sitting there is not how a person behaves - a line the deleted clampedRelaxedNotice had carried and the replacement lost. No owner-facing signal kept on this path: find_available_slots is a read, nothing is pending, and the strict slots are truthful on their own."}
 {"date":"2026-08-06","runId":"wrap-4.5.0","lane":"matchmaker","source":"backlog","ref":"gh#52","finding":"re-surfaced on the 2026-08-04 backlog pass and confirmed still-real","rootCause":"src/db/client.ts:153-163 + :227-265","verdict":"needs-owner-decision","recommend":"defer — the owner said he will review the ticket himself","state":"deferred","note":"Carried unchanged through this wave; not touched by it. Deferred on his own word, due back on the next run."}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-leak-fix","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-fields","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-slack-frontdoor","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-slack-frontdoor>dep","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-tool-split","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-tool-split>dep","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-relaxed-approval","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-colleague-knowledge","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-colleague-knowledge>dep>dep","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-origin-room","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-subject-viewer","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-approval-claim","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-replay-surface","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-replay-surface>dep","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-synthetic-scheduled","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-email-keepalive","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"154-channel-honesty","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#214","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#216","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#217","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#218","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#219","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#220","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#221","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#222","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#223","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#224","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#225","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#226","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#227","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#228","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb — the backfill migration ships with it but has not executed; it runs from getDb() on first boot"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#229","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"o#230","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb as a REVERT — the widening is out, the capability is unbuilt"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"update-meeting-write-door","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"delete-meeting-success-path-raw-subject","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"room-mask-looser-than-dm","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"social-directive-block-no-room-gate","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"marksubjectraised-fires-on-a-suppressed-room-turn","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"thread-people-block-prints-member-pii-in-a-room","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"thread-request-status-section-keyed-on-isowner","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"escalation-narrated-into-the-room","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"email-leg-lost-byte-identity","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"shippedtoolnames-computed-without-authority","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"owner-brief-masked-his-own-personal-events","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"profile-line-strip-reverted","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","ref":"room-bend-disclosure-contradicted-itself","verdict":"wrapped","state":"wrapped","note":"shipped in 5947dfb"}
+{"date":"2026-08-06","runId":"wrap-4.5.0","lane":"matchmaker","source":"github","ref":"gh#154","verdict":"wrapped","state":"closed","note":"Closed in 5947dfb (v4.5.0) — the authority/surface split, the two live leaks, and the deterministic in-code escalation. Full detail in the comment above, including the one capability that was reverted and needs its own ticket. All five of the ticket's own structural questions are answered: two fields not one; the privacy guarantee is the unchanged registry chokepoint; one surface enum resolved once; overrides route through approval deterministically in code; and the discarded-permission notice dissolved rather than shipped, because an override that escalates has nothing to discard."}
+{"date":"2026-08-06","runId":"wrap-4.5.0","lane":"registrar","source":"github","ref":"gh#179","verdict":"needs-owner-decision","recommend":"build — the Hebrew/English mixing in the relay and the coda arriving inside the same message are both untouched output-shape work on the relay leg; a lane can pick them straight up","state":"partial","note":"Commented, not closed. LANDED: the reported inversion (she said approved, then said she would update when Idan updates) is fixed — rewriteOwningTheMiss now gets resolved/unresolved ground truth and keeps a truthful grant; and resolve_approval keys on authority so the owner resolving from a room is no longer refused as a colleague, across three checkpoints including resolvedByColleague which nobody had named. STILL OPEN: Hebrew/English mixing in the relay to Yael, and the social coda arriving inside the same message instead of separately — both output-shape problems on the relay leg, which is why a permission wave did not reach them."}
