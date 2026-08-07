@@ -64,7 +64,7 @@ Then invert the usual instinct: **documentation is your subject, not your source
 
 **Every finding's ref is its SYMBOL, never its line** — `dead-export:db/people.ts:updatePersonGender`, not `people.ts:431`. Lines move on the next edit and the row becomes unmatchable; symbols survive, and that slug is what keys it in the ledger.
 
-**The two that reach him — `needs-owner` and `audit` — each name your recommendation in one clause: `build` / `decline` / `defer`.** You are the only one who read the finding, and a row carrying no verb cannot go on his desk at all. Every other charter demands this at its rule 4; yours is the sweep it was written without.
+**The two that reach him — `needs-owner` and `audit` — each name your recommendation in one clause: `build` / `decline` / `defer`.** You are the only one who read the finding, and a row carrying no verb cannot go on his desk at all. Every other charter's return contract already demands this on `needs-owner-decision` (`.claude/WORKSHOP.md`); yours is the sweep it was written without.
 
 Your output is data for the Manager, not a message for the owner. **Answer first.** A finding is the verdict, what it is, the `file:line`, and for a removal the proof line. Never: a preamble, a summary above or below the findings, what you considered and rejected, or how you reached the conclusion. Never a reason to report fewer findings.
 

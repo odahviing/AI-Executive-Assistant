@@ -717,8 +717,22 @@ const VERDICTS = {
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
+          // The Workshop reversal (2026-08-07) deleted the eight hand-copied
+          // Shared-charter blocks in favour of ONE source, `.claude/WORKSHOP.md`,
+          // that every lane charter now tells the agent to read FIRST and STOP if
+          // it cannot. A charter instruction to stop is invisible to this engine —
+          // it only sees what comes back — so the read needs its own field, or a
+          // lane silently unbound from W1-W12 looks byte-identical to one that
+          // read them. REQUIRED, not optional: an omitted field is indistinguishable
+          // from a check that never ran, the same reasoning `filesTouched`/`traced`
+          // already carry here.
+          workshopRead: {
+            type: 'boolean',
+            description:
+              'true once you have read .claude/WORKSHOP.md this dispatch. If you could not read it, you should already have stopped and returned your escalation verdict instead of building — this field is not where that failure is reported, it is the proof the read happened before this result was produced.',
+          },
         },
-        required: ['id', 'verdict'],
+        required: ['id', 'verdict', 'workshopRead'],
       },
     },
   },
@@ -898,13 +912,17 @@ const VERIFY_OUT = {
 // ---- helpers ----
 // `_where` is a STARTING POINT, never a substitute for reading the code. The
 // framing below is load-bearing: an excerpt is a snapshot, the tree moves under
-// it, and Shared rule 6 (never build on a claim you have not verified) applies to
+// it, and W2 (never build on a claim you have not verified) applies to
 // it exactly as it does to a hand-off from another lane. What the Locate pass
 // removes is the SEARCH, not the reading.
+// X-workshop · was "Shared rule 6" — wrong even before the Workshop migration:
+// the never-relay-unverified-claim clause has always lived in rule 2 (now W2),
+// never rule 6 (stay in your lane). Re-derived from the charter text itself
+// rather than copied, since that is the exact citation-drift class this fixes.
 const WHERE_NOTE =
   `\n\nSome issues carry \`_where\` — the cited location resolved for you, with an excerpt and its immediate neighbours. ` +
   `That is a STARTING POINT, not the truth: it is a snapshot taken before this dispatch, another lane may have moved the code since, ` +
-  `and the citation itself came from the editor and can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive the defect from ` +
+  `and the citation itself came from the editor and can be wrong. **Open the file and read it.** Per W2, re-derive the defect from ` +
   `the code on disk before you build on it — if \`_where\` disagrees with what you find, the file wins and say so in your notes. ` +
   `What this saves you is hunting for the location, not verifying it.`
 
@@ -1638,7 +1656,7 @@ if (VERIFY) {
     //   • `priorClean` — what earlier verifies proved, carried in by the Manager
     //     from the report. Without it every pass re-audits settled ground.
     // Both are leads, not truth: a builder's coverage claim and a past pass's
-    // conclusion are exactly the kind of relay Shared rule 6 exists for, and the
+    // conclusion are exactly the kind of relay W2 exists for, and the
     // prompt says so. Spot-check cheaply; spend the budget on what is NOT there.
     const priorClean = asArray('priorClean', A.priorClean)
 
@@ -2330,6 +2348,16 @@ const manifest = {
 // Arg problems go FIRST: an input that never arrived invalidates everything
 // reported below it, so it cannot be buried under the log-review tells.
 const warnings = [...argWarnings]
+// The Workshop fail-closed proof (2026-08-07): W1-W12 live in ONE file now,
+// `.claude/WORKSHOP.md`, and every lane charter's first instruction is to read
+// it or stop. A charter instruction to stop is invisible to this engine — it
+// only sees what a dispatch returns — so `workshopRead` is the one signal that
+// makes a silent miss loud instead of looking like an ordinary clean result.
+const workshopUnread = results.filter((r) => r.workshopRead === false)
+if (workshopUnread.length)
+  warnings.push(
+    `WORKSHOP NOT READ — ${workshopUnread.length} result(s) report workshopRead:false (${workshopUnread.map((r) => r.id).join(', ')}). That lane built without W1-W12 in context. Do NOT wrap on this; re-dispatch it having confirmed \`.claude/WORKSHOP.md\` is readable.`,
+  )
 const REVIEWED_LOGS = !PRESET && SOURCES.includes('logs')
 // This used to ask "did the review start at line 1?" — which is the CORRECT
 // answer whenever the watermark predates today's file, i.e. every normal night.

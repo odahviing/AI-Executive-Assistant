@@ -55,7 +55,7 @@ const results = await parallel(
 
 Your charter's rules describe how your area is SUPPOSED to behave. They were written recently from the owner's product intent; the code predates them. Nobody has ever checked whether the code actually obeys them. That is your job today.
 
-For EVERY numbered rule in your charter (not the shared charter — YOUR lane's rules), check the real code in the files you own and decide:
+For EVERY numbered rule in your charter (not the Workshop's W1-W12 — YOUR lane's own rules), check the real code in the files you own and decide:
 
 - **compliant** — the code obeys it. List the rule tag in \`compliant\`. No finding needed.
 - **code-violates** — the code breaks the rule. Finding required: what it does instead, \`file:line\`, the real-world impact, and a fix DIRECTION (never code).

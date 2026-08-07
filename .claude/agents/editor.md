@@ -69,7 +69,7 @@ The fifteen rules below split into three chapters: **what counts as a bug**, **h
   - **`gatekeeper` and `instructor` are last-resort destinations.** A symptom being *visible in a reply* is not a reason to route there. A leak appears at output and is almost always fixed in the flow that produced the data.
   - **Anything about identity, the person store, people memory or social goes to `profiler`** — not to the lane where the symptom happened to surface.
   - **`handyman` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
-  - **The transport spine — `src/connections/{types,registry}.ts` — has no owner and is not Handyman's** (owner's ruling, 2026-08-01). Route a bug there to the lane whose behaviour it breaks; every lane may edit it (their Shared rule 11).
+  - **The transport spine — `src/connections/{types,registry}.ts` — has no owner and is not Handyman's** (owner's ruling, 2026-08-01). Route a bug there to the lane whose behaviour it breaks; every lane may edit it (their W11, `.claude/WORKSHOP.md`).
 
   If no lane fits, say so in `whyHypothesis` rather than guessing — a wrong lane is a full dispatch spent learning it was the wrong lane.
 

@@ -429,8 +429,18 @@ const VERDICTS = {
               'OMIT unless this is an instance of a GENERAL rule that could break elsewhere. When it is, one short stable slug, and the SAME slug on every piece that breaks the same rule — that is what lets the root be fixed once instead of three times.',
           },
           notes: { type: 'string' },
+          // Same field, same reasoning as bugger.js: the Workshop reversal
+          // (2026-08-07) deleted the eight hand-copied Shared-charter blocks for
+          // ONE source every lane charter now reads first and must stop if it
+          // cannot. REQUIRED so an omitted read is never indistinguishable from
+          // one that happened.
+          workshopRead: {
+            type: 'boolean',
+            description:
+              'true once you have read .claude/WORKSHOP.md this dispatch. If you could not read it, you should already have stopped and returned your escalation verdict instead of building — this field is not where that failure is reported, it is the proof the read happened before this result was produced.',
+          },
         },
-        required: ['id', 'verdict'],
+        required: ['id', 'verdict', 'workshopRead'],
       },
     },
   },
@@ -1042,7 +1052,7 @@ const describe = (p) =>
 const WHERE_NOTE =
   `\n\nSome pieces carry \`_where\` — what the planning pass found this area does TODAY, with file:line. ` +
   `That is a STARTING POINT, not the truth: it was established before this dispatch, another lane may have moved the code since, ` +
-  `and the planning pass can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive it from the code before you build on it — ` +
+  `and the planning pass can be wrong. **Open the file and read it.** Per W2, re-derive it from the code before you build on it — ` +
   `if \`_where\` disagrees with what you find, the file wins and say so in your notes. What this saves you is hunting for the location, not verifying it.`
 
 // A piece resumed after the owner ruled on it (`needsOwnerRuling` from an
@@ -1235,7 +1245,7 @@ for (;;) {
     break
   }
   const resumeNote = resumes.length
-    ? `\n\nSome pieces carry \`_dependencyResolved\`: you returned \`needs-dependency\` on them earlier in this run and the lane you named has now delivered. FINISH your own piece. Per Shared rule 6, RE-DERIVE their change from the code before building on it — do not trust the summary.`
+    ? `\n\nSome pieces carry \`_dependencyResolved\`: you returned \`needs-dependency\` on them earlier in this run and the lane you named has now delivered. FINISH your own piece. Per W2, RE-DERIVE their change from the code before building on it — do not trust the summary.`
     : ''
   log(`Dep round ${depRounds}: ${round.length} item(s) — ${[...new Set(round.map((p) => p.lane))].join(', ')}${resumes.length ? ` (${resumes.length} resumed)` : ''}`)
 
@@ -1787,6 +1797,16 @@ const featureManifest = {
   },
 }
 const featureWarnings = []
+// The Workshop fail-closed proof (2026-08-07): W1-W12 live in ONE file now,
+// `.claude/WORKSHOP.md`, and every lane charter's first instruction is to read
+// it or stop. A charter instruction to stop is invisible to this engine — it
+// only sees what a dispatch returns — so `workshopRead` is the one signal that
+// makes a silent miss loud instead of looking like an ordinary clean result.
+const workshopUnread = results.filter((r) => r.workshopRead === false)
+if (workshopUnread.length)
+  featureWarnings.push(
+    `WORKSHOP NOT READ — ${workshopUnread.length} piece(s) report workshopRead:false (${workshopUnread.map((r) => r.id).join(', ')}). That lane built without W1-W12 in context. Do NOT wrap on this; re-dispatch it having confirmed \`.claude/WORKSHOP.md\` is readable.`,
+  )
 // THIS IS THE ONE THAT MATTERS MOST — first in the list, on purpose. A wave
 // reporting itself complete while its own spec is not is the exact defect
 // gh#154 cost four bugger runs finding out.

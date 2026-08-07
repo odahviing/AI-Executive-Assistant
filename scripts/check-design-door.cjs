@@ -875,6 +875,87 @@ const main = async () => {
   )
   ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B2\'s carve-out, not a loophole', noSymptomBugger.out && noSymptomBugger.out.manifest.outcome.untraced === 0, noSymptomBugger.out && noSymptomBugger.out.manifest.outcome)
   ok('no warning on the honest no-symptom wave', noSymptomBugger.out && !noSymptomBugger.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), noSymptomBugger.out && noSymptomBugger.out.warnings)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // THE WORKSHOP (2026-08-07) — W1-W12 moved from eight hand-copied "Shared
+  // charter" blocks into ONE source, `.claude/WORKSHOP.md`, that every lane
+  // charter now reads FIRST and must fail closed against. Two independent
+  // things can each fail silently: a charter could still carry (or regrow) a
+  // duplicated copy, or a lane could build without ever reading the source and
+  // nothing downstream would show it. Both get a fixture — the first is a
+  // static read, the second drives the real engines.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('29 · THE WORKSHOP FILE — ONE SOURCE, W1 THROUGH W12, NOTHING DUPLICATED  (fires on the bad input, silent on the good one)')
+  const WORKSHOP_FILE = path.join(ROOT, '.claude', 'WORKSHOP.md')
+  const workshopSrc = fs.readFileSync(WORKSHOP_FILE, 'utf8')
+  ok('WORKSHOP.md exists and is non-trivial', workshopSrc.length > 2000, workshopSrc.length)
+  const workshopTags = [...workshopSrc.matchAll(/^- \*\*W([0-9]+) ·/gm)].map((m) => Number(m[1])).sort((a, b) => a - b)
+  ok('WORKSHOP.md carries exactly W1 through W12, no gaps, no repeats', JSON.stringify(workshopTags) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), workshopTags)
+
+  // A charter is WORKSHOP-CLEAN when it (a) carries no duplicate of the old
+  // block — the "## Shared charter" heading every copy used to open with —
+  // (b) tells the agent to read WORKSHOP.md and STOP if it cannot, and (c) its
+  // return contract proves the read happened. Tested against a synthetic GOOD
+  // and two BAD strings BEFORE trusting the regex against the real files —
+  // that is what makes this a fixture rather than a read of the files alone.
+  const workshopChecks = (text) => ({
+    noDuplicateBlock: !/^## Shared charter/m.test(text),
+    readsFirst: /\.claude\/WORKSHOP\.md/.test(text) && /STOP/.test(text),
+    provesRead: /workshopRead/.test(text),
+  })
+  const GOOD_CHARTER_TEXT = '## Read the Workshop rules first\n\nread `.claude/WORKSHOP.md`. If you cannot, STOP.\n\nevery result sets `workshopRead: true`.'
+  const BAD_CHARTER_NO_POINTER = '## Some other heading\n\nthis charter mentions none of it.'
+  const BAD_CHARTER_DUPLICATE = '## Shared charter — every Maelle agent follows this\n\n1. Deep solution, never a patch...'
+  const goodCheck = workshopChecks(GOOD_CHARTER_TEXT)
+  ok('the checker PASSES a synthetic clean charter on all three tests', goodCheck.noDuplicateBlock && goodCheck.readsFirst && goodCheck.provesRead, goodCheck)
+  const badNoPointer = workshopChecks(BAD_CHARTER_NO_POINTER)
+  ok('the checker FAILS a charter with no Workshop pointer at all', !badNoPointer.readsFirst && !badNoPointer.provesRead, badNoPointer)
+  const badDuplicate = workshopChecks(BAD_CHARTER_DUPLICATE)
+  ok('the checker FAILS a charter that still carries the duplicated block', !badDuplicate.noDuplicateBlock, badDuplicate)
+
+  const BUILDER_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'instructor', 'slackmaster', 'diplomat', 'handyman']
+  for (const lane of BUILDER_LANES) {
+    const text = fs.readFileSync(path.join(ROOT, '.claude', 'agents', `${lane}.md`), 'utf8')
+    const c = workshopChecks(text)
+    ok(`${lane}.md carries no duplicated Shared-charter block`, c.noDuplicateBlock)
+    ok(`${lane}.md reads WORKSHOP.md first and fails closed`, c.readsFirst)
+    ok(`${lane}.md's return contract proves the read`, c.provesRead)
+  }
+
+  section('30 · WORKSHOP READ FAILURE — feature.js WARNS LOUDLY  (fires on the bad input, silent on the good one)')
+  const unreadBuild = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'built', workshopRead: false }] } },
+  )
+  ok('no throw', !unreadBuild.err, unreadBuild.err && unreadBuild.err.message)
+  ok(
+    'WORKSHOP NOT READ fires, naming the piece',
+    unreadBuild.out && unreadBuild.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w) && w.includes('p1')),
+    unreadBuild.out && unreadBuild.out.warnings,
+  )
+  const readBuild = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'built', workshopRead: true }] } },
+  )
+  ok('no throw', !readBuild.err, readBuild.err && readBuild.err.message)
+  ok('no WORKSHOP warning on a clean read', readBuild.out && !readBuild.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w)), readBuild.out && readBuild.out.warnings)
+  ok(
+    'a result that never mentions workshopRead is NOT flagged (schema enforces required; this fixture cannot fake that layer)',
+    clean.out && !clean.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w)),
+    clean.out && clean.out.warnings,
+  )
+
+  section('31 · WORKSHOP READ FAILURE — bugger.js, THE SAME MECHANISM  (fires on the bad input, silent on the good one)')
+  const unreadBugger = await runBugger({ issues: [BUG_ISSUE] }, { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', workshopRead: false }] } })
+  ok('no throw', !unreadBugger.err, unreadBugger.err && unreadBugger.err.message)
+  ok(
+    'WORKSHOP NOT READ fires, naming the row',
+    unreadBugger.out && unreadBugger.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w) && w.includes('b1')),
+    unreadBugger.out && unreadBugger.out.warnings,
+  )
+  const readBugger = await runBugger({ issues: [BUG_ISSUE] }, { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', workshopRead: true }] } })
+  ok('no throw', !readBugger.err, readBugger.err && readBugger.err.message)
+  ok('no WORKSHOP warning on a clean read', readBugger.out && !readBugger.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w)), readBugger.out && readBugger.out.warnings)
 }
 
 main().then(
