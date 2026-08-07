@@ -34,6 +34,10 @@ const ENGINE = path.join(ROOT, '.claude', 'workflows', 'feature.js')
 const CLUSTERER = path.join(__dirname, 'design-cluster.cjs')
 const LEDGER = path.join(ROOT, '.claude', 'agent-loop', 'ledger.jsonl')
 const STATS = path.join(__dirname, 'ledger-stats.cjs')
+// X172 · the phantom-candidate file matcher, required directly rather than
+// re-implemented — `ledger-stats.cjs` stops before touching argv/the ledger
+// when `require.main !== module`, so this is the one live function, not a copy.
+const { citesReleaseFile } = require(STATS)
 
 let failed = 0
 let passed = 0
@@ -717,6 +721,36 @@ const main = async () => {
     'a wave with NO rulings gets an UNCHANGED bouncer payload — no `_ownerRuled` key, no governing note',
     !/_ownerRuled/.test(promptOf(bounce.calls, 'bouncer:wave')) && !/IS THE SPEC/.test(promptOf(bounce.calls, 'bouncer:wave')),
     promptOf(bounce.calls, 'bouncer:wave').slice(0, 400),
+  )
+
+  section('25 · PHANTOM-CANDIDATE FILE MATCH — full path, never a basename  (fires on the bad input, silent on the good one)')
+  // The exact 4.5.1 false positive: a citation and a touched file share a
+  // basename (`calendarReads.ts`) but live under different directories. This
+  // must NOT match — that guess is precisely what flagged
+  // `colleague-subject-permissive-half-not-built` as resolved by a wrap that
+  // never touched the file its rootCause actually named.
+  ok(
+    'a same-BASENAME, different-path pair does NOT match',
+    citesReleaseFile(['src/skills/meetings/ops/handlers/calendarReads.ts'], ['src/connectors/graph/calendarReads.ts']) === false,
+  )
+  // A genuine same-path citation must still fire — the fix must not have
+  // overcorrected into never matching anything.
+  ok(
+    'an EXACT same-path citation still matches',
+    citesReleaseFile(['src/connectors/graph/calendarReads.ts'], ['src/connectors/graph/calendarReads.ts', 'src/other/file.ts']) === true,
+  )
+  // A bare filename with no directory is never guessed into a match either —
+  // that guess is the same failure shape, just on the citation side instead
+  // of the release-file side.
+  ok(
+    'a bare filename citation (no directory) matches nothing, even against a same-named touched file',
+    citesReleaseFile(['calendarReads.ts'], ['src/connectors/graph/calendarReads.ts']) === false,
+  )
+  // Two files, one of which genuinely matches — proves the fix does not just
+  // return false unconditionally.
+  ok(
+    'a mixed citation list matches on the one genuine full-path hit',
+    citesReleaseFile(['src/skills/meetings/ops/handlers/calendarReads.ts', 'src/connectors/graph/calendarReads.ts'], ['src/connectors/graph/calendarReads.ts']) === true,
   )
 }
 

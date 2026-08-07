@@ -161,6 +161,30 @@ const REREAD = new Set(['moved', 'unexamined']);
 const LEGEND_REREAD =
   'RE-READ = nobody has stood behind this row yet — either the code it cites MOVED after it was written, or NO ONE HAS EVER RE-READ IT. Re-read it, then rule; nothing is closed automatically.';
 
+// ── X172 · PHANTOM-CANDIDATE FILE MATCH — full repo-relative path, never a
+// basename. `--wrap`'s phantom check used to compare bare filenames
+// (`c.split('/').pop()`), and this codebase has several duplicated basenames —
+// `calendarReads.ts` exists under both `src/connectors/graph/` and
+// `src/skills/meetings/ops/handlers/`, and `findAvailableSlots.ts` the same
+// way. On the 4.5.1 wrap that flagged `colleague-subject-permissive-half-not-built`
+// (rootCause citing the `.../handlers/calendarReads.ts` copy) as resolved by a
+// diff that only ever touched `.../graph/calendarReads.ts` — a false positive
+// on the check's own first real wrap. NEVER guess from a basename: a cited
+// path with no directory component at all (a bare filename) matches nothing,
+// because a basename fallback is exactly the guess that produced this.
+// Exported so `check-design-door.cjs` can prove both directions without
+// spinning up real git history.
+const citesReleaseFile = (cited, releaseFiles) => {
+  const files = new Set(releaseFiles);
+  return cited.some((c) => c.includes('/') && files.has(c));
+};
+module.exports = { citesReleaseFile };
+// Required by the fixture for that function alone. Everything below is the
+// CLI and ends in `process.exit`, so a plain `require` of this file from
+// anywhere else would run the whole script. Nothing above this line touches
+// argv, the ledger or the filesystem.
+if (require.main !== module) return;
+
 const argv = process.argv.slice(2);
 const argOf = (flag) => {
   const i = argv.indexOf(flag);
@@ -465,9 +489,8 @@ if (argOf('--wrap')) {
       } catch {
         /* no diff — nothing to cross-reference, reported below as NOT RUN */
       }
-      const releaseBasenames = new Set(releaseFiles.map((f) => f.split('/').pop()));
       let openRows = null;
-      if (releaseBasenames.size) {
+      if (releaseFiles.length) {
         try {
           openRows = JSON.parse(
             execFileSync(process.execPath, [__filename, '--open', '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }),
@@ -484,7 +507,7 @@ if (argOf('--wrap')) {
         for (const r of openRows) {
           if (!r.ref || examined(r)) continue;
           const cited = [...new Set(String(r.rootCause || '').match(CITED) || [])];
-          const via = cited.some((c) => releaseBasenames.has(c.split('/').pop()))
+          const via = citesReleaseFile(cited, releaseFiles)
             ? "rootCause cites a file this wrap's own commits touched"
             : r.invariant && closedInvariants.has(r.invariant)
               ? `shares invariant "${r.invariant}" with a row this wrap closed`
