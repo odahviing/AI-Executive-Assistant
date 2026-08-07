@@ -1535,3 +1535,5 @@
 {"date":"2026-08-07","runId":"invariant-backfill-2026-08-07","kind":"invariant-backfill","ref":"154-origin-room","invariant":"rule-must-reach-every-path-it-governs"}
 {"date":"2026-08-07","runId":"invariant-backfill-2026-08-07","kind":"invariant-backfill","ref":"154-replay-surface","invariant":"authority-and-data-scope-are-two-fields"}
 {"date":"2026-08-07","runId":"invariant-backfill-2026-08-07","kind":"invariant-backfill","ref":"create-task-runs-colleague-work-with-owner-privilege","invariant":"owner-authority-in-a-room-is-action-only"}
+{"date":"2026-08-07","runId":"wrap-4.5.1","ref":"category-classifier-nondeterministic-headcount-miscount","verdict":"wrapped","state":"wrapped","note":"shipped in 3cb3614"}
+{"date":"2026-08-07","runId":"wrap-4.5.1","ref":"over-optional-slot-gets-a-quotable-per-slot-label","verdict":"wrapped","state":"wrapped","note":"shipped in 3cb3614"}
