@@ -1,6 +1,6 @@
 # Agent-loop report
 
-**Empty — v4.5.1 wrapped. 0 rows await you.** Standing backlog: **10 open rows** across 10 bugs · 2 still-real · 6 need a re-read · 2 cite no file · **10 rulable · 0 waiting on a verb** (`node scripts/ledger-stats.cjs --open`).
+**Empty — v4.5.1 wrapped. 0 rows await you.** Standing backlog: **10 open rows** across 10 bugs · 1 still-real · 7 need a re-read · 2 cite no file · **10 rulable · 0 waiting on a verb** (`node scripts/ledger-stats.cjs --open`).
 
 **Built and shipped in this wrap (2):** `category-classifier-nondeterministic-headcount-miscount` — temperature pinned on the category classifier, closing the same-session inconsistent-category bug · `over-optional-slot-gets-a-quotable-per-slot-label` — a WE-tagged slot now carries a marker a requester can act on, without naming the owner's meeting to someone who should not see it. Bouncer-confirmed after one wording round. A third live report (a night-shift window looking ignored in a 10-option search) was investigated and **declined** — the window is recognised and available, just deprioritised under density ranking, which matches the stated priority.
 
