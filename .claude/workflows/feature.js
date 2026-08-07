@@ -3,7 +3,6 @@ export const meta = {
   description:
     'Feature/improvement wave — the door bugger.js does not have. TWO invocations, deliberately: `mode:"plan"` reads open Improvement issues, works out what each actually means, and returns a DECOMPOSITION for the owner to approve — it builds nothing. `mode:"build"` takes the approved pieces, dispatches the lanes in dependency order, runs ONE combined-diff verify, and returns a report. Builds in the working tree; NEVER commits (the owner wraps).',
   phases: [
-    { title: 'Intake' },
     { title: 'Recon' },
     { title: 'Decompose' },
     { title: 'Build' },
@@ -509,7 +508,15 @@ const VERIFY_OUT = {
 // PLAN MODE — read, understand, decompose. Build NOTHING.
 // ═══════════════════════════════════════════════════════════════════════════
 if (MODE === 'plan') {
-  phase('Intake')
+  // X177 · Intake folds into Recon — two phases become one. Measured on his
+  // own run panel: Intake was 15.8k tokens and 10 seconds — it lists open
+  // Improvement/Feature tickets and nothing else, a `gh issue list` wearing a
+  // phase title. Recon (the per-item UNDERSTOOD pass below) is the real work,
+  // at 94.5k tokens and 4 minutes. Decompose stays separate: Recon fans out
+  // one call per item in parallel, Decompose is a single pass that consumes
+  // all of Recon's results, and you cannot merge a fan-out with its own
+  // barrier.
+  phase('Recon')
   // BOTH tracks. Note the syntax: `--label A --label B` is an AND in gh and would
   // match nothing, so this uses search, where `label:A,B` is an OR. Reading only
   // `Improvement` was a trap — a design question filed as a `Feature` (which is
@@ -544,11 +551,12 @@ if (MODE === 'plan') {
       // decision means do not dispatch" — and every one of those is wrong here.
       // Effort and model stay as tuned: one shell command does not need more.
       // X151 · the label names the agent first (framer, every dispatch in this
-      // file) and the task second — `Intake` already says what phase this is.
-      { label: 'framer:backlog', phase: 'Intake', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
+      // file) and the task second. X177 · phase is `Recon` — the listing and
+      // the per-item understand pass below now share one box, not two.
+      { label: 'framer:backlog', phase: 'Recon', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
     )
     items = (raw && raw.items) || []
-    log(`Intake: ${items.length} open item(s)${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
+    log(`Recon: ${items.length} open item(s) found${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
   }
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
   items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
@@ -633,7 +641,6 @@ if (MODE === 'plan') {
       )}\n\n`
     : ''
 
-  phase('Recon')
   const recon = (
     await parallel(
       items.map((it) => () =>
@@ -1012,6 +1019,15 @@ const WHERE_NOTE =
   `and the planning pass can be wrong. **Open the file and read it.** Per Shared rule 6, re-derive it from the code before you build on it — ` +
   `if \`_where\` disagrees with what you find, the file wins and say so in your notes. What this saves you is hunting for the location, not verifying it.`
 
+// A piece resumed after the owner ruled on it (`needsOwnerRuling` from an
+// earlier build return of THIS SAME wave). It is not a fresh design question —
+// the decision is made; finish the piece per his ruling, exactly the same
+// standing as an OWNER DECISION already named on a piece (`productDecision`).
+const OWNER_RULED_NOTE =
+  `\n\nSome pieces carry \`_ownerRuled\`: this wave already returned \`needs-owner-decision\` or \`blocked-charter\` on them, and the owner has now ruled. ` +
+  `\`askedBecause\` is the question this raised; \`hisRuling\` is his answer, verbatim — build it, do not re-litigate it. If finishing it now reveals a genuine ` +
+  `correctness problem with the ruling itself, say so plainly and return \`needs-owner-decision\` again rather than shipping something broken.`
+
 // X168-parity · same fix as bugger.js, same reason: the panel showed a bare
 // lane name and nothing else, so a chained wave — here, EITHER a `dependsOn`
 // split across build waves or a cross-lane dependency ask — left the owner
@@ -1020,10 +1036,21 @@ const WHERE_NOTE =
 // dep-round numbering, and it is shared across BOTH loops below because from
 // the panel they are the same box: a lane appearing twice in `Build` is a
 // dependency round regardless of which of the two mechanisms produced it.
+//
+// X177 · THE LABEL SYSTEM, his: `<why>:<agent>(<count>)`, no prefix when
+// nobody sent it back. `dep:` (a round asked for it) and `rebuild:` (the
+// bouncer refused it) already existed; `owner:` is new — a piece carrying
+// `_ownerRuled` is being rebuilt because HE ruled on it, which is neither a
+// bounce (the bouncer never refused this piece) nor an ordinary dependency
+// round (nothing asked another lane for anything). Reading one as the other
+// is exactly the confusion this system removes: the panel reads as a
+// sentence, build → owner → verify, or build → verify → rebuild → verify.
 const dispatchedLanesOnce = new Set()
 const buildLane = (lane, pcs, roundNote, asBounce) => {
   const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
   if (!asBounce) dispatchedLanesOnce.add(lane)
+  const isOwnerRound = !asBounce && pcs.some((p) => p && p._ownerRuled)
+  const prefix = isOwnerRound ? 'owner:' : isDepRound ? 'dep:' : ''
   return agent(
     `You are dispatched APPROVED improvement work in your lane. This is a FEATURE wave, not a bug wave — there is no root cause to prove; the owner has decided he wants this.\n\n` +
       `For EACH piece: read the code first, build it within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%, and **list every file you edited in \`filesTouched\`** so the verify can tell your change from work already sitting in the tree.` +
@@ -1031,7 +1058,7 @@ const buildLane = (lane, pcs, roundNote, asBounce) => {
         // settled from the code. Same sentence as bugger.js, same reason: gh#166
         // was "fixed" three times by picking a different number and the path was
         // never timed once.
-        `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}\n\n` +
+        `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}${pcs.some((p) => p._ownerRuled) ? OWNER_RULED_NOTE : ''}\n\n` +
       // The framer authored the contract and is read-only; you implement it. The
       // split is deliberate: it holds no lane's product rules, so the design
       // INSIDE your files is yours and the seam BETWEEN them is not.
@@ -1050,11 +1077,11 @@ const buildLane = (lane, pcs, roundNote, asBounce) => {
     // so there is no second box to add here either. The prefix, not the
     // phase, is what tells a rebuild apart from a first Build-phase dispatch
     // by the same lane; a bare lane name must never appear under Verify.
-    // X168-parity · every other label carries its count, and `·dep` marks any
-    // dispatch that is not this lane's first in the run — see the comment
-    // above this function.
+    // X168-parity/X177 · every other label carries its count, and a `dep:` or
+    // `owner:` prefix marks WHY a dispatch is not this lane's first in the
+    // run — see the comment above this function.
     {
-      label: asBounce ? `rebuild:${lane}(${pcs.length})` : `${lane}(${pcs.length}${isDepRound ? '·dep' : ''})`,
+      label: asBounce ? `rebuild:${lane}(${pcs.length})` : `${prefix}${lane}(${pcs.length})`,
       phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
       agentType: lane,
       effort: EFFORT[lane],
@@ -1219,11 +1246,38 @@ for (;;) {
   }
 }
 
+// ── THE OWNER GATE — BEFORE VERIFY, NEVER AFTER ─────────────────────────────
+// His words, 2026-08-06: "You plan and decompose, then you start to build and
+// you discover you have unanswered questions. You go back to the owner and
+// ask, you get them, you go back to build, and when finished, THEN the
+// bouncer verifies the code intention. If we do it the other way it won't
+// make a lot of sense." Until today `phase('Verify')` ran regardless, and the
+// OWNER GATE further down read what the bouncer had already examined — so a
+// wave with an unanswered piece paid a full bouncer pass over work everyone
+// already knew was unfinished, the gap surfaced as a verify FAILURE, and a
+// SECOND bouncer pass ran after the ruling. Two Opus passes over one diff,
+// which is the exact waste he complained about that morning.
+//
+// `OWNER_GATE_VERDICTS` is hoisted here, before the bouncer is ever
+// dispatched, so this check and the OWNER GATE section further down (which
+// computes `needsOwnerRuling` off `verified`) share ONE definition. When this
+// gate fires, `verified` stays `results` untouched — the section below
+// already handles that case correctly, because it always did on a run where
+// verify never ran at all (`A.verify===false`, or nothing was built).
+const OWNER_GATE_VERDICTS = new Set(['needs-owner-decision', 'blocked-charter'])
+const preVerifyOwnerGate = results.filter((r) => OWNER_GATE_VERDICTS.has(r.verdict))
+if (preVerifyOwnerGate.length)
+  log(
+    `OwnerGate: ${preVerifyOwnerGate.length} piece(s) returned needs-owner-decision/blocked-charter during Build — STOPPING BEFORE VERIFY: ${preVerifyOwnerGate
+      .map((r) => r.id)
+      .join(', ')}. One verify runs over the FINISHED diff, after he rules — never before.`,
+  )
+
 // ONE combined-diff verify — same reasoning as bugger.js: a per-piece pass cannot
 // see the only class that needs an bouncer, which is two pieces that are each
 // right alone and wrong together. Feature waves are MORE exposed to this than bug
 // waves, because the pieces were deliberately split across lanes to serve one idea.
-phase('Verify')
+// NEVER dispatched while `preVerifyOwnerGate` holds anything — see above.
 let verified = results
 let verifiedClean = []
 // `agent()` returns null when a subagent dies after its retries, and every read
@@ -1271,7 +1325,8 @@ let bounceDepAsks = []
 // sent back" — opposite facts. `eligible` is the first pass's overturn count.
 let bounceEligible = 0
 let bounceEscalated = 0
-if ((built.length || claimedFixed.length) && A.verify !== false) {
+if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.verify !== false) {
+  phase('Verify')
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
   // Same two mechanisms as bugger.js, same reasoning — the tree holds more than
   // this wave, and a `priorClean` entry describing code this wave changed is a
@@ -1291,6 +1346,11 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
       `priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} at index ${priorCleanDropped.map((d) => d.i).join(',')} — this wave changed the code they described.`,
     )
 
+  // X177 · a piece the owner ruled on mid-build carries `_ownerRuled` — see
+  // `stripInternal`/`OWNER_RULED_NOTE` above, where the LANE was told the same
+  // thing. The bouncer needs it too, or it judges the finished code against a
+  // decompose text his ruling has since superseded.
+  const rulingsPresent = approved.some((p) => p && p._ownerRuled)
   const check = await agent(
     // Bar, standard, seams-first scope, trace sampling, budget,
     // overturn-vs-discovery and the return contract live in
@@ -1304,7 +1364,21 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
       (waveFiles.length
         ? `**THIS WAVE'S FILES. Everything else in the diff is the environment:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n`
         : `**No lane reported which files it touched, so the whole diff is in scope.** Say in your return that you could not separate this wave from work already in the tree.\n\n`) +
-      `APPROVED INTENT:\n${JSON.stringify(approved.map((p) => ({ id: p.id, whatChanges: p.whatChanges, connection: p.connection, expectation: p.expectation, productDecision: p.productDecision })), null, 2)}\n\n` +
+      `APPROVED INTENT:\n${JSON.stringify(
+        approved.map((p) => ({
+          id: p.id,
+          whatChanges: p.whatChanges,
+          connection: p.connection,
+          expectation: p.expectation,
+          productDecision: p.productDecision,
+          ...(p && p._ownerRuled ? { _ownerRuled: p._ownerRuled } : {}),
+        })),
+        null,
+        2,
+      )}\n\n` +
+      (rulingsPresent
+        ? `**Some pieces above carry \`_ownerRuled\` — mid-build the wave asked the owner a question and he ruled.** For those, \`_ownerRuled.hisRuling\` IS THE SPEC: the \`whatChanges\`/\`connection\`/\`productDecision\` shown for that piece is the ORIGINAL PLAN, superseded wherever the two disagree. **Code matching his ruling is correct even where it contradicts the plan text above — do not overturn a piece for departing from a decompose his ruling replaced.**\n\n`
+        : '') +
       // X68 · one line, not a second pass.
       (claimedFixed.length
         ? `**SPOT-CHECK — ${claimedFixed.length} piece(s) a lane CLOSED as \`already-fixed\` without building anything.** Nobody has checked these. For each, open the code it names and answer one question: is it actually there at HEAD? **One read each — no trace, no budget.** Return a result per row: \`already-fixed\` if the lane was right, any other verdict if it was not. A row you do not return is reported as still unchecked.\n${JSON.stringify(claimedFixed, null, 2)}\n\n`
@@ -1494,6 +1568,63 @@ if ((built.length || claimedFixed.length) && A.verify !== false) {
   })
 }
 
+// ── THE WAVE'S OWN SPEC MUST RESOLVE BEFORE THE WAVE IS DONE ─────────────────
+// Owner ruling, 2026-08-06: a feature wave must not end while its OWN spec is
+// unresolved, and his ruling on it must re-enter THIS wave — never bugger.js,
+// which strips the plan, the connection/expectation contracts and the joint
+// trace. gh#154 ran as one feature wave and then FOUR separate bugger runs —
+// $444 end to end, 69% of it spent after the wave that was meant to deliver it
+// — because a needs-owner-decision PIECE was treated exactly like an ordinary
+// bug the moment it reached the report.
+//
+// THREE CLASSES, and only the third changes here:
+//   1. An unrelated discovery -> `discoveries`, leaves for bugger.js. UNCHANGED —
+//      `VERIFY_OUT.discoveries` is a SEPARATE array by construction and never
+//      touches `results`, so nothing below can leak one into this bucket.
+//   2. A piece that fails its own `expectation` -> the bounce round (X167). BUILT.
+//   3. A piece of THIS PLAN that returns needs-owner-decision/blocked-charter ->
+//      today it reads exactly like a bug row and gets rebuilt as one. FIXED here.
+// The test for "is this the wave's own business": every id in `verified` is
+// already a piece the PLAN cut — either approved directly, or a cross-lane ask
+// (`>dep`) that a piece of the plan raised mid-run.
+// `OWNER_GATE_VERDICTS` is the SAME Set defined above the verify block (X177) —
+// one definition, so this section and the pre-verify gate can never drift.
+const needsOwnerRuling = verified
+  .filter((r) => OWNER_GATE_VERDICTS.has(r.verdict))
+  .map((r) => {
+    const spec = specById.get(r.id) || {}
+    return { ...spec, id: r.id, verdict: r.verdict, fix: r.fix || '', notes: r.notes || '', bounces: Number(spec.bounces || r.bounces || 0), awaitingOwner: true }
+  })
+const needsOwnerRulingById = new Map(needsOwnerRuling.map((p) => [p.id, p]))
+// THE RE-ENTRY PAYLOAD — cheap because of caching, not despite it. `Workflow`
+// caches an `agent()` call by its exact (prompt, opts); a piece nobody touched
+// produces the IDENTICAL call it made this run, so resuming replays it for FREE
+// and only the ruled piece (plus the re-verify its new verdict forces) runs
+// live. That only holds if what gets resent is BYTE-IDENTICAL to what was sent
+// this run — so `resume.pieces` carries every approved piece UNCHANGED except
+// the ones needing a ruling, and strips only the underscore-prefixed dispatch
+// scratch (`_where`, `_bouncedBack`, `_dependencyResolved`) that gets
+// recomputed fresh from `recon` next time anyway; a real field (`bounces`) is
+// never one of those and always survives.
+const stripInternal = (p) => Object.fromEntries(Object.entries(p).filter(([k]) => !k.startsWith('_')))
+const resumePieces = [...approved.map((p) => stripInternal(needsOwnerRulingById.get(p.id) || p)), ...deferredDepAsks.map(stripInternal)]
+// `remaining` (wave-cap truncated pieces) needs no annotation — they were never
+// dispatched, so resending them via `resume.pieces` (they are already inside
+// `approved`) is a first attempt, not a resume of a stale verdict.
+//
+// A piece still sitting at `needs-dependency` with no `satisfiedIds` entry ran
+// out the MAX_DEP_ROUNDS cap with its ask never delivered — the SAME "this
+// plan's own business is not finished" fact as the other three, and leaving it
+// out would let `waveComplete` read true while a piece is silently stuck.
+// Already inside `approved` unchanged, so `resume.pieces` needs no extra entry
+// for it either — resending just gives the dependency chain another 5 rounds.
+const stillBlockedIds = new Set(verified.filter((r) => r.verdict === 'needs-dependency' && !satisfiedIds.has(r.id)).map((r) => r.id))
+const ownSpecUnresolved = needsOwnerRuling.length + deferredDepAsks.length + remaining.length + stillBlockedIds.size
+const waveComplete = ownSpecUnresolved === 0
+log(
+  `OwnerGate: ${ownSpecUnresolved} piece(s) stayed as THIS WAVE'S OWN BUSINESS (${needsOwnerRuling.length} need your ruling · ${deferredDepAsks.length} cross-lane ask(s) awaiting routing · ${remaining.length} never dispatched · ${stillBlockedIds.size} stuck on a dependency past the round cap) — these resume via feature.js, never bugger.js. ${discoveries.length} unrelated discovery(ies) left for bugger.js's next run.`,
+)
+
 // Charter rules the wave earned — surfaced, never written by an agent. The owner
 // decides what becomes a permanent rule; this only makes sure none is lost.
 const earnedRules = approved.filter((p) => p.charterRule).map((p) => ({ lane: p.lane, rule: p.charterRule, from: p.id }))
@@ -1521,6 +1652,12 @@ const featureManifest = {
   decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
   reconThreaded: approved.filter((p) => p._where).length,
   wavesRun: wave,
+  // THE WAVE'S OWN BUSINESS vs DISCOVERIES — the split the report has never
+  // been able to show. `complete:false` is the assertion this wave is NOT done
+  // and must not be treated as finished; `discoveries` is copied here (not
+  // moved) so the two counts sit side by side rather than in two unrelated
+  // corners of the manifest.
+  ownSpec: { complete: waveComplete, needsRuling: needsOwnerRuling.length, deferredDepAsks: deferredDepAsks.length, neverDispatched: remaining.length, stillBlocked: stillBlockedIds.size, discoveries: discoveries.length },
   // `neverDispatched` lives in `counts` ONLY, as a number. It was here as an id LIST
   // under the same name — one word meaning two shapes in one return object, which is
   // how a reader ends up doing arithmetic on an array. The ids are not lost: the
@@ -1572,6 +1709,16 @@ const featureManifest = {
   },
 }
 const featureWarnings = []
+// THIS IS THE ONE THAT MATTERS MOST — first in the list, on purpose. A wave
+// reporting itself complete while its own spec is not is the exact defect
+// gh#154 cost four bugger runs finding out.
+if (!waveComplete)
+  featureWarnings.push(
+    `THIS WAVE IS NOT DONE — ${ownSpecUnresolved} piece(s) of its OWN SPEC are unresolved: ${needsOwnerRuling.length} need your ruling, ${deferredDepAsks.length} cross-lane ask(s) await routing, ${remaining.length} never dispatched, ${stillBlockedIds.size} stuck past the dependency round cap. ` +
+      `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Rule on \`needsOwnerRuling\`, then find the matching piece(s) inside \`resume.pieces\`, add \`_ownerRuled:{askedBecause, hisRuling}\` and drop \`awaitingOwner\` on each, and re-invoke ` +
+      `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon}}). ` +
+      `Untouched pieces replay from cache for free — only the ruled piece and the re-verify it forces run live.`,
+  )
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
 if (recon.length === 0) featureWarnings.push('`recon` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
 // The join is by `ref`. "Passed but nothing matched" used to be indistinguishable
@@ -1586,7 +1733,7 @@ if (deferredDepAsks.length)
     `The verify raised ${deferredDepAsks.length} dependency ask(s) that this run CANNOT dispatch — it runs last. They are in \`deferredDepAsks\`, pre-shaped for the next run's \`args.pieces\`: ${deferredDepAsks.map((a) => `${a.from}→${a.lane}`).join(', ')}. Report each as a row awaiting the owner; a wrap that drops them loses a named incomplete fix.`
   )
 if (built.length && A.verify === false) featureWarnings.push('Verify was disabled on a run that built code.')
-if (built.length && A.verify !== false && !verifyRan)
+if (built.length && A.verify !== false && !verifyRan && !preVerifyOwnerGate.length)
   featureWarnings.push(`THE VERIFY DID NOT RUN — ${built.length} built piece(s) are unchecked. Do NOT wrap without \`/manager verify\`.`)
 if (results.some((r) => r.verdict === 'needs-dependency' && !satisfiedIds.has(r.id)))
   featureWarnings.push('A piece is still blocked on a dependency that never landed — it is unfinished, not built.')
@@ -1653,7 +1800,22 @@ return {
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // X84 · `[{i, entry}]`. **DELETE BY `i`** — the index in the array you passed as `priorClean`; `entry` is the text as received, for reading only. Match on the text and a list you trimmed on the way in drops nothing. `state.verifiedClean` ends exactly this many entries shorter
   discoveries, // X30 · NEW problems unrelated to these pieces. NEXT RUN'S INTAKE, not rows on his desk — already lane-assigned and severity-ranked for `args.issues`. Never built this wave, and never softened: a `high` one arrives first in the next queue
-  deferredDepAsks, // X25 · asks the VERIFY raised. Pre-shaped for the next run's `args.pieces` — paste them, do not recompose. NOT approved: each parent is waiting on the owner
+  deferredDepAsks, // X25 · asks the VERIFY raised. Pre-shaped for `resume.pieces` on THIS wave — paste them, do not recompose, and never send them through `args.issues`/bugger.js. NOT approved: each parent is waiting on the owner
+  // THE WAVE'S OWN SPEC, waiting on him — the FULL piece (ref, lane, whatChanges,
+  // connection, expectation, productDecision, risk…) plus the verdict and why,
+  // never the stripped-down bug shape `build <ids>` produces for bugger.js. A
+  // row here is CLOSED exactly the way a bounce is: he rules, it re-enters this
+  // same wave with its contract intact — it never becomes a fresh bugger.js issue.
+  needsOwnerRuling,
+  // `null` when the wave is complete — nothing to resume. Otherwise the exact
+  // re-invocation payload: `pieces` is every approved piece UNCHANGED except
+  // the ones in `needsOwnerRuling` (find them by `id`, add `_ownerRuled:
+  // {askedBecause, hisRuling}`, delete `awaitingOwner`) and the cross-lane asks
+  // from `deferredDepAsks` (delete `awaitingOwner` once routed). Re-invoke with
+  // `resumeFromRunId` set to THIS run's own id — the engine cannot self-name it,
+  // the Manager already captures it into `state.lastRun.id` the moment this
+  // call returns. Untouched pieces then replay from cache for free.
+  resume: waveComplete ? null : { pieces: resumePieces, sharedPiece: SHARED_PIECE, answers, recon },
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

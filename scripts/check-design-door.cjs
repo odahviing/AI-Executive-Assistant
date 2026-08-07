@@ -87,6 +87,12 @@ const promptOf = (calls, label) => (called(calls, label)[0] || {}).prompt || ''
 // such label is now a value the real engine can actually produce.
 const calledPhase = (calls, phase) => calls.filter((c) => c.opts && c.opts.phase === phase)
 const promptOfPhase = (calls, phase) => (calledPhase(calls, phase)[0] || {}).prompt || ''
+// X177 · Intake folded into Recon — the item-listing dispatch (`framer:backlog`)
+// now ALSO carries phase:'Recon', so counting or reading by phase alone can no
+// longer tell the listing call apart from the per-item UNDERSTOOD dispatch.
+// Exclude it by label, the one thing that still distinguishes them.
+const reconOnly = (calls) => calledPhase(calls, 'Recon').filter((c) => c.label !== 'framer:backlog')
+const promptOfRecon = (calls) => (reconOnly(calls)[0] || {}).prompt || ''
 
 // ── canned dispatch results ─────────────────────────────────────────────────
 const INTAKE = { items: [{ ref: '#154', title: 'Owner authority across chat surfaces', priority: 'High', asks: 'decide which surfaces clamp the owner and what the clamp governs' }] }
@@ -151,19 +157,19 @@ const main = async () => {
   const d = await run({ ...CLUSTER_ARGS }, GOOD)
   ok('no throw', !d.err, d.err && d.err.message)
   ok(`gh#154 still holds at least 9 refs from at least 5 lanes (found ${N} from ${LANES})`, N >= 9 && LANES >= 5, { refs: N, lanes: LANES })
-  ok(`ONE recon dispatch, not ${N}`, calledPhase(d.calls, 'Recon').length === 1, d.calls.map((c) => c.label))
+  ok(`ONE recon dispatch, not ${N}`, reconOnly(d.calls).length === 1, d.calls.map((c) => c.label))
   ok('ONE item in the return', d.out && d.out.items && d.out.items.length === 1, d.out && d.out.items)
-  ok(`all ${N} refs reached the recon prompt`, CLUSTER_ARGS.cluster.refs.every((r) => promptOfPhase(d.calls, 'Recon').includes(r.ref)), promptOfPhase(d.calls, 'Recon').length)
-  ok('recon was told not to patch per row', /Do NOT design a patch per row/.test(promptOfPhase(d.calls, 'Recon')))
+  ok(`all ${N} refs reached the recon prompt`, CLUSTER_ARGS.cluster.refs.every((r) => promptOfRecon(d.calls).includes(r.ref)), promptOfRecon(d.calls).length)
+  ok('recon was told not to patch per row', /Do NOT design a patch per row/.test(promptOfRecon(d.calls)))
   ok('design block records what it absorbed', d.out && d.out.design && d.out.design.absorbs.length === N, d.out && d.out.design)
   ok('the join-back command is on the return', d.out && d.out.design && /design-cluster\.cjs gh#154 --decide/.test(d.out.design.joinBack), d.out && d.out.design && d.out.design.joinBack)
 
   section('2 · A `refs:` INVOCATION IS UNCHANGED  (silent on the good path)')
   const r = await run({ mode: 'plan', refs: ['#154'] }, GOOD)
   ok('no throw', !r.err, r.err && r.err.message)
-  ok('the intake prompt is BYTE-IDENTICAL to the design run', promptOfPhase(r.calls, 'Intake') === promptOfPhase(d.calls, 'Intake'))
+  ok('the intake prompt is BYTE-IDENTICAL to the design run', promptOf(r.calls, 'framer:backlog') === promptOf(d.calls, 'framer:backlog'))
   ok('the intake dispatch options are identical', JSON.stringify(r.calls[0].opts) === JSON.stringify(d.calls[0].opts), r.calls[0].opts)
-  ok('NO cluster block in the recon prompt', !/BUG ROWS ARE WAITING/.test(promptOfPhase(r.calls, 'Recon')))
+  ok('NO cluster block in the recon prompt', !/BUG ROWS ARE WAITING/.test(promptOfRecon(r.calls)))
   ok('`design` is null', r.out && r.out.design === null, r.out && r.out.design)
   ok('same dispatch count as the design run', r.calls.length === d.calls.length, { refs: r.calls.length, design: d.calls.length })
 
@@ -209,9 +215,9 @@ const main = async () => {
   ok('the EXPECTATION is in the build prompt', /ENTITLED TO ASSUME OF THIS ONE ONCE IT LANDS: every surface/.test(promptOf(b.calls, 'slackmaster')))
   ok('the contract is stated as binding', /those are the contract and they are binding/i.test(promptOf(b.calls, 'slackmaster')))
   ok('sharedPiece is named to the lane', /WHO WRITES THE SHARED CODE: slackmaster/.test(promptOf(b.calls, 'slackmaster')))
-  // X168 · a single, ordinary dispatch is silent on the good path: the count
-  // is there, the `·dep` marker is not.
-  ok('the label carries its item count and no dep marker', b.calls.some((c) => c.label === 'slackmaster(1)'), b.calls.map((c) => c.label))
+  // X168/X177 · a single, ordinary dispatch is silent on the good path: the
+  // count is there, no `dep:`/`owner:` prefix is.
+  ok('the label carries its item count and no prefix', b.calls.some((c) => c.label === 'slackmaster(1)'), b.calls.map((c) => c.label))
   const b2 = await run({ mode: 'build', pieces: [GOOD_PIECE], sharedPiece: 'none', verify: false }, { slackmaster: { results: [{ id: 'p1', verdict: 'built' }] } })
   ok('`none` adds no shared-code line', !/WHO WRITES THE SHARED CODE/.test(promptOf(b2.calls, 'slackmaster')))
 
@@ -221,7 +227,7 @@ const main = async () => {
     { 'framer:new-1': { ...RECON, ref: 'new-1' }, framer: { ...GOOD_PLAN, pieces: [{ ...GOOD_PIECE, ref: 'new-1' }] } },
   )
   ok('no throw', !desc.err, desc.err && desc.err.message)
-  ok('no intake dispatch on a described item', calledPhase(desc.calls, 'Intake').length === 0, desc.calls.map((c) => c.label))
+  ok('no intake dispatch on a described item', called(desc.calls, 'framer:backlog').length === 0, desc.calls.map((c) => c.label))
   ok('ONE ticket, not one per ref', desc.out && desc.out.needsTicket.length === 1, desc.out && desc.out.needsTicket.length)
   const body = desc.out && desc.out.needsTicket[0] ? desc.out.needsTicket[0].body : ''
   for (const [what, re] of [
@@ -263,7 +269,7 @@ const main = async () => {
     { 'framer:backlog': { items: [INTAKE.items[0], { ref: '#155', title: 'other', priority: 'Low', asks: 'x' }] }, 'framer:#154': RECON, framer: GOOD_PLAN },
   )
   ok('refuses a design run that intake fanned out to two items', !!twoItems.err && /one design item, and intake returned 2/.test(twoItems.err.message), twoItems.err && twoItems.err.message)
-  ok('  …before any recon', calledPhase(twoItems.calls, 'Recon').length === 0, twoItems.calls.map((c) => c.label))
+  ok('  …before any recon', reconOnly(twoItems.calls).length === 0, twoItems.calls.map((c) => c.label))
   const bare = await run({ mode: 'plan', design: 'gh#154' }, GOOD)
   ok('a design run with NO cluster is allowed (a first-time design item)', !bare.err && bare.out.design.absorbs.length === 0, bare.err ? bare.err.message : bare.out.design)
   ok('  …and says the cluster was not passed', bare.logs.some((l) => /No cluster passed/.test(l)), bare.logs)
@@ -333,7 +339,21 @@ const main = async () => {
   // visible"), so a substring search finds all nine there and reads as a leak —
   // and `B157-c` is a prefix of another ledger row's ref, so a loose match is
   // wrong twice. An OPEN row is the one whose ref is bracketed.
-  const openRefs = new Set([...openOut.matchAll(/^ {2}[A-Z][A-Z\- ]*?\[([^\]]+)\]/gm)].map((m) => m[1]))
+  //
+  // X168-fix · the label was `[A-Z][A-Z\- ]*?` — letters, hyphens and spaces
+  // only — which is every label EXCEPT `DEFERRED`'s, which has printed
+  // `DEFERRED <date> · DUE NEXT RUN`/`OVERDUE — N run(s) since` since X23
+  // (ledger-stats.cjs:1420, unchanged by this wave). A digit, a `·` or a `(`
+  // between the label and the bracket silently dropped that row from the
+  // count on ANY ledger whose open set includes a deferral — this was latent
+  // until tonight's live ledger happened to carry one. Only the LEADING "2
+  // spaces then a non-space" is the real row-header marker (every
+  // continuation line — rootCause, recommend, re-read — indents 10 spaces,
+  // per ledger-stats.cjs's own `console.log('          ...')` calls), so that
+  // is what a row line is; the label text between it and the bracket can be
+  // anything. Non-greedy `.*?` takes the FIRST bracket on the line, which is
+  // the ref — never a coincidental `[` later in a truncated finding string.
+  const openRefs = new Set([...openOut.matchAll(/^ {2}\S.*?\[([^\]]+)\]/gm)].map((m) => m[1]))
   const claimedOpen = Number((openOut.match(/^OPEN — (\d+) row/m) || [])[1] || 0)
   ok(`the reader's own open count and its bracketed rows agree (${openRefs.size} of ${claimedOpen})`, openRefs.size === claimedOpen && claimedOpen > 0, { parsed: openRefs.size, claimed: claimedOpen })
   const leaked = CLUSTER_ARGS.cluster.refs.map((x) => x.ref).filter((ref) => openRefs.has(ref))
@@ -499,13 +519,13 @@ const main = async () => {
   // response is provably matched by ITS OWN label, not a lucky startsWith.
   const waveSplit = await run(
     { mode: 'build', pieces: [{ ...GOOD_PIECE, id: 'p1' }, { ...GOOD_PIECE, id: 'p2', dependsOn: ['p1'] }], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
-    { 'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] }, 'slackmaster(1·dep)': { results: [{ id: 'p2', verdict: 'built' }] } },
+    { 'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] }, 'dep:slackmaster(1)': { results: [{ id: 'p2', verdict: 'built' }] } },
   )
   ok('no throw', !waveSplit.err, waveSplit.err && waveSplit.err.message)
   const waveLabels = calledPhase(waveSplit.calls, 'Build').map((c) => c.label)
-  ok('slackmaster dispatched twice in the SAME Build box', waveLabels.filter((l) => l.startsWith('slackmaster')).length === 2, waveLabels)
-  ok('the FIRST dispatch carries its count, no dep marker', waveLabels.includes('slackmaster(1)'), waveLabels)
-  ok('the SECOND — same lane, this run — says WHY', waveLabels.includes('slackmaster(1·dep)'), waveLabels)
+  ok('slackmaster dispatched twice in the SAME Build box', waveLabels.filter((l) => l.includes('slackmaster')).length === 2, waveLabels)
+  ok('the FIRST dispatch carries its count, no prefix', waveLabels.includes('slackmaster(1)'), waveLabels)
+  ok('the SECOND — same lane, this run — says WHY, as a PREFIX', waveLabels.includes('dep:slackmaster(1)'), waveLabels)
   ok('both waves actually landed (the labels were matched, not guessed)', waveSplit.out && waveSplit.out.results.filter((r) => r.verdict === 'built').length === 2, waveSplit.out && waveSplit.out.results)
 
   // 16b — the ASK round: slackmaster asks gatekeeper for something, gatekeeper
@@ -519,14 +539,185 @@ const main = async () => {
     {
       'slackmaster(1)': { results: [{ id: 'p1', verdict: 'needs-dependency', dependencyAgent: 'gatekeeper', dependencyAsk: 'add the seam', fix: 'nothing yet' }] },
       'gatekeeper(1)': { results: [{ id: 'p1>dep', verdict: 'built', fix: 'added the seam' }] },
-      'slackmaster(1·dep)': { results: [{ id: 'p1', verdict: 'built' }] },
+      'dep:slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] },
     },
   )
   ok('no throw', !askRound.err, askRound.err && askRound.err.message)
   const askLabels = calledPhase(askRound.calls, 'Build').map((c) => c.label)
-  ok('the lane ASKED for the first time carries no dep marker', askLabels.includes('gatekeeper(1)'), askLabels)
-  ok('the originator RESUMED in a later round IS marked — same lane, second dispatch', askLabels.includes('slackmaster(1·dep)'), askLabels)
+  ok('the lane ASKED for the first time carries no prefix', askLabels.includes('gatekeeper(1)'), askLabels)
+  ok('the originator RESUMED in a later round IS marked — same lane, second dispatch', askLabels.includes('dep:slackmaster(1)'), askLabels)
   ok('the resume actually ran — final verdict is built, not still needs-dependency', askRound.out && askRound.out.results.some((r) => r.id === 'p1' && r.verdict === 'built'), askRound.out && askRound.out.results)
+
+  // ── BUILD 1 · THE WAVE'S OWN SPEC MUST RESOLVE BEFORE THE WAVE IS DONE ──────
+  const GOOD_PIECE2 = { ...GOOD_PIECE, id: 'p2', lane: 'matchmaker' }
+
+  section("17 · OWNERGATE — a piece needing the owner's own decision keeps the WHOLE WAVE unfinished  (fires on the bad input)")
+  const gate = await run(
+    { mode: 'build', pieces: [GOOD_PIECE, GOOD_PIECE2], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    {
+      'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'matchmaker(1)': { results: [{ id: 'p2', verdict: 'needs-owner-decision', notes: 'is the widened scope safe — needs his call' }] },
+    },
+  )
+  ok('no throw', !gate.err, gate.err && gate.err.message)
+  ok('the wave reports itself NOT complete', gate.out && gate.out.manifest.ownSpec.complete === false, gate.out && gate.out.manifest.ownSpec)
+  ok('ownSpec.needsRuling counts exactly the one piece', gate.out && gate.out.manifest.ownSpec.needsRuling === 1, gate.out && gate.out.manifest.ownSpec)
+  ok('needsOwnerRuling holds exactly p2', gate.out && gate.out.needsOwnerRuling.length === 1 && gate.out.needsOwnerRuling[0].id === 'p2', gate.out && gate.out.needsOwnerRuling)
+  const ruled = gate.out && gate.out.needsOwnerRuling[0]
+  ok('the FULL contract travels — connection', ruled && ruled.connection === GOOD_PIECE.connection, ruled)
+  ok('the FULL contract travels — expectation', ruled && ruled.expectation === GOOD_PIECE.expectation, ruled)
+  ok('the FULL contract travels — whatChanges', ruled && ruled.whatChanges === GOOD_PIECE.whatChanges, ruled)
+  ok('the FULL contract travels — lane and ref', ruled && ruled.lane === 'matchmaker' && ruled.ref === GOOD_PIECE.ref, ruled)
+  ok('the reason it stopped travels too', ruled && /is the widened scope safe/.test(ruled.notes), ruled)
+  ok('it is flagged `awaitingOwner`, same gate as a deferred dependency ask', ruled && ruled.awaitingOwner === true, ruled)
+  ok('`resume` is NOT null', gate.out && gate.out.resume !== null, gate.out && gate.out.resume)
+  ok('resume.pieces carries both ids', gate.out && gate.out.resume.pieces.map((p) => p.id).sort().join(',') === 'p1,p2', gate.out && gate.out.resume.pieces)
+  const resumeP1 = gate.out && gate.out.resume.pieces.find((p) => p.id === 'p1')
+  ok('the UNTOUCHED piece (p1) is BYTE-IDENTICAL to what was approved — the cache-hit guarantee', JSON.stringify(resumeP1) === JSON.stringify(GOOD_PIECE), resumeP1)
+  const resumeP2 = gate.out && gate.out.resume.pieces.find((p) => p.id === 'p2')
+  ok('the RULED piece (p2) carries `awaitingOwner` inside resume.pieces too', resumeP2 && resumeP2.awaitingOwner === true, resumeP2)
+  ok('the OwnerGate warning fired, NAMING bugger.js as the wrong door', gate.out && gate.out.warnings.some((w) => /THIS WAVE IS NOT DONE/.test(w) && /NOT bugger\.js WORK/.test(w)), gate.out && gate.out.warnings)
+  ok('the warning names resumeFromRunId as the re-entry mechanism', gate.out && gate.out.warnings.some((w) => /resumeFromRunId/.test(w)), gate.out && gate.out.warnings)
+  ok('the OwnerGate log line fired with the right split', gate.logs.some((l) => /OwnerGate: 1 piece\(s\) stayed as THIS WAVE'S OWN BUSINESS/.test(l) && /0 unrelated discovery/.test(l)), gate.logs)
+
+  const gateCharter = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'blocked-charter', notes: 'no charter route to this' }] } },
+  )
+  ok('`blocked-charter` gates the wave the SAME way `needs-owner-decision` does', gateCharter.out && gateCharter.out.manifest.ownSpec.complete === false && gateCharter.out.needsOwnerRuling.length === 1, gateCharter.out && gateCharter.out.manifest.ownSpec)
+
+  section('18 · A FULLY-RESOLVED WAVE REPORTS COMPLETE — no OwnerGate warning, no resume  (silent on the good input)')
+  const clean2 = await run(
+    { mode: 'build', pieces: [GOOD_PIECE, GOOD_PIECE2], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { 'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] }, 'matchmaker(1)': { results: [{ id: 'p2', verdict: 'built' }] } },
+  )
+  ok('no throw', !clean2.err, clean2.err && clean2.err.message)
+  ok('the wave reports itself complete', clean2.out && clean2.out.manifest.ownSpec.complete === true, clean2.out && clean2.out.manifest.ownSpec)
+  ok('needsOwnerRuling is empty', clean2.out && clean2.out.needsOwnerRuling.length === 0, clean2.out && clean2.out.needsOwnerRuling)
+  ok('resume is null — nothing to re-enter', clean2.out && clean2.out.resume === null, clean2.out && clean2.out.resume)
+  ok('NO OwnerGate warning on a clean wave', !clean2.out.warnings.some((w) => /THIS WAVE IS NOT DONE/.test(w)), clean2.out.warnings)
+  ok('the OwnerGate log line still fires, reading zero', clean2.logs.some((l) => /OwnerGate: 0 piece\(s\) stayed as THIS WAVE'S OWN BUSINESS/.test(l)), clean2.logs)
+
+  section("19 · RESUMING A RULED PIECE — `_ownerRuled` reaches the lane as his ruling, not a fresh question")
+  const resumed2 = await run(
+    { mode: 'build', pieces: [{ ...GOOD_PIECE, _ownerRuled: { askedBecause: 'is the widened scope safe', hisRuling: 'yes — ship it as designed' } }], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { 'owner:slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] } },
+  )
+  ok('no throw', !resumed2.err, resumed2.err && resumed2.err.message)
+  // X177 · the resume is labelled `owner:`, not a bare lane name or `dep:` —
+  // it is neither this lane's first dispatch nor a cross-lane ask, it is a
+  // rebuild because HE ruled.
+  ok('the dispatch is labelled owner:, not dep: or bare', resumed2.calls.some((c) => c.label === 'owner:slackmaster(1)'), resumed2.calls.map((c) => c.label))
+  ok('the lane is told this is a ruling, not a new question', /owner has now ruled/.test(promptOf(resumed2.calls, 'owner:slackmaster')), promptOf(resumed2.calls, 'owner:slackmaster').slice(0, 400))
+  ok('the question that was asked reaches the lane', /is the widened scope safe/.test(promptOf(resumed2.calls, 'owner:slackmaster')))
+  ok('his actual ruling reaches the lane', /yes — ship it as designed/.test(promptOf(resumed2.calls, 'owner:slackmaster')))
+  ok('a wave with no `_ownerRuled` pieces gets NONE of this text', !/owner has now ruled/.test(promptOf(d.calls, 'slackmaster')), promptOf(d.calls, 'slackmaster'))
+  ok('the resumed piece completes the wave', resumed2.out && resumed2.out.manifest.ownSpec.complete === true, resumed2.out && resumed2.out.manifest.ownSpec)
+
+  section('20 · A CROSS-LANE ASK THE VERIFY RAISES ALSO KEEPS THE WAVE OPEN, AND STAYS OUT OF bugger.js')
+  const askOut = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      slackmaster: BUILT_ONCE,
+      'bouncer:wave(1)': {
+        results: [{ id: 'p1', verdict: 'built', dependencyAgent: 'gatekeeper', dependencyAsk: 'add the seam gatekeeper-side too', notes: 'p1 itself is fine' }],
+        discoveries: [],
+        ticketCoverage: [],
+        verifiedClean: [],
+      },
+    },
+  )
+  ok('no throw', !askOut.err, askOut.err && askOut.err.message)
+  ok('NOT an overturn — p1 stays built, no bounce dispatched', !askOut.calls.some((c) => String(c.label).startsWith('rebuild:')), askOut.calls.map((c) => c.label))
+  ok('the wave is NOT complete — a cross-lane ask is still unrouted', askOut.out && askOut.out.manifest.ownSpec.complete === false, askOut.out && askOut.out.manifest.ownSpec)
+  ok('ownSpec.deferredDepAsks counts it', askOut.out && askOut.out.manifest.ownSpec.deferredDepAsks === 1, askOut.out && askOut.out.manifest.ownSpec)
+  ok('the ask is shaped for resume.pieces, not args.issues', askOut.out && askOut.out.resume && askOut.out.resume.pieces.some((p) => p.id === 'p1>dep' && p.lane === 'gatekeeper' && p.awaitingOwner === true), askOut.out && askOut.out.resume)
+
+  section('21 · A DEPENDENCY THAT NEVER LANDS ALSO KEEPS THE WAVE OPEN  (fires on the bad input)')
+  const stuck = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'needs-dependency', dependencyAgent: 'nonexistent-lane', dependencyAsk: 'a lane that does not exist' }] } },
+  )
+  ok('no throw', !stuck.err, stuck.err && stuck.err.message)
+  ok('the piece stays needs-dependency, never satisfied', stuck.out && stuck.out.results.find((r) => r.id === 'p1').verdict === 'needs-dependency', stuck.out && stuck.out.results)
+  ok('ownSpec.stillBlocked counts it', stuck.out && stuck.out.manifest.ownSpec.stillBlocked === 1, stuck.out && stuck.out.manifest.ownSpec)
+  ok('the wave is NOT complete', stuck.out && stuck.out.manifest.ownSpec.complete === false, stuck.out && stuck.out.manifest.ownSpec)
+  ok('the pre-existing stuck-dependency warning also fires', stuck.out && stuck.out.warnings.some((w) => /still blocked on a dependency/.test(w)), stuck.out && stuck.out.warnings)
+
+  section('22 · A DEPENDENCY THAT DOES LAND CLEARS stillBlocked  (silent on the good input)')
+  const unstuck = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    {
+      'slackmaster(1)': { results: [{ id: 'p1', verdict: 'needs-dependency', dependencyAgent: 'gatekeeper', dependencyAsk: 'add the seam' }] },
+      'gatekeeper(1)': { results: [{ id: 'p1>dep', verdict: 'built', fix: 'added the seam' }] },
+      'dep:slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] },
+    },
+  )
+  ok('no throw', !unstuck.err, unstuck.err && unstuck.err.message)
+  ok('ownSpec.stillBlocked is 0 once the dependency resolves', unstuck.out && unstuck.out.manifest.ownSpec.stillBlocked === 0, unstuck.out && unstuck.out.manifest.ownSpec)
+  ok('the wave completes', unstuck.out && unstuck.out.manifest.ownSpec.complete === true, unstuck.out && unstuck.out.manifest.ownSpec)
+
+  // ── X177 · THE OWNER GATE MOVES — BEFORE VERIFY, NEVER AFTER ────────────────
+  section('23 · A PIECE NEEDING THE OWNER STOPS THE WAVE BEFORE VERIFY EVER DISPATCHES  (fires on the bad input)')
+  const preGate = await run(
+    { mode: 'build', pieces: [GOOD_PIECE, GOOD_PIECE2], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'matchmaker(1)': { results: [{ id: 'p2', verdict: 'needs-owner-decision', notes: 'is the widened scope safe' }] },
+    },
+  )
+  ok('no throw', !preGate.err, preGate.err && preGate.err.message)
+  ok('NO bouncer call at all — the wave never reaches Verify', !preGate.calls.some((c) => String(c.label).startsWith('bouncer:')), preGate.calls.map((c) => c.label))
+  ok('the `phase(\'Verify\')` announcement itself never fires', !preGate.phases.includes('Verify'), preGate.phases)
+  ok('the manifest says verify did not run', preGate.out && preGate.out.manifest.verify.ran === false, preGate.out && preGate.out.manifest.verify)
+  ok(
+    'NO false "VERIFY DID NOT RUN" alarm — the OwnerGate warning explains it instead',
+    preGate.out && !preGate.out.warnings.some((w) => /THE VERIFY DID NOT RUN/.test(w)),
+    preGate.out && preGate.out.warnings,
+  )
+  ok(
+    'the wave still reports itself incomplete, needing his ruling',
+    preGate.out && preGate.out.manifest.ownSpec.complete === false && preGate.out.manifest.ownSpec.needsRuling === 1,
+    preGate.out && preGate.out.manifest.ownSpec,
+  )
+  ok('the OwnerGate log line names the stop', preGate.logs.some((l) => /STOPPING BEFORE VERIFY/.test(l)), preGate.logs)
+
+  const noGate = await run(
+    { mode: 'build', pieces: [GOOD_PIECE, GOOD_PIECE2], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'matchmaker(1)': { results: [{ id: 'p2', verdict: 'built', filesTouched: ['b.ts'] }] },
+      'bouncer:wave(2)': { results: [{ id: 'p1', verdict: 'built' }, { id: 'p2', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
+    },
+  )
+  ok('no throw', !noGate.err, noGate.err && noGate.err.message)
+  ok('a CLEAN wave (nobody needs the owner) still dispatches the bouncer — silent on the good path', noGate.calls.some((c) => c.label === 'bouncer:wave(2)'), noGate.calls.map((c) => c.label))
+  ok('Verify DOES fire here', noGate.phases.includes('Verify'), noGate.phases)
+
+  section("24 · A RULING REACHES THE BOUNCER MARKED AS GOVERNING  (fires forward, silent in reverse)")
+  const RULED_PIECE = {
+    ...GOOD_PIECE,
+    _ownerRuled: { askedBecause: 'is the widened scope safe', hisRuling: 'yes — ship it as designed, even though it widens the seam beyond what whatChanges describes' },
+  }
+  const ruledVerify = await run(
+    { mode: 'build', pieces: [RULED_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      'owner:slackmaster(1)': { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'p1', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
+    },
+  )
+  ok('no throw', !ruledVerify.err, ruledVerify.err && ruledVerify.err.message)
+  ok('the resumed build dispatch is labelled owner:', ruledVerify.calls.some((c) => c.label === 'owner:slackmaster(1)'), ruledVerify.calls.map((c) => c.label))
+  ok('the bouncer payload carries the ORIGINAL plan text', /processMessage\.ts:139/.test(promptOf(ruledVerify.calls, 'bouncer:wave')), promptOf(ruledVerify.calls, 'bouncer:wave').slice(0, 900))
+  ok('the bouncer payload ALSO carries his ruling', /yes — ship it as designed/.test(promptOf(ruledVerify.calls, 'bouncer:wave')))
+  ok('the ruling is marked as GOVERNING over the original plan text', /IS THE SPEC/.test(promptOf(ruledVerify.calls, 'bouncer:wave')))
+  ok('the piece is not overturned for departing from the superseded plan', ruledVerify.out && ruledVerify.out.results.find((r) => r.id === 'p1').verdict === 'built', ruledVerify.out && ruledVerify.out.results)
+
+  ok(
+    'a wave with NO rulings gets an UNCHANGED bouncer payload — no `_ownerRuled` key, no governing note',
+    !/_ownerRuled/.test(promptOf(bounce.calls, 'bouncer:wave')) && !/IS THE SPEC/.test(promptOf(bounce.calls, 'bouncer:wave')),
+    promptOf(bounce.calls, 'bouncer:wave').slice(0, 400),
+  )
 }
 
 main().then(

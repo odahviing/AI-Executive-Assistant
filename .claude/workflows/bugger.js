@@ -13,8 +13,8 @@ export const meta = {
     // to be readable once they share a box: `rebuild:<lane>(N)` names a lane's
     // second attempt, `bouncer:wave(N)` the first pass, `bouncer:recheck(N)`
     // the second — distinct from a first-time `Build`/`Context` dispatch,
-    // which (X168) carries its own item count and a `·dep` suffix on any
-    // round after the first: `matchmaker(5)` is fresh, `matchmaker(2·dep)` is
+    // which (X168) carries its own item count and a `dep:` PREFIX on any
+    // round after the first: `matchmaker(5)` is fresh, `dep:matchmaker(2)` is
     // the same lane answering a dependency round, never guessed at from the
     // panel.
     { title: 'Verify' },
@@ -56,6 +56,15 @@ if (typeof A === 'string') {
   } catch (e) {
     throw new Error(`args arrived as a string and is not valid JSON, so nothing it named could be honoured: ${String((e && e.message) || e)}`)
   }
+  // X162 · a string that PARSES cleanly to a non-object (a number, an array, null,
+  // a bare string) is exactly as unusable as a parse failure — every `A.<key>` below
+  // would read `undefined` (or crash outright on `null`) and the engine would take
+  // its default path in total silence, which is the exact failure X6 guards the
+  // CONTAINER against. Refuse it the same way, before anything spawns.
+  if (A === null || typeof A !== 'object' || Array.isArray(A))
+    throw new Error(
+      `args arrived as a string that parsed to ${A === null ? 'null' : Array.isArray(A) ? 'an array' : `a ${typeof A}`}, not an object — nothing it might have named could be honoured. Pass the args object directly, not a JSON-encoded scalar or array.`,
+    )
 }
 
 // X11 · STOP where a silent default is EXPENSIVE; warn where it is cheap.
@@ -207,14 +216,36 @@ if (openKnownDeferred.length)
       .map((o) => o.ref || '(no ref)')
       .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the editor must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
   )
+// X176 · A THIRD LIST, WITH A THIRD BEHAVIOUR. `alreadyBuilt` and `openKnown` are
+// DROP lists — a match means the finding is already handled and must not reach a
+// lane. Neither ever carried a row that is simply still OPEN: not yet built, not
+// converted, just sitting on his desk or in the backlog. So a bug he already
+// reported, unbuilt, was invisible to intake and got re-found under a BRAND-NEW
+// ref every time it recurred — `dateverifier-hebrew-false-positive` (open since
+// 2026-07-28) and `log-dateverifier-falsepos-confirmed` (built 2026-08-03, same
+// rootCause `src/utils/dateVerifier.ts:187`) were the same bug under two ledger
+// identities, reconciled only by the owner noticing by hand.
+//
+// His shape, and it deliberately does NOT mirror the two drop lists: intake NAMES
+// a match here, it NEVER DROPS one. A fresh finding matching an open backlog row is
+// evidence that row is still real, carrying tonight's fresh proof — the exact
+// treatment `editor.md` E12 already gives a `backlog`-source RE-READ match, now
+// extended to every finding on every run, because the general open backlog was
+// never visible to intake at all outside a `backlog` source.
+//
+// Shape: [{ref, symptom, rootCause, invariant, state}] — same as the two lists
+// above, and it is meant to be the WHOLE open ledger (`ledger-stats --open`),
+// which already excludes anything built/converted/declined/audited. Parsed here,
+// before the drop lists' ref sets exist below, so it can be checked against them.
+const OPEN_BACKLOG_RAW = asArray('openBacklog', A.openBacklog)
 // X22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
 // groups nothing and the writer produces noise, which is the decoration A5 forbids.
-// No new arg for it: both lists above are already derived from `ledger.jsonl`, so
-// carrying each row's `invariant` through makes them the vocabulary too. Empty on a
-// run that passes neither, and then the lanes coin new slugs — correct, that is how
+// No new arg for it: all three lists above are already derived from `ledger.jsonl`,
+// so carrying each row's `invariant` through makes them the vocabulary too. Empty on
+// a run that passes none, and then the lanes coin new slugs — correct, that is how
 // a first one gets created.
-const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN].map((r) => r && r.invariant).filter(Boolean))]
+const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN, ...OPEN_BACKLOG_RAW].map((r) => r && r.invariant).filter(Boolean))]
 // ── X43 · THE READER FOR `state.pendingOverflow` ─────────────────────────────
 // The field was WRITE-ONLY. `grep pendingOverflow` returned SKILL.md:67, :231,
 // :385, :391 and state.json:20 — and nothing in either engine. X30 then made it
@@ -243,6 +274,17 @@ const refKey = (v) => String(v || '').toLowerCase().replace(/^gh#|^#/, '').trim(
 const overflowArg = asArray('pendingOverflow', A.pendingOverflow)
 const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? o : o.ref)).filter(Boolean))
 const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' ? b : b.ref)).filter(Boolean))
+// X176 · a Manager mistake handing the SAME ref to a DROP list and this CONFIRM
+// list would tell the editor two contradictory things about one bug in one brief
+// — drop it here rather than leave it to whichever instruction gets read last.
+const openBacklogOverlap = OPEN_BACKLOG_RAW.filter((o) => o && (parkedRefs.has(refKey(o.ref)) || builtRefs.has(refKey(o.ref))))
+const OPEN_BACKLOG = OPEN_BACKLOG_RAW.filter((o) => !openBacklogOverlap.includes(o))
+if (openBacklogOverlap.length)
+  argWarnings.push(
+    `${openBacklogOverlap.length} \`openBacklog\` entr${openBacklogOverlap.length === 1 ? 'y' : 'ies'} also appear${openBacklogOverlap.length === 1 ? 's' : ''} on \`alreadyBuilt\`/\`openKnown\` and ${openBacklogOverlap.length === 1 ? 'was' : 'were'} REMOVED from the confirm list: ${openBacklogOverlap
+      .map((o) => o.ref || '(no ref)')
+      .join(', ')}. A ref cannot be both DROP and CONFIRM in the same brief.`,
+  )
 const carriedDropped = overflowArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
 const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) && builtRefs.has(refKey(i.id || i.ref)))
 // X88 · A DEFERRAL HE MAKES ON A CARRIED ITEM. A queued discovery drains at the
@@ -310,16 +352,40 @@ if (undecidedPreset.length)
       `Each is a dependency ask whose PARENT is waiting on the owner, so building it could implement a dependency of something he declines. ` +
       `Nothing has been dispatched. Get his ruling, delete \`awaitingOwner\` from the row, and re-invoke.`,
   )
+// X146 · `invariant` is the STRONGER signal and used to reach neither
+// description at all — the editor matched on `ref`/`rootCause`/`symptom` prose
+// only, even though a shared identity slug is exactly what
+// `ledger-stats --index` now uses to prove two refs are the same underlying
+// bug. Surfacing it costs one line and is silent where an entry carries none
+// (most still do not — X146's own re-check found real duplicate-build cases,
+// e.g. `dateverifier-hebrew-false-positive` vs `log-dateverifier-falsepos-confirmed`,
+// sharing `src/utils/dateVerifier.ts:187` and the `one-fact-one-derivation`
+// identity, built independently two days apart because nothing showed the
+// editor the identity to match on).
 const describeOpen = (o) =>
   typeof o === 'string'
     ? `  • ${o}`
-    : `  • **${o.ref || '(no ref)'}** — ${o.symptom || '(no symptom)'}${o.state ? ` [${o.state}]` : ''}` + `${o.note ? `\n      ${o.note}` : ''}`
+    : `  • **${o.ref || '(no ref)'}** — ${o.symptom || '(no symptom)'}${o.state ? ` [${o.state}]` : ''}` +
+      `${o.invariant ? `\n      identity: ${o.invariant}` : ''}` +
+      `${o.note ? `\n      ${o.note}` : ''}`
 const describeBuilt = (b) =>
   typeof b === 'string'
     ? `  • ${b}`
     : `  • ${b.ref ? `**ref ${b.ref}** — ` : ''}${b.symptom || '(no symptom)'}` +
       `${b.rootCause ? `\n      root cause already fixed at: ${b.rootCause}` : ''}` +
+      `${b.invariant ? `\n      identity: ${b.invariant}` : ''}` +
       `${b.state === 'awaiting-owner' ? `\n      **state: awaiting-owner — DROP any finding for this ref, even if more work looks available**` : ''}`
+// X176 · shares `describeOpen`'s shape (ref/symptom/state/invariant/note) but adds
+// the root-cause line `describeBuilt` shows for a built row — a still-open row
+// commonly names one too (the lane or pass that raised it usually settled the root
+// before escalating), and `rootCause` is X176's second match key after identity.
+const describeOpenBacklog = (o) =>
+  typeof o === 'string'
+    ? `  • ${o}`
+    : `  • **${o.ref || '(no ref)'}** — ${o.symptom || '(no symptom)'}${o.state ? ` [${o.state}]` : ''}` +
+      `${o.rootCause ? `\n      cites root cause at: ${o.rootCause}` : ''}` +
+      `${o.invariant ? `\n      identity: ${o.invariant}` : ''}` +
+      `${o.note ? `\n      ${o.note}` : ''}`
 // COLLECT mode — find and record, build nothing. **Explicit opt-in only.**
 // Building every night the owner is away IS the product: he leaves, the loop
 // fixes, and the work is waiting for approval when he opens his laptop. An
@@ -381,6 +447,16 @@ const EDITOR = {
       type: 'array',
       items: { type: 'string' },
       description: 'the ref or symptom of every finding you dropped because it is already fixed. Empty array if none — do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+    },
+    // X176 · the CONFIRM list — the opposite instruction from the two drop lists
+    // above. A match here is NOT a reason to drop anything: the finding is still
+    // emitted, and it also carries `matchesOpenBacklog` on the issue itself (see
+    // below) so the ref survives on the row, not only in this summary array.
+    matchedOpenBacklog: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        "the ref of every `openBacklog` row a finding matched tonight — the same refs set on those issues' `matchesOpenBacklog`. Never a drop list: matched findings are still emitted and dispatched normally. Empty array if you checked and found none — do NOT omit the field, an omission is indistinguishable from `openBacklog` never being checked.",
     },
     // X32 + X33 · ONE field for both halves of the ticket problem, because both
     // are invisible in the same way. gh#156 carried three numbered complaints and
@@ -535,6 +611,15 @@ const EDITOR = {
           },
           evidence: { type: 'string' },
           clarity: { type: 'string', enum: ['clear', 'ambiguous'] },
+          // X176 · the annotation, not a suppression. Set this instead of dropping
+          // the finding when it matches a row on the `openBacklog` list the brief
+          // hands you — the finding is still emitted and dispatched exactly as any
+          // other, this only records which already-open row it corroborates.
+          matchesOpenBacklog: {
+            type: 'string',
+            description:
+              "the ref of an `openBacklog` row this finding matches — same bug, still open, getting fresh evidence tonight. Never a reason to drop; the finding ships normally. Omit when it matches nothing on that list.",
+          },
           // Filled ONLY when the issue cites a code location. This was its own
           // Haiku pass; the editor is already holding the issue, so it resolves
           // the citation in the same turn instead of a second agent re-opening
@@ -815,12 +900,14 @@ const TIMEOUT_NOTE =
 // else, so a chained run had no way to tell "matchmaker(5), fresh" from
 // "matchmaker again, and here's why" without asking. Every label below now
 // carries its item count, and any SECOND dispatch of a lane already seen this
-// run gets `·dep` — because by construction that can only be a dependency
-// round: `buildable` is queued whole in round 1, so nothing fresh reaches a
-// lane a second time. `dispatchedLanesOnce` is the one bit of state that
-// makes "second" checkable instead of inferred from which round number we
-// happen to be in — it stays correct whether the second dispatch is a raised
-// ask or a resumed originator, without either case being named specially.
+// run gets a `dep:` PREFIX (2026-08-07 fix — it shipped as a `·dep` SUFFIX,
+// which broke the `<why>:<agent>(<count>)` pattern every other marker
+// follows) — because by construction that can only be a dependency round:
+// `buildable` is queued whole in round 1, so nothing fresh reaches a lane a
+// second time. `dispatchedLanesOnce` is the one bit of state that makes
+// "second" checkable instead of inferred from which round number we happen
+// to be in — it stays correct whether the second dispatch is a raised ask or
+// a resumed originator, without either case being named specially.
 const dispatchedLanesOnce = new Set()
 // X137 · `asBounce` is the other variation: a re-attempt shows on the
 // `/workflows` panel as `rebuild:<lane>(N)` inside the `Verify` phase (X151
@@ -849,7 +936,7 @@ const dispatch = (lane, issues, asBounce) => {
       // comment above explains, and `·dep` is the reason a repeat is never
       // fresh work. `Verify` does not say "this is a rebuild", so that prefix
       // stays — see the comment above `dispatch`.
-      label: asBounce ? `rebuild:${lane}(${issues.length})` : `${lane}(${issues.length}${isDepRound ? '·dep' : ''})`,
+      label: asBounce ? `rebuild:${lane}(${issues.length})` : `${isDepRound ? 'dep:' : ''}${lane}(${issues.length})`,
       phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
       agentType: lane,
       effort: EFFORT[lane],
@@ -932,6 +1019,11 @@ const deferredDepAsks = (rs) =>
 let allIssues = []
 let triageDropped = []
 let openKnownDropped = []
+// X176 · `reported` is the omission guard, separate from the count: `[]` means
+// either "checked, found none" or "never checked", and only the editor's own
+// return can tell those apart — a missing field must not read as a clean zero.
+let matchedOpenBacklog = []
+let openBacklogReported = false
 let editorReport = {}
 let findingsSeen = 0
 let locationsResolved = 0
@@ -993,20 +1085,30 @@ const editor = await agent(
     `Report \`findingsSeen\` — the raw count before merging — so the manifest can show how much collapsed.\n` +
     (ALREADY_BUILT.length
       ? `\n## Already fixed, not yet deployed — DROP these\n\n` +
-        `Production keeps emitting these symptoms until the owner deploys, so an honest review re-finds them every night. Match them per your charter — **the \`ref\` exactly first** (\`#147\` = \`gh#147\` = \`147\`), then the root cause, then the same user-visible failure described differently. Dispatching one costs a full lane turn to be told "already-fixed": the entire price of the bug, paid again, for nothing.\n\n` +
+        `Production keeps emitting these symptoms until the owner deploys, so an honest review re-finds them every night. Match them per your charter — **the \`ref\` exactly first** (\`#147\` = \`gh#147\` = \`147\`), **then a shared \`identity\` slug where one is shown below — that is a stronger signal than prose, a rule already proven to break the same way**, then the root cause, then the same user-visible failure described differently. Dispatching one costs a full lane turn to be told "already-fixed": the entire price of the bug, paid again, for nothing.\n\n` +
         `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running the check, which is how this check silently failed before.\n\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
       : '') +
     (OPEN_KNOWN.length
       ? `\n## Left the bug track — DROP these too\n\n` +
         `Each of these was CONVERTED into a GitHub issue where the design question is being worked. **Nothing is fixed**, so unlike the list above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
-        `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
+        `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Match on \`ref\` first, then a shared \`identity\` slug where one is shown below, then the description. Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
         `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
+      : '') +
+    (OPEN_BACKLOG.length
+      ? `\n## Still open, not yet built or converted — CONFIRM these, never drop\n\n` +
+        `Each of these is a bug he already knows about: reported, triaged, and sitting open — not fixed, not converted, not declined. **A fresh finding that matches one is evidence the row is still real, not a new bug.** Unlike the two lists above, do NOT drop it: emit the issue exactly as you would any other, and set \`matchesOpenBacklog\` to the matching row's ref.\n\n` +
+        `**Match in this order:** the shared \`identity\` slug where one is shown below — the strongest signal there is — then \`rootCause\` at its \`file:line\`, then the same user-visible failure described differently. **Your own hypothesis about the cause differing from theirs is not evidence of a different bug** — that is the exact trap that let \`dateverifier-hebrew-false-positive\` (open since 2026-07-28) and \`log-dateverifier-falsepos-confirmed\` (built 2026-08-03, same file:line) stand as two unrelated rows for eleven days until he noticed by hand.\n\n` +
+        `**Report every match in \`matchedOpenBacklog\`, and return an empty array if you found none.** Omitting the field is indistinguishable from never running the check.\n\n${OPEN_BACKLOG.map(describeOpenBacklog).join('\n')}\n`
       : ''),
   { label: 'editor', phase: 'Intake', effort: EFFORT.editor, agentType: 'editor', schema: EDITOR },
 )
 allIssues = (editor && editor.issues) || []
 triageDropped = (editor && editor.droppedAsAlreadyBuilt) || []
 openKnownDropped = (editor && editor.droppedAsOpenKnown) || []
+// X176 · `Array.isArray`, not `|| []` — the whole point is telling "reported
+// empty" apart from "field omitted", and `||` erases exactly that distinction.
+openBacklogReported = Boolean(editor && Array.isArray(editor.matchedOpenBacklog))
+matchedOpenBacklog = openBacklogReported ? editor.matchedOpenBacklog : []
 findingsSeen = (editor && editor.findingsSeen) || allIssues.length
 ticketComplaints = (editor && editor.ticketComplaints) || []
 backlogSeen = (editor && typeof editor.backlogSeen === 'number' ? editor.backlogSeen : 0)
@@ -1015,6 +1117,7 @@ backlogReread = (editor && editor.backlogReread) || []
 editorReport = editor || {}
 log(`Editor: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
+if (OPEN_BACKLOG.length) log(`Open backlog: ${matchedOpenBacklog.length} of ${OPEN_BACKLOG.length} row(s) matched by tonight's fresh findings — confirmed, not dropped.`)
 }
 
 // X98 · a backlog re-read that comes back `fixed` CLOSES a ledger row with no
@@ -1950,6 +2053,13 @@ const manifest = {
   // X51 · `deferredRejected` is the derivation error made visible. Non-zero means the
   // Manager put a due row on the drop list and the engine took it back off.
   openKnown: { passedIn: OPEN_KNOWN.length, deferredRejected: openKnownDeferred.length, dropped: openKnownDropped.length, refs: openKnownDropped },
+  // X176 · a CONFIRM list, never a drop list — a match means tonight's finding is
+  // the SAME bug as an already-open row, so it is emitted as normal, annotated
+  // with the ref it matches. Zero matches on an ordinary night warns of nothing,
+  // same reasoning as `openKnown` above; `reported: false` is the one that
+  // matters, because the field never coming back at all is indistinguishable
+  // from the check never running.
+  openBacklog: { passedIn: OPEN_BACKLOG.length, matched: matchedOpenBacklog.length, refs: matchedOpenBacklog, reported: openBacklogReported },
   // X43 · what the run picked up out of `state.pendingOverflow`. **The Manager
   // must DELETE `carry.refs` AND `carry.droppedAsBuiltRefs` from
   // `state.pendingOverflow`** — the engine cannot write state, and an entry left
@@ -2191,6 +2301,13 @@ if (VERIFY && verifyAttempted > 0 && !verifyRan)
   warnings.push(`THE VERIFY DID NOT RUN — ${verifyAttempted} built fix(es) are unchecked. \`agent()\` returns null when a subagent dies after its retries, and every read downstream is null-guarded, so this was previously indistinguishable from a clean pass. Do NOT wrap this run without \`/manager verify\`.`)
 if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
   warnings.push(`alreadyBuilt passed ${ALREADY_BUILT.length} entries and triage dropped NONE — either genuinely all-new, or ref matching failed again (gh#147 vs #147).`)
+// X176 · never fires on `matched: 0` — a normal night confirms nothing, same
+// reasoning as `openKnown`'s zero above. It fires only when the field never came
+// back at all, which is the one state that is genuinely a check that did not run.
+if (!PRESET && OPEN_BACKLOG.length > 0 && !openBacklogReported)
+  warnings.push(
+    `\`openBacklog\` passed ${OPEN_BACKLOG.length} row(s) and the editor never reported \`matchedOpenBacklog\` — the confirm check may not have run at all. Treat tonight's findings as unchecked against the open backlog.`,
+  )
 if (verified.some((r) => r.verdict === 'already-fixed'))
   warnings.push('A lane returned `already-fixed` — a duplicate reached a full dispatch. alreadyBuilt should have caught it earlier and cheaper.')
 // X68 · the close itself, not the waste. A row closed on a lane's own word that
@@ -2328,6 +2445,10 @@ if (BACKLOG) {
 log(
   `Manifest — cutoff:${(!PRESET && editorReport.cutoffUtc) || 'n/a'} files:${(Array.isArray(editorReport.filesRead) && editorReport.filesRead.length) || 0}` +
     ` alreadyBuilt:${triageDropped.length}/${ALREADY_BUILT.length} parked:${openKnownDropped.length}/${OPEN_KNOWN.length}` +
+    // X176 · a CONFIRM count, not a drop — `matched/passedIn`, printed with zeros
+    // included so a run that never checked (`reported:false`) is distinguishable
+    // from one that checked and found nothing.
+    `${OPEN_BACKLOG.length ? ` openBacklog:${matchedOpenBacklog.length}/${OPEN_BACKLOG.length}${openBacklogReported ? '' : ',NOT-REPORTED'}` : ''}` +
     ` depAsks:${allDepAsks} deferred:${deferredNow.length} misrouted:${misrouted.length} verify:${verifyRan ? 'ran' : 'no'}` +
     // X143 · printed on EVERY run, zeros and all. `bounce:0/0` says the round ran
     // and had nothing to do; the line missing entirely says a stale engine.

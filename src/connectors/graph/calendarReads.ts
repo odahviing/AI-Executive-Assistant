@@ -221,6 +221,16 @@ export function pickSpreadSlots(
   // same clean slots WITHOUT the 1h gap — the durationMinutes non-overlap guard
   // still blocks overlapping starts, so these stay genuine, bookable options
   // (21:15 + 21:45, not just 21:15).
+  //
+  // #Ayala-2 (2026-08-05) — a same-day-clustering variant was tried here: run
+  // the clean-relaxed pass BEFORE WE-soft, so every clean slot (even
+  // tightly-spaced) is exhausted before a WE-soft slot is ever added. Built,
+  // then reverted the same night on the owner's ruling: he prefers day-DIVERSE
+  // options over a dense same-day clean fill, even when that means a WE-soft
+  // slot appears in the mix before every clean slot has been tried at a
+  // tighter spacing. Order is back to clean-strict → WE-soft → clean-relaxed;
+  // WE-soft slots stay clearly annotated (`over_optional`) so the requester can
+  // still tell them apart and choose.
   const runTiers = (pool: SpreadSlot[]) => {
     fillFrom(pool.filter(s => !s.over_optional));
     fillFrom(pool.filter(s => !!s.over_optional));

@@ -49,6 +49,15 @@
       "invariant": "stale-line-citation",
       "symptom": "A developer following a comment to find where the owner's role is clamped lands on a logger call instead — the clamp moved and the citations did not.",
       "evidence": "src/utils/guards/runOutputGates.ts:179 cites processMessage.ts:139 for the clamp; the clamp is at processMessage.ts:122, and the isOwnerInChannel it cites as :138 is at :121. calendarReads.ts:152 carries the correct :122, which is what makes the others visibly stale. Raised by wf_d3e9831c-b30's verify."
+    },
+    {
+      "id": "meeting-chat-handoff-tier-order-inverted",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": ".claude/MEETING_CHAT_HANDOFF.md:47 states the WE-soft tier is \"Strictly below the relaxed tier... and above clean\" - inverted on both halves. The code (and calendarReads.ts:211-215's own comment) has WE-soft strictly ABOVE the relaxed tier and strictly BELOW clean - the original order, restored after the same-night reorder-then-revert.",
+      "evidence": "One-line doc fix, no code change. Raised by the bouncer verifying the runTiers reorder fix; still true post-revert since the reorder itself was reverted, not the underlying tier concept the doc misdescribes."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",
@@ -153,7 +162,12 @@
     "meetings.ts:1132-1139 contains no definition of attendee_status's per-value semantics ('busy'/'tentative'/'oof' vs 'free') — only that it is a conflict tag and whose calendar it names — so the concrete mapping restored in _attendee_unverified_note duplicates nothing in the system prompt.",
     "calendarIssues.ts:762 .get() is deterministic without ORDER BY/LIMIT — UNIQUE (owner_user_id, event_id) is on the table at db/client.ts:671 and no migration widens it; dismissOverlapIssue is byte-equivalent to HEAD apart from the comment.",
     "postReply.ts:531's synthetic ts cannot be mistaken for a real Slack ts — buildTurnContext.ts:404 stamps user rows only, assistant.ts:589 merely formats it for recall output, and no code addresses a Slack message by a conversation-history row's ts.",
-    "`npx tsc --noEmit -p tsconfig.json` is clean across the whole working tree with all 16 rows of the 2026-08-05 wave on disk, exit 0."
+    "`npx tsc --noEmit -p tsconfig.json` is clean across the whole working tree with all 16 rows of the 2026-08-05 wave on disk, exit 0.",
+    "runTiers revert BOUNCER 2026-08-06: git diff HEAD on calendarReads.ts shows zero changed code lines - the runTiers reorder is a genuine, complete revert to the original clean-strict -> WE-soft -> clean-relaxed order, with only an added historical comment.",
+    "less_preferred_label BOUNCER 2026-08-06: the field is populated only when over_optional is a non-empty string, and interpolates nothing from it after the final wording pass (bare 'less preferred' string, no subject, no re-derive) - no new leak class.",
+    "less_preferred_label BOUNCER 2026-08-06: ops.ts's email-leg scrub (~136-147) deletes less_preferred_label in the same slot walk as over_optional, same channel==='email' gate - Slack is unaffected, the email leg gets neither field.",
+    "less_preferred_label BOUNCER 2026-08-06: label attach and _over_optional_note attach share the identical hasOverOptional condition (findAvailableSlots.ts:1772, 1799, 1868) - Sonnet is never told to quote an absent field, and mustBe/usedOwnerAttendeeTagged/recovery paths are additive-only, not suppressed or duplicated.",
+    "`npx tsc --noEmit` clean across the whole working tree with the runTiers revert + less_preferred_label (all 3 wording rounds) on disk."
   ],
   "_carryNote": "The last run's own counts, copied off its manifest the moment it returned. A number the engine did not emit is null — never omitted and never estimated, because absent must read as not-recorded.",
   "carry": {

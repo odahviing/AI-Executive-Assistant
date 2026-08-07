@@ -133,9 +133,14 @@ export class SchedulingSkill {
       // internal colleague's email + free/busy status per slot — and reaches
       // an owner-initiated email turn whenever ignore_attendee_availability or
       // a granted relaxed override is set, same as the fields above.
+      // `less_preferred_label` (#Ayala-3, findAvailableSlots.ts, same subject
+      // as `over_optional` pre-rendered into a quotable string) carries the
+      // identical leak and is stripped alongside it — deleting `over_optional`
+      // alone would leave the same subject text sitting one field over.
       if (Array.isArray(r.slots)) {
         for (const s of r.slots as Array<Record<string, unknown>>) {
           delete s.over_optional;
+          delete s.less_preferred_label;
           delete s.attendee_conflicts;
           delete s.attendee_status;
         }

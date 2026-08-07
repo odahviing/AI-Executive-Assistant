@@ -117,6 +117,12 @@ Example: Physical | External attendee from accept2.com coming for an in-person m
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       ...SONNET,
+      // temperature: 0 — this is a boundary-condition judgment (e.g. "5 or
+      // more people") read off a fixed attendee list; it must be
+      // deterministic run-to-run, not resampled. Local to this call only —
+      // do not hoist into the shared SONNET bundle, which other call sites
+      // rely on for default sampling.
+      temperature: 0,
       max_tokens: 120,
       messages: [{ role: 'user', content: prompt }],
     });

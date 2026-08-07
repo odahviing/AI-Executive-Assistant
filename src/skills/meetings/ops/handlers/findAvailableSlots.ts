@@ -1770,6 +1770,38 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // (the tier holds them back otherwise), so their appearance IS the
             // signal to narrate the trade-off.
             const hasOverOptional = annotatedSlots.some((s: any) => typeof s.over_optional === 'string' && s.over_optional.length > 0);
+            // #Ayala-3 (2026-08-06) — a per-slot, QUOTABLE label, not just a
+            // top-level "some slots" note. The Ayala/"Weekly Forecast" incident
+            // had `over_optional` set and `_over_optional_note` attached (both
+            // traced end to end above), yet the reply presented the WE-tagged
+            // slot as clean while narrating a DIFFERENT attendee's real conflict
+            // in the same message — a colleague-path search always carries a
+            // SECOND per-slot signal (`attendee_status`) explained only in the
+            // system prompt, and asking the model to also cross-reference a
+            // free-text top-level note against "which slot" for a second,
+            // unrelated fact is exactly the class of gap M14 exists to close for
+            // timezone strings: don't narrate from data, quote a rendered string
+            // verbatim. `less_preferred_label` is that string, attached directly
+            // to the slot it describes — same pattern as `presentation_local` /
+            // `broken_rule_label` below.
+            //
+            // Bounced 2026-08-06 (bounces:2) — owner's call: the label carries
+            // NO reason and NO subject, for either audience. "i suggested 'less
+            // preferred' they don't need to know why, just let them a chance to
+            // choose something else." A prior version varied the string by
+            // `viewer` (a second-person "your optional ..." for the owner, a
+            // person-free framing for everyone else) specifically to avoid
+            // narrating whose meeting it was or naming its subject — that's now
+            // moot since the label never carries either, for anyone. Both
+            // branches below emit the identical bare marker; the `viewer` check
+            // is kept only as a structural seam for a future real difference,
+            // not because the content differs today.
+            if (hasOverOptional) {
+              annotatedSlots = annotatedSlots.map((s: any) => {
+                if (typeof s.over_optional !== 'string' || s.over_optional.length === 0) return s;
+                return { ...s, less_preferred_label: 'less preferred' };
+              });
+            }
             // Does the payload actually CARRY the per-slot rule it breaks? The
             // walker emits `broken_rule_label` for the owner's own view only, so a
             // note that promised it unconditionally would, on any other view, tell
@@ -1834,8 +1866,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 }
               }
               if (hasOverOptional) {
+                // Bounced 2026-08-06 (bounces:2) — owner's call: don't explain
+                // or expand on WHY a slot is less preferred, to either
+                // audience — just append the bare label next to it so
+                // whoever's reading can pick something else if they'd like.
+                // `over_optional`'s subject is internal bookkeeping only
+                // (used above to decide which slots get the label); never
+                // say the subject or a reason aloud, and never build a
+                // homemade explanation from it.
                 result._over_optional_note =
-                  'Some slots carry `over_optional: "<subject>"` — they sit over an OPTIONAL meeting the owner joins only if free (e.g. a daily standup), not a hard commitment. They only appear because clean times were too few. Present them AFTER any clean options and say the trade-off plainly ("Wed 16:00 — over your optional <subject>, which you\'d drop"). Booking one is fine and needs NO approval — the optional event stays on the calendar (he just skips it); do NOT delete it, do NOT flag a conflict.';
+                  'Some slots carry `over_optional: "<subject>"` internally — they sit over an OPTIONAL meeting the owner joins only if free (e.g. a daily standup), not a hard commitment, but that subject is never said aloud to anyone. They only appear because clean times were too few. Present them AFTER any clean options, and NEVER as identical to a clean slot: each such slot also carries `less_preferred_label`, a bare marker with no reason or subject in it — quote it VERBATIM in parentheses right next to that slot\'s time ("Wed 16:00 (<less_preferred_label>)"), the same way you quote `presentation_local`; do not reword it, expand it, explain why, or build your own version from `over_optional` instead. It is still fully bookable and needs NO approval — the optional event stays on the calendar (he just skips it); do NOT delete it, do NOT flag a conflict.';
               }
               if (isRecoveryResult) {
                 // Flag so Sonnet knows these slots break soft rules — she

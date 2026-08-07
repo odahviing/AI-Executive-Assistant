@@ -2,6 +2,37 @@
 
 ---
 
+## 4.5.1 — a feature wave now finishes what it started
+
+Almost entirely framework. One ticket last week became a feature run plus **four separate bug runs**, cost $444, and 69% of that was spent *after* the wave meant to deliver it — because a feature engine that hit an unanswered question had nowhere to put it. The wave ended, the question became a report row, and the only door back in was the bug engine, which had never heard of the plan. This release closes that, and several other places where the loop knew something and could not say it.
+
+**A feature wave no longer ends while its own spec is unresolved.** A piece that needs an owner decision now stops the wave *before* the bouncer runs, rather than after — so nobody pays to verify work everyone already knows is unfinished, and nobody pays a second time once the ruling comes back. The ruling re-enters the same wave with its plan and its contracts intact, and reaches the bouncer marked as **the** spec, so a correct piece is not overturned for contradicting a plan that has since changed.
+
+**A piece that fails goes back to its lane once**, the way a bug fix already did. Only a second refusal reaches the owner, carrying both attempts.
+
+**Two decompose-time checks that cost nothing and would each have caught a real failure.** A piece whose route a pre-existing gate makes unreachable is now flagged before a lane is paid to build it — one such piece shipped as dead code last week. And when a fix pattern repeats across files, the sites are **counted first**, so the same defect is not split into six pieces that each fix one of them and none knows about the other five.
+
+**The wrap now asks whether it closed something it wasn't looking at.** Sixteen of twenty-three build-ready backlog rows turned out to be bugs already fixed under different refs — 70% of the standing backlog was phantom, and every decision made off that count was made against an inflated number. The wrap surfaces candidates and refuses to finish while one is unexamined; it never closes them itself.
+
+### Added — the ledger learned to recognise a repeat
+
+- **Every bug now records the promise it broke**, not just where it broke. 100% of history is catalogued: 385 refs carry a reusable identity, 84 were examined and declared genuinely local, none unexamined.
+- **`ledger-stats.cjs --index`** — one line per recurring failure, sorted by how often it has happened. *The count is the finding*: a promise broken seven times across four lanes is one missing mechanism, not seven bugs.
+- **`ledger-file.cjs`** — the bug ledger's first writer. Every row in it had been hand-composed JSON; it now refuses a row that declares no identity and suggests a close existing match before accepting a new one.
+- **A returning failure is derived, not noticed** — an identity closed and open again is a regression by definition.
+- **The intake checks a fresh finding against the open backlog** — and *annotates* the match rather than dropping it, so one row gets stronger instead of two rows nobody connects.
+
+### Changed — charters
+
+- **The Editor has numbered rules for the first time** — 15, in three chapters: what counts as a bug · how you shape it · whether the loop stays healthy. It gains the ledger as territory, a definition of what genuinely needs the owner, and the rule that a good answer written like a bot is a bug.
+- **The shared lane block goes 13 rules to 12.** Verification folds into no-guessing; the enforcement ladder becomes **code → guard → prompt**, with the prompt last because it is the only rung that can silently stop working; and a new rule names what is an owner decision — a conflict between two of a lane's own rules, and any new LLM call or tier change.
+- **Matchmaker gains a write-once rule** (`M15`) and **Gatekeeper gains one governing which gates run at all** (`G10`) — both were previously enforced only by comments.
+
+### Fixed (product)
+
+- The category classifier ran non-deterministically and could return different headcounts for one meeting in a single session. Temperature pinned.
+- A WE-tagged slot offered as a lesser option now carries a per-slot marker a requester can act on, without naming the owner's meeting to someone who should not see it.
+
 ## 4.5.0 — one flag decided who may read and who may act; now two fields do
 
 Maelle had a single value, `senderRole`, answering two unrelated questions: *who else can see this turn*, and *whose word carries the owner's authority*. Because a group DM or a channel clamps that value to `colleague`, the owner lost his own authority the moment he stepped into a room — and five files had each invented a private workaround for it, disagreeing with one another. This release splits it: **`authority`**, derived from the authenticated Slack sender id and gating actions only, and **`surface`** (`owner_dm` / `colleague_dm` / `room`). Both are required, so no future transport can default into "unclamped". `senderRole` keeps its old meaning as data scope, so the two tool chokepoints that are the real privacy floor never moved.

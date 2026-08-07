@@ -31,6 +31,8 @@
  *   node scripts/ledger-stats.cjs --runs          # per-run summary
  *   node scripts/ledger-stats.cjs --by-invariant  # one PRINCIPLE, however many places broke it
  *   node scripts/ledger-stats.cjs --index         # one line per identity — recurrence, regressions, coverage
+ *   node scripts/ledger-stats.cjs --wrap 4.5.0    # this release's own rows, BUILT->WRAPPED, GITHUB sync, PHANTOM CANDIDATES
+ *   node scripts/ledger-stats.cjs --open --json   # machine-readable open set — feeds --wrap's phantom check, nothing else consumes it
  *
  * `--open` exists because the backlog IS the ledger — every row whose verdict is
  * not `built` is still open, so a separate backlog file is a second copy that
@@ -170,6 +172,12 @@ const byRun = argv.includes('--runs');
 const byInvariant = argv.includes('--by-invariant');
 const showIndex = argv.includes('--index');
 const openOnly = argv.includes('--open');
+// X171 · `--open --json` — a machine-readable dump of the SAME open-row array
+// `--open` already computes, for `--wrap`'s phantom-candidate check below.
+// Never a second definition of "open": this only adds a print branch after
+// the one collapse-by-ref pass, so a fix to that logic cannot drift between
+// what a person reads and what `--wrap` cross-references.
+const jsonOut = argv.includes('--json');
 
 // --architect reads the OTHER ledger: `.claude/agent-loop/architect-ledger.jsonl`,
 // the framework's own backlog, filed by whichever chat hit the problem via
@@ -222,6 +230,17 @@ if (argv.includes('--architect')) {
   const counts = {};
   for (const r of rows) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
   console.log(`  ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([v, n]) => `${v}:${n}`).join(' · ')}`);
+  // A14 · THE MARK. A row built without his approval carries the literal string
+  // `AUTO-BUILT (A14)` at the start of its `built` field — this is the only place
+  // that reads it, so "what got built without me" is a headline every run,
+  // never a manual search. Printed even at zero: silence and "checked, none"
+  // must never look the same (A5).
+  const builtRows = rows.filter((r) => r.verdict === 'built');
+  const autoBuilt = builtRows.filter((r) => /^AUTO-BUILT \(A14\)/.test(String(r.built || '')));
+  console.log(
+    `  ${autoBuilt.length} of ${builtRows.length} built row(s) are AUTO-BUILT (A14) — built without his approval` +
+      (autoBuilt.length ? `: ${autoBuilt.map((r) => r.id).join(', ')}` : '.'),
+  );
 
   if (!open.length) {
     console.log(`\nNothing open. Every framework finding is built, declined, refuted or a duplicate.\n`);
@@ -413,8 +432,89 @@ if (argOf('--wrap')) {
     console.log(`\nGITHUB <-> LEDGER SYNC — ${ticketNums.length - missingSync.length} of ${ticketNums.length} ticket(s) touched have a matching \`gh#<n>\` closed/partial row.`);
     if (missingSync.length) console.log(`  MISSING for: ${missingSync.map((n) => `gh#${n}`).join(', ')}`);
 
-    if (missingWrapped.length || missingSync.length || mutatedRows.length) {
-      console.log(`\n${missingWrapped.length + missingSync.length + mutatedRows.length} problem(s). Do not call the wrap finished.\n`);
+    // ── X171 · PHANTOM CANDIDATES — did THIS WRAP'S OWN DIFF already resolve
+    // something sitting open under a DIFFERENT ref? Measured on the 4.5.0 wrap:
+    // 16 of 23 build-ready backlog rows were bugs this wave had already fixed
+    // under a different ref (`owner-room-bend-escalation-is-dead-code` vs.
+    // the row that shipped it, `o#223`) — found by hand, after the fact,
+    // because nothing here or in the wrap ever cross-referenced the shipped
+    // diff against the STANDING backlog. Distinct from `alreadyBuilt`, which
+    // guards INTAKE (a new finding vs. what is already built) — this guards
+    // the opposite direction, a backlog row a later fix silently resolved.
+    //
+    // NEVER AUTO-CLOSES. A false "fixed" here means the row is dropped and
+    // nobody ever builds it, which is the expensive direction — a false
+    // candidate costs one wasted read. So this only SURFACES, cheapest signal
+    // first: (1) the row's `rootCause` cites a file this wrap's own commits
+    // touched, (2) it shares an `invariant` with a row this wrap closed, (3)
+    // its `ref` appears in one of this wrap's own commit subjects.
+    //
+    // EXAMINED = SILENCED, not closed. The ledger is append-only, so a
+    // `{"date":"…","ref":"…","recheck":"…"}` line dated on or after this
+    // release advances the merged row's own `date` past it (same convention
+    // `--open`'s X38/X59 staleness already reads) — that is how a row
+    // confirmed as a genuinely distinct, still-open bug stops being reflagged
+    // without being closed on no evidence.
+    let phantomCandidates = [];
+    {
+      let releaseFiles = [];
+      try {
+        releaseFiles = git(['diff', '--name-only', `${oldest.sha}^`, newest.sha])
+          .split(/\r?\n/)
+          .filter(Boolean);
+      } catch {
+        /* no diff — nothing to cross-reference, reported below as NOT RUN */
+      }
+      const releaseBasenames = new Set(releaseFiles.map((f) => f.split('/').pop()));
+      let openRows = null;
+      if (releaseBasenames.size) {
+        try {
+          openRows = JSON.parse(
+            execFileSync(process.execPath, [__filename, '--open', '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }),
+          );
+        } catch {
+          openRows = null; // reported below as NOT RUN, never as "0 found"
+        }
+      }
+      if (openRows) {
+        const examined = (r) => String(r.recheck || '').trim() && String(r.date || '') >= newest.date;
+        const closedInvariants = new Set(wrapRows.filter((r) => r.verdict === 'built' && r.invariant).map((r) => r.invariant));
+        const subjects = hits.map((c) => c.subject).join('\n');
+        const byRef = new Map();
+        for (const r of openRows) {
+          if (!r.ref || examined(r)) continue;
+          const cited = [...new Set(String(r.rootCause || '').match(CITED) || [])];
+          const via = cited.some((c) => releaseBasenames.has(c.split('/').pop()))
+            ? "rootCause cites a file this wrap's own commits touched"
+            : r.invariant && closedInvariants.has(r.invariant)
+              ? `shares invariant "${r.invariant}" with a row this wrap closed`
+              : subjects.includes(r.ref)
+                ? "ref appears in this wrap's own commit message(s)"
+                : '';
+          if (via) byRef.set(r.ref, { ...r, via });
+        }
+        phantomCandidates = [...byRef.values()];
+      }
+      if (phantomCandidates.length) {
+        console.log(`\n! PHANTOM CANDIDATES — ${phantomCandidates.length} open ledger row(s) may already be resolved by THIS wrap's own diff, under a different ref:`);
+        for (const c of phantomCandidates) {
+          console.log(`  ${c.ref}  [${c.verdict || '?'}] — ${c.via}`);
+          if (c.rootCause) console.log(`      cites: ${c.rootCause}`);
+        }
+        console.log(
+          `\n  NEVER auto-closed. Verify each against the CURRENT tree — cite the exact file:line that makes the original failure impossible — then close it: ` +
+            `node scripts/ledger-file.cjs --ref "<ref>" --verdict already-fixed --rootCause "<where it's fixed now>" --invariant <slug|none> --source verify --finding "…" --note "shipped in ${newest.sha.slice(0, 7)} (v${V})". ` +
+            `If one genuinely is a distinct, still-open bug, append a recheck line dated today so this stops flagging it.`,
+        );
+      } else if (openRows) {
+        console.log(`\n  phantom check: 0 open row(s) cite a file, share an invariant, or appear in a commit message this wrap touched.`);
+      } else {
+        console.log(`\n  phantom check: NOT RUN — either this wrap touched no file, or \`--open --json\` could not be read.`);
+      }
+    }
+
+    if (missingWrapped.length || missingSync.length || mutatedRows.length || phantomCandidates.length) {
+      console.log(`\n${missingWrapped.length + missingSync.length + mutatedRows.length + phantomCandidates.length} problem(s). Do not call the wrap finished.\n`);
       process.exit(1);
     }
   } else {
@@ -1181,6 +1281,14 @@ if (openOnly) {
   }
   // A row with no ref cannot be collapsed — that is exactly what `ref` is for.
   open.push(...refless);
+  // X171 · JSON EXIT, before any of the human-readable prints below. `--wrap`
+  // needs the exact same open set a person reads — every field ever written for
+  // the ref, merged — never a re-derivation with its own bugs. Nothing else is
+  // printed: a consumer parsing stdout as JSON cannot tolerate narration mixed in.
+  if (jsonOut) {
+    console.log(JSON.stringify(open));
+    process.exit(0);
+  }
   if (!open.length) {
     console.log('\nNothing open. Every ledger row is built or already-fixed.\n');
     process.exit(0);
@@ -1577,8 +1685,19 @@ if (showIndex) {
   // pass). It must not become a phantom identity literally named "none": it
   // contributes nothing to `.invariants` and is counted in its own bucket, so
   // "read" always equals "tagged + declared-local + matched-nothing" exactly.
+  //
+  // X168 · `e.declaredLocal` is set on the REF itself, not only counted as a row.
+  // Before this, "declared local" existed only as a count of backfill ROWS
+  // (`declaredLocalRows` below) — nothing recorded WHICH ref that verdict
+  // belonged to, so the headline could only report `tagged` vs "the rest",
+  // and "the rest" silently mixed two different claims: a ref someone looked at
+  // and found genuinely local, and a ref nobody has ever opened. Measured
+  // 2026-08-07: the two read identically from outside (both simply lack
+  // `.invariants`), and that cost real work the same night — 46 refs already
+  // examined and declared local were re-sent to agents, which re-derived the
+  // same "no principle here" answer a second time.
   const unmatchedBackfill = [];
-  let declaredLocal = 0;
+  let declaredLocalRows = 0;
   for (const t of backfillTags) {
     if (!t.ref) continue;
     const key = parentRef(t.ref);
@@ -1588,7 +1707,10 @@ if (showIndex) {
       continue;
     }
     if (t.invariant) e.invariants.add(canonInvariant(t.invariant));
-    else declaredLocal += 1;
+    else {
+      declaredLocalRows += 1;
+      e.declaredLocal = true;
+    }
   }
   for (const e of byRef.values()) {
     e.dates.sort();
@@ -1631,17 +1753,33 @@ if (showIndex) {
   // A5: the view that indexes 23% of the ledger while looking complete IS the
   // failure this whole file is written against — same discipline as
   // `--by-invariant`'s own coverage line, stated the same way.
+  //
+  // X168 · THREE BUCKETS, NEVER TWO. `none` is an answer, and a headline that
+  // only ever printed `tagged of total` read as "the rest is uncatalogued" —
+  // false whenever a ref had been examined and correctly found to hold no
+  // reusable principle. A ref that is `!tagged` is EITHER declared-local
+  // (examined, nothing to index) OR never-examined (nobody has looked) — those
+  // are different claims about the SAME missing field, and only the second one
+  // is a gap. `declaredLocal + neverExamined` always equals `totalRefs - tagged`
+  // by construction (every byRef entry falls in exactly one bucket), so this
+  // is a partition, not a second, independently-counted view.
   const totalRefs = byRef.size;
-  const tagged = [...byRef.values()].filter((e) => e.invariants.size).length;
+  const identityRefs = [...byRef.values()].filter((e) => e.invariants.size);
+  const declaredLocalRefs = [...byRef.values()].filter((e) => !e.invariants.size && e.declaredLocal);
+  const neverExaminedRefs = [...byRef.values()].filter((e) => !e.invariants.size && !e.declaredLocal);
+  const tagged = identityRefs.length;
   if (backfillTags.length) {
-    const taggedByBackfill = backfillTags.length - unmatchedBackfill.length - declaredLocal;
+    const taggedByBackfill = backfillTags.length - unmatchedBackfill.length - declaredLocalRows;
     console.log(
-      `\n  backfill: ${backfillTags.length} tag row(s) read (kind:"invariant-backfill") · ${taggedByBackfill} tagged an existing ref · ${declaredLocal} declared local (no principle, correctly not indexed)` +
+      `\n  backfill: ${backfillTags.length} tag row(s) read (kind:"invariant-backfill") · ${taggedByBackfill} tagged an existing ref · ${declaredLocalRows} declared local (no principle, correctly not indexed)` +
         (unmatchedBackfill.length ? ` · ${unmatchedBackfill.length} matched NOTHING: ${unmatchedBackfill.slice(0, 8).join(', ')}` : ' · 0 matched nothing'),
     );
   }
   console.log(
-    `\n  ${tagged} of ${totalRefs} distinct ref(s) (${totalRefs ? Math.round((tagged / totalRefs) * 100) : 0}%) carry an \`invariant\` tag. This index sees only what was tagged — the rest is invisible here, not absent from the ledger.`,
+    `\n  ${totalRefs} distinct ref(s) — ${tagged} carry an \`invariant\` identity (${totalRefs ? Math.round((tagged / totalRefs) * 100) : 0}%) · ${declaredLocalRefs.length} examined and declared local · ${neverExaminedRefs.length} never examined.` +
+      (neverExaminedRefs.length
+        ? ` The ${neverExaminedRefs.length} never-examined are the real gap — nobody has judged them yet: ${neverExaminedRefs.slice(0, 8).map((e) => e.ref).join(', ')}${neverExaminedRefs.length > 8 ? ', …' : ''}`
+        : ' Every ref has been judged — tagged with a principle, or examined and found genuinely local. History is complete enough to build on.'),
   );
 }
 
