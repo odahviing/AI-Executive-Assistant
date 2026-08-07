@@ -1253,7 +1253,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   violation_label: movePlan.violationLabel,
                   approval_id: approval.approval_id,
                   category: movePlan.category,
-                  // R11 (owner ruling, verbatim: "she dont need to write in
+                  // gh#154-R11 (owner ruling, verbatim: "she dont need to write in
                   // the room ... she doesnt need to write anything. its
                   // person to person ... still will get back after hour and
                   // approved.") — meta-instruction for the model, NEVER a

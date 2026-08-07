@@ -297,7 +297,7 @@ export function anyRequestResolvedForThread(ownerUserId: string, threadTs: strin
 }
 
 /**
- * R6 (2026-08-06), narrowed by R7 (2026-08-06) — ground truth for whether a
+ * gh#154-R6 (2026-08-06), narrowed by gh#154-R7 (2026-08-06) — ground truth for whether a
  * decision is genuinely outstanding RIGHT NOW (`awaiting_owner`), as opposed
  * to merely "a request row exists somewhere in this thread's history". This
  * answers ONE of the two questions the room-approval honesty check needs —

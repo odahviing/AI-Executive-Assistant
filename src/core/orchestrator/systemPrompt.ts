@@ -331,7 +331,7 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
   // colleague's message is (a question, "thanks", or silence-filling ack) — a plain
   // "thanks" is not a request for an update, but it deserves the same honest status.
   const threadRequestStatusSection = (() => {
-    // R12 — re-keyed to `isOwnerTyping` (authenticated identity), matching the
+    // gh#154-R12 — re-keyed to `isOwnerTyping` (authenticated identity), matching the
     // sibling colleagueThreadApprovalsSection fix above (o#225). `isOwner` is
     // the post-clamp role — false in a room even when the owner himself is
     // typing — so this still handed the authenticated owner colleague-facing
@@ -858,7 +858,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // we have actual people to list. Renders inline with the dynamic block so
   // it's per-turn fresh and doesn't break the static cache.
   //
-  // R10 — `!isOwner` is true on EVERY room turn (`isOwner` is the post-clamp
+  // gh#154-R10 — `!isOwner` is true on EVERY room turn (`isOwner` is the post-clamp
   // role, false for the owner too when he's typing in an MPIM/channel — see
   // isOwnerTyping above), so this used to render full contact data (email,
   // tz, city, gender) for every other member straight into a shared

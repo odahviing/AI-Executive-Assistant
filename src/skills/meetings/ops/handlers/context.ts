@@ -15,7 +15,7 @@ export interface OpCtx {
   userEmail: SkillContext['profile']['user']['email'];
   timezone: SkillContext['profile']['user']['timezone'];
   /**
-   * R3 (2026-08-06) — `grantRelaxed(args, context)`'s result, computed ONCE
+   * gh#154-R3 (2026-08-06) — `grantRelaxed(args, context)`'s result, computed ONCE
    * by `SchedulingSkill.executeToolCall` (the same call it needs for its own
    * room-bend disclosure chokepoint) and threaded down so
    * `handleFindAvailableSlots` reads it here instead of calling

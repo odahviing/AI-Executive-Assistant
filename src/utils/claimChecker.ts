@@ -33,7 +33,7 @@
  * A's — not "did the owner's claimed action really happen" but "does this room
  * reply falsely tell the COLLEAGUE a decision came back (including a decision
  * that came back NEGATIVE)". The caller (runOutputGates.ts) gates it
- * deterministically — R7 (2026-08-06): a request row must have EVER existed
+ * deterministically — gh#154-R7 (2026-08-06): a request row must have EVER existed
  * for this thread (getLatestRequestForThread), and then EITHER a request is
  * genuinely `awaiting_owner` right now OR no request in the thread was ever
  * resolved — so it never runs on an ordinary colleague turn with no request
@@ -90,7 +90,7 @@ export interface ClaimCheckInput {
    * The caller (runOutputGates.ts) builds this context whenever a request row
    * has EVER existed for the thread AND EITHER a request is genuinely
    * `awaiting_owner` right now OR no request in the thread was ever resolved
-   * (R7, 2026-08-06) — so a thread whose only requests ever went
+   * (gh#154-R7, 2026-08-06) — so a thread whose only requests ever went
    * `cancelled`/`expired` (never resolved) still gets a context object, and
    * keeps paying for as long as it stays active, because a "he approved it"
    * claim there is a GENUINE standing risk, not a cost-free non-event
@@ -146,8 +146,8 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // v2.3.2 (2B) — coda mode always checks. Codas are SHORT by design but
   // every word matters; the "shares my name" hallucination was 9 words.
   if (input.mode === 'coda') return true;
-  // v4.4.x (#154) / o#227, tightened R6, widened R7 (2026-08-06), floor
-  // hole closed R8 (2026-08-06) — approvalGrantContext is only ever
+  // v4.4.x (#154) / o#227, tightened gh#154-R6, widened gh#154-R7 (2026-08-06), floor
+  // hole closed gh#154-R8 (2026-08-06) — approvalGrantContext is only ever
   // CONSTRUCTED by the caller (runOutputGates.ts) when a request row has
   // EVER existed for this thread AND (some request is genuinely
   // `awaiting_owner` right now OR no request in the thread was ever
@@ -156,7 +156,7 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // whose request(s) resolved stops getting one too, the moment nothing new
   // is pending — that pair is what stops the paid-forever case (36 of 47
   // request-carrying threads build no context and pay nothing). Gating the
-  // floor-skip on `hasLivePending` alone (R7) missed the OTHER population the
+  // floor-skip on `hasLivePending` alone (gh#154-R7) missed the OTHER population the
   // caller already narrowed down to: the terminal-never-resolved threads
   // (10 of 47, measured 2026-08-06) get a context object too (`!isResolved`),
   // but hasLivePending reads false for them BY CONSTRUCTION, so the 30-char
@@ -535,7 +535,7 @@ export async function rewriteOwningTheMiss(opts: {
   toolSummaries?: string[];
   // v4.4.x (#154) added an approvalGrantContext param here for the
   // permission-granted claim class; removed in o#224 when the class went
-  // detect-and-log only, then RESTORED in R5 (2026-08-06) — but the binding
+  // detect-and-log only, then RESTORED in gh#154-R5 (2026-08-06) — but the binding
   // that makes it safe lives at the CALL SITE (runOutputGates.ts), not here:
   // the caller never routes a permission_granted claim into this rewrite
   // unless anyRequestResolvedForThread is false for the thread (no request

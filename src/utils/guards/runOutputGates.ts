@@ -353,7 +353,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     let approvalGrantContext: { isResolved: boolean } | undefined;
     try {
       const { anyRequestResolvedForThread, anyRequestPendingForThread, getLatestRequestForThread } = await import('../../db/requests');
-      // R7 (2026-08-06) — R6 gated construction on hasLivePending ALONE
+      // gh#154-R7 (2026-08-06) — gh#154-R6 gated construction on hasLivePending ALONE
       // (state='awaiting_owner' right now). That correctly stopped the
       // paid-forever case on a RESOLVED thread (isResolved permanently true,
       // nothing left to falsely announce), but it also silently stopped the
@@ -363,15 +363,15 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       // thread that was in fact cancelled), not a cost-free non-event.
       // Measured 2026-08-06: 10 of 47 request-carrying threads are fully
       // terminal with zero resolved rows ever (9 cancelled, 1 expired) — under
-      // R6 NONE of them could ever reach the catch below, because
+      // gh#154-R6 NONE of them could ever reach the catch below, because
       // approvalGrantContext was never built for them. Gate is now
       // `hasLivePending || (thread ever carried a request && !isResolved)`:
       // a thread that resolved still goes quiet the moment isResolved flips
-      // true (R6's actual cost win, untouched — 37 of 47 threads), a thread
+      // true (gh#154-R6's actual cost win, untouched — 37 of 47 threads), a thread
       // that never carried a request stays untouched at one cheap query
       // (the vast majority), and only the narrow terminal-never-resolved
       // slice (plus the one currently-live thread) keeps paying — which is
-      // the same shape req_1783847332015_bgs91 had pre-R6, except now it's
+      // the same shape req_1783847332015_bgs91 had pre-gh#154-R6, except now it's
       // the genuine risk surface instead of an accidental blanket check.
       const latestRow = getLatestRequestForThread(profile.user.slack_user_id, threadTs);
       if (latestRow) {
@@ -874,7 +874,7 @@ async function runClaimCheckAndMaybeRewrite(
       });
     }
 
-    // o#224 / R5 — permission_granted's ground truth (anyRequestResolvedForThread)
+    // o#224 / gh#154-R5 — permission_granted's ground truth (anyRequestResolvedForThread)
     // is thread-scoped, not bound to the SPECIFIC request row a sentence is
     // about — a thread carrying 2+ requests can have an approved OLDER request
     // and a still-pending NEWER one, and nothing here can tell which one a

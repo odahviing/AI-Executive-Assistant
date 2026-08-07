@@ -58,7 +58,7 @@ export class SchedulingSkill {
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
-    // R3 (2026-08-06) — computed ONCE here, for find_available_slots only,
+    // gh#154-R3 (2026-08-06) — computed ONCE here, for find_available_slots only,
     // and threaded into the handler via OpCtx.relaxedGrant (context.ts) so
     // `handleFindAvailableSlots`'s own internal `grantRelaxed(args, context)`
     // call (findAvailableSlots.ts:183 — needed mid-search for the real

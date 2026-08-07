@@ -1,5 +1,5 @@
 /**
- * v4.4.9 — backfill the pre-fix social provenance mis-stamp (R7).
+ * v4.4.9 — backfill the pre-fix social provenance mis-stamp (gh#154-R7).
  *
  * Before cc7d4ce (4.4.8), `runSubjectReconciliation` (capturePass.ts) stamped
  * EVERY write `created_by='owner'` regardless of which leg was reconciling.

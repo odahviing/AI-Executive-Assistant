@@ -181,7 +181,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // Resolving it here rather than per-site also means the DENIED log fires once
   // per tool call, not once per internal search.
   //
-  // R3 (2026-08-06) — read off `ctx.relaxedGrant`, computed ONCE by
+  // gh#154-R3 (2026-08-06) — read off `ctx.relaxedGrant`, computed ONCE by
   // `SchedulingSkill.executeToolCall` (ops.ts) before dispatch, rather than
   // calling `grantRelaxed` again here — that second call was harmless but
   // logged the same DENIED/owner_room_bend decision a second time per turn.

@@ -55,7 +55,7 @@ export function getDb(): Database.Database {
       logger.error('v4.0.4 people-dedupe migration threw — continuing', { err: String(err) });
     }
     // v4.4.9 — backfill social_subjects/social_topics rows mis-stamped
-    // created_by='owner' by the pre-cc7d4ce reconciliation writer (R7). Runs
+    // created_by='owner' by the pre-cc7d4ce reconciliation writer (gh#154-R7). Runs
     // AFTER the tables exist (initSchema, above); idempotent, no-ops once clean.
     try {
       runSocialProvenanceBackfill(db);

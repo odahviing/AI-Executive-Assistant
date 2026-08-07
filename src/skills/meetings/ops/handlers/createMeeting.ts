@@ -1105,7 +1105,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 violation_label: plan.violationLabel,
                 approval_id: approval.approval_id,
                 category: plan.category,
-                // R11 (owner ruling, verbatim: "she dont need to write in the
+                // gh#154-R11 (owner ruling, verbatim: "she dont need to write in the
                 // room ... she doesnt need to write anything. its person to
                 // person ... still will get back after hour and approved.") —
                 // this is meta-instruction for the model, NEVER a sentence to

@@ -280,7 +280,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         // the top of this handler — there is no scoped view that means anything
         // for him, since every event is "his".)
         if (isSharedSurface) {
-          // R1 (owner ruling 2026-08-06, verbatim: "o#230 - is revert and
+          // gh#154-R1 (owner ruling 2026-08-06, verbatim: "o#230 - is revert and
           // then do trace only for that, as this is a core security item.")
           // — o#230 widened this branch to list EVERY meeting on the
           // calendar (existence + time + attendee names) with only the
@@ -719,7 +719,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         let preDeleteStartIso: string | undefined;
         let preDeleteStartTz: string | undefined;
         let preDeleteSubject: string | undefined;
-        // R2 (2026-08-06) — the masked (display) version of preDeleteSubject,
+        // gh#154-R2 (2026-08-06) — the masked (display) version of preDeleteSubject,
         // authoritative because it comes from the probe, never from
         // args.meeting_subject (model-supplied, can carry the real title from
         // earlier context regardless of THIS turn's surface).
@@ -754,7 +754,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           preDeleteStartIso = probe?.startDateTime;
           preDeleteStartTz = probe?.startTimeZone;
           preDeleteSubject = probe?.subject;
-          // R2 (2026-08-06) — the SAME mask, computed here (the one place
+          // gh#154-R2 (2026-08-06) — the SAME mask, computed here (the one place
           // that has the raw probe) and carried through to the SUCCESS
           // narration below (`cancelledSubject`). Pre-fix only the refusal
           // branch above was masked; the success path shipped probe.subject
@@ -1017,7 +1017,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // rebuilt the date list itself from truncated subjects and got it wrong
         // (12 deletes narrated as "all 11 declined … Aug 13, 14, 17, 18, 19, 20,
         // 21, 24, 25, 26, 28" — Aug 27 was cancelled and never mentioned).
-        // R2 (2026-08-06) — the masked, probe-derived subject wins over
+        // gh#154-R2 (2026-08-06) — the masked, probe-derived subject wins over
         // args.meeting_subject: the model's own argument can carry the real
         // title (e.g. recalled from earlier owner-DM context) even when THIS
         // narration is read in a room. Only fall back to args when the probe

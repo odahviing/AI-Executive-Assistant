@@ -914,7 +914,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           // Fully blocked by another meeting. Subjects are viewer-scoped: in
           // a colleague's own 1:1 DM, a normal meeting they're confirmed on
           // shows its real subject; anything they're not confirmed on, or
-          // ANY meeting mentioned in a room (unbounded audience — R4,
+          // ANY meeting mentioned in a room (unbounded audience — gh#154-R4,
           // 2026-08-06), reads "[Private]"/"a meeting" instead — never the
           // real title for someone who isn't verifiably the sole reader (M12).
           const conflictNames = directConflicts.map(ev => {
