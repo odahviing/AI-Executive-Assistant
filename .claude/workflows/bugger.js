@@ -787,6 +787,43 @@ const VERIFY_OUT = {
       description:
         'problems you found that are NOT about the fixes under review. Return an empty array if none — do NOT put them in `results`, and do NOT stay quiet about one to keep the wave clean.',
     },
+    // ── X182 · THE OUTCOME TRACE, question 1, AND ITS DENOMINATOR ─────────────
+    // Question 1 was made "the whole pass now" (his ruling, 2026-08-03) with a
+    // stated 100% bar, and 1b got a real mechanism for its own coverage the
+    // same week (X144) — but Q1 itself stayed PROSE ONLY: nothing recorded
+    // which rows were even traced, so a pass that traced 3 of 15 and one that
+    // traced all 15 produced byte-identical artefacts, exactly the class of
+    // check this file is written against.
+    //
+    // THE ENGINE NAMES THE DENOMINATOR, never the bouncer: every row this wave
+    // marks `built` is a candidate, because every issue this engine ever
+    // dispatches carries a `symptom` field (schema-required on `issues` above)
+    // — bouncer.md B2's own words are "everything a person reported, and
+    // everything carrying a `Seen:` line, gets traced". The one thing left to
+    // judgement is B2's own carve-out (a one-line comment fix has no
+    // behavioural symptom) — and that must be STATED as `no-symptom`, never a
+    // silent omission, exactly as an un-traceable 1b pair is `unproven` and
+    // never just missing.
+    outcomeTraces: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'the row id, exactly as it appears in `results`' },
+          verdict: {
+            type: 'string',
+            enum: ['traced', 'no-symptom'],
+            description:
+              '`traced` = you walked the bug forward from the reported symptom (or the report\'s `Seen:` line for a loop-born row) to the line where behaviour now diverges from before. `no-symptom` = this row has no behavioural outcome to trace — a one-line comment correction is the named example — and you are SAYING so rather than skipping it.',
+          },
+          evidence: { type: 'string', description: 'REQUIRED when verdict is `traced`: `file:line`, as the file stands at HEAD, where behaviour now diverges from before.' },
+          notes: { type: 'string', description: 'REQUIRED when verdict is `no-symptom`: why this row has no behavioural outcome. Optional otherwise.' },
+        },
+        required: ['id', 'verdict'],
+      },
+      description:
+        'ONE ENTRY PER ROW THIS WAVE CLAIMS FIXED — question 1, the outcome trace. A row you leave out is reported as UNTRACED and named to the owner. A row whose symptom cannot be established at all is not this field\'s job — refuse it as an overturn in `results` instead (B2\'s third case). Empty array only when no row was built this wave.',
+    },
     // ── X144 · THE JOINT TRACE, question 1b, AND ITS DENOMINATOR ──────────────
     // 1b exists for his stated fear: *"if a bug had two lanes, two agents, and for
     // some reason they both went a different way of fixing it, we get a bug that's
@@ -1555,6 +1592,13 @@ let bounceDepAsks = []
 // a defect. `escalated` is what actually reached his desk after everything.
 let bounceEligible = 0
 let bounceEscalated = 0
+// X182 · question 1's denominator and numerator — same reasoning as X144's
+// pair below, one question earlier. `outcomeCandidates` is what the ENGINE
+// derived (every row this wave marks `built`); `outcomeTraces` is what came
+// back. Recorded even at zero, for the reason X143 gives.
+let outcomeCandidates = []
+let outcomeTraces = []
+let outcomeUntraced = []
 // X144 · question 1b's denominator and numerator. `jointCandidates` is what the
 // ENGINE derived and handed over; `jointTraced` is what came back matching one.
 // Both are recorded even at zero, for the reason X143 gives: a mechanism that
@@ -1632,6 +1676,19 @@ if (VERIFY) {
       log(
         `priorClean: dropped ${priorCleanDropped.length} of ${priorClean.length} at index ${priorCleanDropped.map((d) => d.i).join(',')} — this wave changed the code they described.`,
       )
+
+    // ── X182 · QUESTION 1'S CANDIDATES — every row this wave claims fixed ─────
+    // Every `built` row's own dispatched issue carries a `symptom` (required on
+    // `issues` above), so the wave's own claim IS the candidate list — no
+    // structural tell to derive, unlike 1b. `specById` still holds the original
+    // issue, so the symptom text travels into the brief without the bouncer
+    // having to re-find it.
+    outcomeCandidates = built.map((r) => ({ id: r.id, symptom: String((specById.get(r.id) || {}).symptom || '').slice(0, 200) }))
+    log(
+      outcomeCandidates.length
+        ? `Outcome-trace candidates (question 1): ${outcomeCandidates.length} row(s) claim a fix — every one is owed a trace or an explicit \`no-symptom\`.`
+        : `Outcome-trace candidates (question 1): 0 — nothing was built this wave.`,
+    )
 
     // ── X144 · WHICH ROWS ARE A MULTI-LANE PAIR — derived, never asked for ────
     // `bouncer.md` 1b names three tells and the engine can compute all three, so
@@ -1712,6 +1769,14 @@ if (VERIFY) {
                 : ''
             }\n${JSON.stringify(spotCheck, null, 2)}\n\n`
           : '') +
+        // X182 · question 1's denominator, handed over the same way 1b's is —
+        // the wave's own claim is the candidate list, so an empty `outcomeTraces`
+        // against a non-empty list here is visibly a refusal, not an oversight.
+        (outcomeCandidates.length
+          ? `**QUESTION 1 — ${outcomeCandidates.length} ROW(S) THIS WAVE CLAIMS FIXED.** Trace each from its reported symptom (or the report's \`Seen:\` line for a loop-born row) to the line where behaviour now diverges — your charter's B2, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per row below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare row with no behavioural outcome (a comment-only fix). A row you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
+              .map((c) => `  • ${c.id} — ${c.symptom || '(no symptom text)'}`)
+              .join('\n')}\n\n`
+          : '') +
         // X144 · 1b's denominator, handed over rather than left to be found. The
         // count is stated in the brief so an empty `jointTraces` is visibly a
         // refusal rather than an oversight.
@@ -1733,6 +1798,21 @@ if (VERIFY) {
     discoveries = (check && check.discoveries) || []
     ticketCoverage = (check && check.ticketCoverage) || []
     if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built (building them would invalidate the pass that found them).`)
+    // ── X182 · MATCHED AGAINST THE CANDIDATES, never counted on its own ───────
+    // Same discipline as 1b: never trust `outcomeTraces` being non-empty by
+    // itself — that invites one token line per row that proves nothing. The
+    // test is whether every row the engine named is actually accounted for,
+    // by id, with EITHER verdict — `traced` or the explicit `no-symptom`.
+    outcomeTraces = ((check && check.outcomeTraces) || []).filter((t) => t && t.id)
+    {
+      const coveredIds = new Set(outcomeTraces.map((t) => t.id))
+      outcomeUntraced = outcomeCandidates.filter((c) => !coveredIds.has(c.id))
+      const tracedCount = outcomeTraces.filter((t) => t.verdict === 'traced').length
+      const noSymptomCount = outcomeTraces.filter((t) => t.verdict === 'no-symptom').length
+      log(
+        `Outcome traces (question 1): ${outcomeCandidates.length - outcomeUntraced.length} of ${outcomeCandidates.length} row(s) accounted for · ${tracedCount} traced · ${noSymptomCount} no-symptom`,
+      )
+    }
     // ── X144 · MATCHED AGAINST THE CANDIDATES, never counted on its own ────────
     // A returned trace covers a candidate only when its `ids` contain ALL of that
     // candidate's ids — so one line mentioning one half of a pair does not clear
@@ -2210,6 +2290,20 @@ const manifest = {
     escalated: bounceEscalated,
     depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
   },
+  // ── X182 · QUESTION 1, MADE OBSERVABLE ─────────────────────────────────────
+  // Same shape as `joint` below, one question earlier. `candidates` is the
+  // engine's own derivation (every row this wave marks `built`), so it is a
+  // fact rather than a claim; `traced` is what the pass actually accounted
+  // for, by either verdict. Always present, zeros written — `candidates:0` is
+  // readable silence (nothing built), and ABSENT means a stale engine.
+  outcome: {
+    candidates: outcomeCandidates.length,
+    candidateIds: outcomeCandidates.map((c) => c.id),
+    traced: outcomeCandidates.length - outcomeUntraced.length,
+    untraced: outcomeUntraced.length,
+    untracedIds: outcomeUntraced.map((c) => c.id),
+    noSymptom: outcomeTraces.filter((t) => t.verdict === 'no-symptom').length,
+  },
   // ── X144 · QUESTION 1b, MADE OBSERVABLE ────────────────────────────────────
   // `candidates` is the engine's own derivation, so it is a fact rather than a
   // claim; `traced` is what the pass returned that actually covers one. Always
@@ -2259,6 +2353,18 @@ if (REVIEWED_LOGS && !Array.isArray(editorReport.filesRead))
 if (VERIFY && verifyAttempted > 0 && verifyRan && waveFiles.length === 0)
   warnings.push(
     `No lane reported \`filesTouched\`, so the verify could not tell this wave from anything else uncommitted in the tree. It checked everything, which is safe but wasteful — and any overturned row may belong to work this run did not do.`,
+  )
+// ── X182 · QUESTION 1's GATE, and it compares against the DENOMINATOR ────────
+// Same discipline as 1b's, one question earlier: never against `outcomeTraces`
+// being non-empty — that invites one token line per row that proves nothing.
+// The test is whether every row the engine named as `built` is actually
+// accounted for. His ruling made Q1 "the whole pass now"; this is the warning
+// that makes that claim checkable instead of self-reported.
+if (VERIFY && verifyRan && outcomeUntraced.length)
+  warnings.push(
+    `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} row(s) this wave claims fixed were NOT traced: ${outcomeUntraced
+      .map((c) => c.id)
+      .join(', ')}. A fix that cannot be traced back to its reported symptom IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these rows.`,
   )
 // ── X144 · 1b's GATE, and it compares against the DENOMINATOR ────────────────
 // Never against `jointTraces` being non-empty: a required field invites one token
@@ -2454,6 +2560,9 @@ log(
     // and had nothing to do; the line missing entirely says a stale engine.
     ` bounce:${bounceEligible}elig/${bouncedIds.length}sent${bouncedIds.length ? `(${bounceCleared.length}ok/${bounceStillWrong.length}owner${bounceRecheckRan ? '' : ',RECHECK-DEAD'})` : ''}` +
     `${bounceAtLimit.length ? ` atLimit:${bounceAtLimit.length}` : ''}${bounceUnroutable.length ? ` noLane:${bounceUnroutable.length}` : ''}` +
+    // X182 · printed on EVERY run, zeros included. `outcome:0/0` says nothing
+    // was built this wave; the field missing says a stale engine.
+    ` outcome:${outcomeCandidates.length - outcomeUntraced.length}/${outcomeCandidates.length}${outcomeUntraced.length ? ` UNTRACED:${outcomeUntraced.length}` : ''}` +
     // X144 · printed on EVERY run, zeros included. `joint:0/0` says there was no
     // multi-lane pair to trace; the field missing says a stale engine.
     ` joint:${jointCandidates.length - jointUntraced.length}/${jointCandidates.length}${manifest.joint.disagrees ? ` DISAGREE:${manifest.joint.disagrees}` : ''}${jointUntraced.length ? ` UNTRACED:${jointUntraced.length}` : ''}` +

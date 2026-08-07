@@ -22,11 +22,15 @@ Almost entirely framework. One ticket last week became a feature run plus **four
 - **A returning failure is derived, not noticed** — an identity closed and open again is a regression by definition.
 - **The intake checks a fresh finding against the open backlog** — and *annotates* the match rather than dropping it, so one row gets stronger instead of two rows nobody connects.
 
+**The verify's own most important question can now be shown to have run.** *"Did it actually fix the reported problem"* has been the whole pass since 2026-08-03 — and it was the one check with no observable: no field recorded which rows carried a symptom, none recorded which were traced, and a pass that traced three of fifteen rows while reporting fifteen would have gone through silently. The engine now derives the denominator itself from each row's own symptom, so the gate cannot mark its own homework, and a shortfall prints `QUESTION 1 IS UNCOVERED`. A row with no behavioural symptom — a comment correction — is excluded by design, so a healthy wave stays silent.
+
 ### Changed — charters
 
 - **The Editor has numbered rules for the first time** — 15, in three chapters: what counts as a bug · how you shape it · whether the loop stays healthy. It gains the ledger as territory, a definition of what genuinely needs the owner, and the rule that a good answer written like a bot is a bug.
 - **The shared lane block goes 13 rules to 12.** Verification folds into no-guessing; the enforcement ladder becomes **code → guard → prompt**, with the prompt last because it is the only rung that can silently stop working; and a new rule names what is an owner decision — a conflict between two of a lane's own rules, and any new LLM call or tier change.
 - **Matchmaker gains a write-once rule** (`M15`) and **Gatekeeper gains one governing which gates run at all** (`G10`) — both were previously enforced only by comments.
+- **The Bouncer was audited for the first time and numbered** — `B1`–`B14`, tag `B` minted. It was the only agent never held to the last-line-of-defence lens, and it is the last thing between a change and real people. Two gaps closed: the bias-toward-blocking rule never said *why*, and the framework section framed its safety question entirely as a fixture test — silent about a prose diff, which is exactly where no fixture can exist.
+- **The "cold read" is retired.** A prose framework change used to be owed a second architect reading it fresh; the bouncer now checks the architect the way it checks every other agent. The Opus override naming that dispatch was dead configuration and is gone.
 
 ### Fixed (product)
 

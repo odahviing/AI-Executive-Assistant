@@ -62,8 +62,18 @@ const neutralise = (src) =>
 const SRC = fs.readFileSync(ENGINE, 'utf8')
 const compiled = vm.compileFunction(`return (async () => {${neutralise(SRC)}\n})()`, ['args', 'agent', 'parallel', 'log', 'phase'], { filename: ENGINE })
 
-/** Run the engine with canned dispatch results. Returns {out, err, calls, logs}. */
-const run = async (args, canned) => {
+// X182 · the SECOND engine, compiled the same way, for the outcome-trace
+// mechanism's bugger.js half. This file started as "the fixture for the
+// framer's DESIGN door" and has since grown to cover the whole build engine's
+// mechanics shared by both (the bounce round, the owner gate) — a second
+// harness FILE for one mechanism both engines carry is the two-copies-drift
+// failure A9 exists to prevent, so it lives here instead.
+const ENGINE_BUGGER = path.join(ROOT, '.claude', 'workflows', 'bugger.js')
+const SRC_BUGGER = fs.readFileSync(ENGINE_BUGGER, 'utf8')
+const compiledBugger = vm.compileFunction(`return (async () => {${neutralise(SRC_BUGGER)}\n})()`, ['args', 'agent', 'parallel', 'log', 'phase'], { filename: ENGINE_BUGGER })
+
+/** Run a compiled engine with canned dispatch results. Returns {out, err, calls, logs}. */
+const makeRunner = (compiledFn) => async (args, canned) => {
   const calls = []
   const logs = []
   const phases = []
@@ -74,12 +84,14 @@ const run = async (args, canned) => {
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
   try {
-    const out = await compiled(args, agent, parallel, (m) => logs.push(String(m)), (p) => phases.push(p))
+    const out = await compiledFn(args, agent, parallel, (m) => logs.push(String(m)), (p) => phases.push(p))
     return { out, err: null, calls, logs, phases }
   } catch (e) {
     return { out: null, err: e, calls, logs, phases }
   }
 }
+const run = makeRunner(compiled)
+const runBugger = makeRunner(compiledBugger)
 const called = (calls, label) => calls.filter((c) => c.label === label || c.label.startsWith(label))
 const promptOf = (calls, label) => (called(calls, label)[0] || {}).prompt || ''
 // X151-fix (X159) · PHASE, never a label prefix, for "did a dispatch of THIS
@@ -752,6 +764,117 @@ const main = async () => {
     'a mixed citation list matches on the one genuine full-path hit',
     citesReleaseFile(['src/skills/meetings/ops/handlers/calendarReads.ts', 'src/connectors/graph/calendarReads.ts'], ['src/connectors/graph/calendarReads.ts']) === true,
   )
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // X182 · QUESTION 1 — THE OUTCOME TRACE. His ruling made it "the whole pass
+  // now"; 1b got a real engine mechanism the same week and Q1 stayed prose
+  // only. Both directions, both engines — a check that fires on a healthy
+  // wave gets learned into noise exactly as fast as one that never fires at
+  // all.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('26 · QUESTION 1 (X182) — FEATURE.JS, AN OMITTED TRACE READS AS UNTRACED  (fires on the bad input)')
+  const untracedFeature = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      slackmaster: { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'p1', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: [] }, // outcomeTraces OMITTED
+    },
+  )
+  ok('no throw', !untracedFeature.err, untracedFeature.err && untracedFeature.err.message)
+  ok(
+    'question 1 is handed to the bouncer, naming the piece\'s own requirement',
+    /QUESTION 1 —/.test(promptOf(untracedFeature.calls, 'bouncer:wave')) && promptOf(untracedFeature.calls, 'bouncer:wave').includes(GOOD_PIECE.requirement),
+    promptOf(untracedFeature.calls, 'bouncer:wave').slice(0, 900),
+  )
+  ok('manifest.outcome.candidates is the ENGINE\'S OWN count, 1', untracedFeature.out && untracedFeature.out.manifest.outcome.candidates === 1, untracedFeature.out && untracedFeature.out.manifest.outcome)
+  ok('an OMITTED outcomeTraces reads as untraced:1, never a silent zero', untracedFeature.out && untracedFeature.out.manifest.outcome.untraced === 1, untracedFeature.out && untracedFeature.out.manifest.outcome)
+  ok('QUESTION 1 IS UNCOVERED fires', untracedFeature.out && untracedFeature.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), untracedFeature.out && untracedFeature.out.warnings)
+
+  section('27 · QUESTION 1 (X182) — FEATURE.JS, A FULLY TRACED WAVE STAYS SILENT  (silent on the good one)')
+  const tracedFeature = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      slackmaster: { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'bouncer:wave(1)': {
+        results: [{ id: 'p1', verdict: 'built' }],
+        discoveries: [],
+        ticketCoverage: [],
+        verifiedClean: [],
+        outcomeTraces: [{ id: 'p1', verdict: 'traced', evidence: 'a.ts:12' }],
+      },
+    },
+  )
+  ok('no throw', !tracedFeature.err, tracedFeature.err && tracedFeature.err.message)
+  ok('a fully traced wave has untraced:0', tracedFeature.out && tracedFeature.out.manifest.outcome.untraced === 0, tracedFeature.out && tracedFeature.out.manifest.outcome)
+  ok('QUESTION 1 IS UNCOVERED does NOT fire on the healthy path', tracedFeature.out && !tracedFeature.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), tracedFeature.out && tracedFeature.out.warnings)
+
+  const noSymptomFeature = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece },
+    {
+      slackmaster: { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] },
+      'bouncer:wave(1)': {
+        results: [{ id: 'p1', verdict: 'built' }],
+        discoveries: [],
+        ticketCoverage: [],
+        verifiedClean: [],
+        // B2's own carve-out — an explicit, named exemption, never a silent skip.
+        outcomeTraces: [{ id: 'p1', verdict: 'no-symptom', notes: 'pure scaffolding another piece depends on — no behavioural outcome of its own' }],
+      },
+    },
+  )
+  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B2\'s carve-out, not a loophole', noSymptomFeature.out && noSymptomFeature.out.manifest.outcome.untraced === 0, noSymptomFeature.out && noSymptomFeature.out.manifest.outcome)
+  ok('no warning on the honest no-symptom wave — this is the failure the phantom check made tonight, avoided here', noSymptomFeature.out && !noSymptomFeature.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), noSymptomFeature.out && noSymptomFeature.out.warnings)
+
+  section('28 · QUESTION 1 (X182) — BUGGER.JS, THE SAME MECHANISM, THE SAME TWO DIRECTIONS')
+  const BUG_ISSUE = { id: 'b1', symptom: 'the reminder fires twice', lane: 'slackmaster', severity: 'high', clarity: 'clear', source: 'github' }
+  const untracedBugger = await runBugger(
+    { issues: [BUG_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'b1', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: [] }, // outcomeTraces OMITTED
+    },
+  )
+  ok('no throw', !untracedBugger.err, untracedBugger.err && untracedBugger.err.message)
+  ok(
+    'question 1 is handed to the bouncer, naming the row\'s own symptom',
+    /QUESTION 1 —/.test(promptOf(untracedBugger.calls, 'bouncer:wave')) && promptOf(untracedBugger.calls, 'bouncer:wave').includes(BUG_ISSUE.symptom),
+    promptOf(untracedBugger.calls, 'bouncer:wave').slice(0, 900),
+  )
+  ok('manifest.outcome.candidates is the ENGINE\'S OWN count, 1  (fires on the bad input)', untracedBugger.out && untracedBugger.out.manifest.outcome.candidates === 1, untracedBugger.out && untracedBugger.out.manifest.outcome)
+  ok('an OMITTED outcomeTraces reads as untraced:1, never a silent zero', untracedBugger.out && untracedBugger.out.manifest.outcome.untraced === 1, untracedBugger.out && untracedBugger.out.manifest.outcome)
+  ok('QUESTION 1 IS UNCOVERED fires', untracedBugger.out && untracedBugger.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), untracedBugger.out && untracedBugger.out.warnings)
+
+  const tracedBugger = await runBugger(
+    { issues: [BUG_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': {
+        results: [{ id: 'b1', verdict: 'built' }],
+        discoveries: [],
+        ticketCoverage: [],
+        verifiedClean: [],
+        outcomeTraces: [{ id: 'b1', verdict: 'traced', evidence: 'src/x.ts:44' }],
+      },
+    },
+  )
+  ok('a fully traced wave has untraced:0  (silent on the good one)', tracedBugger.out && tracedBugger.out.manifest.outcome.untraced === 0, tracedBugger.out && tracedBugger.out.manifest.outcome)
+  ok('QUESTION 1 IS UNCOVERED does NOT fire on the healthy path', tracedBugger.out && !tracedBugger.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), tracedBugger.out && tracedBugger.out.warnings)
+
+  const noSymptomBugger = await runBugger(
+    { issues: [BUG_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': {
+        results: [{ id: 'b1', verdict: 'built' }],
+        discoveries: [],
+        ticketCoverage: [],
+        verifiedClean: [],
+        outcomeTraces: [{ id: 'b1', verdict: 'no-symptom', notes: 'one-line comment correction, no behavioural symptom' }],
+      },
+    },
+  )
+  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B2\'s carve-out, not a loophole', noSymptomBugger.out && noSymptomBugger.out.manifest.outcome.untraced === 0, noSymptomBugger.out && noSymptomBugger.out.manifest.outcome)
+  ok('no warning on the honest no-symptom wave', noSymptomBugger.out && !noSymptomBugger.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), noSymptomBugger.out && noSymptomBugger.out.warnings)
 }
 
 main().then(

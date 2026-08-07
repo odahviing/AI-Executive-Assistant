@@ -478,6 +478,32 @@ const VERIFY_OUT = {
       },
       description: 'problems found that are NOT about the pieces under review. Empty array if none — never in `results`, and never suppressed to keep the wave clean.',
     },
+    // ── X182-PARITY · THE OUTCOME TRACE, question 1, AND ITS DENOMINATOR ──────
+    // Same field, same words as bugger.js — a piece here has no reported
+    // symptom, so its own `requirement` (the product outcome it buys, required
+    // on every piece in the PLAN schema) is what you trace forward from
+    // instead. Every `built` piece is a candidate; the ENGINE names the
+    // denominator, never the bouncer.
+    outcomeTraces: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'the piece id, exactly as it appears in `results`' },
+          verdict: {
+            type: 'string',
+            enum: ['traced', 'no-symptom'],
+            description:
+              '`traced` = you walked the code forward from the piece\'s own `requirement` to the line where that outcome now holds. `no-symptom` = this piece has no behavioural outcome of its own to trace (pure scaffolding another piece depends on) — say so rather than skipping it.',
+          },
+          evidence: { type: 'string', description: 'REQUIRED when verdict is `traced`: `file:line`, as the file stands at HEAD, where the requirement is now met.' },
+          notes: { type: 'string', description: 'REQUIRED when verdict is `no-symptom`: why this piece has no behavioural outcome of its own. Optional otherwise.' },
+        },
+        required: ['id', 'verdict'],
+      },
+      description:
+        'ONE ENTRY PER PIECE THIS WAVE CLAIMS BUILT — question 1, the outcome trace. A piece you leave out is reported as UNTRACED and named to the owner. Empty array only when no piece was built this wave.',
+    },
     // Same field and reasoning as bugger.js: work satisfies open tickets by
     // accident, and only the pass reading the finished diff can notice.
     ticketCoverage: {
@@ -1325,6 +1351,18 @@ let bounceDepAsks = []
 // sent back" — opposite facts. `eligible` is the first pass's overturn count.
 let bounceEligible = 0
 let bounceEscalated = 0
+// X182-PARITY · question 1's denominator and numerator, stolen from bugger.js
+// (X182) exactly as the bounce counter above was stolen — his ruling is not
+// engine-specific: "did it really fix the problem? I don't care how — that's
+// the lane's — but did it actually fix it." bugger.js traces from the reported
+// symptom; a piece here has no symptom, so its own `requirement` (the product
+// outcome it buys) is the equivalent claim to walk forward from. Every piece
+// this engine ever plans carries one (`requirement` is required in the PLAN
+// schema above), so every `built` piece is a candidate — no structural tell
+// to hunt for, same as bugger.js.
+let outcomeCandidates = []
+let outcomeTraces = []
+let outcomeUntraced = []
 if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.verify !== false) {
   phase('Verify')
   const priorClean = Array.isArray(A.priorClean) ? A.priorClean : []
@@ -1351,6 +1389,10 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
   // thing. The bouncer needs it too, or it judges the finished code against a
   // decompose text his ruling has since superseded.
   const rulingsPresent = approved.some((p) => p && p._ownerRuled)
+  // X182-PARITY · question 1's candidates — every piece this wave claims
+  // built, since every piece's own PLAN entry already required a `requirement`
+  // (the schema at :299). No structural tell to hunt for, same as bugger.js.
+  outcomeCandidates = built.map((r) => ({ id: r.id, requirement: String((specById.get(r.id) || {}).requirement || '').slice(0, 200) }))
   const check = await agent(
     // Bar, standard, seams-first scope, trace sampling, budget,
     // overturn-vs-discovery and the return contract live in
@@ -1367,6 +1409,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
       `APPROVED INTENT:\n${JSON.stringify(
         approved.map((p) => ({
           id: p.id,
+          requirement: p.requirement,
           whatChanges: p.whatChanges,
           connection: p.connection,
           expectation: p.expectation,
@@ -1378,6 +1421,15 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
       )}\n\n` +
       (rulingsPresent
         ? `**Some pieces above carry \`_ownerRuled\` — mid-build the wave asked the owner a question and he ruled.** For those, \`_ownerRuled.hisRuling\` IS THE SPEC: the \`whatChanges\`/\`connection\`/\`productDecision\` shown for that piece is the ORIGINAL PLAN, superseded wherever the two disagree. **Code matching his ruling is correct even where it contradicts the plan text above — do not overturn a piece for departing from a decompose his ruling replaced.**\n\n`
+        : '') +
+      // X182-PARITY · question 1's denominator, handed over the same way
+      // bugger.js hands over its own — the wave's own claim is the candidate
+      // list, so an empty `outcomeTraces` against a non-empty list is visibly
+      // a refusal, not an oversight.
+      (outcomeCandidates.length
+        ? `**QUESTION 1 — ${outcomeCandidates.length} PIECE(S) THIS WAVE CLAIMS BUILT.** Trace each from its own \`requirement\` above (the product outcome it buys) to the line where that outcome now holds — your charter's B2, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per piece below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare piece with no behavioural outcome of its own (pure scaffolding another piece depends on). A piece you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
+            .map((c) => `  • ${c.id} — ${c.requirement || '(no requirement text)'}`)
+            .join('\n')}\n\n`
         : '') +
       // X68 · one line, not a second pass.
       (claimedFixed.length
@@ -1393,6 +1445,19 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
   discoveries = (check && check.discoveries) || []
   ticketCoverage = (check && check.ticketCoverage) || []
   if (discoveries.length) log(`Verify found ${discoveries.length} NEW problem(s) unrelated to this wave — reported, NOT built.`)
+  // X182-PARITY · matched against the candidates, never counted on its own —
+  // same discipline as bugger.js: the test is whether every piece the engine
+  // named as `built` is actually accounted for, by id, with EITHER verdict.
+  outcomeTraces = ((check && check.outcomeTraces) || []).filter((t) => t && t.id)
+  {
+    const coveredIds = new Set(outcomeTraces.map((t) => t.id))
+    outcomeUntraced = outcomeCandidates.filter((c) => !coveredIds.has(c.id))
+    const tracedCount = outcomeTraces.filter((t) => t.verdict === 'traced').length
+    const noSymptomCount = outcomeTraces.filter((t) => t.verdict === 'no-symptom').length
+    log(
+      `Outcome traces (question 1): ${outcomeCandidates.length - outcomeUntraced.length} of ${outcomeCandidates.length} piece(s) accounted for · ${tracedCount} traced · ${noSymptomCount} no-symptom`,
+    )
+  }
   ticketCoverage.forEach((t) => log(`  ticket ${t.ref}: ${t.state}${t.state === 'partial' && t.whatIsMissing ? ` — still missing: ${String(t.whatIsMissing).slice(0, 90)}` : ''}`))
   // X25 · Shaped to drop straight into the NEXT run's `args.pieces`, the way
   // `discoveries` drops into `args.issues`. It is deliberately NOT dispatchable
@@ -1683,6 +1748,19 @@ const featureManifest = {
           overturned: results.filter((r, i) => verified[i] && r.verdict !== verified[i].verdict).length,
           verifiedCleanReturned: verifiedClean.length,
         },
+  // X182-PARITY · question 1, made observable — same shape as bugger.js's
+  // `manifest.outcome`. `candidates` is the engine's own derivation (every
+  // piece this wave marks `built`), so it is a fact rather than a claim.
+  // Always present, zeros written — `candidates:0` is readable silence
+  // (nothing built), and ABSENT means a stale engine.
+  outcome: {
+    candidates: outcomeCandidates.length,
+    candidateIds: outcomeCandidates.map((c) => c.id),
+    traced: outcomeCandidates.length - outcomeUntraced.length,
+    untraced: outcomeUntraced.length,
+    untracedIds: outcomeUntraced.map((c) => c.id),
+    noSymptom: outcomeTraces.filter((t) => t.verdict === 'no-symptom').length,
+  },
   // X137-PARITY · same shape as bugger.js's `manifest.bounce`, ALWAYS an
   // object with explicit zeros — never omitted. `eligible` beside `bounced`
   // is what makes a zero readable: `eligible:0 bounced:0` is healthy silence,
@@ -1718,6 +1796,16 @@ if (!waveComplete)
       `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Rule on \`needsOwnerRuling\`, then find the matching piece(s) inside \`resume.pieces\`, add \`_ownerRuled:{askedBecause, hisRuling}\` and drop \`awaitingOwner\` on each, and re-invoke ` +
       `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon}}). ` +
       `Untouched pieces replay from cache for free — only the ruled piece and the re-verify it forces run live.`,
+  )
+// ── X182-PARITY · QUESTION 1's GATE, and it compares against the DENOMINATOR ─
+// Never against `outcomeTraces` being non-empty — that invites one token line
+// per piece that proves nothing. The test is whether every piece the engine
+// named as `built` is actually accounted for. Same discipline as bugger.js.
+if (verifyRan && outcomeUntraced.length)
+  featureWarnings.push(
+    `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} piece(s) this wave claims built were NOT traced: ${outcomeUntraced
+      .map((c) => c.id)
+      .join(', ')}. A fix that cannot be traced back to its own requirement IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these pieces.`,
   )
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
 if (recon.length === 0) featureWarnings.push('`recon` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')
