@@ -17,7 +17,7 @@ const anthropic = getAnthropicClient();
 export async function buildTurnContext(input: OrchestratorInput) {
   const { userMessage, conversationHistory, threadTs, profile } = input;
 
-  // v4.4.9 (R9) / W3 fix — "who else can read the answer" (surface). Computed
+  // v4.4.9 (gh#154-R9) / gh#154-W3 fix — "who else can read the answer" (surface). Computed
   // once, up top, so every wholesale room-suppression site (the proactive
   // raise-stamp below, personWorkBlock/socialBlock/socialDirectiveBlock
   // further down) reads the SAME value. A room turn never renders a proactive
@@ -268,7 +268,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // marking, so every subject sat at last_assistant_initiated_at=NULL and
         // the whole rotation/decay machinery was dead. (raise_new has no
         // subject yet — it's stamped when reconciliation creates the subject.)
-        // W3 fix — gated on `!isRoom` to match `socialDirectiveBlock` below,
+        // gh#154-W3 fix — gated on `!isRoom` to match `socialDirectiveBlock` below,
         // which suppresses the render wholesale on any room surface. Before
         // this the stamp ran unconditionally, so a room turn recorded a
         // "raise" that was never actually rendered — corrupting the re-raise
@@ -630,7 +630,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
   // v2.2 — Social Directive block. Populated by the pre-pass above.
   // When mode === 'none' this is empty and has no effect on the prompt.
-  // v4.4.9 (R9) — same wholesale room suppression as personWorkBlock/socialBlock
+  // v4.4.9 (gh#154-R9) — same wholesale room suppression as personWorkBlock/socialBlock
   // above. The directive is built from `turnPersonSlackId`, which on an
   // owner-in-room turn (isOwnerTyping) IS the owner's own id — so the picker
   // (directiveForProactiveSlot) surfaces the OWNER's own private subjects

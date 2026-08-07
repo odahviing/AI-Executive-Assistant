@@ -517,7 +517,7 @@ function buildContext(
     threadTs: context.threadTs,
     isMpim: context.isMpim === true,
     isOwnerInGroup: context.isOwnerInGroup === true,
-    // W5/R4 (2026-08-06) — the room-tightening lives inside viewerEmailFor
+    // gh#154-W5/gh#154-R4 (2026-08-06) — the room-tightening lives inside viewerEmailFor
     // now (surface==='room' → null); call it directly. A blanket `?? null`
     // here also forced the EMAIL leg's correct `undefined` into `null`,
     // masking every forwarded subject instead of only private ones — see

@@ -192,7 +192,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   const viewer = subjectViewerFor(context);
   // v4.4.9 (#154) — the attendee-aware half of that same mask, threaded
   // alongside `viewer` into every findAvailableSlots call below.
-  // W5/R4 (2026-08-06) — room-tightening lives inside viewerEmailFor now
+  // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside viewerEmailFor now
   // (surface==='room' → null); call it directly — a blanket ?? null here
   // also masked the email leg's forwarded subjects unconditionally.
   const viewerEmail = viewerEmailFor(context);

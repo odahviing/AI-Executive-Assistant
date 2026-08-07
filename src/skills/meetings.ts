@@ -603,7 +603,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // colleague asking to join is very often NOT on whatever owns the
         // slot, so that event's subject must stay masked whether or not it's
         // privacy-flagged.
-        // W5/R4 (2026-08-06) — the room-vs-DM tightening now lives inside
+        // gh#154-W5/gh#154-R4 (2026-08-06) — the room-vs-DM tightening now lives inside
         // viewerEmailFor itself (surface==='room' → null); call it directly.
         // A blanket `?? null` here also flattened the EMAIL leg's correct
         // `undefined` into `null`, masking every forwarded subject instead of

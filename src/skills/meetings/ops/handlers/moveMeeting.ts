@@ -46,7 +46,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
   const { context, userEmail, timezone } = ctx;
         // v2.7.0 — ownership via findMeetingOwner, fetched ONCE and reused by
         // BOTH the attendee-only (not_organizer) guard directly below and the
-        // requester-controls gate further down. W1 bounce (2026-08-06): the
+        // requester-controls gate further down. gh#154-W1 bounce (2026-08-06): the
         // two gates used to each call findMeetingOwner separately with the
         // identical {ownerUserId, ownerEmail, eventId} — two Graph
         // getEventOrganizer round trips per colleague update_meeting call.
@@ -99,7 +99,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             // whoever triggered this refusal (update_meeting is
             // colleague-allowed, and the owner-organizer gate above this probe
             // passes for the owner's own private recurring series too).
-            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
             // viewerEmailFor now (surface==='room' → null); call directly —
             // a blanket ?? null here also masked the email leg's subjects.
             const maskedSubject = displaySubject(
@@ -122,7 +122,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
         }
 
-        // W1 (2026-08-06) — requester-controls gate, moved OUT of the
+        // gh#154-W1 (2026-08-06) — requester-controls gate, moved OUT of the
         // attendee/venue-change conditional below and made UNCONDITIONAL for
         // every colleague-path update_meeting call. Previously this only ran
         // when `hasAttendeeChange || venueChangeRequested` was true, so a
@@ -865,7 +865,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // above; move_meeting is colleague-allowed too, and delete_meeting
             // (the third of these three) became newly reachable from a room
             // this wave (OWNER_ROOM_ACTION_TOOLS).
-            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
             // viewerEmailFor now (surface==='room' → null); call directly —
             // a blanket ?? null here also masked the email leg's subjects.
             const maskedSubject = displaySubject(
@@ -1187,7 +1187,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // he'd be colliding with; a colleague-path move never does.
             viewer: subjectViewerFor(context),
             // v4.4.9 (#154) — the attendee-aware half of that same mask.
-            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
             // viewerEmailFor now; call it directly (no blanket ?? null).
             viewerEmail: viewerEmailFor(context),
           });
@@ -1271,7 +1271,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 error: approval.error ?? 'internal_error',
                 meeting_subject: args.meeting_subject,
                 violation_label: movePlan.violationLabel,
-                // W4 (2026-08-06) — the SAME silence rule as the success
+                // gh#154-W4 (2026-08-06) — the SAME silence rule as the success
                 // branch above applies here too: whether the private-DM raise
                 // SUCCEEDED or — here — FAILED internally, the room must
                 // never learn a rule-bend was even attempted. `approval.reason`

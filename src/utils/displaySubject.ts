@@ -153,13 +153,13 @@ export function subjectViewerFor(
  * email to resolve here. `surface` is deliberately an ADDITIONAL restriction,
  * never a replacement for the `senderRole` check.
  *
- * W5/R4 (2026-08-06) — a Slack ROOM turn (MPIM/channel) has no single
+ * gh#154-W5/gh#154-R4 (2026-08-06) — a Slack ROOM turn (MPIM/channel) has no single
  * identifiable colleague either, yet must mask at least as strictly as a 1:1
  * DM (owner ruling: a room is never MORE permissive than a DM). That
  * tightening now lives HERE, keyed on `surface === 'room'` → `null` (opts
  * into the strict test with nobody able to pass it), rather than as a
  * `?? null` coerced onto this function's result at each of its 9 call sites —
- * which is what R4 originally shipped, and which flattened EVERY `undefined`
+ * which is what gh#154-R4 originally shipped, and which flattened EVERY `undefined`
  * into `null` regardless of why it was returned, including the EMAIL leg
  * (`senderRole` reads `'owner'` there, so this function already opts out
  * above `?? null` just reasserted `null` anyway) — masking every forwarded

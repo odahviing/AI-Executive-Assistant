@@ -417,7 +417,7 @@ export async function createApprovalRequest(
               kind: subkind, missing,
             });
             return {
-              // W4>dep (2026-08-06) — `reason`, not `message`: every other
+              // gh#154-W4>dep (2026-08-06) — `reason`, not `message`: every other
               // gate refusal in this function (gateApprovalAsk's
               // unknown_kind / no_verified_deviation / missing_reason, plus
               // freeform_calendar_change / freeform_needs_clarification

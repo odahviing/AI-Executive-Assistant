@@ -47,7 +47,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
   // v4.4.9 (#154) — resolved once per call, mirroring subjectViewerFor(context)
   // below: the attendee-aware half of the subject mask, for every occupancy
   // scan / conflict message this handler produces on the colleague path.
-  // W5/R4 (2026-08-06) — the room-tightening (a room can never be more
+  // gh#154-W5/gh#154-R4 (2026-08-06) — the room-tightening (a room can never be more
   // permissive than a 1:1 DM) lives inside viewerEmailFor now, keyed on
   // surface==='room'; call it directly. The old `?? null` coercion here also
   // caught the EMAIL leg's `undefined`, masking every forwarded subject
@@ -1121,7 +1121,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               success: false,
               error: approval.error ?? 'internal_error',
               violation_label: plan.violationLabel,
-              // W4 (2026-08-06) — the SAME silence rule as the success branch
+              // gh#154-W4 (2026-08-06) — the SAME silence rule as the success branch
               // above applies here too: whether the private-DM raise
               // SUCCEEDED or — here — FAILED internally, the room must never
               // learn a rule-bend was even attempted. `approval.reason` is

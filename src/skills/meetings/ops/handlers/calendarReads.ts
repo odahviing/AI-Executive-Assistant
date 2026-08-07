@@ -733,7 +733,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
             // from a room this wave (OWNER_ROOM_ACTION_TOOLS, registry.ts) —
             // this is the leak that wave widened, since the raw probe.subject
             // would otherwise render into a room full of colleagues.
-            // W5/R4 (2026-08-06) — room-tightening lives inside
+            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
             // viewerEmailFor now (surface==='room' → null); call it directly
             // — a blanket ?? null here also masked the email leg's subjects.
             const maskedSubject = displaySubject(
