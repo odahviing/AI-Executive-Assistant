@@ -717,6 +717,20 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
+          // 2026-08-06, three repairs in one wave: each built EXACTLY what its
+          // brief described and delivered NONE of the outcome the brief existed
+          // for — a symptom's file:line got fixed while the cost sat one call
+          // site up, a field was added with nothing to backfill the rows already
+          // on disk, a gate compared against reason-code strings that occur zero
+          // times in the live table. Common cause, his own diagnosis: no brief
+          // ever asked the lane to check real data, so none did. `traced` proves
+          // you walked the CODE; this proves you checked the WORLD it acts on —
+          // the mechanism is not the same claim as the outcome.
+          observable: {
+            type: 'string',
+            description:
+              "REQUIRED on `built` and `already-fixed`: the MEASURABLE check you ran against REAL, LIVE data — a query against the table, a grep of a live log, a re-run against production input — that shows this fix's actual effect, not merely that the code path changed. If the state you fixed already exists on disk (an existing row, a stored counter, a config value written before your fix), check THAT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so explicitly — never leave this blank.",
+          },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
@@ -954,6 +968,17 @@ const TIMEOUT_NOTE =
   `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
   `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
 
+// 2026-08-06 · THE MECHANISM IS NOT THE OUTCOME. Three repairs in one wave each
+// built exactly what their brief specified and changed nothing that mattered:
+// one fixed the symptom's file:line while the cost was incurred one call site
+// up, one stamped a new field going forward with nothing to backfill the rows
+// already on disk, one gated on reason-code strings that occur zero times in
+// the live table. His own diagnosis: no brief ever asked the lane to check
+// real data, so none did — all three failures were visible ONLY in real rows.
+const OBSERVABLE_NOTE =
+  `\n\n**BEFORE YOU RETURN \`built\` OR \`already-fixed\`** — name the MEASURABLE observable you checked in the \`observable\` field: a check against REAL, LIVE data (query the table, grep a live log, re-run against production input), not a re-read of the code you changed. ` +
+  `If the state you are fixing already exists on disk — an existing row, a stored counter, a config value written before your fix — check IT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so — never leave this blank.`
+
 // X168 · his ask, 2026-08-05: the panel showed a bare lane name and nothing
 // else, so a chained run had no way to tell "matchmaker(5), fresh" from
 // "matchmaker again, and here's why" without asking. Every label below now
@@ -978,7 +1003,7 @@ const dispatch = (lane, issues, asBounce) => {
   const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
   if (!asBounce) dispatchedLanesOnce.add(lane)
   return agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}${OBSERVABLE_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
     // hand-dispatched lane gets it too. Setting it in the engine only made it
     // true on the engine path, which is the shape of failure this framework
@@ -2129,6 +2154,15 @@ const notBuilt = verified
 const DECISION_BUDGET = typeof A.capDecisions === 'number' ? A.capDecisions : 12
 const onHisDesk =
   notBuilt.length + deferredNow.length + needsShaping.length + unshaped.length + flagged.length + pending.length + ticketCoverage.filter((t) => t.state !== 'satisfied').length
+// 2026-08-06 · MEASURED OBSERVABLE — o#227/o#228/o#229: three repairs each
+// built exactly what their brief specified and delivered none of the outcome
+// it existed for, because nothing asked the lane to check the change against
+// LIVE data. Computed on `verified` (the FINAL, post-bounce verdicts), not
+// `results`, so a row the bounce round rebuilt with a real check clears here
+// too. `already-fixed` counts as a close exactly like `built` — either way the
+// row is leaving the report on a claim nobody but the lane has checked.
+const closedRows = verified.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed')
+const noObservable = closedRows.filter((r) => String(r.observable || '').trim().length < 10)
 const manifest = {
   mode: MODE,
   preset: !!PRESET,
@@ -2326,6 +2360,18 @@ const manifest = {
     untracedIds: outcomeUntraced.map((c) => c.id),
     noSymptom: outcomeTraces.filter((t) => t.verdict === 'no-symptom').length,
   },
+  // ── 2026-08-06 · THE MEASURED OBSERVABLE, MADE OBSERVABLE ──────────────────
+  // `closed` is every row THIS run marked `built` or `already-fixed`; `checked`
+  // is how many actually name a real-data check rather than a re-read of the
+  // code that changed. Always present, zeros written — `closed:0` is readable
+  // silence (nothing closed), ABSENT means a stale engine, same as `outcome`
+  // and `joint` above.
+  observable: {
+    closed: closedRows.length,
+    checked: closedRows.length - noObservable.length,
+    missing: noObservable.length,
+    missingIds: noObservable.map((r) => r.id),
+  },
   // ── X144 · QUESTION 1b, MADE OBSERVABLE ────────────────────────────────────
   // `candidates` is the engine's own derivation, so it is a fact rather than a
   // claim; `traced` is what the pass returned that actually covers one. Always
@@ -2397,6 +2443,20 @@ if (VERIFY && verifyRan && outcomeUntraced.length)
     `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} row(s) this wave claims fixed were NOT traced: ${outcomeUntraced
       .map((c) => c.id)
       .join(', ')}. A fix that cannot be traced back to its reported symptom IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these rows.`,
+  )
+// ── 2026-08-06 · THE MEASURED OBSERVABLE'S GATE ──────────────────────────────
+// Build-time, not verify-time: whether the verify ran or not, a lane that
+// closed a row without naming what it actually checked against live data is
+// the o#227/o#228/o#229 failure repeating — three repairs that each built
+// exactly what their brief specified and changed nothing that mattered,
+// because nobody queried real data. This fires independent of VERIFY because
+// the discipline belongs to the lane's own dispatch, not to the pass that
+// reads its diff afterward.
+if (noObservable.length)
+  warnings.push(
+    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${closedRows.length} closed row(s) name no real-data check: ${noObservable
+      .map((r) => r.id)
+      .join(', ')}. The code may be correct and the real-world effect unchecked — this is o#227/o#228/o#229 repeating, where each brief's mechanism was built and nobody queried the live data it was meant to fix. Do not wrap these as confirmed.`,
   )
 // ── X144 · 1b's GATE, and it compares against the DENOMINATOR ────────────────
 // Never against `jointTraces` being non-empty: a required field invites one token
@@ -2595,6 +2655,9 @@ log(
     // X182 · printed on EVERY run, zeros included. `outcome:0/0` says nothing
     // was built this wave; the field missing says a stale engine.
     ` outcome:${outcomeCandidates.length - outcomeUntraced.length}/${outcomeCandidates.length}${outcomeUntraced.length ? ` UNTRACED:${outcomeUntraced.length}` : ''}` +
+    // 2026-08-06 · printed on EVERY run, zeros included. `observed:0/0` says
+    // nothing closed this wave; the field missing says a stale engine.
+    ` observed:${closedRows.length - noObservable.length}/${closedRows.length}${noObservable.length ? ` MISSING:${noObservable.length}` : ''}` +
     // X144 · printed on EVERY run, zeros included. `joint:0/0` says there was no
     // multi-lane pair to trace; the field missing says a stale engine.
     ` joint:${jointCandidates.length - jointUntraced.length}/${jointCandidates.length}${manifest.joint.disagrees ? ` DISAGREE:${manifest.joint.disagrees}` : ''}${jointUntraced.length ? ` UNTRACED:${jointUntraced.length}` : ''}` +

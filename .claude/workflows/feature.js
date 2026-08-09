@@ -416,6 +416,17 @@ const VERDICTS = {
             description:
               'the scenarios you paper-traced and the ones you deliberately did NOT, one line each. Be honest about the gaps — an uncovered case named here gets checked by the bouncer; one you quietly omit gets checked by nobody.',
           },
+          // 2026-08-06, same field, same words as bugger.js — the long note
+          // there holds the reasoning: three repairs each built exactly what
+          // their brief specified and delivered none of the outcome it existed
+          // for, because no brief ever asked the lane to check real data.
+          // `traced` proves you walked the CODE; this proves you checked the
+          // WORLD it acts on.
+          observable: {
+            type: 'string',
+            description:
+              "REQUIRED on `built` and `already-fixed`: the MEASURABLE check you ran against REAL, LIVE data — a query against the table, a grep of a live log, a re-run against production input — that shows this piece's actual effect, not merely that the code path changed. If the state you fixed already exists on disk (an existing row, a stored counter, a config value written before your fix), check THAT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so explicitly — never leave this blank.",
+          },
           dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           // X22 · same field, same words as bugger.js. It matters here because
@@ -1064,6 +1075,17 @@ const OWNER_RULED_NOTE =
   `\`askedBecause\` is the question this raised; \`hisRuling\` is his answer, verbatim — build it, do not re-litigate it. If finishing it now reveals a genuine ` +
   `correctness problem with the ruling itself, say so plainly and return \`needs-owner-decision\` again rather than shipping something broken.`
 
+// 2026-08-06 · THE MECHANISM IS NOT THE OUTCOME — same note, same reasoning as
+// bugger.js. Three repairs in one wave each built exactly what their brief
+// specified and changed nothing that mattered: one fixed the symptom's
+// file:line while the cost was incurred one call site up, one stamped a new
+// field going forward with nothing to backfill the rows already on disk, one
+// gated on reason-code strings that occur zero times in the live table. His
+// own diagnosis: no brief ever asked the lane to check real data, so none did.
+const OBSERVABLE_NOTE =
+  `\n\n**BEFORE YOU RETURN \`built\` OR \`already-fixed\`** — name the MEASURABLE observable you checked in the \`observable\` field: a check against REAL, LIVE data (query the table, grep a live log, re-run against production input), not a re-read of the code you changed. ` +
+  `If the state you are fixing already exists on disk — an existing row, a stored counter, a config value written before your fix — check IT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so — never leave this blank.`
+
 // X168-parity · same fix as bugger.js, same reason: the panel showed a bare
 // lane name and nothing else, so a chained wave — here, EITHER a `dependsOn`
 // split across build waves or a cross-lane dependency ask — left the owner
@@ -1094,7 +1116,7 @@ const buildLane = (lane, pcs, roundNote, asBounce) => {
         // settled from the code. Same sentence as bugger.js, same reason: gh#166
         // was "fixed" three times by picking a different number and the path was
         // never timed once.
-        `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${pcs.some((p) => p._where) ? WHERE_NOTE : ''}${pcs.some((p) => p._ownerRuled) ? OWNER_RULED_NOTE : ''}\n\n` +
+        `\n\n**IF A PIECE IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded, or say plainly that the path was never observed. A different number with no measurement behind it is not a fix. If you cannot observe the path, that is \`needs-owner-decision\`.${OBSERVABLE_NOTE}${pcs.some((p) => p._where) ? WHERE_NOTE : ''}${pcs.some((p) => p._ownerRuled) ? OWNER_RULED_NOTE : ''}\n\n` +
       // The framer authored the contract and is read-only; you implement it. The
       // split is deliberate: it holds no lane's product rules, so the design
       // INSIDE your files is yours and the seam BETWEEN them is not.
@@ -1722,6 +1744,12 @@ const onHisDesk =
   remaining.length +
   earnedRules.length +
   ticketCoverage.filter((t) => t.state !== 'satisfied').length
+// 2026-08-06 · MEASURED OBSERVABLE — same mechanism, same reasoning as
+// bugger.js. Computed on `verified` (the FINAL, post-bounce verdicts), not
+// `results`, so a piece the bounce round rebuilt with a real check clears
+// here too. `already-fixed` counts as a close exactly like `built`.
+const closedRows = verified.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed')
+const noObservable = closedRows.filter((r) => String(r.observable || '').trim().length < 10)
 const featureManifest = {
   approved: approved.length,
   decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
@@ -1770,6 +1798,16 @@ const featureManifest = {
     untraced: outcomeUntraced.length,
     untracedIds: outcomeUntraced.map((c) => c.id),
     noSymptom: outcomeTraces.filter((t) => t.verdict === 'no-symptom').length,
+  },
+  // 2026-08-06-PARITY · same shape as bugger.js's `manifest.observable`.
+  // `closed` is every piece THIS run marks `built` or `already-fixed`;
+  // `checked` is how many actually name a real-data check rather than a
+  // re-read of the code that changed. Always present, zeros written.
+  observable: {
+    closed: closedRows.length,
+    checked: closedRows.length - noObservable.length,
+    missing: noObservable.length,
+    missingIds: noObservable.map((r) => r.id),
   },
   // X137-PARITY · same shape as bugger.js's `manifest.bounce`, ALWAYS an
   // object with explicit zeros — never omitted. `eligible` beside `bounced`
@@ -1826,6 +1864,16 @@ if (verifyRan && outcomeUntraced.length)
     `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} piece(s) this wave claims built were NOT traced: ${outcomeUntraced
       .map((c) => c.id)
       .join(', ')}. A fix that cannot be traced back to its own requirement IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these pieces.`,
+  )
+// ── 2026-08-06-PARITY · THE MEASURED OBSERVABLE'S GATE ───────────────────────
+// Build-time, not verify-time — same discipline and same reasoning as
+// bugger.js. Fires independent of `verifyRan` because the check belongs to
+// the lane's own dispatch, not to the pass that reads its diff afterward.
+if (noObservable.length)
+  featureWarnings.push(
+    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${closedRows.length} closed piece(s) name no real-data check: ${noObservable
+      .map((r) => r.id)
+      .join(', ')}. The code may be correct and the real-world effect unchecked — this is o#227/o#228/o#229 repeating, where each brief's mechanism was built and nobody queried the live data it was meant to fix. Do not wrap these as confirmed.`,
   )
 if (waveCapHit) featureWarnings.push(`WAVE CAP HIT — ${remaining.length} approved piece(s) never dispatched: ${remaining.map((p) => p.id).join(', ')}. They are NOT built.`)
 if (recon.length === 0) featureWarnings.push('`recon` was not passed back from the plan run, so every builder re-derived what its area does today. Pass it next time.')

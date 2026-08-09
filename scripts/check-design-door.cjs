@@ -956,6 +956,78 @@ const main = async () => {
   const readBugger = await runBugger({ issues: [BUG_ISSUE] }, { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', workshopRead: true }] } })
   ok('no throw', !readBugger.err, readBugger.err && readBugger.err.message)
   ok('no WORKSHOP warning on a clean read', readBugger.out && !readBugger.out.warnings.some((w) => /WORKSHOP NOT READ/.test(w)), readBugger.out && readBugger.out.warnings)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // MEASURED OBSERVABLE (2026-08-06) — o#227/o#228/o#229: three repairs each
+  // built exactly what their brief specified and delivered none of the outcome
+  // it existed for, because no brief ever asked the lane to check the change
+  // against LIVE data. Both engines gained an `observable` field, a dispatch
+  // note demanding it, and an engine-derived MISSING count — tested the same
+  // two directions as every other mechanism in this file, and independent of
+  // `verify` because the discipline belongs to the lane's own dispatch.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('32 · MEASURED OBSERVABLE — FEATURE.JS, A CLOSE WITH NO REAL-DATA CHECK WARNS  (fires on the bad input)')
+  const noObsFeature = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    { slackmaster: { results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'] }] } }, // observable OMITTED
+  )
+  ok('no throw', !noObsFeature.err, noObsFeature.err && noObsFeature.err.message)
+  ok(
+    'the dispatch BRIEF itself carries the observable discipline',
+    /BEFORE YOU RETURN `built`/.test(promptOf(noObsFeature.calls, 'slackmaster')),
+    promptOf(noObsFeature.calls, 'slackmaster').slice(0, 400),
+  )
+  ok("manifest.observable.closed is the ENGINE'S OWN count, 1", noObsFeature.out && noObsFeature.out.manifest.observable.closed === 1, noObsFeature.out && noObsFeature.out.manifest.observable)
+  ok('an OMITTED observable reads as missing:1, never a silent zero', noObsFeature.out && noObsFeature.out.manifest.observable.missing === 1, noObsFeature.out && noObsFeature.out.manifest.observable)
+  ok(
+    'MEASURED OBSERVABLE MISSING fires, naming the piece',
+    noObsFeature.out && noObsFeature.out.warnings.some((w) => /MEASURED OBSERVABLE MISSING/.test(w) && w.includes('p1')),
+    noObsFeature.out && noObsFeature.out.warnings,
+  )
+
+  section('33 · MEASURED OBSERVABLE — FEATURE.JS, A REAL CHECK STAYS SILENT  (silent on the good one)')
+  const withObsFeature = await run(
+    { mode: 'build', pieces: [GOOD_PIECE], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
+    {
+      slackmaster: {
+        results: [{ id: 'p1', verdict: 'built', filesTouched: ['a.ts'], observable: 'queried engagement_rank_log for owner_directive/manual — both codes now appear on live rows' }],
+      },
+    },
+  )
+  ok('no throw', !withObsFeature.err, withObsFeature.err && withObsFeature.err.message)
+  ok('a named real-data check reads as checked: missing 0', withObsFeature.out && withObsFeature.out.manifest.observable.missing === 0, withObsFeature.out && withObsFeature.out.manifest.observable)
+  ok(
+    'MEASURED OBSERVABLE MISSING does NOT fire on the healthy path',
+    withObsFeature.out && !withObsFeature.out.warnings.some((w) => /MEASURED OBSERVABLE MISSING/.test(w)),
+    withObsFeature.out && withObsFeature.out.warnings,
+  )
+
+  section('34 · MEASURED OBSERVABLE — BUGGER.JS, THE SAME MECHANISM, THE SAME TWO DIRECTIONS')
+  const noObsBugger = await runBugger({ issues: [BUG_ISSUE], verify: false }, { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] } })
+  ok('no throw', !noObsBugger.err, noObsBugger.err && noObsBugger.err.message)
+  ok(
+    'the dispatch BRIEF itself carries the observable discipline  (fires on the bad input)',
+    /BEFORE YOU RETURN `built`/.test(promptOf(noObsBugger.calls, 'slackmaster')),
+    promptOf(noObsBugger.calls, 'slackmaster').slice(0, 400),
+  )
+  ok("manifest.observable.closed is the ENGINE'S OWN count, 1", noObsBugger.out && noObsBugger.out.manifest.observable.closed === 1, noObsBugger.out && noObsBugger.out.manifest.observable)
+  ok('an OMITTED observable reads as missing:1, never a silent zero', noObsBugger.out && noObsBugger.out.manifest.observable.missing === 1, noObsBugger.out && noObsBugger.out.manifest.observable)
+  ok(
+    'MEASURED OBSERVABLE MISSING fires, naming the row',
+    noObsBugger.out && noObsBugger.out.warnings.some((w) => /MEASURED OBSERVABLE MISSING/.test(w) && w.includes('b1')),
+    noObsBugger.out && noObsBugger.out.warnings,
+  )
+  const withObsBugger = await runBugger(
+    { issues: [BUG_ISSUE], verify: false },
+    { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'], observable: 'grepped maelle-2026-08-06.log — the reminder no longer fires twice on 6 real occurrences' }] } },
+  )
+  ok('no throw', !withObsBugger.err, withObsBugger.err && withObsBugger.err.message)
+  ok('a named real-data check reads as checked: missing 0  (silent on the good one)', withObsBugger.out && withObsBugger.out.manifest.observable.missing === 0, withObsBugger.out && withObsBugger.out.manifest.observable)
+  ok(
+    'MEASURED OBSERVABLE MISSING does NOT fire on the healthy path',
+    withObsBugger.out && !withObsBugger.out.warnings.some((w) => /MEASURED OBSERVABLE MISSING/.test(w)),
+    withObsBugger.out && withObsBugger.out.warnings,
+  )
 }
 
 main().then(
