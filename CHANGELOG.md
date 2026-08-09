@@ -2,6 +2,19 @@
 
 ---
 
+## 4.5.2 — flagging a bug no longer costs a ticket or the full loop
+
+The owner wanted to note a bug from whatever chat he was in, without fixing it on the spot and without paying the Manager skill's full boot cost (~55k tokens, unconditional, just to write one sentence down). Two heavier designs were tried and dropped first — a new pre-ledger queue, and splitting the Manager skill into two files — in favor of reusing what already existed.
+
+### Added
+
+- **A bug flagged directly, in any chat, now records instantly and needs no GitHub issue.** One command against the existing bug ledger, no code investigation, no Manager skill boot — it surfaces and gets triaged normally on the next `/manager run`, same as a GitHub or log finding. "Build it now" stays a separate, heavier ask through the Manager — the flag path never shortcuts into one.
+- **The GitHub-backed Backlog board can be refreshed on demand** (`github-board` skill) — rebuilds the Next / Roadmap / Idea view from live issue state and republishes to its artifact link, reporting what opened, closed or changed tier since the last run.
+
+### Fixed
+
+- A ledger row with no `file:line` citation — exactly what a quick owner flag produces — used to be permanently excluded from ever being picked back up by a real run. It's now recognised as a fresh flag rather than an old unlocatable one, and enters ordinary triage instead of sitting invisible forever.
+
 ## 4.5.1 — a feature wave now finishes what it started
 
 Almost entirely framework. One ticket last week became a feature run plus **four separate bug runs**, cost $444, and 69% of that was spent *after* the wave meant to deliver it — because a feature engine that hit an unanswered question had nowhere to put it. The wave ended, the question became a report row, and the only door back in was the bug engine, which had never heard of the plan. This release closes that, and several other places where the loop knew something and could not say it.

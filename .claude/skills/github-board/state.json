@@ -1,0 +1,170 @@
+{
+  "artifactUrl": "https://claude.ai/code/artifact/e50f8212-93da-495d-b3ff-b572537785b2",
+  "snapshot": {
+    "2": {
+      "title": "Email meeting summaries to externals",
+      "type": "Feature",
+      "tier": null
+    },
+    "4": {
+      "title": "WhatsApp connector",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "5": {
+      "title": "Email connector",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "6": {
+      "title": "Inbound workflows",
+      "type": "Feature",
+      "tier": "Next"
+    },
+    "12": {
+      "title": "Support Hebrew voice",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "13": {
+      "title": "Channel digests",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "15": {
+      "title": "Birthday & anniversary manager",
+      "type": "Feature",
+      "tier": "Idea"
+    },
+    "24": {
+      "title": "Book meeting via email",
+      "type": "Feature",
+      "tier": null
+    },
+    "27": {
+      "title": "Live huddle participation",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "31": {
+      "title": "Book travel buffer on offsite meetings",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "33": {
+      "title": "Accept or decline calendar invites",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "42": {
+      "title": "Support multiple calendars",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "44": {
+      "title": "Enrich social openers with web search",
+      "type": "Improvement",
+      "tier": "Idea"
+    },
+    "45": {
+      "title": "Save if-then handling rules",
+      "type": "Improvement",
+      "tier": "Idea"
+    },
+    "52": {
+      "title": "Action log for undo support",
+      "type": "Improvement",
+      "tier": "Next"
+    },
+    "58": {
+      "title": "VIP semantics and privileges",
+      "type": "Feature",
+      "tier": "Idea"
+    },
+    "82": {
+      "title": "Handle blocked LinkedIn fetch",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "87": {
+      "title": "Microsoft Teams transport",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "88": {
+      "title": "SMS alerts for owner",
+      "type": "Feature",
+      "tier": null
+    },
+    "89": {
+      "title": "Outbound phone calls",
+      "type": "Feature",
+      "tier": null
+    },
+    "90": {
+      "title": "Ingest knowledge from Drive",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "91": {
+      "title": "Travel booking skill",
+      "type": "Feature",
+      "tier": "Idea"
+    },
+    "96": {
+      "title": "Google Places as venue discovery backend",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "108": {
+      "title": "Support cross-midnight work hours",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "110": {
+      "title": "Meeting prep skill",
+      "type": "Feature",
+      "tier": "Idea"
+    },
+    "111": {
+      "title": "Maelle learns from her work",
+      "type": "Feature",
+      "tier": "Next"
+    },
+    "123": {
+      "title": "Rank news by importance",
+      "type": "Improvement",
+      "tier": "Idea"
+    },
+    "155": {
+      "title": "Rebuild the calendar health skill",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "178": {
+      "title": "Charter management",
+      "type": "Framework",
+      "tier": "Next"
+    },
+    "182": {
+      "title": "Detect regressions in ledger lookup",
+      "type": "Framework",
+      "tier": "Roadmap"
+    },
+    "183": {
+      "title": "Colleague sees meeting attendees",
+      "type": "Improvement",
+      "tier": "Next"
+    },
+    "184": {
+      "title": "General task tracking system",
+      "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "185": {
+      "title": "Provision a phone number",
+      "type": "Feature",
+      "tier": "Roadmap"
+    }
+  }
+}

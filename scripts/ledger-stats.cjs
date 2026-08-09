@@ -1492,7 +1492,7 @@ if (openOnly) {
   // rows quietly counted as still-real.
   if (noCite.length) {
     console.log(`${noCite.length} open row(s) cite no file, so staleness cannot be checked and no backlog pass will ever re-read them. Read these by hand:`);
-    for (const r of noCite) console.log(`  ${r.ref || '(no ref)'}  ${String(r.finding || '').slice(0, 88)}`);
+    for (const r of noCite) console.log(`  ${r.ref || '(no ref)'}  source:${r.source || '(none)'}  ${String(r.finding || '').slice(0, 88)}`);
     console.log('');
   }
   // X77 · NAMED, for the same reason `cite no file` is: a count he cannot turn

@@ -520,7 +520,7 @@ const EDITOR = {
     backlogNoCite: {
       type: 'number',
       description:
-        'the count `ledger-stats --open` printed as `cite no file`. Do NOT re-read those rows and do not go hunting for their code — they need the owner, not a lane. Backlog runs only.',
+        'the count `ledger-stats --open` printed as `cite no file`, MINUS any UNTOUCHED `source:owner` row (no `recommend` yet) you pulled out and emitted into `issues` instead (see the backlog re-read brief\'s EXCEPTION). Do NOT re-read the rest and do not go hunting for their code — they need the owner, not a lane. Backlog runs only.',
     },
     backlogReread: {
       type: 'array',
@@ -591,7 +591,10 @@ const EDITOR = {
           // GitHub, and all four were real bugs nobody had reported). A merged
           // issue takes `both`; that IS the interesting case, because the
           // owner's words carry the ask and the transcript carries the proof.
-          source: { type: 'string', enum: ['github', 'logs', 'both'] },
+          // `owner` is the one no-cite backlog row the editor pulls into this list
+          // itself (see the backlog re-read brief's EXCEPTION) — everything else
+          // still arrives via the GitHub pull or the log review.
+          source: { type: 'string', enum: ['github', 'logs', 'both', 'owner'] },
           lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -1121,6 +1124,7 @@ const editor = await agent(
       ? `## The backlog re-read\n\n` +
         `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — nobody has stood behind those rows: either the code they cite **moved** after they were written, or **nobody has ever re-read them** (X59, and that second reason is the large half — 28 of 52 on 2026-07-30 against 0 that had moved). **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
+        `  • **EXCEPTION — pull an UNTOUCHED \`source:owner\` row out of that skip, first.** \`--open\`'s no-cite list now prints each row's \`source:<value>\` next to it. A row tagged \`source:owner\` **with no \`recommend\` yet** is not a stale row with nowhere to point — it is a FRESH flag he logged directly in some other chat, outside any run, on purpose (\`.claude/SESSION_STARTER.md\`'s "flag a bug directly" section), and it cites nothing only because nobody has looked yet. **Check \`recommend\` before you touch it — re-run \`node scripts/ledger-stats.cjs --open --json\` and pull the row by its \`ref\`**, which also gives you the FULL \`finding\` text the console line truncates at 88 chars. **A \`source:owner\` row that already carries a \`recommend\` is NOT this case** — it has already been triaged and parked (his own past ruling may be sitting in it, e.g. a \`defer\`) — leave it in the ordinary hand-read list untouched. Only for the untouched ones, **treat it exactly like a raw GitHub or log finding**: validate it against the code from scratch (E1), classify \`atomic\`/\`needs-shaping\` as usual, route it to the owning lane, and emit it into \`issues\` — \`source: 'owner'\`, and its own ledger \`ref\` as the issue's \`id\` (never renumber it, never fold it into a ticket suffix). **Only a row you actually pulled out this way is excluded from \`backlogNoCite\`** — every other no-cite row, owner-sourced or not, keeps today's behavior exactly: not yours, count it, move on.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
         `  • **Emit NO issue for a row you RE-READ here** — it rides on its own row, not as a duplicate. **X129 · your \`recommend\` verb is now ACTED ON in this same run:** a \`build\` verb sends that row to the lane you name in \`lane\`, so write it only where you would dispatch a fresh atomic bug. Every other verb keeps the row on his desk and builds nothing.\n` +

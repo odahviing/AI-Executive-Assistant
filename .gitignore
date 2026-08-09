@@ -39,3 +39,6 @@ Thumbs.db
 # Claude Code — local-only permissions/settings
 .claude/settings.local.json
 .claude/worktrees/
+
+# github-board — generated each run, never source
+.claude/skills/github-board/backlog.html
