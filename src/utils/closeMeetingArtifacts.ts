@@ -13,7 +13,9 @@
  *   1. (v3.4.6) Close matching spine REQUESTS — pending approvals are requests
  *      now (the legacy approvals table is retired). Match order: tier-0
  *      fulfillingRequestId (skip — the resolver owns it), then
- *      outcome_external_event_id, details meeting_id, and origin_thread_ts.
+ *      outcome_external_event_id, details meeting_id, origin_thread_ts, and
+ *      (v4.5.x) subject+start for an orphaned create_meeting approval that a
+ *      direct tool call fulfilled with none of the above to go on.
  *      See step 5 for the full cascade.
  *
  *   2. Close reschedule outreach whose context_json references this meeting_id, by
@@ -52,6 +54,7 @@
 import { getDb } from '../db';
 import { resolveCalendarIssuesForMeeting } from '../db/calendarIssues';
 import type { OutreachJob } from '../db/jobs';
+import type { RequestRow } from '../core/requests/types';
 import logger from './logger';
 
 export type MeetingArtifactReason = 'created' | 'moved' | 'updated' | 'deleted';
@@ -111,6 +114,23 @@ export async function closeMeetingArtifacts(params: {
    */
   newStartIso?: string;
   newEndIso?: string;
+  /**
+   * v4.5.x — colleague-approval-orphaned-after-replay-failure-direct-book.
+   * The start time THIS booking landed on, supplied only by `reason:'created'`
+   * call sites. Its one consumer is step 5's orphaned-approval match: when an
+   * approval's automatic replay throws (resolver.ts's on_approve catch block
+   * leaves the request `awaiting_owner` for retry) and the model then books the
+   * decision with a direct tool call instead of retrying `resolve_approval`,
+   * that call carries no `_fulfilling_request_id` — and a brand-new event has
+   * no pre-existing meeting_id for the id/details_json matches above to find
+   * either. Thread-match cannot help here by design: a colleague-initiated
+   * approval's `origin_thread_ts` is the colleague's own thread (R10), never
+   * the owner's decision thread this booking landed in. Matching on subject +
+   * exact requested start (both read off the approval's own stored
+   * `deferred_action`, never re-derived) closes the gap without touching that
+   * separation. FAIL-SAFE: absent, step 5's orphan tier is a no-op.
+   */
+  bookingStartIso?: string;
 }): Promise<CloseMeetingArtifactsResult> {
   const result: CloseMeetingArtifactsResult = {
     tasksCancelled: 0,
@@ -259,10 +279,14 @@ export async function closeMeetingArtifacts(params: {
       }
     }
 
-    // 5. (v2.7.0) Close matching requests on the spine. Two match paths:
+    // 5. (v2.7.0) Close matching requests on the spine. Match paths, in order:
     //    (a) outcome_external_event_id directly matches (coord that already
     //        booked, request preserved the Graph id).
     //    (b) details_json references the meeting id under common keys.
+    //    (c) origin_thread_ts thread-match (single-candidate guard, below).
+    //    (d) (v4.5.x) orphaned-approval subject+start match (single-candidate
+    //        guard, below) — for a brand-new event neither (a)/(b) nor (c) can
+    //        ever fire; see findOrphanedApprovalMatch's own comment.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getRequestsByExternalEventId, getOpenRequestsForOwner } = require('../db/requests') as
@@ -318,6 +342,22 @@ export async function closeMeetingArtifacts(params: {
         }
       }
 
+      // v4.5.x (colleague-approval-orphaned-after-replay-failure-direct-book) —
+      // catch an approval whose auto-replay THREW (resolver.ts leaves it
+      // `awaiting_owner` for retry) and was then executed by a direct tool call
+      // instead of a `resolve_approval` retry, so neither the id/details_json
+      // match above nor the thread-match below can ever find it: the event is
+      // brand new (no pre-existing meeting_id to match on) and, for a colleague-
+      // initiated approval, the owner's decision thread is never the colleague's
+      // own origin thread (R10) the way `bookingThreadTs` above assumes. Matches
+      // on subject + exact requested start, both read off the approval's OWN
+      // stored `deferred_action` — never re-derived. SINGLE-CANDIDATE GUARD, same
+      // discipline as the thread-match: ambiguous → log, leave open, never guess.
+      const approvalMatchId = findOrphanedApprovalMatch(
+        open.filter(r => !directMatches.some(d => d.id === r.id)),
+        { reason: params.reason, subject: params.subject, bookingStartIso: params.bookingStartIso },
+      );
+
       for (const r of open) {
         // tier-0 skip — the resolver owns this exact request's close + relay
         // (it stamped its id into the replay). Touching it here is the race we
@@ -339,6 +379,13 @@ export async function closeMeetingArtifacts(params: {
           logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
             requestId: r.id, subject: r.subject,
             bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
+          });
+        }
+        if (!matched && approvalMatchId && r.id === approvalMatchId) {
+          matched = true;
+          logger.info('closeMeetingArtifacts — orphaned-approval subject+start match fired', {
+            requestId: r.id, subject: r.subject,
+            bookingStartIso: params.bookingStartIso, meetingId: params.meetingId,
           });
         }
         if (matched) {
@@ -615,4 +662,53 @@ function payloadReferencesMeeting(payloadJson: string | null | undefined, meetin
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * v4.5.x (colleague-approval-orphaned-after-replay-failure-direct-book) — find
+ * the ONE open `create_meeting` approval this freshly-booked meeting fulfills,
+ * when nothing stamped `_fulfilling_request_id` and there was no pre-existing
+ * meeting_id or shared thread to match on (see the call site's comment for the
+ * full scenario). Reads the approval's OWN stored `deferred_action` — the exact
+ * tool + args the resolver would have replayed — never re-derives from subject
+ * text alone (that fragile tier was deleted in v3.4.6 for good reason: a
+ * renamed meeting must never false-match a stale same-subject request). The
+ * exact-start requirement is what makes subject reuse safe again: two asks
+ * that happen to share a subject essentially never share the same instant too.
+ */
+function findOrphanedApprovalMatch(
+  candidates: RequestRow[],
+  params: { reason: MeetingArtifactReason; subject?: string; bookingStartIso?: string },
+): string | null {
+  if (params.reason !== 'created' || !params.subject || !params.bookingStartIso) return null;
+  const bookingMs = new Date(params.bookingStartIso).getTime();
+  if (!Number.isFinite(bookingMs)) return null;
+  const wantSubject = params.subject.trim().toLowerCase();
+
+  const matches = candidates.filter(r => {
+    if (r.kind !== 'approval') return false;
+    if (!r.requester_slack_id) return false;
+    if (r.subject.trim().toLowerCase() !== wantSubject) return false;
+    if (!r.details_json) return false;
+    try {
+      const details = JSON.parse(r.details_json) as {
+        deferred_action?: { tool?: string; args?: { start?: string } };
+      };
+      if (details.deferred_action?.tool !== 'create_meeting') return false;
+      const askedStart = details.deferred_action.args?.start;
+      if (typeof askedStart !== 'string') return false;
+      const askedMs = new Date(askedStart).getTime();
+      return Number.isFinite(askedMs) && askedMs === bookingMs;
+    } catch (_) {
+      return false;
+    }
+  });
+
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    logger.info('closeMeetingArtifacts — multiple open approvals match this booking by subject+start, not auto-closing (ambiguous)', {
+      count: matches.length, subject: params.subject, requestIds: matches.map(m => m.id),
+    });
+  }
+  return null;
 }

@@ -1619,6 +1619,13 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // the originating request id, so the cascade skips it (resolver owns
             // its close + relay). Undefined on direct/owner-path books.
             fulfillingRequestId: args._fulfilling_request_id as string | undefined,
+            // v4.5.x (colleague-approval-orphaned-after-replay-failure-direct-book)
+            // — the requested start, so the requests-lane cascade can retroactively
+            // match this booking to an open approval whose auto-replay failed and
+            // was then executed by this direct call instead of a resolve_approval
+            // retry (no _fulfilling_request_id, no pre-existing meeting_id, and the
+            // owner's decision thread is never the colleague's origin thread).
+            bookingStartIso: args.start as string | undefined,
           });
 
           // The booked slot became real, so any tentative hold on it is

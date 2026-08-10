@@ -79,7 +79,7 @@ async function colleaguePendingCapRefusal(
   const pending = getPendingRequestCountForColleague(ownerUserId, context.userId);
   if (pending < COLLEAGUE_PENDING_CAP) return null;
 
-  // gh#colleague-pending-cap-room-leak (2026-08-10, SlackMaster hand-off) —
+  // gh#pending-cap-blocks-unrelated-questions (2026-08-10, SlackMaster hand-off) —
   // the message-receipt gate this replaced (processMessage.ts) had a
   // channel/DM privacy split: in a real channel it DM'd the colleague
   // privately ("you have pending requests with {owner}") instead of posting

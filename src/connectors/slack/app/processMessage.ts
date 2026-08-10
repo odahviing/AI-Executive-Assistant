@@ -242,7 +242,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // file; the privacy branch this block used to have — channel: DM the
       // colleague instead of posting the refusal publicly; DM/MPIM: post the
       // refusal in-thread — WAS rebuilt there, and deliberately widened
-      // (gh#colleague-pending-cap-room-leak, 2026-08-10): `colleaguePendingCapRefusal`
+      // (gh#pending-cap-blocks-unrelated-questions, 2026-08-10): `colleaguePendingCapRefusal`
       // checks `context.surface === 'room'`, which now covers MPIM as well as
       // channel (see src/tasks/skill.ts:88-91 for why), so both get the
       // private-DM treatment; for that case it sends the real explanation via

@@ -288,6 +288,32 @@ const chatCost = sum(chats, (c) => c.cost)
 const TOTAL = agentCost + chatCost
 const scope = ONE_DAY ? ONE_DAY : `${SINCE} →`
 
+// ---- --dispatches: the raw dispatch list, machine-readable ----------------
+// gh#197 · nothing could compare "what actually ran" against "what the ledger
+// recorded" — SlackMaster ran three real hand dispatches on 2026-08-10 (real
+// turns, real cost, real shipped code) and left zero ledger rows. This is
+// the read side of that check: every real dispatch (turns > 0), canonicalised
+// through the same rename map every other mode here uses, so a lane never
+// prints under two names. Checked BEFORE `--day`/the header print below —
+// this must emit nothing but the array when `--json` is passed, so a
+// consumer (scripts/check-dispatch-coverage.cjs) can pipe it straight into
+// JSON.parse without the header text corrupting it. GENERIC dispatch types
+// are excluded: they carry no charter, so no lane owns their coverage.
+if (flag('--dispatches')) {
+  const list = agents
+    .filter((a) => !GENERIC.has(a.type))
+    .map((a) => ({ type: canon(a.type), day: a.day, session: a.session, run: a.run, turns: a.turns, cost: a.cost, how: a.how }))
+  if (flag('--json')) {
+    console.log(JSON.stringify(list))
+  } else {
+    console.log(`\n${list.length} dispatch(es), ${scope}\n`)
+    for (const d of list.sort((a, b) => a.day.localeCompare(b.day)))
+      console.log(`  ${d.day}  ${pad(d.type, 14)}${pad(d.how, 7)}${lp(d.turns, 6)}${lp(usd(d.cost), 8)}`)
+    console.log(`\nPass --json for [{type, day, session, run, turns, cost, how}] directly.\n`)
+  }
+  process.exit(0)
+}
+
 console.log(`\nspend — ${agents.length} agents · ${chats.length} chat windows · ${scope}`)
 if (!TOTAL) {
   console.log(`\nNothing in range. Widen it with --since, or check --root.\n`)

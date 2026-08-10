@@ -1042,6 +1042,25 @@ const main = async () => {
   // ══════════════════════════════════════════════════════════════════════════
   section('35 · `--already-built` — DROPS what shipped, KEEPS the rest with its full shape  (fires on the bad input, silent on the good one)')
   const abTmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'already-built-')), 'ledger.jsonl')
+  // DERIVED, never literal — same discipline N/LANES already use above, for the
+  // same reason. This was hardcoded '2026-08-09' ("a real wrap DID land on
+  // 2026-08-09") and broke the moment the NEXT real wrap shipped (4.5.3,
+  // 2026-08-10): the row correctly got swept as "a wrap landed after it", and
+  // that correct behaviour read as a test failure because the fixture's own
+  // premise had gone stale, not because the mechanism under test broke.
+  const latestWrapDate = (() => {
+    try {
+      const log = execFileSync('git', ['-C', ROOT, 'log', '--format=%ad|%s', '--date=short'], { encoding: 'utf8' })
+      const dates = log
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .filter((l) => /^\d{4}-\d{2}-\d{2}\|\d+\.\d+\.\d+(?![\w.])/.test(l))
+        .map((l) => l.split('|')[0])
+      return dates[0] || '2026-08-09' // git log is newest-first; [0] is the latest wrap
+    } catch {
+      return '2026-08-09' // no git history available — best-effort fallback, matches the old literal
+    }
+  })()
   const abRows = [
     // A wrap has landed many times since 2026-04-01 (the real repo's own history
     // starts 2026-04-20) — this row carries no wrap-companion of its own, so it
@@ -1056,10 +1075,10 @@ const main = async () => {
     // this one being dropped, isolating that half of the check.
     { date: '2099-02-01', runId: 'test', lane: 'gatekeeper', ref: 'fix-explicit-wrap', finding: 'explicit wrap symptom', rootCause: 'src/fake/wrapped.ts:3', verdict: 'built', state: 'built' },
     { date: '2099-02-02', runId: 'wrap-test', lane: 'gatekeeper', ref: 'fix-explicit-wrap', verdict: 'wrapped', state: 'wrapped', note: 'shipped in test' },
-    // A real wrap DID land on 2026-08-09 (this repo's own history) — same-day is
+    // Dated on the ACTUAL latest real wrap day (derived above) — same-day is
     // NOT "after" (day-granularity, strict `>`), so this must survive. Proves the
     // check leans toward KEEPING on a same-day ambiguity, never toward dropping.
-    { date: '2026-08-09', runId: 'test', lane: 'profiler', ref: 'fix-sameday', finding: 'same-day symptom', rootCause: 'src/fake/sameday.ts:4', verdict: 'built', state: 'built' },
+    { date: latestWrapDate, runId: 'test', lane: 'profiler', ref: 'fix-sameday', finding: 'same-day symptom', rootCause: 'src/fake/sameday.ts:4', verdict: 'built', state: 'built' },
     // No `ref` at all — must be silently ignored, never crash and never appear.
     { date: '2099-03-01', runId: 'test', lane: 'handyman', finding: 'refless symptom', verdict: 'built', state: 'built' },
     // Not a `built` verdict at all — excluded regardless of any date.

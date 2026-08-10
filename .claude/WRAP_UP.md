@@ -213,9 +213,19 @@ node scripts/ledger-stats.cjs --report
 
 It exits 1 naming any release commit that neither marker stands behind, and it checks the report's own headline counts against the ledger at the same time. **A green `--report` is the acceptance test for this step — do not finish the wrap on a red one.**
 
+**gh#197 — a second check, same moment: did every builder dispatch actually leave a row?** SlackMaster was hand-dispatched three times on 2026-08-10 (real turns, real cost, real shipped code) and left zero ledger rows — the only trace of its work survived as a sentence inside a different lane's row. `node scripts/check-dispatch-coverage.cjs --since <last-wrap-date>` compares `spend.cjs`'s own record of what ran against `ledger.jsonl`'s record of what was reported, per builder lane per day, and exits 1 naming any lane-day with real turns and no row at all. **Run it before this step's commit** — a missing row found after the push is a backfill; found before, it is one line.
+
 ### 12. GitHub issues — close the resolved, COMMENT the rest
 
 Close only when all three hold: verdict is `built`, the commit exists (close *after* the push, so the sha is real), and he said wrap.
+
+**gh#196 — check the comment BEFORE it ships, not after.** gh#194's closing comment claimed *"the three live rows already corrupted by this bug were cleaned up directly"* — the fix's own ledger row said the opposite, and the false claim then got copied into the ledger's own gh-sync row too. Draft the comment body to a temp file first, then:
+
+```bash
+node scripts/check-closing-claims.cjs --issue <n> --body-file <tmp>.md --refs "<every ledger ref this comment is actually about>"
+```
+
+Pass `--refs` explicitly whenever a row's own `ref` was not tagged `gh#<n>` at filing time (it will not always be — that link then lives only in your own head while drafting) — the check cannot find a row it has no name for. It exits 1 naming any sentence that asserts something a ledger row's `note` explicitly denies; it is a heuristic (word-overlap, not a proof), so a flag is a prompt to re-read both, not an automatic rewrite. **Green, then close:**
 
 ```bash
 gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what changed>"
