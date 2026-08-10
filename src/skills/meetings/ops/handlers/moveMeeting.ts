@@ -16,6 +16,7 @@ import {
   getCalendarEvents,
   findDuplicateEvent,
   findReschedulableSibling,
+  findSameSubjectSiblings,
   type CalendarEvent,
   getFreeBusy,
   findAvailableSlots,
@@ -38,12 +39,131 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
+import { displaySubject, subjectViewerFor, viewerEmailFor, isEventPrivate } from '../../../../utils/displaySubject';
 import { createApprovalRequest } from '../../../../tasks/skill';
 import type { OpCtx } from './context';
 
 export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+
+        // elie-eli-name-confusion-noy-addition-unclear-confirmation (2026-08-09)
+        // — same-subject-collision guard for the update-by-name path. Every
+        // gate below (organizer check, requester-controls, the attendee merge
+        // itself) trusts args.meeting_id verbatim, but on a colleague's bare
+        // "add X to the meeting" reference, meeting_id was resolved by the
+        // MODEL matching whatever get_calendar returned against the subject
+        // text — no code-owned check that the match was unique. Two
+        // independent live events sharing an identical subject (created
+        // minutes apart, for different attendee sets — Maayan's brand-new
+        // "Offensive Hub Technical Q&A" vs. Elie's pre-existing meeting of the
+        // same name) are indistinguishable to it: the wrong one got Noy Shalev
+        // added, the requester-controls gate below even fired
+        // colleague_not_requester against the WRONG event, and the resulting
+        // create_approval replay still executed on it, because
+        // _deferred_action_hint just carries whatever meeting_id was already
+        // (wrongly) chosen.
+        //
+        // Mirrors findReschedulableSibling's create-path principle — match WHO,
+        // not just WHAT — but for lookup: when another live event shares the
+        // identical subject, resolve which one the ASKER actually means via the
+        // SAME per-meeting signal the requester-controls gate below already
+        // trusts (requests.requester_slack_id) plus raw attendee membership,
+        // then either silently correct meeting_id (exactly one match — the
+        // gates below then naturally pass, no approval needed) or refuse and
+        // ask instead of guessing (zero or multiple matches). Owner-path is
+        // exempt — he can see his own calendar and disambiguate himself; this
+        // is the colleague-blind-reference case only.
+        const attendeeChangeRequested =
+          (Array.isArray(args.add_attendees) && (args.add_attendees as unknown[]).length > 0)
+          || (Array.isArray(args.remove_attendees) && (args.remove_attendees as unknown[]).length > 0);
+        if (attendeeChangeRequested && context.authority !== 'owner' && typeof args.meeting_id === 'string' && typeof args.meeting_subject === 'string') {
+          try {
+            const { findMeetingOwner } = await import('../../findMeetingOwner');
+            const { getEventType } = await import('../../../../connectors/graph/calendar');
+            const chosenProbe = await getEventType(userEmail, args.meeting_id);
+            const subjectForMatch = (chosenProbe?.subject ?? (args.meeting_subject as string)).trim().toLowerCase();
+            if (chosenProbe?.startDateTime && subjectForMatch) {
+              const askerEmail = getPersonMemory(context.userId)?.email?.toLowerCase();
+              const siblings = await findSameSubjectSiblings({
+                userEmail, subject: subjectForMatch, anchorIso: chosenProbe.startDateTime, timezone,
+              });
+              const others = siblings.filter(s => {
+                if (s.id === args.meeting_id) return false;
+                const attendeeEmails = (s.attendees ?? []).map(a => (a.emailAddress?.address ?? '').toLowerCase());
+                const askerIsOn = !!askerEmail && attendeeEmails.includes(askerEmail);
+                // M12 — a private sibling a colleague isn't on is invisible to
+                // them either way; never let it surface (as a redirect target
+                // or in the ambiguous list) just because the subject collided.
+                if (isEventPrivate({ sensitivity: s.sensitivity, categories: s.categories }, context.profile) && !askerIsOn) return false;
+                return true;
+              });
+              if (others.length > 0) {
+                type Candidate = { id: string; startIso: string; startTz?: string; attendeeEmails: string[] };
+                const candidates: Candidate[] = [
+                  {
+                    id: args.meeting_id,
+                    startIso: chosenProbe.startDateTime,
+                    startTz: chosenProbe.startTimeZone,
+                    attendeeEmails: (chosenProbe.attendees ?? [])
+                      .map(a => (a?.emailAddress?.address ?? '').toLowerCase())
+                      .filter(Boolean),
+                  },
+                  ...others.map(s => ({
+                    id: s.id,
+                    startIso: s.start.dateTime,
+                    startTz: s.start.timeZone,
+                    attendeeEmails: (s.attendees ?? []).map(a => (a.emailAddress?.address ?? '').toLowerCase()),
+                  })),
+                ];
+                const askerId = context.userId;
+                const matches: Candidate[] = [];
+                for (const c of candidates) {
+                  let isMatch = !!askerEmail && c.attendeeEmails.includes(askerEmail);
+                  if (!isMatch) {
+                    try {
+                      const info = await findMeetingOwner({
+                        ownerUserId: context.profile.user.slack_user_id, ownerEmail: userEmail, eventId: c.id,
+                      });
+                      isMatch = !!info.requesterSlackId && info.requesterSlackId === askerId;
+                    } catch (err) {
+                      logger.warn('update_meeting — same-subject collision, findMeetingOwner threw for a candidate', {
+                        candidateId: c.id, err: String(err).slice(0, 160),
+                      });
+                    }
+                  }
+                  if (isMatch) matches.push(c);
+                }
+                if (matches.length === 1) {
+                  if (matches[0].id !== args.meeting_id) {
+                    logger.info('update_meeting — same-subject collision, redirected to the event the asker actually requested/attends', {
+                      askedFor: args.meeting_id, redirectedTo: matches[0].id, subject: subjectForMatch,
+                    });
+                    args.meeting_id = matches[0].id;
+                  }
+                  // else: matches[0] IS the chosen event — already correct
+                  // despite the sibling; no-op.
+                } else {
+                  const fmt = (c: Candidate): string =>
+                    DateTime.fromISO(c.startIso, { zone: c.startTz ?? timezone }).setZone(timezone).toFormat('EEE d MMM HH:mm');
+                  logger.info('update_meeting — same-subject collision, ambiguous — refusing to guess', {
+                    meetingId: args.meeting_id, subject: subjectForMatch,
+                    candidateIds: candidates.map(c => c.id), matchCount: matches.length,
+                  });
+                  return {
+                    success: false,
+                    error: 'ambiguous_meeting_subject',
+                    meeting_subject: args.meeting_subject,
+                    candidates: candidates.map(c => ({ meeting_id: c.id, when: fmt(c) })),
+                    message: `There's more than one meeting called "${args.meeting_subject}" — one on ${candidates.map(fmt).join(', another on ')}. Ask which one they mean before making the change; don't guess.`,
+                  };
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn('update_meeting — same-subject collision check threw, proceeding with given meeting_id', { err: String(err).slice(0, 160) });
+          }
+        }
+
         // v2.7.0 — ownership via findMeetingOwner, fetched ONCE and reused by
         // BOTH the attendee-only (not_organizer) guard directly below and the
         // requester-controls gate further down. gh#154-W1 bounce (2026-08-06): the

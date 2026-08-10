@@ -137,6 +137,15 @@ export function processCalendarEvents(
    * unclear caller → return less.
    */
   viewer: SubjectViewer = 'other',
+  // colleague-subject-permissive-half-not-built — the attendee-aware half of
+  // M12's mask (utils/displaySubject.ts's opt-in `viewerEmail` test, v4.4.9
+  // #154). Threaded through by callers that can be READ on a room/shared
+  // surface without being pre-scoped to one colleague's own meetings (see
+  // handleAnalyzeCalendar). Omitted → today's privacy-flag-only behaviour,
+  // unchanged for every existing caller (get_calendar's colleague branch
+  // pre-scopes the event list instead; the owner-only DM/brief callers pass
+  // viewer:'owner' and never reach this test at all).
+  viewerEmail?: string | null,
 ): ProcessedEvent[] {
   const result: ProcessedEvent[] = [];
 
@@ -181,10 +190,16 @@ export function processCalendarEvents(
     // classifier flows (autoCategorize / detectCategory) read those directly
     // and stay unaffected.
     const sensitivity = ev.sensitivity ?? 'normal';
+    // colleague-subject-permissive-half-not-built — the o#230 comment below
+    // (attendeeNames) already states the ruling: "only the subject needs the
+    // stricter test." viewerEmail (undefined for every caller that hasn't
+    // opted in) carries that test here too, same as calendarReads.ts /
+    // moveMeeting.ts / createMeeting.ts.
     const subject = displaySubject(
-      { subject: ev.subject, sensitivity, categories: ev.categories },
+      { subject: ev.subject, sensitivity, categories: ev.categories, organizer: ev.organizer, attendees: ev.attendees },
       profile,
       viewer,
+      viewerEmail,
     );
 
     // o#230 — attendee-name visibility is gated on the event's OWN privacy

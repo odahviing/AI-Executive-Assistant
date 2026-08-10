@@ -66,6 +66,18 @@ export function getOutreachJobByRequestId(requestId: string): OutreachJob | null
 // Count open requests where this colleague is the requester or target — used by
 // the colleague rate-limit gate (max 2 pending requests per colleague). Reads
 // the requests spine (the lifecycle owner), independent of any side table.
+//
+// EXCLUDES subkind='freeform_owner_flag' (bouncer fix,
+// pending-cap-blocks-unrelated-questions, 2026-08-10, widened
+// gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions):
+// those rows are minted by two identical-shape backstops — tasks/skill.ts's
+// `flagUnresolvedFreeformForOwner` (an ambiguous freeform ask that can't be
+// confidently routed) and runOutputGates.ts's claim-checker relay backstop
+// (an unconfirmed "I told him" relay claim) — both durable DMs to the owner
+// that must fire regardless of the colleague's own pending count (R4: each
+// exists precisely to stop a drop, so neither can itself be the thing that
+// gets dropped). Counting either here would silently eat a genuine slot of
+// the colleague's quota for something they never asked to have tracked.
 export function getPendingRequestCountForColleague(ownerUserId: string, colleagueSlackId: string): number {
   const db = getDb();
   const count = (db.prepare(`
@@ -73,6 +85,7 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
     WHERE owner_user_id = ?
     AND state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
     AND (requester_slack_id = ? OR target_slack_id = ?)
+    AND NOT (kind = 'reminder' AND subkind IS 'freeform_owner_flag')
   `).get(ownerUserId, colleagueSlackId, colleagueSlackId) as any)?.cnt ?? 0;
   return count;
 }

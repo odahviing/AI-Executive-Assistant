@@ -155,10 +155,20 @@ const QUESTION_ONLY_CLASSES: ReadonlySet<IssueClass> = new Set<IssueClass>([
   'missing_category',
 ]);
 
+/** The axis a class lives on — one value per row, persisted in the `axis`
+ *  column (calendar-issues-schema-lacks-axis-column) and part of the table's
+ *  UNIQUE(owner_user_id, event_id, axis) constraint. Single source of truth:
+ *  the column is derived from this, never set independently, so a row's
+ *  stored axis always agrees with what this returns for its issue_class. */
+export type IssueAxis = 'conflict' | 'question';
+export function axisFor(cls: IssueClass): IssueAxis {
+  return QUESTION_ONLY_CLASSES.has(cls) ? 'question' : 'conflict';
+}
+
 /** True when two classes sit on the same axis — i.e. they may share a cluster
  *  and a row, and a terminal row of one may suppress a detection of the other. */
 function sameAxis(a: IssueClass, b: IssueClass): boolean {
-  return QUESTION_ONLY_CLASSES.has(a) === QUESTION_ONLY_CLASSES.has(b);
+  return axisFor(a) === axisFor(b);
 }
 
 /** Single detected issue, pre-clustering. The detector emits these in
@@ -205,6 +215,7 @@ export interface CalendarIssueRow {
   event_date: string;
   event_end_ms: number;
   issue_class: IssueClass;
+  axis: IssueAxis;
   status: IssueStatus;
   notes: string | null;
   request_id: string | null;
@@ -312,18 +323,15 @@ function clustersForOneAxis(
 /**
  * Upsert a cluster's row. Three paths:
  * Only rows on the cluster's own AXIS are considered (see
- * `QUESTION_ONLY_CLASSES`); a row on the other axis is left alone UNLESS it
- * occupies the same event_id and the fresh-insert path below collides with
- * it — `calendar_issues` carries UNIQUE(owner_user_id, event_id) with no
- * axis distinction, so at most one row can ever exist per event regardless
- * of class. On that collision: a SAME-axis occupant (necessarily an EXPIRED
- * terminal row — see the insert branch's own comment) is reclaimed via
- * UPDATE; an OTHER-axis occupant, or one already `approved`, is left
- * untouched and this write becomes a no-op for this pass (see the insert
- * branch's own comment for why cross-axis is never reclaimed here).
+ * `QUESTION_ONLY_CLASSES`). `calendar_issues` carries UNIQUE(owner_user_id,
+ * event_id, axis) (calendar-issues-schema-lacks-axis-column), so a row on the
+ * OTHER axis never occupies this same slot at all — the only collision the
+ * fresh-insert path below can still hit is a SAME-axis occupant, and that can
+ * only be an EXPIRED terminal row (see the insert branch's own comment),
+ * reclaimed via UPDATE (or left untouched if already `approved`).
  *   - 0 existing rows touched by cluster → INSERT new row (or, on a UNIQUE
  *       collision, reclaim an expired same-axis row via UPDATE, or no-op if
- *       the occupant is on the OTHER axis or is an explicit `approved`)
+ *       the occupant is already `approved`)
  *   - 1 row whose event_id is in cluster.events → UPDATE in place
  *       (also covers the migrate-anchor case: row.event_id may differ from
  *        cluster.anchor_event_id; we re-anchor by updating event_id, class,
@@ -381,32 +389,30 @@ export function upsertCluster(
     // Fresh insert — except `existing` above is scoped to THIS cluster's own
     // axis, and (for the terminal check) to rows still inside their window,
     // so a row can be invisible to both of those and still occupy this exact
-    // event_id in the table: either an EXPIRED terminal row on the SAME axis
+    // (event_id, axis) in the table: an EXPIRED terminal row on the SAME axis
     // (its event_end_ms already passed, so the `terminal` find above skipped
-    // it — the "owner reverted a stale auto-move" case), or a row on the
-    // OTHER axis entirely (e.g. an open `missing_category` question on this
-    // same event, or a permanent `dismissOverlapIssue` dismissal). `calendar_issues`
-    // carries UNIQUE(owner_user_id, event_id) with NO axis distinction
-    // (db/client.ts:671) — at most one row can ever exist per event,
-    // regardless of class — so a blind INSERT here throws in either case,
-    // aborting whatever loop called us (checkHealth.ts's per-cluster loop has
-    // no local catch, so one collision skipped every cluster after it,
-    // including markStaleResolved and narration). Catch it: reclaim the row
-    // via UPDATE ONLY for the SAME-axis case (legitimate anchor migration).
-    // For the OTHER-axis case, DO NOT reclaim — this write runs unconditionally
-    // every detection pass (missing_category has no suppression check), so a
-    // blind cross-axis reclaim would silently erase the other axis's row on
-    // this pass and every pass after, including a PERMANENT
-    // `DISMISSAL_NEVER_EXPIRES` dismissal — gh#180's exact harm reinstated
-    // through this door. No-op instead: the other axis's own detector/cascade
-    // owns that row, and this axis's write retries next sweep.
+    // it — the "owner reverted a stale auto-move" case). Catch it: reclaim
+    // the row via UPDATE (legitimate anchor migration).
+    //
+    // calendar-issues-schema-lacks-axis-column — UNIQUE is now
+    // (owner_user_id, event_id, axis), so a row on the OTHER axis (e.g. an
+    // open `missing_category` question sitting under a permanent overlap
+    // dismissal on the same event) no longer collides with this INSERT at
+    // all: it differs in `axis`, so both rows coexist and this branch can
+    // only ever be reached by a SAME-axis collision. Before this column
+    // existed, a blind INSERT threw for either case and the code here had to
+    // diagnose cross-axis vs same-axis and refuse to reclaim cross-axis (to
+    // avoid gh#180's harm — a permanent dismissal silently flipped back to
+    // active). That branch is gone: the schema now makes the mistake it
+    // guarded against unrepresentable, not just caught.
+    const axis = axisFor(cluster.anchor_class);
     const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     try {
       db.prepare(`
         INSERT INTO calendar_issues
           (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
-           issue_class, status, notes, request_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           issue_class, axis, status, notes, request_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
       `).run(
         id, ownerUserId,
         cluster.anchor_event_id,
@@ -414,6 +420,7 @@ export function upsertCluster(
         cluster.event_date,
         cluster.event_end_ms,
         cluster.anchor_class,
+        axis,
         initialStatus,
         cluster.detail ?? null,
       );
@@ -421,35 +428,22 @@ export function upsertCluster(
     } catch (err) {
       const msg = String(err);
       if (!(msg.includes('UNIQUE constraint failed') && msg.includes('calendar_issues'))) throw err;
+      // Scoped to this SAME axis — the constraint is (owner_user_id, event_id,
+      // axis), so the row that actually collided can only be this axis's own
+      // occupant, never the other axis's.
       const row = db.prepare(`
         SELECT id, issue_class, status, event_end_ms FROM calendar_issues
-        WHERE owner_user_id = ? AND event_id = ?
-      `).get(ownerUserId, cluster.anchor_event_id) as
+        WHERE owner_user_id = ? AND event_id = ? AND axis = ?
+      `).get(ownerUserId, cluster.anchor_event_id, axis) as
         { id: string; issue_class: IssueClass; status: IssueStatus; event_end_ms: number } | undefined;
       if (!row) throw err; // constraint fired but no row found — unexplained, surface it
       // Don't downgrade an explicit approval — same guard `dismissOverlapIssue`'s
       // own existing-row branch uses below.
       if (row.status === 'approved') return { action: 'noop', row_id: row.id };
-      if (!sameAxis(row.issue_class, cluster.anchor_class)) {
-        // The occupant holding this event_id is on the OTHER axis (see
-        // QUESTION_ONLY_CLASSES) — e.g. a permanent overlap dismissal written by
-        // `dismissOverlapIssue` (DISMISSAL_NEVER_EXPIRES) sitting under a
-        // `missing_category` detection that reruns UNCONDITIONALLY every sweep.
-        // This path runs once per cluster per detection pass, so blindly
-        // reclaiming here would erase the other axis's row on this pass and
-        // every pass after — gh#180's exact harm reinstated through this door:
-        // a permanent "don't auto-fix this again" dismissal flipped back to an
-        // active question, un-suppressing the event so the auto-move fires
-        // again. The other axis's own detector/cascade owns that row's
-        // lifecycle; leave it alone and skip this axis's write for this sweep —
-        // re-detection tries again next pass, and picks up cleanly once the
-        // other axis's row itself resolves/expires and stops occupying the slot.
-        return { action: 'noop', row_id: row.id };
-      }
-      // Same axis: this can only be an EXPIRED terminal row (a live one would
-      // already have been found — and handled — by the `existing`/`terminal`
-      // logic above, before any INSERT was attempted). Recycling it is the
-      // intended anchor-migration case (see the fresh-insert comment above);
+      // This can only be an EXPIRED terminal row (a live one would already
+      // have been found — and handled — by the `existing`/`terminal` logic
+      // above, before any INSERT was attempted). Recycling it is the intended
+      // anchor-migration case (see the fresh-insert comment above);
       // event_end_ms is still MAX'd, never blindly overwritten, so a stale
       // row can only ever be extended, never shortened, by this reclaim.
       const nextEndMs = Math.max(row.event_end_ms, cluster.event_end_ms);
@@ -479,7 +473,7 @@ export function upsertCluster(
     db.prepare(`
       UPDATE calendar_issues
       SET event_id = ?, peer_event_id = ?, event_date = ?, event_end_ms = ?,
-          issue_class = ?, notes = COALESCE(notes, ?),
+          issue_class = ?, notes = COALESCE(?, notes),
           updated_at = datetime('now')
       WHERE id = ?
     `).run(
@@ -500,7 +494,7 @@ export function upsertCluster(
   db.prepare(`
     UPDATE calendar_issues
     SET event_id = ?, peer_event_id = ?, event_date = ?, event_end_ms = ?,
-        issue_class = ?, notes = COALESCE(notes, ?),
+        issue_class = ?, notes = COALESCE(?, notes),
         updated_at = datetime('now')
     WHERE id = ?
   `).run(
@@ -739,9 +733,9 @@ export function dismissFloatingBlockGap(opts: {
   db.prepare(`
     INSERT INTO calendar_issues
       (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
-       issue_class, status, notes, request_id)
-    VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', 'dismissed', ?, NULL)
-  `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
+       issue_class, axis, status, notes, request_id)
+    VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', ?, 'dismissed', ?, NULL)
+  `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, axisFor('missing_floating_block'), opts.notes ?? null);
 }
 
 /**
@@ -829,14 +823,14 @@ export const DISMISSAL_NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
  *  any write to shorten an existing one: "if I said no, it's no" can only be
  *  reinforced by a later write, never quietly undone by a less-certain one.
  *
- *  The UNIQUE-collision reclaim path (this function's own INSERT catch, for
- *  when a `missing_category` row already occupies the event_id) carries the
- *  SAME two guards: it refuses to overwrite an `approved` occupant, and it
- *  MAX's event_end_ms rather than overwriting blind. It does NOT refuse on
- *  axis alone — reclaiming the open question here is the accepted cost of a
- *  STATED "never again" dismissal actually landing (see that catch block's
- *  own comment) — unlike `upsertCluster`'s reclaim, which runs unconditionally
- *  every sweep and must never claim a row this function just wrote. */
+ *  calendar-issues-schema-lacks-axis-column — UNIQUE(owner_user_id, event_id,
+ *  axis) means a fresh dismissal INSERT here (axis='conflict') can no longer
+ *  collide with an open `missing_category` question on the same event
+ *  (axis='question'): the two rows simply coexist. Before the axis column,
+ *  they occupied the same slot and this function's INSERT catch reclaimed
+ *  the question row outright — the accepted cost, at the time, of a STATED
+ *  "never again" dismissal actually landing. That trade is gone: both facts
+ *  are independently trackable now, so there is nothing left to reclaim. */
 export function dismissOverlapIssue(opts: {
   ownerUserId: string;
   eventId: string;
@@ -847,21 +841,19 @@ export function dismissOverlapIssue(opts: {
 }): void {
   if (!opts.ownerUserId || !opts.eventId) return;
   const db = getDb();
-  const questionClasses = Array.from(QUESTION_ONLY_CLASSES);
-  // `calendar_issues` carries UNIQUE(owner_user_id, event_id) at the table
-  // level (db/client.ts:671) — at most one row can ever exist for this
-  // owner+event pair, regardless of issue_class, so this SELECT matches 0 or
-  // 1 rows by construction. `.get()` needs no ORDER BY/LIMIT to be
-  // deterministic; there is nothing to order between. A "0 rows" result here
-  // does NOT mean no row exists for this event_id at all — the `issue_class
-  // NOT IN` clause also excludes a row that's on the OTHER (question) axis,
-  // which the UNIQUE constraint still counts against a fresh INSERT below.
-  // See that INSERT's catch block for the reclaim this makes necessary.
+  const axis = axisFor('overlap');
+  // Scoped to the conflict axis — UNIQUE(owner_user_id, event_id, axis) means
+  // this SELECT matches 0 or 1 rows by construction (this function only ever
+  // writes 'overlap', a conflict-axis class). `.get()` needs no ORDER
+  // BY/LIMIT to be deterministic; there is nothing to order between. Unlike
+  // before the axis column existed, "0 rows" here really does mean no
+  // conflict-axis row exists for this event — an open `missing_category`
+  // question on the same event lives at a different axis value and can
+  // never match, so the INSERT below cannot collide with it.
   const existing = db.prepare(`
     SELECT id, status, event_end_ms FROM calendar_issues
-    WHERE owner_user_id = ? AND event_id = ?
-      AND issue_class NOT IN (${questionClasses.map(() => '?').join(',')})
-  `).get(opts.ownerUserId, opts.eventId, ...questionClasses) as { id: string; status: string; event_end_ms: number } | undefined;
+    WHERE owner_user_id = ? AND event_id = ? AND axis = ?
+  `).get(opts.ownerUserId, opts.eventId, axis) as { id: string; status: string; event_end_ms: number } | undefined;
   if (existing) {
     if (existing.status === 'approved') return;  // don't downgrade an explicit approval
     const nextEndMs = Math.max(existing.event_end_ms, opts.eventEndMs);
@@ -884,47 +876,12 @@ export function dismissOverlapIssue(opts: {
     return;
   }
   const id = `ci_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  try {
-    db.prepare(`
-      INSERT INTO calendar_issues
-        (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
-         issue_class, status, notes, request_id)
-      VALUES (?, ?, ?, ?, ?, ?, 'overlap', 'dismissed', ?, NULL)
-    `).run(id, opts.ownerUserId, opts.eventId, opts.peerEventId ?? null, opts.eventDate, opts.eventEndMs, opts.notes ?? null);
-  } catch (err) {
-    const msg = String(err);
-    if (!(msg.includes('UNIQUE constraint failed') && msg.includes('calendar_issues'))) throw err;
-    // The `existing` lookup above is scoped OFF the question axis (this write
-    // is never about "what category is this?"), so it misses a row that
-    // DOES occupy this exact event_id on that OTHER axis — an open
-    // `missing_category` question on the same event. Same UNIQUE(owner_user_id,
-    // event_id) family as upsertCluster's insert above: no axis distinction
-    // at the table level, so at most one row per event regardless of class.
-    // Reclaim it in place rather than leave the dismissal unwritten — an
-    // unwritten dismissal is exactly what let a reverted auto-move re-fire
-    // silently on the next sweep for any event with an open category question.
-    const row = db.prepare(`
-      SELECT id, status, event_end_ms FROM calendar_issues WHERE owner_user_id = ? AND event_id = ?
-    `).get(opts.ownerUserId, opts.eventId) as { id: string; status: IssueStatus; event_end_ms: number } | undefined;
-    if (!row) throw err;
-    // Don't downgrade an explicit approval — same guard the `existing` branch
-    // above uses. The occupant reaching this catch is always the OTHER
-    // (question) axis: a same-axis row would already have matched the scoped
-    // SELECT above (issue_class NOT IN questionClasses) and taken the
-    // `existing` branch instead, never reaching this INSERT at all.
-    if (row.status === 'approved') return;
-    // Monotonic bound even across axes: never let this write shorten
-    // whatever end this row already carried, same reasoning as the
-    // `existing` branch's own Math.max above.
-    const nextEndMs = Math.max(row.event_end_ms, opts.eventEndMs);
-    db.prepare(`
-      UPDATE calendar_issues
-      SET peer_event_id = ?, event_date = ?, event_end_ms = ?,
-          issue_class = 'overlap', status = 'dismissed', notes = ?,
-          updated_at = datetime('now')
-      WHERE id = ?
-    `).run(opts.peerEventId ?? null, opts.eventDate, nextEndMs, opts.notes ?? null, row.id);
-  }
+  db.prepare(`
+    INSERT INTO calendar_issues
+      (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
+       issue_class, axis, status, notes, request_id)
+    VALUES (?, ?, ?, ?, ?, ?, 'overlap', ?, 'dismissed', ?, NULL)
+  `).run(id, opts.ownerUserId, opts.eventId, opts.peerEventId ?? null, opts.eventDate, opts.eventEndMs, axis, opts.notes ?? null);
 }
 
 /** v3.5.x — stable synthetic anchor id for a DAY/WINDOW-level issue that isn't

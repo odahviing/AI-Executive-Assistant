@@ -117,12 +117,21 @@ Example: Physical | External attendee from accept2.com coming for an in-person m
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       ...SONNET,
-      // temperature: 0 — this is a boundary-condition judgment (e.g. "5 or
-      // more people") read off a fixed attendee list; it must be
-      // deterministic run-to-run, not resampled. Local to this call only —
-      // do not hoist into the shared SONNET bundle, which other call sites
-      // rely on for default sampling.
-      temperature: 0,
+      // gh#193 — Sonnet 5 (and every model after Opus 4.6) rejects any
+      // explicit `temperature` with a 400 ("temperature is deprecated for
+      // this model"); only 1.0 (the no-op default) is accepted. The
+      // `temperature: 0` pin below was added deliberately (v4.5.1) to keep
+      // this boundary-condition judgment (e.g. "5 or more people" read off
+      // a fixed attendee list) deterministic run-to-run — that knob no
+      // longer exists on this tier, so the param is dropped rather than
+      // relaxed to 1.0 (which would silently reintroduce sampling noise
+      // while looking like it still pins something). Re-verified live
+      // against the exact 4-vs-5-attendee "Physical" boundary that
+      // motivated v4.5.1 (4 calls per side, default sampling, no
+      // temperature arg): 4/4 "Meeting" at 4 attendees, 4/4 "Physical" at
+      // 5 — determinism holds without the param on this model. If it ever
+      // regresses, the fix is a code-side re-check of the boundary, not
+      // reaching for a sampling param this tier no longer has.
       max_tokens: 120,
       messages: [{ role: 'user', content: prompt }],
     });

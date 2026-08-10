@@ -2,6 +2,50 @@
 
 ---
 
+## 4.5.3 — approval flow stops silently mis-binding, guessing, and going quiet
+
+A hand-run bug wave (the `Workflow` engine failed all night on a harness-level error, later diagnosed as a local Claude Code client config issue, not a framework bug — so this ran as direct agent dispatches instead of one script). It grew into a long approval-reliability investigation that started as "she got confused about who confirmed what" and ended up touching the anchor logic, the duplicate-detection logic, the free-text amendment path, and the honesty guard that's supposed to catch all three going wrong — plus around twenty other fixes across calendar handling, fabricated claims, and a colleague rate limit that was blocking innocent questions.
+
+### Fixed — approval & request reliability (high-impact)
+
+- A bare "yes" from the owner could bind to the wrong pending approval when more than one was open in the same daily thread — now requires the reply to be the sole outstanding candidate before trusting thread position alone. (#194)
+- A duplicate approval could get raised for a meeting that was actually the one just approved minutes earlier — now cross-checks the conflicting event against the requester's own linked meetings before minting a new ask. (#194)
+- A free-text correction to an undecided approval (e.g. "not tonight, Tuesday, 25 min instead") was silently discarded and replayed with stale, pre-correction details — now forces a fresh, re-posted ask whenever a correction actually changes anything, and no longer erases a proven collision reason on a transient read failure.
+- A colleague correcting an approval's terms could get routed as if rescheduling an already-booked meeting instead of amending the pending ask — now blocks that path and redirects to the correct one.
+- An honest "I couldn't do that" confession could still overpromise a follow-up that never happened ("I'm handling it now") — the confession now self-checks before it ships, and a genuine promise to relay something to the owner is backed by a real, tracked reminder instead of just words. (#194)
+- A colleague's ambiguous identity/clarification question that got refused by the calendar-ambiguity guard had no durable path back to the owner if the model didn't self-correct in the same turn — now opens a tracked reminder that guarantees delivery.
+- The "max 2 pending requests" rate limit was blocking a capped colleague from asking anything at all, not just from opening a third tracked item — enforcement moved from message-receipt to the point a request actually gets created, so ordinary questions go through normally, and the refusal detail is now sent privately rather than narrated in a shared room.
+
+### Fixed — calendar & scheduling
+
+- `detectCategory`'s classifier call failed on every turn (a deprecated model parameter) — category detection is back online. (#193)
+- A calendar-health issue's stored description froze after its first write and never updated on re-detection, while its timestamp kept advancing as if freshly checked — a stale number could resurface in later conversation context looking current.
+- Three other stale-read paths in the calendar-health sweep (an OOF-issue revalidation, a floating-block rebalance, a dense-packing defrag) now read live data instead of a cross-turn cache.
+- The counter-offer for a dead-gap meeting request only ever proposed an earlier slot, never a later one, even when later packed tighter against the day. (#188)
+- An owner booking directly from a room (not a DM) silently lost the attendee-work-hours check that every other booking path gets.
+- Two colleagues' meetings sharing an identical subject could get confused on an update-by-name request, landing changes on the wrong event.
+- A model-invented, malformed meeting id sent `delete_meeting` through five doomed API calls before failing with a raw stack trace, instead of a clean refusal.
+- A non-attendee colleague running a calendar analysis in a shared room could see the raw subject line of the owner's other, unrelated meetings.
+
+### Fixed — honesty & fabrication
+
+- A colleague DM asking about a person with an owner-only file got a confidently fabricated "no history with her" instead of a refusal — now correctly declines, matching existing room behavior, without breaking the case where the colleague asks about themselves.
+- A social "coda" could ride along in the same message as a booking confirmation or an approval-outcome relay — now suppressed on any turn that actually reports an executed action or an in-thread pending decision, not just an approval relay. (#179)
+- An ignored social topic kept resurfacing with no memory it had already gone nowhere.
+
+### Fixed — small
+
+- Research replies could cite more sources than were actually read; citations now match what was genuinely extracted. (#192)
+- Meeting-summary knowledge-base grounding only looked at a transcript's opening lines, missing topics raised later. (#190)
+- Taught summary style preferences were never checked for near-duplicates before saving, letting conflicting rules pile up. (#189)
+- A doc file described a scheduling tier's ordering backwards from the code.
+- A tool description still described a scheduling counter-offer as always-earlier after the fix above made it bidirectional.
+- Several stale code comments pointed at the wrong line for a security clamp, after the referenced code had moved.
+
+### Migration
+
+- `calendar_issues` gained an `axis` column, closing a class of cross-axis collision handling that existed only because two independent issue types were forced to share one row per event.
+
 ## 4.5.2 — flagging a bug no longer costs a ticket or the full loop
 
 The owner wanted to note a bug from whatever chat he was in, without fixing it on the spot and without paying the Manager skill's full boot cost (~55k tokens, unconditional, just to write one sentence down). Two heavier designs were tried and dropped first — a new pre-ledger queue, and splitting the Manager skill into two files — in favor of reusing what already existed.

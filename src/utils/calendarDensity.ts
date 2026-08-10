@@ -146,15 +146,41 @@ export function alignUpQuarter(ms: number, timezone: string): number {
 }
 
 /**
- * #133 counter-offer core. When a requested slot creates a dead gap, find the
- * EARLIER connective start — the aligned start that packs the meeting back-to-
- * back (≤ buffer) with the nearest earlier commitment. Owner direction: earlier
- * is always better (and for cross-TZ, the earliest slot inside the overlap is
- * the precious one). Returns the candidate start (ms) or null when the requested
- * slot is already efficient, there's nothing earlier to abut, the grid can't make
- * it connective, or the earlier start isn't strictly better. The CALLER must
- * still validate the candidate against the owner's rules (checkSlot) before
- * offering it — this stays pure.
+ * Round a millis timestamp DOWN to the previous :00/:15/:30/:45 quarter-hour
+ * in the given timezone. Mirror of alignUpQuarter — moved here alongside it
+ * (#188) so earlierConnectiveStart's later-side search doesn't need to reach
+ * into floatingBlocks.ts (which itself imports FROM this module — that would
+ * be circular). Re-exported by floatingBlocks.ts, which used to keep its own
+ * copy, for existing callers.
+ */
+export function alignDownQuarter(ms: number, timezone: string): number {
+  const dt = DateTime.fromMillis(ms).setZone(timezone);
+  const minute = dt.minute;
+  const remainder = minute % 15;
+  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
+  return dt
+    .minus({ minutes: remainder })
+    .set({ second: 0, millisecond: 0 })
+    .toMillis();
+}
+
+/**
+ * #133 / #188 counter-offer core. When a requested slot creates a dead gap,
+ * find a connective start — an aligned start that packs the meeting back-to-
+ * back (≤ buffer) with a neighbouring commitment. Searches BOTH sides
+ * (mirrors findConsolidatingSlotForBlock, #133b): an EARLIER start that abuts
+ * the nearest prior commitment's end, and a LATER start that abuts the
+ * nearest next commitment's start — same scoring/rejection on each side
+ * (scoreSlotDensity; reject if the candidate itself creates a dead gap, or
+ * isn't strictly better than the requested slot's score). When both sides
+ * produce a strictly-better candidate, the higher-scoring one wins; a tie
+ * favours earlier (owner direction: earlier is always better, and for
+ * cross-TZ the earliest slot inside the overlap is the precious one).
+ * Returns the candidate start (ms), or null when the requested slot is
+ * already efficient, there's nothing to abut on either side, the grid can't
+ * make either side connective, or neither candidate is strictly better. The
+ * CALLER must still validate the candidate against the owner's rules
+ * (checkSlot) before offering it — this stays pure.
  */
 export function earlierConnectiveStart(
   requestedStart: number,
@@ -166,15 +192,41 @@ export function earlierConnectiveStart(
   const reqScore = scoreSlotDensity(requestedStart, requestedEnd, commitments, cfg);
   if (!reqScore.createsDeadGap) return null;          // already efficient — never nag
   const durationMs = requestedEnd - requestedStart;
-  let leftEnd = -Infinity;                            // nearest commitment ending at/before the request
+
+  // EARLIER side — abut the nearest commitment ending at/before the request.
+  let leftEnd = -Infinity;
   for (const c of commitments) if (c.end <= requestedStart && c.end > leftEnd) leftEnd = c.end;
-  if (leftEnd === -Infinity) return null;             // nothing earlier to pack against
-  const candidate = alignUpQuarter(leftEnd, timezone);
-  if (candidate >= requestedStart) return null;        // not actually earlier
-  if ((candidate - leftEnd) / 60000 > cfg.bufferMinutes) return null;  // grid can't make it connective
-  const candScore = scoreSlotDensity(candidate, candidate + durationMs, commitments, cfg);
-  if (candScore.createsDeadGap || candScore.score <= reqScore.score) return null;  // not strictly better
-  return candidate;
+  let earlier: { start: number; score: number } | null = null;
+  if (leftEnd !== -Infinity) {
+    const cand = alignUpQuarter(leftEnd, timezone);
+    if (cand < requestedStart && (cand - leftEnd) / 60000 <= cfg.bufferMinutes) {
+      const s = scoreSlotDensity(cand, cand + durationMs, commitments, cfg);
+      if (!s.createsDeadGap && s.score > reqScore.score) earlier = { start: cand, score: s.score };
+    }
+  }
+
+  // LATER side — mirror image: abut the nearest commitment starting at/after
+  // the request's end. Align the START itself down to the nearest tick at/
+  // before (rightStart − duration) — same construction as
+  // findConsolidatingSlotForBlock's abutting candidates (floatingBlocks.ts,
+  // `alignDownQuarter(c.start - durationMs, ...)`) — so the START lands on
+  // the quarter grid even when duration isn't a multiple of 15 minutes;
+  // aligning the END and subtracting duration would not guarantee that.
+  let rightStart = Infinity;
+  for (const c of commitments) if (c.start >= requestedEnd && c.start < rightStart) rightStart = c.start;
+  let later: { start: number; score: number } | null = null;
+  if (rightStart !== Infinity) {
+    const cand = alignDownQuarter(rightStart - durationMs, timezone);
+    if (cand > requestedStart && (rightStart - (cand + durationMs)) / 60000 <= cfg.bufferMinutes) {
+      const s = scoreSlotDensity(cand, cand + durationMs, commitments, cfg);
+      if (!s.createsDeadGap && s.score > reqScore.score) later = { start: cand, score: s.score };
+    }
+  }
+
+  if (!earlier && !later) return null;
+  if (!later) return earlier!.start;
+  if (!earlier) return later.start;
+  return later.score > earlier.score ? later.start : earlier.start;  // tie → earlier
 }
 
 /** Resolve the density thresholds from a profile's meetings config. */

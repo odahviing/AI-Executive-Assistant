@@ -573,6 +573,8 @@ export interface UpdateRequestPatch {
   subject?: string;
   /** v3.1 — stamp when the colleague-requester has been told the outcome (idempotency). */
   requesterNotifiedAt?: string | null;
+  /** Recompute + rewrite ONLY when a subject correction must not stay matchable by the old subject's key (see refreshIfOpen, skill.ts). */
+  idempotencyKey?: string;
 }
 
 export function updateRequest(id: string, patch: UpdateRequestPatch): void {
@@ -604,6 +606,7 @@ export function updateRequest(id: string, patch: UpdateRequestPatch): void {
   if (patch.description !== undefined) { sets.push(`description = @description`); params.description = patch.description; }
   if (patch.subject !== undefined) { sets.push(`subject = @subject`); params.subject = patch.subject; }
   if (patch.requesterNotifiedAt !== undefined) { sets.push(`requester_notified_at = @requester_notified_at`); params.requester_notified_at = patch.requesterNotifiedAt; }
+  if (patch.idempotencyKey !== undefined) { sets.push(`idempotency_key = @idempotency_key`); params.idempotency_key = patch.idempotencyKey; }
 
   if (sets.length === 0) return;
 

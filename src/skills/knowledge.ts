@@ -115,10 +115,15 @@ async function readSection(profile: UserProfile, sectionId: string): Promise<{ c
 }
 
 /**
- * Public helper for SummarySkill: given a meeting subject + transcript opening,
+ * Public helper for SummarySkill: given a meeting subject + the full transcript,
  * ask Sonnet which sections (if any) would help ground the summary, then return
  * the concatenated content. Returns empty string when KB is empty / nothing
  * relevant / Sonnet errored. Fail-open by design.
+ *
+ * Takes the WHOLE transcript, not an opening slice (gh#190) — the topic that
+ * decides which KB sections are relevant can surface anywhere in the meeting,
+ * and the drafting call right after this one already sends the transcript
+ * unbounded, so this is no more exposed than that call.
  *
  * Lives here (not in summary.ts) so the cross-skill import is clearly one-way:
  * SummarySkill depends on KB, never the reverse.
@@ -126,7 +131,7 @@ async function readSection(profile: UserProfile, sectionId: string): Promise<{ c
 export async function selectRelevantKbForMeeting(params: {
   profile: UserProfile;
   meetingSubject: string;
-  transcriptOpening: string;
+  transcript: string;
   anthropic: import('@anthropic-ai/sdk').default;
 }): Promise<string> {
   const sections = await listSections(params.profile);
@@ -143,9 +148,9 @@ AVAILABLE SECTIONS:
 ${catalog}
 
 MEETING SUBJECT: "${params.meetingSubject}"
-TRANSCRIPT OPENING (first ~1000 chars):
+TRANSCRIPT:
 """
-${params.transcriptOpening.slice(0, 1000)}
+${params.transcript}
 """
 
 Output ONLY the JSON.`;

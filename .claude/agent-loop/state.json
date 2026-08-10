@@ -1,63 +1,70 @@
 {
   "_thisFileNote": "CURRENT STATE ONLY, and that is the rule this file lost: the keys documented in .claude/skills/manager/SKILL.md 'State you own', ONE operating note each, and the run in progress or the last one (its `note` = what went in, `_resultNote` = what came out). Everything older is HISTORY and history is ledger.jsonl, which is append-only and queryable. Reduced 2026-07-31 from 114 KB / 44 prose keys against 7 documented ones; every ruling in those 44 was verified to be a ledger row already before a byte was deleted. A `_previousRun*` key, a second note on one field, or a note about a run that has ended means it is regrowing - move it to the ledger and delete it. The wrap is where this is checked.",
-  "lastSeenIso": "2026-08-05T09:15:00+0300",
+  "lastSeenIso": "2026-08-10T07:44:00+0300",
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
   "lastWrapIso": "2026-08-09T08:49:52+03:00",
   "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C10.",
   "lastCleanSha": "aeab9630b5e9874a425511e6e70dce98034f7f58",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
-  "nextReportId": 231,
+  "nextReportId": 239,
   "_inFlightNote": "What is being worked RIGHT NOW — add on dispatch, remove on return, and check it before dispatching so one item is never sent twice. EMPTY THIS IN THE SAME TURN A RUN RETURNS: a stale entry is the STOP 1 lock and refuses the next run. It went stale for three consecutive rounds on 2026-08-06 because every return fed straight into the next dispatch instead of into this file, and the final bouncer pass is what caught it.",
   "inFlight": [],
   "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here.",
   "pendingOverflow": [
     {
-      "id": "missing-category-detection-has-no-suppression-set",
-      "lane": "matchmaker",
+      "id": "deferred-replay-uses-stale-pre-rename-snapshot",
+      "lane": "registrar",
       "severity": "medium",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "missing_category detection re-emits for every uncategorized event on every health sweep with no suppression check at all - only the narration is gated. This is why the UNIQUE-constraint reclaim tonight's fix now handles safely had to fire on every single sweep rather than once.",
-      "evidence": "src/skills/calendarHealth/handlers/checkHealth.ts:498-511 — add a suppression check matching the overlap axis's existing getSuppressedEventIds pattern; would reduce reclaim-noop churn."
+      "clarity": "unclear",
+      "source": "logs",
+      "symptom": "A deferred replay may book a renamed/attendee-updated meeting under its OLD subject — Yael complained a booked event kept the original subject after a rename.",
+      "evidence": "Found during the 2026-08-10 gh#194 log trace, not yet root-caused to a file:line. Next run should investigate the deferred-action-replay snapshot mechanism from scratch."
     },
     {
-      "id": "calendar-issues-schema-lacks-axis-column",
+      "id": "move-meeting-bare-subject-lookup-same-ambiguity-class",
       "lane": "matchmaker",
       "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "invariant": "calendar-issues-unique-pair-blocks-insert",
-      "symptom": "calendar_issues carries UNIQUE(owner_user_id, event_id) with no axis column, while the design wants two independent rows per event (problem-axis and question-axis). Every UNIQUE collision tonight's fixes catch is this schema contradiction surfacing - a careful allocation of who wins, not a fix that loses nothing.",
-      "evidence": "src/db/client.ts:671 — a schema migration adding an axis/class dimension to the unique key is the only fix that loses nothing. Low urgency, candidate for a dedicated session."
+      "symptom": "move_meeting's own bare-subject reference path is exposed to the identical same-subject-collision ambiguity class the elie-eli fix just closed on update_meeting.",
+      "evidence": "Flagged by matchmaker while building findSameSubjectSiblings for elie-eli-name-confusion-noy-addition-unclear-confirmation, 2026-08-10 — not confirmed to have actually fired yet."
     },
     {
-      "id": "colleague-dm-has-no-warm-refusal-instruction",
-      "lane": "instructor",
+      "id": "outreach-row-missing-expiry-timer",
+      "lane": "registrar",
       "severity": "medium",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "A colleague DMs Maelle about someone whose file is entirely owner-written and she answers with a confident specific negative ('no history with her') instead of saying she cannot share it — the same fabrication class the room branches were just taught to avoid, on the one surface gh#154's wave did not reach.",
-      "evidence": "src/core/orchestrator/systemPrompt.ts:502 — the warm refusal line renders only when `isMpim || isChannel`; a colleague 1:1 DM (surface colleague_dm) gets no equivalent instruction, while db/people.ts now correctly returns an empty block for exactly that case. Raised by wf_d3e9831c-b30's verify."
+      "clarity": "unclear",
+      "source": "logs",
+      "symptom": "req_1786285877993_rytmp has next_check_at/next_check_handler both NULL, unlike its sibling row — this row can never expire/close on its own (R4 violation).",
+      "evidence": "Traced 2026-08-10: db/jobs.ts's createOutreachJob bridge and outreach.ts's deadline computation look identical on current disk code, so root cause could not be pinned confidently given many concurrent uncommitted changes that same night. Needs a dedicated trace once the tree settles."
     },
     {
-      "id": "stale-clamp-line-citations-in-runoutputgates",
-      "lane": "gatekeeper",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "verify",
-      "invariant": "stale-line-citation",
-      "symptom": "A developer following a comment to find where the owner's role is clamped lands on a logger call instead — the clamp moved and the citations did not.",
-      "evidence": "src/utils/guards/runOutputGates.ts:179 cites processMessage.ts:139 for the clamp; the clamp is at processMessage.ts:122, and the isOwnerInChannel it cites as :138 is at :121. calendarReads.ts:152 carries the correct :122, which is what makes the others visibly stale. Raised by wf_d3e9831c-b30's verify."
-    },
-    {
-      "id": "meeting-chat-handoff-tier-order-inverted",
+      "id": "axisFor-not-read-for-filtering",
       "lane": "matchmaker",
       "severity": "low",
       "clarity": "clear",
-      "source": "verify",
-      "symptom": ".claude/MEETING_CHAT_HANDOFF.md:47 states the WE-soft tier is \"Strictly below the relaxed tier... and above clean\" - inverted on both halves. The code (and calendarReads.ts:211-215's own comment) has WE-soft strictly ABOVE the relaxed tier and strictly BELOW clean - the original order, restored after the same-night reorder-then-revert.",
-      "evidence": "One-line doc fix, no code change. Raised by the bouncer verifying the runTiers reorder fix; still true post-revert since the reorder itself was reverted, not the underlying tier concept the doc misdescribes."
+      "source": "audit",
+      "symptom": "The new calendar_issues axis column exists but getSuppressedEventIds and clustersForOneAxis still derive the axis from QUESTION_ONLY_CLASSES at query time instead of reading the persisted column — can't disagree today, but this is the drift setup.",
+      "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the gh#189/calendar-issues-schema-lacks-axis-column fix."
+    },
+    {
+      "id": "duplicate-quarter-hour-aligners-two-files",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "audit",
+      "symptom": "alignNearestQuarter stayed in floatingBlocks.ts while alignUpQuarter/alignDownQuarter both moved into calendarDensity.ts — one shared rule, three implementations across two files.",
+      "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the gh#188 bidirectional fix. gh#188's own reasoning applies to the third aligner too."
+    },
+    {
+      "id": "ignored-raise-decay-only-fires-picked-category",
+      "lane": "profiler",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "audit",
+      "symptom": "applyIgnoredRaiseDecay only fires for the randomly-picked category each sweep, so an ignored subject in an unpicked category still only decays at the slower weekly rate.",
+      "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the coda-topic-decay-no-negative-feedback fix. Directionally correct, just slower than intended."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",
@@ -167,28 +174,41 @@
     "less_preferred_label BOUNCER 2026-08-06: the field is populated only when over_optional is a non-empty string, and interpolates nothing from it after the final wording pass (bare 'less preferred' string, no subject, no re-derive) - no new leak class.",
     "less_preferred_label BOUNCER 2026-08-06: ops.ts's email-leg scrub (~136-147) deletes less_preferred_label in the same slot walk as over_optional, same channel==='email' gate - Slack is unaffected, the email leg gets neither field.",
     "less_preferred_label BOUNCER 2026-08-06: label attach and _over_optional_note attach share the identical hasOverOptional condition (findAvailableSlots.ts:1772, 1799, 1868) - Sonnet is never told to quote an absent field, and mustBe/usedOwnerAttendeeTagged/recovery paths are additive-only, not suppressed or duplicated.",
-    "`npx tsc --noEmit` clean across the whole working tree with the runTiers revert + less_preferred_label (all 3 wording rounds) on disk."
+    "`npx tsc --noEmit` clean across the whole working tree with the runTiers revert + less_preferred_label (all 3 wording rounds) on disk.",
+    "BOUNCER 2026-08-10 (hand-run wave): src/db/calendarIssues.ts's getSuppressedEventIds gates on status IN ('approved','dismissed','resolved'), so the new missing_category suppression pre-filter cannot suppress a not-yet-settled question.",
+    "BOUNCER 2026-08-10: src/db/migrations/v4_5_3_calendar_issues_axis.ts backs up before the destructive change, asserts row-count parity inside the transaction, is idempotent via hasColumn, and no foreign key anywhere references calendar_issues.",
+    "BOUNCER 2026-08-10: src/utils/calendarDensity.ts's bidirectional earlierConnectiveStart (gh#188) introduces no circular import — calendarDensity does not import floatingBlocks — and no overlap-producing candidate is reachable on either side given a free requested slot.",
+    "BOUNCER 2026-08-10: src/tasks/skill.ts:1483-1520's ambiguousDailyThread correctly refuses a bare ack when a second approval shares the day's thread; getAwaitingOwnerRequests is state='awaiting_owner' AND parent_request_id IS NULL.",
+    "BOUNCER 2026-08-10: src/skills/meetings/ops/handlers/calendarReads.ts:780's broadened notFound match sits on the FIRST Graph call in the delete path, so the invalid-id cascade is cut before it starts.",
+    "BOUNCER 2026-08-10: scripts/check-design-door.cjs section 35 genuinely invokes ledger-stats.cjs via execFileSync against a temp ledger and asserts field-by-field — not a mocked check.",
+    "BOUNCER 2026-08-10: src/utils/guards/runOutputGates.ts:176-193's processMessage.ts:121/122 citations (stale-clamp-line-citations fix) are correct at HEAD.",
+    "BOUNCER 2026-08-10 (retry verification): the email leg (transport:'email', set at inbound.ts:344) is the dispatch condition routing to runEmailLegGates — ctx.transport!=='email' cannot be true there, so gh#194-b's backstop is provably excluded from the email leg.",
+    "BOUNCER 2026-08-10 (retry verification): isChannel threads cleanly from handlers.ts/processMessage.ts through postOrchestratorReply into OutputGateContext at postReply.ts:472 — the backstop's !ctx.isChannel exclusion is real, not a dead field.",
+    "BOUNCER 2026-08-10 (retry verification): context.authority is a required, unclamped field on SkillContext (skills/types.ts:105) — freeform-escalation-refused-silently-drops-owner-question's context.authority!=='colleague' gate is correct in both directions (room-clamped owner skips, real colleague in DM or room still fires).",
+    "BOUNCER 2026-08-10 (retry verification): approval-amend-routes-through-reschedule-not-merge's two named exits are both real — resolving the approval drops it from getAwaitingOwnerRequests, and messaging from another thread fails the owner_dm_thread_ts/terminal_dm_msg_ts===context.threadTs test. Neither is a guess.",
+    "BOUNCER 2026-08-10 (retry verification): coda-repeats-and-merges-with-action-confirmations's turnReportedActionResult flag is set as a sibling of turnLeftWorkPending inside the success branch (index.ts:986), so a create_meeting/delete_meeting success:true reaches it — traced end to end on an actual booking-success turn, not asserted.",
+    "BOUNCER 2026-08-10 (retry verification): the owner-path hasOperationalRelay narrowing to thread-bound (buildTurnContext.ts) cannot false-match — threadTs is a required string on OrchestratorInput (index.ts:16), no null===null false positive against unset request columns."
   ],
   "_carryNote": "The last run's own counts, copied off its manifest the moment it returned. A number the engine did not emit is null — never omitted and never estimated, because absent must read as not-recorded.",
   "carry": {
-    "editorRan": null, "fromEditor": 2, "fromQueue": 0, "fromBacklog": 0,
-    "buildable": 2, "dispatched": 2, "built": 2,
-    "confirmedOtherLane": 0, "alreadyFixed": 0, "needsOwner": 0,
-    "stillBlocked": 0, "neverDispatched": 0,
-    "newlyVerbed": 0, "newlyVerbedBuild": 0, "rounds": null,
-    "onHisDesk": 1, "decisionBudget": 12, "overBudget": 0,
-    "verifyRan": true, "fixesToCheck": 2, "waveFilesNamed": 1,
-    "overturned": 0, "discoveries": 3, "ticketsTouched": 1,
-    "verifiedCleanReturned": 5, "priorCleanDropped": 0,
-    "earnedRules": 0, "invariantsTagged": 0, "invariantsOf": 2,
-    "bounced": 0, "bounceEligible": 0, "bounceRecheckRan": false,
-    "jointTraced": 0, "jointCandidates": 0
+    "editorRan": 3, "fromEditor": null, "fromQueue": null, "fromBacklog": null,
+    "buildable": 27, "dispatched": 27, "built": 27,
+    "confirmedOtherLane": 0, "alreadyFixed": 1, "needsOwner": 0,
+    "stillBlocked": 0, "neverDispatched": 2,
+    "newlyVerbed": 0, "newlyVerbedBuild": 0, "rounds": 2,
+    "onHisDesk": 6, "decisionBudget": null, "overBudget": 0,
+    "verifyRan": true, "fixesToCheck": 27, "waveFilesNamed": 34,
+    "overturned": 9, "discoveries": 8, "ticketsTouched": 27,
+    "verifiedCleanReturned": 14, "priorCleanDropped": null,
+    "earnedRules": 0, "invariantsTagged": 0, "invariantsOf": 27,
+    "bounced": 9, "bounceEligible": 27, "bounceRecheckRan": true,
+    "jointTraced": 6, "jointCandidates": 6
   },
   "lastRun": {
-    "id": "wf_eff7ca27-6b8",
+    "id": "hand-run-2026-08-10-workflow-down",
     "status": "complete",
-    "startedAt": "2026-08-06T13:40:00+03:00",
-    "note": "The sixth and last round of the gh#154 permission wave, shipped as v4.5.0. Two items, both direct owner rulings: restore the structured Profile line on a colleague's own DM ('revert -> get her the data', because after his 'its not gossip' ruling the strip closed nothing while losing communication_style on 12 of 55 people), and make the room rule-bend disclosure silent to match the escalation path it contradicted ('stay quiet, if I'm in the room, its long strange that she explains other people why I can't meet with them'). Both built, nothing overturned, no bounce needed.",
+    "startedAt": "2026-08-09T23:55:00+03:00",
+    "note": "Workflow(scriptPath:'.claude/workflows/bugger.js') failed all night on a harness-level 'script contains control characters' error, later diagnosed (architect X189) as the owner's own local Claude Code client hook/permission-handler config, external to this repo — not a bugger.js or framework defect. Run executed by hand instead: editor triage (github+backlog) -> 16 atomic tickets across 6 lanes, instructor last -> 2 dependency ping-pong rounds -> combined Opus bouncer pass (7 of 25 overturned) -> one retry per overturned item (all 6 lanes) -> one follow-up fix on a bouncer-found residual -> final bouncer re-verification (all clean) -> ledger/state persisted. Scope grew mid-run past the original 3 sources on direct owner instruction: a dedicated gh#194 approval-flow log trace, a full log-review pass since the last watermark, a live Yael/Sharon approval investigation, and owner rulings converting 3 previously-parked items (gh#188, gh#194-b, gh#194-c) into real builds — all three superseded 'do not dispatch' ledger rows explicitly, noted on each row. Final: 25 built, 6 new discoveries queued, 3 items still on the owner's desk (gh#194-b's broader guarantee question — resolved by ruling and built; a live-data cleanup on 3 stuck approval/outreach rows that the code fix does not retroactively repair; and the Israel-hours-conditional refinement to gh#188, deferred by his own choice in favor of the simpler bidirectional fix).",
     "notBuilt": []
   }
 }

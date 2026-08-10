@@ -8,6 +8,7 @@
 import { updateMeeting } from '../../../connectors/graph/calendar';
 import {
   auditLog,
+  axisFor,
   getActiveCalendarIssues,
   resolveCalendarIssuesForMeeting,
   updateCalendarIssueStatus,
@@ -147,9 +148,9 @@ export async function handleManageCalendarIssue(args: Record<string, unknown>, c
             db.prepare(`
               INSERT INTO calendar_issues
                 (id, owner_user_id, event_id, peer_event_id, event_date, event_end_ms,
-                 issue_class, status, notes, request_id)
-              VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', 'approved', ?, NULL)
-            `).run(id, ownerUserId, syntheticEventId, date, eventEndMs, notes ?? null);
+                 issue_class, axis, status, notes, request_id)
+              VALUES (?, ?, ?, NULL, ?, ?, 'missing_floating_block', ?, 'approved', ?, NULL)
+            `).run(id, ownerUserId, syntheticEventId, date, eventEndMs, axisFor('missing_floating_block'), notes ?? null);
           }
 
           auditLog({

@@ -241,15 +241,42 @@ export function directiveForProactiveSlot(params: {
   // last_touched_at).
   const RAISE_PENDING_WINDOW_MS = 72 * 60 * 60 * 1000;
   const nowMs = Date.now();
-  const subjects = allSubjects.filter(s => {
-    const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
-    if (!raisedAt) return true;  // never raised → eligible
-    const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
-    const isPending = touchedAt <= raisedAt;
-    const withinWindow = (nowMs - raisedAt) < RAISE_PENDING_WINDOW_MS;
-    // Pending + recent → defer this subject; fall back to others or raise_new.
-    return !(isPending && withinWindow);
-  });
+  // coda-repeats-and-merges-with-action-confirmations (#2) — a raise
+  // whose 72h pending window elapses with STILL no touch is confirmed
+  // ignored, not merely pending. Pre-fix, an expired window just returned the
+  // subject to the pool at its unchanged score with no memory it had been
+  // ignored — the negative-feedback signal repeated ignoring was missing
+  // ("Bodyguard" kept resurfacing, 2026-08-09). Decay it here, in the same
+  // pass that already detects the expiry, so the picker itself carries the
+  // signal instead of waiting on the much slower weekly sweep. `.map` (not
+  // `.filter`) so a decayed row's fresh score/status feeds THIS round's sort
+  // — the DB write is real, so the in-memory copy must match it.
+  const subjects = allSubjects
+    .map(s => {
+      const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
+      if (!raisedAt) return s;  // never raised → eligible, unchanged
+      const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
+      const isPending = touchedAt <= raisedAt;
+      if (!isPending) return s;  // touched since the raise → fully eligible, unchanged
+      const withinWindow = (nowMs - raisedAt) < RAISE_PENDING_WINDOW_MS;
+      // Pending + recent → defer this subject this round; fall back to others or raise_new.
+      if (withinWindow) return null;
+      // Pending + window elapsed → confirmed ignored. Decay + clear the stale
+      // marker so it re-enters the pool at its new score instead of at the
+      // unchanged one.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { applyIgnoredRaiseDecay } = require('../../db/socialSubjects') as
+          typeof import('../../db/socialSubjects');
+        return applyIgnoredRaiseDecay(s.id) ?? s;
+      } catch (err) {
+        logger.warn('applyIgnoredRaiseDecay threw — continuing with prior score', {
+          subjectId: s.id, err: String(err).slice(0, 200),
+        });
+        return s;
+      }
+    })
+    .filter((s): s is SocialSubject => s !== null && s.status === 'active');
   if (subjects.length === 0) {
     return withLegacyShape({
       mode: 'raise_new',
@@ -300,9 +327,24 @@ export function chooseSocialDirective(params: {
   classification: OwnerIntentClassification;
   /** Owner timezone — threaded through to the proactive-slot daily gate. */
   ownerTimezone?: string;
+  /**
+   * gh#179-c / coda-repeats-and-merges-with-action-confirmations — true when
+   * THIS turn will also render an approval-outcome relay (systemPrompt.ts's
+   * PENDING APPROVALS / WORK ALREADY IN FLIGHT / STATUS OF THE REQUEST IN
+   * THIS THREAD sections), computed independently of `classification` from
+   * the requests spine. That relay is real work Sonnet must deliver — Maelle
+   * was free-composing it into the SAME reply as a social directive (confirmed
+   * live: Yael, 2026-08-03 — gh#179 comment #3, "Coda was sent at the same
+   * message, prob a bug as we said coda is separate"), which is also what
+   * broke the #179-b language-match rule (systemPrompt.ts:347-354). Checked
+   * FIRST, ahead of `kind`, so it suppresses celebrate/engage too — not just
+   * the proactive slot — because the relay always outranks a social aside (P10).
+   */
+  hasOperationalRelay?: boolean;
 }): LegacySocialDirectiveShape {
-  const { classification, personSlackId, ownerTimezone } = params;
+  const { classification, personSlackId, ownerTimezone, hasOperationalRelay } = params;
 
+  if (hasOperationalRelay) return noDirective();
   if (classification.kind === 'task') return noDirective();
   if (classification.kind === 'social') return directiveForPersonSocial({ classification });
   if (classification.conversation_state === 'closing') return noDirective();

@@ -28,7 +28,7 @@ import {
 } from '../db';
 import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
-import { updateRequest, getOpenRequestsForColleague } from '../db/requests';
+import { updateRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
 import { toTimerInstant } from '../core/requests/types';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
@@ -179,6 +179,58 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
         const colleagueSlackId = idResolution.slack_id;
+
+        // gh#Yael-25min — an owner reply in the SAME thread as an approval THIS
+        // colleague raised is presumptively about deciding that approval, never
+        // a fresh outbound message to them (R3: replay the decision, never
+        // re-derive it). Pre-fix, a free-text amend to an undecided approval
+        // ("not tonight, Tuesday! 25 mins at 22:45", replying in the approval's
+        // own daily thread) got sent here as a brand-new — and wrong-context —
+        // outreach instead of resolve_approval(verdict='amend'): the approval's
+        // stored terms never updated, and the colleague received a message about
+        // an unrelated calendar event (2026-08-09, req_1786281967442_i5xm1). A
+        // deterministic block is the fix, not more prompt text — the binding
+        // rules already told Sonnet to call resolve_approval here and it didn't.
+        //
+        // approval-amend-routes-through-reschedule-not-merge (bouncer overturn,
+        // 2026-08-10) — `owner_dm_thread_ts` is the SHARED daily thread (R10 —
+        // every ask of the day nests under one root, ownerDailyThread.ts), so a
+        // genuinely unrelated "tell Yael I'll be late" typed there hits this
+        // block too, with the old error text falsely promising a retry would
+        // get through. It deterministically wouldn't: the gate is keyed on
+        // thread + colleague, neither of which retrying message_colleague (same
+        // or different wording) can change. A content-based auto-bypass was
+        // considered and rejected as UNSAFE to build tonight: approval subjects
+        // are free text the model itself writes and often name this SAME
+        // colleague as part of describing the ask ("Quick sync with Michal"),
+        // and the proven bug's own amend text ("not tonight, Tuesday! 25 mins
+        // at 22:45") names neither the colleague nor the subject — so a
+        // same-turn content check would both misfire on real unrelated
+        // messages AND silently let a real amend back through unblocked,
+        // regressing the proven bug this gate exists to prevent (W2: no
+        // autonomous code on a guess). There is no safe deterministic signal
+        // here without asking, so the honest answer is: not this tool. The
+        // message now says so plainly instead of promising a retry that can't
+        // work, and gives the one path that structurally CAN: resolve the
+        // approval first (any verdict closes or bounces it, freeing this
+        // colleague), or have the owner say it outside this thread.
+        if (context.authority === 'owner') {
+          const stuckApproval = getAwaitingOwnerRequests(userId).find(r =>
+            r.kind === 'approval'
+            && r.requester_slack_id === colleagueSlackId
+            && (r.owner_dm_thread_ts === context.threadTs || r.terminal_dm_msg_ts === context.threadTs),
+          );
+          if (stuckApproval) {
+            logger.warn('message_colleague — blocked, colleague has an open approval anchored to this thread', {
+              colleagueSlackId, requestId: stuckApproval.id, threadTs: context.threadTs,
+            });
+            return {
+              ok: false,
+              error: 'pending_approval_from_this_colleague',
+              message: `${args.colleague_name as string} has an open approval waiting on your decision in THIS thread (${stuckApproval.id}${stuckApproval.subject ? ` — "${stuckApproval.subject}"` : ''}). If this message is deciding or countering that ask, call resolve_approval(approval_id='${stuckApproval.id}', verdict=<approve|reject|amend>, ...) instead — that updates the stored terms and relays your real decision to them, whichever verdict it is. If it's genuinely unrelated: do NOT retry message_colleague here — this block is keyed on the thread and colleague, not on your wording, so a retry with the same or different text will hit the identical refusal. Either resolve this approval first (freeing this colleague for a fresh message), or tell the user the unrelated message needs to go from outside this approval's thread.`,
+            };
+          }
+        }
 
         // #149 — send_at becomes the paired request's next_check_at (db/jobs.ts →
         // runSendScheduledOutreach), and spine timers are UTC instants. The model

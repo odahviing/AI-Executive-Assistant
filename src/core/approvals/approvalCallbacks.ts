@@ -57,6 +57,15 @@ export function extractCallbacks(details: Record<string, unknown> | null | undef
   const callbacks = (details.callbacks as ApprovalCallbacks | undefined) ?? {};
 
   // Legacy alias: deferred_action == on_approve when on_approve isn't set.
+  // TRAP for a future writer (bouncer, 2026-08-10): this prefers
+  // `callbacks.on_approve` over `deferred_action` whenever BOTH are present —
+  // fine today because nothing writes `details.callbacks` on a policy_exception
+  // row (only `deferred_action`, e.g. skill.ts's refreshIfOpen). If something
+  // ever does, refreshing `deferred_action` alone (as refreshIfOpen does) stops
+  // having any effect here and the whole "replay the correction" fix goes
+  // silently inert. Not a defect now — just don't add a `callbacks` writer on
+  // this row shape without also teaching refreshIfOpen (or this function) to
+  // keep them in sync.
   if (!callbacks.on_approve) {
     const legacy = details.deferred_action as ToolCallback | undefined;
     if (legacy && typeof legacy.tool === 'string' && legacy.args && typeof legacy.args === 'object') {

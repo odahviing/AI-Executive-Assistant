@@ -469,7 +469,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     profile, result,
     history, userMessage,
     senderId, channelId, threadTs,
-    role, colleagueName, isMpim, isOwnerInGroup, mpimMemberIds,
+    role, colleagueName, isMpim, isChannel, isOwnerInGroup, mpimMemberIds,
   });
 
   // Step 3b — persist history, and NOT one line above the gate stack, where this

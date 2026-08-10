@@ -31,6 +31,7 @@ import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import { updateRequest } from '../../db/requests';
+import { calcResponseDeadline } from '../../utils/responseDeadline';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
@@ -272,16 +273,32 @@ export async function handleOutreachReply(
     assistantName: params.profile.assistant.name,
   });
 
-  // v3.1.1 — a reply of any kind kills the expiry timer for this outreach.
-  // Path 2 moved that timer off the (deleted) `outreach_expiry` TASK onto the
-  // linked request's next_check; clear it here so an actively-replying colleague
-  // is never falsely marked no_response. Closing branches also close the request
-  // (which clears next_check); this covers the 'continue' branch that keeps it open.
+  // v3.1.1 — a reply of any kind kills the CURRENT expiry timer for this
+  // outreach. Path 2 moved that timer off the (deleted) `outreach_expiry`
+  // TASK onto the linked request's next_check; clear it here so an
+  // actively-replying colleague is never falsely marked no_response.
+  // Closing branches (below) close the request outright, which is its own
+  // terminal clear.
   if (job.request_id) {
     updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
   }
 
   if (decision.action === 'continue') {
+    // outreach-row-missing-expiry-timer (2026-08-09, req_1786285877993_rytmp)
+    // — the request DOESN'T close here (CONTINUE means the colleague asked a
+    // question or gave a non-decisive reply, R5's "let me check and come back
+    // to you" case: not a decline, the ask stays open for one more re-ask).
+    // The clear above wiped its expiry unconditionally, and nothing re-armed
+    // one for this branch — the request was left in awaiting_colleague with
+    // next_check_at/handler both NULL forever, unable to ever expire or close
+    // on its own (R4). Re-arm a fresh deadline off THIS reply, same formula
+    // and window a brand-new outreach gets (calcResponseDeadline, 3 working
+    // hours) — the colleague just re-engaged, so the clock restarts from now,
+    // not from the original send.
+    if (job.request_id) {
+      const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
+      updateRequest(job.request_id, { nextCheckAt: freshDeadline, nextCheckHandler: 'outreach_expiry' });
+    }
     // v2.2.4 (bug 6) — preserve thread context. v2.1.5 added dm_message_ts +
     // dm_channel_id so follow-ups can land in the same DM thread the outreach
     // started in. The continue branch was opening a fresh DM and posting at

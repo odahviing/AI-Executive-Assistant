@@ -33,8 +33,18 @@
  *   - assistant raised a subject + person's NEXT message:
  *       · matches subject + non-negative sentiment → +1
  *       · matches subject + negative sentiment    → −1
- *       · doesn't match (pivot) → no signal (marker left alive; weekly decay ages it)
+ *       · doesn't match (pivot) → no signal this chat; see ignored-raise decay below
  *   - weekly decay: −1 to active subjects untouched 7+ days; floor 0 → dormant.
+ *   - ignored-raise decay (the picker, at pick time — `applyIgnoredRaiseDecay`):
+ *       a subject the assistant raised, that then sits past the picker's 72h
+ *       pending window with STILL no touch, is confirmed ignored — −1, and the
+ *       stale raise marker is cleared so the next raise starts its own fresh
+ *       window. Pre-fix an expired pending window just returned the subject to
+ *       the pool at its unchanged score, so a topic ignored every time it
+ *       surfaced ("Bodyguard", 2026-08-09) never lost ground and kept
+ *       resurfacing — this is the "no negative-feedback signal for a subject
+ *       with no uptake" gap; weekly decay alone was too slow to close it for
+ *       a subject the picker kept re-selecting inside the 7-day window.
  *
  * Caps:
  *   - 5 active subjects per (person, category) — new beyond cap evicts lowest-score.
@@ -345,6 +355,42 @@ export function clearSubjectRaisedMarker(subjectId: string): void {
         updated_at = datetime('now')
     WHERE id = ?
   `).run(subjectId);
+}
+
+/**
+ * Ignored-raise decay — the negative-feedback signal a raise that got no
+ * uptake was missing (2026-08-09, "Bodyguard" kept resurfacing). Called by
+ * the picker (`directiveForProactiveSlot` in stateMachine.ts) the moment it
+ * finds a subject whose 72h raise-pending window has elapsed with STILL no
+ * touch: that raise is confirmed ignored, not merely pending. −1 (same
+ * magnitude as weekly decay, for consistency), floor 0 → dormant, and the
+ * stale marker is cleared (mirrors `clearSubjectRaisedMarker`) so the next
+ * raise starts its own fresh pending window instead of reading as still-
+ * pending forever. Deliberately does NOT touch last_touched_at/last_touched_by
+ * — the person didn't engage, so this is not a "touch" (same reasoning as
+ * `markSubjectRaised`'s doc comment above).
+ */
+export function applyIgnoredRaiseDecay(subjectId: string): SocialSubject | null {
+  const db = getDb();
+  const current = getSubjectById(subjectId);
+  if (!current) return null;
+
+  const nextScore = Math.max(SCORE_FLOOR, current.engagement_score - 1);
+  const nextStatus: SubjectStatus = nextScore <= DORMANT_THRESHOLD ? 'dormant' : 'active';
+
+  db.prepare(`
+    UPDATE social_subjects
+    SET engagement_score = @score,
+        status = @status,
+        last_assistant_initiated_at = NULL,
+        updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ id: subjectId, score: nextScore, status: nextStatus });
+
+  logger.info('Social subject decayed — raised with no uptake', {
+    subjectId, label: current.label, from: current.engagement_score, to: nextScore, status: nextStatus,
+  });
+  return getSubjectById(subjectId);
 }
 
 // ── Topic-beat helpers ───────────────────────────────────────────────────────

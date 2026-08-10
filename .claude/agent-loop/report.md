@@ -1,5 +1,5 @@
 # Agent-loop report
 
-**Empty — v4.5.2 wrapped. 0 rows await you.** Standing backlog: **11 open rows** across 11 bugs · 1 still-real · 8 need a re-read · 2 cite no file · **11 rulable · 0 waiting on a verb** (`node scripts/ledger-stats.cjs --open`).
+**Empty — v4.5.3 wrapped. 0 rows await you.** Standing backlog: **9 open rows** across 9 bugs · 0 still-real · 4 need a re-read · 5 cite no file · **9 rulable · 0 waiting on a verb** (`node scripts/ledger-stats.cjs --open`).
 
-**This wrap shipped no bug-loop build** — it's the Workshop chat's own session: a cheap "flag a bug from any chat" path (see CHANGELOG 4.5.2) plus another chat's `github-board` skill, both tracked in the architect ledger (X184), not here. The one standing-backlog change since the last wrap is a fresh owner-flagged row (`create-meeting-owner-path-no-attendee-availability-floor`, matchmaker, `needs-owner-decision`) — filed directly, not yet triaged by a run.
+**This wrap shipped a large hand-run bug wave** — the `Workflow` engine failed all night on a harness-level error (diagnosed as the owner's local Claude Code client config, not this repo), so the run went by hand as direct agent dispatches instead of one script. 27 bugs fixed across 6 lanes, several through 2-3 bouncer rounds. Full detail in the ledger and CHANGELOG 4.5.3. Standing backlog gained 4 rows this run (all low-severity discoveries from the wave's own verification passes, one flagged for a dedicated future session — an owner-personal-fact hallucination, confirmed real, deliberately not fixed tonight) and lost 5 (built).

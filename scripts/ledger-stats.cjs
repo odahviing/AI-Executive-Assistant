@@ -316,6 +316,105 @@ if (argv.includes('--architect')) {
   process.exit(0);
 }
 
+// ── X186/X187/X188 · `--already-built` — the SCOPED alreadyBuilt query ──────
+// SKILL.md used to tell the calling chat to hand-derive `alreadyBuilt` from the
+// WHOLE ledger — every `verdict:built` row ever written, 396 of them, ~125KB as
+// JSON — and pass it as a literal `Workflow()` argument. That is tens of
+// thousands of output tokens the calling chat had to hold in its own context
+// and re-emit in one tool call, and it is what stalled `/manager run` twice on
+// 2026-08-09 (X186). A live attempt to cheapen this the same night trimmed
+// every entry to `{ref, invariant, state}`, silently disabling editor.md E12's
+// tiers 2 and 3 (rootCause / same-symptom-different-words matching) — X188.
+// Both constraints have to hold at once: SMALLER, and no field dropped from
+// what it does include.
+//
+// The real risk window (X186's own diagnosis): a bug only needs deduping while
+// production can still be emitting its OLD symptom — i.e. while the fix is
+// `verdict:built` and has not yet shipped. Collapse the ledger to the LATEST
+// row per `ref` (append-only, later fields win — same rule `--open` uses,
+// simplified to an exact-ref match rather than `--open`'s token-aware
+// collapse; a `built` verdict later closed under a COMBINED ref would not be
+// caught here and would simply stay in the list, which is the safe direction),
+// then drop a candidate the moment EITHER of two independent facts says it has
+// shipped:
+//   1. its OWN latest state is `wrapped` (an explicit `--wrap-companion` row
+//      exists for it), or
+//   2. ANY wrap has landed since — "agents NEVER commit, only the owner wraps"
+//      (SKILL.md, and the Manager's own charter) means a wrap commits the
+//      WHOLE working tree in one shot, so a `built` row dated before a later
+//      version-bump commit was necessarily swept into it, whether or not that
+//      specific wrap remembered to also run `--wrap-companion` for it (that
+//      mechanism is new; almost all history predates it — measured: fact 2
+//      alone collapses 216 not-explicitly-wrapped candidates to 1 real
+//      still-open row against this repo's actual history).
+//
+// SAFE BY CONSTRUCTION: this can only ever SHRINK the naive "every
+// verdict:built row" set — it never invents an entry, so a wrong exclusion
+// costs one wasted re-dispatch that comes back `already-fixed` — the accepted
+// cost gh#195 itself names — never a real bug silently swallowed. Two rows
+// dated the SAME DAY as a wrap are leant TOWARD KEEPING (`>` is strict), since
+// day-level dates cannot order same-day events. When git is unavailable, fact
+// 2 is skipped entirely rather than guessed at (same rule `--open` follows for
+// its own git-backed checks) and only fact 1 applies.
+if (argv.includes('--already-built')) {
+  const ledgerPath = argOf('--ledger') || LEDGER;
+  if (!fs.existsSync(ledgerPath)) {
+    console.error(`No ledger at ${ledgerPath}`);
+    process.exit(1);
+  }
+  const all = fs
+    .readFileSync(ledgerPath, 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const rawBuilt = all.filter((r) => r.verdict === 'built').length;
+  const latest = new Map();
+  for (const r of all) {
+    if (!r.ref) continue; // unindexed rows can never collapse or be matched by ref — same limitation `--open` has
+    latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r }); // ledger is chronological, so later fields win
+  }
+  const candidates = [...latest.values()].filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
+
+  // Fact 2 — every date a wrap (a version-bump commit) landed, same source
+  // `--wrap` already reads (`git log`, subject starting `<major>.<minor>.<patch>`).
+  // Degrades to "no wrap dates known" on any git failure, never a guess.
+  let wrapDates = [];
+  let gitChecked = false;
+  try {
+    const log = require('child_process').execFileSync('git', ['-C', REPO, 'log', '--format=%ad|%s', '--date=short'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    wrapDates = [...new Set(log.split(/\r?\n/).filter((l) => /^\d{4}-\d{2}-\d{2}\|\d+\.\d+\.\d+/.test(l)).map((l) => l.split('|')[0]))];
+    gitChecked = true;
+  } catch {
+    /* no git history here — fact 2 contributes nothing, fact 1 still applies */
+  }
+  const sweptByWrap = (r) => wrapDates.some((d) => d > String(r.date || ''));
+  const dropped = candidates.filter(sweptByWrap);
+  const kept = candidates.filter((r) => !sweptByWrap(r));
+
+  const shape = kept.map((r) => ({ ref: r.ref, symptom: r.finding, rootCause: r.rootCause, invariant: r.invariant, state: r.state }));
+  if (jsonOut) {
+    console.log(JSON.stringify(shape));
+  } else {
+    console.log(`\nALREADY-BUILT — ${shape.length} of ${rawBuilt} raw \`built\` row(s) still need deduping this run`);
+    console.log(
+      `  (${candidates.length} without an explicit wrapped-companion row` +
+        (gitChecked ? ` · ${dropped.length} dropped because a wrap has landed since` : ' · git history NOT CHECKED, nothing dropped by it') +
+        (dropped.length ? `: ${dropped.map((r) => r.ref).join(', ')}` : '') +
+        ')',
+    );
+    for (const r of shape) console.log(`  ${r.ref}  ${String(r.symptom || '').slice(0, 96)}`);
+    console.log(`\nPass --json to get [{ref, symptom, rootCause, invariant, state}] directly for \`args.alreadyBuilt\`.\n`);
+  }
+  process.exit(0);
+}
+
 // ── X67 · WHAT SHIPPED IN VERSION X ─────────────────────────────────────────
 // The wrap summary asserts a pair of numbers — *"7 shipped, 4 verified"* — and
 // nothing could check either. They are hand-typed, and on 2026-07-31 an architect

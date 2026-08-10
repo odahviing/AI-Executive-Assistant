@@ -1201,11 +1201,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           };
         }
 
-        // #133 — efficient-calendar counter-offer (dense packing only). If the
-        // requested time leaves a short dead gap (6–29 min) after the prior
-        // meeting and an EARLIER back-to-back start is free + rule-valid, offer
-        // that instead of booking as-is — owner direction "earlier is always
-        // better". The caller insists by re-calling with keep_requested_time.
+        // #133 / #188 — efficient-calendar counter-offer (dense packing only). If
+        // the requested time leaves a short dead gap (6–29 min) on either side —
+        // after the prior meeting OR before the next one — and a back-to-back
+        // start on that side is free + rule-valid, offer that instead of booking
+        // as-is (earlierConnectiveStart searches both sides; a tie favours
+        // earlier). The caller insists by re-calling with keep_requested_time.
         // Gated on packing_preference==='dense' → byte-identical for other
         // tenants; fail-open (any throw books as requested). Skipped under
         // relaxed — an owner override / approved policy_exception replay
@@ -1227,7 +1228,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // unevidenced) now gets the dense-packing counter-offer instead of skipping
         // it. That is not new behaviour — it is exactly what the same booking gets
         // today without the flag, and the counter-offer is only produced when the
-        // earlier back-to-back start is rule-clean AND free for every attendee. The
+        // back-to-back start is rule-clean AND free for every attendee. The
         // case that MUST keep the suppression keeps it: an approved
         // policy_exception replay runs on a synthetic owner context
         // (deferredActionReplay), so `grantRelaxed` grants it and the approved time
@@ -1282,11 +1283,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     category: (args.category as string) ?? null,
                     events: dayEvents,
                   });
-                  // Attendee-aware: the earlier slot must ALSO be free for any
+                  // Attendee-aware: the candidate slot must ALSO be free for any
                   // attendees. Critical cross-TZ — an earlier IL time can fall
-                  // BEFORE a US attendee's hours (14:45 IL = 07:45 ET). checkSlot
-                  // above only covers OWNER rules; reuse the finder (attendee tz +
-                  // busy) for the candidate window and only counter if it comes back.
+                  // BEFORE a US attendee's hours (14:45 IL = 07:45 ET), and a later
+                  // one can fall AFTER them. checkSlot above only covers OWNER
+                  // rules; reuse the finder (attendee tz + busy) for the candidate
+                  // window and only counter if it comes back.
                   let attendeeClean = true;
                   const attEmails = Array.isArray(args.attendees)
                     ? (args.attendees as Array<{ email?: string }>).map(a => a?.email).filter((e): e is string => !!e)
@@ -1296,9 +1298,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     const { findAvailableSlots } = require('../../../../connectors/graph/calendar') as typeof import('../../../../connectors/graph/calendar');
                     // eslint-disable-next-line @typescript-eslint/no-require-imports
                     const { attendeeCheckParams } = require('../../../../utils/attendeeAvailability') as typeof import('../../../../utils/attendeeAvailability');
-                    // Re-check the earlier candidate against the ATTENDEES too, not just the
+                    // Re-check the candidate against the ATTENDEES too, not just the
                     // owner — attendeeCheckParams carries busy + hours/tz clip, so the cross-TZ
-                    // guard (an earlier IL time BEFORE a US attendee's hours) actually fires.
+                    // guard (an earlier IL time BEFORE, or a later one AFTER, a US
+                    // attendee's hours) actually fires.
                     const attSlots = await findAvailableSlots({
                       userEmail: context.profile.user.email,
                       timezone: tzc,
@@ -1315,16 +1318,26 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     logger.info('create_meeting — efficiency counter-offer', {
                       requested: rs.toISO(), suggested: candStartIso, subject: args.subject,
                     });
+                    // #188 — the candidate can now land on either side of the
+                    // request (earlierConnectiveStart searches both), so the
+                    // reason/note must name the side that actually moved —
+                    // a fixed "earlier" wording would be a false reason (M11)
+                    // half the time.
+                    const isLater = cand > rs.toMillis();
                     return {
                       success: false,
                       error: 'efficiency_counter',
                       counter_offer: {
                         requested_start: rs.toFormat("yyyy-MM-dd'T'HH:mm"),
                         suggested_start: DateTime.fromMillis(cand, { zone: tzc }).toFormat("yyyy-MM-dd'T'HH:mm"),
-                        reason: 'The requested time leaves a short, unfocusable gap after the prior meeting; the earlier start packs it back-to-back and keeps your free time in one block.',
+                        reason: isLater
+                          ? 'The requested time leaves a short, unfocusable gap before the next meeting; the later start packs it back-to-back and keeps your free time in one block.'
+                          : 'The requested time leaves a short, unfocusable gap after the prior meeting; the earlier start packs it back-to-back and keeps your free time in one block.',
                       },
                       _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
-                      _note: 'Dense-calendar preference. Offer suggested_start as the tighter option ("X works — but Y puts it right after your last meeting instead of a dead gap. Y?"). If they keep the original time, re-call create_meeting with keep_requested_time:true to book as requested.',
+                      _note: isLater
+                        ? 'Dense-calendar preference. Offer suggested_start as the tighter option ("X works — but Y puts it right before your next meeting instead of a dead gap. Y?"). If they keep the original time, re-call create_meeting with keep_requested_time:true to book as requested.'
+                        : 'Dense-calendar preference. Offer suggested_start as the tighter option ("X works — but Y puts it right after your last meeting instead of a dead gap. Y?"). If they keep the original time, re-call create_meeting with keep_requested_time:true to book as requested.',
                     };
                   }
                 }

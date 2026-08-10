@@ -77,7 +77,13 @@ async function revalidateActiveOOOIssues(
   const fullDayOOO = new Map<string, boolean>();
   for (const date of oofDates) {
     try {
-      const dayEvents = await getCalendarEvents(userEmail, date, date, timezone);
+      // calendar-health-free-time-stale-recalc-mismatch — this decides
+      // whether an ACTIVE issue row gets silently resolved (a real decision,
+      // not narration), so it belongs on the 'live' side of ReadFreshness's
+      // own line, same as getOwnerEventsForDecision above. The default
+      // 'cached' (≤300s TTL) let this revalidation disagree with a read taken
+      // moments earlier or later on the same window.
+      const dayEvents = await getCalendarEvents(userEmail, date, date, timezone, 'live');
       fullDayOOO.set(date, dayIsFullDayOOO(date, dayEvents, timezone));
     } catch (err) {
       logger.warn('revalidateOOO — day fetch failed, keeping its issues surfaced', {
@@ -146,6 +152,15 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         //     cleared clash is BACK, he reverted it (by hand or via
         //     revert_last_auto_move); re-moving is the exact "no memory" bug.
         const dismissedEventIds = getSuppressedEventIds(context.profile.user.slack_user_id);
+        // missing-category-detection-has-no-suppression-set — the OTHER axis
+        // (db/calendarIssues.ts QUESTION_ONLY_CLASSES), read the same way
+        // dismissedEventIds is: BEFORE the day loop, so the missing_category
+        // detector below can pre-filter like every other detector does,
+        // instead of unconditionally re-pushing an event the owner already
+        // settled (answered, or approved "leave it uncategorized") into
+        // issues[] every sweep. Reused verbatim at narration time further
+        // down (was a second, separate fetch of the identical set).
+        const settledCategoryEventIds = getSuppressedEventIds(context.profile.user.slack_user_id, 'missing_category');
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const recentlyAutoMovedIds = (require('../../../db/requests') as typeof import('../../../db/requests'))
           .getRecentlyAutoMovedEventIds(context.profile.user.slack_user_id);
@@ -497,6 +512,12 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // time, or attendees for it".
           for (const e of nonAllDay) {
             if (!e.categories || e.categories.length === 0) {
+              // missing-category-detection-has-no-suppression-set — same
+              // pre-filter shape as the overlap axis (dismissedEventIds
+              // above): a settled question never re-enters issues[], so it
+              // can't be re-classified by the active-mode fix loop or
+              // re-inserted after the owner said "leave it".
+              if (settledCategoryEventIds.has(e.id)) continue;
               const cStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
               issues.push({
                 type: 'missing_category',
@@ -1129,9 +1150,13 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             // slice via preloadedDayEvents — a 28-day sweep makes 1 Graph read, not
             // 28. Fail-safe: if the range fetch throws, dayEvents stays undefined
             // and the helper fetches that day itself (the original per-day path).
+            // calendar-health-free-time-stale-recalc-mismatch — 'live': this
+            // feeds rebalanceFloatingBlocksAfterMutation, which MUTATES the
+            // calendar (moves floating blocks) off what it reads here. The
+            // default 'cached' let an autonomous move act on a stale copy.
             let sweepEvents: CalendarEvent[] = [];
             try {
-              sweepEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone);
+              sweepEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone, 'live');
             } catch (fetchErr) {
               logger.warn('Sweep range fetch failed — helper will per-day fetch', { err: String(fetchErr).slice(0, 160) });
             }
@@ -1187,10 +1212,14 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // an external / 4+-person / protected meeting is NEVER moved (it stays,
           // sliver and all). Same validated move path as the meeting-to-meeting
           // defrag, via pullInternalMeetingToAbut.
+          // calendar-health-free-time-stale-recalc-mismatch — the comment
+          // above already promised "FRESH data"; the call itself defaulted to
+          // 'cached' (≤300s TTL) and could still miss the sweep's own moves
+          // from moments earlier. 'live' makes the code match its own claim.
           if (prefersDensePacking(profile.meetings)) {
             try {
               const densCfgFb = densityConfigFromProfile(profile.meetings);
-              const freshEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone);
+              const freshEvents = await getCalendarEvents(userEmail, startDate, endDate, timezone, 'live');
               const nowMsFb = DateTime.now().setZone(timezone).toMillis();
               const exclSubjectsFb = (profile.meetings.issue_exclusions?.subjects ?? [])
                 .map(s => s.toLowerCase()).filter(s => s.length > 0);
@@ -1432,18 +1461,19 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // the other day-shape complaints about it; a settled CATEGORY QUESTION
         // silences only itself. Sharing one set would have made every answered
         // category ask hide the event's real double-bookings from here on.
+        // settledCategoryEventIds — same set the detection pass above already
+        // loaded (missing-category-detection-has-no-suppression-set); reused
+        // here rather than re-fetched.
         let suppressedForNarration: Set<string> = new Set();
-        let settledCategoryQuestions: Set<string> = new Set();
         try {
           suppressedForNarration = getSuppressedEventIds(ownerUserId);
-          settledCategoryQuestions = getSuppressedEventIds(ownerUserId, 'missing_category');
         } catch (err) {
           logger.warn('calendar health: suppressed-id load failed — narration unfiltered', {
             err: String(err).slice(0, 120),
           });
         }
         const isAckSuppressed = (i: HealthIssue): boolean => {
-          const axis = i.type === 'missing_category' ? settledCategoryQuestions : suppressedForNarration;
+          const axis = i.type === 'missing_category' ? settledCategoryEventIds : suppressedForNarration;
           if (i.synthetic_id && axis.has(i.synthetic_id)) return true;
           for (const id of (i.eventIds ?? [])) if (axis.has(id)) return true;
           return false;

@@ -201,7 +201,7 @@ async function draftSummaryFromTranscript(params: {
     kbBlock = await selectRelevantKbForMeeting({
       profile: params.profile,
       meetingSubject: subjectHint,
-      transcriptOpening: params.transcript.slice(0, 1000),
+      transcript: params.transcript,
       anthropic,
     });
   }
@@ -428,6 +428,11 @@ function renderDraftForShare(draft: SummaryDraft, profile: UserProfile): string 
 // - Saves under category='summary' for global rules, 'summary_type_<type>'
 //   for type-specific rules (interview/one_on_one/standup/retro/weekly/
 //   quarterly). Type inferred from the current draft's subject.
+// - Dedup/merge (gh#189): the already-saved rules for both categories are
+//   listed in the same classification prompt, and the model is told to reuse
+//   an existing rule's exact key when the new feedback is a near-duplicate or
+//   a conflict, so savePreference's ON CONFLICT(user_id, key) upsert updates
+//   it in place instead of piling up a second row for the same idea.
 //
 // Never blocks the iteration flow: runs asynchronously, fails open on any
 // error (network, parse). Logs every decision at INFO level under
@@ -442,6 +447,19 @@ async function classifyAndSaveStylePreference(params: {
 }): Promise<void> {
   const { feedback, draftBefore, draftAfter, ownerUserId, anthropic } = params;
   const currentType = inferSummaryType(draftAfter.subject ?? params.draftSubjectBefore);
+
+  // gh#189 — feed the rules already saved so the same call can catch a
+  // near-duplicate or a conflict, instead of always minting a fresh rule_key
+  // (which made the ON CONFLICT(user_id, key) dedup in savePreference blind
+  // to anything but an exact key match).
+  const existingStyleRules = getPreferences(ownerUserId).filter(
+    p => p.category === 'summary' || p.category.startsWith('summary_type_'),
+  );
+  const existingRulesBlock = existingStyleRules.length > 0
+    ? existingStyleRules
+        .map(p => `- key="${p.key}" [${p.category === 'summary' ? 'global' : p.category.replace('summary_type_', '')}]: ${p.value}`)
+        .join('\n')
+    : '(none saved yet)';
 
   const prompt = `You watch owner feedback on a meeting-summary draft and decide whether that feedback is a STYLE RULE worth saving for future summaries — or just a one-off topic/content correction.
 
@@ -459,18 +477,22 @@ Action items: ${draftAfter.action_items.length}
 
 ${currentType ? `INFERRED TYPE: ${currentType}` : 'INFERRED TYPE: (general / not categorized)'}
 
+ALREADY-SAVED STYLE RULES (check for duplicates, near-duplicates or conflicts before deciding a key):
+${existingRulesBlock}
+
 DECISION RULES:
 - is_style_rule: true if the feedback is about HOW the summary is written (length, structure, voice, tone, format, sections, naming conventions). False if it's a topic/content correction ("that fact is wrong", "add this attendee", "remove the decision about X").
 - generalizes: true if applying this rule would help FUTURE summaries of similar type. False if it only makes sense for THIS specific meeting.
 - scope: 'global' if the rule should apply to every summary regardless of type. 'type-specific' if it's specific to interview / one-on-one / weekly / etc.
 - type_name: required if scope='type-specific'. Choose from: interview, one_on_one, standup, retro, weekly, quarterly. If the rule is for a type not listed, use the closest match or set scope='global'.
-- rule_key: a short snake_case identifier (2-4 words) for the rule, e.g. "paragraph_style", "owner_self_reference", "interview_sections".
-- rule_value: a single sentence describing the rule in action form. E.g. "Write paragraphs per topic rather than one-line bullets." or "In summaries written from the owner's POV, use first person — never name the owner in third person."
+- rule_key: if this feedback expresses the SAME idea as one of the ALREADY-SAVED STYLE RULES above (even worded differently), or refines/contradicts one of them, reuse that rule's EXACT key verbatim so it gets updated in place instead of duplicated. Otherwise mint a short new snake_case identifier (2-4 words, e.g. "paragraph_style", "owner_self_reference", "interview_sections") that is NOT already used above.
+- rule_value: a single sentence describing the rule in action form. If reusing an existing key, write the ONE final sentence that should replace it — merge the old and new intent, or let the new feedback supersede the old one if it contradicts it. E.g. "Write paragraphs per topic rather than one-line bullets." or "In summaries written from the owner's POV, use first person — never name the owner in third person."
 
 EXAMPLES of save:
 - Feedback "more paragraphs per topic than one-liner bullets" → is_style_rule=true, generalizes=true, scope=global
 - Feedback "don't call me [my name] in the summary, I was in the meeting" → is_style_rule=true, generalizes=true, scope=global (applies to all first-person summaries)
 - Feedback "on interview summary focus on entry/positive/negative/follow-up" → is_style_rule=true, generalizes=true, scope=type-specific, type_name=interview
+- Feedback "actually, one paragraph per topic is too much, keep it tight" when "paragraph_style" is already saved → is_style_rule=true, generalizes=true, rule_key="paragraph_style" (reused, superseding value)
 
 EXAMPLES of SKIP:
 - Feedback "Q3 goals was wrong, should be Q2" → is_style_rule=false (topic correction)
@@ -529,6 +551,7 @@ Output strict JSON only (no prose, no fences):
       ? `summary_type_${verdict.type_name}`
       : 'summary';
     const normalizedKey = verdict.rule_key.replace(/[^a-z0-9_]/gi, '_').toLowerCase();
+    const merged = existingStyleRules.some(p => p.key === normalizedKey);
 
     savePreference({
       userId: ownerUserId,
@@ -542,6 +565,7 @@ Output strict JSON only (no prose, no fences):
       ownerUserId,
       category,
       key: normalizedKey,
+      merged,
       value: verdict.rule_value,
       scope: verdict.scope,
       type_name: verdict.type_name,

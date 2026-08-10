@@ -320,26 +320,37 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
   }
 
   // READ — pull the full text of the top sources so facts come from the
-  // article, not a snippet (and definitely not memory).
+  // article, not a snippet (and definitely not memory). `sources` below is
+  // derived from `readings`, not this candidate list — a source whose
+  // extraction failed is dropped from both, so the model can never cite one
+  // it never actually read (gh#192).
+  const READ_LIMIT = 3;
   const readings: Array<{ url: string; title?: string; content: string }> = [];
-  for (const s of sources.slice(0, 3)) {
+  for (const s of sources.slice(0, READ_LIMIT)) {
     try {
       const ext = await tavilyExtract(s.url) as { content?: string };
       if (ext.content && ext.content.trim().length > 0) {
         readings.push({ url: s.url, title: s.title, content: ext.content.slice(0, 4000) });
       }
-    } catch { /* page blocked extraction — snippet still carries it */ }
+    } catch { /* page blocked extraction — dropped, not carried by a snippet */ }
   }
 
-  logger.info('research — done', { goal: goal.slice(0, 80), queries: plan.queries.length, sources: sources.length, readings: readings.length });
+  // The sources shown/cited to the model must match what was actually read —
+  // pull metadata (snippet, published date) back from the candidate list for
+  // each URL that made it into `readings`, preserving readings' order.
+  const readSources = readings
+    .map(r => sources.find(s => s.url === r.url))
+    .filter((s): s is ResearchSource => s !== undefined);
+
+  logger.info('research — done', { goal: goal.slice(0, 80), queries: plan.queries.length, sources: readSources.length, readings: readings.length });
 
   return {
     goal,
     queries_used: plan.queries,
     recency_days: recency ?? null,
-    sources: sources.slice(0, 8),
+    sources: readSources,
     readings,
-    note: sources.length === 0
+    note: readSources.length === 0
       ? 'NO web sources found. Do NOT fabricate facts — tell the owner you could not find a source and offer to try again.'
       : 'Write GROUNDED in these sources and CITE the URLs in your output. Do not assert any current-events fact not present here.',
   };

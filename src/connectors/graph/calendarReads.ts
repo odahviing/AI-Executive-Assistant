@@ -570,6 +570,39 @@ export async function findReschedulableSibling(params: {
   return matches[0];
 }
 
+/**
+ * findSameSubjectSiblings (elie-eli-name-confusion-noy-addition-unclear-
+ * confirmation, 2026-08-09) — the update-by-name disambiguation guard's
+ * finder. update_meeting's colleague path resolves `meeting_id` from
+ * whatever the model already picked off a bare subject reference ("add Noy
+ * to the meeting") with no code-owned check that the subject match was
+ * unique — two independent live events sharing an identical subject
+ * (created minutes apart, for different attendee sets) are indistinguishable
+ * to it, which is exactly how the wrong "Offensive Hub Technical Q&A" got
+ * Noy added. Sibling of findReschedulableSibling, but for LOOKUP rather than
+ * create-vs-move: returns every OTHER live event whose subject (trim +
+ * lowercase) matches, within a window around the chosen event's own start.
+ * WHO the asker actually means is cross-checked by the CALLER (per-meeting
+ * requester + attendee membership) — this only answers "does a collision
+ * exist at all," time-independent like its sibling, no NL matching.
+ */
+export async function findSameSubjectSiblings(params: {
+  userEmail: string;
+  subject: string;
+  anchorIso: string;
+  timezone: string;
+  windowDays?: number;
+}): Promise<CalendarEvent[]> {
+  const anchorDt = DateTime.fromISO(params.anchorIso, { zone: params.timezone });
+  const wantSubject = params.subject.trim().toLowerCase();
+  if (!anchorDt.isValid || !wantSubject) return [];
+  const windowDays = params.windowDays ?? 45;
+  const from = anchorDt.minus({ days: windowDays }).toFormat('yyyy-MM-dd');
+  const to = anchorDt.plus({ days: windowDays }).toFormat('yyyy-MM-dd');
+  const events = await getCalendarEvents(params.userEmail, from, to, params.timezone);
+  return events.filter(ev => !ev.isCancelled && (ev.subject ?? '').trim().toLowerCase() === wantSubject);
+}
+
 // `cleanStart` / `cleanEnd` are already the normalized full-day window (see
 // getCalendarEvents — the key and the query come from the same pair, so they can
 // never describe different windows).

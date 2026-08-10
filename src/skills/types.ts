@@ -119,6 +119,21 @@ export interface SkillContext {
    */
   messagedColleaguesOkThisTurn?: Set<string>;
   /**
+   * bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
+   * colleague slack_ids already sent the private "you have pending items"
+   * cap notice THIS turn (`colleaguePendingCapRefusal`, tasks/skill.ts). A
+   * model that tries create_approval then create_task in the same turn, or
+   * retries either after the refusal, re-runs the cap check and must NOT
+   * re-send the identical DM. Deliberately a SEPARATE set from
+   * `messagedColleaguesOkThisTurn` — that one feeds the resolver's
+   * reverse-order double-notify guard (an "outcome already relayed" signal,
+   * stamped onto `requester_notified_at`); writing this unrelated cap notice
+   * into it would make the resolver wrongly skip — and mark as delivered — a
+   * real approval-outcome relay to the same colleague later in the same turn.
+   * Orchestrator-populated by reference (same pattern), undefined elsewhere.
+   */
+  capNoticeSentThisTurn?: Set<string>;
+  /**
    * v1.9.0 — which Connection this message arrived on. Used by the router so
    * replies follow the inbound transport (Yael DMs on Slack → Maelle replies
    * on Slack). For now always 'slack' since that's the only Connection; will

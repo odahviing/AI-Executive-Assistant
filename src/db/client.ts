@@ -8,6 +8,7 @@ import { runV207ConsolidateRequests } from './migrations/v2_0_7_consolidate_requ
 import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
 import { runDedupePeopleByEmail } from './migrations/v4_0_4_dedupe_people_email';
 import { runSocialProvenanceBackfill } from './migrations/v4_4_9_social_provenance_backfill';
+import { runCalendarIssuesAxisMigration } from './migrations/v4_5_3_calendar_issues_axis';
 
 let db: Database.Database;
 
@@ -61,6 +62,16 @@ export function getDb(): Database.Database {
       runSocialProvenanceBackfill(db);
     } catch (err) {
       logger.error('v4.4.9 social-provenance backfill threw — continuing', { err: String(err) });
+    }
+    // calendar-issues-schema-lacks-axis-column — widen UNIQUE(owner_user_id,
+    // event_id) to include axis, so a conflict-axis row and a question-axis
+    // row can coexist on the same event. Rebuild (SQLite can't ALTER a
+    // UNIQUE constraint); idempotent, no-ops once calendar_issues.axis exists
+    // (including every fresh install, which gets it straight from initSchema).
+    try {
+      runCalendarIssuesAxisMigration(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v4.5.3 calendar-issues axis migration threw — continuing', { err: String(err) });
     }
     logger.info('Database initialized', { path: config.DB_PATH });
   }
@@ -649,9 +660,24 @@ function initSchema(db: Database.Database): void {
   //   work_on_day_off > oof_with_meetings > overlap > category_limit >
   //   missing_floating_block > busy_day
   //
-  // UNIQUE on (owner_user_id, event_id) — anchor event is the row's identity.
-  // Cluster membership shifts (anchor can change) so app logic merges via
-  // cluster lookup on event_id OR peer_event_id intersection.
+  // UNIQUE on (owner_user_id, event_id, axis) — anchor event + axis is the
+  // row's identity. Cluster membership shifts (anchor can change) so app
+  // logic merges via cluster lookup on event_id OR peer_event_id
+  // intersection, scoped to one axis at a time (db/calendarIssues.ts
+  // QUESTION_ONLY_CLASSES / axisFor).
+  //
+  // calendar-issues-schema-lacks-axis-column — the axis column was ADDED to
+  // the UNIQUE constraint (was just (owner_user_id, event_id)). Before this,
+  // a day-shape problem (conflict axis) and a "which category?" question
+  // (question axis) on the SAME event could never both hold a row — the
+  // second insert hit the constraint and upsertCluster had to catch it,
+  // diagnose which axis actually collided, and no-op rather than risk
+  // erasing the other axis's row (see the collision comment in
+  // upsertCluster — that whole class of risk needed the schema fix, not
+  // another catch branch). Existing DBs are migrated by
+  // db/migrations/v4_5_3_calendar_issues_axis.ts, which backfills axis from
+  // issue_class and rebuilds the table (SQLite can't ALTER a UNIQUE
+  // constraint in place).
   //
   // event_end_ms is the freshness anchor: rows with event_end_ms < now() are
   // filtered out at read time (past issues vanish naturally). Exception: a
@@ -672,12 +698,16 @@ function initSchema(db: Database.Database): void {
       issue_class     TEXT NOT NULL,          -- work_on_day_off | oof_with_meetings
                                               -- | overlap | category_limit
                                               -- | missing_floating_block | busy_day
+                                              -- | missing_category
+      axis            TEXT NOT NULL DEFAULT 'conflict',  -- 'conflict' | 'question'
+                                              -- — derived from issue_class,
+                                              -- see db/calendarIssues.ts axisFor()
       status          TEXT NOT NULL DEFAULT 'new',
       notes           TEXT,
       request_id      TEXT,                   -- FK to requests.id when in_progress
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE (owner_user_id, event_id)
+      UNIQUE (owner_user_id, event_id, axis)
     );
     CREATE INDEX IF NOT EXISTS idx_cal_issues_active
       ON calendar_issues(owner_user_id, status, event_end_ms);

@@ -1028,6 +1028,66 @@ const main = async () => {
     withObsBugger.out && !withObsBugger.out.warnings.some((w) => /MEASURED OBSERVABLE MISSING/.test(w)),
     withObsBugger.out && withObsBugger.out.warnings,
   )
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // X186/X187/X188 — `ledger-stats.cjs --already-built`, the SCOPED query that
+  // replaced hand-deriving `alreadyBuilt` from the whole ledger. Two facts have
+  // to hold at once, proven against a CONTROLLED temp ledger (never the live
+  // one) but the REAL, live git history — the same "against a copy" discipline
+  // section 9 already uses, extended to git because the mechanism's whole
+  // point is checking real wrap-commit dates: (1) a candidate is DROPPED once
+  // either its own `state` says `wrapped` or a real wrap has landed since its
+  // `date`, and (2) an entry that survives keeps its FULL shape — this is the
+  // literal X188 regression, so it is asserted field-by-field, not just by count.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('35 · `--already-built` — DROPS what shipped, KEEPS the rest with its full shape  (fires on the bad input, silent on the good one)')
+  const abTmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'already-built-')), 'ledger.jsonl')
+  const abRows = [
+    // A wrap has landed many times since 2026-04-01 (the real repo's own history
+    // starts 2026-04-20) — this row carries no wrap-companion of its own, so it
+    // proves fact 2 (swept by a LATER wrap) alone, with no help from fact 1.
+    { date: '2026-04-01', runId: 'test', lane: 'matchmaker', ref: 'fix-old-1', finding: 'old symptom one', rootCause: 'src/fake/path.ts:1', invariant: 'inv-old', verdict: 'built', state: 'built' },
+    // No wrap will land after 2099 (this assertion is safe until then). Proves
+    // the mechanism does not blindly drop everything, AND is the shape-fidelity
+    // row: ref/symptom/rootCause/invariant/state must all survive verbatim.
+    { date: '2099-01-01', runId: 'test', lane: 'matchmaker', ref: 'fix-future-1', finding: 'future symptom needing dedup', rootCause: 'src/fake/future.ts:2', invariant: 'inv-future', verdict: 'built', state: 'built' },
+    // Both rows are dated in the future, so fact 2 (a wrap since) cannot fire on
+    // EITHER — only fact 1 (the row's OWN latest state is `wrapped`) can explain
+    // this one being dropped, isolating that half of the check.
+    { date: '2099-02-01', runId: 'test', lane: 'gatekeeper', ref: 'fix-explicit-wrap', finding: 'explicit wrap symptom', rootCause: 'src/fake/wrapped.ts:3', verdict: 'built', state: 'built' },
+    { date: '2099-02-02', runId: 'wrap-test', lane: 'gatekeeper', ref: 'fix-explicit-wrap', verdict: 'wrapped', state: 'wrapped', note: 'shipped in test' },
+    // A real wrap DID land on 2026-08-09 (this repo's own history) — same-day is
+    // NOT "after" (day-granularity, strict `>`), so this must survive. Proves the
+    // check leans toward KEEPING on a same-day ambiguity, never toward dropping.
+    { date: '2026-08-09', runId: 'test', lane: 'profiler', ref: 'fix-sameday', finding: 'same-day symptom', rootCause: 'src/fake/sameday.ts:4', verdict: 'built', state: 'built' },
+    // No `ref` at all — must be silently ignored, never crash and never appear.
+    { date: '2099-03-01', runId: 'test', lane: 'handyman', finding: 'refless symptom', verdict: 'built', state: 'built' },
+    // Not a `built` verdict at all — excluded regardless of any date.
+    { date: '2099-04-01', runId: 'test', lane: 'instructor', ref: 'fix-declined', finding: 'declined symptom', verdict: 'declined', state: 'declined' },
+  ]
+  fs.writeFileSync(abTmp, abRows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  const abJson = JSON.parse(execFileSync(process.execPath, [STATS, '--already-built', '--json', '--ledger', abTmp], { encoding: 'utf8' }))
+  const abByRef = new Map(abJson.map((r) => [r.ref, r]))
+  ok('swept by a LATER wrap is dropped (fact 2 alone)', !abByRef.has('fix-old-1'), abJson.map((r) => r.ref))
+  ok('an explicit `state:wrapped` companion is dropped (fact 1 alone, both dates future)', !abByRef.has('fix-explicit-wrap'), abJson.map((r) => r.ref))
+  ok('not a `built` verdict — excluded regardless of date', !abByRef.has('fix-declined'), abJson.map((r) => r.ref))
+  ok('no throw and no crash on a ref-less row; it never appears', abJson.every((r) => r.ref), abJson)
+  ok('genuinely still open (no wrap after it) survives', abByRef.has('fix-future-1'), abJson.map((r) => r.ref))
+  ok('same-day wrap is NOT "after" — leans toward KEEPING, never dropping', abByRef.has('fix-sameday'), abJson.map((r) => r.ref))
+  const kept = abByRef.get('fix-future-1')
+  ok('  …ref survives verbatim', kept && kept.ref === 'fix-future-1', kept)
+  ok('  …symptom survives verbatim (E12 tier 3)', kept && kept.symptom === 'future symptom needing dedup', kept)
+  ok('  …rootCause survives verbatim (E12 tier 2)', kept && kept.rootCause === 'src/fake/future.ts:2', kept)
+  ok('  …invariant survives verbatim — X188 dropped exactly this field', kept && kept.invariant === 'inv-future', kept)
+  ok('  …state survives verbatim', kept && kept.state === 'built', kept)
+  ok('exactly the two genuinely-open refs reached the payload, nothing else', abJson.length === 2, abJson.map((r) => r.ref))
+  const abText = execFileSync(process.execPath, [STATS, '--already-built', '--ledger', abTmp], { encoding: 'utf8' })
+  ok('the human view reports the same count as the JSON view', new RegExp(`ALREADY-BUILT — ${abJson.length} of `).test(abText), abText.slice(0, 80))
+  // `fix-explicit-wrap` never reaches the console-named drop list — it never
+  // becomes a CANDIDATE at all (its collapsed verdict is already `wrapped`),
+  // which is the same distinction the code makes: fact 1 resolves at the
+  // ledger's own bookkeeping, fact 2 is what the printed list names by ref.
+  ok('the human view names what fact 2 dropped, not just a count', /fix-old-1/.test(abText), abText)
 }
 
 main().then(

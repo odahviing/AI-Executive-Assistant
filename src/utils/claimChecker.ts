@@ -52,6 +52,18 @@ import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
 
+/**
+ * gh#194-b-confession-overpromises-unexecuted-action (2026-08-10, bouncer
+ * overturn) — the safe fallback for `rewriteOwningTheMiss` once verdict=
+ * "rewrite" has already independently confirmed the draft is false, but the
+ * model's own proposed rewrite can't be trusted (empty/meta, or fails the
+ * noPendingActionClaim self-attestation). Never the original (a proven false
+ * claim) — a fixed, tool-less, generic line that asserts nothing about any
+ * action. See rewriteOwningTheMiss's own doc comment for why English-only is
+ * an accepted compromise on this rare-of-rare path.
+ */
+const GENERIC_HONEST_MISS = "Actually, hold on — I'm not sure that went through. Let me double check and come back to you.";
+
 export interface ClaimCheckInput {
   reply: string;
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
@@ -517,9 +529,48 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * where Sonnet "thought out loud" and its monologue (ending in "UNCHANGED")
  * went straight to the owner because the old exact-token veto didn't match it.
  *
- * Tool-less (no write tools) ⇒ it can never duplicate an action. Fails open
- * (returns null on keep, empty/suspect message, or error) → caller keeps the
- * original draft.
+ * Tool-less (no write tools) ⇒ it can never duplicate an action. Fails open to
+ * the ORIGINAL draft only while the false-claim verdict itself is still in
+ * question — verdict="keep" (STEP 1) or a thrown/errored call, both BEFORE any
+ * independent confirmation that the draft is false, so "keep original" really
+ * is the safe miss there.
+ *
+ * gh#194-b-confession-overpromises-unexecuted-action (2026-08-10, bouncer
+ * overturn) — that is NOT true once verdict="rewrite" (STEP 2) has already
+ * been returned: at that point this same call has independently confirmed,
+ * against the tool activity, that the draft states a completed action nothing
+ * backed — the original is a PROVEN false claim, not a suspected one. The two
+ * checks that remain after that point (is `message` usable? did the model
+ * self-attest `noPendingActionClaim`?) audit the REWRITE, not the verdict, so
+ * their failure must never fall back to "keep original" — that would knowingly
+ * ship the lie this whole function exists to stop. Both now return
+ * GENERIC_HONEST_MISS instead: a fixed, tool-less, deterministic line that
+ * asserts nothing about any action. English-only is an accepted compromise
+ * here, same as humanGate's own fallback-of-a-fallback (humanGate.ts:409-411)
+ * — this only fires when the checker AND this rewriter's own veto have both
+ * already agreed the draft is false and the model's proposed fix is itself
+ * untrustworthy, rarer still than either alone.
+ *
+ * gh#194-b (2026-08-10) — the prose instruction against "I'll take care of
+ * it"-style smoothing already existed and a rewrite still shipped a
+ * present-progressive version of the same overpromise ("I'm handling it right
+ * now" / "אני דואגת לזה עכשיו"). Multilingual phrasing rules out a hardcoded
+ * regex strip as the fix, so the SAME call now also forces a `verdict` field
+ * `noPendingActionClaim`: the model must self-attest its own `message` makes
+ * no claim the action is in progress or about to complete. Anything short of
+ * an explicit `true` discards the rewrite — see the note above on why that no
+ * longer means "keep the original" once verdict="rewrite" has fired.
+ *
+ * gh#194-b-promised-resend-never-fired (2026-08-10, owner ruling) — an honest
+ * confession alone is still just words: "if she is saying that she will do a
+ * follow up or reminder, she needs to do it." This function stays tool-less
+ * and side-effect-free itself, but its CALLER (runOutputGates.ts, right after
+ * a rewrite ships) now opens a durable backstop for the one proven, narrow
+ * shape this can safely guarantee — a colleague's false "I relayed this to
+ * him" claim about the owner — by raising a `reminder`-kind request on the
+ * same spine registrar's flagUnresolvedFreeformForOwner (src/tasks/skill.ts)
+ * uses, so the relay lands via the runner regardless of what the model does
+ * next turn. See runOutputGates.ts's call site for the exact scope guards.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -567,7 +618,7 @@ Do not turn a proposal into an apology, and do not "own a miss" that isn't one.
 
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "added X", "I've sent it to Yael") AND the TOOL ACTIVITY shows NO matching successful tool (the tool is absent, or its summary says FAILED). Put the corrected reply in \`message\`. The rewrite must:
 - Make it UNMISTAKABLE the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it.")
-- NOT claim it's done/sent/booked/flagged/handled, and NOT smooth it into "I'll take care of it" (reads as resolved).
+- NOT claim it's done/sent/booked/flagged/handled, and NOT smooth it into "I'll take care of it" (reads as resolved) — and this BANS present-progressive reassurance just as much: "I'm handling it right now", "I'm on it now", "I'm taking care of it as we speak", Hebrew "אני דואגת לזה עכשיו" are the SAME false promise in a different tense — they claim an action is actively in motion this instant when NOTHING is happening and no tool call is queued behind this reply. The rewrite must leave the reader knowing nothing is in progress, only that the assistant noticed the miss.
 - Keep every other fact intact: names, times, dates, numbers, the rest of the message.
 - Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
@@ -598,6 +649,10 @@ ${opts.draft}`;
               type: 'string',
               description: 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
             },
+            noPendingActionClaim: {
+              type: 'boolean',
+              description: 'Only when verdict="rewrite": self-check `message` before returning it. Set true ONLY if `message` contains NO claim or implication — in any tense, any language — that the action is currently being done, is in progress, or is about to complete ("I\'m handling it now", "I\'m on it", "אני דואגת לזה עכשיו" all FAIL this and must be set false). Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
           },
           required: ['verdict'],
         },
@@ -611,7 +666,7 @@ ${opts.draft}`;
     // makes a reasoning leak impossible: the model's monologue, if any, lives in
     // text blocks we ignore; only `verdict`/`message` can ever become the reply.
     const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const input = (toolUse?.input ?? {}) as { verdict?: string; message?: string };
+    const input = (toolUse?.input ?? {}) as { verdict?: string; message?: string; noPendingActionClaim?: boolean };
 
     // verdict=keep (or missing/garbled) → classifier misfired → keep original.
     if (input.verdict !== 'rewrite') {
@@ -624,16 +679,42 @@ ${opts.draft}`;
       return null;
     }
 
-    // verdict=rewrite. Belt-and-suspenders: a rewrite with no usable message, or
-    // one that smells like leaked reasoning, fails open to the original — we
-    // NEVER ship the model's meta-text as the reply.
+    // verdict=rewrite means STEP 2 has ALREADY independently confirmed the
+    // draft is false — from here down we are auditing the REWRITE, not the
+    // verdict, so a failure below can no longer fall back to "keep original"
+    // (gh#194-b-confession-overpromises-unexecuted-action, bouncer overturn):
+    // that would knowingly ship the proven lie. A rewrite with no usable
+    // message, or one that smells like leaked reasoning, ships the fixed
+    // GENERIC_HONEST_MISS line instead — we NEVER ship the model's meta-text,
+    // and never the known-false original, as the reply.
     const message = typeof input.message === 'string' ? input.message.trim() : '';
     if (message.length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(message)) {
-      logger.warn('claim_checker_rewrite — verdict=rewrite but message empty/meta; keeping original draft', {
+      logger.warn('claim_checker_rewrite — verdict=rewrite but message empty/meta; shipping the generic honest-miss line (never the known-false original)', {
         action_type: opts.actionType,
         messagePreview: message.slice(0, 160),
       });
-      return null;
+      return GENERIC_HONEST_MISS;
+    }
+
+    // gh#194-b — the prompt already forbade "I'll take care of it"-style
+    // smoothing, yet a real rewrite still shipped "אני דואגת לזה עכשיו" ("I'm
+    // handling it right now"): a present-progressive reassurance that promises
+    // the SAME unexecuted follow-through in a different tense. A hardcoded
+    // phrase regex can't be the fix (multilingual — see the exact Hebrew
+    // example), so the model must self-attest on the SAME call instead of a
+    // second one: `noPendingActionClaim` forces it to check its own `message`
+    // for that framing before returning it. Anything other than an explicit
+    // `true` (false, or the model omitting the field) means the proposed
+    // rewrite itself cannot be trusted — but verdict=rewrite already proved
+    // the ORIGINAL false, so (gh#194-b-confession-overpromises-unexecuted-action,
+    // bouncer overturn) the safe miss here is the fixed GENERIC_HONEST_MISS
+    // line, never the known-false original.
+    if (input.noPendingActionClaim !== true) {
+      logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the pending-action claim; shipping the generic honest-miss line (never the known-false original)', {
+        action_type: opts.actionType,
+        messagePreview: message.slice(0, 160),
+      });
+      return GENERIC_HONEST_MISS;
     }
     return message;
   } catch (err) {

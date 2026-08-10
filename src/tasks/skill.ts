@@ -13,6 +13,7 @@ import {
   getRequestByIdempotencyKey,
   getRecentOutreachOwnerThread,
   isKnownRequestThreadAnchor,
+  getMeetingsRequestedBy,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
@@ -22,6 +23,7 @@ import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
 import {
   getUnseenEvents,
   markEventsSeen,
+  getPendingRequestCountForColleague,
   type MaelleEvent,
 } from '../db';
 import type { RequestKind, RequestRow } from '../core/requests/types';
@@ -42,6 +44,108 @@ const APPROVAL_SUBKINDS = [
 type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
 
 const anthropic = getAnthropicClient();
+
+// gh#pending-cap-blocks-unrelated-questions (2026-08-10) — the "max 2 pending"
+// rate limit used to gate at MESSAGE-RECEIPT time (processMessage.ts step 3,
+// SlackMaster's file): a capped colleague's whole next message was refused,
+// including one needing zero request-spine involvement (e.g. "is Idan free at
+// 16:00", pure find_available_slots territory). Moved here, to CREATION time,
+// at the two chokepoints a colleague can DELIBERATELY mint a new tracked row
+// via their own ask (create_task / create_approval, both in
+// COLLEAGUE_ALLOWED_TOOLS) — an ordinary question never reaches either tool,
+// so it's never blocked; only the specific act of opening a THIRD open item
+// is. Gated on `authority`, not `senderRole` — same reasoning as
+// flagUnresolvedFreeformForOwner below: `senderRole` reads 'colleague' for
+// the owner clamped into a room too, and the owner is never capped.
+// `getPendingRequestCountForColleague` itself (db/jobs.ts) was already
+// correct — this only relocates where its result is enforced.
+//
+// A THIRD path mints a request row on a colleague's behalf:
+// `flagUnresolvedFreeformForOwner` below opens its own durable-backstop
+// `reminder` row when a freeform approval can't be confidently routed. It is
+// deliberately NEVER gated through `colleaguePendingCapRefusal` — it exists
+// to guarantee an ambiguous ask reaches the owner even when nothing else
+// caught it (R4), so refusing it would recreate exactly the silent-drop bug
+// it was built to close. It is equally deliberately EXCLUDED from
+// `getPendingRequestCountForColleague`'s own count (via
+// `subkind: 'freeform_owner_flag'`) — bouncer fix, 2026-08-10 — so it can
+// never itself eat one of the colleague's two real slots (found: it minted
+// uncapped but still counted against the cap, the worst of both).
+const COLLEAGUE_PENDING_CAP = 2;
+async function colleaguePendingCapRefusal(
+  context: SkillContext, ownerUserId: string,
+): Promise<{ error: string; reason: string } | null> {
+  if (context.authority !== 'colleague') return null;
+  const pending = getPendingRequestCountForColleague(ownerUserId, context.userId);
+  if (pending < COLLEAGUE_PENDING_CAP) return null;
+
+  // gh#colleague-pending-cap-room-leak (2026-08-10, SlackMaster hand-off) —
+  // the message-receipt gate this replaced (processMessage.ts) had a
+  // channel/DM privacy split: in a real channel it DM'd the colleague
+  // privately ("you have pending requests with {owner}") instead of posting
+  // that disclosure where bystanders could read it; in DM/MPIM it replied
+  // in-thread. This tool-result refusal has no surface awareness by default
+  // — it's a plain {error, reason} the model narrates itself — so it can now
+  // say the same thing out loud in a room. `surface === 'room'` covers BOTH
+  // channel and MPIM (the deliberate unification in orchestrator/index.ts:
+  // a channel is just an MPIM with unbounded, unknowable membership), so
+  // both get the room treatment here. Per W9: don't hand the model text it
+  // must not repeat and trust it to be discreet — the disclosure never
+  // enters the payload for a room turn at all. The real explanation goes out
+  // via a private DM to the same colleague instead (mirrors the old code's
+  // channel branch).
+  if (context.surface === 'room') {
+    const roomRefusal = {
+      error: 'colleague_pending_cap',
+      reason: `Don't open a new tracked request/approval right now. If this message is a plain question you can answer directly, just answer it. Otherwise keep your reply here brief and generic (e.g. "I'll follow up with you on this soon") — I've already messaged them privately with the actual reason, so don't restate it in this shared space.`,
+    };
+    // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) — a
+    // retried/second tool call this turn (create_approval then create_task,
+    // or a retry after the refusal — the refusal text itself invites one)
+    // hits this same branch again. Send the private DM at most once per
+    // colleague per turn; `roomRefusal` is still returned every time
+    // regardless, so the model sees the refusal on every attempt.
+    if (context.capNoticeSentThisTurn?.has(context.userId)) return roomRefusal;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+      const conn = getConnection(ownerUserId, context.inboundConnectionId ?? 'slack');
+      if (conn) {
+        // bouncer fix (2026-08-10) — only a CONFIRMED send marks the
+        // colleague notified, matching orchestrator/index.ts:865-869's
+        // `?.ok === true` gate. sendDirect never throws (transports catch
+        // internally and resolve `{ok:false,...}` on failure), so marking
+        // after any non-throwing call used to mark a cap notice as sent
+        // even when the DM never delivered (bad token, cannot_dm_bot, rate
+        // limit) — the colleague was then refused with no notice actually
+        // sent, and a same-turn retry was suppressed regardless.
+        const sendResult = await conn.sendDirect(
+          context.userId,
+          `Hi — you already have a couple of pending requests with ${context.profile.user.name}. I'll follow up with you once those are resolved.`,
+        );
+        if (sendResult?.ok === true) {
+          context.capNoticeSentThisTurn?.add(context.userId);
+        } else {
+          logger.warn('colleaguePendingCapRefusal — private cap notice send failed', {
+            ownerUserId, userId: context.userId, sendResult,
+          });
+        }
+      } else {
+        logger.warn('colleaguePendingCapRefusal — no connection for private cap notice', {
+          ownerUserId, userId: context.userId,
+        });
+      }
+    } catch (err) {
+      logger.warn('colleaguePendingCapRefusal — private cap notice failed', { err: String(err) });
+    }
+    return roomRefusal;
+  }
+
+  return {
+    error: 'colleague_pending_cap',
+    reason: `This person already has ${pending} pending items with the owner — don't open a new tracked request/approval for them right now. If this is a plain question you can answer directly, just answer it (that needs no new row). Otherwise, tell them you'll follow up once those existing items are resolved.`,
+  };
+}
 
 /**
  * #145 (Maayan "move GTM to Wed", 2026-07-20) — calendar-freeform guard.
@@ -96,6 +200,90 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
       err: String(err).slice(0, 200),
     });
     return 'unsure';  // fail-to-ask: an error must never silently let a calendar change ride freeform
+  }
+}
+
+/**
+ * gh#freeform-escalation-refused-silently-drops-owner-question (2026-08-09,
+ * Noy/Eli identity mixup) — a refused 'unsure' freeform returns bare inline
+ * text and TRUSTS the model to ask someone this same turn. Proven to vanish:
+ * the model told the colleague "I've sent Idan the note" without ever calling
+ * a tool that reached him — the claim-checker caught the false claim, but
+ * nothing re-fires the actual ask, and the owner never heard the question. A
+ * colleague-raised ask that needs the OWNER'S read can't depend on the model
+ * self-correcting in the same turn, so the one-shot text gets a durable
+ * backstop on the ONE spine (R2/R4): a `reminder` request that DMs the owner
+ * the real question, inside his work hours, whether or not the model's
+ * in-turn ask lands. Idempotency-keyed on (owner, requester, thread, text) so
+ * the same ambiguous ask re-firing in the same thread doesn't stack DMs.
+ *
+ * Owner-initiated calls skip this — if create_approval was raised from the
+ * owner's OWN conversation, he's already the one Maelle is talking to; there
+ * is no cross-party drop to guard against.
+ *
+ * Gated on `authority`, not `senderRole` (bouncer overturn,
+ * freeform-escalation-refused-silently-drops-owner-question, 2026-08-10):
+ * `senderRole` reads 'colleague' both for a real colleague AND for the owner
+ * clamped into a room/channel (see processMessage.ts's `role` vs `authority`),
+ * so gating on it fired this DM at the owner ON HIMSELF whenever he raised an
+ * ambiguous freeform from a room — requesterSlackId his own id, the message
+ * claiming "a colleague raised something". `authority` stays 'owner' on every
+ * surface (resolve_approval's own gates at 1434/1483/1705 already rely on the
+ * same distinction), so it's the correct "is this genuinely the owner" check.
+ */
+function flagUnresolvedFreeformForOwner(
+  context: SkillContext,
+  ownerUserId: string,
+  flagText: string,
+): void {
+  if (context.authority !== 'colleague') return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { workTimeBaseFromNow } = require('../utils/workHours') as typeof import('../utils/workHours');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getPersonMemory } = require('../db/people') as typeof import('../db/people');
+    const requesterFirst = (getPersonMemory(context.userId)?.name ?? 'A colleague').split(' ')[0];
+    const idempotencyKey = buildIdempotencyKey({
+      ownerUserId,
+      requesterSlackId: context.userId,
+      kind: 'reminder',
+      subject: `freeform_unsure ${context.threadTs} ${flagText}`,
+    });
+    if (getRequestByIdempotencyKey(idempotencyKey)) return;
+    createRequest({
+      ownerUserId,
+      initiatedBy: context.userId,
+      initiatedByRole: 'colleague',
+      kind: 'reminder',
+      // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
+      // marks this row so getPendingRequestCountForColleague (db/jobs.ts)
+      // excludes it from the colleague's pending-cap count. This is a
+      // durable backstop DM to the OWNER, not a tracked item the colleague
+      // asked for — it must mint regardless of their cap (never gated
+      // through colleaguePendingCapRefusal, see the header comment above),
+      // so it must not silently spend one of their two slots either.
+      subkind: 'freeform_owner_flag',
+      subject: `Needs your read: ${flagText.slice(0, 80)}`,
+      description: flagText,
+      state: 'in_flight',
+      informed: 1,
+      requesterSlackId: context.userId,
+      requesterName: requesterFirst,
+      originChannel: context.channelId,
+      originThreadTs: context.threadTs,
+      originIsMpim: context.surface === 'room',
+      idempotencyKey,
+      nextCheckAt: workTimeBaseFromNow(context.profile),
+      nextCheckHandler: 'reminder_fire',
+      details: { message: `${requesterFirst} raised something I couldn't confidently route on my own, and I didn't want it to just sit unanswered: "${flagText}". Flagging it for you directly rather than risk it getting lost.` },
+    });
+    logger.info('create_approval — opened durable fallback reminder for a refused freeform escalation', {
+      ownerUserId, requesterSlackId: context.userId, preview: flagText.slice(0, 80),
+    });
+  } catch (err) {
+    logger.warn('create_approval — failed to open fallback reminder for a refused freeform escalation', {
+      err: String(err).slice(0, 200),
+    });
   }
 }
 
@@ -266,9 +454,13 @@ export async function createApprovalRequest(
             logger.info('create_approval — freeform calendar-change ambiguous; asking before routing (no approval created)', {
               preview: (s || q).slice(0, 80), requesterSlackId: payload.requester_slack_id,
             });
+            // gh#freeform-escalation-refused-silently-drops-owner-question —
+            // don't let this refusal ride ONLY on the model asking someone in
+            // this same turn; back it with a durable fallback DM to the owner.
+            flagUnresolvedFreeformForOwner(context, ownerUserId, [s, q, c].filter(part => part.trim()).join(' — ').slice(0, 500));
             return {
               error: 'freeform_needs_clarification',
-              reason: `I can't tell whether this is a calendar change or a genuine non-calendar decision, and it matters: a calendar change (book / move / reschedule / attendee edit / cancel) MUST go through the tool → policy_exception so it actually executes on approve; a real non-calendar yes/no is fine as freeform. Do NOT raise the approval yet. If the conversation makes it clear, route it now (tool → policy_exception if it touches a meeting; freeform if not). If it's genuinely unclear, ask the requester plainly — e.g. "just so I route this right, are you asking me to change something on your calendar, or is it something else?" — then act on the answer.`,
+              reason: `I can't tell whether this is a calendar change or a genuine non-calendar decision, and it matters: a calendar change (book / move / reschedule / attendee edit / cancel) MUST go through the tool → policy_exception so it actually executes on approve; a real non-calendar yes/no is fine as freeform. Do NOT raise the approval yet, and do NOT claim you've already asked or sent anything — you haven't. If the conversation makes it clear, route it now (tool → policy_exception if it touches a meeting; freeform if not). If it's genuinely unclear, ask the requester plainly — e.g. "just so I route this right, are you asking me to change something on your calendar, or is it something else?" — then act on the answer. I've also flagged the raw ask for the owner directly as a backstop, in case it needs his read and this doesn't get sorted out in conversation.`,
             };
           }
           // 'not_calendar' → a genuine non-calendar ask → allow; fall through.
@@ -382,6 +574,15 @@ export async function createApprovalRequest(
         // the requester before retrying. Same trust model as create_meeting's
         // schema-level `required:` (which today is the canonical enforcement
         // point for booking input shape).
+        //
+        // Bouncer overturn (2026-08-10), Problem B — did the #142c re-derivation
+        // below actually COMPLETE this turn? Read by refreshIfOpen's
+        // honest_hard_reason handling: set true only in the `!check.passes` /
+        // `check.passes` arms (a real verdict was reached), never in the
+        // `catch` (a throw proves nothing) and never when skipped entirely
+        // (existing-event change, no slot to re-derive). A stored hard reason
+        // from an earlier turn must survive a turn that didn't re-check it.
+        let hardReasonReDerived = false;
         if (subkind === 'policy_exception') {
           // #2.1b + Finding A (2026-07-19) — an approval whose deferred_action targets
           // an EXISTING event (edit attendees / reschedule / cancel), not a create,
@@ -460,6 +661,10 @@ export async function createApprovalRequest(
           // reason checkSlot doesn't model (location mode, room, another
           // colleague's hold, an unverifiable free/busy read), so we leave the
           // tool's reason standing and log the divergence rather than override it.
+          // (gh#194-c — one narrow exception below DOES short-circuit: when the
+          // "collision" turns out to be the requester's own already-linked
+          // meeting, that isn't a deviation to label at all, it's a duplicate
+          // create for something update_meeting should touch instead.)
           if (!isExistingEventChange) try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
@@ -490,6 +695,7 @@ export async function createApprovalRequest(
               viewer: 'owner',
             });
             if (!check.passes && check.violation_label) {
+              hardReasonReDerived = true;
               const sonnetRule = typeof payload.rule === 'string' ? payload.rule : null;
               payload.rule = check.violation_kind ?? payload.rule;
               payload.rule_label = check.violation_label;
@@ -503,6 +709,42 @@ export async function createApprovalRequest(
               // sentence naming a private meeting's subject must not enter those.
               if (check.violation_kind === 'owner_busy_collision') {
                 payload.honest_hard_reason = check.violation_label;
+
+                // gh#194-c — the collision may be a meeting THIS SAME requester
+                // already had booked. create_meeting's own advisory steer
+                // (createMeeting.ts:792-793) already named this exact conflicting
+                // event and told the model to call update_meeting instead of
+                // raising a duplicate — but that steer lives in a return value
+                // from a DIFFERENT, independent tool call, and nothing stops the
+                // model from ignoring it and calling create_approval directly
+                // (as happened live, thread 1786275507.424279, 2026-08-09).
+                // Cross-check the SAME occupancy id (check.overCommitment.id,
+                // #165b) against this requester's own linked meetings —
+                // getMeetingsRequestedBy, the same reverse-requester lookup
+                // buildTurnContext.ts uses for "MEETINGS YOU REQUESTED" — using
+                // the request row's OWN subject (not the owner-viewer-scoped
+                // check.overCommitment.subject, which nothing colleague-facing
+                // may read per the M12 note above) since it is already the
+                // requester's own ask. On a match this is not a deviation, it's
+                // a missed update_meeting call — refuse here the same way
+                // gateApprovalAsk refuses an unproven deviation, before a second
+                // policy_exception row is ever minted.
+                const overCommitmentId = check.overCommitment?.id;
+                const ownMatch = overCommitmentId && requesterSlackId
+                  ? getMeetingsRequestedBy(ownerUserId, requesterSlackId, {
+                      withEventIdOnly: true, includeApprovals: true,
+                    }).find(r => r.outcome_external_event_id === overCommitmentId)
+                  : undefined;
+                if (ownMatch) {
+                  logger.info('create_approval — refused at the gate: collision is requester\'s own meeting', {
+                    subject: payload.subject, start: payload.start,
+                    overCommitmentId, existingRequestId: ownMatch.id, requesterSlackId,
+                  });
+                  return {
+                    error: 'own_meeting_collision',
+                    reason: `That time conflicts with "${ownMatch.subject}" (id: ${overCommitmentId}) — a meeting this same person already had booked through me. Call update_meeting(meeting_id: ${overCommitmentId}, ...) instead of raising a new approval — do not create a duplicate for a meeting that already exists and is theirs.`,
+                  };
+                }
               }
               if (sonnetRule !== (check.violation_kind ?? null)) {
                 logger.info('create_approval — re-derived policy_exception reason differs from Sonnet-supplied', {
@@ -511,6 +753,7 @@ export async function createApprovalRequest(
                 });
               }
             } else if (check.passes) {
+              hardReasonReDerived = true;
               logger.info('create_approval — slot breaks no scheduling rule; keeping the refusing tool\'s reason', {
                 subject: payload.subject, start: payload.start, toolRule: payload.rule,
               });
@@ -566,17 +809,25 @@ export async function createApprovalRequest(
         // pointers are re-stamped to wherever it just landed, so a typed reply there
         // still binds (threadBoundApprovalAutoResolve matches on owner_dm_thread_ts).
         const REVIVAL_THRESHOLD_HOURS = 2;
-        const maybeRevive = async (existing: RequestRow): Promise<void> => {
+        const maybeRevive = async (existing: RequestRow, opts?: { force?: boolean }): Promise<void> => {
           // Only revive on awaiting_owner — awaiting_colleague is a pending
           // counter (the colleague IS the one being waited on, no point
           // re-pinging owner).
           if (existing.state !== 'awaiting_owner') return;
+          const force = opts?.force === true;
           const lastSurfacedIso = existing.last_surfaced_at ?? existing.created_at;
           const lastSurfacedMs = lastSurfacedIso
             ? DateTime.fromSQL(lastSurfacedIso, { zone: 'utc' }).toMillis()
             : 0;
           const hoursSince = (Date.now() - lastSurfacedMs) / (1000 * 60 * 60);
-          if (!Number.isFinite(hoursSince) || hoursSince < REVIVAL_THRESHOLD_HOURS) return;
+          // Bouncer overturn (2026-08-10), Problem A — `refreshIfOpen` passes
+          // `force: true` exactly when it just changed subject/description/
+          // deferred_action on this row. That change is what he must see
+          // before his next ✅ can mean anything (silently he could otherwise
+          // sign off a corrected time/attendee list he was never shown), so it
+          // bypasses the cold-re-ask threshold — that gate answers "is he due
+          // a nudge," not "did the ask change under him."
+          if (!force && (!Number.isFinite(hoursSince) || hoursSince < REVIVAL_THRESHOLD_HOURS)) return;
 
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -600,14 +851,17 @@ export async function createApprovalRequest(
               details: parseDetails(existing),
               profile,
               requestId: existing.id,
-              lead: `${requesterFirst} just asked again about this — still need your call:`,
+              lead: force
+                ? `${requesterFirst} changed the ask — here's the updated version, still need your call:`
+                : `${requesterFirst} just asked again about this — still need your call:`,
               reSurface: { raisedAt: existing.created_at },
             });
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { postOwnerDecision } = require('../utils/ownerDailyThread') as
               typeof import('../utils/ownerDailyThread');
             const res = await postOwnerDecision({
-              profile, conn, text: reviveText, label: 'approval re-ask revival',
+              profile, conn, text: reviveText,
+              label: force ? 'approval correction re-post' : 'approval re-ask revival',
             });
             if (res.ok) {
               const nowIso = new Date().toISOString();
@@ -620,7 +874,8 @@ export async function createApprovalRequest(
               });
               logger.info('create_approval — revived stale approval via re-ask', {
                 requestId: existing.id,
-                hoursSinceLastSurface: hoursSince.toFixed(2),
+                forced: force,
+                hoursSinceLastSurface: Number.isFinite(hoursSince) ? hoursSince.toFixed(2) : null,
                 surfacedCount: (existing.surfaced_count ?? 0) + 1,
               });
             }
@@ -631,9 +886,99 @@ export async function createApprovalRequest(
           }
         };
 
+        // deferred-replay-uses-stale-pre-rename-snapshot (2026-08-09, thread
+        // 1786275507.424279) — a retry that dedup-matches an OPEN request is
+        // often a CORRECTION, not an idle repeat: Yael's first ask captured a
+        // deferred_action for "Sync with Yael" (Yael only); her very next
+        // message renamed it to "Idan, Adi & Yael" and added Adi, which
+        // re-hit a rule_violation, re-captured a FRESH deferred_action_hint,
+        // and reached create_approval again — but the LLM dedup judge matched
+        // it to the still-open first request ("now updated with a new name
+        // and attendee" — its own reasoning) and this branch used to return
+        // `existing` completely untouched. The STORED deferred_action stayed
+        // the pre-correction snapshot; when the owner approved 20+ minutes
+        // later, the resolver replayed THAT stale snapshot — booking "Sync
+        // with Yael" with no Adi, exactly what Yael then had to flag back.
+        // Refresh the row's own ask (subject/description/details, including
+        // deferred_action) to the CURRENT payload. Spread EXISTING details
+        // first, `payload` on top — same "counter wins on key conflict"
+        // shape mergeAmendIntoApprove already uses — so the fresh capture's
+        // ask-shape fields (subject/start/end/attendees/deferred_action/…)
+        // win, but bookkeeping the ask-raise payload never carries (counter,
+        // counter_history, amend_round, amended_at — stamped only by an
+        // owner/colleague amend round, resolver.ts) survives untouched. A
+        // bare overwrite would erase an in-flight counter negotiation the
+        // instant a same-topic retry dedup-matched onto it. Scoped to
+        // `awaiting_owner`: once the owner has counter-offered
+        // (awaiting_colleague) or decided (terminal), the stored decision is
+        // his, not a later retry's to overwrite.
+        const refreshIfOpen = (row: RequestRow): { row: RequestRow; changed: boolean } => {
+          if (row.state !== 'awaiting_owner') return { row, changed: false };
+          const priorDetails = (parseDetails(row) ?? {}) as Record<string, unknown>;
+
+          // Bouncer overturn (2026-08-10), Problem A — does this refresh
+          // actually change what the owner is being asked, or the action a ✅
+          // replays? Drives whether maybeRevive below must force a re-post
+          // regardless of its 2h cold-re-ask gate (a correction isn't a
+          // "still waiting" nudge — it's a different ask he hasn't seen).
+          const changed = row.subject !== subject
+            || (row.description ?? '') !== askText
+            || JSON.stringify(priorDetails.deferred_action ?? null) !== JSON.stringify(payload.deferred_action ?? null);
+
+          const mergedDetails: Record<string, unknown> = { ...priorDetails, ...payload };
+          if (changed) {
+            // Problem B, narrowed by bouncer overturn (2026-08-10) —
+            // `honest_hard_reason` is CODE-authored only (line 393 strips it,
+            // the checkSlot re-derivation above is the ONLY place that
+            // re-sets it). Once the ask has materially changed, the PRIOR
+            // sentence must not survive onto a different ask by spread order
+            // alone — UNLESS this turn never actually re-checked the new
+            // slot (existing-event change, or the checkSlot/getCalendarEvents
+            // read threw — `hardReasonReDerived` false in both). "Not
+            // re-proved this turn" is not "disproved": a throw on a Graph
+            // hiccup must not silently erase a hard collision proven true on
+            // an earlier turn (skill.ts:545-547, approvalCallbacks.ts:227-234
+            // — this mechanism never flips that line off on a transient
+            // read). Only clear it when the re-derivation completed and came
+            // back clean/soft; keep the fresh string when it completed and
+            // re-proved the hard collision.
+            if (typeof payload.honest_hard_reason === 'string') {
+              mergedDetails.honest_hard_reason = payload.honest_hard_reason;
+            } else if (hardReasonReDerived) {
+              delete mergedDetails.honest_hard_reason;
+            }
+          }
+
+          updateRequest(row.id, { subject, description: askText, details: mergedDetails });
+
+          // Trap noted by the bouncer, fixed as cheap/obvious: idempotency_key
+          // is hash(owner, requester, kind, subject) — if a subject correction
+          // doesn't also refresh it, a LATER retry keyed off the OLD subject
+          // still resolves to this row and can revert the correction just
+          // made. Best-effort: a collision with a different open row's key is
+          // left alone (logged) rather than crashing this tool call over a
+          // low-stakes housekeeping update.
+          if (row.subject !== subject) {
+            try {
+              const refreshedKey = buildIdempotencyKey({
+                ownerUserId, requesterSlackId: requesterSlackId ?? null, kind: 'approval', subject,
+              });
+              if (refreshedKey !== row.idempotency_key) {
+                updateRequest(row.id, { idempotencyKey: refreshedKey });
+              }
+            } catch (err) {
+              logger.warn('refreshIfOpen — idempotency_key refresh skipped', {
+                requestId: row.id, err: String(err).slice(0, 200),
+              });
+            }
+          }
+
+          return { row: getRequest(row.id)!, changed };
+        };
+
         if (existingId) {
-          const existing = getRequest(existingId)!;
-          await maybeRevive(existing);
+          const { row: existing, changed } = refreshIfOpen(getRequest(existingId)!);
+          await maybeRevive(existing, { force: changed });
           return {
             ok: true,
             approval_id: existing.id,
@@ -657,16 +1002,20 @@ export async function createApprovalRequest(
             || idempotent.state === 'cancelled'
             || idempotent.state === 'expired';
           if (!priorTerminal) {
-            // Live duplicate of the SAME still-open ask — reuse it (re-surface if stale).
+            // Live duplicate of the SAME still-open ask — reuse it (re-surface if
+            // stale), refreshing its stored snapshot first (same stale-replay
+            // risk as the LLM-dedup branch above and the UNIQUE-collision
+            // branch below — see refreshIfOpen's comment).
             logger.info('create_approval — reusing OPEN idempotency match', {
               existingId: idempotent.id, state: idempotent.state, subject, requesterSlackId,
             });
-            await maybeRevive(idempotent);
+            const { row: refreshedIdempotent, changed: idempotentChanged } = refreshIfOpen(idempotent);
+            await maybeRevive(refreshedIdempotent, { force: idempotentChanged });
             return {
               ok: true,
-              approval_id: idempotent.id,
+              approval_id: refreshedIdempotent.id,
               created: false,
-              expires_at: idempotent.expires_at,
+              expires_at: refreshedIdempotent.expires_at,
               kind: subkind,
               reused_existing: true,
             };
@@ -692,6 +1041,23 @@ export async function createApprovalRequest(
             priorId: idempotent.id, priorState: idempotent.state, reAskDay, subject, requesterSlackId,
           });
           idempotencyKey = `${idempotencyKey}:re:${reAskDay}`;
+        }
+
+        // gh#pending-cap-blocks-unrelated-questions — creation-time cap (see
+        // colleaguePendingCapRefusal above), checked HERE and not earlier:
+        // every dedup / open-idempotency reuse above this line has already
+        // had its chance to return an EXISTING row without incrementing the
+        // colleague's pending count. Only past this point are we actually
+        // about to mint a brand-new approval — the "3rd tracked item" the
+        // cap exists to stop, never a correction to one of the first two.
+        {
+          const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId);
+          if (capRefusal) {
+            logger.info('create_approval — refused at the colleague pending cap', {
+              requesterSlackId, subject,
+            });
+            return capRefusal;
+          }
         }
 
         // Midpoint reminder + expiry — one schedule on the request row.
@@ -790,12 +1156,16 @@ export async function createApprovalRequest(
           logger.info('create_approval — UNIQUE collision on OPEN row, returning existing', {
             existingId: existing.id, state: existing.state, requesterSlackId, subject,
           });
-          await maybeRevive(existing);
+          // Same stale-snapshot risk as the LLM-dedup branch above (a retry
+          // hitting the SAME idempotency key is the same-subject case of the
+          // identical bug) — refresh the stored ask before reuse.
+          const { row: refreshed, changed: refreshedChanged } = refreshIfOpen(existing);
+          await maybeRevive(refreshed, { force: refreshedChanged });
           return {
             ok: true,
-            approval_id: existing.id,
+            approval_id: refreshed.id,
             created: false,
-            expires_at: existing.expires_at,
+            expires_at: refreshed.expires_at,
             kind: subkind,
             reused_existing: true,
             hint: 'This requester already has an open approval for this ask. They may be following up — the original is still awaiting decision.',
@@ -1099,6 +1469,17 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // DMs the result. Both fire on the ONE spine sweep (sweepDueRequests);
         // the old tasks-table dispatchers were the duplicate path, now deleted.
         const nextCheckHandler = taskType === 'research' ? 'research_run' : 'reminder_fire';
+
+        // gh#pending-cap-blocks-unrelated-questions — creation-time cap
+        // (see colleaguePendingCapRefusal above). create_task is
+        // colleague-reachable (o#219), so a capped colleague trying to open
+        // a THIRD tracked reminder/follow_up/research is refused here —
+        // never at message receipt, so an ordinary question never trips it.
+        const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId);
+        if (capRefusal) {
+          return { error: capRefusal.error, message: capRefusal.reason };
+        }
+
         const row = createRequest({
           ownerUserId,
           initiatedBy: context.userId,
@@ -1354,17 +1735,16 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
 
         // v3.7.2 — cross-thread bare-ack anchor gate (GH #137/#140). On the
         // owner path a bare approve/reject must be ANCHORED to the approval it
-        // resolves: the owner is replying in the approval's own DM thread
-        // (terminal_dm_msg_ts) or the daily decision thread (owner_dm_thread_ts).
-        // Pre-fix the owner-path prompt injected ALL awaiting_owner approvals
-        // with no thread scoping and nudged "pick the most recently created", so
-        // a bare "Yes" typed in an UNRELATED thread — a fire-and-forget shadow
-        // offer that has no request row of its own — bound to the only pending
-        // approval and booked it (Athena, 2026-07-13 10:07; the owner meant a
-        // lunch-bump offer in another thread). Module D and the orchestrator's
-        // thread-lock both correctly declined on the mismatch; this is the same
-        // gate at the tool chokepoint, where Sonnet's free-bind lands. `amend`
-        // carries a specific counter (never a stray ack) and is exempt.
+        // resolves. Pre-fix the owner-path prompt injected ALL awaiting_owner
+        // approvals with no thread scoping and nudged "pick the most recently
+        // created", so a bare "Yes" typed in an UNRELATED thread — a
+        // fire-and-forget shadow offer that has no request row of its own —
+        // bound to the only pending approval and booked it (Athena,
+        // 2026-07-13 10:07; the owner meant a lunch-bump offer in another
+        // thread). Module D and the orchestrator's thread-lock both correctly
+        // declined on the mismatch; this is the same gate at the tool
+        // chokepoint, where Sonnet's free-bind lands. `amend` carries a
+        // specific counter (never a stray ack) and is exempt.
         // v4.4.x (#154-tool-split) — gated on `authority`, matching the entry
         // gate above: the owner clamped into a room can never anchor to his
         // own DM thread (different channel entirely), so this correctly falls
@@ -1373,9 +1753,46 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         if (context.authority === 'owner' && verdict !== 'amend') {
           const ownerRow = getRequest(requestId);
           if (ownerRow) {
-            const anchored = !!context.threadTs
-              && (context.threadTs === ownerRow.terminal_dm_msg_ts
-                || context.threadTs === ownerRow.owner_dm_thread_ts);
+            // Other approvals currently awaiting the owner, excluding this
+            // one — the shared "could this bare reply plausibly mean
+            // something else open right now" fact every check below needs
+            // (anchored's daily-thread arm, namedMatch, chronoAnchor).
+            // Computed once, up front.
+            const otherOpenApprovals = getAwaitingOwnerRequests(ownerRow.owner_user_id)
+              .filter(r => r.kind === 'approval' && r.id !== requestId);
+            // Two independent ways to be anchored to THIS approval:
+            //  - messageAnchored: the reply is keyed to this approval's own
+            //    posted message (terminal_dm_msg_ts) — always safe, since no
+            //    other approval can share one message's own Slack ts.
+            //  - dailyThreadAnchored: the reply landed in the shared "one
+            //    thread a day" book (R10 — owner_dm_thread_ts is the SAME
+            //    value for every approval asked or resurfaced that day, by
+            //    design; see ownerDailyThread.ts). gh#194 (2026-08-10) — this
+            //    arm used to fire on thread equality ALONE. Because that
+            //    value is shared across every approval of the day, a
+            //    contentless "Yes" typed in that thread satisfied it for BOTH
+            //    a fresh Yael approval and an unrelated resurfaced Elie
+            //    approval at once — being "in today's book" only proves the
+            //    reply is decision-shaped, never WHICH decision it answers.
+            //    `anchored` bound to whichever row the model guessed for
+            //    `approval_id` (Elie's), with zero discrimination between the
+            //    two open approvals, and Maelle told the wrong person the
+            //    outcome. dailyThreadAnchored now only counts when this is
+            //    the SOLE open approval sharing that thread — the same
+            //    sole-outstanding-candidate discipline chronoAnchor below
+            //    already applies to a plain untethered DM reply; a
+            //    shared-thread reply gets no less scrutiny than an unthreaded
+            //    one. When it's ambiguous, control falls through to
+            //    namedMatch/chronoAnchor exactly as an unanchored reply
+            //    already does.
+            const messageAnchored = !!context.threadTs && context.threadTs === ownerRow.terminal_dm_msg_ts;
+            const inDailyThread = !!context.threadTs
+              && !!ownerRow.owner_dm_thread_ts
+              && context.threadTs === ownerRow.owner_dm_thread_ts;
+            const ambiguousDailyThread = inDailyThread
+              && otherOpenApprovals.some(r => r.owner_dm_thread_ts === ownerRow.owner_dm_thread_ts);
+            const dailyThreadAnchored = inDailyThread && !ambiguousDailyThread;
+            const anchored = messageAnchored || dailyThreadAnchored;
             // v4.4.x (GH#169/#176, REVISITED per owner ruling — the first cut
             // wasn't trusted and was sent back) — a reply outside the anchor
             // thread still binds when the OWNER'S OWN message this turn
@@ -1412,12 +1829,9 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             // to name even when a SECOND open approval matches the exact same
             // words — the owner never said which one. Refuse (same
             // needs_clarification shape) when 2+ open awaiting_owner approvals
-            // match this message; anchored replies are unaffected since thread
-            // position alone already disambiguates those.
-            // Computed once — also feeds the chronological fallback below,
-            // which needs the same "is this the only open approval" fact.
-            const otherOpenApprovals = getAwaitingOwnerRequests(ownerRow.owner_user_id)
-              .filter(r => r.kind === 'approval' && r.id !== requestId);
+            // match this message; anchored replies are unaffected since
+            // `anchored` (above) already requires either a message-specific
+            // match or an unambiguous daily-thread match.
             let ambiguousNamedMatch = false;
             if (namedMatch) {
               if (otherOpenApprovals.some(r => messageReferencesRequest(ownerLiteralMessage, r))) {
@@ -1468,12 +1882,12 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
               logger.warn('resolve_approval — bare ack not anchored to the approval thread; refusing to bind', {
                 requestId, verdict, threadTs: context.threadTs,
                 terminalDm: ownerRow.terminal_dm_msg_ts, ownerDaily: ownerRow.owner_dm_thread_ts,
-                ambiguous: ambiguousNamedMatch,
+                ambiguous: ambiguousNamedMatch, ambiguousDailyThread,
               });
               return {
                 ok: false,
                 needs_clarification: true,
-                reason: ambiguousNamedMatch
+                reason: (ambiguousNamedMatch || ambiguousDailyThread)
                   ? `Ambiguous: more than one of your open approvals matches what you said, so I can't tell which one you mean — reply in that specific approval's own thread (or the daily approval thread), or say something that's unique to just the one you mean.`
                   : `Not anchored: this reply isn't in ${requestId}'s decision thread (neither its own DM thread nor a daily approval thread), so a bare yes/no is too ambiguous to bind here — the owner may be responding to something else in this thread. Do NOT resolve it. Tell him you're not sure which approval he means, name the open ones by subject, and ask him to confirm in the approval's own thread (or the daily decision thread) — or just name this one by subject/colleague in his own reply (e.g. "ANF already done"), which is recognized automatically whatever thread it lands in.`,
               };

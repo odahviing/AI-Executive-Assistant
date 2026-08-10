@@ -254,10 +254,57 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // kind/category/sentiment/direction/topic_label which drive the
         // social directive (engage/celebrate/etc.) for THIS turn — no
         // subject-row writes happen per turn anymore.
+        //
+        // gh#179-c / coda-repeats-and-merges-with-action-confirmations — an
+        // approval-outcome relay (PENDING APPROVALS / WORK ALREADY IN FLIGHT /
+        // STATUS OF THE REQUEST IN THIS THREAD, systemPrompt.ts) is computed
+        // independently of `classification` straight from the requests spine,
+        // so a turn the classifier reads as social/other can still land a
+        // relay Sonnet must deliver — and it was free-composing both into one
+        // reply (Yael, 2026-08-03). Mirrors systemPrompt.ts's own gating
+        // exactly (isOwnerTyping decides owner- vs colleague-shaped state) so
+        // this is provably the same signal, not a new heuristic.
+        //
+        // bouncer overturn 2026-08-10 — the owner branch used to be
+        // `getAwaitingOwnerRequests(...).length > 0` with NO thread scoping:
+        // as long as ANY approval sat awaiting_owner ANYWHERE, celebrate/
+        // engage/raise_new/continue went dark on every owner turn in every
+        // thread, for as long as that approval stayed open (days). Narrowed to
+        // the SAME thread-bound test systemPrompt.ts's pendingApprovalsSection
+        // already uses to decide a bare "yes" is answering THIS approval
+        // (terminal_dm_msg_ts / owner_dm_thread_ts === threadTs) — so
+        // suppression now tracks the one thread that could actually be
+        // relaying/confirming a pending approval, not the owner's whole
+        // pending queue.
+        let hasOperationalRelay = false;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } =
+            require('../../db/requests') as typeof import('../../db/requests');
+          if (isOwnerTyping) {
+            hasOperationalRelay = getAwaitingOwnerRequests(profile.user.slack_user_id).some(
+              r => r.terminal_dm_msg_ts === threadTs || r.owner_dm_thread_ts === threadTs,
+            );
+          } else if (threadTs) {
+            const openInThread = getOpenRequestsForThread(profile.user.slack_user_id, threadTs)
+              .filter(r => r.state === 'awaiting_owner' || r.state === 'awaiting_colleague');
+            const latest = getLatestRequestForThread(profile.user.slack_user_id, threadTs);
+            const terminalUnrelayed = !!latest
+              && latest.state !== 'awaiting_owner'
+              && latest.state !== 'awaiting_colleague'
+              && latest.state !== 'in_flight';
+            hasOperationalRelay = openInThread.length > 0 || terminalUnrelayed;
+          }
+        } catch (err) {
+          logger.warn('operational-relay check threw — continuing without it (social directive not suppressed)', {
+            err: String(err).slice(0, 200),
+          });
+        }
         socialDirective = chooseSocialDirective({
           personSlackId: turnPersonSlackId,
           classification: socialClassification,
           ownerTimezone: profile.user.timezone,
+          hasOperationalRelay,
         });
         // Stamp the subject as raised the moment we commit to surfacing it
         // proactively. last_assistant_initiated_at is the linchpin the picker's

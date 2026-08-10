@@ -567,10 +567,18 @@ export async function handleAnalyzeCalendar(args: Record<string, unknown>, ctx: 
           timezone,
         );
         // v4.1.x (M12) — owner-only tool, but still masked when he runs it in an
-        // MPIM (colleagues read that transcript).
+        // MPIM (colleagues read that transcript). colleague-subject-permissive-
+        // half-not-built — that room audience isn't pre-scoped to any one
+        // colleague's own meetings (unlike get_calendar's colleague branch), so
+        // privacy-flag-only masking let every non-private subject on the
+        // owner's FULL calendar render into the room. viewerEmailFor closes it
+        // the same way delete_meeting's seriesMaster refusal already does:
+        // `undefined` (owner-DM) keeps today's behaviour; `null` (room) masks
+        // every subject regardless of privacy flag.
         const processed = processCalendarEvents(
           rawEvents, userEmail, context.profile.user.name, timezone, context.profile,
           subjectViewerFor(context),
+          viewerEmailFor(context),
         );
         // v3.0.3 — analyzeCalendar is read-only; suppression is handled at
         // row-write time elsewhere. (The dead `void getSuppressedEventIds(...)`
@@ -780,9 +788,24 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           // folded into "all 11 declined". Stop here with the real reason and
           // change nothing. Only NOT-FOUND takes this exit; a transient Graph
           // fault still falls through so a live meeting is never reported gone.
+          //
+          // gh#delete-meeting-invalid-id-cascades — a model-invented placeholder
+          // id ("event_id_from_calendar_placeholder", never a real Graph id) is
+          // NOT a 404: Graph rejects it at the id-parsing stage with 400
+          // ErrorInvalidIdMalformed / "The Id is invalid." before it ever looks
+          // the item up. Pre-fix that error pattern fell through this check,
+          // so the same doomed id was replayed against the recurring probe's
+          // fallout (organizer lookup, /decline, /cancel, DELETE — four more
+          // Graph round-trips, each failing identically) before surfacing as an
+          // unhandled stack trace ("Skill Meetings threw during tool
+          // delete_meeting"). A malformed id can never resolve to a real event
+          // either, so it earns the exact same clean refusal as a genuine 404.
           const code = err?.statusCode ?? err?.code;
+          const message = String(err?.message ?? err);
           const notFound = code === 404 || code === 'ErrorItemNotFound'
-            || /not found in the store/i.test(String(err?.message ?? err));
+            || code === 'ErrorInvalidIdMalformed'
+            || /not found in the store/i.test(message)
+            || /the id is invalid/i.test(message);
           if (notFound) {
             logger.info('delete_meeting — event no longer on the calendar, nothing to cancel', {
               meetingId, subject: args.meeting_subject,

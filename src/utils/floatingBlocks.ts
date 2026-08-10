@@ -23,11 +23,11 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
-import { findDeadGaps, alignUpQuarter, type DensityConfig } from './calendarDensity';
+import { findDeadGaps, alignUpQuarter, alignDownQuarter, type DensityConfig } from './calendarDensity';
 // Re-exported — callers requiring `utils/floatingBlocks` (e.g.
 // createMeeting.ts) used to get their own copy; calendarDensity.ts is now the
 // single implementation (#invariant single-implementation-of-a-shared-rule).
-export { alignUpQuarter };
+export { alignUpQuarter, alignDownQuarter };
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday'
@@ -207,21 +207,9 @@ export function alignNearestQuarter(ms: number, timezone: string): number {
     .toMillis();
 }
 
-/**
- * Round a millis timestamp DOWN to the previous quarter-hour in the given
- * timezone. Mirror of alignUpQuarter — used by abut_before to snap the
- * lunch start backwards to the latest aligned tick that still abuts.
- */
-export function alignDownQuarter(ms: number, timezone: string): number {
-  const dt = DateTime.fromMillis(ms).setZone(timezone);
-  const minute = dt.minute;
-  const remainder = minute % 15;
-  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
-  return dt
-    .minus({ minutes: remainder })
-    .set({ second: 0, millisecond: 0 })
-    .toMillis();
-}
+// alignDownQuarter moved to calendarDensity.ts (#188, single implementation
+// alongside alignUpQuarter) — imported + re-exported above so existing
+// requires of this module still work.
 
 // v3.0.2 — buffer parameter removed. Floating blocks are personal time,
 // not meeting-vs-meeting spacing. The 10/25/40/55 meeting durations

@@ -101,6 +101,17 @@ export interface OutputGateContext {
   role: SenderRole;
   colleagueName?: string;
   isMpim?: boolean;
+  /**
+   * gh#194-b-promised-resend-never-fired (2026-08-10, bouncer overturn) — the
+   * missing sibling of isMpim. postReply.ts's own PostReplyInput has always had
+   * an `isChannel` (a real channel, not a DM, not an MPIM) but never forwarded
+   * it into this context, so no gate downstream could tell a channel turn apart
+   * from a 1:1 DM. The claim-checker relay backstop (below, "the relay-to-owner
+   * backstop") is the guard that was silently trusting `!isMpim` alone to mean
+   * "a real 1:1 DM" — it does not, a channel is neither. Threaded through so
+   * that check (and any future one) can ask for a real DM correctly.
+   */
+  isChannel?: boolean;
   isOwnerInGroup?: boolean;
   mpimMemberIds?: string[];
   /**
@@ -176,7 +187,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // In a 1:1 owner DM and in a colleague's DM those two answers are exact
   // negations of each other, which is why one test carried both for so long. In
   // a GROUP DM they come apart: `role` is already clamped to 'colleague'
-  // (processMessage.ts:139) precisely because every colleague in the room reads
+  // (processMessage.ts:122) precisely because every colleague in the room reads
   // the reply, while `isOwnerInGroup` says the owner is the one typing. The old
   // single test read that as "owner-facing", so the one colleague-readable
   // surface in the system shipped with NO leak gate and the wrong voice frame —
@@ -185,13 +196,13 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // v4.2.x — ownerIsActing now asks its question DIRECTLY, of the authenticated
   // Slack sender, instead of through a proxy that answered it for two surfaces out
   // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
-  // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:139) —
+  // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:122) —
   // so the old `role === 'owner' || isOwnerInGroup` pair covered the DM and the
   // group DM and silently missed the CHANNEL: the owner @-mentions Maelle in a
   // real channel, she claims she messaged someone or moved something, and the
   // phantom-action check never ran, because the group-DM fix repaired the MPIM
   // half of the clamp with `isOwnerInGroup` and there is no `isOwnerInChannel`
-  // on this side of the wire (processMessage.ts:138 computes one and never
+  // on this side of the wire (processMessage.ts:121 computes one and never
   // passes it). Keyed on the authenticated identity in code, this covers every
   // present and future surface without a third flag to plumb or forget (shared
   // rule 10, G2). It can only ADD the honesty check, never drop it: `role ===
@@ -975,6 +986,150 @@ async function runClaimCheckAndMaybeRewrite(
       // the warn above.
       if (rewritten && rewritten.trim().length > 0) {
         cleanReply = normalizeForTransport(ctx, rewritten);
+
+        // gh#194-b-promised-resend-never-fired (2026-08-10, owner ruling:
+        // "if she is saying that she will do a follow up or reminder, she
+        // needs to do it") — an honest confession is still just words. Proven
+        // incident (req_1786281967442_i5xm1, 2026-08-09): Yael asked Maelle to
+        // relay urgency to Idan; the false "I forwarded it to him" claim got
+        // caught and rewritten honest, but nothing then made the relay
+        // actually happen — it rode on the model's memory next turn.
+        //
+        // Backstop: reuse the SAME durable reminder spine registrar's
+        // flagUnresolvedFreeformForOwner (src/tasks/skill.ts) uses for the
+        // identical shape — a colleague-raised ask the owner must see, opened
+        // on the ONE requests spine, fired by the existing runner regardless
+        // of what the model does this turn or how the confession is phrased.
+        // Firing unconditionally (not gated on the rewrite's wording) is
+        // deliberate: whether the honest text says "that hasn't gone out
+        // yet" or "let me flag this to him", the owner's point is the same —
+        // the relay must land either way, so making the guarantee depend on
+        // phrasing would just move the gap rather than close it.
+        //
+        // Scope is deliberately the proven incident, not "every false claim":
+        //   - action_type==='message' — a claimed relay/send. A book/task
+        //     claim has no deterministic, safe-to-replay "what" to backstop.
+        //   - the ACTOR is a real colleague, in a real 1:1 DM, never the owner
+        //     and never a room with more than one reader.
+        // The relayed content is the colleague's OWN turn text
+        // (ctx.userMessage) — deterministic, not an LLM paraphrase — the same
+        // flagText shape flagUnresolvedFreeformForOwner uses.
+        //
+        // gh#194-b-promised-resend-never-fired (2026-08-10, bouncer overturn) —
+        // this function (runClaimCheckAndMaybeRewrite) has THREE call sites —
+        // the owner-private leg (:317), the colleague-readable leg gated by
+        // `ownerIsActing || approvalGrantContext` (:411), and the email leg,
+        // unconditional (:624, `runEmailLegGates`) — and the previous version of
+        // this comment asserted only the second was "colleague-reachable". That
+        // was the bug: the CALLER's gate at :411 restricts real colleague turns
+        // correctly, but this check runs from ALL THREE sites and cannot rely on
+        // caller-side scoping to know which one it's in — it must derive "real
+        // colleague, real 1:1 DM" itself, from ctx, every time:
+        //   - EMAIL LEG excluded by transport: `inbound.ts:342` passes
+        //     `senderId: from`, an email address, which is trivially never equal
+        //     to a Slack id — so `senderId !== slack_user_id` was ALWAYS true on
+        //     that leg regardless of who actually sent it, and runEmailLegGates'
+        //     own doc says every draft there IS the owner's own turn (the
+        //     inbound sender gate restricts the whole leg to the owner + his
+        //     aliases) — there is no colleague-relay shape on this leg at all.
+        //   - CHANNEL excluded explicitly: `!ctx.isMpim` excluded a group DM but
+        //     not a real channel — the exact "more than the owner can read this"
+        //     case this backstop must never write a DM-shaped `reminder` row
+        //     for. `isChannel` is now threaded onto OutputGateContext
+        //     (postReply.ts) so this can check it directly.
+        //   - Owner's own Slack turn still excluded by `senderId !==
+        //     slack_user_id` (the owner-private leg, and the owner acting inside
+        //     a group DM/channel at :411, both fail this).
+        const isRealColleagueOneOnOneDm = ctx.transport !== 'email'
+          && ctx.senderId !== profile.user.slack_user_id
+          && !ctx.isMpim
+          && !ctx.isChannel;
+
+        // gh#194-b-promised-resend-never-fired (fix, 2026-08-10, bouncer
+        // finding) — this backstop is scoped (see the block comment above) to
+        // a false claim of relaying TO THE OWNER — "I told him" — never to a
+        // third party. Without this check, a colleague DM asking Maelle to
+        // relay something to someone ELSE ("tell Michal…") that ships a false
+        // send claim opened a reminder that fabricates words the colleague
+        // never said ("<X> asked me to pass this to you") AND never
+        // surfaces the actual undelivered message. `verdict.target_name`
+        // (claimChecker.ts:136, already read above at :843-845 for the
+        // shield check) names whoever the draft claims it messaged —
+        // comparing it against the owner's own name is the deterministic
+        // gate. No match (name absent, or names someone else) is a safe MISS
+        // — no reminder opens, same as before this backstop existed — never
+        // a reminder that puts the wrong words in the wrong mouth.
+        const ownerFirstNameLower = profile.user.name.split(' ')[0].toLowerCase();
+        const ownerFullNameLower = profile.user.name.toLowerCase();
+        const targetIsOwner = !!verdict.target_name
+          && (verdict.target_name.toLowerCase() === ownerFirstNameLower
+            || ownerFullNameLower.includes(verdict.target_name.toLowerCase()));
+        if (verdict.action_type === 'message' && isRealColleagueOneOnOneDm && !targetIsOwner) {
+          logger.info('claim_checker_rewrite — false relay claim named a target other than the owner, skipping the backstop reminder (safe miss)', {
+            senderId: ctx.senderId, threadTs: ctx.threadTs, target_name: verdict.target_name,
+          });
+        }
+
+        if (verdict.action_type === 'message' && isRealColleagueOneOnOneDm && targetIsOwner) {
+          try {
+            const { createRequest, buildIdempotencyKey, getRequestByIdempotencyKey } = await import('../../db/requests');
+            const { workTimeBaseFromNow } = await import('../workHours');
+            const { getPersonMemory } = await import('../../db');
+            const ownerUserId = profile.user.slack_user_id;
+            const requesterFirst = (getPersonMemory(ctx.senderId)?.name ?? 'A colleague').split(' ')[0];
+            const idempotencyKey = buildIdempotencyKey({
+              ownerUserId,
+              requesterSlackId: ctx.senderId,
+              kind: 'reminder',
+              subject: `claim_checker_relay_backstop ${ctx.threadTs} ${ctx.userMessage}`,
+            });
+            if (!getRequestByIdempotencyKey(idempotencyKey)) {
+              createRequest({
+                ownerUserId,
+                initiatedBy: ctx.senderId,
+                initiatedByRole: 'colleague',
+                kind: 'reminder',
+                // subkind marks this row the same way flagUnresolvedFreeformForOwner
+                // (src/tasks/skill.ts:251) marks its sibling: getPendingRequestCountForColleague
+                // (src/db/jobs.ts:78-87) excludes kind='reminder' AND subkind='freeform_owner_flag'
+                // from the colleague's pending-cap count. This row is a durable backstop DM to
+                // the OWNER, not a tracked item the colleague asked for — without this it silently
+                // spends one of their two pending slots (bouncer fix,
+                // gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions,
+                // 2026-08-10): two false-relay claims from one colleague would consume both slots
+                // and their next genuine create_task/create_approval gets refused.
+                subkind: 'freeform_owner_flag',
+                subject: `Needs your read: ${requesterFirst} asked me to pass this to you`,
+                description: ctx.userMessage,
+                state: 'in_flight',
+                // Match the identical-shape precedent (flagUnresolvedFreeformForOwner,
+                // src/tasks/skill.ts:158): this row's OWN nextCheckHandler
+                // ('reminder_fire') is its notification path — it will DM the owner
+                // directly when its timer fires. informed=0 is for "the brief hasn't
+                // told him yet", which would ALSO surface this same flagged relay in
+                // getRequestsForBrief (src/db/requests.ts:395) while it's still
+                // in_flight — a second, redundant notification for one event.
+                informed: 1,
+                requesterSlackId: ctx.senderId,
+                requesterName: requesterFirst,
+                originChannel: ctx.channelId,
+                originThreadTs: ctx.threadTs,
+                originIsMpim: false,
+                idempotencyKey,
+                nextCheckAt: workTimeBaseFromNow(profile),
+                nextCheckHandler: 'reminder_fire',
+                details: { message: `${requesterFirst} asked me to pass this along and I couldn't confirm it actually went through, so flagging it directly: "${ctx.userMessage}"` },
+              });
+              logger.info('claim_checker_rewrite — opened durable backstop reminder for an unconfirmed relay-to-owner claim', {
+                ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
+              });
+            }
+          } catch (backstopErr) {
+            logger.warn('claim_checker_rewrite — failed to open the relay-to-owner backstop reminder', {
+              err: String(backstopErr).slice(0, 200),
+            });
+          }
+        }
       }
     } catch (rwErr) {
       logger.warn('Claim-checker rewrite errored — keeping original draft', { err: String(rwErr) });

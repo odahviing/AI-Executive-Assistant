@@ -36,7 +36,8 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
-import { getOwnerEventsForDecision, getFreeBusyForDecision, type CalendarEvent } from '../../connectors/graph/calendar';
+import { getOwnerEventsForDecision, getFreeBusyForDecision, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
+import { loadAttendeeAvailabilityForEmails } from '../../utils/attendeeAvailability';
 import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
 import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import { subjectViewerFor, type SubjectViewer } from '../../utils/displaySubject';
@@ -767,20 +768,90 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             });
             if (overlap) busyAttendees.push(email);
           }
-          if (busyAttendees.length > 0) {
-            // Pretty-name each busy attendee via people_memory where possible.
-            const names = busyAttendees.map(email => {
-              try {
-                const memMatches = (require('../../db/people') as typeof import('../../db/people'))
-                  .searchPeopleMemory(email.split('@')[0]);
-                const m = (memMatches ?? []).find((x: any) => x.email?.toLowerCase() === email);
-                return m?.name?.split(' ')[0] ?? email.split('@')[0];
-              } catch { return email.split('@')[0]; }
-            });
-            const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-            const label = `${who} ${names.length === 1 ? 'is' : 'are'} busy at this time`;
-            logger.info('planMeeting — attendee busy collision', {
-              busyAttendees, slot: input.slotStartIso, overridden: input.allowRelaxed === true,
+
+          // create-meeting-owner-path-no-attendee-availability-floor — the
+          // overlap loop above only catches a REAL conflicting event
+          // (`attendee_busy_collision`). It says nothing about a slot that
+          // falls outside an attendee's OWN working hours in their own
+          // timezone (`outside_attendee_work_hours`) — a separate rule kind
+          // (scheduleRules.ts's ladder) that existed only inside
+          // findAvailableSlots' SEARCH walker, never at booking time. That is
+          // the gap the 2026-08-07 Kevel/Reflectiz incident actually hit: two
+          // of three named-time candidates were outside Simon's hours and
+          // this owner-path check said nothing because it only ever asked
+          // "is he busy," never "is this even inside his day." Reuse the
+          // SAME mechanism Guard B / move_meeting's colleague-path already
+          // call for this exact purpose (attendeeAvailability + a single-slot
+          // findAvailableSlots read) instead of re-deriving hours/tz math
+          // here — one spine, M2. Only check attendees not already flagged
+          // busy above; a busy attendee's heads-up already covers them.
+          const hoursCheckEmails = internalEmails.filter(e => !busyAttendees.includes(e));
+          const hoursBlockedEmails: string[] = [];
+          if (hoursCheckEmails.length > 0) {
+            try {
+              const availability = loadAttendeeAvailabilityForEmails(hoursCheckEmails, ownerEmail);
+              if (availability && availability.length > 0) {
+                const hoursDiag: { rejectedCounts?: Record<string, number> } = {};
+                await findAvailableSlots({
+                  userEmail: ownerEmail,
+                  timezone: profile.user.timezone,
+                  durationMinutes: Math.max(5, Math.round(slotEnd.diff(slotStart, 'minutes').minutes)),
+                  attendeeAvailability: availability,
+                  searchFrom: input.slotStartIso,
+                  searchTo: input.slotEndIso,
+                  profile,
+                  diagnosticsOut: hoursDiag,
+                  // v3.0.6-style single-slot validation — see the parallel
+                  // comment in create_meeting Guard B. The window is exactly
+                  // [start, end], so widening would only spend extra Graph
+                  // round-trips on candidates this caller discards anyway.
+                  autoExpand: false,
+                });
+                for (const key of Object.keys(hoursDiag.rejectedCounts ?? {})) {
+                  if (key.startsWith('outside_attendee_work_hours:')) {
+                    hoursBlockedEmails.push(key.slice('outside_attendee_work_hours:'.length));
+                  }
+                }
+              }
+            } catch (hoursErr) {
+              logger.warn('planMeeting — attendee working-hours check threw, proceeding', {
+                err: String(hoursErr).slice(0, 200), attendees: hoursCheckEmails,
+              });
+            }
+          }
+
+          // Pretty-name helper shared by both groups.
+          const nameFor = (email: string): string => {
+            try {
+              const memMatches = (require('../../db/people') as typeof import('../../db/people'))
+                .searchPeopleMemory(email.split('@')[0]);
+              const m = (memMatches ?? []).find((x: any) => x.email?.toLowerCase() === email);
+              return m?.name?.split(' ')[0] ?? email.split('@')[0];
+            } catch { return email.split('@')[0]; }
+          };
+          const joinNames = (emails: string[]): string => {
+            const names = emails.map(nameFor);
+            return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+          };
+
+          if (busyAttendees.length > 0 || hoursBlockedEmails.length > 0) {
+            const parts: string[] = [];
+            if (busyAttendees.length > 0) {
+              const who = joinNames(busyAttendees);
+              // No "at this time" here — the ask below appends the actual
+              // whenText once for the WHOLE combined label (M14: one dual
+              // clock, quoted, never repeated per-phrase); the notice usage
+              // (booked-through) already sits next to a confirmation that
+              // states the time itself.
+              parts.push(`${who} ${busyAttendees.length === 1 ? 'is' : 'are'} busy`);
+            }
+            if (hoursBlockedEmails.length > 0) {
+              const who = joinNames(hoursBlockedEmails);
+              parts.push(`it's outside ${who}'s working hours`);
+            }
+            const label = parts.join('; ');
+            logger.info('planMeeting — attendee availability collision', {
+              busyAttendees, hoursBlockedEmails, slot: input.slotStartIso, overridden: input.allowRelaxed === true,
             });
             if (input.allowRelaxed || intent === 'move') {
               // Owner override, approved-replay, OR any MOVE: book anyway and TELL him.
@@ -796,7 +867,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               // it goes out in the SAME message instead of a second round.
               // M14 — one dual clock, quoted, never re-derived per string.
               const subj = input.subject ?? 'this meeting';
-              const askText = `Heads up — ${who} ${names.length === 1 ? 'is' : 'are'} on another meeting at ${whenText(input.slotStartIso, input.slotEndIso)}. Book "${subj}" anyway, or pick a different time?`;
+              const askText = `Heads up — ${label} at ${whenText(input.slotStartIso, input.slotEndIso)}. Book "${subj}" anyway, or pick a different time?`;
               attendeeBusyLabel = label;
               gates.push({ kind: 'attendee_busy', ask: askText });
             }

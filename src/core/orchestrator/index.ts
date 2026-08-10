@@ -240,6 +240,20 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // (create_approval / message_colleague) deliberately do
   // NOT set this (they're the lull case the coda is allowed to ride).
   let turnLeftWorkPending = false;
+  // coda-repeats-and-merges-with-action-confirmations (bouncer overturn,
+  // 2026-08-10) — true once a calendar mutation SUCCEEDS this turn, meaning
+  // the reply is about to report an executed action's result ("Done,
+  // cancelled X and booked Y"). Distinct from turnLeftWorkPending (which
+  // flags a mutation that DIDN'T close): a booking that resolves cleanly
+  // used to sail straight through the task-turn coda piggyback below, which
+  // only checked turnLeftWorkPending — so a resolved booking still got a
+  // coda stacked on it (Bodyguard, 2026-08-09 — confirmed via vm-logs:
+  // "Social coda DUE on a task turn" fired the same beat this booking
+  // closed, no approval/request-spine row involved at all). Handoff tools
+  // (create_approval / message_colleague) are deliberately excluded from
+  // `mutators` below — a parking turn still earns its coda; only a genuine
+  // action-result confirmation is excluded.
+  let turnReportedActionResult = false;
   // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
   // (postReply.ts). Carries FULL event ids so a retry can build a hint that
   // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
@@ -286,6 +300,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // This is the deterministic, clock-free backstop: a same-turn message_colleague
   // to a requester already relayed-to is suppressed on this fact alone.
   const relayedRequestersThisTurn = new Set<string>();
+  // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
+  // colleagues already sent the private cap-notice DM this turn
+  // (colleaguePendingCapRefusal, tasks/skill.ts). Kept SEPARATE from
+  // messagedColleaguesOkThisTurn on purpose — see that field's comment in
+  // skills/types.ts for why folding it in would corrupt the resolver's
+  // double-notify guard.
+  const capNoticeSentThisTurn = new Set<string>();
   // v2.7.2 — capture the most recent rule_violation deferred_action_hint
   // from a meeting tool's result this turn. When create_approval(kind=
   // policy_exception) fires next, the orchestrator stamps this hint as
@@ -435,6 +456,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // double-notify guard). skillContext is rebuilt per response round; the
       // Set persists across the whole turn.
       messagedColleaguesOkThisTurn,
+      // bouncer fix (pending-cap-blocks-unrelated-questions) — same by-
+      // reference pattern, for colleaguePendingCapRefusal's own duplicate-DM
+      // suppression (see skills/types.ts for why it's not folded into the set
+      // above).
+      capNoticeSentThisTurn,
       // v1.8.9 — carry the inbound transport through. Today every caller is
       // the Slack transport so this defaults to 'slack'. When email/WhatsApp
       // inbound lands, those callers will set their own id.
@@ -994,6 +1020,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         if (awaitingDecision || failedMutation || errored) {
           turnLeftWorkPending = true;
         }
+        // coda-repeats-and-merges-with-action-confirmations — the mirror of
+        // failedMutation above: this mutation actually succeeded, so the
+        // reply is reporting a real, executed action.
+        if (mutators.has(toolUse.name) && (r.success === true || r.deleted === true)) {
+          turnReportedActionResult = true;
+        }
       }
 
       // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated
@@ -1339,12 +1371,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // v3.2.5 — end-of-turn social coda on work/scheduling turns, RE-ENABLED
     // (option A). Owner direction: "run it on work turns, but at the END of the
     // process, not in the middle." So the coda may ride a task turn when the
-    // work either RESOLVED this turn (booking done, question answered, note
-    // saved) OR was handed off to someone else (coordination / approval /
-    // await-reply outreach — a natural lull). It is SUPPRESSED only when the
-    // turn is still mid-exchange — Maelle returned a question/decision to the
-    // current interlocutor (confirm-override, pick-a-slot, rule exception) or a
-    // tool failed — which `turnLeftWorkPending` captures during the tool loop.
+    // work was ANSWERED (a question, "note saved") or HANDED OFF to someone
+    // else (coordination / approval / await-reply outreach — a natural lull).
+    // It is SUPPRESSED when the turn is still mid-exchange — Maelle returned a
+    // question/decision to the current interlocutor (confirm-override,
+    // pick-a-slot, rule exception) or a tool failed — which
+    // `turnLeftWorkPending` captures during the tool loop — OR when this turn
+    // is reporting an executed action's result (a booking/cancel/move that
+    // actually succeeded — `turnReportedActionResult`, coda-repeats-and-
+    // merges-with-action-confirmations): that confirmation is the thing the
+    // person is reading right now, and P10 puts a coda stacked on top of it in
+    // the "never in the way" bucket even though the work did resolve.
     //
     // History: the original piggyback (v2.2.1) fired on parking turns but the
     // picker was context-blind → mid-booking non-sequitur ("btw that Samuel L.
@@ -1354,7 +1391,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // guard keeps the coda off genuinely mid-process turns. The cold-open
     // socialOutreachTick is gone (v3.2.5) — this in-conversation coda is now the
     // ONLY proactive-social surface.
-    const codaEligible = !turnLeftWorkPending;
+    const codaEligible = !turnLeftWorkPending && !turnReportedActionResult;
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports

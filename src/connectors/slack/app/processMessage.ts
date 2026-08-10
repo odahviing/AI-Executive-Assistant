@@ -14,7 +14,6 @@ import {
   appendToConversation,
   auditLog,
   logEvent,
-  getPendingRequestCountForColleague,
   upsertPersonMemory,
   getSummarySessionByThread,
 } from '../../../db';
@@ -117,7 +116,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     // (get_free_busy, recall_preferences, get_person_memory, news/web_research, …)
     // and owner-level narration, so his private calendar / owner-only data never
     // lands in a channel. Like owner-in-group he also skips the colleague funnel
-    // (self-upsert / rate-limit / outreach-reply intercept).
+    // (self-upsert / outreach-reply intercept); the pending-request rate limit
+    // is enforced at creation time now (`colleaguePendingCapRefusal`, keyed on
+    // `authority`, src/tasks/skill.ts) and never applied to the owner anyway.
     const isOwnerInChannel = isChannel === true && rawRole === 'owner';
     const role: SenderRole = (isMpim || isChannel) ? 'colleague' : rawRole;
 
@@ -165,7 +166,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
 
     // If this is from a colleague — identify them FIRST, then check active jobs
     // Owner-in-group / owner-in-channel gets colleague TOOLS but skips the colleague
-    // funnel (no self-upsert, no rate limit, no coord/outreach intercept)
+    // funnel (no self-upsert, no coord/outreach intercept). The pending-request
+    // rate limit lives at creation time now (`colleaguePendingCapRefusal`, keyed
+    // on `authority`, src/tasks/skill.ts) and never applied to the owner anyway.
     // Report row 146b — ONE users.info fetch for this senderId, hoisted above
     // the colleague block and reused by Step 4's logEvent title and by the
     // colleagueName resolution further down (previously three separate round
@@ -227,30 +230,25 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         }
       } catch (_) { /* non-critical */ }
 
-      // Step 3: Rate limit check — max 2 pending requests per colleague
-      const pendingCount = getPendingRequestCountForColleague(profile.user.slack_user_id, senderId);
-      if (pendingCount >= 2) {
-        logger.warn('Colleague rate limit reached', { senderId, pendingCount, isChannel, isMpim });
-        // Privacy: in a real channel (where third parties can read), DM the
-        // colleague directly instead of posting publicly with the owner's
-        // name + a "you have pending requests" disclosure. In DM/MPIM the
-        // message stays in-thread (audience already knows the participants).
-        if (isChannel) {
-          await app.client.chat.postMessage({
-            token: assistant.slack.bot_token,
-            channel: senderId,
-            text: `Hi — you already have a couple of pending requests with ${profile.user.name}. I'll follow up with you once those are resolved.`,
-          });
-        } else {
-          await app.client.chat.postMessage({
-            token: assistant.slack.bot_token,
-            channel: channelId,
-            ...(threadTs ? { thread_ts: threadTs } : {}),
-            text: `Hi — you already have a couple of pending requests with ${profile.user.name}. I'll follow up with you once those are resolved.`,
-          });
-        }
-        return;
-      }
+      // Step 3 (gh#pending-cap-blocks-unrelated-questions, 2026-08-10) — the
+      // "max 2 pending" rate limit used to short-circuit HERE, at message
+      // receipt, refusing a capped colleague's entire next message even when
+      // it needed no tracked row at all (e.g. "is Idan free at 16:00").
+      // Enforcement moved to creation time — `colleaguePendingCapRefusal` in
+      // `src/tasks/skill.ts`, run inside `create_task`/`create_approval`, the
+      // only two chokepoints that actually mint a new row — so an ordinary
+      // question never trips it. That refusal is a plain `{error, reason}`
+      // tool result narrated by the model, like every other refusal in that
+      // file; the privacy branch this block used to have — channel: DM the
+      // colleague instead of posting the refusal publicly; DM/MPIM: post the
+      // refusal in-thread — WAS rebuilt there, and deliberately widened
+      // (gh#colleague-pending-cap-room-leak, 2026-08-10): `colleaguePendingCapRefusal`
+      // checks `context.surface === 'room'`, which now covers MPIM as well as
+      // channel (see src/tasks/skill.ts:88-91 for why), so both get the
+      // private-DM treatment; for that case it sends the real explanation via
+      // a private `Connection.sendDirect` DM while handing the model only a
+      // room-safe generic reason to narrate, so the disclosure never enters
+      // the model's context for a room turn (W9) — not in this transport file.
 
       // Step 4: Log the unsolicited message for the briefing.
       // v1.6.14 — stopped writing the raw message text to people_memory.notes
