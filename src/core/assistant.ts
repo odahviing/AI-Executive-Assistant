@@ -808,7 +808,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         if (row) {
           try { notes = JSON.parse(row.notes || '[]'); } catch { notes = []; }
           // Booking snapshots used to be stripped here outright, which made
-          // "we booked yesterday" unrecallable from the store (P6). They come
+          // "we booked yesterday" unrecallable from the store (L6). They come
           // back with a freshness rule + an explicit as-booked frame instead —
           // see readInteractionLog / BOOKING_SNAPSHOT_FRAME in db/people.ts.
           const split = readInteractionLog(row.interaction_log);
@@ -968,7 +968,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // v4.4.x (#170) — travel is a person_id-keyed write (setCurrentTravelById /
         // clearCurrentTravelById), so — unlike the auto-working-hours refresh and
         // engagement_rank below, which really are Slack-only — it applies to
-        // externals too (P4: "I'm in Boston this week" has to land for them the
+        // externals too (L4: "I'm in Boston this week" has to land for them the
         // same as anyone else). Parsed once here and applied by person_id so
         // both branches below share one path instead of duplicating it.
         const travelArg = args.currently_traveling as
@@ -1005,11 +1005,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             setCurrentTravelById(personId, { location: travelArg.location, from: travelArg.from, until: untilIso });
           }
         };
-        // P4 — provenance is derived from the AUTHENTICATED sender, never
+        // L4 — provenance is derived from the AUTHENTICATED sender, never
         // assumed. The colleague branch above force-rewrites the target to the
         // requester's own row, so a colleague reaching here is a person stating
         // a fact about THEMSELVES ('person'), not the owner stating it. Writing
-        // 'owner' on every path recorded a false source in the very column P4's
+        // 'owner' on every path recorded a false source in the very column L4's
         // stated-beats-derived rule reads. Same one-expression shape as
         // confirm_gender.
         const setBy = isOwner ? 'owner' : 'person';
@@ -1073,7 +1073,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             const { setPersonVipById } = require('../db') as typeof import('../db');
             setPersonVipById(target.personId, args.vip);
           }
-          // v4.4.x (#170) — travel (externals travel too; P4's own example).
+          // v4.4.x (#170) — travel (externals travel too; L4's own example).
           applyTravel(target.personId);
           logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);

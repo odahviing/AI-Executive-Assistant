@@ -186,11 +186,31 @@ if (BACKLOG && presetArg.length)
 // `rootCause`: prose alone makes this a fuzzy guess, a ref makes it a lookup.
 // Shape: [{ref, symptom, rootCause, state}].
 const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
-// Items that LEFT the bug track — `converted` into a GitHub issue where the design
-// question is being worked. Distinct from ALREADY_BUILT in the way that matters:
-// nothing is fixed, so the symptom recurs INDEFINITELY rather than only until the
-// next deploy. Without this list a settled decision comes back every night as a
-// fresh bug, which is the failure that re-raised 24 of his rulings on 2026-07-26.
+// Items that LEFT the bug track and settled as a DECISION rather than a fix —
+// two verdicts, both belong here: `converted` into a GitHub issue where the
+// design question is being worked, or `declined` — he ruled directly that it is
+// not a bug, or not worth fixing. Distinct from ALREADY_BUILT in the way that
+// matters: nothing is fixed, so the symptom recurs INDEFINITELY rather than only
+// until the next deploy. Without this list a settled decision comes back every
+// night as a fresh bug, which is the failure that re-raised 24 of his rulings on
+// 2026-07-26 — and until X190, `declined` specifically: it sat on NEITHER this
+// list (converted only) NOR `openBacklog` (which correctly excludes it), so a
+// declined bug rediscovered by an automated pass had no dedup surface at all and
+// could be built as if brand new.
+//
+// His rule on a decline's durability: it must never resurface on its own —
+// "otherwise it will be surfacing again and again" — UNLESS the owner himself
+// restates it (his own act, not an automated rediscovery). So a `declined` entry
+// here is not a pure drop like `converted`: the editor branches on the MATCHING
+// finding's own `source` (see the dispatch brief below and editor.md E12/E2) — a
+// bare `logs` rediscovery can never override it; anything else (`github`,
+// `owner`, `both`) is his own act reaching the editor again and does.
+//
+// `state` on every entry is the row's own VERDICT WORD (`'converted'` or
+// `'declined'`) — set that explicitly when deriving this list, never copy the
+// ledger row's raw `state` column, which tracks something else entirely (a
+// `converted` row can carry `state:'built'`, a `declined` row `state:'open'`)
+// and would tell the editor nothing about which behaviour applies.
 //
 // X51 · a `deferred` row is NOT one of these and must never be passed here. His
 // ruling, 2026-07-30: *"defer for tomorrow or anything like this means defer to
@@ -198,7 +218,6 @@ const ALREADY_BUILT = asArray('alreadyBuilt', A.alreadyBuilt)
 // skip, and since the ledger is only appended during and after a run, every
 // `deferred` row standing when a run starts was deferred by an earlier one and is
 // due by definition. Listing it here tells the editor to drop work he asked for.
-// If he never wants it, the verdict is `declined` — that is the parking state.
 // Shape: [{ref, symptom, state, note}].
 //
 // ENFORCED here, not only written in SKILL.md and editor.md. The rule that lived in
@@ -214,7 +233,7 @@ if (openKnownDeferred.length)
   argWarnings.push(
     `${openKnownDeferred.length} \`openKnown\` entr${openKnownDeferred.length === 1 ? 'y was' : 'ies were'} \`deferred\` and ${openKnownDeferred.length === 1 ? 'was' : 'were'} REMOVED from the drop list: ${openKnownDeferred
       .map((o) => o.ref || '(no ref)')
-      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the editor must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` rows only — derive it that way next time, or record \`declined\` if he never wants ${openKnownDeferred.length === 1 ? 'it' : 'them'}.`,
+      .join(', ')}. A deferral is a ONE-RUN skip, so ${openKnownDeferred.length === 1 ? 'it is' : 'they are'} due NOW and the editor must see ${openKnownDeferred.length === 1 ? 'it' : 'them'} as work. \`openKnown\` is \`converted\` and \`declined\` rows — derive it that way next time.`,
   )
 // X176 · A THIRD LIST, WITH A THIRD BEHAVIOUR. `alreadyBuilt` and `openKnown` are
 // DROP lists — a match means the finding is already handled and must not reach a
@@ -396,12 +415,12 @@ const describeOpenBacklog = (o) =>
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
 const VERIFY = A.verify !== false // one combined bouncer pass over the wave, unless explicitly off
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'handyman'] // run in parallel; context runs LAST, separately
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'slackmaster', 'diplomat', 'handyman'] // run in parallel; context runs LAST, separately
 // Reasoning effort per agent (owner-set). Keys are agent names, renamed 2026-07-28.
 // The non-lane agents live here too, so every dispatch in this engine reads its
 // effort from ONE table — a hardcoded effort at the call site is invisible to
 // anyone tuning the run, which is how the editor sat at `medium` unnoticed.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -441,7 +460,19 @@ const EDITOR = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you. X51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you — a `converted` match (always dropped) or a `declined` match whose OWN source is a bare `logs` rediscovery (stays declined; see `overriddenDeclined` for the one case that proceeds instead). X51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+    },
+    // X190 · the ONE case an `openKnown` match does NOT drop. A `declined` row
+    // matched by anything but a bare `logs` rediscovery is the owner's own act
+    // reaching the editor again — a ticket, a direct restatement — and his rule
+    // is that only his own act can undo a decline. This is the trace for that
+    // reversal, kept separate from `droppedAsOpenKnown` because it is a state
+    // CHANGE, not a routine drop, and needs its own visibility in the manifest.
+    overriddenDeclined: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        "the ref of every `openKnown` row you matched that was `declined`, where the matching finding's OWN `source` is anything but a bare `logs` rediscovery — the owner's own act overriding his prior decline. Also tagged per-issue via `overridesDeclined`. Empty array if none; do NOT omit — an omission is indistinguishable from the check never running.",
     },
     droppedAsAlreadyBuilt: {
       type: 'array',
@@ -558,7 +589,7 @@ const EDITOR = {
           // same judgement, applied to a row it has just re-read.
           lane: {
             type: 'string',
-            enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'],
+            enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman'],
             description: 'REQUIRED when `recommend` starts with `build` — the lane that owns the FIX, routed exactly as you route a fresh issue. Omit on any other verb. A `build` row without this cannot be dispatched and is reported as dropped.',
           },
           severity: {
@@ -595,7 +626,7 @@ const EDITOR = {
           // itself (see the backlog re-read brief's EXCEPTION) — everything else
           // still arrives via the GitHub pull or the log review.
           source: { type: 'string', enum: ['github', 'logs', 'both', 'owner'] },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman'] },
           whyHypothesis: { type: 'string' },
           severity: { type: 'string', enum: ['high', 'medium', 'low'] },
           // KIND is what drives cost, not count. 15-20 atomic items is a normal
@@ -622,6 +653,17 @@ const EDITOR = {
             type: 'string',
             description:
               "the ref of an `openBacklog` row this finding matches — same bug, still open, getting fresh evidence tonight. Never a reason to drop; the finding ships normally. Omit when it matches nothing on that list.",
+          },
+          // X190 · the reversal tag. Set only when this issue's own `source`
+          // overrode a PRIOR `declined` verdict on the matched `openKnown` ref —
+          // never when it merely matches an open or converted row. Omitting this
+          // on an override makes the issue indistinguishable from ordinary new
+          // work, which is exactly the ambiguity his rule (only his own act
+          // reopens a decline) needs to be visibly resolved against.
+          overridesDeclined: {
+            type: 'string',
+            description:
+              "the ref of a `declined` `openKnown` row this issue explicitly overrides. Set ONLY when this finding's own `source` is anything but a bare `logs` rediscovery — a ticket or a direct restatement is the owner's own act, the one thing that can reopen a decline (editor.md E12, E2). Omit entirely otherwise; a bare `logs` match against a `declined` row is DROPPED into `droppedAsOpenKnown`, never overridden.",
           },
           // Filled ONLY when the issue cites a code location. This was its own
           // Haiku pass; the editor is already holding the issue, so it resolves
@@ -731,7 +773,7 @@ const VERDICTS = {
             description:
               "REQUIRED on `built` and `already-fixed`: the MEASURABLE check you ran against REAL, LIVE data — a query against the table, a grep of a live log, a re-run against production input — that shows this fix's actual effect, not merely that the code path changed. If the state you fixed already exists on disk (an existing row, a stored counter, a config value written before your fix), check THAT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so explicitly — never leave this blank.",
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           notes: { type: 'string' },
           // The Workshop reversal (2026-08-07) deleted the eight hand-copied
@@ -801,7 +843,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · a DISCOVERY is the highest-value place for this tag and the only
           // one where it was ever set: you read the whole diff, so you are the pass
@@ -1102,6 +1144,7 @@ const deferredDepAsks = (rs) =>
 let allIssues = []
 let triageDropped = []
 let openKnownDropped = []
+let declinedOverridden = []
 // X176 · `reported` is the omission guard, separate from the count: `[]` means
 // either "checked, found none" or "never checked", and only the editor's own
 // return can tell those apart — a missing field must not read as a clean zero.
@@ -1173,10 +1216,12 @@ const editor = await agent(
         `**Report every ref you drop in \`droppedAsAlreadyBuilt\`, and return an empty array if you drop none.** Omitting the field is indistinguishable from never running the check, which is how this check silently failed before.\n\n${ALREADY_BUILT.map(describeBuilt).join('\n')}\n`
       : '') +
     (OPEN_KNOWN.length
-      ? `\n## Left the bug track — DROP these too\n\n` +
-        `Each of these was CONVERTED into a GitHub issue where the design question is being worked. **Nothing is fixed**, so unlike the list above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
-        `**Drop any finding that matches one, and list the refs in \`droppedAsOpenKnown\` (empty array if none).** Match on \`ref\` first, then a shared \`identity\` slug where one is shown below, then the description. Filing one as new puts a decision he has already made back on his desk as a fresh bug.\n\n` +
-        `**One exception — and report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
+      ? `\n## Already settled — DROP or HOLD, per state\n\n` +
+        `Each of these left the bug track as a DECISION, not a fix. Its own \`state\` says which: \`converted\` (moved to a GitHub issue where the design question is being worked) or \`declined\` (the owner ruled directly it is not a bug, or not worth fixing). Neither is fixed, so unlike \`alreadyBuilt\` above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
+        `**Match on \`ref\` first, then a shared \`identity\` slug where one is shown below, then the description** — same order as \`alreadyBuilt\`.\n\n` +
+        `**A \`converted\` match: always DROP it.** List the ref in \`droppedAsOpenKnown\`.\n\n` +
+        `**A \`declined\` match: branch on THIS finding's own \`source\` (E2's rule, applied here).** A bare \`logs\` source is a pure automated rediscovery — it can NEVER override a decline: DROP it, but list the ref in \`droppedAsOpenKnown\` all the same, so it is held with a trace rather than silently discarded. Any other source (\`github\`, \`owner\`, \`both\`) is the owner's own act reaching you again — a ticket, a direct restatement — and OVERRIDES the decline: keep the issue, proceed exactly as new work, set \`overridesDeclined\` to the matched ref, and also list that ref in \`overriddenDeclined\`. A decline must never resurface on its own; it comes back only on his own act.\n\n` +
+        `**One exception on either state — report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : '') +
     (OPEN_BACKLOG.length
       ? `\n## Still open, not yet built or converted — CONFIRM these, never drop\n\n` +
@@ -1189,6 +1234,7 @@ const editor = await agent(
 allIssues = (editor && editor.issues) || []
 triageDropped = (editor && editor.droppedAsAlreadyBuilt) || []
 openKnownDropped = (editor && editor.droppedAsOpenKnown) || []
+declinedOverridden = (editor && editor.overriddenDeclined) || []
 // X176 · `Array.isArray`, not `|| []` — the whole point is telling "reported
 // empty" apart from "field omitted", and `||` erases exactly that distinction.
 openBacklogReported = Boolean(editor && Array.isArray(editor.matchedOpenBacklog))
@@ -1200,6 +1246,7 @@ backlogNoCite = (editor && typeof editor.backlogNoCite === 'number' ? editor.bac
 backlogReread = (editor && editor.backlogReread) || []
 editorReport = editor || {}
 log(`Editor: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${allIssues.length} atomic issue(s)`)
+if (declinedOverridden.length) log(`Reopened ${declinedOverridden.length} previously-declined item(s) by the owner's own act: ${declinedOverridden.join(', ')}`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 if (OPEN_BACKLOG.length) log(`Open backlog: ${matchedOpenBacklog.length} of ${OPEN_BACKLOG.length} row(s) matched by tonight's fresh findings — confirmed, not dropped.`)
 }
@@ -2188,7 +2235,18 @@ const manifest = {
   // everywhere else in this file.
   // X51 · `deferredRejected` is the derivation error made visible. Non-zero means the
   // Manager put a due row on the drop list and the engine took it back off.
-  openKnown: { passedIn: OPEN_KNOWN.length, deferredRejected: openKnownDeferred.length, dropped: openKnownDropped.length, refs: openKnownDropped },
+  openKnown: {
+    passedIn: OPEN_KNOWN.length,
+    deferredRejected: openKnownDeferred.length,
+    dropped: openKnownDropped.length,
+    refs: openKnownDropped,
+    // X190 · non-zero means a `declined` row was reopened this run — correct
+    // ONLY when the matching finding's own source was the owner's own act (a
+    // ticket, a direct restatement), never a bare `logs` rediscovery. Named so
+    // he can check each ref before the wrap rather than discover it after.
+    declinedOverridden: declinedOverridden.length,
+    declinedOverriddenRefs: declinedOverridden,
+  },
   // X176 · a CONFIRM list, never a drop list — a match means tonight's finding is
   // the SAME bug as an already-open row, so it is emitted as normal, annotated
   // with the ref it matches. Zero matches on an ordinary night warns of nothing,

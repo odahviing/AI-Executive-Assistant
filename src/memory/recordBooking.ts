@@ -21,11 +21,11 @@
  *   written after (keyed by person_id). Next time the owner books them, the
  *   history is already on file.
  *
- * Who earns a row (P3 — ACTIVE engagement, not who asked):
+ * Who earns a row (L3 — ACTIVE engagement, not who asked):
  *   Everyone on a meeting Maelle actually BOOKED. v3.1.7 gated new externals on
  *   `ownerInitiated`, which is the wrong axis: a colleague booking the owner
  *   with an external is still real, deliberate work with that external, and
- *   dropping them meant the next encounter started from zero. The rule P3
+ *   dropping them meant the next encounter started from zero. The rule L3
  *   actually protects is that PASSIVE observation must never mint people —
  *   reading a calendar, scanning a day, passing over an attendee list. That is
  *   enforced where it belongs: the v3.1.7 auto calendar-backfill sweep was

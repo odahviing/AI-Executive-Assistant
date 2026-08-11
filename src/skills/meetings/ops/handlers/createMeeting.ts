@@ -1812,7 +1812,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // v3.0.6 — write a "Booked X" line to each non-owner attendee's
           // person_memory md so future reads have the venue/subject/date.
           // Fire-and-forget; never blocks the response. Every human attendee is
-          // recorded regardless of who initiated (P3 — a booking IS active
+          // recorded regardless of who initiated (L3 — a booking IS active
           // engagement); non-humans are filtered in recordBooking.ts.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -59,7 +59,7 @@
     },
     {
       "id": "ignored-raise-decay-only-fires-picked-category",
-      "lane": "profiler",
+      "lane": "librarian",
       "severity": "low",
       "clarity": "clear",
       "source": "audit",

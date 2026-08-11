@@ -499,7 +499,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
  *  - Only what the OWNER TAUGHT counts. Her own messages are narration, never a
  *    source of facts about her.
  *  - A capability is not an identity fact, and an owner workflow preference is
- *    P7 content — it belongs in the per-skill learned MD via
+ *    L7 content — it belongs in the per-skill learned MD via
  *    update_my_preferences, never on this row.
  */
 const selfSystemPrompt = (assistantName: string, ownerName: string) =>

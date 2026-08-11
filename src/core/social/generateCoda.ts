@@ -12,7 +12,7 @@
  * and only the turn can judge it. WRITING is this file's, and it happens LATER:
  * the orchestrator hands over a `PendingSocialCoda` and the transport calls
  * `composeSocialCoda` inside the 10s beat it already waits before posting. The
- * work answer never waits on a social line (P10).
+ * work answer never waits on a social line (L10).
  *
  * v2.2.4 — language hint passed through so the coda matches the conversation's
  * actual language; discovery-mode for raise_new with no existing topics (ask
@@ -47,7 +47,7 @@ import {
  * on `OrchestratorOutput.socialCoda`. No text: composing it there put a Sonnet
  * call plus a claim-check between "answer ready" and "answer posted", so the
  * person waited two extra round-trips for their WORK answer to produce a line
- * the transport then deliberately posts 10 seconds later (P10 — social never
+ * the transport then deliberately posts 10 seconds later (L10 — social never
  * delays real work). Composition now runs inside that 10s beat, which is dead
  * time, so it costs no user-visible latency anywhere.
  */
@@ -158,7 +158,7 @@ async function generateSocialCoda(params: {
   // coda silently stops arriving. Stating the frame on both paths is the root fix.
   //
   // No gendered pronoun for the reader anywhere below: the output may be Hebrew,
-  // where second person inflects by gender, and langLine owns that (P12 — never
+  // where second person inflects by gender, and langLine owns that (L12 — never
   // guess a gendered form).
   const audienceLine = isOwner
     ? `You're writing TO ${ownerFirst} — the person you work for is the one reading this. Address them directly; never name them or describe them from the outside, the way you would when speaking to someone else ("any trips coming up?", never "does ${ownerFirst} have any trips coming up?").`
@@ -214,7 +214,7 @@ Output the coda sentence only. No quotes, no label.`;
  * Deliberately one function rather than two. The validator needs a snapshot of
  * what Maelle knows about the recipient — their state, timezone and free-text
  * personal notes — and that is people-lane data under a confidentiality rule
- * (P9). Splitting generate and validate would have made the transport assemble
+ * (L9). Splitting generate and validate would have made the transport assemble
  * that snapshot, putting a person's private notes in the pipes for no reason
  * the pipes have. It stays here, where it is already at home, and nothing but
  * the finished sentence ever leaves.
@@ -270,7 +270,7 @@ export async function composeSocialCoda(
           } catch { /* ignore */ }
         }
       }
-      // The person store is the naming authority (P2) — prefer its canonical
+      // The person store is the naming authority (L2) — prefer its canonical
       // name over the transport's display name, fall back to what we were given.
       const recipientName = personRow?.name || pending.senderFirstName || pending.personSlackId;
       const verdict = await checkReplyClaims({

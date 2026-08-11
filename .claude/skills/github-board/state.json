@@ -71,11 +71,6 @@
       "type": "Improvement",
       "tier": "Idea"
     },
-    "52": {
-      "title": "Action log for undo support",
-      "type": "Improvement",
-      "tier": "Next"
-    },
     "58": {
       "title": "VIP semantics and privileges",
       "type": "Feature",
@@ -169,17 +164,12 @@
     "186": {
       "title": "Coda reads the task turn's mood",
       "type": "Improvement",
-      "tier": "Roadmap"
+      "tier": null
     },
     "187": {
       "title": "Closing turn keeps tone context",
       "type": "Improvement",
       "tier": null
-    },
-    "191": {
-      "title": "Research read-depth ignores source agreement",
-      "type": "Improvement",
-      "tier": "Next"
     },
     "198": {
       "title": "Redesign social and coda system",

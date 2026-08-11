@@ -66,7 +66,7 @@ One `people_memory` table for everyone (internal / external / `self`), keyed by 
 
 ### 8. 🔌 Connection / transport layer
 `connections/types.ts` (interface) · `connections/registry.ts` · `connections/slack/*` · `connections/email/*` · inbound in `connectors/slack/*` + `connectors/email/*`
-Outbound goes through the `Connection` interface; **skills never import from `connectors/`**. **The interface and the registry are the shared spine — no lane owns them** (owner's ruling 2026-08-01); the per-transport folders belong to their lanes. Email shipped in 4.3.0; WhatsApp is the next seam. `connectors/graph/calendar.ts` is the Outlook backend (not a messaging Connection).
+Outbound goes through the `Connection` interface; **skills never import from `connectors/`**. **The interface and the registry are Handyman's** (reversed 2026-08-11; ruled ownerless 2026-08-01, until Handyman's seams-between-lanes facet existed to hold it); the per-transport folders still belong to their own lanes. Email shipped in 4.3.0; WhatsApp is the next seam. `connectors/graph/calendar.ts` is the Outlook backend (not a messaging Connection).
 
 ### 9. 🧩 Skills registry — how capabilities plug in
 `skills/registry.ts` · `skills/types.ts`

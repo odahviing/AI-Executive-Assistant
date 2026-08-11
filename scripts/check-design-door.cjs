@@ -913,7 +913,7 @@ const main = async () => {
   const badDuplicate = workshopChecks(BAD_CHARTER_DUPLICATE)
   ok('the checker FAILS a charter that still carries the duplicated block', !badDuplicate.noDuplicateBlock, badDuplicate)
 
-  const BUILDER_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'instructor', 'slackmaster', 'diplomat', 'handyman']
+  const BUILDER_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'instructor', 'slackmaster', 'diplomat', 'handyman']
   for (const lane of BUILDER_LANES) {
     const text = fs.readFileSync(path.join(ROOT, '.claude', 'agents', `${lane}.md`), 'utf8')
     const c = workshopChecks(text)
@@ -1078,7 +1078,7 @@ const main = async () => {
     // Dated on the ACTUAL latest real wrap day (derived above) — same-day is
     // NOT "after" (day-granularity, strict `>`), so this must survive. Proves the
     // check leans toward KEEPING on a same-day ambiguity, never toward dropping.
-    { date: latestWrapDate, runId: 'test', lane: 'profiler', ref: 'fix-sameday', finding: 'same-day symptom', rootCause: 'src/fake/sameday.ts:4', verdict: 'built', state: 'built' },
+    { date: latestWrapDate, runId: 'test', lane: 'librarian', ref: 'fix-sameday', finding: 'same-day symptom', rootCause: 'src/fake/sameday.ts:4', verdict: 'built', state: 'built' },
     // No `ref` at all — must be silently ignored, never crash and never appear.
     { date: '2099-03-01', runId: 'test', lane: 'handyman', finding: 'refless symptom', verdict: 'built', state: 'built' },
     // Not a `built` verdict at all — excluded regardless of any date.

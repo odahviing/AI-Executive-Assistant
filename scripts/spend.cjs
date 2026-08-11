@@ -78,7 +78,8 @@ const RENAMED = new Map([
   ['meeting', 'matchmaker'],
   ['requests', 'registrar'],
   ['guard', 'gatekeeper'],
-  ['people', 'profiler'],
+  ['people', 'librarian'],
+  ['profiler', 'librarian'],
   ['context', 'instructor'],
   ['slack', 'slackmaster'],
   ['outer', 'handyman'],
@@ -401,13 +402,12 @@ if (ONE_DAY) {
       `\n!! OFF CHARTER — ${off.length} dispatch(es) ran on a tier their charter does not declare:\n` +
         off.map((o) => `     ${o.type}: charter says ${o.want}, ran ${o.got} (${o.turns} turns, ${usd(o.cost)})`).join('\n') +
         // A charter may DECLARE a default and name the dispatches that override it —
-        // `architect.md` names two (the A13 cold read, the charter review), and the
-        // whole point of a stated exception is that it is not a defect. The list is
-        // NOT copied here: a second copy of it rots at the first edit, and this
-        // reader's job is to surface the row, not to hold the policy. Without this
-        // line a deliberate override prints as a violation, which is the check
-        // firing on the healthy path and the fastest way to teach everyone to
-        // ignore it.
+        // `architect.md` names one (the charter review), and the whole point of a
+        // stated exception is that it is not a defect. The list is NOT copied here:
+        // a second copy of it rots at the first edit, and this reader's job is to
+        // surface the row, not to hold the policy. Without this line a deliberate
+        // override prints as a violation, which is the check firing on the healthy
+        // path and the fastest way to teach everyone to ignore it.
         `\n     Read the agent's charter before calling one of these a defect: a charter may declare a default AND name the dispatches that override it.`
     )
   else

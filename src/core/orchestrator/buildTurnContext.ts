@@ -655,7 +655,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // Per-person context on COLLEAGUE turns (owner turns use the Social Engine
   // directive below instead). TWO blocks, gated differently:
   //   - WORK context (recent work exchanges + bookings) — on for a colleague's
-  //     OWN 1:1 DM. It is what makes Maelle competent with this person; P6
+  //     OWN 1:1 DM. It is what makes Maelle competent with this person; L6
   //     forbids gating work-competence behind the optional social skill.
   //   - SOCIAL context (engagement rank, initiation cadence, personal notes) —
   //     gated on the toggle (v2.2.3 #3), which is what the toggle is for.

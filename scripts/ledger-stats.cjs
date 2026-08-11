@@ -818,7 +818,16 @@ if (argv.includes('--report')) {
     rs.forEach((r, i) => {
       if (/^wrap-/.test(String(r.runId || ''))) from = i + 1;
     });
-    return rs.slice(from);
+    // A `kind`-tagged row (`run-manifest`, `invariant-backfill`, a historical
+    // `bounce-backfill`) is bookkeeping, never a dispatch — the main pipeline
+    // already excludes these before `scoped` exists (search this file for
+    // `kind === 'run-manifest'`), but this is an INDEPENDENT raw read of the
+    // same ledger and never inherited that exclusion. Left in, a backfill row
+    // appended in the CURRENT open window (exactly what a historical bounce
+    // backfill is) would misattribute a past bounce/build to the upcoming
+    // wrap's own headline the moment it carries `bounces` or `verdict` —
+    // the same drift this whole file exists to catch, just one window later.
+    return rs.slice(from).filter((r) => !r.kind);
   })();
   const builtSinceWrap = sinceWrap.filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
   if (builtAt < 0 && builtSinceWrap.length) {
@@ -1158,11 +1167,21 @@ if (bad.length) console.error(`! ${bad.length} unparseable line(s): ${bad.slice(
 // backfill row has no `lane`, and 310 of them would inflate the "(none)" bucket
 // in the default per-lane table the moment they exist) and INTO its own array,
 // which only `--index` consumes.
+//
+// Every OTHER `kind` value is treated exactly like `run-manifest` — dropped
+// entirely, never a growing list of named exceptions. `kind:"bounce-backfill"`
+// (a historical bounce recorded after `ledger-file.cjs` gained `--bounces`, for
+// a row filed before it existed) is the first case of this, and it has no
+// reader of its own the way `invariant-backfill` has `--index`: nothing needs
+// it structurally, it exists so the bounce that already happened is not lost,
+// and it is still fully recoverable by hand: `grep "\"kind\":\"bounce-backfill\""
+// .claude/agent-loop/ledger.jsonl`. A hardcoded second name here would silently
+// stop covering the THIRD tag-only kind someone invents next.
 const backfillTags = [];
 for (let i = rows.length - 1; i >= 0; i--) {
   if (!rows[i]) continue;
-  if (rows[i].kind === 'run-manifest') rows.splice(i, 1);
-  else if (rows[i].kind === 'invariant-backfill') backfillTags.push(...rows.splice(i, 1));
+  if (rows[i].kind === 'invariant-backfill') backfillTags.push(...rows.splice(i, 1));
+  else if (rows[i].kind) rows.splice(i, 1);
 }
 
 // X166 · the invariant ALIAS map — three of the pre-backfill 43 invariants are

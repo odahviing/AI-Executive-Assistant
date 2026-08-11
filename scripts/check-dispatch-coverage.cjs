@@ -12,7 +12,7 @@
  * lane-day that was dispatched with real work and left NO row behind.
  *
  * SCOPE — the 8 builder lanes only: matchmaker, registrar, gatekeeper,
- * profiler, instructor, slackmaster, diplomat, handyman. Every one shares the
+ * librarian, instructor, slackmaster, diplomat, handyman. Every one shares the
  * same return contract — a verdict per piece, on every dispatch — which is
  * what makes "zero rows" checkable without guessing at intent. Non-builders
  * run different cadences and are not this check's claim: architect writes to
@@ -45,7 +45,7 @@ const LEDGER = path.join(ROOT, '.claude', 'agent-loop', 'ledger.jsonl')
 // Same 8 names `ledger-file.cjs`'s KNOWN_LANES carries for builders — not
 // re-derived from it, because that set also lists non-builders this check
 // deliberately excludes (see header).
-const BUILDERS = new Set(['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'instructor', 'slackmaster', 'diplomat', 'handyman'])
+const BUILDERS = new Set(['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'instructor', 'slackmaster', 'diplomat', 'handyman'])
 
 const argv = process.argv.slice(2)
 const argOf = (f) => {

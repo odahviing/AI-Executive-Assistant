@@ -33,11 +33,16 @@
  *     --finding "…" --rootCause "src/foo.ts:120" --verdict built \
  *     --invariant "existing-slug-or-a-new-one" --note "…"
  *
- *   node scripts/ledger-file.cjs --ref "some-slug" --lane profiler --source github \
+ *   node scripts/ledger-file.cjs --ref "some-slug" --lane librarian --source github \
  *     --finding "…" --verdict needs-owner-decision --invariant none --recommend "decide — …"
  *
  *   node scripts/ledger-file.cjs --ref "some-slug" --invariant "a-new-principle" --confirm-new-invariant \
  *     --lane matchmaker --source verify --finding "…" --verdict built --rootCause "src/foo.ts:1"
+ *
+ *   # a piece the bouncer sent back and the lane fixed on retry — `--bounces 1`,
+ *   # never free text; the outcome (fixed vs escalated) is already `--verdict`:
+ *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
+ *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --bounces 1
  *
  *   # WRAP_UP.md step 12, the built -> wrapped companion (no writer existed for this either):
  *   node scripts/ledger-file.cjs --wrap-companion --ref "some-slug" --version 4.4.8 --sha abc1234
@@ -73,7 +78,7 @@ const die = (msg, extra) => {
 // a rootCause with nothing checkable behind it is a claim nobody can re-derive.
 const POINTS_SOMEWHERE = /(:\d+)|(\bwf_[a-z0-9-]+)|(\.(?:ts|tsx|js|cjs|mjs|md|jsonl|json|yaml|sql)\b)|(\bnode |\bgit |\bnpm )/i
 
-const KNOWN_LANES = new Set(['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', 'architect', 'cleaner', 'editor', 'framer', 'bouncer'])
+const KNOWN_LANES = new Set(['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman', 'architect', 'cleaner', 'editor', 'framer', 'bouncer'])
 const KNOWN_SOURCES = new Set(['github', 'logs', 'both', 'owner', 'audit', 'verify', 'engine', 'manager chat', 'unrecorded'])
 // Every verdict actually in live use, mirrored from the ledger itself (measured
 // 2026-08-05) MINUS the one retired spelling (`flagged-for-owner` — X77 renamed
@@ -225,6 +230,7 @@ const note = argOf('--note') || ''
 const recommend = argOf('--recommend') || ''
 const severity = argOf('--severity')
 const state = argOf('--state') || ''
+const bouncesRaw = argOf('--bounces')
 const confirmNew = flag('--confirm-new-invariant')
 
 if (!ref) die('no --ref.', 'The bug\'s own identity — a ledger `ref`, e.g. a slug or `gh#<n>`.')
@@ -262,6 +268,23 @@ if ((verdictRaw === 'needs-owner-decision' || verdictRaw === 'blocked-charter' |
   die(`a "${verdictRaw}" row needs --recommend or --note.`, 'A row he cannot rule on without re-opening the finding is not a row this ledger should accept (X77).')
 if (severity && !['high', 'medium', 'low'].includes(severity)) die('--severity must be high, medium or low.')
 
+// ── `--bounces` — there was no writer for this field until now. `bugger.js` and
+// `feature.js` both cap the round at BOUNCE_LIMIT=1 ("we can bounce stuff once,
+// not twice", SKILL.md) and only ever emit the field when it is non-zero, so 1
+// is not a default, it is the only value the field ever legitimately holds —
+// same rule for a hand-run bouncer pass (SKILL.md: "write bounces: 1 on every
+// one"). The OUTCOME of the bounce (fixed and cleared, vs escalated after the
+// second attempt) is already carried by `--verdict` (`built` vs
+// `needs-owner-decision`) — a second field for that would be the same fact
+// twice, so this stays a single count, not a new verdict spelling.
+let bounces = null
+if (bouncesRaw !== null) {
+  const n = Number(bouncesRaw)
+  if (!Number.isInteger(n) || n < 1) die('--bounces must be a positive integer.', 'Omit the flag entirely for a row that was never sent back — there is no reason to write `bounces: 0`.')
+  if (n > 1) die(`--bounces ${n} is above the engine's own limit.`, 'BOUNCE_LIMIT is 1 in both bugger.js and feature.js — a row overturned a second time goes to the owner with verdict `needs-owner-decision`, it does not get a bigger count. If this really happened outside the engine, that is a bug in the bounce mechanism, not a new value for this field.')
+  bounces = n
+}
+
 const row = { date: new Date().toISOString().slice(0, 10), ref, lane: lane || '', source, finding, verdict: verdictRaw }
 if (rootCause) row.rootCause = rootCause
 if (invariant !== 'none') row.invariant = invariant
@@ -269,9 +292,10 @@ if (state) row.state = state
 if (severity) row.severity = severity
 if (recommend) row.recommend = recommend
 if (note) row.note = note
+if (bounces) row.bounces = bounces
 
 append(row)
-console.log(`\nAppended — ${ref} [${verdictRaw}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}\n`)
+console.log(`\nAppended — ${ref} [${verdictRaw}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}${bounces ? ' · BOUNCED' : ''}\n`)
 console.log(`  finding : ${finding.slice(0, 120)}`)
 if (rootCause) console.log(`  root    : ${rootCause}`)
 console.log(`\nCheck it landed: node scripts/ledger-stats.cjs --lane ${lane || '""'}\n`)

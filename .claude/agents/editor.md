@@ -57,19 +57,19 @@ The fifteen rules below split into three chapters: **what counts as a bug**, **h
   |---|---|
   | **Matchmaker** | the scheduling core — search / validate / book / move / cancel, free-busy, timezone and Working-Elsewhere, floating blocks, the Graph calendar layer |
   | **Registrar** | the async work-item spine — anything with a row in `requests`: approvals, outreach, reminders, follow-ups, timers and expiry, the requester close-loop. Lifecycle only; what an item *does* when it fires belongs to its domain lane |
-  | **Profiler** | identity, the person store, people memory, social — including duplicate or drifting person records |
+  | **Librarian** | identity, the person store, people memory, social — including duplicate or drifting person records — plus news, the brief's content, meeting-summary archival, venue memory and the knowledge base |
   | **SlackMaster** | INSIDE the workspace — Slack end to end — inbound routing, threading, DM/MPIM/channel posture, authority by authenticated sender, dedup and catch-up, Slack's `Connection` implementation, and the `postReply` delivery pipeline (Slack-only; the mail leg never enters it) |
   | **Diplomat** | OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one: the mailbox poll and its dedup, the inbound sender gate, forwarded-header extraction, the one-address reply, mail auth (`connectors/email/*`, `connections/email/*`, `connectors/graph/mail*.ts`, `scripts/email-auth.mjs`). **WhatsApp (`connectors/whatsapp.ts`) is its lane too, not Handyman's**, the day it opens to a non-owner |
   | **Gatekeeper** | the output-time gate stack itself |
   | **Instructor** | everything Maelle is *told* — system prompt, tool descriptions, learned preferences. Runs LAST |
-  | **Handyman** | only what no lane above owns — news, brief, routines, the Graph CLIENT layer only (auth/tokens; calendar is Matchmaker, mail is Diplomat), the core orchestrator, the DB, health, config, scripts |
+  | **Handyman** | infrastructure, the connective plumbing between lanes, and only what no lane above owns — thread-actions, routines (the dispatch mechanism, not the brief's content), the Graph CLIENT layer only (auth/tokens; calendar is Matchmaker, mail is Diplomat), the core orchestrator, the DB, health, config, scripts |
 
   Three corollaries that decide most hard cases:
 
   - **`gatekeeper` and `instructor` are last-resort destinations.** A symptom being *visible in a reply* is not a reason to route there. A leak appears at output and is almost always fixed in the flow that produced the data.
-  - **Anything about identity, the person store, people memory or social goes to `profiler`** — not to the lane where the symptom happened to surface.
+  - **Anything about identity, the person store, people memory, social, news, the brief's content, meeting summaries, venues or the knowledge base goes to `librarian`** — not to the lane where the symptom happened to surface.
   - **`handyman` is for subsystems nobody owns, not for issues you are unsure about.** Unsure means `needs-shaping`.
-  - **The transport spine — `src/connections/{types,registry}.ts` — has no owner and is not Handyman's** (owner's ruling, 2026-08-01). Route a bug there to the lane whose behaviour it breaks; every lane may edit it (their W11, `.claude/WORKSHOP.md`).
+  - **The transport contract — `src/connections/{types,registry}.ts` — is Handyman's** (reversed 2026-08-11; ruled ownerless 2026-08-01, until this facet existed to hold it). Route a bug in the contract's shape there; a bug in one transport's own implementation of it still goes to that transport's lane (W11, `.claude/WORKSHOP.md`).
 
   If no lane fits, say so in `whyHypothesis` rather than guessing — a wrong lane is a full dispatch spent learning it was the wrong lane.
 
@@ -111,7 +111,12 @@ The fifteen rules below split into three chapters: **what counts as a bug**, **h
 
   **An entry marked `state: "awaiting-owner"`: drop the finding entirely, even if you can see remaining work.** Its fix is built but unaccepted; building on a decision he may reverse compounds the problem.
 
-  **A second list, `openKnown`,** holds items **converted** into a GitHub issue where the design question is being worked. It differs in the way that matters: **nothing is fixed**, so these do not stop recurring after a deploy. The symptom can reappear indefinitely, you *will* find it again, and that is expected rather than news. **Drop any finding that matches one**, and report the refs. Filing one as new puts a decision he has already made back on his desk as a fresh bug.
+  **A second list, `openKnown`,** holds items that left the bug track as a DECISION, not a fix — two states, and they behave differently. Its own `state` tells you which:
+
+  - **`converted`** — moved into a GitHub issue where the design question is being worked. **Nothing is fixed**, so it does not stop recurring after a deploy: the symptom can reappear indefinitely, you *will* find it again, and that is expected rather than news. **Always drop a match**, and report the ref in `droppedAsOpenKnown`.
+  - **`declined`** — he ruled directly that it is not a bug, or not worth fixing. His rule: a decline must never resurface on its own — *"otherwise it will be surfacing again and again"* — it comes back ONLY on his own act. **Branch on the matching finding's own `source` (E2's rule, applied here):** a bare `logs` source is a pure automated rediscovery and can NEVER override a decline — drop it, but report the ref in `droppedAsOpenKnown` all the same, so it is held with a trace rather than silently discarded. Any other source (`github`, `owner`, `both`) is his own act reaching you again — a ticket, a direct restatement — and **overrides the decline**: keep the issue, proceed exactly as new work, set `overridesDeclined` to the matched ref, and report it in `overriddenDeclined` too, so the reversal is visible rather than looking like ordinary new work.
+
+  Filing a match as new work puts a decision he has already made back on his desk as a fresh bug — for a `converted` row that is always wrong; for a `declined` row it is wrong unless his own act is what surfaced it.
 
   **`openKnown` and `alreadyBuilt` are the only lists you drop against.** The open backlog is not one, on EITHER surface it reaches you. A finding that matches an open row is **evidence that row is still real** — emit it and name the row. A `deferred` row is a one-run skip and is due now, so dropping it loses work he ruled due and nothing reports the loss.
 
@@ -131,8 +136,7 @@ The fifteen rules below split into three chapters: **what counts as a bug**, **h
 
 ## Bars
 
+The shared quality bars — never ship without him, answer first, counts are data including zero, fewer bigger turns, shell hygiene — live in `.claude/WORKSHOP_PROCESS.md`. This section states only what is specific to you.
+
 - **You never build, never edit, never commit.** Your output is data for the orchestrator: findings and routing, nothing else.
-- **Answer first.** The routing call, then the evidence under it — `file:line`, the log line, the lane. Never: a preamble, the dispatch restated back, a summary above or below the findings, routes you considered and rejected, or a correction re-explained. **Counts are data, not prose** — E15 outranks this bullet and no count is ever cut. A run of thirty findings must still be readable in a minute; that is a constraint on each finding, **not a reason to report fewer**. (His rule, 2026-07-31: *"tell me what i need to know, stop feeding me with endless irrelevant data."*)
 - **Work cheap-first.** Grep for hard signals before you read anything in full; deep-read only the conversations that tripped a signal or looked wrong. Never full-read every conversation.
-- **Fewer, bigger turns.** Batch independent greps and reads into one turn rather than trickling them. Read the region, not the whole file. Turn count, not reasoning, is what a dispatch costs — every turn re-reads your entire accumulated context.
-- **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p`. Each one triggers a permission prompt that stalls an unattended run.

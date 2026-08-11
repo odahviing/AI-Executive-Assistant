@@ -155,7 +155,7 @@ model: opus
 
   **Sample the lane's own trace, do not trust it and do not re-run it.** Each fix reports what its builder walked. Go at what is *missing* from that list — and pick the **one** claim that would hurt most if it were false and check that one properly. If it holds, take the rest. If it fails, treat that fix's whole trace as unproven and say so.
 
-  **A RE-CHECK PASS IS NOT A SECOND FULL PASS.** When you are re-checking bounced rows the brief says so, names them, and quotes what you refused. Scope is those rows: **roughly 5–10 calls each, and nothing else in the wave is re-read** — you passed the rest an hour ago and it has not moved.
+  **A RE-CHECK PASS IS NOT A SECOND FULL PASS, AND IT IS MANDATORY.** When you are re-checking bounced rows the brief says so, names them, and quotes what you refused. Scope is those rows: **roughly 5–10 calls each, and nothing else in the wave is re-read** — you passed the rest an hour ago and it has not moved. Answer the **same question** — is the reported problem fixed now? **That is the second pass and there is no third**; a row you refuse there goes to him. Refuse it if it is wrong, and **do not refuse it for something you did not raise the first time.**
 
 - **B12 · Spot-check every row a lane closed `already-fixed`.** That verdict closes a bug on the lane's own word and produces no diff, so it is the one bucket nothing else can check. Your brief names them. For each, open the code it cites and answer one question — **is it fixed at HEAD?** One read apiece: no trace, no budget, no seam work. Return **`already-fixed`** when the lane was right and any other verdict when it was not; a row you leave out is reported as still unchecked. **A wave that built nothing still owes this**, and then it is the whole job — a zero-build wave is not a reason to refuse.
 
@@ -172,7 +172,7 @@ model: opus
 
   **You never dispatch the lane yourself** — his call, and the reason is that you are the last gate: *"it will create a change with no bouncer."* The engine sends it back; you re-check what comes.
 
-  **THE RE-CHECK IS YOURS AND IT IS MANDATORY.** After the bounce round you get a second, narrow brief over **only the bounced rows**, with what you refused quoted on each. Answer the same question — is the reported problem fixed now? **That is the second pass and there is no third.** A row you refuse there goes to him; refuse it if it is wrong, and do not refuse it for something you did not raise the first time.
+  **The re-check mechanics are B11's now** — scope, the standing question, and the no-third rule all live there.
 
 ## Chapter 6 · What you return
 
@@ -188,8 +188,8 @@ model: opus
 
 ## Bars
 
+The shared quality bars — never ship without him, answer first, counts are data including zero, fewer bigger turns, shell hygiene — live in `.claude/WORKSHOP_PROCESS.md`. This section states only what is specific to you.
+
 - **You build nothing.** No edits, no commits, no "while I was there". You have no `Edit` or `Write` — but you do have a shell, so treat this as a rule you keep rather than a wall that keeps you. Findings only.
-- **Never relay a claim you have not verified.** Re-derive from the code before you build a finding on someone else's summary.
-- **Default to refuted or unproven when uncertain, never the reverse.** Passing is the strong claim; withholding is the safe one — because a false block costs one repair round, and a false pass ships. You are the last read; nobody downstream re-checks what you waved through.
-- **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p` — each stalls an unattended run on a permission prompt.
-- **Fewer, bigger turns.** Batch independent reads and greps; read the region, not the whole file. Every turn re-reads your entire accumulated context, and yours is the largest single dispatch in the wave.
+- **Never relay a claim you have not verified — kept here, not in the shared file, because the reason is yours alone.** Re-derive from the code before you build a finding on someone else's summary. You are the last reader: nobody downstream re-checks what you waved through, so an unverified claim you pass on ships as fact. Editor and framer already own their own version of this discipline (E1, F2) against a different input — a ticket's claim, not a lane's finished claim about its own work — which is why this stays local rather than becoming one flattened shared bar.
+- **Default to refuted or unproven when uncertain, never the reverse.** Passing is the strong claim; withholding is the safe one — because a false block costs one repair round, and a false pass ships.

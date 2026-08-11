@@ -135,8 +135,8 @@ const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
 // The ONLY way to survey the whole board. Owner, 2026-07-28: "always do 1 unless
 // I'M SAYING more." Without this flag the engine plans at most one unnamed item.
 const SWEEP = A.sweep === true
-const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'profiler', 'slackmaster', 'diplomat', 'handyman']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', profiler: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'slackmaster', 'diplomat', 'handyman']
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -153,14 +153,14 @@ if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — 
 const LANE_MAP =
   '`matchmaker` the scheduling core — finding a time that fits several calendars and rules · ' +
   '`registrar` the async work-item spine (approvals, outreach, reminders, follow-ups, close-loop); nothing raised gets lost · ' +
-  '`gatekeeper` the output-time gates — nothing leaves without passing them · `profiler` identity, person store, memory, social · ' +
+  '`gatekeeper` the output-time gates — nothing leaves without passing them · `librarian` identity, person store, memory, social, news, brief content, summaries, venues, knowledge base · ' +
   '`instructor` everything Maelle is TOLD (system prompt, tool descriptions, learned prefs) and it runs LAST · ' +
   '`slackmaster` INSIDE the workspace — Slack end to end (routing, threading, DM/MPIM/channel posture, ' +
   'authority-by-authenticated-sender, the postReply delivery pipeline, Slack\'s `Connection` implementation) · ' +
   '`diplomat` OUTSIDE the workspace — every channel reaching someone who is not in Slack. Mail is the live one ' +
   '(mailbox poll, the inbound sender gate, forwarded-header extraction, the one-address send cap, reply-not-compose, ' +
   'mail auth); WhatsApp/iMessage land here too when they open · `handyman` only where NO lane owns the subsystem ' +
-  '(news, brief, routines, the Graph CLIENT layer only — calendar is matchmaker, mail is diplomat — core orchestrator, DB, health, config, scripts)'
+  '(routines, the Graph CLIENT layer only — calendar is matchmaker, mail is diplomat — core orchestrator, DB, health, config, scripts)'
 
 // ---- schemas ----
 const RAW = {
@@ -235,7 +235,7 @@ const PLAN = {
         properties: {
           id: { type: 'string' },
           ref: { type: 'string', description: 'the improvement this serves' },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman'] },
           // WHY this piece exists, in product terms. Added on the owner's ask
           // 2026-07-28: the first plan he read gave him lane · change · deps ·
           // size, and he could not decide from it because nothing said what any
@@ -306,12 +306,14 @@ const PLAN = {
     // WITHOUT IT the answer is decided by whichever lane happens to run first.
     //
     // IT NAMES A FACT, NOT A CALL: the owner is whoever owns that file; a
-    // genuinely new file goes to the lane whose subsystem the rule is about; and
-    // `src/connections/{types,registry}.ts` is the shared spine nobody owns.
+    // genuinely new file goes to the lane whose subsystem the rule is about.
+    // `none` is rare — even the transport contract, `src/connections/{types,
+    // registry}.ts`, has an owner now (Handyman, since 2026-08-11; it was
+    // ruled ownerless 2026-08-01, before that lane's seams-facet existed).
     sharedPiece: {
       type: 'string',
       description:
-        'who writes the code no single piece owns — `<lane> — <file>`, or exactly `none`. Several go on one line separated by `;`. This is a FACT, not a choice: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about; `src/connections/{types,registry}.ts` is the shared spine nobody owns. Never blank — `none` is the answer when no piece touches shared code.',
+        'who writes the code no single piece owns — `<lane> — <file>`, or exactly `none`. Several go on one line separated by `;`. This is a FACT, not a choice: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about. `none` is rare — most files have a clear lane owner, including the shared transport contract (`src/connections/{types,registry}.ts`), which is Handyman\'s since 2026-08-11. Never blank — `none` is the answer only when no piece touches genuinely unowned code.',
     },
     blockingQuestions: {
       type: 'array',
@@ -427,7 +429,7 @@ const VERDICTS = {
             description:
               "REQUIRED on `built` and `already-fixed`: the MEASURABLE check you ran against REAL, LIVE data — a query against the table, a grep of a live log, a re-run against production input — that shows this piece's actual effect, not merely that the code path changed. If the state you fixed already exists on disk (an existing row, a stored counter, a config value written before your fix), check THAT now; a new field or branch does not retroactively reach data already there. If there is genuinely nothing to observe outside the code itself, say so explicitly — never leave this blank.",
           },
-          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman', ''] },
+          dependencyAgent: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman', ''] },
           dependencyAsk: { type: 'string' },
           // X22 · same field, same words as bugger.js. It matters here because
           // `VERIFY_OUT.results` reuses this shape, so a feature wave's OVERTURN is a
@@ -483,7 +485,7 @@ const VERIFY_OUT = {
             description:
               'REQUIRED, and it must be a `file:line` AS THE FILE STANDS AT HEAD — open it and point at the line that is still wrong. A log line is what made you look; it is not evidence the defect is still there. If the code has since been fixed, this is not a discovery.',
           },
-          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'profiler', 'slackmaster', 'diplomat', 'handyman'] },
+          lane: { type: 'string', enum: ['matchmaker', 'registrar', 'gatekeeper', 'instructor', 'librarian', 'slackmaster', 'diplomat', 'handyman'] },
           severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'carried into the next run, where the severity-first cap orders the queue. Judge the harm, not whether it blocks this wave — it does not.' },
           // X22 · same field, same words as bugger.js' discoveries.
           invariant: {
@@ -740,7 +742,7 @@ if (MODE === 'plan') {
   const CONTRACT_RULES =
     `• **Every piece names its \`connection\` — what it calls, what calls it, and WHAT IT MUST NOT BYPASS.** The third clause is the one that matters: name the gate, guard or resolver that stays in the path. This is where a cross-lane change actually breaks, and nothing else in this plan asks for it.\n` +
     `• **Every piece names its \`expectation\` — what the OTHER pieces are entitled to assume about this one once it lands.** This is the field that stops two lanes each assuming the other handled it, and it specifies up front exactly what the bouncer's joint-trace verifies at the end: same seam, both ends. "Nothing — no other piece depends on this" is a valid answer.\n` +
-    `• **\`sharedPiece\` on the plan: \`<lane> — <file>\`, or exactly \`none\`.** You are read-only and permanently so — you author the contract, a lane writes the code that embodies it — so this line is the ONLY thing saying who writes a file no single piece owns. It names a FACT, not a call: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about; \`src/connections/{types,registry}.ts\` is the shared spine nobody owns.\n`
+    `• **\`sharedPiece\` on the plan: \`<lane> — <file>\`, or exactly \`none\`.** You are read-only and permanently so — you author the contract, a lane writes the code that embodies it — so this line is the ONLY thing saying who writes a file no single piece owns. It names a FACT, not a call: the owner is whoever owns that file; a genuinely new file goes to the lane whose subsystem the rule is about. \`none\` is rare — even the transport contract (\`src/connections/{types,registry}.ts\`) is Handyman's now (since 2026-08-11).\n`
 
   phase('Decompose')
   const plan = await agent(

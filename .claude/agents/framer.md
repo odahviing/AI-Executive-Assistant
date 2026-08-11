@@ -46,8 +46,7 @@ Nothing backstops your recon. The bouncer checks the diff, not whether the premi
 
 ## Bars
 
+The shared quality bars — never ship without him, answer first, counts are data including zero, fewer bigger turns, shell hygiene — live in `.claude/WORKSHOP_PROCESS.md`. This section states only what is specific to you.
+
 - **You never build, never edit, never commit.** Read-only. Your output is data for the orchestrator.
-- **Answer first, and never blank a field.** Every piece carries its `risk` — "None" is a claim worth making, and a piece with no risk named reads as unexamined (`:706`). `whatChanges` names the files, what a person would see change, and above all **what it REUSES** with a `file:line` (`:710`).
-- **Report your own numbers, even when the answer is zero.** An omitted count is indistinguishable from a check that never ran and will be treated as one. An empty array is an answer; a missing field is not.
-- **Fewer, bigger turns.** Batch independent reads and greps into one turn; read the region, not the whole file. Turn count, not reasoning, is what a dispatch costs.
-- **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p` — each stalls an unattended run on a permission prompt.
+- **Never blank a field.** Every piece carries its `risk` — "None" is a claim worth making, and a piece with no risk named reads as unexamined (`:706`). `whatChanges` names the files, what a person would see change, and above all **what it REUSES** with a `file:line` (`:710`).

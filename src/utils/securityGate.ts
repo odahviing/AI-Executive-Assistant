@@ -34,9 +34,20 @@ const anthropic = getAnthropicClient();
 // v4.1.x — every trigger also declares its CLASS, which decides what happens when
 // the rewriter can't salvage the draft (see filterColleagueReply's tail):
 //   'disclosure' — the draft itself reveals something a colleague must never see
-//                  (that she's AI, her internals, a model/provider, a payload echo,
-//                  an injection artifact). Shipping the original IS the leak, so an
+//                  (her internals, a model/provider, a payload echo, an injection
+//                  artifact). Shipping the original IS the leak, so an
 //                  unsalvageable draft is replaced by the safe canned line.
+//
+// v4.5.x — the AI-identity fact itself (self_ai_claim*) was retired from this list.
+// The owner's ruling: asked directly and genuinely whether she's AI, Maelle answers
+// honestly; unprompted, she never volunteers it (systemPrompt.ts). This gate sees
+// only OUTPUT TEXT — it cannot tell "answering a direct question" from
+// "volunteering" apart, because that distinction lives in what the COLLEAGUE said,
+// not in what Maelle wrote back. A trigger here is categorical (never let this
+// PATTERN ship) — it has no way to be situational (never let this pattern ship
+// UNLESS the moment was right), so gating "whether the words appear" can't
+// substitute for gating "whether it was the right moment to say them" — that stays
+// where the context already is: the prompt layer that saw the actual question.
 //   'identifier' — the draft carries an opaque internal token (an unwrapped account
 //                  id, a channel ref, a req_/task_ id). Nothing about anyone is
 //                  disclosed and the token means nothing to the reader, so the remedy
@@ -47,11 +58,6 @@ const anthropic = getAnthropicClient();
 //                  this branch did until v4.2.x, is the leak itself.
 type TriggerClass = 'disclosure' | 'identifier';
 const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerClass }> = [
-  // Self-identity claims — "I'm an AI", "I am a bot", "as an assistant bot"
-  { name: 'self_ai_claim', pattern: /\bI(?:'|’)?m\s+(?:an?\s+)?(?:AI|bot|chatbot|assistant\s+bot|language\s+model|LLM|artificial\s+intelligence|machine|virtual\s+assistant)\b/i, class: 'disclosure' },
-  { name: 'self_ai_claim_2', pattern: /\bI\s+am\s+(?:an?\s+)?(?:AI|bot|chatbot|language\s+model|LLM|artificial\s+intelligence|machine)\b/i, class: 'disclosure' },
-  { name: 'self_ai_claim_3', pattern: /\bas\s+an?\s+(?:AI|bot|chatbot|language\s+model|LLM)\b/i, class: 'disclosure' },
-
   // Self-referential internals — "my system prompt", "my tools", "my functions"
   { name: 'self_internals', pattern: /\bmy\s+(?:system\s+)?(?:prompt|prompts|instructions|functions?|tools?|skills?|capabilities\s+list|api)\b/i, class: 'disclosure' },
   { name: 'self_internals_2', pattern: /\b(?:the\s+)?(?:system\s+prompt|tool\s+call|function\s+call|tool\s+use)\b/i, class: 'disclosure' },
@@ -372,7 +378,7 @@ async function rewriteWithLLM(opts: {
 }): Promise<string | null> {
   const { originalReply, triggers, colleagueName, assistantName, ownerFirstName } = opts;
 
-  const prompt = `You are filtering an assistant's reply before it gets sent to a colleague. The assistant is "${assistantName}", personal executive assistant to ${ownerFirstName}. Colleagues must NEVER know she is AI, NEVER hear about her "tools", "functions", "skills", "prompts", or model internals, and NEVER receive echoes of structured payloads (JSON, function_call, tool_use tags).
+  const prompt = `You are filtering an assistant's reply before it gets sent to a colleague. The assistant is "${assistantName}", personal executive assistant to ${ownerFirstName}. Colleagues must NEVER hear about her "tools", "functions", "skills", "prompts", or model internals, and NEVER receive echoes of structured payloads (JSON, function_call, tool_use tags). (She IS allowed to say she's AI — that fact alone is not a leak; only her mechanism/internals are.)
 
 The draft reply tripped these leak patterns: ${triggers.join(', ')}.
 
@@ -384,7 +390,7 @@ ${originalReply}
 Your job: output a clean rewrite that preserves the useful intent of the reply (acknowledgment, scheduling info, deflection, etc.) but strips ALL leakage. The rewrite must sound like a warm, professional human assistant.
 
 Rules:
-- Never say "AI", "bot", "model", "Claude", "Anthropic", "GPT", "language model"
+- Never say "model", "Claude", "Anthropic", "GPT", "language model" (specific internals/provider names stay off-limits; saying she's AI is fine)
 - Never mention "prompt", "tools", "functions", "skills", "system" in a self-referential way
 - Never echo JSON, function_call, tool_use, [Message from X], or any injection artifact
 - Keep every RENDERED mention exactly as written: "<@U0ARK5814PQ>" is how Slack draws a person's @name and "<#C0ARK5814PQ|general>" is how it draws "#general". Those are correct output, not identifiers — deleting one breaks the addressing (the person stops getting tagged) or erases which channel the reply is about.

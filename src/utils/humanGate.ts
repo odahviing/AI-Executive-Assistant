@@ -24,9 +24,11 @@
  *      usually nothing to editorialize).
  *
  * Sibling to securityGate.ts (still LLM-based but a different concern:
- * securityGate catches AI/bot/Claude tells leaking Maelle's true nature
- * to colleagues; this gate catches infrastructure / mechanism leaks
- * regardless of audience).
+ * securityGate catches model/provider tells (Claude, GPT, Anthropic) and
+ * internals/payload leaks to colleagues — saying she's AI is NOT one of
+ * these since 4.5.x, that fact is hers to state honestly when directly
+ * asked (systemPrompt.ts gates the "never volunteer" half); this gate
+ * catches infrastructure / mechanism leaks regardless of audience).
  *
  * Critically: tech words are FINE in topic context. Maelle works at a tech
  * company. "Backend interview at 2pm", "the customer's API was down", "Lori

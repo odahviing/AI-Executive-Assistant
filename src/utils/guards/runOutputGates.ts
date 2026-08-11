@@ -673,10 +673,13 @@ export interface CodaGateVerdict {
  * an LLM verdict safe to act on here (G4: tool-less + miss-safe).
  *
  *  1. scanForLeaks — the HARD-IDENTIFIER half: raw Slack ids, req_/task_ ids,
- *     provider tokens, JSON / tool-tag echoes. Those patterns are structured and
- *     language-neutral (G7); the handful of English self-AI-claim patterns in the
- *     same list are a bonus, not the coverage (a Hebrew "אני בוט" passes it — see
- *     2). Free, so it runs first and a hit costs no LLM call. It is NOT redundant
+ *     provider/model self-reference (Claude, GPT, Anthropic), JSON / tool-tag
+ *     echoes. Those patterns are structured and language-neutral (G7) — the
+ *     AI-identity fact itself is deliberately NOT one of them (4.5.x: that fact
+ *     is allowed when directly asked, and this gate can't tell "asked" from
+ *     "volunteered" from text alone, so a stray unprompted "I'm AI" in a coda is
+ *     the prompt layer's miss to prevent, not this scan's). Free, so it runs
+ *     first and a hit costs no LLM call. It is NOT redundant
  *     with the coda's inputs being "just a topic label": those labels and topic
  *     beats are free text Haiku derived from the DM transcript (social_subjects /
  *     social_topics), and each assistant turn in that transcript carries the raw

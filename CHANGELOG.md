@@ -2,6 +2,26 @@
 
 ---
 
+## 4.5.5 — Profiler becomes the Librarian; the charters get audited for real
+
+Framework-only wave, run from the Workshop chat, not the bug loop. Profiler is retired and reborn as the Librarian — the person-and-knowledge lane now owns news, the morning brief's content, meeting-summary archival, venues, the file-based knowledge base, and the raw search primitive, all moved off Handyman, which goes back to being pure infrastructure plus the connective plumbing between lanes (now including the `Connection` transport contract itself, reversed from "no lane owns it"). Landed a new charter-quality rule, A15, that checks a charter's own rules against each other — catching a rule that duplicates a sibling, one that bleeds into another lane's territory, or one that isn't a real product decision at all, just obvious narration — and ran it across every charter in the squad. One real behavior change ships alongside all of it: asked directly and genuinely whether she's AI, Maelle now answers honestly instead of deflecting.
+
+### Added
+- **Librarian** (`.claude/agents/librarian.md`, tag `L`) — renamed from Profiler, absorbing news, the brief's content, meeting-summary archival, venue memory, the knowledge base (the seed of a future RAG/data layer), and the web-search primitive. Two follow-up rewrites this same wave, on direct feedback: rewritten around concepts instead of copy-pasted skill instances, then audited a third time against a new "does this rule name a real decision, or would a model already do this" test — 14 live rules today, down from a peak of 19.
+- **A15** — a standing charter-review rule: altitude check (does a rule restate a sibling's concept at a different level), lane-bleed check (does a rule's content actually belong to a neighboring lane), decision check (does the rule encode a real choice, or is it narration). Every finding stays a proposal for the owner to rule on — none of the three checks authorize an agent to cut, merge, or split a rule on its own.
+- **`.claude/WORKSHOP_PROCESS.md`** — the non-builder counterpart to `WORKSHOP.md`. The editor, framer, bouncer and cleaner had each hand-copied their own version of the same reporting/turn-cost bars and already drifted from each other; now one shared file.
+
+### Fixed
+- Asked directly and genuinely whether she's AI, a bot, or human, Maelle now answers honestly and warmly instead of deflecting — she still never volunteers it unprompted, and every restriction on discussing tools, prompts, internals, or model/provider names is unchanged. Required a matching fix in the security gate, which had been treating any AI self-identification as an automatic leak regardless of context.
+- A bug the owner explicitly declined could resurface on its own if it was independently rediscovered (a new GitHub issue, an automated log-review match) — the editor's dedup check didn't recognize a decline as a prior verdict. Fixed: an automated rediscovery stays held; only the owner's own act (a ticket, a direct restatement) overrides a decline.
+- Gatekeeper's output-gate selection didn't actually cover the email channel — a separate, hardcoded path picked the audience frame without going through the logic Gatekeeper's own charter claimed to govern and log.
+- `SESSION_STARTER.md` contradicted itself on who owns the `Connection` transport contract; Gatekeeper's charter still routed a guard it doesn't own (`addresseeGate`/`imageGuard`, SlackMaster's); Registrar and SlackMaster gave opposite threading instructions for the owner's daily approval thread with neither rule aware of the other.
+- Roughly two dozen smaller charter-rule duplicates found and resolved across Gatekeeper, Matchmaker, Bouncer, SlackMaster, Registrar, Instructor, Diplomat, Handyman and the architect's own charter — a rule restating a shared Workshop rule, a rule restating a sibling rule at a different altitude, a rule with no real fork (a model would already do the obvious thing).
+- The backlog board (`.claude/skills/github-board/state.json`) had drifted from actual GitHub state — two closed issues still listed as open, one issue still carrying a tier label after its parent blocked it.
+
+### Removed
+- The `known_contacts` table's dead boot-time recreation call, and several charter rules that added nothing beyond a shared rule already in force elsewhere (Librarian's and SlackMaster's own restatement of "fix the root cause," Gatekeeper's restatement of "no regex on natural language" and "a guard is a backstop, never the mechanism").
+
 ## 4.5.4 — Maelle remembers what she did, and can undo the last calendar change
 
 Hand-run (the `Workflow` engine is down on a harness-level platform bug, unrelated to this repo — direct agent dispatches again, same as 4.5.3). Built around one idea the owner gave directly: every outward-effect action she takes is a row on the existing requests spine, kept forever, so she can answer "what have you done" honestly and undo the last calendar change she's actually allowed to undo — never a fake success. A combined verify pass caught five real bugs in the revert path before any of this shipped, all fixed in the same wave. Also ships a research read-depth fix from a separate ticket.
