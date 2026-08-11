@@ -2,6 +2,23 @@
 
 ---
 
+## 4.5.4 — Maelle remembers what she did, and can undo the last calendar change
+
+Hand-run (the `Workflow` engine is down on a harness-level platform bug, unrelated to this repo — direct agent dispatches again, same as 4.5.3). Built around one idea the owner gave directly: every outward-effect action she takes is a row on the existing requests spine, kept forever, so she can answer "what have you done" honestly and undo the last calendar change she's actually allowed to undo — never a fake success. A combined verify pass caught five real bugs in the revert path before any of this shipped, all fixed in the same wave. Also ships a research read-depth fix from a separate ticket.
+
+### Added
+- Every outward-effect action — booking, moving, cancelling, a colleague message, an approval decision, a finished research run — now leaves a durable `logged` history row on the requests spine. Nothing on it is ever pruned by age; recall reads newest-first with no cutoff. "What have you done" / "what did you book me yesterday" / "remember the research you did for me" are now answerable from her own records via `get_my_tasks`'s new `recent_activity` bucket, filterable by person. (#52)
+- `revert_last_auto_move` widened from "undo my own last auto-move" into a general undo: also reverts a move or a booking the owner made himself, with an honest, named refusal for anything that genuinely can't be undone — a cancellation (attendees already got the email) or nothing recent to point at. (#52)
+- Research read-depth now interleaves across the search angles it actually planned instead of exhausting its read budget on the first query's own results, so a genuinely different account no longer goes unread just because it ranked lower in one search. Extract calls are now bounded per call site (tight on a live turn, generous on a page handed to her directly for ingest), and a fully-failed read now says the sources couldn't be read rather than claiming none exist. (#191)
+
+### Fixed
+- The 30-day pruning of closed requests/approvals is gone — nothing on the requests spine is deleted by age anymore, by explicit owner ruling.
+- A colleague's own thread status read had no filter against the new activity rows — once they existed, the newest row in a colleague's thread could have been an unrelated internal action instead of their own request. Closed before it ever reached production.
+- Two recurring bugs caught while widening the revert tool, unrelated to this ticket's own scope: an owner-only action gate read the wrong permission field (the owner couldn't revert or set a schedule override from a group DM — the same class of bug already fixed elsewhere post-gh#154), and a private meeting's real subject could have leaked to a colleague on revert.
+
+### Removed
+- `reconcile.ts` and its scheduled prune of terminal requests, deleted outright rather than left disabled.
+
 ## 4.5.3 — approval flow stops silently mis-binding, guessing, and going quiet
 
 A hand-run bug wave (the `Workflow` engine failed all night on a harness-level error, later diagnosed as a local Claude Code client config issue, not a framework bug — so this ran as direct agent dispatches instead of one script). It grew into a long approval-reliability investigation that started as "she got confused about who confirmed what" and ended up touching the anchor logic, the duplicate-detection logic, the free-text amendment path, and the honesty guard that's supposed to catch all three going wrong — plus around twenty other fixes across calendar handling, fabricated claims, and a colleague rate limit that was blocking innocent questions.

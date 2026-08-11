@@ -30,6 +30,7 @@ import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
 import { updateRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
 import { toTimerInstant } from '../core/requests/types';
+import { logActivity } from '../core/requests/logActivity';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
@@ -391,6 +392,17 @@ Only send messages the user explicitly asks for — never reach out to people on
             return { ok: false, error: outcome.reason, detail: hint };
           }
           if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
+          // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
+          // fires only after the post is confirmed sent.
+          logActivity({
+            ownerUserId: userId,
+            kind: 'outreach',
+            subkind: 'channel_post',
+            subject: `Posted to #${(args.channel_name as string | undefined) ?? args.channel_id as string} — mentioned ${args.colleague_name as string}`,
+            initiatedBy: context.userId,
+            initiatedByRole: context.authority,
+            targetSlackId: colleagueSlackId,
+          });
           logger.info('message_colleague — channel post sent', {
             jobId,
             channel: args.channel_name ?? args.channel_id,
@@ -538,6 +550,17 @@ Only send messages the user explicitly asks for — never reach out to people on
           }
         }
         if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
+        // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
+        // fires only after the DM is confirmed sent.
+        logActivity({
+          ownerUserId: userId,
+          kind: 'outreach',
+          subkind: 'dm',
+          subject: `Messaged ${args.colleague_name as string}`,
+          initiatedBy: context.userId,
+          initiatedByRole: context.authority,
+          targetSlackId: colleagueSlackId,
+        });
         logger.info('message_colleague — DM sent', {
           jobId,
           colleague: args.colleague_name,

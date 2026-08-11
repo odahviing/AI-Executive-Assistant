@@ -374,6 +374,13 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
  * instead of the broken reminder_fire path that only DM'd the title and never
  * actually researched anything.
  */
+// gh#52 (52-U8) — cap on what a research closure stores in outcome_json. A
+// few thousand characters holds the actual answer Maelle DM'd the owner
+// without keeping a full transcript or raw tool-call history (the row is
+// data to recall later via get_my_tasks' recent_activity bucket, not an
+// audit trace).
+const RESEARCH_ANSWER_STORE_CAP = 4000;
+
 async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | undefined): Promise<'closed'> {
   const details = parseDetails<Record<string, unknown>>(row) ?? {};
   const researchPrompt = (typeof details.message === 'string' && details.message)
@@ -381,6 +388,7 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
     : (row.description ?? `Research: ${row.subject ?? ''}`);
   const ownerId = profile.user.slack_user_id;
   const channelId = row.origin_channel ?? '';
+  let answer: string | undefined;
 
   try {
     // Dynamic import avoids a load-time cycle (orchestrator → skills → spine).
@@ -426,6 +434,9 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
       app,
     });
     if (result.reply) {
+      answer = result.reply.length > RESEARCH_ANSWER_STORE_CAP
+        ? `${result.reply.slice(0, RESEARCH_ANSWER_STORE_CAP)}…`
+        : result.reply;
       const conn = getConnection(ownerId, 'slack');
       if (conn) {
         if (channelId) {
@@ -440,9 +451,19 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
   }
   closeRequest({
     id: row.id,
-    state: 'resolved',
+    // gh#52 (52-U8) — 'logged', not 'resolved': a research run is exactly
+    // the "completed Maelle-initiated action that needed no owner decision"
+    // logActivity.ts's own header names as a canonical logged-row example
+    // (research run alongside a colleague DM / a resolved approval). Closing
+    // as 'resolved' left it invisible everywhere the instant the brief
+    // surfaced+flipped informed — 'logged' is what makes it recallable via
+    // get_my_tasks' recent_activity bucket (52-U6), forever, by design.
+    state: 'logged',
     closureReason: 'research_completed',
     closedBy: 'system',
+    // The answer Maelle already found, so a later "what did you find out
+    // about X" is answered from this row instead of re-running the research.
+    outcomeJson: answer ? { answer } : undefined,
   });
   return 'closed';
 }

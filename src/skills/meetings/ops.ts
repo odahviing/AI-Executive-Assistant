@@ -29,7 +29,7 @@ import { handleUpdateMeeting, handleMoveMeeting } from './ops/handlers/moveMeeti
 import {
   handleHoldSlot,
   handleGetCalendar,
-  handleRevertLastAutoMove,
+  handleRevertAction,
   handleSetWorkScheduleOverride,
   handleGetWorkScheduleOverrides,
   handleAnalyzeCalendar,
@@ -246,8 +246,11 @@ export class SchedulingSkill {
       case 'get_calendar':
         return handleGetCalendar(args, opCtx);
 
+      // gh#52 (52-U4b) — tool name unchanged (registered in meetings.ts, Instructor's
+      // wording); the handler behind it is now the general revert dispatch, not
+      // auto-move-only. See handleRevertAction's own header for the rename.
       case 'revert_last_auto_move':
-        return handleRevertLastAutoMove(args, opCtx);
+        return handleRevertAction(args, opCtx);
       case 'set_work_schedule_override':
         return handleSetWorkScheduleOverride(args, opCtx);
       case 'get_work_schedule_overrides':

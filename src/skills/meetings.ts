@@ -107,7 +107,11 @@ If the meeting is NOT yet booked and they need to find a time together, use find
       },
       {
         name: 'revert_last_auto_move',
-        description: `Undo the most recent meeting that active-mode calendar-health AUTONOMOUSLY moved to clear a clash (the "🔍 I moved X to clear a conflict, let me know if you'd rather…" notices). Use when ${profile.user.name.split(' ')[0]} pushes back on such an auto-move — "put it back", "revert that", "return it to its original time", "undo the move", "no, leave it where it was". It restores the original time, re-notifies anyone who was told about the move, AND records the rejection so the auto-fix won't re-move it. Owner-only; only reverts an auto-move from the last 12 hours, and says so if there's nothing to undo. Do NOT use for a normal reschedule ${profile.user.name.split(' ')[0]} requested (that's move_meeting) — ONLY for undoing Maelle's OWN autonomous move.`,
+        description: `Undo the single most recent thing Maelle did that can be undone: an autonomous calendar-health move (the "🔍 I moved X to clear a conflict…" notice), a move ${profile.user.name.split(' ')[0]} asked for, or a meeting Maelle just booked for him. Trigger on "put it back", "revert that", "undo that", "no, leave it where it was" — the tool works out which of the three it actually was and reverts it accordingly: a move is restored to its original time (notifying anyone who needs to know, and — for an auto-move — marking it so calendar-health won't re-move it again); a booking is cancelled outright (deleted, not moved back — there's no prior time to restore).
+
+Owner-only. Goes back exactly ONE step, and only within the last 12 hours — says so honestly when there's nothing recent to undo. A CANCELLATION can't be put back this way (everyone already got the cancellation email); it says that plainly and offers to book a fresh one at the same time instead.
+
+For a NEW scheduling change (not putting back one Maelle already made), use move_meeting / create_meeting instead.`,
         input_schema: {
           type: 'object',
           properties: {},

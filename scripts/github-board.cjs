@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Regenerates the "Backlog" artifact page from the current state of GitHub issues.
 // Usage: node scripts/github-board.cjs <output-html-path>
-// Prints a JSON summary to stdout: { artifactUrl, opened, closed, relabeled, warnings, itemCount }
+// Prints a JSON summary to stdout: { artifactUrl, opened, closed, relabeled, fixedLabels, warnings, itemCount }
+// Enforces one label rule on GitHub itself: a blocked item's tier label gets removed
+// if drift left one on it — everything else stays read-only, propose-only.
 
 const fs = require('fs');
 const path = require('path');
@@ -126,6 +128,7 @@ function main() {
   // label is expected, not a classification gap.
 
   const warnings = [];
+  const fixedLabels = [];
   const byNumber = {};
   classified.forEach((c) => (byNumber[c.number] = c));
 
@@ -141,7 +144,15 @@ function main() {
     }
     childNumbers.add(item.number);
     (childrenByParent[parent] = childrenByParent[parent] || []).push(item);
-    if (item.tier) warnings.push(`#${item.number} has a tier label (${item.tier}) despite being blocked by #${parent} — tier ignored in the tree.`);
+    // Enforcement, not just a warning: a blocked item's tier is inherited from its
+    // parent's position, never its own — this rule only holds going forward if
+    // drift from another chat/session actually gets corrected here, not just
+    // rendered around.
+    if (item.tier) {
+      gh(['issue', 'edit', String(item.number), '--remove-label', item.tier]);
+      fixedLabels.push(`#${item.number} — removed stale "${item.tier}" label (blocked by #${parent})`);
+      item.tier = null;
+    }
   }
 
   const columns = { Next: [], Roadmap: [], Idea: [] };
@@ -211,6 +222,7 @@ function main() {
         opened,
         closed,
         relabeled,
+        fixedLabels,
         warnings,
       },
       null,

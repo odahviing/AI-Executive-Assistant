@@ -117,15 +117,16 @@ export async function executeInternalAutoMove(params: {
   // gh#180 (private-mask) — three audiences read a subject derived HERE: the
   // owner (fix_detail / fix_error / shadowNotify — check_calendar_health's
   // summary is an owner-only surface), the colleague notified of the move
-  // NOW (notifyColleagueOfMove's DM, M12-gated), and — via the outcomeJson
-  // this function writes below — a colleague notified again LATER if the
-  // owner reverts (handleRevertLastAutoMove, ops/handlers/calendarReads.ts,
-  // reads this same record back). displaySubject's default viewer is 'other'
+  // NOW (notifyColleagueOfMove's DM, M12-gated — its OWN stored
+  // ctx.meeting_subject is what a later revert's correction actually quotes,
+  // via closeMeetingArtifacts's relayVoidedNotices), and the owner again
+  // LATER if he reverts (handleRevertAction, ops/handlers/calendarReads.ts,
+  // gh#52 52-U4b). displaySubject's default viewer is 'other'
   // (mask) — right for a colleague, wrong for the owner text, which was
-  // showing him "[Private]" for his own meeting. Both views are computed and
-  // BOTH are stored in outcomeJson (`subject` = owner view, `colleague_subject`
-  // = masked view) so the revert path can pick the right one per audience
-  // instead of only having the owner's real subject to work with.
+  // showing him "[Private]" for his own meeting. Both views are computed;
+  // `colleague_subject` below rides along in this request row too, as the
+  // revert path's own last-resort fallback if the live calendar probe ever
+  // fails at revert time.
   const subj = displaySubject(movable, profile, 'owner') || 'Meeting';
   const colleagueSubj = displaySubject(movable, profile) || 'Meeting';
   const newStartIso = params.newStartIso;
@@ -173,11 +174,14 @@ export async function executeInternalAutoMove(params: {
         original_start: mStart.toISO(), original_end: mEnd.toISO(),
         new_start: newStartIso, new_end: newEndIso, subject: subj,
         // gh#180 (bounce 2) — colleague_subject is the M12-masked view, stored
-        // ALONGSIDE the owner's real `subject`. revert_last_auto_move reads
-        // this record to re-notify the SAME colleagues told about the move
-        // (calendarReads.ts's handleRevertLastAutoMove); without this field it
-        // had only the owner-view `subject` to work with and sent the real
-        // title to a colleague DM for a meeting the owner marked private.
+        // ALONGSIDE the owner's real `subject`. gh#52 (52-U4b): the revert
+        // dispatch (calendarReads.ts's handleRevertAction) reads this ONLY as
+        // a last-resort fallback if its own live calendar probe fails — its
+        // primary colleague-correction path is closeMeetingArtifacts's
+        // relayVoidedNotices, which reads the ALREADY-masked subject back off
+        // notifyColleagueOfMove's own stored outreach context instead. Kept
+        // here so a revert is never left with only the owner-view `subject`
+        // to work with if that probe comes back empty.
         colleague_subject: colleagueSubj, kept_event_id: keptEventId,
       },
       idempotencyKey: `auto_move:${movable.id}:${Date.now()}`,
@@ -245,7 +249,6 @@ export async function executeInternalAutoMove(params: {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getPersonByEmail } = require('../../db') as typeof import('../../db');
   const notified: string[] = [];
-  const notifiedSlackIds: string[] = [];
   for (const a of participantsRaw) {
     const email = a.emailAddress.address;
     if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
@@ -260,7 +263,6 @@ export async function executeInternalAutoMove(params: {
       newStartIso, newEndIso, conflictReason,
     });
     notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
-    if (row.slack_id) notifiedSlackIds.push(row.slack_id);
   }
 
   const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
@@ -284,7 +286,7 @@ export async function executeInternalAutoMove(params: {
           original_start: mStart.toISO(), original_end: mEnd.toISO(),
           new_start: newStartIso, new_end: newEndIso, subject: subj,
           colleague_subject: colleagueSubj,
-          notified_slack_ids: notifiedSlackIds, kept_event_id: keptEventId,
+          kept_event_id: keptEventId,
         },
       });
     } catch (reqErr) {

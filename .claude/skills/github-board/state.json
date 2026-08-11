@@ -154,7 +154,7 @@
     "183": {
       "title": "Colleague sees meeting attendees",
       "type": "Improvement",
-      "tier": "Next"
+      "tier": "Idea"
     },
     "184": {
       "title": "General task tracking system",
@@ -164,6 +164,26 @@
     "185": {
       "title": "Provision a phone number",
       "type": "Feature",
+      "tier": "Roadmap"
+    },
+    "186": {
+      "title": "Coda reads the task turn's mood",
+      "type": "Improvement",
+      "tier": "Roadmap"
+    },
+    "187": {
+      "title": "Closing turn keeps tone context",
+      "type": "Improvement",
+      "tier": null
+    },
+    "191": {
+      "title": "Research read-depth ignores source agreement",
+      "type": "Improvement",
+      "tier": "Next"
+    },
+    "198": {
+      "title": "Redesign social and coda system",
+      "type": "Improvement",
       "tier": "Roadmap"
     }
   }

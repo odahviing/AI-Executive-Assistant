@@ -17,6 +17,7 @@ import type {
   RequestRow,
   RequestState,
 } from '../core/requests/types';
+import { ACTIVITY_REVERTIBILITY } from '../core/requests/activityRevertibility';
 import logger from '../utils/logger';
 
 // ── idempotency ──────────────────────────────────────────────────────────────
@@ -257,12 +258,23 @@ export function getOpenRequestsForThread(ownerUserId: string, threadTs: string):
  * colleague-path can answer honestly (and, on a terminal row, offer to revive it).
  * Thread-scoped for privacy — only the row from THIS conversation's thread. Returns
  * null when the thread never carried a request.
+ *
+ * gh#52 (52-U11) — `state != 'logged'` excludes logActivity() rows. Those
+ * record something Maelle did on the OWNER's behalf (a DM sent, an approval
+ * resolved) and are not scoped to protect a colleague's own privacy the way
+ * every other row here is; without this a colleague chasing their own
+ * request in a thread could have the newest row in that thread be an
+ * unrelated activity record instead of their actual request, and
+ * systemPrompt.ts's threadRequestStatusSection would render its terminal
+ * state straight to them (the 'cancelled' fallback branch, since 'logged'
+ * matches neither its 'resolved' nor 'expired' checks).
  */
 export function getLatestRequestForThread(ownerUserId: string, threadTs: string): RequestRow | null {
   const row = getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
       AND origin_thread_ts = ?
+      AND state != 'logged'
     ORDER BY created_at DESC
     LIMIT 1
   `).get(ownerUserId, threadTs) as RequestRow | undefined;
@@ -383,12 +395,22 @@ export function getDueRequests(): RequestRow[] {
  *   - open state AND last_surfaced_at is older than `briefingDayStart`
  *   - OR informed=0 (covers post-closure narration)
  * Top-level rows only.
+ *
+ * gh#52 (52-U1) — `state != 'logged'` is an EXPLICIT, unconditional exclusion,
+ * not folded into the `informed = 0` arm it would otherwise ride along with.
+ * logActivity() rows record something Maelle already did that needed no
+ * owner decision — pulled (undo/history), never pushed to the brief — and
+ * they are minted with no control over `informed` from this function's point
+ * of view, so guarding only the OR-branch would leave the door open the
+ * moment a caller's default informed value ever changed. Excluding the state
+ * outright makes a 'logged' row surfacing here impossible by construction.
  */
 export function getRequestsForBrief(ownerUserId: string, briefingDayStartIso: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
       AND parent_request_id IS NULL
+      AND state != 'logged'
       AND (
         (state IN ('awaiting_owner','awaiting_colleague','in_flight')
          AND (last_surfaced_at IS NULL OR datetime(last_surfaced_at) < datetime(?)))
@@ -419,25 +441,42 @@ export function getRequestsByExternalEventId(ownerUserId: string, eventId: strin
 }
 
 /**
- * v3.7.x (#139 / auto-fix Part B) — the most-recent active-mode auto-move that
- * is still revertible: resolved (the move executed), tagged `auto_move_executed`
- * (a revert relabels the closure_reason, so a reverted one drops out), within
- * the last 12h (the record's own expiry TTL). Owner-scoped, newest first. The
- * row carries outcome_json (original/new times, event id, who was notified) so
- * the revert tool can undo deterministically. NULL when there's nothing to undo.
+ * gh#52 (52-U4b) — generalized replacement for the old auto-move-only
+ * `getRevertibleAutoMove`. The newest activity row a generic "undo that" /
+ * revert dispatch might act on, spanning every subkind
+ * ACTIVITY_REVERTIBILITY (core/requests/activityRevertibility.ts) knows
+ * about, PLUS the auto-fix engine's own `auto_move` subkind — a REQUEST
+ * subkind, not a literal tool name (its underlying tool IS `move_meeting`,
+ * per that table's own key-naming comment), so it gets its own state/
+ * closure_reason shape here (`resolved` + `auto_move_executed`, matching the
+ * old query exactly) rather than a table key of its own.
+ *
+ * Returns the single newest qualifying row REGARDLESS of whether it is
+ * itself revertible or already past its own TTL — that filtering is the
+ * caller's job, reading ACTIVITY_REVERTIBILITY, because a non-revertible or
+ * stale row must still be findable so the revert dispatch can name it
+ * honestly ("I can't undo the cancellation") instead of silently reaching
+ * past it to an older row that IS still revertible, which would undo the
+ * wrong thing. NULL only when nothing qualifying exists at all.
+ *
+ * A completed revert relabels `closure_reason` on the row it acted on
+ * (retiring it from this query — the pre-existing double-revert guard,
+ * generalized to every subkind rather than a new column).
  */
-export function getRevertibleAutoMove(ownerUserId: string): RequestRow | null {
-  const cutoff = DateTime.now().minus({ hours: 12 }).toUTC().toISO()!;
+export function getRevertibleActivity(ownerUserId: string): RequestRow | null {
+  const loggedSubkinds = Object.keys(ACTIVITY_REVERTIBILITY);
+  const placeholders = loggedSubkinds.map(() => '?').join(',');
   return (getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND kind = 'follow_up' AND subkind = 'auto_move'
-      AND state = 'resolved'
-      AND closure_reason = 'auto_move_executed'
-      AND closed_at >= ?
-    ORDER BY closed_at DESC
+      AND kind = 'follow_up'
+      AND (
+        (subkind = 'auto_move' AND state = 'resolved' AND closure_reason = 'auto_move_executed')
+        OR (subkind IN (${placeholders}) AND state = 'logged' AND closure_reason IS NULL)
+      )
+    ORDER BY datetime(COALESCE(closed_at, created_at)) DESC
     LIMIT 1
-  `).get(ownerUserId, cutoff) as RequestRow | null) ?? null;
+  `).get(ownerUserId, ...loggedSubkinds) as RequestRow | null) ?? null;
 }
 
 /**
@@ -513,6 +552,25 @@ export function cancelColleagueBookingRecordsForEvent(ownerUserId: string, event
     WHERE owner_user_id = ? AND subkind = 'colleague_booking_record'
       AND outcome_external_event_id = ? AND state != 'cancelled'
   `).run(ownerUserId, eventId);
+}
+
+/**
+ * gh#52 (52-U6) — recall of Maelle's own completed activity: `logged`-state
+ * rows written by logActivity() (a colleague DM, a resolved approval, a
+ * research run — see logActivity.ts for the exact scope). Newest first, NO
+ * time-based cutoff ever (owner's explicit ruling: this table is never
+ * pruned — 52-U9 already deleted the prune job outright). `limit` is the
+ * only cost control; a caller asking "what did you do three months ago"
+ * must still find it as long as it's inside the limit.
+ */
+export function getRecentActivityForOwner(ownerUserId: string, limit: number): RequestRow[] {
+  return getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND state = 'logged'
+    ORDER BY datetime(created_at) DESC
+    LIMIT ?
+  `).all(ownerUserId, limit) as RequestRow[];
 }
 
 /** For closeLoopOnOwnerHandled scanner — collect open top-level requests for the LLM. */

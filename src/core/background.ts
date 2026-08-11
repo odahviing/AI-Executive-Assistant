@@ -166,24 +166,19 @@ export function startBackgroundTimer(
         .finally(() => { taskPipelineInFlight = false; });
     }
 
-    // v3.1 (Path 2 Stage 8) — requests-spine retention. Prunes old terminal
-    // rows so the spine stays lean. Fire-and-forget; never blocks the task
-    // pipeline.
+    // #30 — slot-hold retention (drop terminal rows >30d). Fire-and-forget;
+    // never blocks the task pipeline.
+    // gh#52 (52-U9) — the requests-spine prune that used to run alongside
+    // this (pruneOldTerminalRequests, core/requests/reconcile.ts) is GONE.
+    // Owner ruling: "its a mistake don't truncate requests/approvals" —
+    // nothing on the requests spine is ever deleted for age. Slot holds are a
+    // separate, much smaller housekeeping table and keep their own retention.
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { pruneOldTerminalRequests } =
-        require('./requests/reconcile') as typeof import('./requests/reconcile');
-      const pruned = pruneOldTerminalRequests();
-      if (pruned > 0) {
-        logger.info('Requests-spine maintenance', { pruned });
-      }
-      // #30 — slot-hold retention (drop terminal rows >30d), alongside the spine prune.
-      try {
-        const { cleanOldSlotHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
-        cleanOldSlotHolds();
-      } catch (_) { /* non-fatal */ }
+      const { cleanOldSlotHolds } = require('../db/slotHolds') as typeof import('../db/slotHolds');
+      cleanOldSlotHolds();
     } catch (err) {
-      logger.warn('Requests-spine maintenance threw — non-fatal', { err: String(err).slice(0, 200) });
+      logger.warn('Slot-hold retention threw — non-fatal', { err: String(err).slice(0, 200) });
     }
 
     // Capture pass runs independently — its errors should never affect the

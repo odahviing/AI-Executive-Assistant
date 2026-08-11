@@ -788,8 +788,10 @@ export const DISMISSAL_NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
  *  occurrences of a recurring series still surface. Idempotent: an existing
  *  `approved` waiver is left alone; anything else is ensured terminal-dismissed.
  *
- *  Two callers, two windows, one mechanism: `revert_last_auto_move` (the stated
- *  decision) passes `DISMISSAL_NEVER_EXPIRES` (gh#180 — NOT the occurrence's own
+ *  Two callers, two windows, one mechanism: the auto-move branch of the
+ *  generalized revert dispatch (gh#52 52-U4b; formerly `revert_last_auto_move`,
+ *  `handleRevertAction` in ops/handlers/calendarReads.ts) passes
+ *  `DISMISSAL_NEVER_EXPIRES` (gh#180 — NOT the occurrence's own
  *  end; that snapshot goes stale on a later reschedule, see the constant's own
  *  comment); the owner's conversational move of a just-auto-moved meeting (the
  *  inferred one, skills/meetings/ops/handlers/moveMeeting.ts) passes

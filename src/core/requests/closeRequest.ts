@@ -46,7 +46,7 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
   if (!row) {
     return { ok: false, request_id: input.id, state: 'cancelled', children_closed: 0, reason: 'request not found' };
   }
-  if (row.state === 'resolved' || row.state === 'cancelled' || row.state === 'expired') {
+  if (row.state === 'resolved' || row.state === 'cancelled' || row.state === 'expired' || row.state === 'logged') {
     logger.info('closeRequest called on already-terminal request — no-op', {
       id: input.id, currentState: row.state, requestedState: input.state,
     });
@@ -60,7 +60,13 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     closureReason: input.closureReason,
     closedBy: input.closedBy,
     closedAt: now,
-    informed: 0,           // brief will narrate the closure once, then flip
+    // informed=0 → brief will narrate the closure once, then flip. Except
+    // for state='logged': getRequestsForBrief excludes state='logged'
+    // outright (52-U1), unconditionally — there is no narration to flip
+    // FOR, ever. Stamp informed=1 immediately instead, matching
+    // logActivity's own inserts (52-U2), so no future reader of `informed`
+    // mistakes a logged row for pending post-closure narration (gh#52).
+    informed: input.state === 'logged' ? 1 : 0,
     nextCheckAt: null,     // kill any pending timer on this row
     nextCheckHandler: null,
     outcomeExternalEventId: input.outcomeExternalEventId,
@@ -71,7 +77,7 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
   if (!input.skipChildren) {
     const children = getChildRequests(input.id);
     for (const child of children) {
-      if (child.state === 'resolved' || child.state === 'cancelled' || child.state === 'expired') continue;
+      if (child.state === 'resolved' || child.state === 'cancelled' || child.state === 'expired' || child.state === 'logged') continue;
       // Cascade with a derived reason so audit can distinguish parent-driven
       // closure from independent child closure.
       const sub = closeRequest({

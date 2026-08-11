@@ -40,6 +40,7 @@ import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTim
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import { createApprovalRequest } from '../../../../tasks/skill';
+import { logActivity } from '../../../../core/requests/logActivity';
 import type { OpCtx } from './context';
 
 export async function handleCreateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -1576,6 +1577,36 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               message,
             };
           }
+
+          // gh#52 (52-U3) — undo/history record for this booking, past the
+          // verifyEventCreated read-back just above (verify.ok already
+          // confirmed the write landed under this id). An undo of a create is
+          // a delete-by-id, so the event id alone is the reverse handle;
+          // subkind is the literal tool name (matches ACTIVITY_REVERTIBILITY's
+          // keying in activityRevertibility.ts) so a later revert dispatch can
+          // look it up directly off this row.
+          logActivity({
+            ownerUserId: context.profile.user.slack_user_id,
+            kind: 'follow_up',
+            subkind: 'create_meeting',
+            subject: `Booked '${args.subject as string}'`,
+            outcomeJson: {
+              event_id: meetingId,
+              start: args.start,
+              end: args.end,
+            },
+            initiatedBy: context.userId,
+            initiatedByRole: context.senderRole,
+            originThreadTs: context.threadTs,
+            originChannel: context.channelId,
+            // OT-4 (bouncer fix, gh#52) — the colleague who asked for this
+            // booking (resolved once, near the top of this handler; excludes
+            // the owner himself), so the row is with_person-filterable on
+            // them. Undefined on a plain owner-initiated booking with no
+            // colleague requester — left null rather than guessed off
+            // attendees, which can be zero, one, or many.
+            requesterSlackId: requesterId,
+          });
 
           // v3.6.x — the Teams-URL-as-location patch was REMOVED. It overwrote the
           // location Graph auto-sets on an online meeting ("Microsoft Teams

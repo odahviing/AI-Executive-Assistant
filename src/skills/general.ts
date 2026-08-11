@@ -9,6 +9,15 @@ import { extractFirstJsonObject } from '../utils/extractJson';
 
 const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
 
+// gh#191 piece 3 — tavilyExtract had NO timeout; a hung page's fetch could
+// block indefinitely. Per-call-site budgets, deliberately DIFFERENT: the
+// research READ loop runs inline in a live turn (someone's waiting) so it
+// gets a TIGHT budget; web_extract and KB-ingest are not time-critical
+// (nobody's waiting synchronously) so they keep this GENEROUS default —
+// they never pass a second argument, so they get it automatically.
+const TAVILY_EXTRACT_DEFAULT_TIMEOUT_MS = 45_000;
+const TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS = 8_000;
+
 // ── External web-search response shapes ──────────────────────────────────────
 // Minimal-surface interfaces — only the fields we actually read. Provider
 // shapes are owned by the vendor; a shape change at one provider degrades to
@@ -289,16 +298,90 @@ Output STRICT JSON only: {"queries": ["...","..."], "recency_days": <number or n
   return { queries: [goal] };
 }
 
+/** Token-set Jaccard similarity between two snippets. Local, read-only copy
+ *  of the formula already inlined at utils/skillPreferences.ts:225-247 and
+ *  skills/news.ts:434-456 — a third copy here rather than a shared helper,
+ *  which is a separate, larger, currently-declined piece (gh#191). */
+function snippetJaccard(a: string, b: string): number {
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  const aTokens = new Set(norm(a).split(' ').filter(Boolean));
+  const bTokens = new Set(norm(b).split(' ').filter(Boolean));
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+  const inter = [...aTokens].filter(x => bTokens.has(x)).length;
+  const union = new Set([...aTokens, ...bTokens]).size;
+  return union > 0 ? inter / union : 0;
+}
+
+/** Read-only instrumentation (gh#191 piece 2): pairwise snippet similarity
+ *  over the FULL candidate pool — not just the 3 sources that get read — so
+ *  whether reads are actually redundant on this system can be judged from
+ *  real numbers before paying for deeper/wider reading. Nothing below reads
+ *  this return value; it only ever reaches the log line. */
+function poolSimilarityStats(pool: ResearchSource[]): {
+  poolSize: number; maxSimilarity: number; medianSimilarity: number; clusters: Record<string, number>;
+} {
+  const n = pool.length;
+  const sims: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+  const pairs: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const sim = snippetJaccard(pool[i].snippet ?? '', pool[j].snippet ?? '');
+      sims[i][j] = sim; sims[j][i] = sim;
+      pairs.push(sim);
+    }
+  }
+  const sorted = [...pairs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length === 0 ? 0 : (sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]);
+  const max = sorted.length === 0 ? 0 : sorted[sorted.length - 1];
+
+  // Single-linkage clustering at each cutoff: how many distinct groups the
+  // pool collapses into once snippets at/above that similarity are merged. A
+  // pool collapsing to 1-2 groups at 0.3 is highly redundant; one that stays
+  // near `n` groups even at 0.3 is genuinely diverse.
+  const clusterCount = (cutoff: number): number => {
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (sims[i][j] >= cutoff) {
+          const ri = find(i), rj = find(j);
+          if (ri !== rj) parent[ri] = rj;
+        }
+      }
+    }
+    return new Set(Array.from({ length: n }, (_, i) => find(i))).size;
+  };
+
+  return {
+    poolSize: n,
+    maxSimilarity: Math.round(max * 100) / 100,
+    medianSimilarity: Math.round(median * 100) / 100,
+    clusters: { '0.3': clusterCount(0.3), '0.4': clusterCount(0.4), '0.5': clusterCount(0.5), '0.6': clusterCount(0.6) },
+  };
+}
+
 /** The grounded research bundle the model writes from. */
 export async function runResearch(goal: string, recencyOverride?: number, opts?: DomainFilterOpts): Promise<object> {
   logger.info('research — start', { goal: goal.slice(0, 120), recencyOverride });
   const plan = await planResearchQueries(goal);
   const recency = recencyOverride ?? plan.recencyDays;
 
-  // GATHER — search each planned query, dedupe sources by URL.
-  const sources: ResearchSource[] = [];
+  // GATHER — search each planned query into its OWN bucket, dedupe by URL
+  // across buckets. Buckets are interleaved round-robin below, BEFORE the
+  // READ slice is taken — collecting into one flat list first (the old
+  // shape) let query 1 alone fill the whole READ_LIMIT whenever it returned
+  // >= 3 results, so the other 2-4 planned angles were never read at all
+  // (gh#191). Query order carries no priority (owner's call) — round-robin,
+  // never weighted toward query 1. A single-query plan (planner fallback)
+  // makes the interleave a no-op, so the original one-query starve case can
+  // still occur there — accepted, not built around (owner's call).
+  const buckets: ResearchSource[][] = plan.queries.map(() => []);
+  const originByUrl = new Map<string, number>();
   const seen = new Set<string>();
-  for (const q of plan.queries) {
+  for (let qi = 0; qi < plan.queries.length; qi++) {
+    const q = plan.queries[qi];
     try {
       const r = await tavilySearch(q, 'advanced', recency, opts) as {
         results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
@@ -307,7 +390,8 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
         const url = item.url;
         if (!url || seen.has(url)) continue;
         seen.add(url);
-        sources.push({
+        originByUrl.set(url, qi);
+        buckets[qi].push({
           title: item.title,
           url,
           snippet: (item.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
@@ -318,21 +402,35 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
       logger.warn('research — a search query failed, continuing', { q, err: String(err).slice(0, 120) });
     }
   }
+  const sources: ResearchSource[] = [];
+  const maxBucketLen = Math.max(0, ...buckets.map(b => b.length));
+  for (let i = 0; i < maxBucketLen; i++) {
+    for (const bucket of buckets) {
+      if (bucket[i]) sources.push(bucket[i]);
+    }
+  }
+
+  // Read-only similarity instrumentation (gh#191 piece 2) over the FULL
+  // candidate pool, before the READ slice below — see poolSimilarityStats.
+  // Zero behavior change: nothing branches on this, it only reaches the log.
+  const similarity = poolSimilarityStats(sources);
 
   // READ — pull the full text of the top sources so facts come from the
   // article, not a snippet (and definitely not memory). `sources` below is
   // derived from `readings`, not this candidate list — a source whose
   // extraction failed is dropped from both, so the model can never cite one
-  // it never actually read (gh#192).
+  // it never actually read (gh#192). Tight timeout (gh#191 piece 3): this
+  // loop runs inline in a live turn — someone's waiting — so a hung page
+  // must not hang the turn.
   const READ_LIMIT = 3;
   const readings: Array<{ url: string; title?: string; content: string }> = [];
   for (const s of sources.slice(0, READ_LIMIT)) {
     try {
-      const ext = await tavilyExtract(s.url) as { content?: string };
+      const ext = await tavilyExtract(s.url, TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS) as { content?: string };
       if (ext.content && ext.content.trim().length > 0) {
         readings.push({ url: s.url, title: s.title, content: ext.content.slice(0, 4000) });
       }
-    } catch { /* page blocked extraction — dropped, not carried by a snippet */ }
+    } catch { /* page blocked extraction or timed out — dropped, not carried by a snippet */ }
   }
 
   // The sources shown/cited to the model must match what was actually read —
@@ -341,8 +439,21 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
   const readSources = readings
     .map(r => sources.find(s => s.url === r.url))
     .filter((s): s is ResearchSource => s !== undefined);
+  // Which planned query each of the READ sources actually came from — how
+  // F191-1's fix is verified live without needing the fuller pool stats.
+  const readOrigin = readSources.map(s => originByUrl.get(s.url) ?? -1);
 
-  logger.info('research — done', { goal: goal.slice(0, 80), queries: plan.queries.length, sources: readSources.length, readings: readings.length });
+  logger.info('research — done', {
+    goal: goal.slice(0, 80),
+    queries: plan.queries.length,
+    sources: readSources.length,
+    readings: readings.length,
+    readOrigin,
+    poolSize: similarity.poolSize,
+    maxSimilarity: similarity.maxSimilarity,
+    medianSimilarity: similarity.medianSimilarity,
+    clusters: similarity.clusters,
+  });
 
   return {
     goal,
@@ -350,9 +461,11 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
     recency_days: recency ?? null,
     sources: readSources,
     readings,
-    note: readSources.length === 0
-      ? 'NO web sources found. Do NOT fabricate facts — tell the owner you could not find a source and offer to try again.'
-      : 'Write GROUNDED in these sources and CITE the URLs in your output. Do not assert any current-events fact not present here.',
+    note: readSources.length > 0
+      ? 'Write GROUNDED in these sources and CITE the URLs in your output. Do not assert any current-events fact not present here.'
+      : sources.length > 0
+        ? 'Sources were found but could not be read (extraction failed or timed out). Do NOT claim none exist — tell the owner the pages could not be read right now and offer to try again.'
+        : 'NO web sources found. Do NOT fabricate facts — tell the owner you could not find a source and offer to try again.',
   };
 }
 
@@ -472,7 +585,7 @@ export async function duckduckgoSearch(query: string): Promise<object> {
 
 // ── URL content extraction ───────────────────────────────────────────────────
 
-export async function tavilyExtract(url: string): Promise<object> {
+export async function tavilyExtract(url: string, timeoutMs: number = TAVILY_EXTRACT_DEFAULT_TIMEOUT_MS): Promise<object> {
   if (!config.TAVILY_API_KEY) {
     throw new Error('TAVILY_API_KEY required for web_extract');
   }
@@ -480,6 +593,8 @@ export async function tavilyExtract(url: string): Promise<object> {
   // extract_depth: advanced handles JS-heavy SPAs and content behind client-side
   // rendering (common on JS-heavy marketing sites). basic mode returned empty
   // content for those pages during KB recovery (2026-04-20).
+  // gh#191 — bounded via AbortSignal.timeout (Node 20 native); a caller-scoped
+  // budget so a hung server can't block the turn that's waiting on it.
   const res = await fetch('https://api.tavily.com/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -488,6 +603,7 @@ export async function tavilyExtract(url: string): Promise<object> {
       urls: [url],
       extract_depth: 'advanced',
     }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {

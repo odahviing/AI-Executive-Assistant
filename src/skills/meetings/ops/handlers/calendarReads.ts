@@ -38,6 +38,8 @@ import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/tim
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
+import { logActivity } from '../../../../core/requests/logActivity';
+import { ACTIVITY_REVERTIBILITY } from '../../../../core/requests/activityRevertibility';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -321,128 +323,271 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         return Object.keys(gcNotes).length > 0 ? { events: processed, ...gcNotes } : processed;
 }
 
-export async function handleRevertLastAutoMove(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
+/**
+ * gh#52 (52-U4b) — the ONE general "undo that" dispatch. Generalized from the
+ * old auto-move-only `handleRevertLastAutoMove`: owner-only deterministic
+ * undo of the newest revertible activity row, whatever kind it was (an
+ * active-mode auto-move, an owner move_meeting, an owner create_meeting).
+ * Looks the row up (db/requests.ts's getRevertibleActivity), checks it
+ * against the ACTIVITY_REVERTIBILITY table (revertible? still in TTL?), then
+ * dispatches the actual restore by the row's subkind:
+ *   - auto_move / move_meeting → restore the prior time via updateMeeting,
+ *     read back to confirm it landed, and (auto_move only) write the terminal
+ *     dismissal so active-mode health won't re-move it ("if I said no, it's
+ *     no") — an owner-requested move has no autofix to suppress, so that
+ *     write must not fire for a plain move_meeting revert.
+ *   - create_meeting (and book_floating_block, same shape) → delete-by-id
+ *     using the stored event_id, read back to confirm it's gone.
+ *   - delete_meeting, or nothing found → the table's own honest refusal text,
+ *     verbatim, never a guess.
+ * Colleague notification + linked-artifact cleanup is the one existing
+ * closeMeetingArtifacts cascade (its relayVoidedNotices step), not a
+ * bespoke resend loop — it already reads back the ORIGINAL notice's own
+ * (masked, when the meeting is private) stored subject before falling back
+ * to what this call passes, so M12 masking survives the swap.
+ */
+export async function handleRevertAction(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
-        // v3.7.x (#139 / auto-fix Part B) — owner-only deterministic undo of the
-        // most recent active-mode auto-move (the "I moved X to clear a clash"
-        // notice). Restores the original time, re-notifies who was told, relabels
-        // the spine record as reverted, and writes a terminal dismissal so the
-        // sweep won't re-move it ("if I said no, it's no").
-        if (context.senderRole !== 'owner') {
-          return { success: false, error: 'owner_only', message: 'Only the owner can revert an auto-move.' };
-        }
-        const ownerUserId = context.profile.user.slack_user_id;
-        const { getRevertibleAutoMove, updateRequest } = await import('../../../../db/requests');
-        const rec = getRevertibleAutoMove(ownerUserId);
-        if (!rec) {
-          return { success: false, error: 'nothing_to_revert', message: 'There is no recent auto-move to undo.' };
-        }
-        let oc: Record<string, unknown> = {};
-        try { oc = rec.outcome_json ? JSON.parse(rec.outcome_json) as Record<string, unknown> : {}; } catch { /* keep empty */ }
-        const eventId = rec.outcome_external_event_id;
-        const originalStart = typeof oc.original_start === 'string' ? oc.original_start : undefined;
-        const originalEnd = typeof oc.original_end === 'string' ? oc.original_end : undefined;
-        const revNewStart = typeof oc.new_start === 'string' ? oc.new_start : undefined;
-        const revSubject = typeof oc.subject === 'string' ? oc.subject : 'the meeting';
-        // gh#180 (bounce 2) — the colleague-masked view of the same subject,
-        // stored alongside `subject` (owner view) by autoMove.ts specifically
-        // so THIS re-notify DM to colleagues never carries the real title of
-        // a meeting the owner marked private. Records written before this
-        // field existed (pre-deploy, within the 12h revert TTL) have no
-        // `colleague_subject` — fall back to the mask rather than the owner's
-        // real subject: M12's "permission unclear → return less" default.
-        const revColleagueSubject = typeof oc.colleague_subject === 'string' ? oc.colleague_subject : PRIVATE_MASK;
-        const keptEventId = typeof oc.kept_event_id === 'string' ? oc.kept_event_id : null;
-        const notifiedSlackIds = Array.isArray(oc.notified_slack_ids)
-          ? (oc.notified_slack_ids as unknown[]).filter((x): x is string => typeof x === 'string')
-          : [];
-        if (!eventId || !originalStart || !originalEnd) {
-          return {
-            success: false, error: 'record_incomplete',
-            message: `I found the auto-move of "${revSubject}" but its record is missing the original time, so I can't safely undo it — you can move it back manually.`,
-          };
-        }
-        // Don't clobber a later change: if the meeting is no longer where the
-        // auto-move put it, someone already moved it — nothing to revert.
-        if (revNewStart) {
-          try {
-            const { getEventType } = await import('../../../../connectors/graph/calendar');
-            const probe = await getEventType(userEmail, eventId);
-            if (probe?.startDateTime) {
-              const curMs = DateTime.fromISO(probe.startDateTime, { zone: timezone }).toUTC().toMillis();
-              const newMs = DateTime.fromISO(revNewStart).toUTC().toMillis();
-              if (Number.isFinite(curMs) && Number.isFinite(newMs) && Math.abs(curMs - newMs) > 5 * 60_000) {
-                return {
-                  success: false, error: 'already_changed',
-                  message: `"${revSubject}" isn't where I auto-moved it anymore — it's already been changed, so there's nothing to revert.`,
-                };
-              }
-            }
-          } catch (e) { logger.warn('revert_last_auto_move — position probe threw; proceeding', { err: String(e).slice(0, 160) }); }
-        }
-        await updateMeeting({ userEmail, timezone, meetingId: eventId, start: originalStart, end: originalEnd });
-        // Relabel the record so it's no longer revertible, and write the dismissal
-        // so active-mode won't re-move this pair.
-        try { updateRequest(rec.id, { closureReason: 'auto_move_reverted' }); } catch { /* best-effort */ }
-        try {
-          const { dismissOverlapIssue, DISMISSAL_NEVER_EXPIRES } = await import('../../../../db/calendarIssues');
-          dismissOverlapIssue({
-            ownerUserId,
-            eventId,
-            peerEventId: keptEventId,
-            eventDate: DateTime.fromISO(originalStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
-            // gh#180 — NOT the occurrence's own end. That snapshot goes stale the
-            // moment this same event is later rescheduled further out (the
-            // terminal-row cascade skip means it's never refreshed), silently
-            // un-suppressing an autofix the owner already rejected. A stated
-            // "don't touch this event again" is permanent, by event id.
-            eventEndMs: DISMISSAL_NEVER_EXPIRES,
-            notes: 'owner reverted auto-move — leave it',
-          });
-        } catch (e) { logger.warn('revert_last_auto_move — dismissal write failed', { err: String(e).slice(0, 160) }); }
-        // Re-notify anyone the auto-move told.
-        let reNotified = 0;
-        if (notifiedSlackIds.length > 0) {
-          try {
-            const { getConnection } = await import('../../../../connections/registry');
-            const conn = getConnection(ownerUserId, 'slack');
-            const origLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
-            for (const sid of notifiedSlackIds) {
-              try {
-                await conn?.sendDirect(sid, `Quick update: "${revColleagueSubject}" is back to its original time (${origLocal}) — please disregard my earlier note about moving it.`);
-                reNotified++;
-              } catch { /* skip one */ }
-            }
-          } catch { /* messaging unavailable */ }
-        }
-        const restoredLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
-        // gh#180 — the active-mode auto-move's shadowNotify (autoMove.ts) told the
-        // owner "I moved X to Y... say revert if you'd rather I hadn't" as a
-        // STANDALONE DM (no threadTs — see autoMove.ts's call), separate from
-        // whatever conversation the "revert" command itself arrives in. Threading
-        // this correction under context.threadTs (the revert command's OWN
-        // thread) does not put it anywhere near that original claim — it's a
-        // different thread entirely, so the stale "moved to Y" message still
-        // sits uncorrected (owner: "it just said it did it, not really did").
-        // Fix: use the SAME conversationKey (the auto-move request id) the
-        // original call tagged itself with — shadowNotify's own threading cache
-        // then replies under that exact message regardless of where THIS
-        // command came from.
-        try {
-          const { shadowNotify } = await import('../../../../utils/shadowNotify');
-          await shadowNotify(context.profile, {
-            channel: context.channelId,
-            icon: '🔧',
-            action: 'Active-mode autofix — reverted',
-            detail: `Reverted "${revSubject}" back to ${restoredLocal} — disregard my earlier note about moving it.`,
-            conversationKey: rec.id,
-          });
-        } catch (e) { logger.warn('revert_last_auto_move — owner correction shadowNotify threw', { err: String(e).slice(0, 160) }); }
-        logger.info('revert_last_auto_move — done', { requestId: rec.id, eventId, restoredLocal, reNotified });
+  // gh#154 fix — `senderRole` is DATA scope, clamped to 'colleague' on every
+  // shared surface INCLUDING the owner's own turn there (processMessage.ts).
+  // Every other action gate in this file reads `context.authority` instead
+  // (moveMeeting.ts:259,678; createMeeting.ts:469) — the authenticated actor,
+  // never clamped by surface. Reading senderRole here meant the owner could
+  // never revert anything from a group DM; this brings the gate in line with
+  // its siblings.
+  if (context.authority !== 'owner') {
+    return { success: false, error: 'owner_only', message: 'Only the owner can revert an action.' };
+  }
+  const ownerUserId = context.profile.user.slack_user_id;
+  const { getRevertibleActivity, updateRequest } = await import('../../../../db/requests');
+  const rec = getRevertibleActivity(ownerUserId);
+  if (!rec) {
+    return { success: false, error: 'nothing_to_revert', message: 'There is nothing recent I can undo.' };
+  }
+
+  // auto_move's underlying TOOL is move_meeting (autoMove.ts records its own
+  // internalActions entry as 'move_meeting') — ACTIVITY_REVERTIBILITY's keys
+  // are literal tool names, so an auto_move row is looked up under that key,
+  // never its own subkind.
+  const revKey = rec.subkind === 'auto_move' ? 'move_meeting' : (rec.subkind ?? '');
+  const rule = ACTIVITY_REVERTIBILITY[revKey];
+  if (!rule || !rule.revertible) {
+    return {
+      success: false, error: 'not_revertible',
+      message: rule?.refusalText ?? `I can't undo "${rec.subject}".`,
+    };
+  }
+  // bouncer fix (gh#52, OT-2) — `closed_at`, when present, is ALWAYS ISO
+  // (closeRequest.ts writes `DateTime.now().toUTC().toISO()`, the only path
+  // that ever populates it for the revertible subkinds here — auto_move);
+  // `created_at` is the opposite, SQL-format (client.ts:
+  // `DEFAULT (datetime('now'))`). Parsing whichever field we actually read
+  // with `fromSQL` made every auto_move row's `closed_at` parse INVALID, so
+  // `actedAt.isValid` was always false and the whole TTL check silently
+  // no-op'd for the one case it exists to catch.
+  const actedAt = rec.closed_at
+    ? DateTime.fromISO(rec.closed_at, { zone: 'utc' })
+    : DateTime.fromSQL(rec.created_at, { zone: 'utc' });
+  if (rule.ttlHours != null && actedAt.isValid && DateTime.now().diff(actedAt, 'hours').hours > rule.ttlHours) {
+    return {
+      success: false, error: 'too_old',
+      message: `"${rec.subject}" happened more than ${rule.ttlHours} hours ago — too long for me to undo now.`,
+    };
+  }
+
+  let oc: Record<string, unknown> = {};
+  try { oc = rec.outcome_json ? JSON.parse(rec.outcome_json) as Record<string, unknown> : {}; } catch { /* keep empty */ }
+  // auto_move stamps the event id onto the row's own column; move_meeting/
+  // create_meeting (logActivity, which has no such column) carry it inside
+  // outcome_json instead. Both land here as one normalized `eventId`.
+  const eventId = rec.outcome_external_event_id ?? (typeof oc.event_id === 'string' ? oc.event_id : undefined);
+  if (!eventId) {
+    return {
+      success: false, error: 'record_incomplete',
+      message: `I found "${rec.subject}" but its record is missing the event id, so I can't safely undo it.`,
+    };
+  }
+
+  const { getEventType, verifyEventMoved } = await import('../../../../connectors/graph/calendar');
+  let probe: Awaited<ReturnType<typeof getEventType>> | null = null;
+  try { probe = await getEventType(userEmail, eventId); } catch (e) {
+    logger.warn('revert_action — event probe threw; proceeding on stored data', { err: String(e).slice(0, 160), eventId });
+  }
+  // gh#154-class fix, generalized here — this tool is reachable from a room
+  // (OWNER_ROOM_ACTION_TOOLS, registry.ts) and takes no arguments, so unlike
+  // move_meeting's own success narration (which only ever echoes a subject
+  // the caller named THIS turn) every subject this handler could show is
+  // pulled from a stored record or a fresh probe — never something already
+  // visible in a shared surface's own transcript. `rawSubject` is for the
+  // ONE genuinely owner-only surface here (shadowNotify — always routed to
+  // the owner's real 1:1 DM regardless of the calling context, verified in
+  // shadowNotify.ts's own header) and for logging. Every RETURNED/narrated
+  // string uses `viewSubject` instead — the same displaySubject(...,
+  // subjectViewerFor(context), viewerEmailFor(context)) resolution move_meeting's
+  // seriesMaster refusal and delete_meeting's success label already use, which
+  // renders the real subject on the owner's own DM (subjectViewerFor → 'owner')
+  // and masks it in a room (viewerEmailFor → null) — exactly M12's rule, not a
+  // blanket mask. Falls back to PRIVATE_MASK, never the raw subject, if even
+  // the live probe fails (M12's "permission unclear → return less" default).
+  const rawSubject = probe?.subject ?? (typeof oc.subject === 'string' ? oc.subject : rec.subject);
+  const viewSubject = probe
+    ? displaySubject(
+        { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+        context.profile, subjectViewerFor(context), viewerEmailFor(context),
+      )
+    : (typeof oc.colleague_subject === 'string' ? oc.colleague_subject : PRIVATE_MASK);
+
+  if (revKey === 'move_meeting') {
+    const originalStartRaw = typeof oc.original_start === 'string' ? oc.original_start : undefined;
+    const originalEndRaw = typeof oc.original_end === 'string' ? oc.original_end : undefined;
+    const priorNewStart = typeof oc.new_start === 'string' ? oc.new_start : undefined;
+    if (!originalStartRaw || !originalEndRaw) {
+      return {
+        success: false, error: 'record_incomplete',
+        message: `I found "${viewSubject}" but its record is missing the original time, so I can't safely undo it — you can move it back manually.`,
+      };
+    }
+    // bouncer fix (gh#52, OT-1) — original_start/original_end were captured
+    // off Graph's raw start.dateTime with no `Prefer: outlook.timezone`
+    // header (see moveMeeting.ts's own pre-move probe comment), so they're
+    // NAIVE strings denominated in `original_tz` (Graph's default, almost
+    // always 'UTC') — never the owner's zone. Passing them straight to
+    // updateMeeting used to anchor the naive wall-clock in the OWNER's zone
+    // (normalizeForGraph) and write the wrong instant. Re-anchor ONCE here,
+    // in the zone they were actually captured in, so every downstream use
+    // below (the write, the verify read-back, the restored-time label, the
+    // dismissal's eventDate, closeMeetingArtifacts) gets a correct absolute
+    // instant instead of a mis-zoned wall-clock string.
+    const originalTz = (typeof oc.original_tz === 'string' && oc.original_tz) || 'UTC';
+    const originalStart = DateTime.fromISO(originalStartRaw, { zone: originalTz }).toISO() ?? originalStartRaw;
+    const originalEnd = DateTime.fromISO(originalEndRaw, { zone: originalTz }).toISO() ?? originalEndRaw;
+    // Don't clobber a later change: if the meeting is no longer where this
+    // move put it, someone already moved it again — nothing to revert.
+    if (priorNewStart && probe?.startDateTime) {
+      const curMs = DateTime.fromISO(probe.startDateTime, { zone: probe.startTimeZone || 'UTC' }).toUTC().toMillis();
+      // priorNewStart is move_meeting's own outcome_json `new_start` — an
+      // offsetless OWNER-LOCAL clock string per the tool schema
+      // (meetings.ts:441), not UTC. Parsing with no zone parsed it in the
+      // PROCESS zone (UTC on the VM), an offset-sized mismatch against the
+      // correctly-zoned `curMs` that produced a false "already_changed".
+      const expectedMs = DateTime.fromISO(priorNewStart, { zone: timezone }).toUTC().toMillis();
+      if (Number.isFinite(curMs) && Number.isFinite(expectedMs) && Math.abs(curMs - expectedMs) > 5 * 60_000) {
         return {
-          success: true, reverted: true, subject: revSubject, restored_to: restoredLocal, re_notified: reNotified,
-          message: `Put "${revSubject}" back to ${restoredLocal}${reNotified ? ` and let ${reNotified} ${reNotified === 1 ? 'person' : 'people'} know` : ''}. I won't auto-move it again.`,
+          success: false, error: 'already_changed',
+          message: `"${viewSubject}" isn't where I left it — it's already been changed since, so there's nothing to revert.`,
         };
+      }
+    }
+    await updateMeeting({ userEmail, timezone, meetingId: eventId, start: originalStart, end: originalEnd });
+    // gh#180-c standard, generalized: verify the PATCH actually landed before
+    // claiming "put back" — don't just assert it the way the old auto-move-
+    // only handler did.
+    const verify = await verifyEventMoved(userEmail, eventId, originalStart, timezone);
+    if (!verify.ok) {
+      return {
+        success: false, error: 'revert_did_not_land',
+        message: `I tried to put "${viewSubject}" back but the calendar didn't confirm it landed — left it for you to check.`,
+      };
+    }
+    try { updateRequest(rec.id, { closureReason: `${rec.subkind}_reverted` }); } catch { /* best-effort */ }
+
+    // Permanent "don't touch this event again" dismissal — auto_move ONLY. An
+    // owner-requested move had no autofix to suppress; writing this for a
+    // plain move_meeting revert would silently disable calendar-health on
+    // that event forever.
+    if (rec.subkind === 'auto_move') {
+      const keptEventId = typeof oc.kept_event_id === 'string' ? oc.kept_event_id : null;
+      try {
+        const { dismissOverlapIssue, DISMISSAL_NEVER_EXPIRES } = await import('../../../../db/calendarIssues');
+        dismissOverlapIssue({
+          ownerUserId,
+          eventId,
+          peerEventId: keptEventId,
+          eventDate: DateTime.fromISO(originalStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
+          // gh#180 — NOT the occurrence's own end; see the constant's own
+          // comment. A stated "don't touch this event again" is permanent.
+          eventEndMs: DISMISSAL_NEVER_EXPIRES,
+          notes: 'owner reverted auto-move — leave it',
+        });
+      } catch (e) { logger.warn('revert_action — dismissal write failed', { err: String(e).slice(0, 160) }); }
+    }
+
+    const restoredLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+    // Colleague correction + linked-artifact cleanup — the ONE existing
+    // cascade every other move already uses, not a bespoke resend loop. Its
+    // relayVoidedNotices step only corrects colleagues with a STILL-OPEN
+    // reschedule ask for this event (and reads back that ask's own stored,
+    // already-masked subject before ever falling back to `viewSubject`
+    // here) — so it's quieter than the old unconditional resend (someone who
+    // already replied to the original notice isn't re-pinged), matching this
+    // codebase's own "correct what's still live, don't chase" rule.
+    const cascade = await closeMeetingArtifacts({
+      ownerUserId,
+      meetingId: eventId,
+      reason: 'moved',
+      subject: viewSubject,
+      bookingThreadTs: context.threadTs,
+      newStartIso: originalStart,
+      newEndIso: originalEnd,
+    });
+
+    if (rec.subkind === 'auto_move') {
+      // The auto-move's own shadowNotify told the owner "moved X to Y... say
+      // revert if you'd rather I hadn't" as a STANDALONE DM keyed to this
+      // request's own id (autoMove.ts) — correct THAT exact claim by reusing
+      // the same conversationKey, regardless of which thread this "revert"
+      // command itself arrived in. shadowNotify is ALWAYS routed to the
+      // owner's real 1:1 DM regardless of `channel` (see its own header), so
+      // `rawSubject` (the real title) is safe here even when the "revert"
+      // command itself was typed in a room.
+      try {
+        const { shadowNotify } = await import('../../../../utils/shadowNotify');
+        await shadowNotify(context.profile, {
+          channel: context.channelId,
+          icon: '🔧',
+          action: 'Active-mode autofix — reverted',
+          detail: `Reverted "${rawSubject}" back to ${restoredLocal} — disregard my earlier note about moving it.`,
+          conversationKey: rec.id,
+        });
+      } catch (e) { logger.warn('revert_action — owner correction shadowNotify threw', { err: String(e).slice(0, 160) }); }
+    }
+
+    logger.info('revert_action — move reverted', { requestId: rec.id, subkind: rec.subkind, eventId, restoredLocal, correctionsRelayed: cascade.correctionsRelayed });
+    return {
+      success: true, reverted: true, subject: viewSubject, restored_to: restoredLocal,
+      corrections_relayed: cascade.correctionsRelayed,
+      message: `Put "${viewSubject}" back to ${restoredLocal}`
+        + `${cascade.correctionsRelayed ? ` and let ${cascade.correctionsRelayed} ${cascade.correctionsRelayed === 1 ? 'person' : 'people'} know` : ''}.`
+        + `${rec.subkind === 'auto_move' ? " I won't auto-move it again." : ''}`,
+    };
+  }
+
+  if (revKey === 'create_meeting' || revKey === 'book_floating_block') {
+    await deleteMeeting(userEmail, eventId);
+    const confirmedGone = await verifyEventDeleted(userEmail, eventId);
+    if (!confirmedGone) {
+      return {
+        success: false, error: 'still_present_after_revert',
+        message: `I tried to undo the booking of "${viewSubject}" but it's still on the calendar — nothing was changed.`,
+      };
+    }
+    try { updateRequest(rec.id, { closureReason: `${rec.subkind}_reverted` }); } catch { /* best-effort */ }
+    await closeMeetingArtifacts({
+      ownerUserId, meetingId: eventId, reason: 'deleted',
+      subject: viewSubject, bookingThreadTs: context.threadTs,
+    });
+    logger.info('revert_action — create reverted (deleted)', { requestId: rec.id, subkind: rec.subkind, eventId });
+    return {
+      success: true, reverted: true, subject: viewSubject,
+      message: `Cancelled the booking I made for "${viewSubject}".`,
+    };
+  }
+
+  // Unreachable given the revertible check above (only the subkinds handled
+  // above are ever marked revertible:true in the table) — a table entry that
+  // says revertible without a dispatch branch here would be the bug, not a
+  // guess to paper over with a generic success.
+  return { success: false, error: 'not_revertible', message: rule.refusalText ?? `I can't undo "${viewSubject}".` };
 }
 
 export async function handleSetWorkScheduleOverride(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -450,7 +595,11 @@ export async function handleSetWorkScheduleOverride(args: Record<string, unknown
         // v3.7.x (#143) — owner-only per-date override WRITE. Dates are
         // Sonnet-parsed from the DATE LOOKUP table (no NL parsing here). A range
         // writes N single-date rows via the merge-upsert; clear:true removes them.
-        if (context.senderRole !== 'owner') {
+        // gh#52 (52-U4b) fix — same defect as the old revert-only gate: `senderRole`
+        // is DATA scope, clamped to 'colleague' on every shared surface INCLUDING
+        // the owner's own turn there. `authority` is the authenticated actor and is
+        // what every other WRITE gate in this file reads.
+        if (context.authority !== 'owner') {
           return { success: false, error: 'owner_only', message: 'Only the owner can set schedule overrides.' };
         }
         const ownerSlackId = context.profile.user.slack_user_id;
@@ -1010,6 +1159,57 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
             notified_via: notifiedVia,
           },
           outcome: 'success',
+        });
+
+        // OT-4 (bouncer fix, gh#52) — "who this cancellation concerns", for
+        // the logActivity row below. Same findMeetingOwner lookup
+        // moveMeeting.ts already uses (resolves the original requester if
+        // booked through Maelle, else the organizer backfilled to a
+        // slack_id) — excludes the owner's own id, so a meeting he organizes
+        // solo (or with attendees we can't reduce to one) stays null rather
+        // than guessed. Fail-soft: a lookup failure here must never block
+        // the cancellation, which has already completed above.
+        let meetingConcernsSlackId: string | undefined;
+        try {
+          const { findMeetingOwner } = await import('../../findMeetingOwner');
+          const ownerInfo = await findMeetingOwner({
+            ownerUserId: context.profile.user.slack_user_id,
+            ownerEmail: userEmail,
+            eventId: meetingId,
+          });
+          if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.profile.user.slack_user_id) {
+            meetingConcernsSlackId = ownerInfo.requesterSlackId;
+          }
+        } catch (err) {
+          logger.warn('delete_meeting — findMeetingOwner lookup for activity log threw, continuing', {
+            err: String(err).slice(0, 160),
+          });
+        }
+
+        // gh#52 (52-U3) — history record for this cancellation, past the
+        // verifyEventDeleted confirmation above (confirmedGone already true
+        // here). Reuses the SAME pre-delete values already captured for the
+        // auditLog just above — no second probe. ACTIVITY_REVERTIBILITY marks
+        // `delete_meeting` non-revertible (Outlook already emailed every
+        // attendee the cancellation), so this row exists for RECALL only —
+        // it still earns one so a future "what did you cancel" / "undo that"
+        // reads the true, honest reason instead of finding nothing.
+        logActivity({
+          ownerUserId: context.profile.user.slack_user_id,
+          kind: 'follow_up',
+          subkind: 'delete_meeting',
+          subject: `Cancelled '${args.meeting_subject ?? preDeleteSubject ?? 'a meeting'}'`,
+          outcomeJson: {
+            event_id: meetingId,
+            event_start_iso: preDeleteStartIso,
+            original_tz: preDeleteStartTz,
+            notified_via: notifiedVia,
+          },
+          initiatedBy: context.userId,
+          initiatedByRole: context.senderRole,
+          originThreadTs: context.threadTs,
+          originChannel: context.channelId,
+          targetSlackId: meetingConcernsSlackId,
         });
 
         // v3.2.x (Tier 1) — a delete frees the deleted event's slot, which may

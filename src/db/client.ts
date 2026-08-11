@@ -782,7 +782,7 @@ function initSchema(db: Database.Database): void {
       subject                  TEXT NOT NULL,
       description              TEXT,
 
-      state                    TEXT NOT NULL,   -- 'awaiting_owner' | 'awaiting_colleague' | 'in_flight' | 'resolved' | 'cancelled' | 'expired'
+      state                    TEXT NOT NULL,   -- 'awaiting_owner' | 'awaiting_colleague' | 'in_flight' | 'resolved' | 'cancelled' | 'expired' | 'logged'
       state_changed_at         TEXT NOT NULL DEFAULT (datetime('now')),
       closure_reason           TEXT,
       closed_at                TEXT,

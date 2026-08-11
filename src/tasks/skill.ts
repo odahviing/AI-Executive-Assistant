@@ -14,9 +14,11 @@ import {
   getRecentOutreachOwnerThread,
   isKnownRequestThreadAnchor,
   getMeetingsRequestedBy,
+  getRecentActivityForOwner,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
+import { logActivity } from '../core/requests/logActivity';
 import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
@@ -1318,6 +1320,8 @@ For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_ta
 
 Optional with_person filter: pass a Slack user ID to scope results to tasks involving that person. Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.
 
+Also returns \`recent_activity\` — a newest-first history of what Maelle has already done (calendar changes, messages sent, approvals decided, research completed), with NO time cutoff (\`recent_activity_count\` in summary is its length). Use it for "what have you done?" or something from weeks/months back — not just what's still open. with_person filters this too. It's capped at the most recent items, not a date range, so a very old item can be missing simply because newer activity pushed it past that cap.
+
 ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do my LinkedIn post?", "did the briefing run?", "weekly review this morning?").`,
         input_schema: {
           type: 'object',
@@ -1609,6 +1613,32 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const awaitingColleague = filtered.filter(r => r.state === 'awaiting_colleague').map(hydrate);
         const inFlight = filtered.filter(r => r.state === 'in_flight').map(hydrate);
 
+        // gh#52 (52-U6) — "what have you done?" recall: completed activity
+        // (logged-state rows), newest first, NO time cutoff (owner's ruling —
+        // this table is never pruned). Default limit keeps the read cheap;
+        // no with_person-style widening arg exists on this tool yet, so none
+        // is added here (52-U6 dispatch note: only widen an existing arg).
+        const RECENT_ACTIVITY_DEFAULT_LIMIT = 25;
+        const recentActivityRows = getRecentActivityForOwner(ownerUserId, RECENT_ACTIVITY_DEFAULT_LIMIT)
+          .filter(r => !withPerson || r.target_slack_id === withPerson || r.requester_slack_id === withPerson);
+        const recentActivity = recentActivityRows.map((r): Record<string, unknown> => {
+          let outcome: Record<string, unknown> | null = null;
+          if (r.outcome_json) {
+            try { outcome = JSON.parse(r.outcome_json) as Record<string, unknown>; } catch { outcome = null; }
+          }
+          return {
+            task_id: r.id,
+            kind: r.kind,
+            subkind: r.subkind,
+            subject: r.subject,
+            // created_at is stored as a bare UTC SQL datetime (see other
+            // fromSQL call sites in this codebase) — render owner-local so
+            // "did X this morning" reads correctly against the owner's clock.
+            done_at: DateTime.fromSQL(r.created_at, { zone: 'utc' }).setZone(profile.user.timezone).toISO() ?? r.created_at,
+            outcome,
+          };
+        });
+
         const totalOpen = awaitingOwner.length + awaitingColleague.length + inFlight.length;
         return {
           summary: {
@@ -1616,15 +1646,15 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             pending_your_input_count: awaitingOwner.length,
             waiting_on_others_count: awaitingColleague.length,
             active_count: inFlight.length,
-            recently_done_count: 0,
+            recent_activity_count: recentActivity.length,
           },
           pending_your_input: awaitingOwner,
           pending_approvals: awaitingOwner.filter(r => (r as any).kind === 'approval'),
           waiting_on_others: awaitingColleague,
           active_tasks: inFlight,
-          recently_done: [],
+          recent_activity: recentActivity,
           count: totalOpen,
-          _note: 'Describe these to the owner USING ONLY the fields in this response. Do NOT add subjects or context remembered from past conversations or people_memory.',
+          _note: 'Describe these to the owner USING ONLY the fields in this response. Do NOT add subjects or context remembered from past conversations or people_memory. recent_activity is newest-first with no time cutoff — if it looks short for an old date, that reflects what was actually logged, not a missing older page.',
         };
       }
 
@@ -1986,11 +2016,39 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           // (state=awaiting_colleague). The orchestrator also hard-suppresses a
           // same-turn message_colleague to that requester — this is the nudge.
           let requesterNotified = false;
+          // OT-4 (gh#52 bouncer fix) — the request's own requester, when this
+          // approval was colleague-originated, so the activity row this
+          // decision earns below is with_person-filterable on them. Null for
+          // an owner-initiated approval (fresh.requester_slack_id is already
+          // null there) rather than guessing.
+          let requesterSlackIdForLog: string | null = null;
           try {
             const fresh = getRequest(result.request_id);
             requesterNotified = !!(fresh?.requester_slack_id
               && (fresh.requester_notified_at || fresh.state === 'awaiting_colleague'));
+            requesterSlackIdForLog = fresh?.requester_slack_id ?? null;
           } catch { /* best-effort nudge */ }
+          // gh#52 (52-U2) — history/undo record of the decision itself (not the
+          // downstream calendar action a replay may have fired — that's
+          // Matchmaker's own activity row, 52-U3/Wave 2). Only a successful
+          // resolveRequest (approve/reject/amend all count — each is a real,
+          // completed decision, whether it closed the request or bounced the
+          // ball to the other side) earns a row.
+          if (result.ok) {
+            logActivity({
+              ownerUserId: context.profile.user.slack_user_id,
+              kind: 'approval',
+              subkind: verdict,
+              subject: result.subject ?? `approval ${requestId}`,
+              outcomeJson: {
+                effect: result.effect,
+                ...(result.booked ? { booked: true, start: result.start } : {}),
+              },
+              initiatedBy: context.userId,
+              initiatedByRole: context.authority,
+              requesterSlackId: requesterSlackIdForLog ?? undefined,
+            });
+          }
           // Surface as approval_id for tool-API back-compat.
           return {
             ...result,

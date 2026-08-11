@@ -37,7 +37,12 @@ export type RequestState =
   | 'in_flight'           // Maelle is working (research running, scheduled outreach not yet sent)
   | 'resolved'            // terminal — closed normally
   | 'cancelled'           // terminal — owner dropped OR auto-cancelled by surfaced_threshold
-  | 'expired';            // terminal — no action within window
+  | 'expired'             // terminal — no action within window
+  | 'logged';             // terminal — a completed Maelle-initiated action, recorded for
+                          // history/undo (gh#52); pulled, never pushed — never surfaces in
+                          // the brief (see getRequestsForBrief) and never pruned — the
+                          // requests-spine prune job was removed outright (52-U9,
+                          // core/background.ts), so nothing here is ever deleted for age
 
 export type RequestRole = 'owner' | 'colleague' | 'system';
 
@@ -194,7 +199,7 @@ export interface CreateRequestInput {
 
 export interface CloseRequestInput {
   id: string;
-  state: 'resolved' | 'cancelled' | 'expired';
+  state: 'resolved' | 'cancelled' | 'expired' | 'logged';
   closureReason: string;
   closedBy: ClosedBy;
   outcomeExternalEventId?: string;

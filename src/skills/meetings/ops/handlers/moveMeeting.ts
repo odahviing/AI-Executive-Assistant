@@ -41,6 +41,7 @@ import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTim
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { displaySubject, subjectViewerFor, viewerEmailFor, isEventPrivate } from '../../../../utils/displaySubject';
 import { createApprovalRequest } from '../../../../tasks/skill';
+import { logActivity } from '../../../../core/requests/logActivity';
 import type { OpCtx } from './context';
 
 export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -934,6 +935,14 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // v2.7.0 — ownership check via findMeetingOwner (requests + Graph).
         // When owner isn't organizer, refuse politely. No DM, no
         // propose-reschedule — just tell the asker it's not the owner's to move.
+        // OT-4 (bouncer fix, gh#52) — this same findMeetingOwner call already
+        // resolves "who this meeting is with" (the original requester if
+        // booked through Maelle, else the organizer backfilled to a slack_id)
+        // — captured here for the logActivity call below, rather than a new
+        // lookup or a guess among possibly-many attendees. Excludes the owner's
+        // own id (his solo/self-organized meetings have no single "other
+        // colleague" and stay null, honestly).
+        let meetingConcernsSlackId: string | undefined;
         try {
           const { findMeetingOwner } = await import('../../findMeetingOwner');
           const ownerInfo = await findMeetingOwner({
@@ -941,6 +950,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             ownerEmail: userEmail,
             eventId: args.meeting_id as string,
           });
+          if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.profile.user.slack_user_id) {
+            meetingConcernsSlackId = ownerInfo.requesterSlackId;
+          }
           if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
             const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
@@ -1709,6 +1721,36 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             original_tz: preMoveTz,
           },
           outcome: 'success',
+        });
+
+        // gh#52 (52-U3) — undo/history record for this move, past the
+        // verifyEventMoved read-back above (verify.ok already confirmed the
+        // write landed) — never recorded on a PATCH Graph accepted but didn't
+        // apply. Reuses the SAME pre-state (preMoveStartIso/preMoveEndIso/
+        // preMoveTz) already captured for the auditLog just above — no second
+        // probe. `new_start`/`new_end` are the EFFECTIVE (post-snap, verified)
+        // instant, not the raw args.new_start hint, so a future revert targets
+        // where the meeting actually landed. subkind is the literal tool name
+        // (matches ACTIVITY_REVERTIBILITY's keying in activityRevertibility.ts)
+        // so a later revert dispatch can look it up directly off this row.
+        logActivity({
+          ownerUserId: context.profile.user.slack_user_id,
+          kind: 'follow_up',
+          subkind: 'move_meeting',
+          subject: `Moved '${args.meeting_subject}'`,
+          outcomeJson: {
+            event_id: args.meeting_id,
+            original_start: preMoveStartIso,
+            original_end: preMoveEndIso,
+            original_tz: preMoveTz,
+            new_start: effectiveStart,
+            new_end: effectiveEnd,
+          },
+          initiatedBy: context.userId,
+          initiatedByRole: context.senderRole,
+          originThreadTs: context.threadTs,
+          originChannel: context.channelId,
+          targetSlackId: meetingConcernsSlackId,
         });
 
         // v2.2.1 — colleague-path inbound reschedule: shadow-DM the owner so he
