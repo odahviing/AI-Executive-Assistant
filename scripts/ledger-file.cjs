@@ -53,13 +53,23 @@
  *   node scripts/ledger-file.cjs --gh-sync --ref gh#201 --version 4.4.8 --ghstate partial \
  *     --note "Landed X, still open Y." --recommend "build — the second half"
  *
- *   # --date overrides the stamped date on ANY of the three shapes above (the
- *   # ordinary path, --wrap-companion, --gh-sync) — for backfilling work that
+ *   # --date overrides the stamped date on ANY shape below (the ordinary path,
+ *   # --wrap-companion, --gh-sync, --recheck) — for backfilling work that
  *   # actually happened on an earlier day. Validated as a real calendar date;
  *   # garbage or an impossible date (2026-02-30) is refused, never silently
  *   # replaced with today:
  *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
  *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --date 2026-08-11
+ *
+ *   # WRAP_UP.md step 12's PHANTOM CANDIDATES check: a candidate that is a genuinely
+ *   # distinct, still-open bug (not something this wrap's own diff already fixed
+ *   # under a different ref) gets a bare recheck row so it stops being reflagged —
+ *   # it stays open, it never gets a verdict, invariant or finding of its own:
+ *   node scripts/ledger-file.cjs --recheck --ref "some-ref" \
+ *     --note "why this is genuinely distinct and still open, citing the file/ref/command that shows it"
+ *
+ * Any flag this script does not read anywhere above is REFUSED, not silently
+ * ignored — see KNOWN_FLAGS below.
  *
  * Read-only checks: `node scripts/ledger-stats.cjs --index` / `--open` / `--by-invariant`.
  * This script only ever appends. It never rewrites or deletes a line.
@@ -100,6 +110,28 @@ const isValidDate = (d) => {
 const dateArg = argOf('--date')
 if (dateArg !== null && !isValidDate(dateArg)) die(`--date "${dateArg}" is not a real calendar date.`, 'Use YYYY-MM-DD, e.g. 2026-08-11. A malformed or out-of-range date (e.g. 2026-02-30) is refused, not silently rounded to the nearest real one or replaced with today.')
 const stampDate = () => dateArg || new Date().toISOString().slice(0, 10)
+
+// ── UNKNOWN FLAG = REFUSE, never silently dropped. `argOf`/`flag` only ever
+// look for a name they already know how to read, so an unmatched `--whatever`
+// used to sit in argv untouched and the run proceeded as if it had never been
+// passed — no error, no warning. That is exactly how a documented `--recheck`
+// mechanism (WRAP_UP.md step 12) went unimplemented for as long as it did:
+// passing `--recheck` produced no complaint at all. This is the general fix,
+// not just the one flag — every flag this script reads, anywhere, in one set,
+// checked once, before any mode-specific logic runs.
+const KNOWN_FLAGS = new Set([
+  '--date',
+  '--targets',
+  '--wrap-companion', '--ref', '--version', '--sha',
+  '--gh-sync', '--ghstate', '--note', '--recommend', '--verdict',
+  '--recheck',
+  '--lane', '--source', '--finding', '--rootCause', '--invariant',
+  '--state', '--bounces', '--confirm-new-invariant', '--severity',
+])
+for (const tok of argv) {
+  if (tok.startsWith('--') && !KNOWN_FLAGS.has(tok))
+    die(`unrecognized flag "${tok}".`, `Known flags: ${[...KNOWN_FLAGS].sort().join(', ')}\nAn unrecognized or unimplemented flag is refused, not silently ignored — check the spelling, or read the file header (or --targets) for the right one.`)
+}
 
 // Same shape as architect-file.cjs's own check, same reason: a closing claim or
 // a rootCause with nothing checkable behind it is a claim nobody can re-derive.
@@ -185,6 +217,7 @@ const nearestInvariants = (candidate, vocab) => {
 
 if (argv.includes('--targets') || argv.length === 0) {
   console.log(`\nUsage — see the file header, or:\n  node ${path.basename(__filename)} --ref "…" --lane <lane> --source <source> --finding "…" --verdict <verdict> --invariant "<slug>|none"\n`)
+  console.log(`Other modes: --wrap-companion, --gh-sync, --recheck (see the file header)`)
   console.log(`Lanes: ${[...KNOWN_LANES].join(', ')}`)
   console.log(`Sources: ${[...KNOWN_SOURCES].join(', ')}`)
   console.log(`Verdicts: ${[...KNOWN_VERDICTS].join(', ')}`)
@@ -242,6 +275,39 @@ if (flag('--gh-sync')) {
   if (recommend) row.recommend = recommend
   append(row)
   console.log(`\nAppended — ${ref} synced (${ghstate}, wrap-${version}).\n`)
+  process.exit(0)
+}
+
+// ── WRAP_UP.md step 12, act 3: the PHANTOM-CANDIDATES recheck row ───────────
+// The check (`ledger-stats.cjs --wrap`) tells the reader, on a candidate that
+// is genuinely a distinct, still-open bug, to "append a `{date, ref, recheck}`
+// line dated today or later so it stops being reflagged." Nothing ever wrote
+// that shape — ledger-stats.cjs's own merge-by-ref logic (X47/X59) and its
+// `bucketOf`/`examined` checks already read a BARE `{date, ref, recheck}` row
+// as "this was re-read, stands as still-real", but this writer had no command
+// that produced one, so the 4.5.6 wrap's real gh#199 false positive got
+// hand-typed as a full ordinary finding row instead (a needless
+// needs-owner-decision row cluttering the ledger with no way to actually
+// silence the recheck). This writes exactly the documented shape and nothing
+// else — no verdict, no invariant, no finding — so the existing reader logic
+// picks it up unchanged on the very next `--open` or `--wrap` run.
+if (flag('--recheck')) {
+  const ref = argOf('--ref')
+  const note = argOf('--note')
+  if (!ref) die('no --ref.', 'The exact ref the phantom-candidates check printed.')
+  const rows = readRows()
+  const forRef = rows.filter((r) => r.ref === ref)
+  if (!forRef.length) die(`"${ref}" is not a ref in this ledger.`, 'Check the spelling — `node scripts/ledger-stats.cjs --open` lists every open ref.')
+  const { CLOSED } = require('./ledger-stats.cjs')
+  const lastVerdictRow = [...forRef].reverse().find((r) => r.verdict)
+  if (lastVerdictRow && CLOSED.has(lastVerdictRow.verdict))
+    die(`"${ref}" is already ${lastVerdictRow.verdict} (${lastVerdictRow.date}).`, 'A closed row is not rechecked — there is nothing left for the phantom check to reflag. If the work has come undone, file it fresh instead.')
+  if (!note || note.length < 20) die(note ? `--note is ${note.length} chars.` : 'no --note.', 'Say why this is genuinely distinct and still open, not a rubber stamp — this is what the NEXT re-read of this row sees, same bar as architect-file.cjs\'s own --checked.')
+  if (!POINTS_SOMEWHERE.test(note)) die('that --note does not point at anything checkable.', 'Cite the file, the other ref, or the command that shows this is distinct.')
+  const row = { date: stampDate(), ref, recheck: note }
+  append(row)
+  console.log(`\nAppended — ${ref} rechecked ${row.date}. It stays open and will no longer print as a PHANTOM CANDIDATE for this wrap.\n`)
+  console.log(`  recheck : ${note}`)
   process.exit(0)
 }
 

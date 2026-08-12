@@ -27,6 +27,15 @@
  * only says WHERE to look, the same discipline `--wrap`'s phantom-candidate
  * check already follows for the opposite direction.
  *
+ * COVERAGE IS DATE-OR-RUN, NOT DATE-ONLY. An overnight wave's ledger rows (and
+ * the wrap that writes them) are dated the day it was WRAPPED, one calendar
+ * day after the dispatch actually ran — normal, and it used to read as a
+ * missing row even though the exact `runId` is cited and wrapped. A dispatch's
+ * `run` (spend.cjs) matching a ledger row's `runId`, for the same lane, covers
+ * it regardless of which day the row is stamped. A hand dispatch carries no
+ * `run`, so this is a pure addition — the original 2026-08-10 SlackMaster case
+ * (three hand dispatches, no row, no run id to match) is unaffected.
+ *
  * Usage:
  *   node scripts/check-dispatch-coverage.cjs                    # last 7 days (spend.cjs's own default)
  *   node scripts/check-dispatch-coverage.cjs --since 2026-08-01
@@ -94,22 +103,40 @@ const rows = fs.existsSync(LEDGER)
 // as a `built` one. Only an entirely absent lane-day is the gap this exists
 // to name.
 const covered = new Set()
+// Second, DATE-INDEPENDENT signal: an engine dispatch's `run` (spend.cjs) is
+// the exact same id a ledger row stamps as `runId` — 100% precise, unlike a
+// calendar day. Found backfilling 2026-08-05 handyman/diplomat: the real
+// dispatch ran the night of 08-05, but the wave's own ledger rows (and the
+// wrap that wrote them) are dated 08-06, the day it was WRAPPED — normal for
+// any overnight wave whose commit lands the next morning, and that lag alone
+// used to read as "no row for this lane on this day" even though the exact
+// work is cited, `runId`-matched, and has a `wrapped` companion. Scoped by
+// lane too, so a coincidentally-shared runId across lanes (structurally
+// shouldn't happen, but cheap to guard) can't credit the wrong one.
+const coveredByRun = new Set()
 for (const r of rows) {
-  if (!r.lane || !r.date) continue
-  covered.add(`${r.lane}|${r.date}`)
+  if (!r.lane) continue
+  if (r.date) covered.add(`${r.lane}|${r.date}`)
+  if (r.runId) coveredByRun.add(`${r.lane}|${r.runId}`)
 }
 
 const byKey = new Map()
 for (const d of builderDispatches) {
   const key = `${d.type}|${d.day}`
-  if (!byKey.has(key)) byKey.set(key, { lane: d.type, day: d.day, n: 0, turns: 0, cost: 0 })
+  if (!byKey.has(key)) byKey.set(key, { lane: d.type, day: d.day, n: 0, turns: 0, cost: 0, runIds: new Set() })
   const g = byKey.get(key)
   g.n++
   g.turns += d.turns
   g.cost += d.cost
+  if (d.run) g.runIds.add(d.run)
 }
 
-const missing = [...byKey.values()].filter((g) => !covered.has(`${g.lane}|${g.day}`))
+// A hand dispatch (`d.run` null) carries no runId, so this is a pure no-op for
+// the check's original motivating case (SlackMaster, 2026-08-10, three hand
+// dispatches, none recorded) — it only ever ADDS a way to be covered, never
+// removes the existing date check.
+const isCovered = (g) => covered.has(`${g.lane}|${g.day}`) || [...g.runIds].some((runId) => coveredByRun.has(`${g.lane}|${runId}`))
+const missing = [...byKey.values()].filter((g) => !isCovered(g))
 
 if (missing.length) {
   console.error(`\nREFUSED — ${missing.length} builder lane-day(s) were dispatched with real work and left NO ledger row:\n`)

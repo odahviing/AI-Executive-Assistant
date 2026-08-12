@@ -178,11 +178,29 @@ const citesReleaseFile = (cited, releaseFiles) => {
   const files = new Set(releaseFiles);
   return cited.some((c) => c.includes('/') && files.has(c));
 };
-module.exports = { citesReleaseFile };
-// Required by the fixture for that function alone. Everything below is the
-// CLI and ends in `process.exit`, so a plain `require` of this file from
-// anywhere else would run the whole script. Nothing above this line touches
-// argv, the ledger or the filesystem.
+
+// ── which verdicts CLOSE a bug-ledger row — defined once, HOISTED above the
+// require.main guard below so `ledger-file.cjs` (the writer, which needs to
+// know whether a `--recheck` target is still open) can require it too instead
+// of keeping a second, independently-typed copy. Same fix X78 already made for
+// the architect ledger's own CLOSED (`architect-file.cjs` defines it, this
+// file's `--architect` branch requires it) — a second copy is exactly how a
+// prototype's `CLOSED` here once silently dropped `confirmed-other-lane` and
+// `audit` and over-counted "open" refs that were actually already closed.
+// `audit` is a record that a findings-only pass RAN, not something to decide.
+// `declined` and `converted` close a row as firmly as `built` — a decision is
+// only durable once it is a row, never prose in report.md. `confirmed-other-lane`
+// closes a ref when another lane's fix landed it, deliberately uncounted as
+// shipped below so one change stays one fix in the count. `wrapped` closes a
+// WRAP_UP.md step-12 bookkeeping row (built -> shipped companion, or a
+// GitHub-sync-closed ticket) so it never misreads as a fresh open decision.
+const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
+
+module.exports = { citesReleaseFile, CLOSED };
+// Required by the fixture for that function alone, and by `ledger-file.cjs`
+// for `CLOSED`. Everything below is the CLI and ends in `process.exit`, so a
+// plain `require` of this file from anywhere else would run the whole script.
+// Nothing above this line touches argv, the ledger or the filesystem.
 if (require.main !== module) return;
 
 const argv = process.argv.slice(2);
@@ -1296,11 +1314,9 @@ const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter
 // without this, every one of those bookkeeping rows would misread as a fresh
 // open decision the moment a wrap starts writing them.
 //
-// HOISTED to module scope (was local to `--open` alone) so `--index` reads the
-// SAME set — a second, independently-typed copy is exactly how a prototype's
-// `CLOSED` silently dropped `confirmed-other-lane` and `audit` and over-counted
-// "open" refs that were actually already closed.
-const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
+// CLOSED itself is now HOISTED above the require.main guard near the top of
+// this file (and exported) so `ledger-file.cjs` can require the same set —
+// see there for the verdict-by-verdict rationale, not repeated twice here.
 
 // ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
 // A row is open unless it was built or proven already-fixed. Grouped by lane so
