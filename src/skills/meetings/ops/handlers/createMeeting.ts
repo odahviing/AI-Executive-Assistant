@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -38,6 +38,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { alignUpQuarter, alignNearestQuarter } from '../../../../utils/calendarDensity';
 import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import { createApprovalRequest } from '../../../../tasks/skill';
 import { logActivity } from '../../../../core/requests/logActivity';
@@ -55,6 +56,24 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
   // instead of only private ones — owner ruled email out of scope for this
   // build; see viewerEmailFor's doc comment in utils/displaySubject.ts.
   const viewerEmail = viewerEmailFor(context);
+        // meeting-title-minimum-descriptiveness-required (2026-08-12, owner
+        // ruling) — refuse to silently book a cryptic title (empty,
+        // initials-only, or under ~3 meaningful characters) rather than make
+        // the mismatch matcher (subjectsPlausiblyMatch, ops/helpers.ts)
+        // tolerate one later. Checked first, before any Graph call or
+        // resolution work — a pure input-shape gate, same posture as the
+        // attendees-array-shape guard just below. Scoped to CREATION only:
+        // this cannot rename an existing short-titled meeting already booked.
+        if (typeof args.subject !== 'string' || !isDescriptiveSubject(args.subject)) {
+          logger.warn('create_meeting — subject not descriptive enough, refusing to silently book', {
+            subject: args.subject, requester: context.userId,
+          });
+          return {
+            success: false,
+            error: 'subject_not_descriptive',
+            message: `"${typeof args.subject === 'string' ? args.subject : ''}" isn't descriptive enough for a calendar invite — empty, initials-only, or too short. Ask what the meeting is about (or who it's with) and use a fuller title before booking.`,
+          };
+        }
         // v3.5.x — anchor-to-event-end ("a 2h block after my flight"). When the
         // model passes start_at_event_end_id + duration_minutes and no explicit
         // start, resolve start = that event's END instant (read once, tz-correct)
@@ -92,8 +111,6 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 message: `I couldn't load the event to anchor this block to (id ${anchorId}). Re-fetch it from the calendar and pass its current id, or give me an explicit start time.`,
               };
             }
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { alignUpQuarter } = require('../../../../utils/floatingBlocks') as typeof import('../../../../utils/floatingBlocks');
             const snappedStartMs = alignUpQuarter(anchor.end.toMillis(), timezone);
             const snappedStart = DateTime.fromMillis(snappedStartMs, { zone: timezone });
             args.start = snappedStart.toISO();
@@ -278,8 +295,6 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         {
           const startStr = args.start, endStr = args.end;
           if (!args.start_is_explicit && typeof startStr === 'string' && typeof endStr === 'string') {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { alignNearestQuarter } = require('../../../../utils/floatingBlocks') as typeof import('../../../../utils/floatingBlocks');
             const tz = context.profile.user.timezone;
             const sDt = DateTime.fromISO(startStr, { zone: tz });
             if (sDt.isValid) {
@@ -1585,6 +1600,18 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // subkind is the literal tool name (matches ACTIVITY_REVERTIBILITY's
           // keying in activityRevertibility.ts) so a later revert dispatch can
           // look it up directly off this row.
+          // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
+          // create_meeting never attributed a target before this; requesterId/
+          // requesterName (a relayer/organizer who may have been scrubbed OUT
+          // of `attendees` above, requester_is_attending:false) is the more
+          // precise signal and wins when present, else fall back to whichever
+          // booked attendee resolves against people_memory — the same
+          // broadened capture moveMeeting.ts now does.
+          const createTargetIdentity = resolveActivityTargetIdentity({
+            attendeeEmails: attendees.map(a => a.email),
+            ownerEmail: userEmail,
+            preferred: { targetSlackId: requesterId, targetName: requesterName },
+          });
           logActivity({
             ownerUserId: context.profile.user.slack_user_id,
             kind: 'follow_up',
@@ -1606,6 +1633,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // colleague requester — left null rather than guessed off
             // attendees, which can be zero, one, or many.
             requesterSlackId: requesterId,
+            targetSlackId: createTargetIdentity.targetSlackId,
+            targetName: createTargetIdentity.targetName,
           });
 
           // v3.6.x — the Teams-URL-as-location patch was REMOVED. It overwrote the

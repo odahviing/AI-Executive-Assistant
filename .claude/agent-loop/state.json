@@ -49,15 +49,6 @@
       "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the gh#189/calendar-issues-schema-lacks-axis-column fix."
     },
     {
-      "id": "duplicate-quarter-hour-aligners-two-files",
-      "lane": "matchmaker",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "audit",
-      "symptom": "alignNearestQuarter stayed in floatingBlocks.ts while alignUpQuarter/alignDownQuarter both moved into calendarDensity.ts — one shared rule, three implementations across two files.",
-      "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the gh#188 bidirectional fix. gh#188's own reasoning applies to the third aligner too."
-    },
-    {
       "id": "ignored-raise-decay-only-fires-picked-category",
       "lane": "librarian",
       "severity": "low",
@@ -223,10 +214,10 @@
     "jointTraced": 6, "jointCandidates": 6
   },
   "lastRun": {
-    "id": "hand-run-2026-08-10-workflow-down",
+    "id": "manual-2026-08-12-yaelwave",
     "status": "complete",
-    "startedAt": "2026-08-09T23:55:00+03:00",
-    "note": "Workflow(scriptPath:'.claude/workflows/bugger.js') failed all night on a harness-level 'script contains control characters' error, later diagnosed (architect X189) as the owner's own local Claude Code client hook/permission-handler config, external to this repo — not a bugger.js or framework defect. Run executed by hand instead: editor triage (github+backlog) -> 16 atomic tickets across 6 lanes, instructor last -> 2 dependency ping-pong rounds -> combined Opus bouncer pass (7 of 25 overturned) -> one retry per overturned item (all 6 lanes) -> one follow-up fix on a bouncer-found residual -> final bouncer re-verification (all clean) -> ledger/state persisted. Scope grew mid-run past the original 3 sources on direct owner instruction: a dedicated gh#194 approval-flow log trace, a full log-review pass since the last watermark, a live Yael/Sharon approval investigation, and owner rulings converting 3 previously-parked items (gh#188, gh#194-b, gh#194-c) into real builds — all three superseded 'do not dispatch' ledger rows explicitly, noted on each row. Final: 25 built, 6 new discoveries queued, 3 items still on the owner's desk (gh#194-b's broader guarantee question — resolved by ruling and built; a live-data cleanup on 3 stuck approval/outreach rows that the code fix does not retroactively repair; and the Israel-hours-conditional refinement to gh#188, deferred by his own choice in favor of the simpler bidirectional fix).",
+    "startedAt": "2026-08-12T00:00:00+03:00",
+    "note": "Workflow tool still broken (Claude Code platform/client permission-handler bug, external to this repo) — all of today's runs (manual-2026-08-12, manual-2026-08-12-followup, manual-2026-08-12-yaelwave) executed by hand dispatch. The yaelwave run was triggered by a real incident the owner reported live (a wrong-event calendar move he caught and walked through in chat): editor triage on the transcript -> atomic tickets to matchmaker/instructor -> combined bouncer pass -> per-ticket retries -> owner rulings expanded scope twice (root-cause id-resolution fix instead of guard-only; then a full undo-against-history feature plus an outreach-reliability investigation that found and fixed a real false 'colleague never replied' report, including a manual production DB fix on the live VM). All bounced items resolved on retry, 0 unresolved escalations. Wrapped as v4.5.6 together with the day's two earlier runs.",
     "notBuilt": []
   }
 }

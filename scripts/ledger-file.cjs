@@ -53,6 +53,14 @@
  *   node scripts/ledger-file.cjs --gh-sync --ref gh#201 --version 4.4.8 --ghstate partial \
  *     --note "Landed X, still open Y." --recommend "build — the second half"
  *
+ *   # --date overrides the stamped date on ANY of the three shapes above (the
+ *   # ordinary path, --wrap-companion, --gh-sync) — for backfilling work that
+ *   # actually happened on an earlier day. Validated as a real calendar date;
+ *   # garbage or an impossible date (2026-02-30) is refused, never silently
+ *   # replaced with today:
+ *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
+ *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --date 2026-08-11
+ *
  * Read-only checks: `node scripts/ledger-stats.cjs --index` / `--open` / `--by-invariant`.
  * This script only ever appends. It never rewrites or deletes a line.
  */
@@ -73,6 +81,25 @@ const die = (msg, extra) => {
   if (extra) console.error(`${extra}\n`)
   process.exit(1)
 }
+
+// ── --date — a REAL override, checked once, used by every append path below.
+// There was no such flag: every row silently stamped `new Date()` regardless
+// of what a backfill actually happened on, which broke backfilling by
+// construction (found while backfilling a dispatch-coverage gap — the two
+// rows it produced that same night both stamped the day they were FILED, not
+// the day the work was BUILT). `isValidDate` rejects both a malformed string
+// and a well-formed-but-impossible one (`2026-02-30` parses to March 2nd
+// under `Date` — the round-trip-through-`toISOString` check is what catches
+// that, a regex alone would not). Garbage is REFUSED, never silently rounded
+// or silently replaced with today.
+const isValidDate = (d) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false
+  const iso = new Date(`${d}T00:00:00.000Z`)
+  return !Number.isNaN(iso.getTime()) && iso.toISOString().slice(0, 10) === d
+}
+const dateArg = argOf('--date')
+if (dateArg !== null && !isValidDate(dateArg)) die(`--date "${dateArg}" is not a real calendar date.`, 'Use YYYY-MM-DD, e.g. 2026-08-11. A malformed or out-of-range date (e.g. 2026-02-30) is refused, not silently rounded to the nearest real one or replaced with today.')
+const stampDate = () => dateArg || new Date().toISOString().slice(0, 10)
 
 // Same shape as architect-file.cjs's own check, same reason: a closing claim or
 // a rootCause with nothing checkable behind it is a claim nobody can re-derive.
@@ -182,7 +209,7 @@ if (flag('--wrap-companion')) {
   if (!ref) die('no --ref.', 'Name the same ref the built row used.')
   if (!version) die('no --version.', 'The wrap this ships in, e.g. 4.4.8.')
   if (!sha) die('no --sha.', 'The commit this ref actually shipped in — `git log -1 --format=%h`.')
-  const row = { date: new Date().toISOString().slice(0, 10), runId: `wrap-${version}`, ref, verdict: 'wrapped', state: 'wrapped', note: `shipped in ${sha}` }
+  const row = { date: stampDate(), runId: `wrap-${version}`, ref, verdict: 'wrapped', state: 'wrapped', note: `shipped in ${sha}` }
   append(row)
   console.log(`\nAppended — ${ref} now has a wrapped companion row (wrap-${version}, ${sha}).\n`)
   process.exit(0)
@@ -210,7 +237,7 @@ if (flag('--gh-sync')) {
     if (!verdict && !recommend) die('a PARTIAL ticket needs --recommend or --verdict needs-owner-decision.', 'WRAP_UP.md:230 — pick the verb the comment\'s own "why" supports. Do not leave it silent.')
     if (verdict && verdict !== 'needs-owner-decision') die(`--verdict "${verdict}" is not valid for a partial sync row.`, 'Only `needs-owner-decision` is — for everything else, state it as --recommend instead.')
   }
-  const row = { date: new Date().toISOString().slice(0, 10), runId: `wrap-${version}`, ref, state: ghstate, note }
+  const row = { date: stampDate(), runId: `wrap-${version}`, ref, state: ghstate, note }
   if (verdict) row.verdict = verdict
   if (recommend) row.recommend = recommend
   append(row)
@@ -285,7 +312,7 @@ if (bouncesRaw !== null) {
   bounces = n
 }
 
-const row = { date: new Date().toISOString().slice(0, 10), ref, lane: lane || '', source, finding, verdict: verdictRaw }
+const row = { date: stampDate(), ref, lane: lane || '', source, finding, verdict: verdictRaw }
 if (rootCause) row.rootCause = rootCause
 if (invariant !== 'none') row.invariant = invariant
 if (state) row.state = state

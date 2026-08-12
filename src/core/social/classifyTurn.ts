@@ -80,7 +80,7 @@ export interface ClassifyTurnResult {
    * v3.1.2 (D) — true when the OWNER is asking a "do I have buffer / free
    * time / how packed is X / am I free" question. Orchestrator uses this
    * to deterministically run analyzeCalendar + inject real numbers BEFORE
-   * Sonnet narrates, replacing the broken prompt rule at meetings.ts:2044
+   * Sonnet narrates, replacing the broken prompt rule at meetings.ts:1298
    * ("USE THE TOOL — don't math by hand") that Sonnet kept ignoring. Set
    * only on owner-path intent classification; false on colleague turns
    * (those go through precheckAvailability separately).

@@ -202,6 +202,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
         // NOT pre-pass workDays from here — the function's own mode-aware logic
         // decides so in_person is enforced as a hard rule.
         {
+          // moving-event-gate-false-positive-blocks-attendeeless-move
+          // (2026-08-12) — captured BEFORE the default-fill just below
+          // overwrites args.duration_minutes with the profile default, so the
+          // owner-path empty-roster duration/category cross-check further
+          // down can tell "the caller actually asked for 40" from "nobody
+          // said, so it defaulted to 30" — the gate must never judge a
+          // candidate event wrong against a value Sonnet never stated.
+          const callerStatedDurationMinutes: number | undefined =
+            typeof args.duration_minutes === 'number' ? args.duration_minutes : undefined;
           // v3.1.6 — duration safety default — code backstop for when
           // Sonnet omits duration entirely (the tool description tells her to
           // default to default_meeting_duration when no length was stated).
@@ -400,8 +409,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // calendars she has no standing to read — bounced 2026-08-04). Otherwise
           // an empty explicit set (she named no one) would satisfy #145b's "explicit
           // set is empty" branch and hand her a stranger meeting's attendee list on
-          // a mismatched/guessed moving_event_id. The owner has no such gate: it's
-          // always his own calendar. Per-attendee annotation (v2.7.0 colleague-path
+          // a mismatched/guessed moving_event_id. gh#owner-path-move-meeting-id-
+          // misresolution-unguarded (2026-08-12) — the owner path now has its OWN
+          // gate too (see the `else` branch below): different signal (this turn's
+          // named/passed attendees, not requester standing), same purpose — never
+          // trust a resolved id blind. Per-attendee annotation (v2.7.0 colleague-path
           // block below) is unrelated and untouched — that's the busy/free
           // narration layer; this is what gets INTO attendeeEmails at all.
           // v4.1.x — STRICT (post-clamp) owner path, same definition as
@@ -429,10 +441,34 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // could name an owner event she isn't part of and have it excluded
           // from his busy calculation just by passing its id, even though the
           // fold-into-attendeeEmails logic below already gated that same id
-          // for a different purpose. One list, one gate, both consumers.
-          // Owner path stays ungated — it's always his own calendar.
+          // for a different purpose. One list, one gate, THREE consumers now:
+          // the five excludeEventIds call sites below, the attendee-fold logic
+          // just below this block (qualifyingIds feeding fromEvent into
+          // attendeeEmails), and resolveMovingAnchorDay further below —
+          // routed through this same gated `excludeEventIdsForSearch` as of
+          // 2026-08-12 (bouncer overturn, point 3). It used to re-derive its
+          // own raw `movingIds` straight from args.moving_event_ids, so a
+          // wrong id the gate below had just judged and dropped still anchored
+          // slot ordering on that wrong event's day.
+          // gh#owner-path-move-meeting-id-misresolution-unguarded (2026-08-12) —
+          // owner path used to be unconditionally trusted here ("it's always his
+          // own calendar" — true for AUTHORITY, but that was never the failure).
+          // Provisionally trust the full list; the owner-path roster cross-check
+          // below (mirrors the colleague gate, different signal) narrows this to
+          // `qualifyingIds` whenever this turn actually named/passed someone to
+          // check it against — closing the Donnie-Time/Yael-&-Idan-Weekly gap
+          // where Maelle's own id-resolution mistake sailed through unchecked.
           let excludeEventIdsForSearch: string[] | undefined =
             isOwnerInitiatedSearch && movingIdsForAttendees.length > 0 ? movingIdsForAttendees : undefined;
+          // gh#owner-path-move-meeting-id-misresolution-unguarded (point 1,
+          // bouncer overturn 2026-08-12) — set below when the owner-path
+          // roster cross-check judges a passed moving_event_id wrong. Merged
+          // into every return path this handler can take (mirrors
+          // attendeeEmailWarning / attendeeNotCheckedWarning declared just
+          // below) so Sonnet is TOLD the id was wrong and re-reads the
+          // calendar before any mutation, instead of the drop being visible
+          // only in a `logger.warn` nobody in the conversation ever sees.
+          let movingEventIdMismatchWarning: Record<string, unknown> | undefined;
           if (movingIdsForAttendees.length > 0) {
             try {
               const { resolveMovingEventAttendees } = await import('../../../../utils/movingEventAttendees');
@@ -446,12 +482,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // attendees). On the colleague path, an id only qualifies when ITS OWN
               // roster contains the requester; a mismatched/guessed id — or a real id
               // for a meeting she isn't on — is dropped instead of unioned in. The
-              // owner path skips this check — it is always reading his own calendar.
+              // owner path runs its OWN, differently-shaped gate in the `else` below
+              // (gh#owner-path-move-meeting-id-misresolution-unguarded, 2026-08-12).
               let qualifyingIds = movingIdsForAttendees;
               if (!isOwnerInitiatedSearch) {
                 const requesterEmailLower = (getPersonMemory(context.userId)?.email ?? '').toLowerCase();
                 const onOwnRoster = (id: string) => !!requesterEmailLower
-                  && (rosterById.get(id) ?? []).some(e => e.toLowerCase() === requesterEmailLower);
+                  && (rosterById.get(id)?.attendees ?? []).some(e => e.toLowerCase() === requesterEmailLower);
                 qualifyingIds = [];
                 for (const id of movingIdsForAttendees) {
                   if (onOwnRoster(id)) { qualifyingIds.push(id); continue; }
@@ -490,8 +527,152 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                 }
                 excludeEventIdsForSearch = qualifyingIds.length > 0 ? qualifyingIds : undefined;
+              } else {
+                // gh#owner-path-move-meeting-id-misresolution-unguarded (2026-08-12)
+                // — the owner path used to skip this gate entirely on "it's always
+                // his own calendar", which is true for AUTHORITY (he never needs
+                // standing to move his own event) but was never the failure this
+                // closes. The Donnie-Time/Yael-&-Idan-Weekly incident was MAELLE'S
+                // OWN id-resolution mistake: nothing here checked that the
+                // moving_event_id she picked while searching for "Yael & Idan
+                // Weekly" actually belonged to a meeting with Yael on it — before
+                // that wrong id got trusted enough to be subtracted from the
+                // owner's busy pool and forbidden as a candidate, corrupting the
+                // search itself (the move_meeting mutation-time guard added
+                // earlier tonight only catches this once he tries to book the
+                // wrong event; it does nothing for a search that silently treated
+                // Donnie Time's slot as vacated). Same "owner is exempt, he can
+                // disambiguate himself" reasoning as moveMeeting.ts's same-subject
+                // collision guard (gated `authority !== 'owner'`) — it doesn't
+                // hold here either: he never SAW a choice to disambiguate, Maelle
+                // silently picked wrong before he was ever shown anything.
+                //
+                // Cross-check against context.resolvedMeetingAttendees UNION the
+                // explicit attendee_emails already on hand — the SAME
+                // deterministic per-turn named-participant signal already trusted
+                // a few dozen lines below (and in createMeeting.ts), resolved by
+                // buildTurnContext.ts from THIS message's own text via a
+                // classifier + directory lookup, never from the model's own
+                // event-id guess. Only fires when there IS a positive expectation
+                // — someone was actually named this turn, or passed explicitly.
+                // A bare "move my 3pm block" names no one and has nothing to
+                // cross-check, so it keeps trusting the id exactly as before.
+                const expectedLower = new Set<string>([
+                  ...attendeeEmails.map(e => e.toLowerCase()),
+                  ...(Array.isArray(context.resolvedMeetingAttendees) ? context.resolvedMeetingAttendees : [])
+                    .map(e => e.toLowerCase()),
+                ]);
+                if (expectedLower.size > 0) {
+                  // gh#owner-path-move-meeting-id-misresolution-unguarded
+                  // (point 2, bouncer overturn 2026-08-12) — `rosterById.has(id)`
+                  // is ONE discriminator, NOT `.get(id) ?? []`. An id that WAS
+                  // fetched with a genuinely EMPTY roster (a personal event,
+                  // no attendees) and an id that was NEVER resolved at all
+                  // (resolveMovingEventAttendees only looks -7d/+60d and
+                  // returns an empty map on any throw —
+                  // movingEventAttendees.ts:54-56,83-88) both read as `[]`
+                  // under `?? []` and were being judged "wrong" identically.
+                  // A never-resolved id (a move >60 days out, or a transient
+                  // Graph read fault) carries NO evidence either way — this
+                  // gate must not drop it, or a legitimate move loses its
+                  // busy-pool exclusion and search silently anchors on
+                  // nothing.
+                  //
+                  // moving-event-gate-false-positive-blocks-attendeeless-move
+                  // (2026-08-12) — a genuinely EMPTY roster carries no
+                  // ATTENDEE evidence, the same way an unresolved id does:
+                  // "move my focus block, the Yael sync matters more" resolves
+                  // expectedLower={yael}, the focus block's OWN roster is `[]`
+                  // (an attendee-less personal event, correctly resolved, not
+                  // unresolved) — disjoint-from-empty is vacuously true and
+                  // would wrongly flag the CORRECT id on attendees alone. But
+                  // an empty roster is not evidence-free: what THIS search
+                  // asked for (duration_minutes / category, when the caller
+                  // actually supplied one) can still be checked against what
+                  // the candidate event itself IS. Owner-approved fix — the
+                  // real incident asked for 40min/"Weekly" and the wrongly-
+                  // resolved id (Donnie Time) was a 330min "Personal" block:
+                  // an 8x duration gap and a different category entirely.
+                  // Deliberately loose (>=4x duration, or a stated category
+                  // that plainly doesn't match) — a small explicit change
+                  // ("same event, make it an hour instead") stays under the
+                  // ratio and passes. But the check is a SHAPE match, not an
+                  // identity check: it can't tell tonight's wrong-id incident
+                  // apart from a legitimate "move this out of the way so the
+                  // real meeting can go there" ask against an empty-roster
+                  // event whose stated duration/category happens to cross the
+                  // same 4x line — both get flagged the same way. The 4x
+                  // ratio is the actual boundary; this is not blanket safety
+                  // for every explicit duration/category change.
+                  const askedCategory = typeof args.category === 'string' && args.category.trim().length > 0
+                    ? args.category.trim()
+                    : undefined;
+                  const grossMismatchReason = (info: { durationMinutes: number | null; categories: string[] }): string | undefined => {
+                    if (callerStatedDurationMinutes != null && info.durationMinutes != null && info.durationMinutes > 0) {
+                      const ratio = Math.max(callerStatedDurationMinutes, info.durationMinutes)
+                        / Math.min(callerStatedDurationMinutes, info.durationMinutes);
+                      if (ratio >= 4) {
+                        return `asked for ${callerStatedDurationMinutes}min, this event is ${info.durationMinutes}min`;
+                      }
+                    }
+                    if (askedCategory && info.categories.length > 0
+                        && !info.categories.some(c => c.toLowerCase() === askedCategory.toLowerCase())) {
+                      return `asked for category "${askedCategory}", this event is categorized ${info.categories.join('/')}`;
+                    }
+                    return undefined;
+                  };
+                  const wrongIds: string[] = [];
+                  const wrongIdReasons = new Map<string, string>();
+                  qualifyingIds = movingIdsForAttendees.filter(id => {
+                    if (!rosterById.has(id)) return true; // never resolved — not judged by this gate, stays trusted
+                    const info = rosterById.get(id)!;
+                    if (info.attendees.length === 0) {
+                      // genuinely attendee-less — nothing to cross-check
+                      // against WHO was named; fall back to WHAT was asked
+                      // for. No supplied duration/category, or no gross
+                      // mismatch, leaves it trusted exactly as before.
+                      const reason = grossMismatchReason(info);
+                      if (!reason) return true;
+                      wrongIds.push(id);
+                      wrongIdReasons.set(id, reason);
+                      return false;
+                    }
+                    const matches = info.attendees.some(e => expectedLower.has(e.toLowerCase()));
+                    if (!matches) {
+                      wrongIds.push(id);
+                      wrongIdReasons.set(id, 'its actual attendee roster shares none of them');
+                    }
+                    return matches;
+                  });
+                  if (wrongIds.length > 0) {
+                    logger.warn('find_available_slots — dropping owner-path moving_event_id(s) that do not match this turn (wrong attendee roster, or a grossly mismatched duration/category against an attendee-less event)', {
+                      movingEventIds: movingIdsForAttendees,
+                      wrongIds,
+                      wrongIdReasons: Object.fromEntries(wrongIdReasons),
+                      qualifyingIds,
+                      expectedAttendees: [...expectedLower],
+                      askedDuration: callerStatedDurationMinutes,
+                      askedCategory,
+                    });
+                    // gh#owner-path-move-meeting-id-misresolution-unguarded
+                    // (point 1, bouncer overturn 2026-08-12) — dropping the id
+                    // from excludeEventIdsForSearch is a no-op for slot
+                    // computation whenever the wrong event sits outside the
+                    // search window (Donnie Time, Sep 13, searched Sep 15):
+                    // the model still holds the wrong id from its earlier
+                    // resolution and will still call move_meeting with it,
+                    // because nothing in THIS response ever told it the id
+                    // was wrong. Surface it so Sonnet re-reads the calendar
+                    // and re-resolves the id before any mutation.
+                    movingEventIdMismatchWarning = {
+                      moving_event_id_mismatch: wrongIds,
+                      _moving_event_id_mismatch_warning: `moving_event_id ${wrongIds.join(', ')} looks like the WRONG event for this move — ${wrongIds.map(id => `${id}: ${wrongIdReasons.get(id)}`).join('; ')}. It was NOT used to exclude anything from this search. Do NOT call move_meeting (or any other mutation) with ${wrongIds.length > 1 ? 'these ids' : 'this id'} — re-read the calendar (get_calendar) to find the correct event first.`,
+                    };
+                  }
+                  excludeEventIdsForSearch = qualifyingIds.length > 0 ? qualifyingIds : undefined;
+                }
               }
-              const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id) ?? []))];
+              const fromEvent = [...new Set(qualifyingIds.flatMap(id => rosterById.get(id)?.attendees ?? []))];
               if (fromEvent.length > 0) {
                 const explicitLc = attendeeEmails.map(e => e.toLowerCase());
                 const eventLc = fromEvent.map(e => e.toLowerCase());
@@ -984,6 +1165,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               results,
               ...(attendeeEmailWarningCand ?? {}),
               ...(attendeeNotCheckedWarningCand ?? {}),
+              ...(movingEventIdMismatchWarning ?? {}),
               ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, ${groundTzStated ? 'the zone the times were given in' : 'a zone Maelle inferred from the attendees (nobody actually stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
@@ -1231,7 +1413,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
             }
             if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
-              if (attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint) {
+              if (attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning) {
                 return {
                   slots: rawSlots,
                   ...(diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0
@@ -1239,6 +1421,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   ...(attendeeEmailWarning ?? {}),
                   ...(attendeeNotCheckedWarning ?? {}),
                   ...(colleagueSoftBlockHint ?? {}),
+                  ...(movingEventIdMismatchWarning ?? {}),
                   ...tzGroundingFields,
                 };
               }
@@ -1298,13 +1481,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
               if (relaxedRecoverySlots.length === 0) {
                 // Recovery also empty — return original empty result with day_summary.
-                if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint) {
+                if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning) {
                   return {
                     slots: [],
                     ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
                     ...(attendeeEmailWarning ?? {}),
                     ...(attendeeNotCheckedWarning ?? {}),
                     ...(colleagueSoftBlockHint ?? {}),
+                    ...(movingEventIdMismatchWarning ?? {}),
                   };
                 }
                 return [];
@@ -1346,12 +1530,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // looks up the moving event's local date (cheap — getCalendarEvents
             // is per-turn memoized) and pickSpreadSlots walks that day first.
             // Falls back to undefined → pure chronological for new bookings.
+            // gh#owner-path-move-meeting-id-misresolution-unguarded (point 3,
+            // bouncer overturn 2026-08-12) — reads the SAME gated
+            // `excludeEventIdsForSearch` the five other consumers use, not a
+            // raw re-derivation from args.moving_event_ids. Before this fix,
+            // an id the roster gate had just judged wrong (and dropped from
+            // the busy-pool exclusion above) still anchored slot ordering on
+            // that wrong event's day — the gate's verdict reached everything
+            // except this one consumer.
             const { resolveMovingAnchorDay } = await import('../../../../utils/movingAnchorDay');
-            const movingIds = Array.isArray(args.moving_event_ids)
-              ? (args.moving_event_ids as string[]).filter(id => typeof id === 'string' && id.length > 0)
-              : [];
-            const anchorDay = movingIds.length > 0
-              ? await resolveMovingAnchorDay(movingIds, userEmail, timezone)
+            const anchorDay = excludeEventIdsForSearch && excludeEventIdsForSearch.length > 0
+              ? await resolveMovingAnchorDay(excludeEventIdsForSearch, userEmail, timezone)
               : undefined;
             // v2.7.6 — when relaxed recovery surfaced slots, use those as the
             // candidate set. They came from the relaxed pass which bypassed
@@ -1820,10 +2009,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const hasAttendeeStatus = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_status) && s.attendee_status.length > 0,
             );
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus) {
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);
+              // gh#owner-path-move-meeting-id-misresolution-unguarded (point 1,
+              // bouncer overturn 2026-08-12) — forces this wrapped shape (and
+              // is merged below) whenever the owner-path gate judged a passed
+              // moving_event_id wrong, so the mismatch is never silently
+              // dropped into a bare slots array Sonnet has no reason to
+              // re-examine.
+              if (movingEventIdMismatchWarning) Object.assign(result, movingEventIdMismatchWarning);
               // v4.1.x (M10/M11) — the named time that did NOT make the list, with
               // its real reason. Present only when a preferred_slot was asked for
               // and could not be offered.

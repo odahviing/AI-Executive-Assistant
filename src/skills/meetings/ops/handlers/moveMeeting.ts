@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -39,6 +39,7 @@ import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
+import { alignNearestQuarter } from '../../../../utils/calendarDensity';
 import { displaySubject, subjectViewerFor, viewerEmailFor, isEventPrivate } from '../../../../utils/displaySubject';
 import { createApprovalRequest } from '../../../../tasks/skill';
 import { logActivity } from '../../../../core/requests/logActivity';
@@ -210,37 +211,83 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // control. Occurrences (single firings of a recurring series) and
         // exceptions (already-customized single firings) are allowed — Graph
         // creates/modifies an exception for that instance on PATCH.
+        // gh#wrong-event-moved-move-meeting (2026-08-12) — same probe now also
+        // refuses BEFORE the PATCH below when the id resolves to a REAL
+        // subject that doesn't plausibly match the CLAIMED args.meeting_subject
+        // — Maelle's own id-resolution mistake (a prior search/read handed back
+        // the wrong id), not the colleague-disambiguation case
+        // findSameSubjectSiblings guards above (gated to colleague-path only,
+        // for the DIFFERENT failure mode of two live events sharing one
+        // subject). Unconditional — every authority. `updateProbeSubject` feeds
+        // the success narration below (already MASKED — see below) so it
+        // never echoes an unverified OR unmasked claim.
+        // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: if the
+        // probe throws (transient Graph fault), BOTH the seriesMaster refusal
+        // AND the wrong-event subject-mismatch guard are skipped for this
+        // call, not just the seriesMaster check — `updateProbeSubject` stays
+        // undefined and the success narration falls back to narrating the
+        // caller's unverified `args.meeting_subject` claim, i.e. the exact
+        // original incident behavior for this one call. Accepted trade-off
+        // (failing closed on every transient read error has its own cost:
+        // every update_meeting would refuse whenever Graph blips) — not
+        // silent; see the catch below.
+        let updateProbeSubject: string | undefined;
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, args.meeting_id as string);
+          // o#216 (bouncer fix, 2026-08-12) — mask the probed subject ONCE, off
+          // the raw Graph value, before it reaches ANY caller-facing payload
+          // below: the seriesMaster refusal, the mismatch refusal, and
+          // `updateProbeSubject` (→ the success narration) all share this one
+          // masked value now, instead of each shipping (or, pre-fix, two of
+          // three shipping) a private meeting's real title to whoever
+          // triggered this call — update_meeting is colleague-allowed, and the
+          // owner-organizer gate above this probe passes for the owner's own
+          // private recurring series too.
+          // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
+          // viewerEmailFor now (surface==='room' → null); call directly —
+          // a blanket ?? null here also masked the email leg's subjects.
+          const maskedProbeSubject = probe
+            ? displaySubject(
+                { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
+                context.profile,
+                subjectViewerFor(context),
+                viewerEmailFor(context),
+              )
+            : undefined;
           if (probe?.type === 'seriesMaster') {
-            // o#216 — probe.subject is the RAW Graph subject. Mask it through
-            // the same viewer test every other subject-bearing payload in this
-            // file uses, instead of shipping a private series' real title to
-            // whoever triggered this refusal (update_meeting is
-            // colleague-allowed, and the owner-organizer gate above this probe
-            // passes for the owner's own private recurring series too).
-            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
-            // viewerEmailFor now (surface==='room' → null); call directly —
-            // a blanket ?? null here also masked the email leg's subjects.
-            const maskedSubject = displaySubject(
-              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
-              context.profile,
-              subjectViewerFor(context),
-              viewerEmailFor(context),
-            );
             logger.info('update_meeting refused on recurring seriesMaster', {
               meetingId: args.meeting_id,
               subject: probe.subject,
             });
             return {
               error: 'recurring_series_master',
-              meeting_subject: maskedSubject,
-              message: `"${maskedSubject}" is a recurring series. Updating the series here would change every occurrence — that's not safe to do automatically. The owner should update the series directly in the calendar. For a SINGLE occurrence, call update_meeting with that occurrence's meeting_id (get it from get_calendar for that specific date) — the system will create an exception for that one date only.`,
+              meeting_subject: maskedProbeSubject,
+              message: `"${maskedProbeSubject}" is a recurring series. Updating the series here would change every occurrence — that's not safe to do automatically. The owner should update the series directly in the calendar. For a SINGLE occurrence, call update_meeting with that occurrence's meeting_id (get it from get_calendar for that specific date) — the system will create an exception for that one date only.`,
             };
           }
+          if (probe?.subject && typeof args.meeting_subject === 'string'
+              && !subjectsPlausiblyMatch(args.meeting_subject, probe.subject)) {
+            logger.warn('update_meeting — meeting_id resolved to a subject that does not match the claim, refusing to guess', {
+              meetingId: args.meeting_id, claimedSubject: args.meeting_subject, actualSubject: probe.subject,
+            });
+            return {
+              success: false,
+              error: 'meeting_id_subject_mismatch',
+              meeting_subject: args.meeting_subject,
+              // o#216 (bouncer fix) — masked, not the raw probe.subject: this
+              // refusal is exactly as colleague/room-reachable as the
+              // seriesMaster refusal above, which already masks.
+              actual_subject: maskedProbeSubject,
+              message: `The id given for "${args.meeting_subject}" actually points to a different event on the calendar ("${maskedProbeSubject}") — I won't change the wrong meeting. Re-read the calendar (get_calendar) to find the real id for "${args.meeting_subject}" and retry.`,
+            };
+          }
+          updateProbeSubject = maskedProbeSubject;
         } catch (err) {
-          logger.warn('update_meeting recurring-preflight failed — proceeding', { err: String(err) });
+          // Fail-open — see the comment above this try block. Both the
+          // seriesMaster check AND the wrong-event subject-mismatch guard are
+          // skipped for this call, not just the recurring-series check.
+          logger.warn('update_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
         }
 
         // gh#154-W1 (2026-08-06) — requester-controls gate, moved OUT of the
@@ -580,15 +627,25 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         const summaryIsOnline = venueChangeRequested ? (newIsOnlineFromShape ?? explicitIsOnline) : explicitIsOnline;
         if (summaryIsOnline === false) updateChanges.push('switched to in-person');
         else if (explicitIsOnline === true) updateChanges.push('switched to online');
+        // gh#wrong-event-moved-move-meeting (2026-08-12) — narrate off the
+        // PROBED real subject, not the caller's claim: updateProbeSubject is
+        // only ever set once the plausibility check above has already passed
+        // (or the probe genuinely couldn't run, in which case the claim is all
+        // there is). Prevents a misresolved event from ever narrating as if
+        // the claimed meeting was the one actually touched.
+        // o#216 (bouncer fix) — updateProbeSubject is already MASKED (see the
+        // probe block above), so this narration — update_meeting is
+        // colleague-allowed — can never render a private meeting's real title.
+        const updatedSubject = (updateProbeSubject ?? args.meeting_subject) as string | undefined;
         return {
           success: true,
-          updated: args.meeting_subject,
+          updated: updatedSubject,
           category: args.category ?? newCategoryFromShape ?? null,
           new_subject: args.new_subject ?? null,
           added_attendees: rawAdd.map(a => a.email).filter(Boolean),
           removed_attendees: rawRemove,
           // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
-          action_summary: `Updated '${args.meeting_subject}'${updateChanges.length > 0 ? ': ' + updateChanges.join(', ') : ''}.`,
+          action_summary: `Updated '${updatedSubject}'${updateChanges.length > 0 ? ': ' + updateChanges.join(', ') : ''}.`,
         };
 }
 
@@ -625,25 +682,118 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             logger.warn('move_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
-        // #135c — pure reschedule keeps the meeting's length. When the model
-        // omits new_end (it should, on a plain "move it to Thursday 11:00"),
-        // derive it from the moving event's existing duration and populate
-        // args.new_end HERE — early, before the colleague rule-check, the audit
-        // log, and the success result all read it — so the model never has to
-        // supply (or re-ask the owner for) a length it already knows. One light
-        // event fetch, only on the omit path; 30-min fallback if unreadable.
-        if ((typeof args.new_end !== 'string' || (args.new_end as string).length === 0) && typeof args.new_start === 'string') {
-          let durMin = 30;
+        // #135c / v1.8.8 / gh#wrong-event-moved-move-meeting (2026-08-12) — ONE
+        // unconditional probe of the moving event, run BEFORE any colleague-path
+        // business logic and well before the Graph PATCH at the bottom of this
+        // function. Three jobs off the single fetch: (a) refuse a seriesMaster
+        // move (v1.8.8 — moving the series here would shift every occurrence),
+        // (b) refuse when the id resolves to a REAL subject that does not
+        // plausibly match the CLAIMED args.meeting_subject — the
+        // wrong-event-moved root cause: a prior search (find_available_slots)
+        // handed back an id for a DIFFERENT event ("Donnie Time", a personal
+        // block) than the one being searched for ("Yael & Idan Weekly"), and
+        // nothing before this checked the id and the claim described the same
+        // meeting before the PATCH mutated the wrong one and Maelle narrated it
+        // as a success regardless. Unconditional — every authority; this is
+        // Maelle's OWN id-resolution mistake, not the colleague-disambiguation
+        // case findSameSubjectSiblings guards elsewhere in this file (gated to
+        // colleague-path only, for the different failure mode of two live
+        // events sharing one subject). (c) derives new_end from the existing
+        // duration when the model omitted it (#135c) — one fetch instead of
+        // two. preMoveStartIso/preMoveEndIso/preMoveTz/preMoveSubject feed the
+        // success narration and the audit/history rows further down.
+        // preMoveSubject is already MASKED (see below) so that narration can
+        // never render a private meeting's real title.
+        // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: if
+        // the probe throws (transient Graph fault), BOTH the seriesMaster
+        // refusal AND the wrong-event subject-mismatch guard are skipped for
+        // this call, not just the seriesMaster check — preMoveSubject stays
+        // undefined and `movedSubject` further down falls back to narrating
+        // the caller's unverified args.meeting_subject claim, i.e. the exact
+        // original incident behavior for this one call. Accepted trade-off
+        // (failing closed on every transient read error has its own cost:
+        // every move_meeting would refuse whenever Graph blips) — not
+        // silent; see the catch below.
+        let preMoveStartIso: string | undefined;
+        let preMoveEndIso: string | undefined;
+        let preMoveTz: string | undefined;
+        let preMoveSubject: string | undefined;
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
+        // the moving event's own roster, captured off the SEPARATE
+        // getEventForAttendeeUpdate probe below (moveAttendees, planMeeting's
+        // own fetch — no extra Graph call) into this outer scope so the
+        // logActivity call far below can resolve a target identity from it.
+        let preMoveAttendeeEmails: string[] = [];
+        {
+          let moveProbe: Awaited<ReturnType<typeof import('../../../../connectors/graph/calendar').getEventType>> | undefined;
           try {
             const { getEventType } = await import('../../../../connectors/graph/calendar');
-            const probe = await getEventType(userEmail, args.meeting_id as string);
-            if (probe?.startDateTime && probe?.endDateTime) {
-              const s0 = DateTime.fromISO(probe.startDateTime, { zone: timezone });
-              const e0 = DateTime.fromISO(probe.endDateTime, { zone: timezone });
-              if (s0.isValid && e0.isValid && e0.toMillis() > s0.toMillis()) durMin = Math.round(e0.diff(s0, 'minutes').minutes);
-            }
+            moveProbe = await getEventType(userEmail, args.meeting_id as string);
           } catch (err) {
-            logger.warn('move_meeting — duration probe threw; defaulting new_end to 30min', { err: String(err).slice(0, 160) });
+            logger.warn('move_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
+          }
+          // o#216 (bouncer fix, 2026-08-12) — mask the probed subject ONCE, off
+          // the raw Graph value, before it reaches ANY caller-facing payload
+          // below: the seriesMaster refusal, the mismatch refusal, and
+          // preMoveSubject (→ the success narration) all share this one masked
+          // value now — move_meeting is colleague-allowed, and pre-fix only the
+          // seriesMaster branch masked; the mismatch refusal and the success
+          // narration shipped the raw title.
+          // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
+          // viewerEmailFor now (surface==='room' → null); call directly —
+          // a blanket ?? null here also masked the email leg's subjects.
+          const maskedMoveProbeSubject = moveProbe
+            ? displaySubject(
+                { subject: moveProbe.subject, sensitivity: moveProbe.sensitivity, categories: moveProbe.categories, organizer: moveProbe.organizer, attendees: moveProbe.attendees },
+                context.profile,
+                subjectViewerFor(context),
+                viewerEmailFor(context),
+              )
+            : undefined;
+          if (moveProbe?.type === 'seriesMaster') {
+            logger.info('move_meeting refused on recurring seriesMaster', {
+              meetingId: args.meeting_id,
+              subject: moveProbe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: maskedMoveProbeSubject,
+              message: `"${maskedMoveProbeSubject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
+            };
+          }
+          if (moveProbe?.subject && typeof args.meeting_subject === 'string'
+              && !subjectsPlausiblyMatch(args.meeting_subject, moveProbe.subject)) {
+            logger.warn('move_meeting — meeting_id resolved to a subject that does not match the claim, refusing to guess', {
+              meetingId: args.meeting_id, claimedSubject: args.meeting_subject, actualSubject: moveProbe.subject,
+            });
+            return {
+              success: false,
+              error: 'meeting_id_subject_mismatch',
+              meeting_subject: args.meeting_subject,
+              // o#216 (bouncer fix) — masked, not the raw moveProbe.subject:
+              // this refusal is exactly as colleague/room-reachable as the
+              // seriesMaster refusal above, which already masks.
+              actual_subject: maskedMoveProbeSubject,
+              message: `The id given for "${args.meeting_subject}" actually points to a different event on the calendar ("${maskedMoveProbeSubject}") — I won't move the wrong meeting. Re-read the calendar (get_calendar) to find the real id for "${args.meeting_subject}" and retry.`,
+            };
+          }
+          preMoveStartIso = moveProbe?.startDateTime;
+          preMoveEndIso = moveProbe?.endDateTime;
+          preMoveTz = moveProbe?.startTimeZone;
+          preMoveSubject = maskedMoveProbeSubject;
+        }
+        // #135c — pure reschedule keeps the meeting's length. When the model
+        // omits new_end (it should, on a plain "move it to Thursday 11:00"),
+        // derive it from the moving event's existing duration read just above —
+        // so the model never has to supply (or re-ask the owner for) a length
+        // it already knows. 30-min fallback when the probe above didn't
+        // resolve start/end (unreadable / threw).
+        if ((typeof args.new_end !== 'string' || (args.new_end as string).length === 0) && typeof args.new_start === 'string') {
+          let durMin = 30;
+          if (preMoveStartIso && preMoveEndIso) {
+            const s0 = DateTime.fromISO(preMoveStartIso, { zone: timezone });
+            const e0 = DateTime.fromISO(preMoveEndIso, { zone: timezone });
+            if (s0.isValid && e0.isValid && e0.toMillis() > s0.toMillis()) durMin = Math.round(e0.diff(s0, 'minutes').minutes);
           }
           args.new_end = DateTime.fromISO(args.new_start as string, { zone: timezone }).plus({ minutes: durMin }).toISO() ?? (args.new_start as string);
           logger.info('move_meeting — derived new_end from existing duration (new_end omitted)', {
@@ -662,7 +812,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         //
         // o#221/o#223 — gated on AUTHORITY, not senderRole. senderRole reads
         // 'colleague' both for a genuine colleague AND for the AUTHENTICATED
-        // owner clamped into a room (processMessage.ts:122), so this whole
+        // owner clamped into a room (processMessage.ts:123), so this whole
         // "can this asker move THIS meeting" gate — built for a colleague's
         // own move request — used to fire for the owner's move-in-room too.
         // He is never a required Graph attendee of his own meetings
@@ -943,6 +1093,12 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // own id (his solo/self-organized meetings have no single "other
         // colleague" and stay null, honestly).
         let meetingConcernsSlackId: string | undefined;
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) — the
+        // display name paired with meetingConcernsSlackId, when findMeetingOwner
+        // resolved one; feeds resolveActivityTargetIdentity's `preferred` below
+        // so the more precise requester-resolution signal is never overridden
+        // by a weaker roster guess.
+        let meetingConcernsName: string | undefined;
         try {
           const { findMeetingOwner } = await import('../../findMeetingOwner');
           const ownerInfo = await findMeetingOwner({
@@ -952,6 +1108,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           });
           if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.profile.user.slack_user_id) {
             meetingConcernsSlackId = ownerInfo.requesterSlackId;
+            meetingConcernsName = ownerInfo.requesterName ?? undefined;
           }
           if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
             const ownerFirst = context.profile.user.name.split(' ')[0];
@@ -971,57 +1128,22 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           logger.warn('move_meeting ownership lookup threw — proceeding', { err: String(err) });
         }
 
-        // v1.8.8 — same series-master block as update_meeting. Moving a
-        // seriesMaster would shift every occurrence in the series. Single
-        // occurrence moves (type='occurrence' or 'exception') are allowed; Graph
-        // creates an exception pinning just that date.
         // v3.1.8 — capture the meeting's OLD start so the success result can
         // report the VACATED slot (the time that just opened up). Lets a
         // follow-up "move X into the freed slot" resolve without Maelle
         // re-asking what time the moved meeting used to be at.
-        let preMoveStartIso: string | undefined;
         // #52 (M2) — pre-state for the audit row (original_start/original_end/
-        // original_tz below). Same probe already fetched for preMoveStartIso;
-        // no extra Graph call. `getEventType` sends no `Prefer: outlook.timezone`
-        // header, so Graph answers in UTC and `startTimeZone` says so — store it
+        // original_tz below). `getEventType` sends no `Prefer: outlook.timezone`
+        // header, so Graph answers in UTC and `startTimeZone` says so — stored
         // alongside the instants (mirrors the documented trap at
-        // calendarReads.ts's pre-delete capture) so a later reader converts with
-        // the right zone instead of assuming the owner's.
-        let preMoveEndIso: string | undefined;
-        let preMoveTz: string | undefined;
-        try {
-          const { getEventType } = await import('../../../../connectors/graph/calendar');
-          const probe = await getEventType(userEmail, args.meeting_id as string);
-          if (probe?.type === 'seriesMaster') {
-            // o#216 — same mask as update_meeting's seriesMaster refusal
-            // above; move_meeting is colleague-allowed too, and delete_meeting
-            // (the third of these three) became newly reachable from a room
-            // this wave (OWNER_ROOM_ACTION_TOOLS).
-            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
-            // viewerEmailFor now (surface==='room' → null); call directly —
-            // a blanket ?? null here also masked the email leg's subjects.
-            const maskedSubject = displaySubject(
-              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
-              context.profile,
-              subjectViewerFor(context),
-              viewerEmailFor(context),
-            );
-            logger.info('move_meeting refused on recurring seriesMaster', {
-              meetingId: args.meeting_id,
-              subject: probe.subject,
-            });
-            return {
-              error: 'recurring_series_master',
-              meeting_subject: maskedSubject,
-              message: `"${maskedSubject}" is a recurring series. Moving the series here would shift every occurrence — the owner should do series-level moves directly in the calendar. For a SINGLE occurrence, call move_meeting with that occurrence's meeting_id from get_calendar for that specific date; Graph will create an exception for that one.`,
-            };
-          }
-          preMoveStartIso = probe?.startDateTime;
-          preMoveEndIso = probe?.endDateTime;
-          preMoveTz = probe?.startTimeZone;
-        } catch (err) {
-          logger.warn('move_meeting recurring-preflight failed — proceeding', { err: String(err) });
-        }
+        // calendarReads.ts's pre-delete capture) so a later reader converts
+        // with the right zone instead of assuming the owner's.
+        // gh#wrong-event-moved-move-meeting (2026-08-12) — this used to be its
+        // own probe + seriesMaster check, run AFTER the colleague-path gate and
+        // ownership lookup above. It's now folded into the single unconditional
+        // probe near the top of this function (before ANY of that business
+        // logic runs on what might be the wrong event) — preMoveStartIso/
+        // preMoveEndIso/preMoveTz/preMoveSubject are already populated from it.
 
         // v2.3.1 (#61) — deterministic floating-block alignment. When the
         // meeting being moved is a floating block (lunch, coffee, etc.), don't
@@ -1062,8 +1184,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // by findAlignedSlotForBlock below, so this only affects the regular
         // (non-floating) move fall-through.
         if (!args.start_is_explicit && typeof effectiveStart === 'string') {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { alignNearestQuarter } = require('../../../../utils/floatingBlocks') as typeof import('../../../../utils/floatingBlocks');
           const sDt = DateTime.fromISO(effectiveStart, { zone: timezone });
           if (sDt.isValid) {
             const alignedMs = alignNearestQuarter(sDt.toMillis(), timezone);
@@ -1152,7 +1272,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // exact owner-given time (start_is_explicit) as-is.
                 const alignedMs = args.start_is_explicit
                   ? newStartDt.toMillis()
-                  : fb.alignNearestQuarter(newStartDt.toMillis(), timezone);
+                  : alignNearestQuarter(newStartDt.toMillis(), timezone);
                 const hintStartDt = DateTime.fromMillis(alignedMs, { zone: timezone });
                 const hintStartMs = hintStartDt.toMillis();
                 const hintEndMs = hintStartMs + movingDurationMin * 60 * 1000;
@@ -1279,6 +1399,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           const existingLocation = movingEvent?.location;
           const existingIsOnline = movingEvent?.isOnline;
           const moveAttendees = movingEvent?.attendees ?? [];
+          preMoveAttendeeEmails = moveAttendees.map(a => a.email).filter(Boolean);
           // v4.4.x (#154) — resolved ONCE; both allowRelaxed and ownerRoomBend
           // below read this same grant so they can never disagree.
           const moveRelaxedGrant = grantRelaxed(args, context);
@@ -1733,6 +1854,18 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // where the meeting actually landed. subkind is the literal tool name
         // (matches ACTIVITY_REVERTIBILITY's keying in activityRevertibility.ts)
         // so a later revert dispatch can look it up directly off this row.
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
+        // meetingConcernsSlackId (the resolved requester) wins when present;
+        // otherwise resolve against preMoveAttendeeEmails (already fetched
+        // above to act on this event — no extra Graph call) via
+        // people_memory, so a move with no provable "requester" still
+        // captures whichever attendee is resolvable, not only the
+        // requester-resolution path.
+        const moveTargetIdentity = resolveActivityTargetIdentity({
+          attendeeEmails: preMoveAttendeeEmails,
+          ownerEmail: userEmail,
+          preferred: { targetSlackId: meetingConcernsSlackId, targetName: meetingConcernsName },
+        });
         logActivity({
           ownerUserId: context.profile.user.slack_user_id,
           kind: 'follow_up',
@@ -1750,7 +1883,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           initiatedByRole: context.senderRole,
           originThreadTs: context.threadTs,
           originChannel: context.channelId,
-          targetSlackId: meetingConcernsSlackId,
+          targetSlackId: moveTargetIdentity.targetSlackId,
+          targetName: moveTargetIdentity.targetName,
         });
 
         // v2.2.1 — colleague-path inbound reschedule: shadow-DM the owner so he
@@ -1827,9 +1961,20 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
 
+        // gh#wrong-event-moved-move-meeting (2026-08-12) — narrate off the
+        // PROBED real subject, not the caller's claim: preMoveSubject is only
+        // ever set once the plausibility check earlier in this function has
+        // already passed (or the probe genuinely couldn't run, in which case
+        // the claim is all there is). Prevents a misresolved event from ever
+        // narrating as if the claimed meeting was the one actually moved.
+        // o#216 (bouncer fix) — preMoveSubject is already MASKED (see the
+        // probe block above), so `moved` and `action_summary` below —
+        // move_meeting is colleague-allowed — can never render a private
+        // meeting's real title.
+        const movedSubject = (preMoveSubject ?? args.meeting_subject) as string | undefined;
         return {
           success: true,
-          moved: args.meeting_subject,
+          moved: movedSubject,
           // #1.5 — the ACTUAL booked time (after the grid-snap at :4156), not the
           // pre-snap arg. So narration AND the orchestrator's mutationActions
           // (→ dateVerifier + #135 honesty backstop) reflect where it truly landed.
@@ -1855,7 +2000,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
           // instead of acknowledging her own action.
-          action_summary: `Moved '${args.meeting_subject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.`,
+          action_summary: `Moved '${movedSubject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.`,
           ...(moveTripDisplay ? { _trip_note: 'Travel day — state the moved time from `action_summary` VERBATIM (both clocks, correctly labelled); do not recompute it.' } : {}),
         };
 }

@@ -16,8 +16,7 @@ import { updateCalendarIssueStatus, type CalendarIssueRow } from '../../db';
 import logger from '../../utils/logger';
 import { displaySubject } from '../../utils/displaySubject';
 import type { UserProfile } from '../../config/userProfile';
-import { densityConfigFromProfile, scoreSlotDensity } from '../../utils/calendarDensity';
-import { alignDownQuarter } from '../../utils/floatingBlocks';
+import { densityConfigFromProfile, scoreSlotDensity, alignDownQuarter } from '../../utils/calendarDensity';
 import { parseGraphDt } from './classify';
 import type { HealthIssue } from './types';
 

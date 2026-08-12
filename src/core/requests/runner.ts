@@ -532,10 +532,19 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
     updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
     return 'closed';
   }
+  // outreach-expiry-tombstone-says-never-replied (2026-08-12) — `state` alone
+  // can't tell "never replied" apart from "replied once, then went quiet
+  // again": a non-decisive reply (coordinator.ts's `continue` branch, and
+  // meetingReschedule.ts's "checking" branch) re-arms this same deadline
+  // WITHOUT moving state off awaiting_colleague. `phase==='outreach:re_engaged'`
+  // is the marker those re-arms stamp; branch the closure copy on it, same
+  // principle runExpiry already applies to approvals (#42: pick the copy from
+  // the row's actual last-known state, not from kind/deadline alone).
+  const repliedThenWentQuiet = row.phase === 'outreach:re_engaged';
   closeRequest({
     id: row.id,
     state: 'expired',
-    closureReason: 'outreach_no_response',
+    closureReason: repliedThenWentQuiet ? 'outreach_no_further_response' : 'outreach_no_response',
     closedBy: 'expiry',
   });
   // Owner heads-up so the request appears in next brief with closure context.
@@ -544,9 +553,12 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
         const targetName = row.target_name ?? 'them';
+        const what = repliedThenWentQuiet
+          ? `${targetName} replied but never came back with a real answer — I've closed that one out. Tell me if you want to try again.`
+          : `${targetName} never replied to the message I sent — I've closed that one out. Tell me if you want to try again.`;
         await conn.postToChannel(
           row.owner_dm_channel,
-          `${targetName} never replied to the message I sent — I've closed that one out. Tell me if you want to try again.`,
+          what,
           { threadTs: row.owner_dm_thread_ts ?? undefined },
         );
       }

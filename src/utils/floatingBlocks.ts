@@ -24,10 +24,6 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
 import { findDeadGaps, alignUpQuarter, alignDownQuarter, type DensityConfig } from './calendarDensity';
-// Re-exported — callers requiring `utils/floatingBlocks` (e.g.
-// createMeeting.ts) used to get their own copy; calendarDensity.ts is now the
-// single implementation (#invariant single-implementation-of-a-shared-rule).
-export { alignUpQuarter, alignDownQuarter };
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday'
@@ -179,37 +175,6 @@ export function windowMsForDay(
 ): number {
   return DateTime.fromISO(`${dayDate}T${hhmm}`, { zone: timezone }).toMillis();
 }
-
-// alignUpQuarter moved to calendarDensity.ts (single implementation, v4.4.x) —
-// imported + re-exported above so existing requires of this module still work.
-
-/**
- * Round a millis timestamp to the NEAREST quarter-hour in the given timezone.
- * Half rounds up (8 min → next quarter). Used by override paths that accept
- * a free-form HH:MM from the owner and need to snap to the standard
- * :00/:15/:30/:45 grid the rest of the system assumes.
- */
-export function alignNearestQuarter(ms: number, timezone: string): number {
-  const dt = DateTime.fromMillis(ms).setZone(timezone);
-  const minute = dt.minute;
-  const remainder = minute % 15;
-  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
-  // Round half up: remainder >= 8 → next quarter, else previous quarter.
-  if (remainder >= 8) {
-    return dt
-      .plus({ minutes: 15 - remainder })
-      .set({ second: 0, millisecond: 0 })
-      .toMillis();
-  }
-  return dt
-    .minus({ minutes: remainder })
-    .set({ second: 0, millisecond: 0 })
-    .toMillis();
-}
-
-// alignDownQuarter moved to calendarDensity.ts (#188, single implementation
-// alongside alignUpQuarter) — imported + re-exported above so existing
-// requires of this module still work.
 
 // v3.0.2 — buffer parameter removed. Floating blocks are personal time,
 // not meeting-vs-meeting spacing. The 10/25/40/55 meeting durations

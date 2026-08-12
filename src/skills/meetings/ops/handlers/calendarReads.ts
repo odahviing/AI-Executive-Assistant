@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -39,7 +39,7 @@ import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTim
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
 import { logActivity } from '../../../../core/requests/logActivity';
-import { ACTIVITY_REVERTIBILITY } from '../../../../core/requests/activityRevertibility';
+import { ACTIVITY_REVERTIBILITY, isEventStillUpcoming } from '../../../../core/requests/activityRevertibility';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -151,7 +151,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
         // ── Who may see how much (#8a) ────────────────────────────────────────
         // A SHARED surface (group DM / channel) is never a private one. The
         // transport clamps every sender there — the owner included — to
-        // senderRole 'colleague' (processMessage.ts:122), so that single field is
+        // senderRole 'colleague' (processMessage.ts:123), so that single field is
         // the whole test. It used to be written
         // `senderRole === 'colleague' && isOwnerInGroup !== true`, and that
         // second clause was an escape hatch: in a group DM the owner's OWN turn
@@ -329,7 +329,8 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
  * undo of the newest revertible activity row, whatever kind it was (an
  * active-mode auto-move, an owner move_meeting, an owner create_meeting).
  * Looks the row up (db/requests.ts's getRevertibleActivity), checks it
- * against the ACTIVITY_REVERTIBILITY table (revertible? still in TTL?), then
+ * against the ACTIVITY_REVERTIBILITY table (revertible? is the event it acted
+ * on still upcoming? — owner ruling 2026-08-12: relevance, not age), then
  * dispatches the actual restore by the row's subkind:
  *   - auto_move / move_meeting → restore the prior time via updateMeeting,
  *     read back to confirm it landed, and (auto_move only) write the terminal
@@ -359,59 +360,49 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
     return { success: false, error: 'owner_only', message: 'Only the owner can revert an action.' };
   }
   const ownerUserId = context.profile.user.slack_user_id;
-  const { getRevertibleActivity, updateRequest } = await import('../../../../db/requests');
-  const rec = getRevertibleActivity(ownerUserId);
+  const { getRevertibleActivity, getRevertibleActivityById, updateRequest } = await import('../../../../db/requests');
+  // revert-intent-and-single-step-undo-scope, piece 3 (2026-08-12) — a
+  // specific target ("undo the move I did for Dana yesterday") resolves by
+  // id via get_my_tasks' recent_activity (task_id === this row's id,
+  // tasks/skill.ts:1639/1649/1650 already exposes it plus target_name/
+  // target_slack_id for the model to match a described person against).
+  // `task_id` is the arg key to keep in step with that same field name — the
+  // tool's own input_schema (meetings.ts:120) now declares it. No target id →
+  // the old zero-arg "last thing" behavior, unchanged.
+  const targetRequestId = typeof args.task_id === 'string' && args.task_id.trim()
+    ? args.task_id.trim()
+    : undefined;
+  const rec = targetRequestId
+    ? getRevertibleActivityById(ownerUserId, targetRequestId)
+    : getRevertibleActivity(ownerUserId);
   if (!rec) {
-    return { success: false, error: 'nothing_to_revert', message: 'There is nothing recent I can undo.' };
-  }
-
-  // auto_move's underlying TOOL is move_meeting (autoMove.ts records its own
-  // internalActions entry as 'move_meeting') — ACTIVITY_REVERTIBILITY's keys
-  // are literal tool names, so an auto_move row is looked up under that key,
-  // never its own subkind.
-  const revKey = rec.subkind === 'auto_move' ? 'move_meeting' : (rec.subkind ?? '');
-  const rule = ACTIVITY_REVERTIBILITY[revKey];
-  if (!rule || !rule.revertible) {
     return {
-      success: false, error: 'not_revertible',
-      message: rule?.refusalText ?? `I can't undo "${rec.subject}".`,
-    };
-  }
-  // bouncer fix (gh#52, OT-2) — `closed_at`, when present, is ALWAYS ISO
-  // (closeRequest.ts writes `DateTime.now().toUTC().toISO()`, the only path
-  // that ever populates it for the revertible subkinds here — auto_move);
-  // `created_at` is the opposite, SQL-format (client.ts:
-  // `DEFAULT (datetime('now'))`). Parsing whichever field we actually read
-  // with `fromSQL` made every auto_move row's `closed_at` parse INVALID, so
-  // `actedAt.isValid` was always false and the whole TTL check silently
-  // no-op'd for the one case it exists to catch.
-  const actedAt = rec.closed_at
-    ? DateTime.fromISO(rec.closed_at, { zone: 'utc' })
-    : DateTime.fromSQL(rec.created_at, { zone: 'utc' });
-  if (rule.ttlHours != null && actedAt.isValid && DateTime.now().diff(actedAt, 'hours').hours > rule.ttlHours) {
-    return {
-      success: false, error: 'too_old',
-      message: `"${rec.subject}" happened more than ${rule.ttlHours} hours ago — too long for me to undo now.`,
+      success: false, error: 'nothing_to_revert',
+      message: targetRequestId
+        ? "I couldn't find that one to undo — the meeting it acted on may have already passed, it may already be reverted, or it may not be undoable."
+        : 'There is nothing recent I can undo.',
     };
   }
 
+  // Parse the stored outcome, resolve the event id, and compute the ONE
+  // masked `viewSubject` up here — above EVERY refusal below, not just the
+  // terminal success path. This handler's own convention (see the comment on
+  // `viewSubject` itself) is that every returned/narrated string uses the
+  // masked view; "not revertible" / "already passed" / "record incomplete"
+  // all name the meeting too, so leaving them on raw `rec.subject` was the
+  // same M12 leak wearing three different error codes.
   let oc: Record<string, unknown> = {};
   try { oc = rec.outcome_json ? JSON.parse(rec.outcome_json) as Record<string, unknown> : {}; } catch { /* keep empty */ }
   // auto_move stamps the event id onto the row's own column; move_meeting/
   // create_meeting (logActivity, which has no such column) carry it inside
   // outcome_json instead. Both land here as one normalized `eventId`.
   const eventId = rec.outcome_external_event_id ?? (typeof oc.event_id === 'string' ? oc.event_id : undefined);
-  if (!eventId) {
-    return {
-      success: false, error: 'record_incomplete',
-      message: `I found "${rec.subject}" but its record is missing the event id, so I can't safely undo it.`,
-    };
-  }
-
   const { getEventType, verifyEventMoved } = await import('../../../../connectors/graph/calendar');
   let probe: Awaited<ReturnType<typeof getEventType>> | null = null;
-  try { probe = await getEventType(userEmail, eventId); } catch (e) {
-    logger.warn('revert_action — event probe threw; proceeding on stored data', { err: String(e).slice(0, 160), eventId });
+  if (eventId) {
+    try { probe = await getEventType(userEmail, eventId); } catch (e) {
+      logger.warn('revert_action — event probe threw; proceeding on stored data', { err: String(e).slice(0, 160), eventId });
+    }
   }
   // gh#154-class fix, generalized here — this tool is reachable from a room
   // (OWNER_ROOM_ACTION_TOOLS, registry.ts) and takes no arguments, so unlike
@@ -437,6 +428,37 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
       )
     : (typeof oc.colleague_subject === 'string' ? oc.colleague_subject : PRIVATE_MASK);
 
+  // auto_move's underlying TOOL is move_meeting (autoMove.ts records its own
+  // internalActions entry as 'move_meeting') — ACTIVITY_REVERTIBILITY's keys
+  // are literal tool names, so an auto_move row is looked up under that key,
+  // never its own subkind.
+  const revKey = rec.subkind === 'auto_move' ? 'move_meeting' : (rec.subkind ?? '');
+  const rule = ACTIVITY_REVERTIBILITY[revKey];
+  if (!rule || !rule.revertible) {
+    return {
+      success: false, error: 'not_revertible',
+      message: rule?.refusalText ?? `I can't undo "${viewSubject}".`,
+    };
+  }
+
+  // Owner ruling 2026-08-12 (revert-intent-and-single-step-undo-scope) —
+  // eligibility is relevance, not age: a future meeting is worth correcting
+  // no matter how long ago the mistake happened; an already-passed meeting is
+  // not worth touching no matter how recent the mistake was. Replaces the old
+  // time-since-action (ttlHours) gate outright.
+  if (!isEventStillUpcoming(revKey, oc, timezone)) {
+    return {
+      success: false, error: 'meeting_already_passed',
+      message: `"${viewSubject}" has already happened — nothing to undo now.`,
+    };
+  }
+  if (!eventId) {
+    return {
+      success: false, error: 'record_incomplete',
+      message: `I found "${viewSubject}" but its record is missing the event id, so I can't safely undo it.`,
+    };
+  }
+
   if (revKey === 'move_meeting') {
     const originalStartRaw = typeof oc.original_start === 'string' ? oc.original_start : undefined;
     const originalEndRaw = typeof oc.original_end === 'string' ? oc.original_end : undefined;
@@ -461,6 +483,23 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
     const originalTz = (typeof oc.original_tz === 'string' && oc.original_tz) || 'UTC';
     const originalStart = DateTime.fromISO(originalStartRaw, { zone: originalTz }).toISO() ?? originalStartRaw;
     const originalEnd = DateTime.fromISO(originalEndRaw, { zone: originalTz }).toISO() ?? originalEndRaw;
+    // bouncer fix (revert-intent-and-single-step-undo-scope, safety gap) — the
+    // isEventStillUpcoming check above only confirms the event's CURRENT state
+    // (new_start) is still ahead of now; it says nothing about the RESTORE
+    // TARGET this branch is about to write. A move dated far enough back (e.g.
+    // Wednesday's meeting moved to the 20th on the 5th) can have an upcoming
+    // new_start yet a long-passed original_start — "undo that" on the 12th
+    // would PATCH the meeting back to the 5th, already gone, and then
+    // closeMeetingArtifacts would relay a correction about a time Outlook
+    // already told colleagues had moved past. Symmetric guard: refuse before
+    // writing, same as the event-state check, just checked against the other
+    // end of the move.
+    if (DateTime.fromISO(originalStart, { zone: timezone }) <= DateTime.now()) {
+      return {
+        success: false, error: 'restore_target_passed',
+        message: `I can't undo that — the slot I'd put "${viewSubject}" back into has already passed.`,
+      };
+    }
     // Don't clobber a later change: if the meeting is no longer where this
     // move put it, someone already moved it again — nothing to revert.
     if (priorNewStart && probe?.startDateTime) {
@@ -876,6 +915,11 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         let preDeleteStartIso: string | undefined;
         let preDeleteStartTz: string | undefined;
         let preDeleteSubject: string | undefined;
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) — the
+        // event's own roster, captured once off this SAME probe (no extra
+        // Graph call), so the logActivity call far below can resolve a target
+        // identity from whoever was actually on the cancelled meeting.
+        let preDeleteAttendeeEmails: string[] = [];
         // gh#154-R2 (2026-08-06) — the masked (display) version of preDeleteSubject,
         // authoritative because it comes from the probe, never from
         // args.meeting_subject (model-supplied, can carry the real title from
@@ -884,40 +928,18 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
           const probe = await getEventType(userEmail, meetingId);
-          if (probe?.type === 'seriesMaster') {
-            // o#216 — same mask as update_meeting/move_meeting's seriesMaster
-            // refusals (moveMeeting.ts). delete_meeting became newly reachable
-            // from a room this wave (OWNER_ROOM_ACTION_TOOLS, registry.ts) —
-            // this is the leak that wave widened, since the raw probe.subject
-            // would otherwise render into a room full of colleagues.
-            // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
-            // viewerEmailFor now (surface==='room' → null); call it directly
-            // — a blanket ?? null here also masked the email leg's subjects.
-            const maskedSubject = displaySubject(
-              { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
-              context.profile,
-              subjectViewerFor(context),
-              viewerEmailFor(context),
-            );
-            logger.info('delete_meeting refused on recurring seriesMaster', {
-              meetingId, subject: probe.subject,
-            });
-            return {
-              error: 'recurring_series_master',
-              meeting_subject: maskedSubject,
-              message: `"${maskedSubject}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
-            };
-          }
-          preDeleteStartIso = probe?.startDateTime;
-          preDeleteStartTz = probe?.startTimeZone;
-          preDeleteSubject = probe?.subject;
-          // gh#154-R2 (2026-08-06) — the SAME mask, computed here (the one place
-          // that has the raw probe) and carried through to the SUCCESS
-          // narration below (`cancelledSubject`). Pre-fix only the refusal
-          // branch above was masked; the success path shipped probe.subject
-          // raw all the way to `cancelled_label` / `action_summary` — the
-          // exact leak the refusal fix was supposed to close for this
-          // room-reachable tool (o#216).
+          // gh#154-R2 (2026-08-06) / o#216 (bouncer fix, 2026-08-12) — mask the
+          // probed subject ONCE, off the raw Graph value, before it reaches ANY
+          // caller-facing payload below: the seriesMaster refusal, the
+          // mismatch refusal, AND the success narration (`cancelledSubject`)
+          // all share this one masked value now. Pre-fix only the seriesMaster
+          // branch masked; the mismatch refusal shipped the raw probed
+          // subject — the exact leak the R2 fix was supposed to close for this
+          // room-reachable tool (delete_meeting became newly reachable from a
+          // room this wave, OWNER_ROOM_ACTION_TOOLS, registry.ts).
+          // gh#154-W5/gh#154-R4 (2026-08-06) — room-tightening lives inside
+          // viewerEmailFor now (surface==='room' → null); call it directly
+          // — a blanket ?? null here also masked the email leg's subjects.
           preDeleteSubjectMasked = probe
             ? displaySubject(
                 { subject: probe.subject, sensitivity: probe.sensitivity, categories: probe.categories, organizer: probe.organizer, attendees: probe.attendees },
@@ -926,6 +948,45 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
                 viewerEmailFor(context),
               )
             : undefined;
+          if (probe?.type === 'seriesMaster') {
+            logger.info('delete_meeting refused on recurring seriesMaster', {
+              meetingId, subject: probe.subject,
+            });
+            return {
+              error: 'recurring_series_master',
+              meeting_subject: preDeleteSubjectMasked,
+              message: `"${preDeleteSubjectMasked}" is a recurring series. Deleting the series here would cancel every occurrence — that's not safe to do automatically. To cancel a single occurrence, call delete_meeting with that occurrence's meeting_id (get it from get_calendar for the specific date). To end the series itself, the owner should do that directly in Outlook.`,
+            };
+          }
+          preDeleteStartIso = probe?.startDateTime;
+          preDeleteStartTz = probe?.startTimeZone;
+          preDeleteSubject = probe?.subject;
+          preDeleteAttendeeEmails = (probe?.attendees ?? [])
+            .map(a => a?.emailAddress?.address ?? undefined)
+            .filter((e): e is string => !!e);
+          // gh#wrong-event-moved-move-meeting (2026-08-12) — same guard as
+          // move_meeting/update_meeting: refuse BEFORE the decline/delete Graph
+          // call below when the id resolves to a subject that doesn't plausibly
+          // match the CLAIMED args.meeting_subject. Declining/deleting the wrong
+          // meeting is exactly as catastrophic as moving it — Outlook notifies
+          // real people either way, and there is no undo. Unconditional, every
+          // authority.
+          if (preDeleteSubject && typeof args.meeting_subject === 'string'
+              && !subjectsPlausiblyMatch(args.meeting_subject, preDeleteSubject)) {
+            logger.warn('delete_meeting — meeting_id resolved to a subject that does not match the claim, refusing to guess', {
+              meetingId, claimedSubject: args.meeting_subject, actualSubject: preDeleteSubject,
+            });
+            return {
+              success: false,
+              error: 'meeting_id_subject_mismatch',
+              meeting_subject: args.meeting_subject,
+              // o#216 (bouncer fix) — masked, not the raw preDeleteSubject:
+              // this refusal is exactly as room/colleague-reachable as the
+              // seriesMaster refusal above, which already masks.
+              actual_subject: preDeleteSubjectMasked,
+              message: `The id given for "${args.meeting_subject}" actually points to a different event on the calendar ("${preDeleteSubjectMasked}") — I won't cancel the wrong meeting. Re-read the calendar (get_calendar) to find the real id for "${args.meeting_subject}" and retry.`,
+            };
+          }
         } catch (err: any) {
           // #147.2 — a STALE id (already cancelled earlier in the thread, or a
           // dead id from an injected ledger block) must come back as "it isn't
@@ -974,7 +1035,18 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
               message: `"${args.meeting_subject}" is not on the calendar under that id — it was already cancelled, or the id is stale. Nothing was changed by this call. Do NOT count it as one you just cancelled; if it should still exist, re-read the day with get_calendar and use the id from there.`,
             };
           }
-          logger.warn('delete_meeting recurring-preflight failed — proceeding', { err: String(err) });
+          // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: a
+          // non-404 (transient Graph) failure here skips BOTH the
+          // seriesMaster refusal AND the wrong-event subject-mismatch guard
+          // for this call, not just the recurring-series check —
+          // preDeleteSubject/preDeleteSubjectMasked stay undefined and
+          // `cancelledSubject` further down falls back to narrating the
+          // caller's unverified args.meeting_subject claim, i.e. the exact
+          // original incident behavior for this one call. Accepted trade-off
+          // (failing closed on every transient read error has its own cost:
+          // every delete_meeting would refuse whenever Graph blips) — not
+          // silent, logged here.
+          logger.warn('delete_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
         }
 
         // ── Which Graph verb, and therefore who Outlook notifies ────────────
@@ -1036,11 +1108,24 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           });
         }
 
+        // gh#decline-cancel-comment-not-wired (2026-08-12) — Graph already
+        // supports a custom decline/cancellation note: declineMeeting/
+        // deleteMeeting (calendarMutations.ts) both accept `options.comment`
+        // and forward it as Graph's `Comment` field on /decline and /cancel.
+        // This call just never threaded one through. `comment` is now
+        // declared on delete_meeting's input_schema (meetings.ts) — read it
+        // directly; there is no `note` alias (never declared for this tool,
+        // so the model can never populate it).
+        const declineComment = typeof args.comment === 'string' && args.comment.trim()
+          ? args.comment.trim()
+          : undefined;
+        const mutationOptions = declineComment ? { comment: declineComment } : undefined;
+
         // Who Outlook actually told — read off the call that ran, never asserted.
         let notifiedVia: 'outlook_decline_to_organizer' | 'outlook_cancellation_to_attendees' | 'nobody' | 'unknown';
         let notifiedWho: string | null = null;
         if (declineAsAttendee) {
-          const { notified } = await declineMeeting(userEmail, meetingId);
+          const { notified } = await declineMeeting(userEmail, meetingId, mutationOptions);
           notifiedVia = notified === 'organizer' ? 'outlook_decline_to_organizer'
             : notified === 'attendees' ? 'outlook_cancellation_to_attendees'
             : 'nobody';
@@ -1048,7 +1133,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
             : notified === 'attendees' ? 'everyone on the invite'
             : null;
         } else {
-          const { cancellationSent } = await deleteMeeting(userEmail, meetingId);
+          const { cancellationSent } = await deleteMeeting(userEmail, meetingId, mutationOptions);
           notifiedVia = !roleResolved ? 'unknown' : (cancellationSent ? 'outlook_cancellation_to_attendees' : 'nobody');
           notifiedWho = notifiedVia === 'outlook_cancellation_to_attendees' ? 'everyone on the invite' : null;
         }
@@ -1170,6 +1255,10 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // than guessed. Fail-soft: a lookup failure here must never block
         // the cancellation, which has already completed above.
         let meetingConcernsSlackId: string | undefined;
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
+        // paired display name; feeds resolveActivityTargetIdentity's
+        // `preferred` below.
+        let meetingConcernsName: string | undefined;
         try {
           const { findMeetingOwner } = await import('../../findMeetingOwner');
           const ownerInfo = await findMeetingOwner({
@@ -1179,6 +1268,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           });
           if (ownerInfo.requesterSlackId && ownerInfo.requesterSlackId !== context.profile.user.slack_user_id) {
             meetingConcernsSlackId = ownerInfo.requesterSlackId;
+            meetingConcernsName = ownerInfo.requesterName ?? undefined;
           }
         } catch (err) {
           logger.warn('delete_meeting — findMeetingOwner lookup for activity log threw, continuing', {
@@ -1194,6 +1284,16 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // attendee the cancellation), so this row exists for RECALL only —
         // it still earns one so a future "what did you cancel" / "undo that"
         // reads the true, honest reason instead of finding nothing.
+        // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
+        // meetingConcernsSlackId (the resolved requester) wins when present;
+        // otherwise resolve against the cancelled event's own roster
+        // (preDeleteAttendeeEmails, captured off the pre-delete probe above —
+        // no extra Graph call) via people_memory.
+        const deleteTargetIdentity = resolveActivityTargetIdentity({
+          attendeeEmails: preDeleteAttendeeEmails,
+          ownerEmail: userEmail,
+          preferred: { targetSlackId: meetingConcernsSlackId, targetName: meetingConcernsName },
+        });
         logActivity({
           ownerUserId: context.profile.user.slack_user_id,
           kind: 'follow_up',
@@ -1209,7 +1309,8 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           initiatedByRole: context.senderRole,
           originThreadTs: context.threadTs,
           originChannel: context.channelId,
-          targetSlackId: meetingConcernsSlackId,
+          targetSlackId: deleteTargetIdentity.targetSlackId,
+          targetName: deleteTargetIdentity.targetName,
         });
 
         // v3.2.x (Tier 1) — a delete frees the deleted event's slot, which may

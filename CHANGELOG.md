@@ -2,6 +2,40 @@
 
 ---
 
+## 4.5.6 — A wrong meeting move gets fixed at the root, and undo learns to look further back
+
+Triggered by a real incident: asked to move one meeting, Maelle moved a different one instead and reported it as a success, then couldn't cleanly undo her own mistake. That investigation grew into a full pass on calendar-mutation safety, an undo mechanism that now works against full activity history instead of only the last action, and an outreach-reliability bug that had already told the owner a colleague never replied when she had. Also ships three rounds of mail-polling reliability work and a couple of honesty fixes.
+
+### Added
+- Undo now works against full activity history, not just the single most recent action — name what happened ("undo the move to Donnie Time") and it's found and reversed even if other changes happened after it. Eligibility follows the event's own date, not how long the mistake has sat: a still-upcoming meeting can be corrected no matter how long ago the mistake happened, an already-passed one is left alone. A plain "undo that" with nothing named stays bounded to the last 30 days; naming something specific has no limit. Colleague-identity capture was broadened at every calendar-mutation site so a later "undo what you did with X" can match on the person, not only the meeting title.
+- A meeting title that's only initials or a couple of letters is rejected at booking time — she asks for something more descriptive instead of silently creating something cryptic.
+- Declining or cancelling a meeting can now carry a custom note through to Outlook — the capability already existed one layer down and was never wired up.
+- Floating-block bookings ("book my lunch") are now actually undoable — the code already claimed they were; nothing had ever logged the activity.
+- mailPoll recovers from a stuck tick without silently going dead, escalates to the owner on sustained failure with backoff instead of flooding him with duplicate DMs, and its stale-tick ceiling and short-call timeout are now calibrated against real log evidence instead of assertion.
+
+### Fixed (high-impact)
+- Root cause of a wrong-event calendar move: resolving which event to act on could silently pick the wrong one during search, and the mutation went through reporting false success. Now caught two ways — a search-time check comparing what was asked for (duration, category, attendees) against the candidate event, and a mutation-time guard that refuses rather than guesses when the event's real title doesn't match the claim.
+- An outreach request that outlived a 3-hour reply window auto-closed and told the owner a colleague "never replied" — she then answered about 2.5 hours late, a normal same-day turnaround, and by then nothing was tracking the thread. The reply window is now 24 real working hours, correctly skipping non-work days for the colleague's own timezone.
+- The owner's shadow-DM view of an outbound colleague conversation only ever showed the reply, never the original outbound message.
+- A replayed, owner-approved calendar action could narrate a private meeting's real title into a group chat where the original request had it masked; the same masking gap existed in the undo flow's own refusal messages.
+- A safety net meant to stop Maelle from cancelling the same meeting twice in one turn was dead code from a field-name mismatch.
+- Asked directly and genuinely whether she's AI, Maelle used to deflect; she now answers honestly and warmly. Required a matching fix in the security gate, which had been treating any AI self-identification as an automatic leak regardless of context. (built 2026-08-11, formally logged this wrap)
+- Maelle used to assert a wrong internal mechanism for how holiday detection works rather than admit she wasn't sure.
+- A colleague's free-text correction to an approval could be silently discarded; a room-visible refusal could still claim a private DM was sent when the send had actually failed.
+
+### Fixed (small)
+- Consolidated three separate implementations of the same quarter-hour-alignment rule into one.
+- Removed dead code: an unused phase-validation function, a pure re-export shim left over from an earlier consolidation, an identity-lookup call that could never resolve to anything.
+- Fixed a duplicate-row bug in colleague identity lookup that could non-deterministically miss a colleague already known to the system.
+- A handful of stale `file:line` comment citations, repeated after earlier edits shifted the lines they pointed at.
+
+### Invariants preserved
+- Owner-DM narration is never masked, verified explicitly across every fix touching subject display this wave.
+- A guard is a backstop, never a substitute for fixing the resolution mistake it's catching — applied deliberately after the owner's own ruling on the wrong-event-move root cause.
+
+### Not changed
+- Vertex-hosted Claude (#199) stays blocked externally — Google's Model Garden quota for Sonnet on Vertex is provisioned at zero (`RESOURCE_EXHAUSTED`, reproduced twice from the VM's own service account); Haiku's quota is fine. Staying on Anthropic-direct until the quota increase lands.
+
 ## 4.5.5 — Profiler becomes the Librarian; the charters get audited for real
 
 Framework-only wave, run from the Workshop chat, not the bug loop. Profiler is retired and reborn as the Librarian — the person-and-knowledge lane now owns news, the morning brief's content, meeting-summary archival, venues, the file-based knowledge base, and the raw search primitive, all moved off Handyman, which goes back to being pure infrastructure plus the connective plumbing between lanes (now including the `Connection` transport contract itself, reversed from "no lane owns it"). Landed a new charter-quality rule, A15, that checks a charter's own rules against each other — catching a rule that duplicates a sibling, one that bleeds into another lane's territory, or one that isn't a real product decision at all, just obvious narration — and ran it across every charter in the squad. One real behavior change ships alongside all of it: asked directly and genuinely whether she's AI, Maelle now answers honestly instead of deflecting.

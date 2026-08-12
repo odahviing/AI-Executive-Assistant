@@ -63,6 +63,65 @@ const MAIL_DELEGATED_SCOPES = [
   'offline_access',
 ];
 
+// mailpoll-tick-no-timeout-single-stall-blocks-all-polling (bouncer overturn,
+// manual-2026-08-12) — neither the token-endpoint fetch below nor the Graph
+// delta calls in listNewMessages had a ceiling, so a single hung network call
+// in either could hold mailPoll's tickInFlight forever. Both are bounded now
+// with plain AbortSignal.timeout (Node-native), matching general.ts's
+// tavilyExtract (gh#191-3).
+//
+// SHORT_MAIL_CALL_TIMEOUT_MS covers the two single-round-trip calls (token
+// refresh, mark-as-read) — comfortably under mailPoll's 30s tick interval,
+// since neither is legitimately slow.
+//
+// short-mail-call-timeout-now-tightest-unjustified-ceiling (bouncer
+// follow-up, manual-2026-08-12) — that claim was an assertion, not evidence,
+// when first written. Checked now against both incident windows below plus
+// 30 days of logs for token-refresh-specific terms: zero listNewMessages
+// failures anywhere in 6 days (including both incidents, where the overall
+// call still completed successfully in ~22-90s — see mailPoll.ts's
+// stale-tick comment) and zero invalid_grant / "token refresh" log lines in
+// 30 days. refreshAccessToken logs no duration on success, so this can't
+// prove an individual refresh call stays under 15s. It's also a different
+// Microsoft service (login.microsoftonline.com, Azure AD) from the Graph
+// delta endpoint (graph.microsoft.com) that was slow in both incidents, so
+// there's no reason to expect it shares that degradation. Left at 15s on
+// this evidence — revisit if a future listNewMessages failure's error text
+// ever points at the token endpoint.
+//
+// LIST_MESSAGES_TIMEOUT_MS is NOT sized to the tick interval, and is
+// deliberately larger than SHORT_MAIL_CALL_TIMEOUT_MS — raised 20s -> 180s on
+// a bouncer follow-up, 2026-08-12, after evidence the first number was itself
+// too low.
+//
+// mailpoll-calibration-comment-still-wrong-2nd-time (bouncer follow-up,
+// manual-2026-08-12) — this row previously claimed the 2026-08-11 01:03-01:09
+// incident itself "shows listNewMessages completing normally at ~90s". It
+// doesn't: that window is a run of skip-warns with NO "processed new mail"
+// completion logs to time anything by (it processed 0 new messages, which
+// logs nothing — see mailPoll.ts's stale-tick comment), so it shows repeated
+// skip-warns, not a measured completion time. The companion 2026-08-07
+// 18:10-18:20 window DOES have those completion logs, and pairing each
+// tick's grid-aligned start with its completion (mailPoll.ts's stale-tick
+// comment has the full pairing, re-derived precisely 2026-08-12 after an
+// earlier pass on this row undercounted it) gives an observed max of ~88.5s
+// (18:09:40.542 to 18:11:09.064) — for one full tick's round trip
+// (listNewMessages plus one handler() orchestrator turn plus one
+// markMessageRead), NOT for listNewMessages alone. Nothing in these logs
+// times listNewMessages in isolation, so ~88.5s (call it up to ~90s) is
+// treated as an upper bound on its own share of that time, not as its
+// measured duration. A 20s ceiling was aborting genuine multi-page deltas,
+// not just hangs — and because a timed-out call persists no watermark
+// progress at all (see listNewMessages below), every one of those aborts
+// restarted the whole delta from page 1 and aborted again, so the ceiling
+// was making the underlying problem worse, not bounding it. 180s gives ~2x
+// margin over that ~90s upper bound. What tolerates a tick running past one
+// 30s interval is mailPoll's own tickInFlight + stale-tick force-clear
+// machinery (mailPoll.ts) — this constant does not need to fit inside a
+// single tick.
+const SHORT_MAIL_CALL_TIMEOUT_MS = 15_000;
+export const LIST_MESSAGES_TIMEOUT_MS = 180_000;
+
 /** Thrown when the stored refresh token is dead — revoked or past its idle
  * window. Never retry-loop on this; it needs a human to re-run
  * scripts/email-auth.mjs. */
@@ -189,6 +248,7 @@ async function refreshAccessToken(profileId: string): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal: AbortSignal.timeout(SHORT_MAIL_CALL_TIMEOUT_MS),
   });
   const json: any = await res.json().catch(() => ({}));
 
@@ -324,16 +384,31 @@ const MESSAGE_SELECT = 'id,conversationId,subject,from,toRecipients,replyTo,rece
  *
  * On a 410 Gone (Graph's "delta token expired, resync" signal) the stored
  * link is dropped and the delta is restarted from scratch exactly once.
+ *
+ * BOUNDED (mailpoll-tick-no-timeout-single-stall-blocks-all-polling, bouncer
+ * overturn) — one AbortSignal.timeout budget (LIST_MESSAGES_TIMEOUT_MS)
+ * covers the WHOLE call: the initial request, every /nextLink pagination
+ * page, and the from-scratch retry after a 410 all share it, deliberately —
+ * a fresh signal per request would let pagination or the retry keep
+ * extending the total past the intended ceiling. This is what makes the call
+ * genuinely bounded rather than merely raced: the abort fires INSIDE the
+ * fetch, before writeDeltaLink below ever runs, so a timed-out call never
+ * persists the watermark and never returns messages. The caller
+ * (mailPoll.ts) sees a plain thrown failure and retries next tick from the
+ * SAME unconsumed watermark — nothing is lost, and nothing already fetched
+ * here survives to be handled twice, because a timeout means this call
+ * produced no messages at all.
  */
 export async function listNewMessages(profile: UserProfile): Promise<MailMessage[]> {
   const profileId = profileIdOf(profile);
   const client = getMailClient(profile);
+  const signal = AbortSignal.timeout(LIST_MESSAGES_TIMEOUT_MS);
 
   const runDelta = async (fromScratch: boolean): Promise<MailMessage[]> => {
     const deltaLink = fromScratch ? null : readDeltaLink(profileId);
     let response = deltaLink
-      ? await client.api(deltaLink).get()
-      : await client.api('/me/mailFolders/inbox/messages/delta').select(MESSAGE_SELECT).get();
+      ? await client.api(deltaLink).option('signal', signal).get()
+      : await client.api('/me/mailFolders/inbox/messages/delta').select(MESSAGE_SELECT).option('signal', signal).get();
 
     const messages: MailMessage[] = [];
     for (;;) {
@@ -342,7 +417,7 @@ export async function listNewMessages(profile: UserProfile): Promise<MailMessage
       }
       const nextLink = response['@odata.nextLink'];
       if (nextLink) {
-        response = await client.api(nextLink).get();
+        response = await client.api(nextLink).option('signal', signal).get();
         continue;
       }
       const newDeltaLink = response['@odata.deltaLink'];
@@ -366,10 +441,21 @@ export async function listNewMessages(profile: UserProfile): Promise<MailMessage
 }
 
 /** Mark a message read — second-layer dedup (in addition to the caller's own
- * processed-set) and a visible signal in the mailbox that Maelle handled it. */
+ * processed-set) and a visible signal in the mailbox that Maelle handled it.
+ *
+ * BOUNDED (mailpoll-tick-no-timeout-single-stall-blocks-all-polling, bouncer
+ * follow-up 2026-08-12) — same AbortSignal.timeout treatment as
+ * listNewMessages/refreshAccessToken above, sharing SHORT_MAIL_CALL_TIMEOUT_MS
+ * since this is a single lightweight PATCH, not a paginated call. Closes the
+ * remaining indefinite-hang source mailPoll.ts's stale-tick comment named —
+ * ~90 lines of force-clear machinery exist to survive a hang here rather than
+ * this being bounded at the root; this is the root fix, the force-clear stays
+ * as the backstop for a truly-unbounded caller (the per-message handler). */
 export async function markMessageRead(profile: UserProfile, messageId: string): Promise<void> {
   const client = getMailClient(profile);
-  await client.api(`/me/messages/${encodeURIComponent(messageId)}`).update({ isRead: true });
+  await client.api(`/me/messages/${encodeURIComponent(messageId)}`)
+    .option('signal', AbortSignal.timeout(SHORT_MAIL_CALL_TIMEOUT_MS))
+    .update({ isRead: true });
 }
 
 export interface ReplyToMailOptions {

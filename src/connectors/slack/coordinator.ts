@@ -292,12 +292,22 @@ export async function handleOutreachReply(
     // one for this branch — the request was left in awaiting_colleague with
     // next_check_at/handler both NULL forever, unable to ever expire or close
     // on its own (R4). Re-arm a fresh deadline off THIS reply, same formula
-    // and window a brand-new outreach gets (calcResponseDeadline, 3 working
+    // and window a brand-new outreach gets (calcResponseDeadline, 24 working
     // hours) — the colleague just re-engaged, so the clock restarts from now,
     // not from the original send.
     if (job.request_id) {
       const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
-      updateRequest(job.request_id, { nextCheckAt: freshDeadline, nextCheckHandler: 'outreach_expiry' });
+      // outreach-expiry-tombstone-says-never-replied (2026-08-12) — stamp
+      // phase='outreach:re_engaged' so a second silence after THIS re-arm
+      // reads correctly at expiry time (runner.ts's runOutreachExpiryOrDecision):
+      // `state` alone stays 'awaiting_colleague' across this re-arm, so without
+      // this marker a real reply followed by renewed silence is indistinguishable
+      // from never having replied at all.
+      updateRequest(job.request_id, {
+        nextCheckAt: freshDeadline,
+        nextCheckHandler: 'outreach_expiry',
+        phase: 'outreach:re_engaged',
+      });
     }
     // v2.2.4 (bug 6) — preserve thread context. v2.1.5 added dm_message_ts +
     // dm_channel_id so follow-ups can land in the same DM thread the outreach

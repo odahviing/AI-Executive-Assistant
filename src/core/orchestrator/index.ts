@@ -546,7 +546,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // sees the result and can adjust its narration. This is the code-level
       // backstop behind the confirm-before-delete prompt rule.
       if (toolUse.name === 'delete_meeting') {
-        const eventId = (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
+        const eventId = (toolUse.input as any)?.meeting_id ?? (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
         if (typeof eventId === 'string' && deletedEventIdsThisTurn.has(eventId)) {
           logger.warn('delete_meeting called twice with same id — short-circuiting', {
             senderUserId: input.userId,
@@ -841,12 +841,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // v1.6.4 — remember deleted event ids so the same id can't be deleted
         // twice in one turn. See the short-circuit at the top of the loop.
         if (toolUse.name === 'delete_meeting') {
-          const eventId = (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
+          const eventId = (toolUse.input as any)?.meeting_id ?? (toolUse.input as any)?.event_id ?? (toolUse.input as any)?.id;
           if (typeof eventId === 'string') {
-            deletedEventIdsThisTurn.add(eventId);
+            // Only a CONFIRMED delete arms the same-turn short-circuit — a failed
+            // delete must leave the id retryable (still_present_after_delete /
+            // meeting_id_subject_mismatch both expect a same-turn retry to actually
+            // re-attempt, not be told "already deleted this turn").
+            const deleteConfirmed = r.success === true || r.deleted === true || r.ok === true;
+            if (deleteConfirmed) {
+              deletedEventIdsThisTurn.add(eventId);
+            }
             // Drop it from the thread ledger too, so a later reference-back
             // ("change the one I just booked") never resolves to the dead id.
-            if (input.threadTs && (r.success === true || r.deleted === true || r.ok === true)) {
+            if (input.threadTs && deleteConfirmed) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { forgetThreadEvent } = require('../../utils/threadEventLedger') as

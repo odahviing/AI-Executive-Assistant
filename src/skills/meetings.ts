@@ -107,14 +107,18 @@ If the meeting is NOT yet booked and they need to find a time together, use find
       },
       {
         name: 'revert_last_auto_move',
-        description: `Undo the single most recent thing Maelle did that can be undone: an autonomous calendar-health move (the "🔍 I moved X to clear a conflict…" notice), a move ${profile.user.name.split(' ')[0]} asked for, or a meeting Maelle just booked for him. Trigger on "put it back", "revert that", "undo that", "no, leave it where it was" — the tool works out which of the three it actually was and reverts it accordingly: a move is restored to its original time (notifying anyone who needs to know, and — for an auto-move — marking it so calendar-health won't re-move it again); a booking is cancelled outright (deleted, not moved back — there's no prior time to restore).
+        description: `Undo something Maelle did that can be undone: an autonomous calendar-health move (the "🔍 I moved X to clear a conflict…" notice), a move ${profile.user.name.split(' ')[0]} asked for, or a meeting Maelle just booked for him. Trigger on "put it back", "revert that", "undo that", "no, leave it where it was" — the tool works out which of the three it actually was and reverts it accordingly: a move is restored to its original time (notifying anyone who needs to know, and — for an auto-move — marking it so calendar-health won't re-move it again); a booking is cancelled outright (deleted, not moved back — there's no prior time to restore).
 
-Owner-only. Goes back exactly ONE step, and only within the last 12 hours — says so honestly when there's nothing recent to undo. A CANCELLATION can't be put back this way (everyone already got the cancellation email); it says that plainly and offers to book a fresh one at the same time instead.
+With no argument this reverts the single most recent undoable action, same as always. When he instead names or describes a SPECIFIC past one ("undo the Donnie Time move", "revert what you did to Yael's meeting", "undo that thing from earlier"), first call get_my_tasks — its recent_activity rows carry target_name/target_slack_id — find the row matching what he described, then pass its id as task_id here. Never guess an id from memory. If more than one recent row could plausibly match, list the candidates (subject, who, when) and ask which one rather than picking.
+
+Owner-only. Goes back exactly ONE step, and only while the event it acted on is still upcoming — a meeting that's already happened isn't worth un-touching, no matter how recently the mistake was made. Says so honestly when there's nothing eligible to undo. A CANCELLATION can't be put back this way (everyone already got the cancellation email); it says that plainly and offers to book a fresh one at the same time instead.
 
 For a NEW scheduling change (not putting back one Maelle already made), use move_meeting / create_meeting instead.`,
         input_schema: {
           type: 'object',
-          properties: {},
+          properties: {
+            task_id: { type: 'string', description: 'Optional. The id of a SPECIFIC past action to undo, from get_my_tasks\' recent_activity rows (their task_id field) — set only after matching a row there against what he described. Omit to revert the latest undoable action (default, unchanged).' },
+          },
         },
       },
       {
@@ -518,12 +522,13 @@ ATTENDEES (v2.9.1):
       },
       {
         name: 'delete_meeting',
-        description: `Cancel and permanently delete a meeting. Ask the user to confirm first; only call after explicit yes.`,
+        description: `Cancel and permanently delete a meeting. Ask the user to confirm first; only call after explicit yes. If he gives a note to send along with the decline/cancellation (e.g. "decline and write Yom Kippur"), pass it as comment — Outlook delivers it to the organizer (decline) or attendees (cancel).`,
         input_schema: {
           type: 'object',
           properties: {
             meeting_id: { type: 'string' },
             meeting_subject: { type: 'string' },
+            comment: { type: 'string', description: 'OPTIONAL. A note to send with the decline/cancellation, when the owner gives one. Delivered by Outlook to the organizer (if declining as attendee) or to attendees (if cancelling as organizer). Omit if he gave none.' },
           },
           required: ['meeting_id', 'meeting_subject'],
         },

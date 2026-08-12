@@ -13,9 +13,38 @@ import {
 } from '../../../connectors/graph/calendar';
 import logger from '../../../utils/logger';
 import type { PreferPosition, AnchorEvent } from '../../../utils/floatingBlocks';
+import { alignNearestQuarter } from '../../../utils/calendarDensity';
 import { getEffectiveWorkDay } from '../../../utils/workHours';
 import { parseGraphDt } from '../classify';
 import type { OpCtx } from './context';
+import { logActivity } from '../../../core/requests/logActivity';
+import type { SkillContext } from '../../types';
+
+// book-floating-block-revert-dead-end-to-end (2026-08-12) — one shared
+// logActivity call for both booking branches below (override and
+// positional), so a future field change lands once instead of drifting
+// between two near-identical copies. Floating blocks have no attendees, so
+// there is no target person to attribute this to — targetSlackId/targetName
+// stay omitted, matching logActivity's own doc on a row with no counterpart.
+function logFloatingBlockActivity(
+  context: SkillContext,
+  blockLabel: string,
+  eventId: string,
+  startIso: string,
+  endIso: string,
+): void {
+  logActivity({
+    ownerUserId: context.profile.user.slack_user_id,
+    kind: 'follow_up',
+    subkind: 'book_floating_block',
+    subject: `Booked '${blockLabel}'`,
+    outcomeJson: { event_id: eventId, start: startIso, end: endIso },
+    initiatedBy: context.userId,
+    initiatedByRole: context.senderRole,
+    originThreadTs: context.threadTs,
+    originChannel: context.channelId,
+  });
+}
 
 export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, profile, userEmail, timezone } = ctx;
@@ -100,7 +129,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           // findAlignedSlotForBlock, but the override branch doesn't go
           // through that helper).
           const overrideStart = DateTime.fromMillis(
-            fb.alignNearestQuarter(rawOverrideStart.toMillis(), timezone),
+            alignNearestQuarter(rawOverrideStart.toMillis(), timezone),
           ).setZone(timezone);
           const overrideEnd = overrideStart.plus({ minutes: block.duration_minutes });
 
@@ -211,6 +240,23 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               timezone,
             });
             const eventId = created.id;
+
+            // book-floating-block-revert-dead-end-to-end (2026-08-12) —
+            // undo/history record for this booking, same shape create_meeting's
+            // own logActivity call writes (createMeeting.ts), so
+            // ACTIVITY_REVERTIBILITY's book_floating_block entry
+            // (currentStartField: 'start') and the revert dispatch's
+            // create_meeting/book_floating_block delete-by-id branch
+            // (calendarReads.ts:604) actually have a row to find. Before this,
+            // no write site ever logged one for this subkind despite both
+            // sides of that table assuming it worked — "book my lunch" /
+            // "undo that" had nothing to revert.
+            logFloatingBlockActivity(
+              context, blockLabel, eventId,
+              overrideStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+              overrideEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+            );
+
             logger.info('book_floating_block: owner-override booking', {
               blockName: block.name, date, start_time: explicitStartTime,
               window: `${block.preferred_start}-${block.preferred_end}`,
@@ -476,6 +522,22 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             timezone,
           });
           const eventId = created.id;
+
+          // book-floating-block-revert-dead-end-to-end (2026-08-12) —
+          // undo/history record for this booking, same shape create_meeting's
+          // own logActivity call writes (createMeeting.ts), so
+          // ACTIVITY_REVERTIBILITY's book_floating_block entry
+          // (currentStartField: 'start') and the revert dispatch's
+          // create_meeting/book_floating_block delete-by-id branch
+          // (calendarReads.ts:604) actually have a row to find. Before this,
+          // no write site ever logged one for this subkind despite both sides
+          // of that table assuming it worked — "book my lunch" / "undo that"
+          // had nothing to revert.
+          logFloatingBlockActivity(
+            context, blockLabel, eventId,
+            blockStart.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+            blockEnd.toFormat("yyyy-MM-dd'T'HH:mm:ss"),
+          );
 
           // Surface any pre-existing meetings sitting inside the booked
           // floating-block window. Floating blocks coexist with meetings by

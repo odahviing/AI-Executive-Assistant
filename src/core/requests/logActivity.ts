@@ -61,6 +61,14 @@ export interface LogActivityInput {
    */
   targetSlackId?: string;
   requesterSlackId?: string;
+  /**
+   * gh#52 follow-up (revert-intent-and-single-step-undo-scope, piece 3) — the
+   * display name paired with targetSlackId, threaded straight to
+   * createRequest's own targetName field so a captured activity row carries a
+   * human-readable identity, not just an id. Optional: a call site with no
+   * resolved name (or no target at all) omits it, same as targetSlackId.
+   */
+  targetName?: string;
 }
 
 export function logActivity(input: LogActivityInput): void {
@@ -83,6 +91,7 @@ export function logActivity(input: LogActivityInput): void {
       originThreadTs: input.originThreadTs,
       originChannel: input.originChannel,
       targetSlackId: input.targetSlackId,
+      targetName: input.targetName,
       requesterSlackId: input.requesterSlackId,
     });
   } catch (err) {

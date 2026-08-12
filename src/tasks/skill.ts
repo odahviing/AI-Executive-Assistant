@@ -97,17 +97,25 @@ async function colleaguePendingCapRefusal(
   // via a private DM to the same colleague instead (mirrors the old code's
   // channel branch).
   if (context.surface === 'room') {
-    const roomRefusal = {
-      error: 'colleague_pending_cap',
-      reason: `Don't open a new tracked request/approval right now. If this message is a plain question you can answer directly, just answer it. Otherwise keep your reply here brief and generic (e.g. "I'll follow up with you on this soon") — I've already messaged them privately with the actual reason, so don't restate it in this shared space.`,
-    };
+    // failed-private-dm-still-narrates-as-sent (2026-08-12) — the "I've already
+    // messaged them privately" clause must be TRUE, not asserted unconditionally.
+    // The 2026-08-10 fix made `capNoticeSentThisTurn` mark ONLY on a confirmed
+    // send, but this text still claimed the DM landed regardless — so a refused
+    // colleague in a room heard a room-visible lie about a private message that
+    // never arrived. Build the reason from the actual outcome instead.
+    const sentReason = `Don't open a new tracked request/approval right now. If this message is a plain question you can answer directly, just answer it. Otherwise keep your reply here brief and generic (e.g. "I'll follow up with you on this soon") — I've already messaged them privately with the actual reason, so don't restate it in this shared space.`;
+    const notSentReason = `Don't open a new tracked request/approval right now. If this message is a plain question you can answer directly, just answer it. Otherwise keep your reply here brief and generic (e.g. "I'll follow up with you on this soon") — I could NOT reach them privately, so do not claim you messaged them and do not restate the pending-request reason in this shared space either.`;
     // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) — a
     // retried/second tool call this turn (create_approval then create_task,
     // or a retry after the refusal — the refusal text itself invites one)
     // hits this same branch again. Send the private DM at most once per
-    // colleague per turn; `roomRefusal` is still returned every time
-    // regardless, so the model sees the refusal on every attempt.
-    if (context.capNoticeSentThisTurn?.has(context.userId)) return roomRefusal;
+    // colleague per turn; the refusal is still returned every time regardless,
+    // so the model sees it on every attempt. A prior confirmed send this turn
+    // means `sentReason` is genuinely true here.
+    if (context.capNoticeSentThisTurn?.has(context.userId)) {
+      return { error: 'colleague_pending_cap', reason: sentReason };
+    }
+    let sent = false;
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
@@ -126,6 +134,7 @@ async function colleaguePendingCapRefusal(
           `Hi — you already have a couple of pending requests with ${context.profile.user.name}. I'll follow up with you once those are resolved.`,
         );
         if (sendResult?.ok === true) {
+          sent = true;
           context.capNoticeSentThisTurn?.add(context.userId);
         } else {
           logger.warn('colleaguePendingCapRefusal — private cap notice send failed', {
@@ -140,7 +149,7 @@ async function colleaguePendingCapRefusal(
     } catch (err) {
       logger.warn('colleaguePendingCapRefusal — private cap notice failed', { err: String(err) });
     }
-    return roomRefusal;
+    return { error: 'colleague_pending_cap', reason: sent ? sentReason : notSentReason };
   }
 
   return {
@@ -1320,7 +1329,7 @@ For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_ta
 
 Optional with_person filter: pass a Slack user ID to scope results to tasks involving that person. Coord tasks (multi-party meetings) are excluded from the filter since they don't have a single counterpart.
 
-Also returns \`recent_activity\` — a newest-first history of what Maelle has already done (calendar changes, messages sent, approvals decided, research completed), with NO time cutoff (\`recent_activity_count\` in summary is its length). Use it for "what have you done?" or something from weeks/months back — not just what's still open. with_person filters this too. It's capped at the most recent items, not a date range, so a very old item can be missing simply because newer activity pushed it past that cap.
+Also returns \`recent_activity\` — a newest-first history of what Maelle has already done (calendar changes, messages sent, approvals decided, research completed), with NO time cutoff (\`recent_activity_count\` in summary is its length). Use it for "what have you done?" or something from weeks/months back — not just what's still open. with_person filters this too. It's capped at the most recent items, not a date range, so a very old item can be missing simply because newer activity pushed it past that cap. Each row also carries \`target_name\`/\`target_slack_id\` when the action had a specific counterpart — match a person or action the owner describes against these to find the right \`task_id\`, e.g. to pass into revert_last_auto_move for a specific undo.
 
 ALSO CHECK ROUTINES when the owner asks about recurring activities ("did you do my LinkedIn post?", "did the briefing run?", "weekly review this morning?").`,
         input_schema: {
@@ -1631,6 +1640,14 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             kind: r.kind,
             subkind: r.subkind,
             subject: r.subject,
+            // gh#52 follow-up (revert-intent-and-single-step-undo-scope, piece
+            // 3a) — the captured target identity, when the row has one (see
+            // OT-4's targetSlackId/targetName comment on logActivity.ts). Was
+            // dropped here even though the DB row already carried it; a
+            // revert-by-description ask ("undo the move I did for Dana") needs
+            // this to match a described person against a specific row.
+            target_name: r.target_name,
+            target_slack_id: r.target_slack_id,
             // created_at is stored as a bare UTC SQL datetime (see other
             // fromSQL call sites in this codebase) — render owner-local so
             // "did X this morning" reads correctly against the owner's clock.

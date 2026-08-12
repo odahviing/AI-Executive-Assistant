@@ -14,6 +14,13 @@
  * to check if they're free or not" — the tool should not depend on Sonnet
  * remembering. Auto-fill from the event itself.
  *
+ * v4.5.6 (moving-event-gate-false-positive-blocks-attendeeless-move) — also
+ * carries durationMinutes/categories per id, read off the SAME event fetch
+ * (no extra Graph round trip). Needed by the owner-path id-mismatch gate in
+ * findAvailableSlots.ts for the genuinely-empty-roster case, where there is
+ * no attendee to cross-check and the only remaining signal is "does this
+ * candidate event even resemble what was asked for."
+ *
  * Cheap: uses getCalendarEvents (per-turn memoized via turnCache).
  *
  * Keyed per id (not unioned) so a caller gating on membership — e.g. the
@@ -30,12 +37,18 @@ import { DateTime } from 'luxon';
 import { getCalendarEvents } from '../connectors/graph/calendar';
 import logger from './logger';
 
+export interface MovingEventInfo {
+  attendees: string[];
+  durationMinutes: number | null;
+  categories: string[];
+}
+
 export async function resolveMovingEventAttendees(
   eventIds: string[],
   userEmail: string,
   timezone: string,
-): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+): Promise<Map<string, MovingEventInfo>> {
+  const result = new Map<string, MovingEventInfo>();
   if (!eventIds || eventIds.length === 0) return result;
 
   const today = DateTime.now().setZone(timezone);
@@ -56,7 +69,15 @@ export async function resolveMovingEventAttendees(
         if (addr.toLowerCase() === ownerEmailLower) continue;
         emails.add(addr);
       }
-      result.set(evt.id, [...emails]);
+      let durationMinutes: number | null = null;
+      const s = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
+      const e = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' });
+      if (s.isValid && e.isValid) durationMinutes = Math.round(e.diff(s, 'minutes').minutes);
+      result.set(evt.id, {
+        attendees: [...emails],
+        durationMinutes,
+        categories: evt.categories ?? [],
+      });
     }
     return result;
   } catch (err) {

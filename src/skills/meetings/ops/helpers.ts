@@ -6,6 +6,7 @@
  */
 import { DateTime } from 'luxon';
 import logger from '../../../utils/logger';
+import { PRIVATE_MASK } from '../../../utils/displaySubject';
 
 // Local alias for the profile type without adding another import — re-use the
 // one imported below. Ts hoists type-only imports so this works.
@@ -104,6 +105,164 @@ export function recordProposedAlternatives(params: {
       err: String(err).slice(0, 150),
     });
   }
+}
+
+/**
+ * gh#wrong-event-moved-move-meeting (2026-08-12) — the last check before a
+ * move/update/delete PATCH lands on the WRONG event. `meeting_id` is resolved
+ * upstream (a prior search, or the model's own read of the calendar); when
+ * that resolution is wrong — find_available_slots handed back an id that
+ * belonged to a DIFFERENT event ("Donnie Time", a personal block) than the
+ * one it was searching for ("Yael & Idan Weekly") — nothing checked that the
+ * id and the CLAIMED subject (`args.meeting_subject`, read off the SAME
+ * calendar) describe the same meeting before the mutation. Deliberately
+ * LENIENT — normalized equality, containment, or one shared non-trivial word
+ * all pass — because the two strings are almost always the SAME string read
+ * twice; the bar is only to catch a CLEAR mismatch (zero shared content),
+ * never to second-guess a real rename or a punctuation/case difference (M4 —
+ * don't manufacture a re-ask over a title that merely differs cosmetically).
+ * Structural string normalization only (Unicode-aware, no meaning extraction)
+ * — same class as the exact-match subject comparisons already used by
+ * findDuplicateEvent / findSameSubjectSiblings, just widened to "plausible"
+ * for a comparison that must never falsely refuse a real match.
+ */
+export function subjectsPlausiblyMatch(claimed: string, actual: string): boolean {
+  // o#216 (bouncer fix, 2026-08-12) — a claimed subject that IS the privacy
+  // mask literal is not a real claim to compare. On a room turn, the email
+  // leg, or a non-attendee colleague DM, get_calendar itself only ever hands
+  // back `[Private]` for a masked event (displaySubject.ts) — the caller
+  // structurally cannot know the real title there, so comparing that mask
+  // against the probe's real subject would always find zero shared content
+  // and falsely refuse a legitimate move/update/cancel forever (the
+  // refusal's own "re-read the calendar and retry" instruction returns the
+  // same mask again — it can't self-heal). This also covers replay: a
+  // room-origin approved action's `_deferred_action_hint` stores this same
+  // masked claim verbatim, so without this check an owner-approved move
+  // would refuse again at replay time. Other gates already own authority on
+  // those surfaces — this guard has nothing meaningful to check when the
+  // claim itself is only ever the mask.
+  if (claimed.trim() === PRIVATE_MASK) return true;
+  const norm = (s: string): string =>
+    s.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  const a = norm(claimed);
+  const b = norm(actual);
+  if (!a || !b) return true;  // nothing to compare against — don't block on missing data
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const wordsA = new Set(a.split(' ').filter(w => w.length >= 3));
+  return b.split(' ').some(w => w.length >= 3 && wordsA.has(w));
+}
+
+/**
+ * meeting-title-minimum-descriptiveness-required (2026-08-12) — owner ruling,
+ * prompted by subjectsPlausiblyMatch's own short-token edge case above (a
+ * title made only of initials/very-short words has no comparable content
+ * left there and always reads as a mismatch). Rather than make the matcher
+ * tolerate short titles, don't let one get BOOKED in the first place —
+ * enforced at create_meeting (createMeeting.ts) only; this does not, and
+ * cannot, rename an existing short-titled meeting already on the calendar.
+ * Same Unicode-aware structural normalization as subjectsPlausiblyMatch —
+ * meaning is never inspected, only shape.
+ *  - empty/whitespace-only → not descriptive.
+ *  - every token reduces to a single character ("J D", "J.D.K.") → initials-
+ *    only, not descriptive, even if the combined length would otherwise clear
+ *    the floor below (e.g. 3 single-letter initials).
+ *  - fewer than 3 total letter/number characters once punctuation and
+ *    whitespace are stripped → not descriptive (catches "JS", "Hi", "Q&A"'s
+ *    stripped form "QA", etc).
+ */
+export function isDescriptiveSubject(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const tokens = trimmed
+    .split(/\s+/)
+    .map(t => t.replace(/[^\p{L}\p{N}]+/gu, ''))
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  if (tokens.every(t => t.length === 1)) return false;  // initials-only
+  const meaningfulChars = tokens.join('').length;
+  return meaningfulChars >= 3;
+}
+
+/**
+ * revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) — the
+ * target identity a `logActivity` call attaches to a calendar mutation.
+ * Owner ruling: whichever identifying signal a later revert-by-description
+ * ask actually has (a name, a subject, conversational recency) should
+ * already be on the row — broadens capture from "only a resolved REQUESTER"
+ * (moveMeeting.ts's pre-existing findMeetingOwner-only signal) to "any
+ * attendee already in scope at mutation time, resolved against
+ * people_memory."
+ *
+ * `preferred` — a more precise signal already resolved by the caller (e.g.
+ * findMeetingOwner's verified requester) — wins outright and is never
+ * overridden by a weaker roster guess. Falls back to the first
+ * `attendeeEmails` entry (in roster order, owner excluded) that resolves to
+ * a people_memory row carrying a slack_id. Fail-soft, same posture as
+ * logActivity itself: a lookup hiccup returns {} and never throws, so it can
+ * never block the mutation it's attached to.
+ *
+ * bouncer fix (2026-08-12) — the roster fallback used to be its own
+ * `searchPeopleMemory(email).find(exact match)` scan, which has no
+ * preference between duplicate rows for the same human: `people_memory`
+ * legitimately holds a calendar-sourced row (slack_id NULL) alongside a
+ * later Slack-sourced row for the same email (the "Luke Joas bug", see
+ * resolveAttendeeEmails.ts:195-203), and whichever came back first/most-
+ * recently could be the NULL-slack_id one — silently abandoning capture for
+ * an attendee who is in fact resolvable. `getPersonByEmail` is the
+ * established fix for exactly this (already used the same way at
+ * tasks/briefs.ts:18 and resolveAttendeeEmails.ts:174): its query orders by
+ * `(slack_id IS NOT NULL) DESC` so the populated row always wins. Call it
+ * directly instead of re-implementing the scan.
+ *
+ * Also: when `preferred` carries an id but no name (findMeetingOwner can
+ * return a requester_slack_id with a NULL requester_name,
+ * findMeetingOwner.ts:86-95), backfill the name from people_memory via the
+ * slack_id rather than leaving the activity row nameless — the revert
+ * tool's wording matches by name, so a resolvable-but-blank name is a
+ * silent capture gap, not a genuine "no name available" case.
+ */
+export function resolveActivityTargetIdentity(params: {
+  attendeeEmails: Array<string | undefined | null>;
+  ownerEmail: string;
+  preferred?: { targetSlackId?: string | null; targetName?: string | null };
+}): { targetSlackId?: string; targetName?: string } {
+  if (params.preferred?.targetSlackId) {
+    const targetSlackId = params.preferred.targetSlackId;
+    let targetName = params.preferred.targetName ?? undefined;
+    if (!targetName) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { personIdForSlackId, getPersonById } = require('../../../db/people') as
+          typeof import('../../../db/people');
+        const personId = personIdForSlackId(targetSlackId);
+        const person = personId ? getPersonById(personId) : null;
+        targetName = person?.name ?? undefined;
+      } catch (err) {
+        logger.warn('resolveActivityTargetIdentity — name backfill lookup threw, leaving name unresolved', {
+          err: String(err).slice(0, 160),
+        });
+      }
+    }
+    return { targetSlackId, targetName };
+  }
+  const ownerLower = params.ownerEmail.toLowerCase();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getPersonByEmail } = require('../../../db/people') as typeof import('../../../db/people');
+    for (const raw of params.attendeeEmails) {
+      const email = (raw ?? '').toLowerCase().trim();
+      if (!email || email === ownerLower) continue;
+      const hit = getPersonByEmail(email);
+      if (hit?.slack_id) {
+        return { targetSlackId: hit.slack_id, targetName: hit.name ?? undefined };
+      }
+    }
+  } catch (err) {
+    logger.warn('resolveActivityTargetIdentity — people_memory lookup threw, leaving target unresolved', {
+      err: String(err).slice(0, 160),
+    });
+  }
+  return {};
 }
 
 // v1.8.3 — extract "HH:MM" from an ISO datetime string for action_summary

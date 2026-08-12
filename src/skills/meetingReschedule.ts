@@ -296,9 +296,15 @@ export async function handleRescheduleReply(
     // Re-arm the request's spine timer: one re-ask at +24h (overrides the
     // reply-time timer clear above).
     if (job.request_id) {
+      // outreach-expiry-tombstone-says-never-replied (2026-08-12) — this IS a
+      // genuine reply ("checking"), so mark it same as coordinator.ts's continue
+      // branch: `state` stays awaiting_colleague through this re-arm (and the
+      // reschedule_reask → outreach_expiry re-arm after it), so without this
+      // marker a later silence reads as "never replied" at expiry time.
       updateRequest(job.request_id, {
         nextCheckAt: DateTime.now().plus({ hours: 24 }).toUTC().toISO(),
         nextCheckHandler: 'reschedule_reask',
+        phase: 'outreach:re_engaged',
       });
     }
     logger.info('Reschedule reply = checking — kept open, armed reschedule_reask +24h', {
@@ -590,10 +596,10 @@ export async function notifyColleagueOfMove(params: {
       // deadline" branch: state `awaiting_colleague`, phase
       // `outreach:awaiting_reply`, next_check_at NULL — an ask with no terminal
       // path, which is what left a calendar mutation as its only possible
-      // closer. Same shared convention message_colleague uses (3 working hours
-      // in THEIR zone, skills/outreach.ts → calcResponseDeadline), so silence
-      // resolves the way it does for every other await_reply outreach: expire,
-      // close, tell both sides.
+      // closer. Same shared convention message_colleague uses (24 working
+      // hours in THEIR zone, skills/outreach.ts → calcResponseDeadline), so
+      // silence resolves the way it does for every other await_reply
+      // outreach: expire, close, tell both sides.
       reply_deadline: calcResponseDeadline(params.colleagueTz ?? tz),
       context_json: JSON.stringify(ctx),
     });

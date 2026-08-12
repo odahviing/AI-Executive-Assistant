@@ -13,7 +13,6 @@ import { getDb } from './client';
 import type {
   CreateRequestInput,
   NextCheckHandler,
-  RequestPhase,
   RequestRow,
   RequestState,
 } from '../core/requests/types';
@@ -45,11 +44,36 @@ export function buildIdempotencyKey(parts: {
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 24);
 }
 
+// ── phase validation (shared by BOTH write paths — see updateRequest) ───────
+
+/**
+ * Namespace/kind guard for `phase` (setPhase-dead-code-bypassed-by-tonights-
+ * writes, 2026-08-12, round 2). A `phase` value is namespaced (`outreach:…`)
+ * and only legal on the kind that namespace belongs to. Shared by
+ * createRequest's INSERT and updateRequest's UPDATE branch so there is
+ * exactly one validation RULE — even though there are necessarily two write
+ * paths (an INSERT and an UPDATE statement) — instead of the rule being
+ * re-typed twice and drifting between them.
+ */
+function isPhaseValidForKind(phase: string, kind: string): boolean {
+  const ns = phase.split(':')[0];
+  return ns === 'outreach' && (kind === 'outreach' || kind === 'social_outreach');
+}
+
 // ── create ──────────────────────────────────────────────────────────────────
 
 export function createRequest(input: CreateRequestInput): RequestRow {
   const db = getDb();
   const id = `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  // Validate phase at creation too — this is the highest-volume phase write
+  // in the system (every outreach_jobs row, via db/jobs.ts) and it INSERTs
+  // straight into this row with no other gate in front of it.
+  let phase: string | null = input.phase ?? null;
+  if (phase !== null && !isPhaseValidForKind(phase, input.kind)) {
+    logger.warn('createRequest — phase namespace/kind mismatch, dropping phase write', { kind: input.kind, phase });
+    phase = null;
+  }
 
   const idempotencyKey = input.idempotencyKey ?? buildIdempotencyKey({
     ownerUserId: input.ownerUserId,
@@ -101,7 +125,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
     subject: input.subject,
     description: input.description ?? null,
     state: input.state,
-    phase: input.phase ?? null,
+    phase,
     informed,
     expires_at: input.expiresAt ?? null,
     next_check_at: input.nextCheckAt ?? null,
@@ -452,31 +476,83 @@ export function getRequestsByExternalEventId(ownerUserId: string, eventId: strin
  * old query exactly) rather than a table key of its own.
  *
  * Returns the single newest qualifying row REGARDLESS of whether it is
- * itself revertible or already past its own TTL — that filtering is the
- * caller's job, reading ACTIVITY_REVERTIBILITY, because a non-revertible or
- * stale row must still be findable so the revert dispatch can name it
- * honestly ("I can't undo the cancellation") instead of silently reaching
- * past it to an older row that IS still revertible, which would undo the
- * wrong thing. NULL only when nothing qualifying exists at all.
+ * itself revertible or whether the event it acted on has already passed —
+ * that filtering is the caller's job, reading ACTIVITY_REVERTIBILITY (+
+ * isEventStillUpcoming), because a non-revertible or already-past row must
+ * still be findable so the revert dispatch can name it honestly ("I can't
+ * undo the cancellation") instead of silently reaching past it to an older
+ * row that IS still eligible, which would undo the wrong thing. NULL only
+ * when nothing qualifying exists at all.
  *
  * A completed revert relabels `closure_reason` on the row it acted on
  * (retiring it from this query — the pre-existing double-revert guard,
  * generalized to every subkind rather than a new column).
+ *
+ * Owner ruling 2026-08-12 (revert-intent-and-single-step-undo-scope): this
+ * zero-arg lookup is ALSO bounded to rows logged in the last 30 days (see
+ * REVERTIBLE_ACTIVITY_MAX_AGE_DAYS below) — a bare "undo that" names nothing,
+ * so it should not reach weeks back just because the event it acted on is
+ * still upcoming. getRevertibleActivityById has no such bound: naming a
+ * specific past action is deliberate and may reach arbitrarily far back.
  */
+// bouncer fix (revert-intent-and-single-step-undo-scope, cleanup round 2) —
+// the exact kind/subkind/state/closure_reason shape a revert candidate must
+// have, shared verbatim by getRevertibleActivity and getRevertibleActivityById
+// below (was two hand-maintained copies) so a future eligibility edit can't
+// land in one and miss the other.
+const REVERTIBLE_ACTIVITY_SUBKINDS = Object.keys(ACTIVITY_REVERTIBILITY);
+const REVERTIBLE_ACTIVITY_PLACEHOLDERS = REVERTIBLE_ACTIVITY_SUBKINDS.map(() => '?').join(',');
+const REVERTIBLE_ACTIVITY_PREDICATE = `
+      kind = 'follow_up'
+      AND (
+        (subkind = 'auto_move' AND state = 'resolved' AND closure_reason = 'auto_move_executed')
+        OR (subkind IN (${REVERTIBLE_ACTIVITY_PLACEHOLDERS}) AND state = 'logged' AND closure_reason IS NULL)
+      )
+`;
+
+// Owner ruling 2026-08-12 (revert-intent-and-single-step-undo-scope) — the
+// explicit by-id path (getRevertibleActivityById below) may reach arbitrarily
+// far back because the owner named a specific past action deliberately. The
+// bare zero-arg "undo that" has nothing named, so it stays bounded: it must
+// not accidentally reach a row logged weeks ago just because the event it
+// acted on happens to still be upcoming. Bounded on `created_at` (when the
+// action was LOGGED), not the event's own date — that's the separate
+// isEventStillUpcoming check the caller already does.
+const REVERTIBLE_ACTIVITY_MAX_AGE_DAYS = 30;
+
 export function getRevertibleActivity(ownerUserId: string): RequestRow | null {
-  const loggedSubkinds = Object.keys(ACTIVITY_REVERTIBILITY);
-  const placeholders = loggedSubkinds.map(() => '?').join(',');
   return (getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND kind = 'follow_up'
-      AND (
-        (subkind = 'auto_move' AND state = 'resolved' AND closure_reason = 'auto_move_executed')
-        OR (subkind IN (${placeholders}) AND state = 'logged' AND closure_reason IS NULL)
-      )
+      AND ${REVERTIBLE_ACTIVITY_PREDICATE}
+      AND datetime(created_at) >= datetime('now', '-${REVERTIBLE_ACTIVITY_MAX_AGE_DAYS} days')
     ORDER BY datetime(COALESCE(closed_at, created_at)) DESC
     LIMIT 1
-  `).get(ownerUserId, ...loggedSubkinds) as RequestRow | null) ?? null;
+  `).get(ownerUserId, ...REVERTIBLE_ACTIVITY_SUBKINDS) as RequestRow | null) ?? null;
+}
+
+/**
+ * gh#52 follow-up (revert-intent-and-single-step-undo-scope, piece 2) — the
+ * SAME eligibility predicate as getRevertibleActivity above (identical
+ * kind/subkind/state/closure_reason shape), generalized to a SPECIFIC row
+ * instead of "whichever is newest": the owner describes a past action ("undo
+ * the move I made for Dana yesterday") and a caller (matching against
+ * get_my_tasks's recent_activity, piece 3) already knows which request id
+ * that is. Returns null when the id doesn't exist, isn't this owner's, or
+ * doesn't match the shape getRevertibleActivity requires — a row outside
+ * that shape was never a revert candidate in the first place, by id or
+ * otherwise. Revertibility / event-still-upcoming filtering (ACTIVITY_
+ * REVERTIBILITY + isEventStillUpcoming) is still the caller's job here too —
+ * this only targets WHICH row. getRevertibleActivity() itself is untouched
+ * and stays the zero-argument default for "just undo the last thing."
+ */
+export function getRevertibleActivityById(ownerUserId: string, requestId: string): RequestRow | null {
+  return (getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND id = ?
+      AND ${REVERTIBLE_ACTIVITY_PREDICATE}
+  `).get(ownerUserId, requestId, ...REVERTIBLE_ACTIVITY_SUBKINDS) as RequestRow | null) ?? null;
 }
 
 /**
@@ -585,21 +661,6 @@ export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
   `).all(ownerUserId) as RequestRow[];
 }
 
-/** Set the kind-namespaced activity phase, validating the namespace matches kind. */
-export function setPhase(id: string, phase: RequestPhase): void {
-  const row = getRequest(id);
-  if (!row) return;
-  const ns = phase.split(':')[0];
-  // outreach phases on outreach/social_outreach.
-  const kindOk =
-    (ns === 'outreach' && (row.kind === 'outreach' || row.kind === 'social_outreach'));
-  if (!kindOk) {
-    logger.warn('setPhase — namespace/kind mismatch, ignoring', { id, kind: row.kind, phase });
-    return;
-  }
-  getDb().prepare(`UPDATE requests SET phase = ?, updated_at = datetime('now') WHERE id = ?`).run(phase, id);
-}
-
 // ── update ──────────────────────────────────────────────────────────────────
 
 export interface UpdateRequestPatch {
@@ -643,7 +704,29 @@ export function updateRequest(id: string, patch: UpdateRequestPatch): void {
     sets.push(`state = @state`, `state_changed_at = datetime('now')`);
     params.state = patch.state;
   }
-  if (patch.phase !== undefined) { sets.push(`phase = @phase`); params.phase = patch.phase; }
+  if (patch.phase !== undefined) {
+    if (patch.phase === null) {
+      sets.push(`phase = @phase`); params.phase = patch.phase;
+    } else {
+      // Namespace/kind guard (setPhase-dead-code-bypassed-by-tonights-writes,
+      // 2026-08-12) — this validation used to live in a standalone `setPhase`
+      // export that had zero callers; every real phase write (including the
+      // two added tonight, coordinator.ts + meetingReschedule.ts) went through
+      // this function's raw field instead, bypassing it entirely. Inlined here
+      // and shared (isPhaseValidForKind, above createRequest) with the INSERT
+      // path in this same file, so BOTH places a `phase` can land on a row are
+      // validated by the one rule — round 2 (still same day) closed the INSERT
+      // gap: db/jobs.ts's createOutreachJob → requests.createRequest was the
+      // highest-volume phase write of all and had no gate whatsoever.
+      const row = getRequest(id);
+      const kindOk = !!row && isPhaseValidForKind(patch.phase, row.kind);
+      if (!kindOk) {
+        logger.warn('updateRequest — phase namespace/kind mismatch, ignoring phase write', { id, kind: row?.kind, phase: patch.phase });
+      } else {
+        sets.push(`phase = @phase`); params.phase = patch.phase;
+      }
+    }
+  }
   if (patch.closureReason !== undefined) { sets.push(`closure_reason = @closure_reason`); params.closure_reason = patch.closureReason; }
   if (patch.closedBy !== undefined) { sets.push(`closed_by = @closed_by`); params.closed_by = patch.closedBy; }
   if (patch.closedAt !== undefined) { sets.push(`closed_at = @closed_at`); params.closed_at = patch.closedAt; }

@@ -66,7 +66,7 @@
  * inputs, and `filterColleagueReply` itself. Since the delivery pipeline moved the
  * history write BELOW this call, a throw there did not leave the draft it was handed
  * — it left the FUNCTION, so postReply never sent and never stored, and the runner's
- * catch answered with the generic failure line instead (processMessage.ts:744,
+ * catch answered with the generic failure line instead (processMessage.ts:572-814,
  * `delivered` still false). One unloadable module and the entire answer was gone, on
  * the one leg where a non-owner is reading it.
  *
@@ -187,7 +187,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // In a 1:1 owner DM and in a colleague's DM those two answers are exact
   // negations of each other, which is why one test carried both for so long. In
   // a GROUP DM they come apart: `role` is already clamped to 'colleague'
-  // (processMessage.ts:122) precisely because every colleague in the room reads
+  // (processMessage.ts:123) precisely because every colleague in the room reads
   // the reply, while `isOwnerInGroup` says the owner is the one typing. The old
   // single test read that as "owner-facing", so the one colleague-readable
   // surface in the system shipped with NO leak gate and the wrong voice frame —
@@ -196,13 +196,13 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // v4.2.x — ownerIsActing now asks its question DIRECTLY, of the authenticated
   // Slack sender, instead of through a proxy that answered it for two surfaces out
   // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
-  // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:122) —
+  // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:123) —
   // so the old `role === 'owner' || isOwnerInGroup` pair covered the DM and the
   // group DM and silently missed the CHANNEL: the owner @-mentions Maelle in a
   // real channel, she claims she messaged someone or moved something, and the
   // phantom-action check never ran, because the group-DM fix repaired the MPIM
   // half of the clamp with `isOwnerInGroup` and there is no `isOwnerInChannel`
-  // on this side of the wire (processMessage.ts:121 computes one and never
+  // on this side of the wire (processMessage.ts:122 computes one and never
   // passes it). Keyed on the authenticated identity in code, this covers every
   // present and future surface without a third flag to plumb or forget (shared
   // rule 10, G2). It can only ADD the honesty check, never drop it: `role ===
@@ -482,7 +482,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // v4.2.x — and it is CAUGHT, which it was not. Together with the db read above,
     // this was the only await in the stack outside a try, and what it cost was the
     // whole answer, on the one leg where a non-owner is reading: the throw reached the
-    // runner's catch (processMessage.ts:746) with `delivered` still false, so the
+    // runner's catch (processMessage.ts:572-814) with `delivered` still false, so the
     // colleague got the generic failure line instead of their reply, and nothing was
     // stored either (postReply's history write sits below this call).
     //
@@ -1106,11 +1106,11 @@ async function runClaimCheckAndMaybeRewrite(
                 description: ctx.userMessage,
                 state: 'in_flight',
                 // Match the identical-shape precedent (flagUnresolvedFreeformForOwner,
-                // src/tasks/skill.ts:158): this row's OWN nextCheckHandler
+                // src/tasks/skill.ts:245-288): this row's OWN nextCheckHandler
                 // ('reminder_fire') is its notification path — it will DM the owner
                 // directly when its timer fires. informed=0 is for "the brief hasn't
                 // told him yet", which would ALSO surface this same flagged relay in
-                // getRequestsForBrief (src/db/requests.ts:395) while it's still
+                // getRequestsForBrief (src/db/requests.ts:432) while it's still
                 // in_flight — a second, redundant notification for one event.
                 informed: 1,
                 requesterSlackId: ctx.senderId,

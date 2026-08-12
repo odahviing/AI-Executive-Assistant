@@ -58,13 +58,21 @@ export type ClosedBy =
 /**
  * v3.1 (Path 2) — kind-namespaced activity sub-state values. The string union
  * documents the legal phases; `phase` is stored as TEXT so callers pass these
- * literals. Never mix a phase onto the wrong request kind — setPhase
- * validates the namespace matches the kind.
+ * literals. Never mix a phase onto the wrong request kind — both write paths
+ * in src/db/requests.ts (createRequest's INSERT and updateRequest's `phase`
+ * branch) call the shared `isPhaseValidForKind` guard before writing, and
+ * drop the write (with a warning) otherwise.
  */
 export type OutreachPhase =
   | 'outreach:scheduled'      // future send_at, not yet sent (state=in_flight)
   | 'outreach:awaiting_reply' // sent, waiting (state=awaiting_colleague)
   | 'outreach:nudged'         // follow-up sent once
+  | 'outreach:re_engaged'     // colleague replied non-decisively ("let me check") and the
+                              // deadline was re-armed off that reply — state stays
+                              // awaiting_colleague throughout, so this is the only record
+                              // that a reply ever happened (outreach-expiry-tombstone-says-
+                              // never-replied, 2026-08-12; see runner.ts's
+                              // runOutreachExpiryOrDecision)
   | 'outreach:no_response';   // window elapsed, pending owner decision
 
 export type RequestPhase = OutreachPhase;

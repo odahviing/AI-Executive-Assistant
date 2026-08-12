@@ -550,6 +550,33 @@ Only send messages the user explicitly asks for — never reach out to people on
           }
         }
         if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
+        // shadow-dm-gap (2026-08-12) — mirror the OUTBOUND question to the
+        // owner's shadow feed. Pre-fix, only a colleague's REPLY got mirrored
+        // (postReply.ts Step 4.6) — the question that prompted it never did,
+        // so the owner's shadow thread started mid-conversation with a reply
+        // to a question he never saw. Same conversationKey convention this
+        // spine already uses elsewhere for "conversation with a colleague"
+        // shadows (resolver.ts's notifyRequesterOfDecision keys on
+        // origin_thread_ts): threadTsForSend when we're continuing an
+        // already-anchored thread, else this send's own ts, so a later
+        // shadow of the same conversation threads under this one instead of
+        // opening a fresh header. Fail-soft — never let a shadow hiccup
+        // undo a confirmed send.
+        try {
+          const { shadowNotify } = await import('../utils/shadowNotify');
+          const rawPreview = (args.message as string).replace(/\s+/g, ' ').trim();
+          const preview = rawPreview.length > 350 ? `${rawPreview.slice(0, 350).trim()}…` : rawPreview;
+          await shadowNotify(context.profile, {
+            channel: context.channelId,
+            threadTs: context.threadTs,
+            action: 'Message sent',
+            detail: `I → ${args.colleague_name as string}: "${preview}"`,
+            conversationKey: threadTsForSend ?? outcome.ts ?? linkedRequestId ?? jobId,
+            conversationHeader: `Conversation with ${args.colleague_name as string}`,
+          });
+        } catch (err) {
+          logger.warn('message_colleague — shadowNotify for outbound DM failed, continuing', { err: String(err) });
+        }
         // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
         // fires only after the DM is confirmed sent.
         logActivity({

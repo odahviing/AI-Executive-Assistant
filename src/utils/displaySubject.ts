@@ -135,7 +135,7 @@ export function subjectViewerFor(
  * o#217 — gated on BOTH `senderRole === 'colleague'` AND
  * `surface === 'colleague_dm'`. `senderRole` alone used to be the whole gate,
  * on the theory that it "never fires for the owner-in-a-group case" — false:
- * processMessage.ts:122 clamps `senderRole` to 'colleague' for the owner too,
+ * processMessage.ts:123 clamps `senderRole` to 'colleague' for the owner too,
  * whenever he's in a room (MPIM/channel), and his `userId` is NOT clamped —
  * it's still his own real Slack id. So the old gate resolved the OWNER's own
  * email via `getPersonMemory`, which trivially passes the attendee test on
@@ -145,13 +145,19 @@ export function subjectViewerFor(
  * 1:1 colleague DM, where the asker really is the whole audience.
  *
  * This does NOT reopen the replay gap `subjectViewerFor` closed
- * (#154-replay-surface): a colleague-DM-origin replay's synthetic context
- * carries `senderRole: 'owner'` (deferredActionReplay.ts hardcodes it for
- * every replay) and `userId: ownerUserId`, never the original requester's own
- * slack id — so the (still-present) `senderRole === 'colleague'` half of this
- * gate excludes every replay regardless of `surface`, and there is no correct
- * email to resolve here. `surface` is deliberately an ADDITIONAL restriction,
- * never a replacement for the `senderRole` check.
+ * (#154-replay-surface): a colleague-DM- or owner-DM-origin replay's
+ * synthetic context carries `senderRole: 'owner'` (deferredActionReplay.ts
+ * hardcodes it for every replay) and `userId: ownerUserId`, never the
+ * original requester's own slack id — so for THOSE two surfaces the
+ * `senderRole === 'colleague'` bail below still excludes the replay (no
+ * correct email to resolve for a colleague_dm replay; owner_dm doesn't need
+ * one — `subjectViewerFor` already reads it as the full 'owner' viewer).
+ * `surface === 'room'` is the ONE exception, checked BEFORE that bail — see
+ * the room-tightening note below
+ * (gh#room-origin-replay-narrates-unmasked-title-on-success, 2026-08-12): a
+ * room-origin replay has no identifiable colleague either, but unlike the
+ * other two surfaces it must still mask, because the room itself hasn't
+ * changed just because the synthetic context says 'owner'.
  *
  * gh#154-W5/gh#154-R4 (2026-08-06) — a Slack ROOM turn (MPIM/channel) has no single
  * identifiable colleague either, yet must mask at least as strictly as a 1:1
@@ -169,13 +175,33 @@ export function subjectViewerFor(
  * (`owner_dm`, `email`) original opt-out, and removes the need for any call
  * site to know a surface exists at all — call `viewerEmailFor(context)`
  * directly, never `?? null`.
+ *
+ * gh#room-origin-replay-narrates-unmasked-title-on-success (2026-08-12) — the
+ * `surface === 'room'` check below moved BEFORE the `senderRole !== 'colleague'`
+ * bail. A room-origin deferred-action replay (deferredActionReplay.ts:108,114)
+ * hardcodes `senderRole: 'owner'` for every replay but sets `surface: 'room'`
+ * only when the approval's own origin was a room — that combination is UNIQUE
+ * to replay; a genuine LIVE turn from the owner while he is physically in a
+ * room is already clamped to `senderRole: 'colleague'` before it ever reaches
+ * here (processMessage.ts's clamp — see this file's top-of-function doc).
+ * With the old ordering the `senderRole !== 'colleague'` bail fired first for
+ * that synthetic context and returned `undefined` ("opt out, fall back to
+ * privacy-flag-only"), so a room-origin replay of a successful move/update
+ * narrated the REAL subject of a non-privacy-flagged event the original live
+ * room turn had masked to `[Private]` via this exact room test. Checking
+ * `surface === 'room'` first makes a replay mask exactly as the live room
+ * turn that raised it did — regardless of what `senderRole` the synthetic
+ * replay context carries — without touching the colleague_dm / owner_dm
+ * behaviour above, which still needs the `senderRole` bail (no correct
+ * per-colleague email exists on those two replay shapes either).
  */
 export function viewerEmailFor(
   caller: { senderRole?: 'owner' | 'colleague'; surface?: 'owner_dm' | 'colleague_dm' | 'room'; userId?: string } | undefined,
 ): string | null | undefined {
-  if (!caller || caller.senderRole !== 'colleague') return undefined;
-  if (caller.surface === 'colleague_dm') return getPersonMemory(caller.userId ?? '')?.email?.toLowerCase() ?? null;
+  if (!caller) return undefined;
   if (caller.surface === 'room') return null;
+  if (caller.senderRole !== 'colleague') return undefined;
+  if (caller.surface === 'colleague_dm') return getPersonMemory(caller.userId ?? '')?.email?.toLowerCase() ?? null;
   return undefined;
 }
 

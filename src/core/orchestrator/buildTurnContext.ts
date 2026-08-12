@@ -132,7 +132,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   let toolScopes: string[] | undefined;
   // v3.1.2 (D) — captured from classifyTurn so a deterministic analyzeCalendar
   // pre-check can fire below for owner buffer/free-time questions, replacing
-  // the leaky meetings.ts:2044 prompt rule.
+  // a leaky free-time prompt rule that meetings.ts has since removed.
   let isFreeTimeInquiry = false;
   // v3.6.4 — participant names classifyTurn extracted from a scheduling
   // request, and the internal colleagues we deterministically resolved from
@@ -842,7 +842,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // "how packed is Thursday?", "am I free this afternoon?"), run
   // analyzeCalendar for today + tomorrow deterministically and inject the
   // real freeMin + gap structure into the prompt. Replaces the leaky
-  // meetings.ts:2044 "USE THE TOOL — don't math by hand" prompt rule that
+  // meetings.ts:1298 "USE THE TOOL — don't math by hand" prompt rule that
   // Sonnet kept ignoring, producing fabricated "2h45 free / healthy"
   // narrations. No NL regex — the classifier's LLM pre-pass decides
   // intent. Fails open: any error in analyze leaves the block empty and

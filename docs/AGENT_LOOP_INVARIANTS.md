@@ -26,9 +26,9 @@ Why it matters: Anthropic caches based on cumulative byte equality. If the stati
 
 ---
 
-## 3. MPIM senderRole rewrite **mutates `input`**
+## 3. MPIM senderRole is clamped **before** the orchestrator ever sees `input`
 
-Where: `core/orchestrator/index.ts:385`. When an MPIM message arrives, if owner is in the group, `input.senderRole` is overwritten to `'colleague'` while `isOwnerInGroup` stays `true`. Downstream code has TWO senderRole-ish signals: `input.senderRole === 'colleague'` AND `input.isOwnerInGroup === true`. The COMBO means "owner-in-MPIM, gets colleague tools."
+Where: `connectors/slack/app/processMessage.ts:111-123` (moved out of the orchestrator by gh#154's permission layer, v4.5.0 — this used to be a mutation of `input.senderRole` inside `core/orchestrator/index.ts`; now `role` is resolved once at the Slack transport boundary and handed to the orchestrator already clamped). When an MPIM message arrives, `role` is clamped to `'colleague'` even for the owner, while `isOwnerInGroup` is computed separately and stays `true`. Downstream code has TWO senderRole-ish signals: `input.senderRole === 'colleague'` AND `input.isOwnerInGroup === true`. The COMBO means "owner-in-MPIM, gets colleague tools."
 
 Why it matters: any code that reads `input.senderRole` alone gets a misleading answer on owner-in-MPIM. Permission checks that read both fields work; checks that read only senderRole silently downgrade the owner.
 
@@ -62,7 +62,7 @@ Why it matters: re-ordering Phase 2 and Phase 3 silently breaks (b). The Phase c
 
 ## 6. `CalendarEvent.categories` is on the type — the 23 `as unknown as` casts are gone
 
-Where: `connectors/graph/calendar.ts:41`. The field is canonical now.
+Where: `connectors/graph/calendarTypes.ts:12` (`calendar.ts` re-exports it now — the file split into `calendarTypes`/`calendarReads`/`calendarMutations`/`findAvailableSlots`). The field is canonical now.
 
 Why it matters: pre-v3.3.x audit, ~23 sites cast `(ev as unknown as { categories?: string[] })` because the field was structurally on Graph's response but missing from our type. We added it to the type and deleted every cast. A future reader who reverts the type field (thinking it's redundant) will resurface all 23 casts AND the next person to add a usage will use the cast pattern.
 
@@ -90,13 +90,13 @@ Why it matters: layer 1 (filter) keeps Sonnet from SEEING owner-only tools. Laye
 - Layer 1: leave them OUT of `COLLEAGUE_ALLOWED_TOOLS`.
 - Layer 2: the chokepoint reads the same Set; nothing to add (one source of truth).
 
-The 5-name `ownerOnlyTools` Set in `core/assistant.ts:380` is a NARROWER set (tools whose colleague-self rewrite makes no sense — e.g. `manage_preference`). The chokepoint at registry covers everything; the assistant.ts Set is in-handler defense for the specific tools that share AssistantSkill.
+The 4-name `ownerOnlyTools` Set in `core/assistant.ts:430` is a NARROWER set (tools whose colleague-self rewrite makes no sense — e.g. `manage_preference`). The chokepoint at registry covers everything; the assistant.ts Set is in-handler defense for the specific tools that share AssistantSkill.
 
 ---
 
 ## 9. The thread-action engine ONLY runs on `!isMpimChannel && threadTs !== event.ts && threadFetchOk`
 
-Where: `connectors/slack/app.ts:2030`. The owner-presence gate runs for mid-thread real-channel mentions only.
+Where: `connectors/slack/app/handlers.ts:1032-1106` (`app.ts` split into `app/handlers.ts` + `app/processMessage.ts` since). The owner-presence gate runs for mid-thread real-channel mentions only.
 
 Why it matters: top-of-thread channel mention (`threadTs === event.ts`) falls through to normal orchestrator processing — colleague role, no owner authority. That's the design: people can use Maelle in channels by @-mentioning at top-of-thread, and her response is colleague-tier.
 
@@ -108,7 +108,7 @@ MPIM thread mentions are handled by the MPIM owner-in-group authority model else
 
 ## 10. Catch-up's `markProcessed(msgTs)` fires BEFORE the reply post
 
-Where: `core/background.ts:483`. The mark happens before `chat.postMessage`. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
+Where: `core/background.ts:782` (inside `replayMissedMessage`). The mark happens before `chat.postMessage`. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
 
 Why it matters: even with C-4's Phase-2-before-Phase-3 ordering, the dedup Set is the line of defense against any future race where catch-up + live overlap.
 
@@ -122,7 +122,7 @@ Where: `core/threadActions/index.ts:ownerPostedInThread`. We slice to the last 5
 
 Why it matters: pre-v3.3.x the gate scanned the ENTIRE thread. A "👍" from owner months ago granted any thread participant indefinite owner-tier authority. The recency window makes the gate read "is the owner currently engaged here?" not "has the owner ever touched this thread."
 
-Sender-is-owner short-circuit at `app.ts:2036` handles "owner @-mentions Maelle in any thread" — that bypasses this gate entirely, so the recency window only filters the non-owner @-mentioner case.
+Sender-is-owner short-circuit at `connectors/slack/app/handlers.ts:1111-1112` handles "owner @-mentions Maelle in any thread" — that bypasses this gate entirely, so the recency window only filters the non-owner @-mentioner case.
 
 **Don't**: remove the slice. **Do**: tune the window size if real-world data shows 5 is too tight.
 

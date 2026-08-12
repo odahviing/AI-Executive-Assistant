@@ -130,8 +130,9 @@ export function findDeadGaps(commitments: Interval[], cfg: DensityConfig): DeadG
 /**
  * Round a millis timestamp UP to the next :00/:15/:30/:45 quarter-hour in the
  * given timezone. THE single implementation of the owner's quarter grid rule —
- * re-exported (not duplicated) by floatingBlocks.ts, which used to keep its
- * own copy; a naive UTC-ms version lived here instead until v4.4.x.
+ * lives here; floatingBlocks.ts imports and uses it internally but does not
+ * re-export it. floatingBlocks.ts used to keep its own copy; a naive UTC-ms
+ * version lived here instead until v4.4.x.
  */
 export function alignUpQuarter(ms: number, timezone: string): number {
   const dt = DateTime.fromMillis(ms).setZone(timezone);
@@ -150,14 +151,41 @@ export function alignUpQuarter(ms: number, timezone: string): number {
  * in the given timezone. Mirror of alignUpQuarter — moved here alongside it
  * (#188) so earlierConnectiveStart's later-side search doesn't need to reach
  * into floatingBlocks.ts (which itself imports FROM this module — that would
- * be circular). Re-exported by floatingBlocks.ts, which used to keep its own
- * copy, for existing callers.
+ * be circular). floatingBlocks.ts imports and uses it internally but does not
+ * re-export it; it used to keep its own copy.
  */
 export function alignDownQuarter(ms: number, timezone: string): number {
   const dt = DateTime.fromMillis(ms).setZone(timezone);
   const minute = dt.minute;
   const remainder = minute % 15;
   if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
+  return dt
+    .minus({ minutes: remainder })
+    .set({ second: 0, millisecond: 0 })
+    .toMillis();
+}
+
+/**
+ * Round a millis timestamp to the NEAREST :00/:15/:30/:45 quarter-hour in the
+ * given timezone. Half rounds up (8 min → next quarter). Used by override
+ * paths that accept a free-form HH:MM from the owner and need to snap to the
+ * standard grid the rest of the system assumes. Moved here alongside
+ * alignUpQuarter/alignDownQuarter (single implementation of the shared quarter-
+ * grid rule). floatingBlocks.ts does not import or re-export this one; it
+ * used to keep its own copy.
+ */
+export function alignNearestQuarter(ms: number, timezone: string): number {
+  const dt = DateTime.fromMillis(ms).setZone(timezone);
+  const minute = dt.minute;
+  const remainder = minute % 15;
+  if (remainder === 0 && dt.second === 0 && dt.millisecond === 0) return ms;
+  // Round half up: remainder >= 8 → next quarter, else previous quarter.
+  if (remainder >= 8) {
+    return dt
+      .plus({ minutes: 15 - remainder })
+      .set({ second: 0, millisecond: 0 })
+      .toMillis();
+  }
   return dt
     .minus({ minutes: remainder })
     .set({ second: 0, millisecond: 0 })
