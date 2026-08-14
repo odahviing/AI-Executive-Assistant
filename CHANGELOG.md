@@ -2,6 +2,20 @@
 
 ---
 
+## 4.5.7 — A colleague finally hears when a long absence actually ends
+
+Real incident (gh#200): a single ~20-day away period had Maelle telling a colleague "fully booked" one day at a time in a Hebrew scheduling chat, never once naming the underlying reason or when it ends — a long, repetitive, annoying exchange. Separately, telling her about the vacation through the schedule-override tool worked correctly underneath, but a safety check falsely flagged her own accurate confirmation as unverified.
+
+### Fixed (high-impact)
+- When a colleague proposes a day inside a known multi-day away period, Maelle now says "away through Fri 29 Aug" once, instead of re-explaining "away that whole day" fresh for every proposed day with no end date ever surfacing — fixed on both the "propose a specific time" path and the "when are you free" search path. Took three passes to land: the first attempt touched an owner-only code path that the colleague-facing incident never runs through; the second built the real fix for half of it and left the other half unwired.
+- A correct multi-day schedule-override write (e.g. "off for 2 weeks") could get its own accurate confirmation reply falsely flagged by the claim-checker, because the tool's activity summary only showed the first day of the range and a safety-net table had no entry for this tool at all — both fixed.
+
+### Fixed (small)
+- A note-only schedule-override change rendered its confirmation with an empty detail; a couple of stale `file:line` comment citations from this same wave's edits corrected.
+
+### Not changed
+- The bulk "when are you free" narration (the model reading a full week's summary at once) doesn't yet explicitly use the new away-period end date, even though it's present in the data — left for a follow-up if it proves to matter in practice, since it's a prompt-wording question rather than a code gap.
+
 ## 4.5.6 — A wrong meeting move gets fixed at the root, and undo learns to look further back
 
 Triggered by a real incident: asked to move one meeting, Maelle moved a different one instead and reported it as a success, then couldn't cleanly undo her own mistake. That investigation grew into a full pass on calendar-mutation safety, an undo mechanism that now works against full activity history instead of only the last action, and an outreach-reliability bug that had already told the owner a colleague never replied when she had. Also ships three rounds of mail-polling reliability work and a couple of honesty fixes.

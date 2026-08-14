@@ -335,6 +335,21 @@ export interface RuleCheckResult {
      * `window` below — never re-derive by string-matching `window`.
      */
     isAllDay?: true;
+    /**
+     * gh#200 — set only when `allDayOutOfOffice` is true AND the span reaches
+     * past the day being checked: the LAST day the underlying OOF event
+     * covers, ALREADY FORMATTED ("Friday 29 Aug") by THIS validator — the one
+     * producer (gh#200 dedup, v2). Every consumer (this file's own
+     * violation_label below, check_join_availability, availabilityPreCheck's
+     * ledger + narration) quotes it verbatim; none may re-derive it from a raw
+     * date with a second DateTime.fromISO/.toFormat call. Lets a caller say
+     * "away through Aug 29" once instead of re-deriving "away that whole day"
+     * for every separate day a colleague proposes inside a known away period —
+     * the actual gh#200 incident (a ~20-day away period, re-explained fresh,
+     * day after day, with no end ever named). Computed via `computeOofSpan`
+     * off this SAME event — never a second span derivation.
+     */
+    allDayOutOfOfficeUntilDisplay?: string;
   };
 }
 
@@ -509,6 +524,43 @@ export function isAllDayOutOfOffice(ev: {
   return ev.showAs === 'oof';
 }
 
+/**
+ * gh#200 — the [start, endExclusive) calendar-date span a single all-day OOF
+ * event covers, in the OWNER's timezone. One event IS one span (a 20-day away
+ * period is one Graph event with a start and a far-off end, not 20 separate
+ * events), so this is deliberately NOT a merge across events — just the one
+ * event's own start+duration turned into calendar dates.
+ *
+ * Shared so `analyzeCalendar`'s day-loop bucketing and `checkSlot`'s own
+ * "away through" label (both gh#200) compute the SAME span off the SAME
+ * inputs instead of two copies that could disagree about where an away
+ * period ends. Takes an owner-local start DATE (not a raw Graph timestamp) so
+ * either caller can feed it from whatever shape it already parsed the event
+ * into — `analyzeCalendar`'s `ProcessedEvent._localDate`/`_durationMin`
+ * (Graph timestamps deliberately stripped upstream) or `checkSlot`'s raw
+ * `CalendarEvent` converted to owner-local at the call site.
+ */
+export interface OofSpan {
+  eventId: string;
+  startDate: string;          // yyyy-MM-dd, owner tz
+  endDateExclusive: string;   // yyyy-MM-dd, owner tz — first day NOT covered
+}
+
+export function computeOofSpan(
+  eventId: string,
+  startDateOwnerLocal: string,
+  durationMin: number,
+  ownerTz: string,
+): OofSpan {
+  return {
+    eventId,
+    startDate: startDateOwnerLocal,
+    endDateExclusive: DateTime.fromISO(startDateOwnerLocal, { zone: ownerTz })
+      .plus({ minutes: durationMin })
+      .toFormat('yyyy-MM-dd'),
+  };
+}
+
 export function occupancyRoleOf(
   ev: CalendarEvent,
   floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
@@ -612,6 +664,30 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     overOptional = undefined;
     {
       const commitSubj = displaySubject(ev, profile, viewer, viewerEmail);
+      const isOof = isAllDayOutOfOffice(ev);
+      // gh#200 — when the OOF is a MULTI-day span, the last day it covers
+      // (inclusive), off the SAME `computeOofSpan` analyzeCalendar uses — so a
+      // caller can say "away through Aug 29" once instead of re-explaining
+      // "away that whole day" for every day a colleague proposes inside a
+      // known away period. Unset for a single-day OOF: nothing extra to say.
+      // Formatted ONCE, right here — this is the ONE producer (gh#200 dedup);
+      // every consumer (this file's own violation_label below,
+      // check_join_availability, availabilityPreCheck's ledger + narration)
+      // quotes it verbatim and never re-derives via its own DateTime.fromISO.
+      let allDayOutOfOfficeUntilDisplay: string | undefined;
+      if (isOof) {
+        const span = computeOofSpan(
+          ev.id,
+          evStart.setZone(tz).toFormat('yyyy-MM-dd'),
+          evEnd.diff(evStart, 'minutes').minutes,
+          tz,
+        );
+        const lastDayInclusive = DateTime.fromISO(span.endDateExclusive, { zone: tz })
+          .minus({ days: 1 }).toFormat('yyyy-MM-dd');
+        if (lastDayInclusive > span.startDate) {
+          allDayOutOfOfficeUntilDisplay = DateTime.fromISO(lastDayInclusive, { zone: tz }).toFormat('EEEE d MMM');
+        }
+      }
       overCommitment = {
         id: ev.id,
         subject: (commitSubj && commitSubj !== PRIVATE_MASK) ? commitSubj : 'meeting',
@@ -625,7 +701,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         window: ev.isAllDay
           ? 'all day'
           : `${evStart.setZone(tz).toFormat('HH:mm')}–${evEnd.setZone(tz).toFormat('HH:mm')}`,
-        ...(isAllDayOutOfOffice(ev) ? { allDayOutOfOffice: true as const } : {}),
+        ...(isOof ? { allDayOutOfOffice: true as const } : {}),
+        ...(allDayOutOfOfficeUntilDisplay ? { allDayOutOfOfficeUntilDisplay } : {}),
         ...(ev.isAllDay ? { isAllDay: true as const } : {}),
       };
     }
@@ -680,9 +757,15 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       violation_kind: 'owner_busy_collision',
       // An all-day OOF is the same hard collision, but it is a day OFF, not
       // a clash: "already busy at this time" invites "then what about 30 min
-      // later", which has the same answer all day.
+      // later", which has the same answer all day. gh#200 — when the span
+      // reaches past this one day, name the real end ("away through Fri 29
+      // Aug") instead of just this day, so a colleague proposing several
+      // different days inside the same away period is told the whole window
+      // once instead of a fresh day-scoped "out of office" for each one.
       violation_label: overCommitment.allDayOutOfOffice
-        ? `${ownerReads ? "you're" : `${ownerFirst} is`} out of office all day on ${slotStart.toFormat('EEEE d MMM')} ("${overCommitment.subject}")`
+        ? overCommitment.allDayOutOfOfficeUntilDisplay
+          ? `${ownerReads ? "you're" : `${ownerFirst} is`} away through ${overCommitment.allDayOutOfOfficeUntilDisplay} ("${overCommitment.subject}")`
+          : `${ownerReads ? "you're" : `${ownerFirst} is`} out of office all day on ${slotStart.toFormat('EEEE d MMM')} ("${overCommitment.subject}")`
         : `${ownerReads ? "you're" : `${ownerFirst} is`} already busy at this time ("${overCommitment.subject}" ${overCommitment.window})`,
       ...slotFacts,
     };

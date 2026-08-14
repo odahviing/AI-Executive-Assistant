@@ -17,6 +17,7 @@ import {
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,
+  type DaySummaryEntry,
   getFreeBusy,
   findAvailableSlots,
   createMeeting,
@@ -939,15 +940,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           const diagnosticsOut: {
             rejectedCounts?: Record<string, number>;
             rejectedExamples?: Record<string, string[]>;
-            daySummary?: Array<{
-              date: string;
-              accepted: number;
-              top_reasons: string[];
-              blocked_by?: Array<{ email: string; slots_blocked: number }>;
+            daySummary?: Array<DaySummaryEntry & {
               // gh#168-a — grounded, code-computed strings for a day whose
               // top_reasons names `outside_attendee_work_hours`, so a follow-up
               // ("why does Monday fall outside their hours?") is answered by
               // QUOTING this instead of Sonnet converting the two zones herself.
+              // Populated by THIS handler, not the walker — see the
+              // enrichment loop below. `DaySummaryEntry` (the walker's own
+              // shape, connectors/graph/findAvailableSlots.ts) carries
+              // `oof_until_display` — see its own field doc.
               attendee_hours_note?: string[];
             }>;
             unresolvedAttendees?: string[];
@@ -1028,8 +1029,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // Local partial application of the shared humanizeViolationLabel
             // (../../ops/violationLabels.ts) — already the one implementation,
             // imported here and by calendarReads/createMeeting/moveMeeting;
-            // this just binds ownerFirst for the call site below.
-            const labelFor = (reason: string | undefined): string => humanizeViolationLabel(reason, ownerFirst);
+            // this just binds ownerFirst for the call site below. gh#200 —
+            // `oofUntilDisplay` passes through to the `owner_out_of_office`
+            // case only; every other reason ignores it.
+            const labelFor = (reason: string | undefined, oofUntilDisplay?: string): string =>
+              humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay);
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
             // explicit present_in_timezone, used to echo each result back in that zone.
@@ -1057,6 +1061,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 rejectedCounts?: Record<string, number>;
                 unresolvedAttendees?: string[];
                 attendeesNotChecked?: string[];
+                // gh#200 — populated by findAvailableSlots whenever any
+                // instant in this narrow window was rejected (same
+                // unconditional trigger as the main branch's own
+                // daySummary); read below to attach an all-day OOF's away
+                // span end to its broken_rule_label, never re-derived.
+                daySummary?: DaySummaryEntry[];
               } = {};
               perCandidateDiags.push(diag);
               if (!cand.end) {
@@ -1093,6 +1103,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
                 const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                // gh#200 — an all-day OOF rejects every instant on that day
+                // before checkSlot ever runs, so the away span's real end
+                // lives on the day_summary entry for this candidate's date
+                // (day_summary is populated unconditionally whenever
+                // rejectedCounts is non-empty — see findAvailableSlots.ts),
+                // never on a per-instant field. Already formatted by the
+                // walker; quoted verbatim into the label below.
+                const brokenRuleUntilDisplay = brokenRule === 'owner_out_of_office'
+                  ? diag.daySummary?.find(d => d.date === cand.start.slice(0, 10))?.oof_until_display
+                  : undefined;
                 // #148 — render the (already owner-local) slot back in the zone the
                 // candidate was STATED in, so Sonnet quotes "08:00 ET (15:00 his time)"
                 // instead of head-converting the owner-local time back to the foreign zone.
@@ -1121,7 +1141,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   end: cand.end,
                   available: matches,
                   ...(presentLocal ? { presentation_local: presentLocal } : {}),
-                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule) } : {}),
+                  ...(brokenRule ? { broken_rule: brokenRule, broken_rule_label: labelFor(brokenRule, brokenRuleUntilDisplay) } : {}),
                   ...(attendeeHoursNote ? { attendee_hours_note: attendeeHoursNote } : {}),
                 };
               } catch (err) {

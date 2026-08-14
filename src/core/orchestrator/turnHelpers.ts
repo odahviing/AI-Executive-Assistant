@@ -117,6 +117,16 @@ const MUTATION_DOMAIN: Record<string, MutationDomain> = {
   confirm_gender: 'other', update_person_profile: 'other', update_person_memory: 'other',
   manage_routine: 'other', manage_calendar_issue: 'other', update_task: 'other',
   update_summary_draft: 'other', manage_knowledge: 'other', resolve_approval: 'other',
+  // gh#200 (200b) — a per-date work-schedule override (day off / custom hours /
+  // office-home flip / travel timezone). NOT 'book': it never creates, moves, or
+  // deletes a calendar EVENT, so the calendar-mutation branch's outcome reader
+  // (mutationOutcome, shaped for meetingId/needs_confirmation/needs_owner_approval)
+  // does not apply to its result shape ({success, dates, off?, hours?, ...}).
+  // It sits with the memory/preference/routine family above — a schedule-adjacent
+  // STATE write, not a meeting booking — which is also what the claim-checker's
+  // own action_type rubric would call it (its "book" examples are all
+  // create/move/update/delete meeting + book_floating_block by name).
+  set_work_schedule_override: 'other',
 };
 
 /**
@@ -345,6 +355,51 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[resolve_approval OK — decision recorded, NO calendar change]`;
         }
         return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}]`;
+      }
+      case 'set_work_schedule_override': {
+        // gh#200 (200b) — before this case, the generic `default` below rendered
+        // ONLY the first input key (`date_from=...`), so a 17-day range wrote
+        // correctly (handler logged `wrote {count:17}`) but the claim-checker
+        // couldn't see the range, the day count, or the off/hours/clear intent —
+        // it had nothing to verify "marked off from today through Aug 29"
+        // against, and flagged the TRUE claim as unconfirmed (false positive,
+        // unnecessary rewrite cycle). Render the tool's own result fields
+        // (calendarReads.ts handleSetWorkScheduleOverride) instead of guessing
+        // from input (G3) — EXCEPT `note` (see below). FAILED (owner_only /
+        // bad_date / bad_range / nothing_to_set) is already handled by the
+        // generic error-string check at the top of this function — those are
+        // all `{ error: '<code>' }`.
+        //
+        // gh#200 (recheck, 200b) — a note-ONLY override is a legal success on
+        // its own (calendarReads.ts:684 lets `note` alone satisfy
+        // `nothing_to_set`), but `note` isn't in the handler's success result
+        // (calendarReads.ts:710-718 — only handleGetWorkScheduleOverrides
+        // echoes it back, :737), so this case rendered an EMPTY detail for a
+        // real success. `note` is the one field safe to read from `input`
+        // instead of `result`: the handler persists it unchanged (only a
+        // `.trim()`, calendarReads.ts:678,699) with no validation branch that
+        // can drop or alter it the way hours/off can — once `success:true`
+        // confirms the write, `input.note` IS the persisted value, not a guess.
+        const r = result as {
+          dates?: unknown; cleared?: number;
+          off?: boolean; hours?: unknown; location?: string; timezone?: string;
+        };
+        const dates = Array.isArray(r.dates) ? (r.dates as string[]) : [];
+        const range = dates.length > 1
+          ? `${dates[0]}→${dates[dates.length - 1]} (${dates.length}d)`
+          : (dates[0] ?? '');
+        if (typeof r.cleared === 'number') {
+          return `[set_work_schedule_override OK — cleared ${range}]`;
+        }
+        const parts: string[] = [];
+        if (r.off) parts.push('off=true');
+        if (Array.isArray(r.hours) && r.hours.length) parts.push(`hours=${(r.hours as string[]).join(',')}`);
+        if (r.location) parts.push(`location=${r.location}`);
+        if (r.timezone) parts.push(`tz=${r.timezone}`);
+        const note = typeof input.note === 'string' ? input.note.trim() : '';
+        if (note) parts.push(`note="${note.replace(/\s+/g, ' ').slice(0, 80)}"`);
+        const detail = parts.length ? `: ${parts.join(' ')}` : '';
+        return `[set_work_schedule_override OK — ${range}${detail}]`;
       }
       default: {
         // Generic: just tool name + first key-value

@@ -109,11 +109,27 @@ import { renderClockInZone } from './timezoneConvert';
  */
 export function hardBlockClassPhrase(
   kind: string | undefined,
-  opts: { ownerFirst: string; allDayOutOfOffice?: boolean },
+  opts: {
+    ownerFirst: string;
+    allDayOutOfOffice?: boolean;
+    /**
+     * gh#200 — the away span's real end, already formatted by the producer
+     * (e.g. "Friday 29 Aug") — same convention as HardBlockedSlot.display:
+     * rendered once, quoted verbatim, never re-derived here. When present,
+     * names the whole away period instead of just the one day being checked,
+     * so a colleague proposing several different days inside it hears the
+     * real end instead of a fresh day-scoped "away that whole day" each time.
+     */
+    allDayOutOfOfficeUntilDisplay?: string;
+  },
 ): string | null {
   // The all-day case first: it is the same hard collision, but "busy at that
   // time" invites "an hour later then?", which has the same answer all day.
-  if (opts.allDayOutOfOffice) return `${opts.ownerFirst} is away that whole day`;
+  if (opts.allDayOutOfOffice) {
+    return opts.allDayOutOfOfficeUntilDisplay
+      ? `${opts.ownerFirst} is away through ${opts.allDayOutOfOfficeUntilDisplay}`
+      : `${opts.ownerFirst} is away that whole day`;
+  }
   switch (kind) {
     case 'owner_busy_collision':
       return `it clashes with a meeting already on ${opts.ownerFirst}'s calendar`;
@@ -314,6 +330,8 @@ export function recordHardBlockedSlot(params: {
   display: string;
   kind: string | undefined;
   allDayOutOfOffice?: boolean;
+  /** gh#200 — see hardBlockClassPhrase's own field doc. */
+  allDayOutOfOfficeUntilDisplay?: string;
   /** The length `checkSlot` was run at to reach this verdict (see HardBlockedSlot). */
   durationMin: number;
 }): void {
@@ -330,6 +348,7 @@ export function recordHardBlockedSlot(params: {
     phrase: hardBlockClassPhrase(params.kind, {
       ownerFirst: params.ownerFirst,
       allDayOutOfOffice: params.allDayOutOfOffice,
+      allDayOutOfOfficeUntilDisplay: params.allDayOutOfOfficeUntilDisplay,
     }),
     durationMin: params.durationMin,
     expiresAt: now + TTL_MS,

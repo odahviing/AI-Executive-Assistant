@@ -34,6 +34,43 @@ type SlotCandidate = {
   attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }>;
 };
 
+/**
+ * One workday's rejection summary — surfaced per touched day so a caller can
+ * narrate "why no Monday?" honestly instead of fabricating. `accepted` is the
+ * count of slots that survived all rules for that day; `top_reasons` is the
+ * top 2 distinct rejection reasons ordered by count, empty when the day
+ * accepted ≥1 slot.
+ *
+ * Exported (gh#200) so a caller with its own NARROW diagnosticsOut — the
+ * candidate_slots per-candidate loop, create_meeting's colleague-path Guard B —
+ * can type its own receiver against this EXACT shape instead of hand-rolling an
+ * incompatible subset that TypeScript would then reject at the call site.
+ */
+export interface DaySummaryEntry {
+  date: string;
+  accepted: number;
+  top_reasons: string[];
+  /**
+   * Per-attendee blame for this day. Populated when one or more attendees'
+   * busy time blocked slots. Empty when the blockers were all owner-side
+   * (owner_busy / focus_time / etc). Lets Sonnet narrate "Isaac blocked
+   * 8 slots on Monday, that's where it dies" instead of "fully booked."
+   */
+  blocked_by?: Array<{ email: string; slots_blocked: number }>;
+  /**
+   * gh#200 — set when `top_reasons` includes `owner_out_of_office` AND the
+   * away span reaches past this one day: the whole span's real end, ALREADY
+   * FORMATTED ("Friday 29 Aug") by this walker — the one producer (gh#200
+   * dedup v2, same convention as checkSlot's own
+   * overCommitment.allDayOutOfOfficeUntilDisplay). Quote verbatim; never
+   * re-derive from a raw date. Lets the reply say "away through Aug 29" once
+   * for the whole span instead of a fresh day-scoped "out of office that
+   * whole day" for every day inside it — the actual gh#200 incident (several
+   * proposed days, each re-explained, with no end ever named).
+   */
+  oof_until_display?: string;
+}
+
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
 
 export async function findAvailableSlots(params: {
@@ -190,23 +227,10 @@ export async function findAvailableSlots(params: {
     /**
      * Per-day summary across the search window. One entry per workday touched
      * by the slot walker (off-workweek days like Friday/Saturday are omitted).
-     * `accepted` is the count of slots that survived all rules for that day;
-     * `top_reasons` is the top 2 distinct rejection reasons ordered by count,
-     * empty when the day accepted ≥1 slot. Used by Sonnet to narrate honestly
-     * when the user asks "why no Monday?" — instead of fabricating.
+     * Used by Sonnet to narrate honestly when the user asks "why no Monday?"
+     * — instead of fabricating. See `DaySummaryEntry` for the per-field docs.
      */
-    daySummary?: Array<{
-      date: string;
-      accepted: number;
-      top_reasons: string[];
-      /**
-       * Per-attendee blame for this day. Populated when one or more attendees'
-       * busy time blocked slots. Empty when the blockers were all owner-side
-       * (owner_busy / focus_time / etc). Lets Sonnet narrate "Isaac blocked
-       * 8 slots on Monday, that's where it dies" instead of "fully booked."
-       */
-      blocked_by?: Array<{ email: string; slots_blocked: number }>;
-    }>;
+    daySummary?: DaySummaryEntry[];
     // v3.3.7 (#124h) — attendee addresses Graph could not resolve to a mailbox
     // (their "busy" was empty by nonexistence, not by freedom). Owner email
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
@@ -225,7 +249,14 @@ export async function findAvailableSlots(params: {
     // gh#165-d — carried structurally off verdict.overCommitment (never
     // string-matched from `window`), so a caller can tell "the whole day is
     // gone" from "this hour clashes" without re-deriving the fact.
-    conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true };
+    conflictingEvent?: {
+      id: string;
+      subject: string;
+      allDayOutOfOffice?: true;
+      isAllDay?: true;
+      /** gh#200 — see RuleCheckResult.overCommitment's own field doc (scheduleRules.ts); carried straight off checkSlot's verdict, never re-derived. */
+      allDayOutOfOfficeUntilDisplay?: string;
+    };
   };
 }): Promise<SlotCandidate[]> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -397,7 +428,7 @@ export async function findAvailableSlots(params: {
     // search can never offer a slot the book path then refuses. Lazy-required to
     // match this file's idiom and sidestep the type-only cycle with scheduleRules.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkSlot, isAllDayOutOfOffice } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+    const { checkSlot, isAllDayOutOfOffice, computeOofSpan } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
     // v3.7.x (#143) — the per-date effective work context, so the walker gates +
     // hours + tz come from the SAME accessor checkSlot validates against.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -492,16 +523,46 @@ export async function findAvailableSlots(params: {
     // the one shared predicate, so "is he out that day" has exactly one answer in
     // the subsystem. Span-aware (a multi-day vacation covers every day it spans).
     const oofDayKeys = new Set<string>();
+    // gh#200 — date → the away span's LAST day (inclusive, owner tz), set ONLY
+    // when the span reaches past that one day. So day_summary can tell the
+    // drafter "away through Aug 29" once instead of a fresh day-scoped
+    // `owner_out_of_office` for every day inside the same known period — the
+    // actual gh#200 incident (a colleague proposing several different days,
+    // re-told "away that whole day" fresh, day after day, with no end named).
+    // Span computed via the SAME `computeOofSpan` analyzeCalendar and checkSlot
+    // use, off the SAME `isAllDayOutOfOffice` predicate — one span answer.
+    const oofUntilByDay = new Map<string, string>();
     for (const evt of ownerEventsForFb) {
       if (!isAllDayOutOfOffice(evt)) continue;
-      const from = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
-        .setZone(params.timezone).startOf('day');
+      const evStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
+      const evEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' });
+      if (!evStart.isValid || !evEnd.isValid) continue;
+      const span = computeOofSpan(
+        evt.id,
+        evStart.setZone(params.timezone).toFormat('yyyy-MM-dd'),
+        evEnd.diff(evStart, 'minutes').minutes,
+        params.timezone,
+      );
+      const from = DateTime.fromISO(span.startDate, { zone: params.timezone });
       // Graph all-day end is EXCLUSIVE (midnight after the last covered day).
-      const toExclusive = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
-        .setZone(params.timezone).startOf('day');
-      if (!from.isValid || !toExclusive.isValid) continue;
+      // gh#200 v2 — evStart/evEnd are already validated above, and a valid
+      // DateTime's .toFormat/.plus round-trip through computeOofSpan always
+      // stays valid, so `from`/`toExclusive` can never be invalid here — the
+      // dead defensive check this comment used to guard was removed.
+      const toExclusive = DateTime.fromISO(span.endDateExclusive, { zone: params.timezone });
+      const lastInclusive = toExclusive.minus({ days: 1 }).toFormat('yyyy-MM-dd');
+      const isMultiDay = lastInclusive > span.startDate;
+      // gh#200 — format ONCE, here, at the producer (same convention as
+      // checkSlot's overCommitment.allDayOutOfOfficeUntilDisplay): every
+      // downstream consumer of day_summary.oof_until_display quotes this
+      // string verbatim, never re-derives it.
+      const lastInclusiveDisplay = isMultiDay
+        ? DateTime.fromISO(lastInclusive, { zone: params.timezone }).toFormat('EEEE d MMM')
+        : undefined;
       for (let d = from; d < toExclusive; d = d.plus({ days: 1 })) {
-        oofDayKeys.add(d.toFormat('yyyy-MM-dd'));
+        const key = d.toFormat('yyyy-MM-dd');
+        oofDayKeys.add(key);
+        if (lastInclusiveDisplay) oofUntilByDay.set(key, lastInclusiveDisplay);
       }
     }
 
@@ -775,6 +836,7 @@ export async function findAvailableSlots(params: {
         subject: oc.subject,
         ...(oc.allDayOutOfOffice ? { allDayOutOfOffice: true as const } : {}),
         ...(oc.isAllDay ? { isAllDay: true as const } : {}),
+        ...(oc.allDayOutOfOfficeUntilDisplay ? { allDayOutOfOfficeUntilDisplay: oc.allDayOutOfOfficeUntilDisplay } : {}),
       };
     };
     // P25 — `outOfWorkHours` is the VALIDATOR's own fact about this slot
@@ -1398,9 +1460,16 @@ export async function findAvailableSlots(params: {
               }
             }
           }
-          return blocked_by
-            ? { date, accepted, top_reasons, blocked_by }
-            : { date, accepted, top_reasons };
+          // gh#200 — the away span's real end (already formatted — see
+          // oofUntilByDay above), only when it reaches past this one day
+          // (oofUntilByDay is empty for a single-day OOF).
+          const oof_until_display = top_reasons.includes('owner_out_of_office')
+            ? oofUntilByDay.get(date) : undefined;
+          return {
+            date, accepted, top_reasons,
+            ...(blocked_by ? { blocked_by } : {}),
+            ...(oof_until_display ? { oof_until_display } : {}),
+          };
         });
         params.diagnosticsOut.daySummary = daySummary;
       }

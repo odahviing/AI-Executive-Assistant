@@ -18,6 +18,7 @@ import {
   findDuplicateEvent,
   findReschedulableSibling,
   type CalendarEvent,
+  type DaySummaryEntry,
   getFreeBusyForDecision,
   findAvailableSlots,
   createMeeting,
@@ -655,7 +656,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // gh#165-d — carries the structural all-day facts too, so the
                 // refusal below can tell "the whole day is gone" from "this
                 // hour clashes" without re-deriving it.
-                conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true };
+                conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true; allDayOutOfOfficeUntilDisplay?: string };
+                // gh#200 — an all-day OOF rejects the whole day before
+                // checkSlot ever runs (conflictingEvent stays unset for that
+                // case), so the away span's real end lives on the
+                // day_summary entry instead — populated unconditionally
+                // whenever rejectedCounts is non-empty. Already formatted by
+                // the walker; read below, never re-derived.
+                daySummary?: DaySummaryEntry[];
               } = {};
               if (fromIso && toIso) {
                 const runSlotCheck = () => findAvailableSlots({
@@ -728,7 +736,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // guessing. v2.7.1 — no owner_buffer_collision label: connected
                 // back-to-backs are fine by design (the buffer is baked into
                 // standard durations).
-                const labelFor = (reason: string | undefined): string => humanizeViolationLabel(reason, ownerFirst);
+                // gh#200 — `oofUntilDisplay` reaches the `owner_out_of_office`
+                // case only; every other reason ignores it.
+                const labelFor = (reason: string | undefined, oofUntilDisplay?: string): string =>
+                  humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay);
                 const counts = diagnostics.rejectedCounts ?? {};
                 const fired = Object.keys(counts);
                 // Pick the first reason that fired. Narrow window means
@@ -737,6 +748,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // pick whichever shows up first — caller gets a real fact
                 // either way.
                 const brokenRule = fired[0];
+                // gh#200 — an all-day OOF rejects the whole day before
+                // checkSlot ever runs (so `conflictingEvent` below stays
+                // unset for it — see its own field doc); the away span's
+                // real end lives on the day_summary entry for the requested
+                // day instead, already formatted by the walker, quoted
+                // verbatim here.
+                const brokenRuleUntilDisplay = brokenRule === 'owner_out_of_office'
+                  ? diagnostics.daySummary?.find(d => d.date === startDt.toFormat('yyyy-MM-dd'))?.oof_until_display
+                  : undefined;
 
                 // v4.3.x (#165b) — name the ACTUAL conflicting event when the
                 // rejection is a real calendar clash (not a work-hours/lunch/
@@ -777,14 +797,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // block that isn't actually OOF is not "he's away").
                 const isAllDayCollision = conflictingEvent?.isAllDay === true;
                 const brokenRuleLabel = (brokenRule === 'owner_busy_collision' && conflictingEvent?.allDayOutOfOffice)
-                  ? humanizeViolationLabel('owner_out_of_office', ownerFirst)
+                  ? humanizeViolationLabel('owner_out_of_office', ownerFirst, conflictingEvent.allDayOutOfOfficeUntilDisplay)
                   // No quotes here (unlike the other labels' plain phrasing) — the
                   // message below already names the specific subject in its own
                   // quotes, and nesting quotes-in-quotes when this string is
                   // re-quoted verbatim into ask_text reads as a paste error.
                   : (brokenRule === 'owner_busy_collision' && isAllDayCollision && conflictingEvent)
                     ? `blocked all day by another commitment on ${ownerFirst}'s calendar`
-                    : labelFor(brokenRule);
+                    : labelFor(brokenRule, brokenRuleUntilDisplay);
 
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,

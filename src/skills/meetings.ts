@@ -959,9 +959,15 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             // An all-day OOF is not "he has something at that time", it is
             // "he is away that day". The old wording invited the obvious next
             // question ("could he do 30 min later?"), which has the same answer
-            // for every hour of the day.
+            // for every hour of the day. gh#200 — when the span reaches past
+            // this one day, name its real end so a colleague asking about
+            // several different days inside the same known period is told the
+            // whole window once instead of a fresh day-scoped "away that whole
+            // day" every time.
             message: held?.allDayOutOfOffice
-              ? `${ownerFirst} is out of office that whole day ("${held.subject}") — not just at that time, so a different hour on the same day won't help either. Offer another day.`
+              ? held.allDayOutOfOfficeUntilDisplay
+                ? `${ownerFirst} is away through ${held.allDayOutOfOfficeUntilDisplay} ("${held.subject}") — not just today, so a different day inside that window won't help either. Offer a day after that.`
+                : `${ownerFirst} is out of office that whole day ("${held.subject}") — not just at that time, so a different hour on the same day won't help either. Offer another day.`
               : held
                 ? `${ownerFirst} has "${held.subject}" on his calendar at that time.`
                 : `${ownerFirst} has something on his calendar at that time.`,

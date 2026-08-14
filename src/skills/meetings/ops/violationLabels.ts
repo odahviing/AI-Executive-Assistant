@@ -4,8 +4,14 @@
  * the owner sees "outside your work hours" not a rule code. v2.7.1 — no
  * owner_buffer_collision label (connected back-to-backs are fine). Extracted
  * (v3.7.x) from three identical inline copies in ops.ts.
+ *
+ * `oofUntilDisplay` (gh#200) — the away span's real end, ALREADY FORMATTED
+ * ("Friday 29 Aug") by its own producer (checkSlot's
+ * overCommitment.allDayOutOfOfficeUntilDisplay, or the search walker's
+ * day_summary.oof_until_display) — quoted verbatim, never re-derived here.
+ * Only the `owner_out_of_office` case reads it; every other reason ignores it.
  */
-export function humanizeViolationLabel(reason: string | undefined, ownerFirst: string): string {
+export function humanizeViolationLabel(reason: string | undefined, ownerFirst: string, oofUntilDisplay?: string): string {
   // The walker tags per-attendee rejections as `<reason>:<email>` so day_summary
   // can attribute blame. Strip the suffix (structured string, not natural
   // language) — otherwise every attendee-blamed reason humanized to "unknown",
@@ -25,7 +31,13 @@ export function humanizeViolationLabel(reason: string | undefined, ownerFirst: s
     // all-day out-of-office. Distinct from owner_busy_collision on purpose: "the
     // whole day is gone" and "that hour clashes" invite completely different
     // next moves from the person reading it.
-    case 'owner_out_of_office': return `${ownerFirst} is out of office that whole day`;
+    // gh#200 — when the away span reaches past this one day, name its real,
+    // already-formatted end instead of a fresh day-scoped "that whole day" —
+    // same phrasing convention as hardBlockClassPhrase's own all-day branch
+    // (availabilityGate.ts), so the two never disagree about the wording.
+    case 'owner_out_of_office': return oofUntilDisplay
+      ? `${ownerFirst} is away through ${oofUntilDisplay}`
+      : `${ownerFirst} is out of office that whole day`;
     // Adjectival, like every other label here — "That time is X" is the
     // template several callers plug this into (createMeeting.ts), and a verb
     // phrase there read as "That time is conflicts with..." (owner report,

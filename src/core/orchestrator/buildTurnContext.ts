@@ -889,7 +889,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
           const meetingsHh = Math.floor(totalMin / 60);
           const meetingsMm = totalMin % 60;
           const meetingsStr = meetingsHh > 0 ? `${meetingsHh}h${meetingsMm > 0 ? `${String(meetingsMm).padStart(2, '0')}m` : ''}` : `${meetingsMm}m`;
-          // An all-day OOO zeroes freeMin upstream (ops/analysis.ts:499),
+          // An all-day OOO zeroes freeMin upstream (ops/analysis.ts:562),
           // so the numeric line renders "0m free / 0m in meetings across 0
           // meetings" and reads as packed solid — the opposite of "he's away".
           // Same second-person idiom the validator already uses for this state

@@ -329,7 +329,7 @@ export function analyzeCalendar(
   const fb = require('../../../utils/floatingBlocks') as typeof import('../../../utils/floatingBlocks');
   const floatingBlocks = fb.getFloatingBlocks(profile);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { requiredFreeMinutesForWorkDay, isAllDayOutOfOffice } =
+  const { requiredFreeMinutesForWorkDay, isAllDayOutOfOffice, computeOofSpan } =
     require('../../../utils/scheduleRules') as typeof import('../../../utils/scheduleRules');
   // v3.6.x (bug 1.13) — required free time is now LENGTH-based, not a fixed
   // office/home target: 1h free per 4h worked, rounded UP to the next 15 min,
@@ -337,6 +337,28 @@ export function analyzeCalendar(
   // summed). The old fixed free_time_per_office/home_day_hours and the
   // buffer_minutes shave are gone from this calc (buffer_minutes still lives in
   // check_join_availability). Computed per day in the loop below via workTotalMin.
+
+  // gh#200 — pre-compute every all-day OOF event's own [start, endExclusive)
+  // span ONCE, from the full (not day-filtered) event list, via the SAME
+  // `computeOofSpan` checkSlot uses (scheduleRules.ts) — one span computation,
+  // not a second copy that could disagree about where an away period ends.
+  // `processCalendarEvents` parses `_localDate` from the event's OWN start
+  // only, so a 20-day away event sits at ONE `_localDate` (its first day) no
+  // matter how many days the loop below walks — the day loop's per-day
+  // `events.filter(e => e._localDate === dateStr)` therefore never re-finds it
+  // past day one; this span lets every day of it be checked regardless. Mirrors
+  // checkHealth.ts's `dayIsFullDayOOO` (#146), the proven span-aware pattern
+  // for this exact shape.
+  const oofSpans = events
+    .filter(e => e._eventType === 'mine' && isAllDayOutOfOffice(e))
+    .map(e => computeOofSpan(e.id, e._localDate, e._durationMin, profile.user.timezone));
+  // gh#200 — every meeting found sitting on a MULTI-day OOF span's day 2..N
+  // (previously invisible past the event's own `_localDate` — see above),
+  // bucketed by the underlying OOF event's id and accumulated across the WHOLE
+  // day loop below, so it lands in the SAME single issue day 1 already
+  // produces instead of being silently dropped. The consolidated push happens
+  // once, after the day loop.
+  const oofSpanMeetings = new Map<string, Array<{ date: string; day: string; events: ProcessedEvent[] }>>();
 
   // Iterate every calendar day in the range
   const results: DayAnalysis[] = [];
@@ -401,20 +423,41 @@ export function analyzeCalendar(
 
     // ── Work day analysis ───────────────────────────────────────────────────
 
-    // Check for OOF event
-    const oofEvent = myEvents.find(e => e.showAs === 'oof');
-    // An ALL-DAY OOF means the day is gone, whatever the yaml says about it
-    // being a work day. Not merged into `isWorkDay`: that would swap the
-    // `oof_with_meetings` issue for `work_on_day_off` and rewrite issue classes
-    // #146 depends on. It only gates the free-time maths at the end.
-    // P29 — through THE predicate (scheduleRules.isAllDayOutOfOffice), not a local
-    // copy of its three-way test. The copy agreed exactly, which is why it had to
-    // go: "is he out that day" is one question, and two implementations of it would
-    // eventually answer differently for the validator and for the narration.
-    const outOfOfficeAllDay = myEvents.some(isAllDayOutOfOffice);
+    // gh#200 — is this date covered by one of the pre-computed OOF spans?
+    // Span-aware (start <= dateStr < endExclusive), so a 20-day away event
+    // is recognized on EVERY day it covers, not only the day matching its
+    // own `_localDate`. An ALL-DAY OOF means the day is gone, whatever the
+    // yaml says about it being a work day. Not merged into `isWorkDay`: that
+    // would swap the `oof_with_meetings` issue for `work_on_day_off` and
+    // rewrite issue classes #146 depends on. It only gates the free-time
+    // maths at the end.
+    // P29 — the span is built from THE predicate (scheduleRules.isAllDayOutOfOffice),
+    // not a local copy of its three-way test — see the `oofSpans` computation above.
+    const coveringOofSpan = oofSpans.find(s => s.startDate <= dateStr && dateStr < s.endDateExclusive);
+    const outOfOfficeAllDay = coveringOofSpan !== undefined;
     const nonAllDayMeetings = myEvents.filter(e => !e.isAllDay && e.showAs !== 'oof');
 
-    if (oofEvent && nonAllDayMeetings.length > 0) {
+    // gh#200 retry (bouncer overturn) — the `oof_with_meetings` gate must catch
+    // ANY oof event on the day, timed included, not only an all-day span: HEAD
+    // read `myEvents.find(e => e.showAs === 'oof')` with no isAllDay test, and
+    // checkHealth.ts:234's own detector still does (`dayEvents.filter(e =>
+    // e.showAs === 'oof')`) — narrowing to all-day-only here silently dropped a
+    // timed OOF block with meetings on top of it, and disagreed with that other
+    // surface (the exact P29 drift this predicate exists to prevent).
+    const anyOofToday = myEvents.find(e => e.showAs === 'oof');
+    if (coveringOofSpan && nonAllDayMeetings.length > 0) {
+      // gh#200 — accumulate rather than emit here, so a meeting on day 5 of a
+      // 20-day span (previously invisible past the event's own `_localDate`;
+      // see the oofSpans doc above) lands in the SAME issue as day 1's,
+      // instead of being dropped. The consolidated push happens once, after
+      // the day loop below.
+      const bucket = oofSpanMeetings.get(coveringOofSpan.eventId) ?? [];
+      bucket.push({ date: dateStr, day: dayName, events: nonAllDayMeetings });
+      oofSpanMeetings.set(coveringOofSpan.eventId, bucket);
+    } else if (anyOofToday && nonAllDayMeetings.length > 0) {
+      // A TIMED oof block (not part of an all-day span) — a one-off, so it
+      // emits immediately exactly as HEAD did; no multi-day consolidation
+      // applies to it.
       issues.push({
         type: 'oof_with_meetings',
         severity: 'high',
@@ -687,6 +730,44 @@ export function analyzeCalendar(
     });
 
     cursor = cursor.plus({ days: 1 });
+  }
+
+  // gh#200 — emit the consolidated `oof_with_meetings` issue(s), one per
+  // underlying OOF event, on the FIRST affected day of each span. The real fix
+  // here is COVERAGE, not count: pre-fix already emitted exactly one issue per
+  // span (day 1's own `_localDate` match — see the oofSpans doc above), so a
+  // single-day span reads exactly as it did before. What's new is that a
+  // meeting on ANY day of a multi-day span (day 2..N, previously invisible)
+  // now makes it into that same one issue instead of being silently dropped.
+  for (const bucket of oofSpanMeetings.values()) {
+    // Every bucket has >=1 entry (only ever created immediately before a
+    // push, above) and `bucket[0].date` is always a date this SAME day loop
+    // already pushed a DayAnalysis row for — the accumulation above only runs
+    // past the day-off early `continue`, and nothing between there and this
+    // day's own `results.push` skips it — so `anchor` is always found.
+    const anchor = results.find(d => d.date === bucket[0].date)!;
+    const totalCount = bucket.reduce((n, b) => n + b.events.length, 0);
+    if (bucket.length === 1) {
+      // Single OOF day — identical wording to the pre-gh#200 per-day issue.
+      anchor.issues.push({
+        type: 'oof_with_meetings',
+        severity: 'high',
+        detail: `You're out-of-office but have ${totalCount} meeting(s) scheduled: ${bucket[0].events.map(e => `${e.subject} at ${e._localStartTime}`).join(', ')}`,
+        suggestedFix: 'These meetings need to be moved or cancelled.',
+      });
+    } else {
+      // Multi-day span — ONE issue naming every affected meeting across every
+      // day of the span.
+      const meetingList = bucket
+        .flatMap(b => b.events.map(e => `${b.day.slice(0, 3)} ${b.date} "${e.subject}" at ${e._localStartTime}`))
+        .join(', ');
+      anchor.issues.push({
+        type: 'oof_with_meetings',
+        severity: 'high',
+        detail: `You're out-of-office ${bucket[0].date} through ${bucket[bucket.length - 1].date} but have ${totalCount} meeting(s) still scheduled across that span: ${meetingList}`,
+        suggestedFix: 'These meetings need to be moved or cancelled.',
+      });
+    }
   }
 
   return results;

@@ -420,6 +420,17 @@ interface SlotOutcome {
    */
   outOfOfficeAllDay?: true;
   /**
+   * gh#200 — set alongside `outOfOfficeAllDay` only when the away span reaches
+   * past this one day: the LAST day checkSlot's
+   * `overCommitment.allDayOutOfOfficeUntilDisplay` named, ALREADY FORMATTED
+   * ("Friday 29 Aug") by that one producer (gh#200 dedup, v2) — quote
+   * verbatim here and downstream, never re-derive from a raw date. Lets the
+   * reply say "away through Aug 29" once instead of re-explaining "away that
+   * whole day" for every separate day a colleague proposes inside the same
+   * known period.
+   */
+  outOfOfficeUntilDisplay?: string;
+  /**
    * o#189 — the exact meeting length `checkSlot` was run at to reach this
    * verdict: the asked length (snapped to allowed durations) for a normal ask,
    * or the smallest allowed duration for a gap query's "nothing fits" verdict
@@ -794,11 +805,13 @@ export async function precheckAvailability(params: {
       let maxFit: number | null = null;
       let blockedBy: RuleViolationKind | undefined;
       let blockedByOoo = false;
+      let blockedByOooUntilDisplay: string | undefined;
       for (const d of [...allowedDurations].sort((a, b) => b - a)) {
         const probe = checkAt(d);
         if (probe.passes) { maxFit = d; break; }
         blockedBy = probe.violation_kind;
         blockedByOoo = probe.overCommitment?.allDayOutOfOffice === true;
+        blockedByOooUntilDisplay = probe.overCommitment?.allDayOutOfOfficeUntilDisplay;
       }
       return {
         date, time,
@@ -806,6 +819,9 @@ export async function precheckAvailability(params: {
         maxFreeMinutes: maxFit,
         ...(maxFit === null && blockedBy ? { rejection_reason: blockedBy } : {}),
         ...(maxFit === null && blockedByOoo ? { outOfOfficeAllDay: true as const } : {}),
+        // gh#200 — the away span's real end (LAST day, inclusive), already
+        // formatted by checkSlot. See SlotOutcome.outOfOfficeUntilDisplay.
+        ...(maxFit === null && blockedByOooUntilDisplay ? { outOfOfficeUntilDisplay: blockedByOooUntilDisplay } : {}),
         // The "nothing fits" verdict was established by the LAST (smallest)
         // probe in the descending sweep — o#189, so the ledger/refuter re-probe
         // at that same length rather than a possibly-different smallest-allowed.
@@ -820,6 +836,8 @@ export async function precheckAvailability(params: {
       bookable: false,
       rejection_reason: check.violation_kind ?? 'unknown',
       ...(check.overCommitment?.allDayOutOfOffice ? { outOfOfficeAllDay: true as const } : {}),
+      ...(check.overCommitment?.allDayOutOfOfficeUntilDisplay
+        ? { outOfOfficeUntilDisplay: check.overCommitment.allDayOutOfOfficeUntilDisplay } : {}),
       durationMin: snappedMin,
     };
   };
@@ -968,6 +986,14 @@ export async function precheckAvailability(params: {
         display: formatSlotDisplay(r.date, r.time, tz),
         kind: r.rejection_reason,
         allDayOutOfOffice: r.outOfOfficeAllDay === true,
+        // gh#200 — bake the span's real end into the ledger's own phrase at
+        // record time (same as every other field here), so the output-guard's
+        // later rewrite (runOutputGates) also names it instead of falling back
+        // to the generic "away that whole day". Already formatted by checkSlot
+        // (the one producer, gh#200 dedup v2) — quoted verbatim, never re-derived.
+        ...(r.outOfOfficeUntilDisplay
+          ? { allDayOutOfOfficeUntilDisplay: r.outOfOfficeUntilDisplay }
+          : {}),
         // Always set alongside rejection_reason (evaluateInstant, above) — the
         // fallback only guards the type, it is not expected to fire.
         durationMin: r.durationMin ?? durationMinutes,
@@ -1324,11 +1350,20 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
     const phrase = hardBlockClassPhrase(o.rejection_reason, {
       ownerFirst,
       allDayOutOfOffice: o.outOfOfficeAllDay,
+      // gh#200 — when the away span reaches past this one day, name its real
+      // end so a colleague proposing several different days inside the same
+      // known period is told the whole window once ("away through Fri 29
+      // Aug") instead of a fresh day-scoped "away that whole day" every time.
+      // Already formatted by checkSlot (the one producer) — quoted verbatim.
+      allDayOutOfOfficeUntilDisplay: o.outOfOfficeUntilDisplay,
     });
     // The all-day case also rules out the obvious follow-up: a different hour on
-    // the same day has the same answer.
+    // the same day has the same answer. gh#200 — when the span's real end is
+    // known, rule out the whole span at once instead of just this one day.
     const sameDayNote = o.outOfOfficeAllDay
-      ? ` Offer another DAY — do NOT offer a different time on the same day, and do NOT say he's booked.`
+      ? o.outOfOfficeUntilDisplay
+        ? ` Offer a day AFTER that whole span — do NOT offer any day up to and including it, and do NOT say he's booked.`
+        : ` Offer another DAY — do NOT offer a different time on the same day, and do NOT say he's booked.`
       : '';
     const reasonRule = phrase
       ? `never give a reason other than the one on this line (and never name the meeting, who is on it, or whose it is)`
