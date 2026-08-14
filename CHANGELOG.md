@@ -2,6 +2,34 @@
 
 ---
 
+## 4.5.8 — Honest AI disclosure, a floating-block charter rule, and a backlog of concurrent fixes
+
+Two threads in one wrap: a security-gate fix that took three real bounces to get right, and a bundle of independently-verified fixes from concurrent bug-fixing sessions tonight, held uncommitted until now.
+
+### Fixed — AI disclosure (three rounds, each caught by an independent adversarial pass)
+
+- Asked directly and genuinely whether she's AI, a bot, or human, Maelle now answers honestly — proven with live model calls across English, Hebrew, French, in an existing thread, a fresh thread, and with the owner present in a group chat. She still never volunteers it unprompted.
+- The first attempt at this fix removed the security check entirely instead of making it conditional, based on a claim later proven false in the code; a second attempt fixed that but broke the same guarantee for Hebrew/French text and for email, and left the owner-in-group case blind. Both are now fixed and independently verified with live execution, not just a code read.
+- Known, deliberate gap: Maelle's own unprompted asides (codas) can still volunteer an AI-disclosure claim in non-English languages — the code comment claiming full multilingual coverage there was false and has been corrected. Left as-is because the coda system is being rewritten separately; re-check when that lands.
+
+### Added — framework
+
+- New charter rule (Matchmaker M16): a floating block's position within its valid range carries no ranking, so a rebalance move is never chained against whatever action triggered it.
+- The charter rule-count band (5–15 rules) is now a real hard block at 8–20, not an advisory self-test — a legitimate charter change was refused on the old, non-binding version of this rule, which should never have been possible.
+- New script, `check-stale-citations.cjs`, wired into the wrap: catches a code comment or doc citing a `file:line` that has since drifted, before it ships. Found and fixed roughly 20 stale citations across the framework and codebase in its first uses tonight.
+- The wrap report can no longer claim "0 rows await you" while a real, rulable backlog exists — it was doing exactly that until tonight.
+
+### Fixed — concurrent bug-fixing sessions, bundled into this wrap
+
+- A wrong calendar move now gets caught and refused before it happens, not after; undo can look further back than just the single most recent action.
+- A floating block's rebalance is no longer at risk of being silently mis-undone.
+- Mail polling no longer goes permanently dead with no visible signal after repeated failures.
+- A colleague's "did they ever reply" tracking no longer reports a false negative inside the normal reply window.
+- Out-of-office handling: a multi-day absence is now flagged once instead of once per day, the search path no longer drops its own reason when OOF overlaps a workday, and "until" wording is now documented in the bulk-narration contract.
+- A request's phase field is now typed instead of a bare string; a stale precedence bug in callback extraction is fixed; a reminder that fires no longer goes invisible the same way a finished research run once did.
+- A fabricated personal fact about the owner can no longer reach a colleague reply; the schedule-override tool's own safety-net tables were missing an entry.
+- `tavilySearch` is now bounded the same way `tavilyExtract` already was; two duplicate away-span formatters and one hand-duplicated event-conflict shape are consolidated to one each.
+
 ## 4.5.7 — A colleague finally hears when a long absence actually ends
 
 Real incident (gh#200): a single ~20-day away period had Maelle telling a colleague "fully booked" one day at a time in a Hebrew scheduling chat, never once naming the underlying reason or when it ends — a long, repetitive, annoying exchange. Separately, telling her about the vacation through the schedule-override tool worked correctly underneath, but a safety check falsely flagged her own accurate confirmation as unverified.

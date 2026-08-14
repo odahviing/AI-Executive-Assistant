@@ -24,6 +24,54 @@ import { getEffectiveWorkDay } from './workHours';
 import { prefersDensePacking, densityConfigFromProfile } from './calendarDensity';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import logger from './logger';
+import { logActivity } from '../core/requests/logActivity';
+
+// floating-block-auto-rebalance-not-revertible-and-misundo-risk (2026-08-14)
+// — every block this function actually relocates via updateMeeting (both
+// move sites below) now writes its own activity row too, mirroring
+// book_floating_block's own logFloatingBlockActivity
+// (calendarHealth/handlers/floatingBlockOps.ts). Two reasons: (a) so "undo
+// that" can put the block back, and (b) so right after a create_meeting /
+// move_meeting whose mutation triggered this shift, the NEWEST logged row is
+// THIS one, not the parent mutation's — undo then targets the shift, never
+// the meeting that caused it. No precedence/undo-chaining logic against the
+// triggering action is needed, even a non-revertible one like delete_meeting
+// (matchmaker.md M16): the block's post-rebalance position carries no
+// ranking, so logging this row and stopping is the whole job. subkind is
+// literally 'move_meeting' (not a
+// bespoke tag) so the EXISTING move_meeting revert path
+// (ops/handlers/calendarReads.ts's handleRevertAction) picks it up with no
+// new dispatch code — the same key autoMove's own auto_move rows resolve
+// to (activityRevertibility.ts). ownerUserId comes off `params.ownerSlackId`
+// (already threaded by every call site, previously unused in this file);
+// no owner id → best-effort skip, matching logActivity's own fail-soft
+// contract.
+function logRebalanceMoveActivity(
+  ownerSlackId: string | undefined,
+  blockName: string,
+  blockEvent: CalendarEvent,
+  tz: string,
+  newStart: DateTime,
+  newEnd: DateTime,
+): void {
+  if (!ownerSlackId) return;
+  logActivity({
+    ownerUserId: ownerSlackId,
+    kind: 'follow_up',
+    subkind: 'move_meeting',
+    subject: `Rebalanced '${blockName}'`,
+    outcomeJson: {
+      event_id: blockEvent.id,
+      original_start: blockEvent.start.dateTime,
+      original_end: blockEvent.end.dateTime,
+      original_tz: blockEvent.start.timeZone ?? tz,
+      new_start: newStart.toISO(),
+      new_end: newEnd.toISO(),
+    },
+    initiatedBy: ownerSlackId,
+    initiatedByRole: 'system',
+  });
+}
 
 // Process-lifetime dedup cache for "floating block overlap" shadows.
 // Same (date, blockName, overlappingEventId) fingerprint within the TTL
@@ -351,6 +399,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               });
               result.moved++;
               result.movedBlockEventIds.push(blockEvent.id);
+              logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
               await shadowNotify(profile, {
                 channel: '',
                 icon: '🔧',
@@ -422,6 +471,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           });
           result.moved++;
           result.movedBlockEventIds.push(blockEvent.id);
+          logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
           await shadowNotify(profile, {
             channel: '',  // sendDirect path; cache handles the channel
             icon: '🔧',

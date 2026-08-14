@@ -767,12 +767,22 @@ if (argv.includes('--report')) {
   });
   if (!claims.length) {
     console.log(`\n  headline: NOT CHECKED — no "<n> rows await you" line found. Its ledger total is a separate claim: node scripts/ledger-stats.cjs --open`);
-  } else {
+  } else if (totalRows > 0) {
     for (const c of claims) {
       const ok = c.want === pendingRows;
       if (!ok) bad += 1;
       console.log(`\n  line ${String(c.line).padStart(4)} claims "${c.says}" · the pending group(s) hold ${pendingRows}   ${ok ? 'ok' : '! MISMATCH'}`);
     }
+  } else {
+    // X194 · AN EMPTIED TABLE makes `pendingRows` trivially 0, so checking an
+    // "await you" claim against it here would pass "0 rows await you" no matter
+    // how large the standing backlog is — a check that passes on the exact input
+    // it exists to catch. His own words, 2026-08-14: he read exactly that
+    // sentence, on an emptied table, while the ledger held 9 rulable rows he had
+    // never ruled on, and was told everything was clear. Deferred to the
+    // standing-backlog check below, the only honest target once the table is
+    // itself empty.
+    console.log(`\n  headline claim(s) on an emptied table — checked against the standing backlog below, not against 0 table rows.`);
   }
   // ── X77 · A ROW HE CANNOT ANSWER IS THE DEFECT — not the length of the list ──
   // He is not asking for a shorter table: forty rulable rows are fine and one row
@@ -1119,6 +1129,27 @@ if (argv.includes('--report')) {
         `      ${want['waiting on a verb']} open row(s) need his build-or-decline and carry no verb, so X77 keeps every one of them OFF the table. Silence on this line reads as nothing pending — write it, then give those rows their verb (M6b).`,
       );
     if (wrong.length) bad += 1;
+    // X194 · THE "0 ROWS AWAIT YOU" ALL-CLEAR, CHECKED AGAINST THE STANDING
+    // BACKLOG, not just the table. His own words, 2026-08-14: he read that exact
+    // sentence on an emptied report and was told nothing needed him, while the
+    // ledger held 9 rulable rows he had never ruled on. The claim was TRUE of the
+    // table (0 rows) and FALSE of what he actually needed to know, and nothing
+    // here ever compared the two — every check above validates the table's own
+    // arithmetic or the ledger TOTAL, never this specific claim against RULABLE.
+    // Fires only when the table itself is empty; a populated report is already
+    // covered by the pendingRows check above, where "await you" correctly means
+    // "what this table lists."
+    if (!totalRows) {
+      for (const c of claims) {
+        const ok = c.want === (want.rulable || 0);
+        if (!ok) bad += 1;
+        console.log(
+          `\n  line ${String(c.line).padStart(4)} claims "${c.says}" · the standing backlog holds ${want.rulable || 0} rulable row(s) he has never ruled on   ${
+            ok ? 'ok' : '! MISMATCH — an emptied report reading this as an all-clear must name the standing rulable count, never 0, while one stands'
+          }`,
+        );
+      }
+    }
   }
   // ── X83 · his bound on the narration · X137 · ON NARRATION, which is not the
   // same set as "lines outside the table". A line THIS CHECK REQUIRES AND

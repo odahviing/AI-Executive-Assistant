@@ -306,6 +306,68 @@ async function notifyOwnerOfSustainedListFailure(
   }
 }
 
+/**
+ * DM's the owner once tick() has given up STARTING NEW TICKS — not
+ * necessarily given up forever (mailpoll-permanent-dead-state-only-logs-no-
+ * owner-dm, manual backlog wave, 2026-08-14; corrected 2026-08-14 by the
+ * bouncer's mailpoll-permanent-dead-state-false-restart-claim follow-up) —
+ * the counterpart to notifyOwnerOfSustainedListFailure above, and worse in
+ * the moment it fires: a sustained listNewMessages failure still retries
+ * every tick on its own; once MAX_CONSECUTIVE_FORCE_CLEARS is hit, tick()
+ * stops starting new ticks until the already-stuck generation finishes.
+ * That can still happen on its own (see the .finally() reset next to
+ * consecutiveForceClears below) — this notifier does NOT mean intake is
+ * provably dead forever, only that repeated force-clears happened with no
+ * recovery yet. If the stuck generation never finishes (a genuine
+ * indefinite hang), a restart is the only way out; if it does finish,
+ * polling resumes on the very next tick with no restart needed. Per D4: a
+ * state that persists until something changes earns a message even when
+ * "something changes" may be automatic recovery rather than owner action —
+ * silence here is still the worse failure.
+ *
+ * Same notification mechanism as the two notifiers above (getConnection +
+ * slack.sendDirect) — Slack is the only channel known to still be reachable
+ * once email intake itself is what died. The message states what's actually
+ * true (repeated force-clears, no confirmed recovery yet) rather than
+ * asserting an outcome the code can't guarantee is irreversible. Guarded by
+ * notifiedPermanentPollDeath, next to consecutiveForceClears above, which
+ * now resets at the SAME recovery point consecutiveForceClears does — see
+ * that flag's own comment — so a genuine later death after a real recovery
+ * still gets its own fresh notification instead of being silently
+ * swallowed by a stale "already notified" flag.
+ *
+ * Never throws — same contract as the two notifiers above.
+ */
+async function notifyOwnerOfPermanentPollFailure(profile: UserProfile, stuckForMs: number): Promise<void> {
+  const profileId = profile.user.slack_user_id;
+  try {
+    const slack = getConnection(profileId, 'slack');
+    if (!slack) {
+      logger.warn('mailPoll — no Slack connection registered, cannot notify owner of permanent mail-poll failure', {
+        profileId,
+      });
+      return;
+    }
+    const mailbox = profile.channels?.email?.mailbox ?? 'the configured mailbox';
+    const stuckForMin = Math.round(stuckForMs / 60_000);
+    const text = `Checking email (${mailbox}) has been stuck for ~${stuckForMin} min and I've force-cleared a `
+      + `stalled poll ${MAX_CONSECUTIVE_FORCE_CLEARS} times in a row without it finishing, so I've stopped `
+      + `starting new polls for now. That earlier stalled run can still complete on its own, in which case `
+      + `polling resumes automatically with no action from you — but if email keeps not coming through, `
+      + `restarting me is the reliable way to get it moving again.`;
+    const res = await slack.sendDirect(profileId, text);
+    if (!res.ok) {
+      logger.error('mailPoll — Slack permanent-failure notification send failed', {
+        profileId, reason: res.reason, detail: res.detail,
+      });
+    }
+  } catch (err) {
+    logger.error('mailPoll — notifyOwnerOfPermanentPollFailure itself threw', {
+      profileId, err: String(err).slice(0, 200),
+    });
+  }
+}
+
 let tickInFlight = false;
 let tickStartedAt = 0;
 let currentTickGeneration = 0;
@@ -417,6 +479,20 @@ const STALE_TICK_CEILING_MS = LIST_MESSAGES_TIMEOUT_MS + STALE_TICK_MESSAGES_MAR
 const MAX_CONSECUTIVE_FORCE_CLEARS = 3;
 let consecutiveForceClears = 0;
 
+// mailpoll-permanent-dead-state-only-logs-no-owner-dm (manual backlog wave,
+// 2026-08-14; reset point corrected 2026-08-14 by the bouncer's
+// mailpoll-permanent-dead-state-false-restart-claim follow-up) — once tick()
+// gives up below, every tick re-enters that branch every 30s until either a
+// restart or the stuck generation finishes on its own (see the .finally()
+// below, which resets this flag at the same point it resets
+// consecutiveForceClears). Without this guard the DM added there would
+// repeat every 30s for as long as the dead state lasts — the exact flood
+// mailpoll-sustained-failure-notification-flood already fixed one mechanism
+// over. Resets on genuine recovery, not just on restart, so a later real
+// death after a real recovery still gets its own fresh notification instead
+// of being silenced forever by a flag that was never cleared.
+let notifiedPermanentPollDeath = false;
+
 function tick(profiles: Map<string, UserProfile>): void {
   if (tickInFlight) {
     const stuckForMs = Date.now() - tickStartedAt;
@@ -431,6 +507,13 @@ function tick(profiles: Map<string, UserProfile>): void {
         + 'run behind an already-unrecovered stall, not help)',
         { stuckForMs, consecutiveForceClears },
       );
+      if (!notifiedPermanentPollDeath) {
+        notifiedPermanentPollDeath = true;
+        for (const profile of profiles.values()) {
+          if (!profileConfigured(profile)) continue;
+          void notifyOwnerOfPermanentPollFailure(profile, stuckForMs);
+        }
+      }
       return;
     }
     consecutiveForceClears++;
@@ -462,14 +545,22 @@ function tick(profiles: Map<string, UserProfile>): void {
       // Only the still-current tick clears the flag — see the generation
       // comment above for why a stale, force-cleared tick must not clear a
       // newer one's flag when it finally resolves. Same reasoning for the
-      // force-clear counter: this generation finishing on its own is a
-      // recovery signal, so it resets the count of consecutive force-clears
+      // force-clear counter AND the permanent-death notification flag: this
+      // generation finishing on its own is a recovery signal, so it resets
+      // the count of consecutive force-clears and notifiedPermanentPollDeath
       // with no intervening success — a STALE generation's eventual
       // .finally() must not (it is the thing that was stuck, not proof the
-      // stall is over).
+      // stall is over). Resetting notifiedPermanentPollDeath here too
+      // (mailpoll-permanent-dead-state-false-restart-claim, bouncer
+      // follow-up, 2026-08-14) matters because the "gave up" DM never
+      // promised the dead state was irreversible — it can end exactly here,
+      // and when it does, a LATER genuine permanent death must still earn
+      // its own notification instead of being silently swallowed by a flag
+      // that was left `true` forever.
       if (myGeneration === currentTickGeneration) {
         tickInFlight = false;
         consecutiveForceClears = 0;
+        notifiedPermanentPollDeath = false;
       }
     });
 }

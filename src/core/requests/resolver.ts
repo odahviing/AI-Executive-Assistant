@@ -25,7 +25,7 @@ import {
   RESOLVER_REPLAY_TOOLS,
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
-import { runDeferredAction } from './deferredActionReplay';
+import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
@@ -497,6 +497,41 @@ async function resolveRequestInner(
     });
   }
 
+  // possible-reschedule-replay-failure-has-no-recovery-path (2026-08-14) —
+  // same shape as the location-mode merge above: resolution DATA for the
+  // SAME approved decision, arriving on a plain re-`approve` (not an
+  // 'amend' — R9's counter cap doesn't apply, nothing here is a new offer
+  // needing anyone's consent). The prior replay attempt threw
+  // `possible_reschedule` (runApproveCallback's catch, below) and told the
+  // caller the sibling's meeting_id; this is what a follow-up "move it
+  // instead" (R8: a book may resolve to a move — no tool is off the table)
+  // or "book it anyway" actually does with that answer.
+  if (effectiveApprove && effectiveApprove.tool === 'create_meeting'
+      && typeof approveData.move_existing_meeting_id === 'string'
+      && approveData.move_existing_meeting_id.trim().length > 0) {
+    const src = effectiveApprove.args;
+    effectiveApprove = {
+      tool: 'move_meeting',
+      args: {
+        meeting_id: approveData.move_existing_meeting_id.trim(),
+        new_start: src.start,
+        // new_end deliberately omitted (bouncer fix, 2026-08-14): src.end is
+        // the approved CREATE window's length, not the moving meeting's own
+        // duration. Leaving new_end unset lets moveMeeting.ts's #135c logic
+        // derive it from the moving event's existing duration, same as any
+        // other pure reschedule — so a 60-minute meeting recovered through
+        // this path doesn't silently get cut to the approved window's length.
+        meeting_subject: src.subject,
+      },
+    };
+    logger.info('resolveRequest — possible_reschedule recovery: on_approve create_meeting → move_meeting', {
+      id: requestId, existingMeetingId: approveData.move_existing_meeting_id,
+    });
+  } else if (effectiveApprove && approveData.force_new === true) {
+    effectiveApprove = { ...effectiveApprove, args: { ...effectiveApprove.args, force_new: true } };
+    logger.info('resolveRequest — possible_reschedule recovery: forcing a new meeting on retry', { id: requestId });
+  }
+
   if (effectiveApprove) {
     return runApproveCallback(row, effectiveApprove, ctx, {
       mergedFromAmend: !!hasCounter,
@@ -615,6 +650,33 @@ async function runApproveCallback(
       surface: deriveOriginSurface(row),
     });
   } catch (err) {
+    // possible-reschedule-replay-failure-has-no-recovery-path (2026-08-14) —
+    // pre-fix this fell straight to the generic branch below: the sentinel's
+    // existing_meeting_id/subject/when never survived past `ReplayToolError`'s
+    // flattened message ("tool returned error: possible_reschedule"), so the
+    // caller had nothing to act on and the request just sat awaiting_owner
+    // with no way forward. The live (non-replay) create_meeting path already
+    // hands this exact sentinel straight to Sonnet with a "move_meeting on
+    // meeting_id X, or retry with force_new" instruction (see createMeeting.ts);
+    // this mirrors that same recovery for the replay path, closing the loop
+    // through the `move_existing_meeting_id` / `force_new` data merge above.
+    if (err instanceof ReplayToolError && err.sentinel.error === 'possible_reschedule' && tool === 'create_meeting') {
+      const existingId = typeof err.sentinel.existing_meeting_id === 'string' ? err.sentinel.existing_meeting_id : undefined;
+      const existingSubj = typeof err.sentinel.existing_subject === 'string' ? err.sentinel.existing_subject : 'it';
+      const existingWhen = typeof err.sentinel.existing_when === 'string' ? err.sentinel.existing_when : 'around then';
+      logger.warn('on_approve replay hit possible_reschedule — returning a recovery path instead of a dead end', {
+        id: row.id, existingId,
+      });
+      return {
+        ok: false,
+        request_id: row.id,
+        state: row.state,
+        effect: 'approve_replay_possible_reschedule',
+        reason: existingId
+          ? `There's already "${existingSubj}" on ${existingWhen} with the same person (meeting_id ${existingId}). To MOVE that meeting to the approved time instead of creating a new one, call resolve_approval again with verdict="approve", data={"move_existing_meeting_id":"${existingId}"}. To book a separate NEW meeting anyway, call resolve_approval again with verdict="approve", data={"force_new":true}.`
+          : `A possible duplicate meeting was found, but no id came back with it — call resolve_approval again with verdict="approve", data={"force_new":true} to book anyway.`,
+      };
+    }
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {
       id: row.id, tool, err: String(err).slice(0, 300),
     });
@@ -630,11 +692,13 @@ async function runApproveCallback(
   // #141 Change 5 — link the booked event id on the approval row when a
   // colleague requested it. The replay runs as a SYNTHETIC owner
   // (deferredActionReplay forces senderRole:'owner'), so the direct colleague
-  // requester-link at ops.ts:3869 never fires for approval-booked meetings, and
-  // no id was ever recorded — a colleague who requested a meeting via approval
-  // then couldn't move it (the "Talia" gap). Stamping the event id onto the
-  // approval row (which already carries requester_slack_id) lets
-  // getMeetingsRequestedBy reverse-resolve it. One arg on the close we already do.
+  // requester-link at createMeeting.ts:244 (isGenuineColleague ? context.userId
+  // : undefined — moved off ops.ts when the v3.7.x handler split landed) never
+  // fires for approval-booked meetings, and no id was ever recorded — a
+  // colleague who requested a meeting via approval then couldn't move it (the
+  // "Talia" gap). Stamping the event id onto the approval row (which already
+  // carries requester_slack_id) lets getMeetingsRequestedBy reverse-resolve it.
+  // One arg on the close we already do.
   const bookedEventId = typeof replayResult?.meetingId === 'string'
     ? (replayResult.meetingId as string)
     : undefined;

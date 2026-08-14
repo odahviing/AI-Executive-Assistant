@@ -13,6 +13,7 @@ import { getDb } from './client';
 import type {
   CreateRequestInput,
   NextCheckHandler,
+  RequestPhase,
   RequestRow,
   RequestState,
 } from '../core/requests/types';
@@ -665,8 +666,18 @@ export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
 
 export interface UpdateRequestPatch {
   state?: RequestState;
-  /** v3.1 — kind-namespaced activity sub-state. */
-  phase?: string | null;
+  /**
+   * v3.1 — kind-namespaced activity sub-state. Typed `RequestPhase | null`
+   * (updateRequestPatch-phase-typed-string-not-RequestPhase, 2026-08-14) — the
+   * standalone `setPhase(id, phase: RequestPhase)` export that used to give this
+   * write a compile-time literal check was deleted as dead code (2026-08-12,
+   * see isPhaseValidForKind's header) and its runtime replacement only checks
+   * the NAMESPACE prefix, not the exact literal, so a typo'd phase like
+   * `'outreach:reengaged'` (vs the real `'outreach:re_engaged'`) used to write
+   * cleanly as a bare `string` and silently defeat every exact-match reader.
+   * Restoring the union type here makes that a compile error again.
+   */
+  phase?: RequestPhase | null;
   closureReason?: string;
   closedBy?: string;
   closedAt?: string;

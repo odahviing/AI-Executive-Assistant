@@ -19,6 +19,7 @@ import {
   findReschedulableSibling,
   type CalendarEvent,
   type DaySummaryEntry,
+  type ConflictingEventEntry,
   getFreeBusyForDecision,
   findAvailableSlots,
   createMeeting,
@@ -656,7 +657,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // gh#165-d — carries the structural all-day facts too, so the
                 // refusal below can tell "the whole day is gone" from "this
                 // hour clashes" without re-deriving it.
-                conflictingEvent?: { id: string; subject: string; allDayOutOfOffice?: true; isAllDay?: true; allDayOutOfOfficeUntilDisplay?: string };
+                conflictingEvent?: ConflictingEventEntry;
                 // gh#200 — an all-day OOF rejects the whole day before
                 // checkSlot ever runs (conflictingEvent stays unset for that
                 // case), so the away span's real end lives on the

@@ -313,7 +313,19 @@ export async function closeMeetingArtifacts(params: {
       // state so closed rows aren't disturbed. (v2.9.2 + v3.4.6 — the old exact-
       // subject / subkind='in_flight_action' fallback tier was deleted in v3.4.6;
       // the thread-match below replaced it. See the tier note in the loop.)
-      const open = getOpenRequestsForOwner(params.ownerUserId);
+      // closeMeetingArtifacts-fulfilling-request-not-excluded (2026-08-14) —
+      // exclude the tier-0 fulfilling request from the candidate pool itself,
+      // mirroring directMatches' own tier-0 skip (above) and the main loop's
+      // (below). Pre-fix it stayed IN `open`, so it could win the single-
+      // candidate slot in threadCandidates / findOrphanedApprovalMatch — it
+      // is trivially an exact subject+start match for its own booking — and
+      // when a genuinely different request also matched, the pair read as
+      // AMBIGUOUS (length > 1) and BOTH were left open, instead of the one
+      // real match closing. The main loop's own `continue` on this id only
+      // stopped it from closing itself; it never stopped it from crowding
+      // out someone else's match.
+      const open = getOpenRequestsForOwner(params.ownerUserId)
+        .filter(r => !(params.fulfillingRequestId && r.id === params.fulfillingRequestId));
 
       // Thread-match the booking to its originating colleague request. A
       // request's origin_thread_ts is its "return address"; a booking made in
@@ -359,10 +371,8 @@ export async function closeMeetingArtifacts(params: {
       );
 
       for (const r of open) {
-        // tier-0 skip — the resolver owns this exact request's close + relay
-        // (it stamped its id into the replay). Touching it here is the race we
-        // deleted: leave it entirely to the resolver.
-        if (params.fulfillingRequestId && r.id === params.fulfillingRequestId) continue;
+        // tier-0 (the resolver owns that request's close + relay) is already
+        // excluded from `open` itself, above — nothing left to skip here for it.
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
 

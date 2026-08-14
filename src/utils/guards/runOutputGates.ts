@@ -34,6 +34,8 @@
  *   COLLEAGUE-READABLE (a colleague DM, a channel, or the owner in a group DM):
  *     claim-check (when the owner is the one acting, OR this thread carries a
  *     tracked request row — v4.4.x #154's room-approval honesty check) →
+ *     owner-fact-invention check (EVERY colleague-readable turn, regardless
+ *     of who's acting — see claimChecker.ts's 'owner_fact' mode) →
  *     security gate → humanGate('internal') → date-verify. The leak scrub
  *     runs after every rewriter that could emit an internal token, voice after every rewriter
  *     that could write like a machine, and date-verify LAST — after every
@@ -182,7 +184,13 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   //                       claim-checker exists so the person who can go and
   //                       chase an un-done action learns it didn't happen.
   //   colleagueReadable — somebody other than the owner will read this text.
-  //                       Decides the leak gate and the humanGate voice frame.
+  //                       Decides the leak gate, the humanGate voice frame,
+  //                       and (owner-personal-fact-fabricated-in-colleague-
+  //                       reply, 2026-08-14) the owner-fact-invention check —
+  //                       a colleague reading a fabricated personal claim
+  //                       about the owner is the risk regardless of who is
+  //                       typing this turn, unlike the phantom-action check
+  //                       above which needs the OWNER specifically acting.
   //
   // In a 1:1 owner DM and in a colleague's DM those two answers are exact
   // negations of each other, which is why one test carried both for so long. In
@@ -411,6 +419,16 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply, approvalGrantContext);
     }
 
+    // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — runs on
+    // EVERY colleague-readable turn, independent of ownerIsActing/
+    // approvalGrantContext above: a colleague reading a fabricated personal
+    // claim about the owner is the risk regardless of who is typing this
+    // turn. Kept as its own call (claimChecker's 'owner_fact' mode, its own
+    // Haiku round-trip) rather than folded into the RULE A prompt/call above,
+    // so RULE A's own considered ownerIsActing/approvalGrantContext scoping
+    // (claimChecker.ts's top-of-file doc comment) is untouched by this fix.
+    cleanReply = await runOwnerFactCheckAndMaybeRewrite(ctx, cleanReply);
+
     // Security gate (leak filter + identity-spoof). This is the gate a group DM
     // never had: every trigger in securityGate's TRIGGER_PATTERNS — the disclosure
     // ones and the identifier ones alike — was skipped on the owner's turns in a
@@ -438,6 +456,31 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // hand a check inputs it must not act on). Today colleagueName is undefined
     // for an owner-in-group turn anyway (processMessage.ts:386) — this stops that
     // cross-lane accident from being the only thing holding the branch shut.
+    // 2026-08-14 (bouncer overturn) — `history` is a PRE-TURN snapshot:
+    // processMessage.ts reads it (:281) BEFORE this turn's own message is
+    // appended to conversation storage (:313), so built from history alone
+    // this array can never carry what the sender just said THIS turn. A
+    // same-message "are you AI?" either landed one turn late (thread had
+    // prior history, judge checked the WRONG turns) or never ran the judge
+    // at all (first message in a thread, array empty, the `length > 0` guard
+    // short-circuits). `userMessage` — the sender's own words for the CURRENT
+    // turn, already carried on this context (:99) — is appended as the newest
+    // entry so the judges below see the actual question being answered right
+    // now, not only what came before it.
+    //
+    // 2026-08-14 round 3 (owner-in-group fix) — built UNCONDITIONALLY, unlike
+    // the spoof inputs below. This feeds ONLY the AI-identity "genuinely asked"
+    // judge (securityGate's judgeAiIdentityWasAsked), a question with no
+    // sender-identity angle: whether Maelle's AI-disclosure was genuinely asked
+    // applies the same way when the owner himself is typing in a group DM as it
+    // does for a colleague. The identity-SPOOF inputs just below stay withheld
+    // on ownerIsActing — that withholding is a deliberate double-lock on a
+    // DIFFERENT check (see that comment) and must not also starve this one.
+    const aiIdentityContextMessages = [
+      ...history.filter(h => h.role === 'user').map(h => h.content),
+      userMessage,
+    ].slice(-5);
+
     let verifiedSenderEmail: string | undefined;
     let recentUserMessages: string[] | undefined;
     let ownerEmail: string | undefined;
@@ -445,20 +488,17 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       try {
         const { getPersonMemory } = await import('../../db');
         verifiedSenderEmail = getPersonMemory(senderId)?.email ?? undefined;
-        recentUserMessages = history
-          .filter(h => h.role === 'user')
-          .slice(-5)
-          .map(h => h.content);
+        recentUserMessages = aiIdentityContextMessages;
         ownerEmail = profile.user.email;
       } catch (err) {
         // A db read is not a gate verdict, and it must not be able to cost a
         // colleague their answer. Degrade to the leak-scan-only mode the gate
         // already documents — and degrade ALL THE WAY: the spoof branch needs
         // colleagueName + ownerEmail + recentUserMessages TOGETHER
-        // (securityGate.ts:456), so a half-filled set is the dangerous state, not
-        // the safe one — it would leave detectClaimedEmail running without the
-        // sender's verified address, which makes every on-domain email in the
-        // thread look like an identity claim and hands a WRONG refusal to a
+        // (securityGate.ts:547-552), so a half-filled set is the dangerous state,
+        // not the safe one — it would leave detectClaimedEmail running without
+        // the sender's verified address, which makes every on-domain email in
+        // the thread look like an identity claim and hands a WRONG refusal to a
         // correct reply. All three cleared, so the leak scan still runs on the
         // full draft and only the identity half stands down.
         verifiedSenderEmail = undefined;
@@ -509,8 +549,14 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // follow-up, and after this catch there is no follow-up, only an ERROR log. A
     // guard must not fix a leak by telling a colleague something untrue. Fixed
     // English, same accepted compromise as that fallback and imageGuard's refusal.
+    //
+    // aiDisclosureCleared threads the security gate's own AI-identity-judge
+    // outcome into humanGate below (see humanGate.ts's SYSTEM_PROMPT_TEMPLATE
+    // doc comment). Defaults false: if the security gate throws before it can
+    // run the judge, humanGate must NOT grant an exemption nobody verified.
+    let aiDisclosureCleared = false;
     try {
-      cleanReply = formatForSlack(await runSecurityGate({
+      const securityResult = await runSecurityGate({
         reply: cleanReply,
         colleagueName,
         senderId,
@@ -519,7 +565,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
         verifiedSenderEmail,
         ownerEmail,
         recentUserMessages,
-      }));
+        aiIdentityContextMessages,
+      });
+      cleanReply = formatForSlack(securityResult.reply);
+      aiDisclosureCleared = securityResult.aiIdentityCleared;
     } catch (err) {
       logger.error('Security gate unavailable on a colleague-readable reply — the draft was never vetted, substituting a safe line', {
         senderId, channelId, threadTs, colleagueName,
@@ -543,8 +592,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       // v2.9 — Slack-side colleagues are same-domain by definition (workspace
       // membership), so `audience` resolves to 'internal' here. When
       // EmailConnection lands, its sendReply path will pass 'external' for
-      // off-domain recipients.
-      const verdict = await runHumanGate(cleanReply, profile, audience, channelId);
+      // off-domain recipients. `aiDisclosureCleared` is the ONLY path that may
+      // pass true — see runHumanGate's own doc comment for why every other
+      // caller in this file stays at the false default.
+      const verdict = await runHumanGate(cleanReply, profile, audience, channelId, aiDisclosureCleared);
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }
@@ -674,11 +725,28 @@ export interface CodaGateVerdict {
  *
  *  1. scanForLeaks — the HARD-IDENTIFIER half: raw Slack ids, req_/task_ ids,
  *     provider/model self-reference (Claude, GPT, Anthropic), JSON / tool-tag
- *     echoes. Those patterns are structured and language-neutral (G7) — the
- *     AI-identity fact itself is deliberately NOT one of them (4.5.x: that fact
- *     is allowed when directly asked, and this gate can't tell "asked" from
- *     "volunteered" from text alone, so a stray unprompted "I'm AI" in a coda is
- *     the prompt layer's miss to prevent, not this scan's). Free, so it runs
+ *     echoes, AND self_ai_claim* (4.5.6). Unlike the reply path, this call goes
+ *     straight to `scanForLeaks` — never through `filterColleagueReply`, so the
+ *     AI-identity trigger's conditional judge (recentUserMessages) never runs
+ *     here, and a hit always drops. That is the right default for a coda: it
+ *     answers no question, so there is no "was this genuinely asked" case to
+ *     clear it, and it has none of the conversational context that judge would
+ *     need anyway — a coda that ever claims AI/bot/human identity should never
+ *     ship, full stop. Only the IDENTIFIER patterns here (raw Slack ids,
+ *     req_/task_ ids) are structured and language-neutral (G7); the DISCLOSURE
+ *     patterns (self_ai_claim*, self_internals, model leaks, JSON/tool-tag
+ *     echoes) are English-only regex on natural language and miss the same
+ *     claim in Hebrew or French. runHumanGate (step 2) runs unconditionally on
+ *     every coda regardless of what this scan found, and since round 3 it is
+ *     INTENDED as the language-agnostic backstop for that gap (no
+ *     `aiDisclosureCleared` is ever passed on this path, so the exception never
+ *     opens here and a bare disclosure is always treated as a violation) — but
+ *     bouncer testing (2026-08-14) proved the intent does not hold: 0/4
+ *     casual-aside AI-disclosure claims in French/Spanish/German were caught.
+ *     The honest current scope is English-regex-reliable only; a non-English
+ *     casual-aside disclosure can still ship. Known gap, DEFERRED — the owner
+ *     is rewriting the coda system separately, so this is not being patched
+ *     here (ledger: coda-ai-disclosure-non-english-gap). This scan is free, so it still runs
  *     first and a hit costs no LLM call. It is NOT redundant
  *     with the coda's inputs being "just a topic label": those labels and topic
  *     beats are free text Haiku derived from the DM transcript (social_subjects /
@@ -1144,6 +1212,103 @@ async function runClaimCheckAndMaybeRewrite(
 }
 
 /**
+ * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — colleague-
+ * readable-only check: extends the invented-fact pattern (previously
+ * coda-mode only, verified against a snapshot of what we know about the
+ * RECIPIENT — src/core/social/generateCoda.ts) to a confidently-stated,
+ * ungrounded PERSONAL/CAPABILITY claim about the OWNER himself, landing in
+ * front of a colleague ("a phone call from the car works for him", asserted
+ * with zero tool calls and zero grounding anywhere — the proven incident).
+ *
+ * Runs on EVERY colleague-readable turn regardless of who is acting — see
+ * this file's call site for why that is deliberately independent of RULE A's
+ * own ownerIsActing/approvalGrantContext scoping. Uses claimChecker's
+ * dedicated 'owner_fact' mode (its own small prompt, same JSON shape and
+ * `invented_fact` action_type coda mode already established) rather than a
+ * clause inside RULE A's 'action' prompt — G2: this keeps RULE A's own,
+ * separately-reasoned scoping untouched by this fix.
+ *
+ * Remedy reuses rewriteOwningTheMiss's tool-less, Sonnet-veto, fail-open
+ * machinery (G2 — reuse, don't add a parallel rewriter): a fact-preserving
+ * rewrite that hedges or drops the specific unfounded claim, never a
+ * confession framing ("that didn't go through") that would make no sense for
+ * a stated fact rather than an un-done action.
+ *
+ * Bouncer retry (2026-08-14) fixed three things: (1) the checker now gets
+ * `recentHistorySnippet` — the SAME `ctx.history` Maelle drafted from — so a
+ * fact the owner himself stated earlier in this visible thread reads as
+ * grounded, not invented (see claimChecker.ts's field doc); (2) the fallback
+ * (when the model's own rewrite can't be trusted) now tries a minimal,
+ * verbatim-except-the-claim redaction before ever falling back to a
+ * full-reply-replacing generic hedge, so one bad clause no longer costs the
+ * whole otherwise-true reply; (3) that last-resort hedge carries no
+ * follow-up promise and is no longer English-only (claimChecker.ts's
+ * `genericHonestHedge`).
+ *
+ * Fails open: verifier errors, JSON parse errors, rewrite errors all leave
+ * the original draft in place — never blocks a reply.
+ */
+async function runOwnerFactCheckAndMaybeRewrite(
+  ctx: OutputGateContext,
+  initialReply: string,
+): Promise<string> {
+  const { profile, result } = ctx;
+  let cleanReply = initialReply;
+
+  try {
+    const { checkReplyClaims, rewriteOwningTheMiss } = await import('../claimChecker');
+
+    // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
+    // retry) — ground truth the check needs beyond "did a tool run": the SAME
+    // history array the orchestrator handed Maelle when she drafted this
+    // reply (`ctx.history`, already loaded — no extra DB read, no extra
+    // call), so "he can take a car call" reads as grounded when the owner
+    // said exactly that three turns earlier in this same thread, and only as
+    // invented when it has no such origin anywhere. See claimChecker.ts's
+    // `recentHistorySnippet` doc comment. Capped (last 12 turns, 220 chars
+    // each) to bound prompt size on a check that runs every colleague-
+    // readable turn (G8) — this is the same history window, just formatted.
+    const recentHistorySnippet = (ctx.history ?? [])
+      .slice(-12)
+      .map(h => `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${(h.content ?? '').slice(0, 220)}`)
+      .join('\n') || undefined;
+
+    const verdict = await checkReplyClaims({
+      reply: cleanReply,
+      toolSummaries: result.toolSummaries ?? [],
+      bookingOccurred: result.bookingOccurred ?? false,
+      ownerFirstName: profile.user.name.split(' ')[0],
+      mode: 'owner_fact',
+      recentHistorySnippet,
+    });
+
+    if (!verdict.claimed_action) return cleanReply;
+
+    logger.warn('Owner-fact check: invented personal fact about the owner in a colleague-facing reply — rewriting to hedge/drop it (no tool re-fire)', {
+      senderId: ctx.senderId,
+      threadTs: ctx.threadTs,
+      action_summary: verdict.action_summary,
+    });
+
+    const rewritten = await rewriteOwningTheMiss({
+      draft: cleanReply,
+      actionSummary: verdict.action_summary,
+      actionType: verdict.action_type,
+      targetName: verdict.target_name,
+      ownerFirstName: profile.user.name.split(' ')[0],
+      toolSummaries: result.toolSummaries ?? [],
+    });
+    if (rewritten && rewritten.trim().length > 0) {
+      cleanReply = normalizeForTransport(ctx, rewritten);
+    }
+  } catch (err) {
+    logger.warn('Owner-fact check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+  }
+
+  return cleanReply;
+}
+
+/**
  * The availability floor's POLICY half (the primitives live in
  * utils/availabilityGate). Three deterministic conditions decide whether the
  * detector runs at all, and each one is free:
@@ -1332,7 +1497,13 @@ async function runSecurityGate(opts: {
   verifiedSenderEmail?: string;
   ownerEmail?: string;
   recentUserMessages?: string[];
-}): Promise<string> {
+  // 2026-08-14 round 3 — the AI-identity judge's own input, always populated
+  // by the caller regardless of ownerIsActing. Required (not optional): the
+  // one call site below builds this unconditionally and always passes it — see
+  // filterColleagueReply's own parameter doc for why this is separate from
+  // recentUserMessages.
+  aiIdentityContextMessages: string[];
+}): Promise<{ reply: string; aiIdentityCleared: boolean }> {
   const { filterColleagueReply } = await import('../securityGate');
   const gateResult = await filterColleagueReply({
     reply: opts.reply,
@@ -1343,6 +1514,7 @@ async function runSecurityGate(opts: {
     verifiedSenderEmail: opts.verifiedSenderEmail,
     ownerEmail: opts.ownerEmail,
     recentUserMessages: opts.recentUserMessages,
+    aiIdentityContextMessages: opts.aiIdentityContextMessages,
   });
   if (gateResult.filtered) {
     logger.warn('⚠ Security gate rewrote colleague reply', {
@@ -1353,7 +1525,7 @@ async function runSecurityGate(opts: {
       sent: gateResult.reply.slice(0, 500),
     });
   }
-  return gateResult.reply;
+  return { reply: gateResult.reply, aiIdentityCleared: gateResult.aiIdentityCleared };
 }
 
 // ── Date verifier + retry (v1.6.6) ─────────────────────────────────────────

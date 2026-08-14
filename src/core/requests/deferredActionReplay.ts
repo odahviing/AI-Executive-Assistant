@@ -26,6 +26,21 @@ import type { UserProfile } from '../../config/userProfile';
 import { getConnection } from '../../connections/registry';
 import logger from '../../utils/logger';
 
+/**
+ * Thrown when the replayed tool returned a structured `{ error }` / `{ success:
+ * false }` / `{ ok: false }` sentinel — carries the FULL result (never just the
+ * flattened message string) so a caller with an actual recovery path for a
+ * SPECIFIC sentinel (e.g. resolver.ts's `possible_reschedule` handling) can read
+ * the fields it needs (existing_meeting_id, etc.) instead of losing them the
+ * instant this module turns the sentinel into a bare Error.
+ */
+export class ReplayToolError extends Error {
+  constructor(message: string, public readonly sentinel: Record<string, unknown>) {
+    super(message);
+    this.name = 'ReplayToolError';
+  }
+}
+
 export interface RunDeferredActionInput {
   ownerUserId: string;
   profile: UserProfile;
@@ -157,15 +172,15 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     const r = result as Record<string, unknown> | null | undefined;
     if (r && typeof r === 'object') {
       if (typeof r.error === 'string' && r.error.length > 0) {
-        throw new Error(`tool returned error: ${r.error}`);
+        throw new ReplayToolError(`tool returned error: ${r.error}`, r);
       }
       if (r.success === false) {
         const reason = typeof r.reason === 'string' ? r.reason : 'unknown';
-        throw new Error(`tool returned success:false (${reason})`);
+        throw new ReplayToolError(`tool returned success:false (${reason})`, r);
       }
       if (r.ok === false) {
         const reason = typeof r.reason === 'string' ? r.reason : 'unknown';
-        throw new Error(`tool returned ok:false (${reason})`);
+        throw new ReplayToolError(`tool returned ok:false (${reason})`, r);
       }
     }
 

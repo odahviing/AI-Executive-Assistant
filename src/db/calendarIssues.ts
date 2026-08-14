@@ -135,8 +135,8 @@ const ACTIVE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
  *     at `checkHealth.ts:350` — no row, no narration, no log line. A silent
  *     missed conflict, which is worse than the bug #148 fixed.
  *   • CLUSTERING / ROW IDENTITY — an uncategorized event that ALSO clashes emits
- *     both issues from the same `nonAllDay` set (checkHealth.ts:374 and :491),
- *     so they land in one cluster; the overlap anchors it (priority 3 vs 7) and
+ *     both issues from the same `nonAllDay` set (checkHealth.ts:335), so they
+ *     land in one cluster; the overlap anchors it (priority 3 vs 7) and
  *     the question's class, event and time notes are dropped. The question then
  *     has no row — exactly the no-memory state #148 exists to end — and, worse,
  *     an active row can be re-anchored across axes or deleted by the merge.
@@ -234,8 +234,11 @@ export function buildClusters(
   eventDateByEventId: Map<string, string>,
 ): IssueCluster[] {
   if (issues.length === 0) return [];
-  const problems = issues.filter(i => !QUESTION_ONLY_CLASSES.has(i.class));
-  const questions = issues.filter(i => QUESTION_ONLY_CLASSES.has(i.class));
+  // axisFor-not-read-for-filtering (2026-08-14) — route through axisFor(),
+  // the declared single source of truth for the class→axis mapping, instead
+  // of re-deriving the same split from QUESTION_ONLY_CLASSES directly here.
+  const problems = issues.filter(i => axisFor(i.class) === 'conflict');
+  const questions = issues.filter(i => axisFor(i.class) === 'question');
   const out: IssueCluster[] = [];
   for (const axis of [problems, questions]) {
     if (axis.length > 0) out.push(...clustersForOneAxis(axis, eventDateByEventId));
@@ -659,16 +662,19 @@ export function getCalendarIssueById(id: string): CalendarIssueRow | null {
  *  comment for why the stated case doesn't go stale the same way. */
 export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass): Set<string> {
   const db = getDb();
-  const questionAxis = forClass !== undefined && QUESTION_ONLY_CLASSES.has(forClass);
-  const axisClasses = Array.from(QUESTION_ONLY_CLASSES);
-  const placeholders = axisClasses.map(() => '?').join(',');
+  // axisFor-not-read-for-filtering (2026-08-14) — filter on the PERSISTED
+  // `axis` column directly (axisFor is the declared single source of truth
+  // for what it holds — see the column's own doc above), instead of
+  // re-deriving the same conflict/question split from QUESTION_ONLY_CLASSES
+  // at query time. `forClass` omitted → the conflict axis, same as before.
+  const axis: IssueAxis = forClass !== undefined ? axisFor(forClass) : 'conflict';
   const rows = db.prepare(`
     SELECT event_id, peer_event_id FROM calendar_issues
     WHERE owner_user_id = ?
       AND status IN ('approved','dismissed','resolved')
       AND event_end_ms > ?
-      AND issue_class ${questionAxis ? 'IN' : 'NOT IN'} (${placeholders})
-  `).all(ownerUserId, Date.now(), ...axisClasses) as Array<{ event_id: string; peer_event_id: string | null }>;
+      AND axis = ?
+  `).all(ownerUserId, Date.now(), axis) as Array<{ event_id: string; peer_event_id: string | null }>;
   const out = new Set<string>();
   for (const r of rows) {
     out.add(r.event_id);

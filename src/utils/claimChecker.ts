@@ -41,6 +41,18 @@
  * resolved, but a thread that only ever went cancelled/expired keeps paying
  * for as long as it stays active, because that is exactly where a false
  * "he approved it" claim is provably false.
+ *
+ * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — a SECOND,
+ * unrelated exception, and a different mode entirely (mode: 'owner_fact', not
+ * RULE A's 'action'): catches a draft that states, as settled fact, an
+ * unverified PERSONAL/CAPABILITY claim about the OWNER HIMSELF ("a phone call
+ * from the car works for him") to a colleague, with no grounding anywhere.
+ * This is the mirror image of coda mode's invented-fact check (which guards
+ * facts about the RECIPIENT) — this guards facts about the PRINCIPAL. The
+ * caller (runOutputGates.ts's runOwnerFactCheckAndMaybeRewrite) invokes it on
+ * EVERY colleague-readable turn, independent of RULE A's own
+ * ownerIsActing/approvalGrantContext scoping above — a colleague reading a
+ * fabricated fact about the owner is the risk regardless of who is typing.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -49,6 +61,7 @@ import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
+import { detectMessageLanguage } from './detectMessageLanguage';
 
 const anthropic = getAnthropicClient();
 
@@ -63,6 +76,38 @@ const anthropic = getAnthropicClient();
  * an accepted compromise on this rare-of-rare path.
  */
 const GENERIC_HONEST_MISS = "Actually, hold on — I'm not sure that went through. Let me double check and come back to you.";
+
+/**
+ * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
+ * retry) — the invented-owner-fact sibling of GENERIC_HONEST_MISS above, for
+ * the exact same reason: once `rewriteOwningTheMiss` has confirmed
+ * (actionType === 'invented_fact') that the draft asserts an ungrounded
+ * personal claim about the owner, but BOTH its full rewrite AND its
+ * minimal-redaction alternative (see `minimalRedaction` below) can't be
+ * trusted, this ships instead of the proven-fabricated original. This is the
+ * true last resort — most flags are handled by `minimalRedaction`, which
+ * keeps the rest of the message intact.
+ *
+ * Two things this does NOT do, both bouncer findings on the first pass:
+ *   - No "I'll check with him and get back to you" promise. RULE A's own
+ *     fallback (GENERIC_HONEST_MISS) can make that kind of promise because
+ *     this file's caller opens a durable tracked reminder right behind it
+ *     (runOutputGates.ts's relay-to-owner backstop) — it has a deterministic
+ *     "what" to relay (the colleague's own turn text). An arbitrary
+ *     fabricated personal-fact claim has no equivalent deterministic anchor,
+ *     so a promise here would be words with nothing behind them. Safer to
+ *     make no promise than an untracked one.
+ *   - Not English-only. Reuses `detectMessageLanguage` (W4 — script
+ *     detection, not a language guess) so a Hebrew/Russian/Arabic thread
+ *     doesn't get an English line in its otherwise-native-language reply.
+ */
+function genericHonestHedge(draft: string): string {
+  const lang = detectMessageLanguage(draft);
+  if (lang === 'Hebrew') return 'רגע — לגבי הפרט הספציפי הזה אני לא לגמרי בטוחה, כדאי לוודא ישירות מולו.';
+  if (lang === 'Russian') return 'Секунду — в этом конкретном моменте я не совсем уверена, лучше уточнить напрямую у него.';
+  if (lang === 'Arabic') return 'لحظة — لست متأكدة تمامًا من هذه النقطة بالذات، من الأفضل التأكد منه مباشرة.';
+  return "Actually, I'm not totally sure about that specific point — best to confirm it with him directly.";
+}
 
 export interface ClaimCheckInput {
   reply: string;
@@ -117,7 +162,12 @@ export interface ClaimCheckInput {
   // action claims). 'coda' = check a generated social coda for invented facts
   // or gossipy commentary about a third party. Same JSON shape; caller checks
   // claimed_action and drops the coda when true.
-  mode?: 'action' | 'coda';
+  // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — THIRD
+  // mode. 'owner_fact' = check an ordinary colleague-facing task reply for an
+  // invented PERSONAL/CAPABILITY claim about the owner himself (the mirror
+  // image of 'coda' mode, which checks facts about the recipient). Same JSON
+  // shape and `action_type: 'invented_fact'`, so callers don't branch.
+  mode?: 'action' | 'coda' | 'owner_fact';
   coda?: {
     recipientName: string;
     /** Compact text snapshot of what we actually know about the recipient
@@ -126,6 +176,23 @@ export interface ClaimCheckInput {
      *  invented fact. */
     recipientFactsSnapshot: string;
   };
+  /**
+   * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
+   * retry) — ground truth for 'owner_fact' mode, the missing analogue of
+   * coda mode's `recipientFactsSnapshot` above. Without this, "he can take a
+   * call from the car" reads as equally suspicious whether Maelle invented
+   * it or the owner said exactly that three turns earlier in the same
+   * visible thread — RULE A's own prompt already carries an explicit
+   * carve-out for "referencing what the assistant did in PRIOR turns, not
+   * this turn"; 'owner_fact' mode had no equivalent until now. The caller
+   * (runOutputGates.ts) builds this from the SAME `ctx.history` array the
+   * orchestrator handed Maelle when she drafted this reply — not a fresh
+   * read, not a separate DB query, so this costs nothing extra to obtain.
+   * Absent/undefined → the HISTORY block is simply omitted from the prompt;
+   * the check still runs on tool activity alone, same as before this field
+   * existed.
+   */
+  recentHistorySnippet?: string;
 }
 
 export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | null;
@@ -158,6 +225,14 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // v2.3.2 (2B) — coda mode always checks. Codas are SHORT by design but
   // every word matters; the "shares my name" hallucination was 9 words.
   if (input.mode === 'coda') return true;
+  // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — same
+  // reasoning as coda mode: this is only ever invoked on colleague-readable
+  // turns (a much narrower call site than every action-mode reply — see
+  // runOutputGates.ts's runOwnerFactCheckAndMaybeRewrite), so once called it
+  // always runs. A length floor here would reopen the exact gap this closes:
+  // "he's fine with weekends" is a full, confident, fabricated claim well
+  // under any reasonable floor.
+  if (input.mode === 'owner_fact') return true;
   // v4.4.x (#154) / o#227, tightened gh#154-R6, widened gh#154-R7 (2026-08-06), floor
   // hole closed gh#154-R8 (2026-08-06) — approvalGrantContext is only ever
   // CONSTRUCTED by the caller (runOutputGates.ts) when a request row has
@@ -276,7 +351,61 @@ If the coda passes both checks (no invented facts, no gossipy commentary), set c
 Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to one short line.`
     : null;
 
-  const prompt = codaPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+  // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — THIRD
+  // mode. Same JSON shape and `invented_fact` action_type coda mode already
+  // established (so downstream handling in runOutputGates.ts doesn't need to
+  // branch), but checks the OPPOSITE direction: not "did the coda invent
+  // something about the RECIPIENT", but "does an ordinary task reply
+  // confidently state, as settled fact, an unverified personal/capability
+  // claim about ${ownerFirstName} HIMSELF, to someone who isn't him". Proven
+  // incident (2026-08-10): "a phone call from the car works for Idan" shipped
+  // to a colleague on a turn with zero tool calls and zero grounding anywhere
+  // (people_memory / config / KB / preferences all checked) — true by luck,
+  // not by evidence. Deliberately its own mode rather than a clause inside
+  // RULE A's prompt below: RULE A's own ownerIsActing/approvalGrantContext
+  // scoping (this file's top-of-file doc comment) is a considered design
+  // choice, not a gap to widen as a side effect of this fix.
+  //
+  // Bouncer retry (2026-08-14) — the missing ground truth. Only present when
+  // the caller passed `recentHistorySnippet` (see that field's doc comment
+  // on ClaimCheckInput above).
+  const ownerFactHistoryBlock = input.recentHistorySnippet
+    ? `CONVERSATION HISTORY (the SAME thread history the assistant had access to when drafting this reply — a fact ${input.ownerFirstName} stated about himself earlier here, or one the assistant already stated consistently earlier, is GROUNDED, not invented):\n${input.recentHistorySnippet}\n`
+    : '';
+
+  const ownerFactPrompt = input.mode === 'owner_fact'
+    ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+
+You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your one job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself before it ships.
+
+TOOL ACTIVITY THIS TURN (anything read or confirmed — a matching read here means the claim is GROUNDED, not invented):
+${toolBlock}
+${ownerFactHistoryBlock}
+DRAFT REPLY (to the colleague):
+"""
+${input.reply}
+"""
+
+Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule") that ALL of the following hold:
+(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this), AND
+(b) is not merely describing what's already scheduled on the calendar (a meeting's time, place or attendees is not a personal-capability claim), AND
+(c) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
+
+A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
+
+Output schema (REUSE the action-checker shape so callers don't branch):
+{
+  "claimed_action": boolean,      // true = an invented personal fact about ${input.ownerFirstName} is present
+  "action_type": "invented_fact" | null,
+  "target_name": string | null,   // "${input.ownerFirstName}" when claimed_action is true, else null
+  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars
+}
+
+If the draft is clean (no invented personal fact about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
+Reminder: JSON only. Start with { end with }. No prose.`
+    : null;
+
+  const prompt = codaPrompt ?? ownerFactPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit draft replies from an executive assistant for honesty violations before they get sent. The assistant's principal is ${input.ownerFirstName}.
 
@@ -399,13 +528,15 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
     const response = await anthropic.messages.create({
       // v3.0.6 — Haiku, matching the rest of the project's fast structured
       // judges (classifyTurn, securityGate, capturePass,
-      // threadBoundApprovalAutoResolve). Post-B the checker has
-      // ONE job (RULE A: action claim vs tool history) — pattern matching
-      // against a structured list, exactly what Haiku is for. The
+      // threadBoundApprovalAutoResolve). Post-B the checker's default 'action'
+      // mode has ONE job (RULE A: action claim vs tool history) — pattern
+      // matching against a structured list, exactly what Haiku is for. The
       // matchingToolAlreadyRan shield in runOutputGates.ts already absorbs
       // false-positives from whichever model runs here, so the safety net
       // is unchanged. Coda mode also runs on Haiku — owner direction
-      // 2026-05-26 "ship it and move all to haiku also the coda".
+      // 2026-05-26 "ship it and move all to haiku also the coda" — and so
+      // does 'owner_fact' mode (2026-08-14): same reasoning, a narrow
+      // pattern-match against tool activity, not open-ended reasoning.
       model: MODEL_HAIKU,
       // 5 fields in the schema; action_summary is the only long field (≤120 chars).
       // 300 tokens is comfortable headroom — used to be 800 to fit the v2.7.8
@@ -413,7 +544,11 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
-    logLlmUsage(input.mode === 'coda' ? 'claim_checker_coda' : 'claim_checker', MODEL_HAIKU, response);
+    logLlmUsage(
+      input.mode === 'coda' ? 'claim_checker_coda' : input.mode === 'owner_fact' ? 'claim_checker_owner_fact' : 'claim_checker',
+      MODEL_HAIKU,
+      response,
+    );
     const raw = ((response.content[0] as Anthropic.TextBlock).text ?? '').trim();
     const elapsedMs = Date.now() - start;
 
@@ -571,6 +706,17 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * same spine registrar's flagUnresolvedFreeformForOwner (src/tasks/skill.ts)
  * uses, so the relay lands via the runner regardless of what the model does
  * next turn. See runOutputGates.ts's call site for the exact scope guards.
+ *
+ * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — reused
+ * (G2: reuse, don't add a parallel rewriter with its own fail-safe machinery)
+ * for a SECOND, unrelated flag shape: `actionType === 'invented_fact'`, from
+ * claimChecker's 'owner_fact' mode. Framing differs — there is no "un-done
+ * action" to own, so the STEP 1/STEP 2 prompt and the self-attestation field
+ * both branch on `isInventedOwnerFact` below; the remedy is a fact-preserving
+ * rewrite that drops or hedges the specific unfounded personal claim about
+ * the owner, never a confession ("that didn't go through") that would make no
+ * sense for a stated fact. Same tool-less, structured-verdict, fail-open
+ * contract throughout.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -594,16 +740,40 @@ export async function rewriteOwningTheMiss(opts: {
   // resolved row never reaches this function at all — no approvalGrantContext
   // param is needed on this side of the call.
 }): Promise<string | null> {
+  const isInventedOwnerFact = opts.actionType === 'invented_fact';
+
   const what = opts.actionSummary
-    || (opts.actionType === 'message'
-      ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
-      : 'that action');
+    || (isInventedOwnerFact
+      ? `an unverified personal fact about ${opts.ownerFirstName}`
+      : opts.actionType === 'message'
+        ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
+        : 'that action');
 
   const toolBlock = (opts.toolSummaries && opts.toolSummaries.length)
     ? opts.toolSummaries.map(s => `  - ${s}`).join('\n')
     : '  (no tools ran this turn)';
 
-  const prompt = `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+
+TOOL ACTIVITY THIS TURN (anything that could ground the claim):
+${toolBlock}
+FLAGGED CLAIM: ${what}
+
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read). Do not manufacture a problem that isn't one.
+
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged personal claim about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
+- Remove or soften the specific unfounded claim — either drop it, or turn it into an honest hedge / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you").
+- NOT invent a DIFFERENT unfounded personal claim about ${opts.ownerFirstName} in its place.
+- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Sound like a real person, never a disclaimer or a system message.
+- Match the language of the draft (Hebrew/English/etc).
+
+STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candidate: the draft with ONLY the flagged claim deleted or blanked out and NOTHING else touched — no new sentences, no paraphrasing, no added hedge, every other word copied verbatim from the draft. This is the fallback used if \`message\` cannot be trusted; fill it even when you are confident in \`message\`.
+
+SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a bare, confident, unsupported personal claim about ${opts.ownerFirstName}.
+
+Draft:
+${opts.draft}` : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
@@ -636,22 +806,40 @@ ${opts.draft}`;
       max_tokens: 600,
       tools: [{
         name: 'verdict',
-        description: 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
+        description: isInventedOwnerFact
+          ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
+          : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
         input_schema: {
           type: 'object' as const,
           properties: {
             verdict: {
               type: 'string',
               enum: ['keep', 'rewrite'],
-              description: '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
+              description: isInventedOwnerFact
+                ? '"keep" = the draft is fine (already hedged, or the claim is grounded by tool activity). "rewrite" = the draft states an unverified personal fact about the owner as settled fact.'
+                : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
             },
             message: {
               type: 'string',
-              description: 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
+              description: isInventedOwnerFact
+                ? 'Only when verdict="rewrite": the corrected reply text, with the flagged personal claim removed or hedged. Omit for "keep".'
+                : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
             },
             noPendingActionClaim: {
               type: 'boolean',
-              description: 'Only when verdict="rewrite": self-check `message` before returning it. Set true ONLY if `message` contains NO claim or implication — in any tense, any language — that the action is currently being done, is in progress, or is about to complete ("I\'m handling it now", "I\'m on it", "אני דואגת לזה עכשיו" all FAIL this and must be set false). Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+              description: 'Only for a phantom-action rewrite (verdict="rewrite", flagged action was an un-done action, not an invented fact): self-check `message` before returning it. Set true ONLY if `message` contains NO claim or implication — in any tense, any language — that the action is currently being done, is in progress, or is about to complete ("I\'m handling it now", "I\'m on it", "אני דואגת לזה עכשיו" all FAIL this and must be set false). Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
+            noUnfoundedOwnerClaim: {
+              type: 'boolean',
+              description: 'Only for an invented-owner-fact rewrite (verdict="rewrite", flagged claim was an unverified personal fact about the owner): self-check `message` before returning it. Set true ONLY if `message` no longer asserts, as settled fact, the flagged claim or any other unverified personal claim about the owner. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
+            minimalRedaction: {
+              type: 'string',
+              description: 'Only for an invented-owner-fact rewrite (verdict="rewrite", flagged claim was an unverified personal fact about the owner): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
+            },
+            minimalRedactionPreservesRest: {
+              type: 'boolean',
+              description: 'Only alongside `minimalRedaction`: self-check it before returning it. Set true ONLY if `minimalRedaction` is identical to the draft except for removing/blanking the flagged claim — no other wording changed at all, nothing added. Set false whenever unsure.',
             },
           },
           required: ['verdict'],
@@ -666,11 +854,39 @@ ${opts.draft}`;
     // makes a reasoning leak impossible: the model's monologue, if any, lives in
     // text blocks we ignore; only `verdict`/`message` can ever become the reply.
     const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const input = (toolUse?.input ?? {}) as { verdict?: string; message?: string; noPendingActionClaim?: boolean };
+    const input = (toolUse?.input ?? {}) as {
+      verdict?: string;
+      message?: string;
+      noPendingActionClaim?: boolean;
+      noUnfoundedOwnerClaim?: boolean;
+      minimalRedaction?: string;
+      minimalRedactionPreservesRest?: boolean;
+    };
+
+    const isMetaOrEmpty = (text: string): boolean =>
+      text.trim().length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(text);
+
+    // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
+    // retry) — the scoped fallback for invented_fact mode (G2/G6): before
+    // reaching for the full-reply-replacing genericHonestHedge, try the
+    // model's own minimal-redaction candidate — the draft with ONLY the
+    // flagged claim removed, everything else untouched, so a single false
+    // clause no longer nukes an otherwise-true, otherwise-useful reply. Only
+    // trusted when the model's own self-attestation says it changed nothing
+    // else AND the result isn't implausibly short (a cheap deterministic
+    // guard against a "preserves rest" attestation that doesn't hold up).
+    const resolveInventedFactFallback = (): string => {
+      const redaction = typeof input.minimalRedaction === 'string' ? input.minimalRedaction.trim() : '';
+      const preservesRest = input.minimalRedactionPreservesRest === true;
+      if (preservesRest && !isMetaOrEmpty(redaction) && redaction.length >= opts.draft.length * 0.4) {
+        return redaction;
+      }
+      return genericHonestHedge(opts.draft);
+    };
 
     // verdict=keep (or missing/garbled) → classifier misfired → keep original.
     if (input.verdict !== 'rewrite') {
-      logger.info('claim_checker_rewrite_vetoed — rewriter judged the draft fine (proposal/offer/future-commit or the action did happen); keeping original', {
+      logger.info('claim_checker_rewrite_vetoed — rewriter judged the draft fine (proposal/offer/future-commit, the action did happen, or the personal claim was hedged/grounded); keeping original', {
         action_type: opts.actionType,
         action_summary: opts.actionSummary,
         verdict: input.verdict ?? '(none)',
@@ -685,15 +901,30 @@ ${opts.draft}`;
     // (gh#194-b-confession-overpromises-unexecuted-action, bouncer overturn):
     // that would knowingly ship the proven lie. A rewrite with no usable
     // message, or one that smells like leaked reasoning, ships the fixed
-    // GENERIC_HONEST_MISS line instead — we NEVER ship the model's meta-text,
+    // generic fallback line instead — we NEVER ship the model's meta-text,
     // and never the known-false original, as the reply.
     const message = typeof input.message === 'string' ? input.message.trim() : '';
-    if (message.length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(message)) {
-      logger.warn('claim_checker_rewrite — verdict=rewrite but message empty/meta; shipping the generic honest-miss line (never the known-false original)', {
+    if (isMetaOrEmpty(message)) {
+      logger.warn('claim_checker_rewrite — verdict=rewrite but message empty/meta; shipping a scoped fallback (never the known-false original)', {
         action_type: opts.actionType,
         messagePreview: message.slice(0, 160),
       });
-      return GENERIC_HONEST_MISS;
+      return isInventedOwnerFact ? resolveInventedFactFallback() : GENERIC_HONEST_MISS;
+    }
+
+    if (isInventedOwnerFact) {
+      // owner-personal-fact-fabricated-in-colleague-reply — same self-attest
+      // pattern as the pending-action check below (a hardcoded regex strip
+      // can't be the fix — multilingual), but checking that the rewrite drops
+      // the unfounded personal claim rather than the pending-action framing.
+      if (input.noUnfoundedOwnerClaim !== true) {
+        logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the unfounded owner claim; shipping a scoped fallback (never the known-false original)', {
+          action_type: opts.actionType,
+          messagePreview: message.slice(0, 160),
+        });
+        return resolveInventedFactFallback();
+      }
+      return message;
     }
 
     // gh#194-b — the prompt already forbade "I'll take care of it"-style

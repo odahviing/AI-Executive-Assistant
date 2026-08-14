@@ -71,6 +71,24 @@ export interface DaySummaryEntry {
   oof_until_display?: string;
 }
 
+/**
+ * conflictingevent-shape-hand-mirrored-twice (2026-08-14) — the shape of
+ * `diagnosticsOut.conflictingEvent` below, extracted the same way
+ * `DaySummaryEntry` above was so a caller with its own narrow diagnosticsOut
+ * (createMeeting.ts's Guard B) can name this type instead of hand-mirroring
+ * the same five fields — the exact duplication `DaySummaryEntry`'s own export
+ * was meant to end, which crept back in on this shape because it shipped
+ * after `DaySummaryEntry` did.
+ */
+export interface ConflictingEventEntry {
+  id: string;
+  subject: string;
+  allDayOutOfOffice?: true;
+  isAllDay?: true;
+  /** gh#200 — see RuleCheckResult.overCommitment's own field doc (scheduleRules.ts); carried straight off checkSlot's verdict, never re-derived. */
+  allDayOutOfOfficeUntilDisplay?: string;
+}
+
 // ── Slot-rule helpers ────────────────────────────────────────────────────────
 
 export async function findAvailableSlots(params: {
@@ -249,14 +267,7 @@ export async function findAvailableSlots(params: {
     // gh#165-d — carried structurally off verdict.overCommitment (never
     // string-matched from `window`), so a caller can tell "the whole day is
     // gone" from "this hour clashes" without re-deriving the fact.
-    conflictingEvent?: {
-      id: string;
-      subject: string;
-      allDayOutOfOffice?: true;
-      isAllDay?: true;
-      /** gh#200 — see RuleCheckResult.overCommitment's own field doc (scheduleRules.ts); carried straight off checkSlot's verdict, never re-derived. */
-      allDayOutOfOfficeUntilDisplay?: string;
-    };
+    conflictingEvent?: ConflictingEventEntry;
   };
 }): Promise<SlotCandidate[]> {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
@@ -428,7 +439,7 @@ export async function findAvailableSlots(params: {
     // search can never offer a slot the book path then refuses. Lazy-required to
     // match this file's idiom and sidestep the type-only cycle with scheduleRules.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkSlot, isAllDayOutOfOffice, computeOofSpan } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+    const { checkSlot, isAllDayOutOfOffice, computeOofSpan, formatOofUntilDisplay } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
     // v3.7.x (#143) — the per-date effective work context, so the walker gates +
     // hours + tz come from the SAME accessor checkSlot validates against.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -550,15 +561,11 @@ export async function findAvailableSlots(params: {
       // stays valid, so `from`/`toExclusive` can never be invalid here — the
       // dead defensive check this comment used to guard was removed.
       const toExclusive = DateTime.fromISO(span.endDateExclusive, { zone: params.timezone });
-      const lastInclusive = toExclusive.minus({ days: 1 }).toFormat('yyyy-MM-dd');
-      const isMultiDay = lastInclusive > span.startDate;
-      // gh#200 — format ONCE, here, at the producer (same convention as
-      // checkSlot's overCommitment.allDayOutOfOfficeUntilDisplay): every
-      // downstream consumer of day_summary.oof_until_display quotes this
-      // string verbatim, never re-derives it.
-      const lastInclusiveDisplay = isMultiDay
-        ? DateTime.fromISO(lastInclusive, { zone: params.timezone }).toFormat('EEEE d MMM')
-        : undefined;
+      // two-duplicate-away-span-format-producers (2026-08-14) — format via the
+      // SAME shared helper checkSlot calls (scheduleRules.ts), not a second
+      // hand-rolled copy of the endExclusive→minus-1-day→multi-day-test→
+      // toFormat recipe. undefined for a single-day span.
+      const lastInclusiveDisplay = formatOofUntilDisplay(span, params.timezone);
       for (let d = from; d < toExclusive; d = d.plus({ days: 1 })) {
         const key = d.toFormat('yyyy-MM-dd');
         oofDayKeys.add(key);
@@ -926,22 +933,6 @@ export async function findAvailableSlots(params: {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
-      // v3.7.x (#143) — the day's effective work context (yaml + per-date override).
-      const effectiveDay = profile ? getEffectiveWorkDayForInstantCal(cursorDt.toISO()!, profile) : null;
-      // Day type from the effective location (an override can flip office↔home or
-      // mark an away day), else the yaml classifier for the no-profile path.
-      const dayType: 'office' | 'home' | 'other' = effectiveDay
-        ? (effectiveDay.location === 'office' ? 'office' : effectiveDay.location === 'home' ? 'home' : 'other')
-        : classifyDay(dayName);
-
-      // Workday gate. effectiveDay folds in per-date off/on overrides (profile
-      // path); no-profile falls back to the yaml/meetingMode day-name set. No
-      // override → byte-identical to the old name gate.
-      const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
-      if (!dayIsWorkday) {
-        cursor = new Date(cursor.getTime() + step);
-        continue;
-      }
       // Owner 2026-07-26: "my calendar really block OOO for that entire day,
       // it should be blocked anyway" — an all-day out-of-office on HIS OWN
       // calendar takes the day out, straight off the calendar, with no per-date
@@ -955,10 +946,37 @@ export async function findAvailableSlots(params: {
       // booked" while he was on vacation, and a colleague could reasonably ask her
       // to try the following hour. Same verdict, true reason, and it AGREES with
       // checkSlot rather than competing with it: both refuse, and the one
-      // predicate (`isAllDayOutOfOffice`) decides what counts as out. Placed above
-      // the meeting-mode gate because "he's away" outranks "wrong kind of day".
+      // predicate (`isAllDayOutOfOffice`) decides what counts as out.
+      //
+      // oof-search-path-drops-reason-on-workday-plus-oof-overlap (2026-08-14)
+      // — checked BEFORE the workday gate below, mirroring checkSlot's own
+      // ladder (scheduleRules.ts): rule 8's owner_busy_collision — the
+      // all-day-OOF branch included — sits ABOVE rule 1's vacation_or_off_day
+      // there. A day that is BOTH an all-day OOF event AND a per-date
+      // schedule-override off-day used to hit the workday gate's bare
+      // `continue` first (below), with no trackReject call at all — no
+      // day_summary row, no reason, and the model fell to an "unknown"
+      // honesty path for a day the OOF branch here would otherwise have
+      // named correctly. The propose-a-time path (checkSlot) never had this
+      // gap; only "when is he free" (this walker) did.
       if (oofDayKeys.has(dayKey)) {
         trackReject('owner_out_of_office', cursorDt.toISO()!);
+        cursor = new Date(cursor.getTime() + step);
+        continue;
+      }
+      // v3.7.x (#143) — the day's effective work context (yaml + per-date override).
+      const effectiveDay = profile ? getEffectiveWorkDayForInstantCal(cursorDt.toISO()!, profile) : null;
+      // Day type from the effective location (an override can flip office↔home or
+      // mark an away day), else the yaml classifier for the no-profile path.
+      const dayType: 'office' | 'home' | 'other' = effectiveDay
+        ? (effectiveDay.location === 'office' ? 'office' : effectiveDay.location === 'home' ? 'home' : 'other')
+        : classifyDay(dayName);
+
+      // Workday gate. effectiveDay folds in per-date off/on overrides (profile
+      // path); no-profile falls back to the yaml/meetingMode day-name set. No
+      // override → byte-identical to the old name gate.
+      const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
+      if (!dayIsWorkday) {
         cursor = new Date(cursor.getTime() + step);
         continue;
       }

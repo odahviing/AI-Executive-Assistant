@@ -1362,7 +1362,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
     // known, rule out the whole span at once instead of just this one day.
     const sameDayNote = o.outOfOfficeAllDay
       ? o.outOfOfficeUntilDisplay
-        ? ` Offer a day AFTER that whole span — do NOT offer any day up to and including it, and do NOT say he's booked.`
+        ? ` Offer a day AFTER that whole span — do NOT offer any day inside that span, and do NOT say he's booked.`
         : ` Offer another DAY — do NOT offer a different time on the same day, and do NOT say he's booked.`
       : '';
     const reasonRule = phrase

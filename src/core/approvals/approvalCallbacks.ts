@@ -57,15 +57,23 @@ export function extractCallbacks(details: Record<string, unknown> | null | undef
   const callbacks = (details.callbacks as ApprovalCallbacks | undefined) ?? {};
 
   // Legacy alias: deferred_action == on_approve when on_approve isn't set.
-  // TRAP for a future writer (bouncer, 2026-08-10): this prefers
-  // `callbacks.on_approve` over `deferred_action` whenever BOTH are present —
-  // fine today because nothing writes `details.callbacks` on a policy_exception
-  // row (only `deferred_action`, e.g. skill.ts's refreshIfOpen). If something
-  // ever does, refreshing `deferred_action` alone (as refreshIfOpen does) stops
-  // having any effect here and the whole "replay the correction" fix goes
-  // silently inert. Not a defect now — just don't add a `callbacks` writer on
-  // this row shape without also teaching refreshIfOpen (or this function) to
-  // keep them in sync.
+  // EXPLICIT PRECEDENCE (extractCallbacks-precedence-silent-trap, 2026-08-14):
+  // `callbacks.on_approve` always wins over `deferred_action` when BOTH are
+  // present on the same row. Harmless today — nothing writes `details.callbacks`
+  // on a row that also carries `deferred_action` (only `deferred_action` itself,
+  // e.g. skill.ts's refreshIfOpen) — but it is a silent trap for the day
+  // something does: refreshing `deferred_action` alone (as refreshIfOpen does)
+  // would stop having any effect here, and the whole "replay the correction"
+  // fix would go silently inert. Guarded, not just documented: a row that ever
+  // DOES carry both is logged loudly so the collision is never invisible. Don't
+  // add a `callbacks` writer on a `deferred_action`-carrying row shape without
+  // also teaching refreshIfOpen (or this function) to keep them in sync.
+  if (callbacks.on_approve && details.deferred_action) {
+    logger.warn('extractCallbacks — row carries BOTH callbacks.on_approve and deferred_action; on_approve wins by precedence, deferred_action is ignored', {
+      onApproveTool: callbacks.on_approve.tool,
+      deferredActionTool: (details.deferred_action as { tool?: unknown } | undefined)?.tool,
+    });
+  }
   if (!callbacks.on_approve) {
     const legacy = details.deferred_action as ToolCallback | undefined;
     if (legacy && typeof legacy.tool === 'string' && legacy.args && typeof legacy.args === 'object') {

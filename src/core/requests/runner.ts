@@ -26,6 +26,7 @@ import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface } from './types';
 import { getConnection } from '../../connections/registry';
+import { logActivity } from './logActivity';
 import logger from '../../utils/logger';
 
 /**
@@ -346,6 +347,26 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
         const res = await conn.sendDirect(targetSlackId, framed);
         if (res.ok) {
           await conn.sendDirect(ownerId, `Reminded ${targetName} about "${row.subject ?? message}".`);
+          // runReminderFire-same-invisibility-as-research (2026-08-14) — a
+          // colleague DM is one of logActivity's own four canonical
+          // outward-effect categories ("a colleague DM, a resolved approval, a
+          // research run" — see logActivity.ts's header), and every other DM-
+          // send site (skills/outreach.ts's message_colleague, twice) logs
+          // itself the same way. This one didn't: the reminder row closing
+          // below records that the REMINDER fired, not that a DM went out to
+          // this specific colleague, so a later with_person/recent-activity
+          // read never saw it. Logged only on a confirmed send (logActivity's
+          // own "only after the action succeeded" rule).
+          logActivity({
+            ownerUserId: ownerId,
+            kind: 'outreach',
+            subkind: 'dm',
+            subject: `Reminded ${targetName}: ${row.subject ?? message}`,
+            initiatedBy: ownerId,
+            initiatedByRole: 'owner',
+            targetSlackId,
+            targetName: row.target_name ?? undefined,
+          });
         } else {
           await conn.sendDirect(ownerId, `I couldn't reach ${targetName} to send that reminder — you may want to ping them directly.`);
         }
@@ -359,7 +380,15 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
   }
   closeRequest({
     id: row.id,
-    state: 'resolved',
+    // gh#52 (52-U8) parity (runReminderFire-same-invisibility-as-research,
+    // 2026-08-14) — 'logged', not 'resolved': a fired reminder is exactly the
+    // "completed Maelle-initiated action that needed no owner decision" case
+    // logActivity.ts's header names research/DMs/approvals as examples of.
+    // 'resolved' made it invisible the instant the brief surfaced+flipped
+    // informed — getRequestsForBrief excludes anything resolved once narrated,
+    // so a later "did you remind Yael about X" had nothing to recall from.
+    // 'logged' is what getRecentActivityForOwner (52-U6) can still find, forever.
+    state: 'logged',
     closureReason: 'reminder_fired',
     closedBy: 'system',
   });

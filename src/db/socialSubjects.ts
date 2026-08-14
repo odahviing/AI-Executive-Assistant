@@ -360,9 +360,13 @@ export function clearSubjectRaisedMarker(subjectId: string): void {
 /**
  * Ignored-raise decay — the negative-feedback signal a raise that got no
  * uptake was missing (2026-08-09, "Bodyguard" kept resurfacing). Called by
- * the picker (`directiveForProactiveSlot` in stateMachine.ts) the moment it
- * finds a subject whose 72h raise-pending window has elapsed with STILL no
- * touch: that raise is confirmed ignored, not merely pending. −1 (same
+ * the picker (`directiveForProactiveSlot` in stateMachine.ts), once per
+ * sweep, for every active subject across ALL of the person's categories
+ * (not only whichever category the sweep's random pick lands on — that was
+ * the 2026-08-14 bug: an unpicked category's ignored subjects never got
+ * checked here and only ever decayed at the slower weekly rate) — the
+ * moment it finds a subject whose 72h raise-pending window has elapsed with
+ * STILL no touch: that raise is confirmed ignored, not merely pending. −1 (same
  * magnitude as weekly decay, for consistency), floor 0 → dormant, and the
  * stale marker is cleared (mirrors `clearSubjectRaisedMarker`) so the next
  * raise starts its own fresh pending window instead of reading as still-

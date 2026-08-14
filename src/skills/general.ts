@@ -18,6 +18,22 @@ const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
 const TAVILY_EXTRACT_DEFAULT_TIMEOUT_MS = 45_000;
 const TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS = 8_000;
 
+// gh#191-3 follow-up (tavilysearch-also-unbounded) — tavilySearch had the same
+// gap tavilyExtract had before gh#191 piece 3: no fetch timeout, on the same
+// live research path, ONE STEP AHEAD of extract in the call chain (GATHER
+// runs before READ). Same split as above: the research GATHER loop runs
+// inline in a live turn (someone's waiting) so it gets the same TIGHT budget
+// as READ. Every other caller (web_search tool, venue/location resolution,
+// news gather) keeps this GENEROUS default — they never pass a timeoutMs, so
+// they get it automatically. Sized ABOVE news.ts's NEWS_PER_GOAL_TIMEOUT_MS
+// (12s) on purpose: news.ts already races tavilySearch against that budget
+// itself (searchGoal's withTimeout) and briefs.ts derives its own
+// NEWS_BRIEF_TIMEOUT_MS margins off that number (#166) — a default fetch
+// timeout shorter than 12s would silently cut the news path short before its
+// own tuned race ever fires, inverting a relationship measured elsewhere.
+const TAVILY_SEARCH_DEFAULT_TIMEOUT_MS = 45_000;
+const TAVILY_SEARCH_RESEARCH_TIMEOUT_MS = 8_000;
+
 // ── External web-search response shapes ──────────────────────────────────────
 // Minimal-surface interfaces — only the fields we actually read. Provider
 // shapes are owned by the vendor; a shape change at one provider degrades to
@@ -383,7 +399,9 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
   for (let qi = 0; qi < plan.queries.length; qi++) {
     const q = plan.queries[qi];
     try {
-      const r = await tavilySearch(q, 'advanced', recency, opts) as {
+      // Tight budget (gh#191-3 follow-up): this loop runs inline in a live
+      // turn, same reasoning as READ's TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS below.
+      const r = await tavilySearch(q, 'advanced', recency, opts, TAVILY_SEARCH_RESEARCH_TIMEOUT_MS) as {
         results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
       };
       for (const item of r.results ?? []) {
@@ -480,6 +498,7 @@ export async function tavilySearch(
   depth: 'basic' | 'advanced' = 'advanced',
   timeRangeDays?: number,
   opts?: DomainFilterOpts,
+  timeoutMs: number = TAVILY_SEARCH_DEFAULT_TIMEOUT_MS,
 ): Promise<object> {
   // v1.8.8 — when caller passes timeRangeDays, use Tavily's news topic + days
   // filter so recency is enforced. Otherwise general-topic search (no date
@@ -506,10 +525,14 @@ export async function tavilySearch(
   if (opts?.excludeDomains && opts.excludeDomains.length > 0) {
     body.exclude_domains = opts.excludeDomains;
   }
+  // gh#191-3 follow-up — bounded via AbortSignal.timeout (Node 20 native),
+  // same treatment as tavilyExtract: a hung server can't block the turn
+  // that's waiting on it.
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {

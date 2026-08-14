@@ -163,7 +163,7 @@ safe. Don't force it — a trust regression costs more than the tokens.
   Meetings is the big one (`src/skills/meetings.ts`).
 - **Code that already owns rules** (cite these when arguing "move to code"):
   `resolveLocation`, `detectCategory`, `scheduleRules.checkSlot`,
-  `alignNearestQuarter` (floatingBlocks), `findAvailableSlots` returns
+  `alignNearestQuarter` (calendarDensity), `findAvailableSlots` returns
   `day_summary`/`broken_rule_label`/`per_attendee_local`.
 
 ## Standing rules (from CLAUDE.md + this project)

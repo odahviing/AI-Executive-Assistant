@@ -30,6 +30,7 @@ import {
   getActiveSubjectsForPersonCategory,
   getActiveCategoryEngagementForPerson,
   lastAssistantInitiatedAt,
+  applyIgnoredRaiseDecay,
   type SocialSubject,
 } from '../../db/socialSubjects';
 import logger from '../../utils/logger';
@@ -196,6 +197,42 @@ export function directiveForProactiveSlot(params: {
     if (sinceMs < ONE_DAY_MS) return withLegacyShape(noDirectiveRaw());
   }
 
+  // coda-repeats-and-merges-with-action-confirmations (#2) — a raise
+  // whose 72h pending window elapses with STILL no touch is confirmed
+  // ignored, not merely pending. Pre-fix, an expired window just returned the
+  // subject to the pool at its unchanged score with no memory it had been
+  // ignored — the negative-feedback signal repeated ignoring was missing
+  // ("Bodyguard" kept resurfacing, 2026-08-09).
+  //
+  // ignored-raise-decay-only-fires-picked-category (2026-08-14) — this check
+  // must run over EVERY active subject for this person, across ALL
+  // categories, on every sweep (every call here past the gates above) — not
+  // only the subjects belonging to whichever category the random pick below
+  // lands on. Pre-fix, a subject sitting in a category that didn't get
+  // picked this round never had its pending window checked here at all and
+  // only ever decayed at the much slower weekly rate. Runs before category
+  // selection so a status flip to dormant here is reflected in
+  // `activeCategories`/`activeCount` below too.
+  const RAISE_PENDING_WINDOW_MS = 72 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+  for (const s of getActiveSubjectsForPerson(personSlackId)) {
+    const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
+    if (!raisedAt) continue;                                      // never raised
+    const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
+    if (touchedAt > raisedAt) continue;                           // touched since the raise
+    if (nowMs - raisedAt < RAISE_PENDING_WINDOW_MS) continue;     // still within the pending window
+    // Pending + window elapsed → confirmed ignored. Decay + clear the stale
+    // marker so it re-enters the pool at its new score instead of the
+    // unchanged one.
+    try {
+      applyIgnoredRaiseDecay(s.id);
+    } catch (err) {
+      logger.warn('applyIgnoredRaiseDecay threw — continuing with prior score', {
+        subjectId: s.id, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   // EC6: random over active categories; if <3 active, mix in a raise_new chance.
   const activeCategories = getActiveCategoryEngagementForPerson(personSlackId);
   const activeCount = activeCategories.length;
@@ -238,45 +275,19 @@ export function directiveForProactiveSlot(params: {
   // raised yesterday with no reply, today should pick a different subject,
   // not double-back on soccer. A subject is "still pending response" when
   // last_assistant_initiated_at > last_touched_at (person engagement bumps
-  // last_touched_at).
-  const RAISE_PENDING_WINDOW_MS = 72 * 60 * 60 * 1000;
-  const nowMs = Date.now();
-  // coda-repeats-and-merges-with-action-confirmations (#2) — a raise
-  // whose 72h pending window elapses with STILL no touch is confirmed
-  // ignored, not merely pending. Pre-fix, an expired window just returned the
-  // subject to the pool at its unchanged score with no memory it had been
-  // ignored — the negative-feedback signal repeated ignoring was missing
-  // ("Bodyguard" kept resurfacing, 2026-08-09). Decay it here, in the same
-  // pass that already detects the expiry, so the picker itself carries the
-  // signal instead of waiting on the much slower weekly sweep. `.map` (not
-  // `.filter`) so a decayed row's fresh score/status feeds THIS round's sort
-  // — the DB write is real, so the in-memory copy must match it.
-  const subjects = allSubjects
-    .map(s => {
-      const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
-      if (!raisedAt) return s;  // never raised → eligible, unchanged
-      const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
-      const isPending = touchedAt <= raisedAt;
-      if (!isPending) return s;  // touched since the raise → fully eligible, unchanged
-      const withinWindow = (nowMs - raisedAt) < RAISE_PENDING_WINDOW_MS;
-      // Pending + recent → defer this subject this round; fall back to others or raise_new.
-      if (withinWindow) return null;
-      // Pending + window elapsed → confirmed ignored. Decay + clear the stale
-      // marker so it re-enters the pool at its new score instead of at the
-      // unchanged one.
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { applyIgnoredRaiseDecay } = require('../../db/socialSubjects') as
-          typeof import('../../db/socialSubjects');
-        return applyIgnoredRaiseDecay(s.id) ?? s;
-      } catch (err) {
-        logger.warn('applyIgnoredRaiseDecay threw — continuing with prior score', {
-          subjectId: s.id, err: String(err).slice(0, 200),
-        });
-        return s;
-      }
-    })
-    .filter((s): s is SocialSubject => s !== null && s.status === 'active');
+  // last_touched_at). The ignored-raise decay pass above already ran across
+  // every active subject for this person (all categories) and cleared the
+  // stale marker on any row whose 72h window had elapsed, so this is a plain
+  // eligibility filter now, not a decay site — a row still carrying a live
+  // marker here is genuinely within its window (or decay threw and left it
+  // unchanged; either way, defer it the same as before).
+  const subjects = allSubjects.filter(s => {
+    const raisedAt = s.last_assistant_initiated_at ? new Date(s.last_assistant_initiated_at).getTime() : 0;
+    if (!raisedAt) return true;                       // never raised → eligible
+    const touchedAt = s.last_touched_at ? new Date(s.last_touched_at).getTime() : 0;
+    if (touchedAt > raisedAt) return true;             // touched since the raise → eligible
+    return (nowMs - raisedAt) >= RAISE_PENDING_WINDOW_MS;
+  });
   if (subjects.length === 0) {
     return withLegacyShape({
       mode: 'raise_new',

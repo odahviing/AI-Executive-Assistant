@@ -561,6 +561,25 @@ export function computeOofSpan(
   };
 }
 
+/**
+ * two-duplicate-away-span-format-producers (2026-08-14) — the
+ * display-formatting half of an OOF span, extracted so `checkSlot` (below)
+ * and the search-path walker (`graph/findAvailableSlots.ts`) call this ONE
+ * function for the "away through <date>" string instead of each re-deriving
+ * the identical 4-step recipe by hand (endExclusive → minus 1 day →
+ * yyyy-MM-dd → multi-day test → toFormat). `computeOofSpan`'s own shared seam
+ * stopped one step short of here — both pipelines still formatted the span's
+ * display string independently. Returns undefined for a single-day span:
+ * there's nothing extra to say beyond "he's out that day".
+ */
+export function formatOofUntilDisplay(span: OofSpan, ownerTz: string): string | undefined {
+  const lastDayInclusive = DateTime.fromISO(span.endDateExclusive, { zone: ownerTz })
+    .minus({ days: 1 })
+    .toFormat('yyyy-MM-dd');
+  if (lastDayInclusive <= span.startDate) return undefined;
+  return DateTime.fromISO(lastDayInclusive, { zone: ownerTz }).toFormat('EEEE d MMM');
+}
+
 export function occupancyRoleOf(
   ev: CalendarEvent,
   floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
@@ -670,10 +689,13 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // caller can say "away through Aug 29" once instead of re-explaining
       // "away that whole day" for every day a colleague proposes inside a
       // known away period. Unset for a single-day OOF: nothing extra to say.
-      // Formatted ONCE, right here — this is the ONE producer (gh#200 dedup);
-      // every consumer (this file's own violation_label below,
-      // check_join_availability, availabilityPreCheck's ledger + narration)
-      // quotes it verbatim and never re-derives via its own DateTime.fromISO.
+      // Formatted ONCE, via `formatOofUntilDisplay` (two-duplicate-away-span-
+      // format-producers) — the SAME function the search-path walker
+      // (graph/findAvailableSlots.ts) calls, so the two pipelines can no
+      // longer disagree about the display string. Every consumer of the
+      // result (this file's own violation_label below, check_join_availability,
+      // availabilityPreCheck's ledger + narration) quotes it verbatim and
+      // never re-derives via its own DateTime.fromISO.
       let allDayOutOfOfficeUntilDisplay: string | undefined;
       if (isOof) {
         const span = computeOofSpan(
@@ -682,11 +704,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
           evEnd.diff(evStart, 'minutes').minutes,
           tz,
         );
-        const lastDayInclusive = DateTime.fromISO(span.endDateExclusive, { zone: tz })
-          .minus({ days: 1 }).toFormat('yyyy-MM-dd');
-        if (lastDayInclusive > span.startDate) {
-          allDayOutOfOfficeUntilDisplay = DateTime.fromISO(lastDayInclusive, { zone: tz }).toFormat('EEEE d MMM');
-        }
+        allDayOutOfOfficeUntilDisplay = formatOofUntilDisplay(span, tz);
       }
       overCommitment = {
         id: ev.id,

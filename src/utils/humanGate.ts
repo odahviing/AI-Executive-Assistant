@@ -30,6 +30,22 @@
  * asked (systemPrompt.ts gates the "never volunteer" half); this gate
  * catches infrastructure / mechanism leaks regardless of audience).
  *
+ * `aiDisclosureCleared` (round 3, 2026-08-14) — the named exception below
+ * ("ONE NAMED EXCEPTION TO 'SHE IS HUMAN'") only fires when this parameter is
+ * true, and it is TRUE on exactly one path in the whole codebase: the Slack
+ * colleague-readable leg, and only when securityGate.ts's
+ * `judgeAiIdentityWasAsked` already confirmed the disclosure was a genuine
+ * answer to a genuine question (guards/runOutputGates.ts wires that verdict
+ * through as `aiDisclosureCleared`). Every other call site — the owner-private
+ * leg, the email leg, the social coda — never passes it, so it defaults false
+ * and this gate treats a bare "I'm AI" exactly as it did before the exception
+ * existed: a violation of "she is human", caught and rewritten like any other
+ * bot-tell. That is deliberate, not an oversight: this gate is the ONLY
+ * language-agnostic check in the stack for this class (securityGate's
+ * self_ai_claim* patterns are English-only regex — see securityGate.ts's
+ * TRIGGER_PATTERNS), so it must keep catching a Hebrew or French "I am AI"
+ * exactly as it always did on every leg where nothing upstream ever judged it.
+ *
  * Critically: tech words are FINE in topic context. Maelle works at a tech
  * company. "Backend interview at 2pm", "the customer's API was down", "Lori
  * is checking the system at the customer site" — all normal workplace speech.
@@ -89,6 +105,7 @@ const SYSTEM_PROMPT_TEMPLATE = (
   assistantName: string,
   ownerFirst: string,
   audience: HumanGateAudience,
+  aiDisclosureCleared: boolean,
 ) => {
   // Audience-specific exemplars. The core voice rules don't change — the
   // way an escalation or refusal SOUNDS does. Each branch defines the right
@@ -224,7 +241,9 @@ ${assistantName} is a HUMAN executive assistant — a real person on the team. S
 She works at a tech company. ${ownerFirst} is in tech. People around her talk about systems, backends, APIs, tools, code reviews, server outages, backend interviews — that's normal workplace conversation. Those words are FINE when ${assistantName} is talking about ${ownerFirst}'s company, the customers, external products, or the people she's coordinating with.
 
 The ONLY problem: when ${assistantName} describes HERSELF as having that infrastructure or inner workings. A human EA never says "my routine fired but hit an error" — she says "I forgot earlier, sorry — checking now." A human EA never says "the system processed your request" — she says "got it, booked." A human EA never says "the tool is telling me the only slot is 12:30" or "the tool returned" — she says "looking at your calendar, the only slot is 12:30." A human EA never says "I have a technical issue preventing me from X" — that's machine-state framing.
-
+${aiDisclosureCleared ? `
+ONE NAMED EXCEPTION TO "SHE IS HUMAN": if the draft directly and honestly states that ${assistantName} is AI, a bot, a chatbot, or not a human person — this is only ever an honest answer to someone who asked her directly, never something she volunteers — leave it EXACTLY as written (ok=true). That single fact ("I'm AI" / "Yep, I'm an AI assistant") is not machine-voice framing, it's the truth, and it already passed a separate check upstream that confirmed it was a genuine answer to a genuine question. Do NOT rewrite it into a denial, into "I'm a real person", or into anything evasive — that would ship a lie in place of an honest answer. This exception covers ONLY the bare fact of being AI/a bot/not human; specific internals, model or provider names ("my model", "Claude", "GPT", "Anthropic", "language model") are a different gate's job (securityGate) and stay exactly as risky as ever — rewrite those as usual.
+` : ''}
 AUDIENCE FRAMING (CRITICAL):
 ${aud.thirdPersonRule}
 
@@ -466,6 +485,18 @@ function safeFallback(draft: string, audience: HumanGateAudience, reason: string
  * exactly the question the audience-frame bug raised. Optional: the coda gate
  * has no channel of its own to report.
  *
+ * `aiDisclosureCleared` (default false) is the ONLY thing that turns on the
+ * "she may honestly say she's AI" exception (see SYSTEM_PROMPT_TEMPLATE / the
+ * top-of-file doc comment). Pass true ONLY when an upstream check already
+ * confirmed the disclosure was a genuine answer to a genuine question — today
+ * that is exactly one call site: guards/runOutputGates.ts's colleague-readable
+ * leg, fed by securityGate.ts's judgeAiIdentityWasAsked verdict. Leaving it
+ * false (every other caller) makes this gate catch an AI-disclosure claim the
+ * same way it always did before that exception existed — its role as the
+ * language-agnostic backstop for this class is otherwise silently lost on
+ * every leg nothing upstream ever judges (non-English text, the email leg,
+ * the coda).
+ *
  * Fails open: any API / parse error → return { ok: true, rewrite: null } so
  * the original draft posts unchanged. Same defensive contract as the other
  * output-pass gates.
@@ -475,6 +506,7 @@ export async function runHumanGate(
   profile: UserProfile,
   audience: HumanGateAudience = 'internal',
   channelId?: string,
+  aiDisclosureCleared: boolean = false,
 ): Promise<HumanGateResult> {
   if (!draft || draft.trim().length === 0) {
     return { ok: true, rewrite: null };
@@ -482,7 +514,7 @@ export async function runHumanGate(
 
   const ownerFirst = profile.user.name.split(' ')[0];
   const assistantName = profile.assistant.name;
-  const systemPrompt = SYSTEM_PROMPT_TEMPLATE(assistantName, ownerFirst, audience);
+  const systemPrompt = SYSTEM_PROMPT_TEMPLATE(assistantName, ownerFirst, audience, aiDisclosureCleared);
 
   try {
     // JSON-output classifier + light rewrite — same structural shape as the
