@@ -21,18 +21,30 @@ const TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS = 8_000;
 // gh#191-3 follow-up (tavilysearch-also-unbounded) — tavilySearch had the same
 // gap tavilyExtract had before gh#191 piece 3: no fetch timeout, on the same
 // live research path, ONE STEP AHEAD of extract in the call chain (GATHER
-// runs before READ). Same split as above: the research GATHER loop runs
-// inline in a live turn (someone's waiting) so it gets the same TIGHT budget
-// as READ. Every other caller (web_search tool, venue/location resolution,
-// news gather) keeps this GENEROUS default — they never pass a timeoutMs, so
-// they get it automatically. Sized ABOVE news.ts's NEWS_PER_GOAL_TIMEOUT_MS
-// (12s) on purpose: news.ts already races tavilySearch against that budget
-// itself (searchGoal's withTimeout) and briefs.ts derives its own
-// NEWS_BRIEF_TIMEOUT_MS margins off that number (#166) — a default fetch
-// timeout shorter than 12s would silently cut the news path short before its
-// own tuned race ever fires, inverting a relationship measured elsewhere.
+// runs before READ).
+//
+// The split is by whether a live turn is BLOCKED on this exact call, not by
+// which function happens to invoke it — every caller below except news is a
+// synchronous tool_use dispatch (registry.ts's executeSkillTool has no outer
+// timeout of its own), so "someone's waiting" applies to all of them:
+//   - research GATHER (this file) and READ (tavilyExtract) — live turn.
+//   - web_search tool (below) — live turn, same as GATHER/READ; a first pass
+//     of this fix grouped it with news as "generous default" because it
+//     doesn't sit inside runResearch, but it is dispatched the exact same
+//     way and blocks the exact same reply.
+//   - venue candidate search / venue name resolution (venueSearch.ts) and
+//     venue-address location resolution (locationResolver.ts, used from the
+//     booking flow) — also live turn; same correction.
+//   - news gather (news.ts's searchGoal) is the one caller that is NOT
+//     bounded by this default in practice: it already races tavilySearch
+//     against its own NEWS_PER_GOAL_TIMEOUT_MS (12s) via withTimeout, and
+//     briefs.ts derives NEWS_BRIEF_TIMEOUT_MS margins off that same number
+//     (#166) — so it needs the DEFAULT to stay comfortably above 12s (this
+//     fetch-level abort then only reaps an already-abandoned request rather
+//     than ever winning the race itself). It is the only caller that
+//     deliberately omits an explicit timeoutMs.
 const TAVILY_SEARCH_DEFAULT_TIMEOUT_MS = 45_000;
-const TAVILY_SEARCH_RESEARCH_TIMEOUT_MS = 8_000;
+export const TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS = 8_000;
 
 // ── External web-search response shapes ──────────────────────────────────────
 // Minimal-surface interfaces — only the fields we actually read. Provider
@@ -220,7 +232,11 @@ For a quick one-off fact (weather, exchange rate, is today a holiday), use web_s
 
     try {
       if (config.TAVILY_API_KEY) {
-        const result = await tavilySearch(query, 'advanced', timeRangeDays);
+        // Live turn — the model is blocked on this reply (registry.ts's
+        // executeSkillTool has no outer timeout of its own), same as
+        // runResearch's GATHER/READ below. Tight budget, not the generous
+        // default.
+        const result = await tavilySearch(query, 'advanced', timeRangeDays, undefined, TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS);
         const hasContent = (result as any).answer || ((result as any).results?.length ?? 0) > 0;
         if (hasContent) return result;
         logger.info('Tavily returned empty — falling back to DuckDuckGo', { query });
@@ -401,7 +417,7 @@ export async function runResearch(goal: string, recencyOverride?: number, opts?:
     try {
       // Tight budget (gh#191-3 follow-up): this loop runs inline in a live
       // turn, same reasoning as READ's TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS below.
-      const r = await tavilySearch(q, 'advanced', recency, opts, TAVILY_SEARCH_RESEARCH_TIMEOUT_MS) as {
+      const r = await tavilySearch(q, 'advanced', recency, opts, TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS) as {
         results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
       };
       for (const item of r.results ?? []) {

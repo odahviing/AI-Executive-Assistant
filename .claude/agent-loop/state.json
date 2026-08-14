@@ -65,15 +65,6 @@
       "source": "verify",
       "symptom": "runReminderFire closes a fired reminder as state:resolved, the same eventual-invisibility property research had before gh#52-u8's fix -- getRequestsForBrief excludes it once narrated, so it becomes unrecallable. It also sends a colleague DM, which the owner's own gh#52 scope ruling says should count as a logged activity, and doesn't.",
       "evidence": "Bouncer discovery, 2026-08-11 gh#52+gh#191 combined wave pass. Same one-line fix shape as gh#52-u8 (state:'logged' instead of 'resolved'), plus wire the colleague-DM half through logActivity."
-    },
-    {
-      "id": "tavilysearch-also-unbounded",
-      "lane": "handyman",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "tavilySearch (the search half of research, distinct from tavilyExtract which gh#191-3 bounded) has no fetch timeout either, on the same live research path ahead of extract.",
-      "evidence": "Bouncer discovery, 2026-08-11 gh#191 wave pass. Same AbortSignal.timeout pattern as gh#191-3 would fix it, but tavilySearch's timeout is also read by news.ts's derived brief-timeout margins -- do not touch without checking those derivations first."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",

@@ -16,7 +16,7 @@
 import { getAnthropicClient } from '../llm/client';
 import { SONNET } from '../llm/models';
 import { config } from '../config';
-import { tavilySearch } from '../skills/general';
+import { tavilySearch, TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS } from '../skills/general';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 
@@ -58,7 +58,10 @@ export async function resolveVenueLocation(
 
   let searchResult: { answer?: string | null; results?: Array<{ title?: string; content?: string; url?: string }> };
   try {
-    searchResult = await tavilySearch(query, 'advanced') as typeof searchResult;
+    // Live turn (invite-translation path off createMeeting) — same bound as
+    // any other synchronous tool_use dispatch (tavilysearch-also-unbounded
+    // follow-up), not tavilySearch's generous non-live default.
+    searchResult = await tavilySearch(query, 'advanced', undefined, undefined, TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS) as typeof searchResult;
   } catch (err) {
     logger.warn('resolveVenueLocation — Tavily search failed', {
       input, err: String(err).slice(0, 200),
