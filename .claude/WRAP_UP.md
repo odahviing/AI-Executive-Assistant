@@ -203,7 +203,7 @@ Use the owner's author (not `Maelle Auto-Triage`).
 git log -1 --date=iso-strict --format=%ad     # -> .claude/agent-loop/state.json `lastWrapIso`
 ```
 
-Write that value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 (*nothing uncommitted*) true. `cleaner.md` C10 scopes its entire scan off that instant, so a skipped stamp makes the next cleaner re-scan commits it has already judged. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.**
+Write that value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 (*nothing uncommitted*) true. It is what `ledger-stats --report` below checks a release commit against. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.** (It is **not** the cleaner's clock — that is `lastCleanSha`, a separate watermark advanced by the dispatching chat, X131.)
 
 **The check, and it is one command:**
 

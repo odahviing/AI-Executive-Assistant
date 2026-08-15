@@ -22,8 +22,10 @@ The non-builders find the work (`editor`), shape a product ask into a plan (`fra
 
 - **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p`. Each one triggers a permission prompt that stalls an unattended run.
 
+- **Measure, never estimate — and name the command that produced the number.** *"Roughly"* in a cost or count claim is a defect: a figure you cannot reproduce is not evidence. Whatever you are counting — dispatch turns, tokens, a ratio, a run's own history — cite the command or file it came from, not a memory of it.
+
 ## What stays local, on purpose
 
 Some things look like they belong here and don't. **"Never relay a claim you have not verified"** is the clearest case: the bouncer states it because it is the last reader with nobody downstream to re-check it, and that reasoning does not generalize — the editor and the framer already own their own version of the same discipline (`E1`, `F2`), applied to a different input (a ticket's claim, not a lane's finished claim about its own fix). Putting one flattened sentence here would either weaken the bouncer's reason for having it or manufacture a false symmetry for agents whose version is genuinely different. Keep it where the reasoning lives.
 
-**Note on `architect`:** as of this writing `architect.md` does not carry a hand-copied version of these bars in a footer of its own — its equivalent content (verdict-first reporting, no preamble) is folded into its own "How you report back" section, and it states no shell-hygiene or turn-cost bar at all. Whether to point it here is for a follow-up review, not this one, since a separate change to `architect.md` (A15) was in flight at the time this file was written and A8 reserves every edit to that file for the owner regardless.
+**Note on `architect`:** its "How you report back" section still carries its own verdict-first/no-preamble text rather than pointing here, and it states no shell-hygiene bar of its own — both untouched by the 2026-08-15 review, which only connected its A2 (cost) to this file's measure-never-estimate bar. Folding the rest in is a smaller follow-up, not urgent since A8 reserves every edit to that file for the owner regardless.
