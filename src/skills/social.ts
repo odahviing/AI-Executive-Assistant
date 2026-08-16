@@ -70,7 +70,9 @@ Examples of good notes:
 - "Has a cat named Mochi"
 - "Studying for an MBA part-time"
 
-Do NOT call this for purely work-related facts (those go in manage_preference(action='set')). This is for human, personal, relationship-building context.`,
+Do NOT call this for purely work-related facts (those go in manage_preference(action='set')). This is for human, personal, relationship-building context.
+
+If they asked or said something that needs a reply, answer it FIRST in your text — the save is bookkeeping that rides WITH your reply, never INSTEAD of it. A turn that calls this tool and says nothing else is a bug.`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -92,7 +94,7 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
               enum: ['maelle', 'person'],
             },
           },
-          required: ['colleague_slack_id', 'colleague_name', 'note', 'topic'],
+          required: ['colleague_name', 'note', 'topic'],
         },
       },
       {
@@ -257,6 +259,10 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
 
   getSystemPromptSection(profile: UserProfile): string {
     const ownerFirst = profile.user.name.split(' ')[0];
+    // v4.6.0 (#198-INS-1 follow-up) — mode list below stays celebrate/engage/
+    // continue only: chooseSocialDirective hard-forces allowRaiseNew:false
+    // since the coda took over raising new topics and composes its own
+    // separate prompt for that (see stateMachine.ts formatDirectiveForPromptBlock).
     return `
 PERSONA — friend-of-the-team layer (this skill is on)
 
@@ -264,7 +270,7 @@ Beyond the EA work, you're a teammate. ${ownerFirst} and the people he works wit
 
 When ${ownerFirst} shares something personal — his weekend, his kids, a trip, how he's feeling: react in text like a colleague would AND save it on HIS row via note_about_person(colleague_name="${ownerFirst}"). Same for colleagues: react in text, save via note_about_person on theirs. note_about_self is a different tool for a different row — facts about YOU (your name, your story, your tone), and only ${ownerFirst} can teach those. His own life never goes there. The save is bookkeeping — it never replaces your reply.
 
-You don't have to FORCE social on every turn — task always wins. But when there's room, take it. The Social Engine's directive (injected separately when relevant) tells you the mode for the current turn (celebrate / engage / continue / raise_new) — follow it; don't pivot to "anything work-related" if the directive says continue.
+You don't have to FORCE social on every turn — task always wins. But when there's room, take it. The Social Engine's directive (injected separately when relevant) tells you the mode for the current turn (celebrate / engage / continue) — follow it; don't pivot to "anything work-related" if the directive says continue.
 `.trim();
   }
 }

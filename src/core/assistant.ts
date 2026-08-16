@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
+import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, searchPeopleMemoryEitherDirection, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, getPersonSocialSummary, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
@@ -796,9 +796,25 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // context (comms style, social-engineering flags, past asks) would be
         // unreachable. Resolve the row by slack_id, else by name/email.
         const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
+        // 2026-08-16 (gh#idan-cohen-memory) — asking about the OWNER is the
+        // worst case for a string-search miss: the caller here is ALWAYS the
+        // owner (get_person_memory is on ownerOnlyTools above), and his slack
+        // id is known for certain from context — never a claim in the
+        // message. When the query is exactly his own FULL configured name,
+        // resolve by that id directly instead of trusting a name match — the
+        // exact shape this tool saw fail (query "Idan Cohen" against a row
+        // not reachable by the old one-directional name search). Deliberately
+        // NOT first-name-only: a bare first name ("Idan") could equally name
+        // a colleague who happens to share it, and that ambiguity isn't
+        // resolvable from the query string alone — only the exact full name
+        // he configured is unambiguous enough to short-circuit on.
+        const ownerFullName = context.profile.user.name.trim().toLowerCase();
+        const asksAboutOwnerByFullName = !SLACK_ID_RE.test(query) && query.toLowerCase() === ownerFullName;
         const row = SLACK_ID_RE.test(query)
           ? getPersonMemoryRow(query)
-          : (searchPeopleMemory(query)[0] ?? searchPeopleMemory(query.replace(/-/g, ' '))[0] ?? null);
+          : asksAboutOwnerByFullName
+            ? (getPersonMemoryRow(context.profile.user.slack_user_id) ?? searchPeopleMemoryEitherDirection(query)[0] ?? null)
+            : (searchPeopleMemoryEitherDirection(query)[0] ?? searchPeopleMemoryEitherDirection(query.replace(/-/g, ' '))[0] ?? null);
         // v3.2.0 — md keyed by person_id; legacy name-slug passed as fallback.
         const personId = row?.person_id ?? (await resolvePersonSlug(context.profile, query));
         const content = personId ? await readPersonMemory(context.profile, personId, row?.name ?? query) : null;
@@ -827,7 +843,18 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // tool, so this never exposes a contact's email to a colleague.
         const email = row?.email ?? null;
         const slackId = row?.slack_id ?? null;
-        const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0 || recentBookings.length > 0;
+
+        // Item 2 (2026-08-16) — the coda system's social memory (subjects +
+        // topic-beats, plus item 3's merged per-subject summary once that
+        // column exists) was entirely invisible to this tool, so "what do
+        // you know about me" never saw what the coda picker already learned.
+        // Owner-only tool (isOwner enforced above) — no L9 read-authority
+        // concern: the owner reads everything, about anyone, including
+        // himself. Dead subjects are included and marked, never dropped (L15
+        // — "we used to talk about X" is real memory).
+        const social = slackId ? getPersonSocialSummary(slackId) : { live: [], dead: [] };
+        const hasSocial = social.live.length > 0 || social.dead.length > 0;
+        const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0 || recentBookings.length > 0 || hasSocial;
 
         if (!hasMemory && !email && !slackId) {
           return {
@@ -839,6 +866,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         logger.info('Person memory fetched', {
           person: row?.name ?? query, bytes: content?.length ?? 0, notes: notes.length,
           interactions: recentInteractions.length, hasEmail: !!email,
+          socialLive: social.live.length, socialDead: social.dead.length,
         });
         return {
           found: true,
@@ -852,6 +880,23 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             ? {
                 recent_bookings: recentBookings,
                 recent_bookings_note: `These are ${BOOKING_SNAPSHOT_FRAME}. Safe to say "we booked X on <date>"; check the calendar before stating when it now sits.`,
+              }
+            : {}),
+          ...(hasSocial
+            ? {
+                social_subjects: social.live.map(s => ({
+                  category: s.category, subject: s.label,
+                  summary: s.summary, recent_topics: s.recent_beats,
+                })),
+                ...(social.dead.length > 0
+                  ? {
+                      social_subjects_dead: social.dead.map(s => ({
+                        category: s.category, subject: s.label,
+                        summary: s.summary, recent_topics: s.recent_beats,
+                      })),
+                      social_subjects_dead_note: 'These subjects went quiet or were waved off — not currently raised, but real history. "We used to talk about X" is a fair thing to say; a fresh mention of one of these can bring it back.',
+                    }
+                  : {}),
               }
             : {}),
         };

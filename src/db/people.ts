@@ -898,6 +898,47 @@ export function searchPeopleMemory(query: string): PersonMemory[] {
   `).all(q, q) as PersonMemory[];
 }
 
+/**
+ * Like `searchPeopleMemory`, but matches EITHER direction: the query inside
+ * the stored name (searchPeopleMemory's original semantics) OR the stored
+ * name inside the query. A row stored with a short/first name (e.g. "Idan")
+ * is unreachable by a fuller query ("Idan Cohen") under the original
+ * one-directional LIKE — `lower(name) LIKE '%idan cohen%'` requires "idan
+ * cohen" to appear literally inside the stored name, which a 4-char name
+ * never contains. Scoped here rather than widening `searchPeopleMemory`
+ * itself: that function has ~15 other callers (attendee resolution, meeting
+ * lookups) that rely on its exact candidate set — get_person_memory
+ * (assistant.ts) is the one caller that needs the reverse direction too.
+ *
+ * The reverse leg is a WORD-BOUNDARY match, not a bare substring: both sides
+ * are padded with a leading/trailing space, so the stored name must appear
+ * as a whole word of the query — "Idan" matches "Idan Cohen" (the word is
+ * there), but "Dan" does NOT (it's a substring of "Idan", not a word of the
+ * query), and "Cohen" matches "Idan Cohen" too (a legitimate last-name-only
+ * stored row). A bare substring form let a stored "Dan" or "Cohen" win
+ * against a query for a totally different "Idan Cohen", and — owner-only
+ * tool, ORDER BY last_seen DESC LIMIT 10, first hit wins — misinformed the
+ * owner about the wrong person (2026-08-16 review). `length(name) >= 3` stays
+ * as a second belt against a short stored name (e.g. "Al", "Ed") padding out
+ * to a coincidental one-word match.
+ */
+export function searchPeopleMemoryEitherDirection(query: string): PersonMemory[] {
+  const db = getDb();
+  const q = query.toLowerCase();
+  const paddedQuery = ` ${q} `;
+  return db.prepare(`
+    SELECT * FROM people_memory
+    WHERE (
+        lower(name) LIKE '%' || @q || '%'
+        OR lower(email) LIKE '%' || @q || '%'
+        OR (length(name) >= 3 AND @paddedQuery LIKE '%' || ' ' || lower(name) || ' ' || '%')
+      )
+      AND kind != 'self'
+    ORDER BY last_seen DESC
+    LIMIT 10
+  `).all({ q, paddedQuery }) as PersonMemory[];
+}
+
 /** v3.2.0 — fresh surrogate id for a runtime-created person (no slack_id to
  *  derive from — e.g. a pure-email external first seen at booking time). */
 export function newPersonId(): string {

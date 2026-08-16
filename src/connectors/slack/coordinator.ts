@@ -47,6 +47,23 @@ import logger from '../../utils/logger';
  * Decides whether the colleague's message continues an open outreach (answers
  * what we asked) or is an unrelated new request. Returning `false` lets the
  * message fall through to the normal inbound pipeline.
+ *
+ * gh#201-c bouncer overturn (2026-08-16) — a prior version of this file
+ * replaced this per-job classifier with one comparative call across every
+ * open candidate, on the theory that independent per-job calls let a stale
+ * job "outvote" a fresh one (gh#201: Gidon's 07:53 reply allegedly matched a
+ * stale 2026-08-13 job instead of his own 07:21 ask). Re-traced: that never
+ * happened — the Aug-13 job WAS the correct match (Maelle's own follow-up
+ * DM, which Gidon's reply correctly answered), and
+ * `getOutreachJobsByColleague` requires `await_reply=1` + an
+ * `awaiting_colleague` request state, so the 07:21 turn (which opened no job
+ * at all) was never a competing candidate — `allJobs.length === 1` at match
+ * time. There was nothing to disambiguate and nothing for a comparative call
+ * to differentiate. The replacement also quietly deleted the 2+-candidate
+ * disambiguation DM below and defaulted to a silent newest-wins guess — a
+ * real safety-valve regression for a genuinely ambiguous case. Reverted to
+ * this per-job form; the thread-identity anchor added in the same pass
+ * (handleOutreachReply, below) is real and stays.
  */
 async function isOutreachReplyByContext(params: {
   newReply: string;
@@ -186,51 +203,78 @@ export async function handleOutreachReply(
     text: string;
     profile: UserProfile;
     bot_token: string;
+    /**
+     * gh#201-c — the inbound message's own ts and Slack's resolved thread_ts
+     * (processMessage.ts's callers already default threadTs to the message's
+     * own ts when Slack reports no real thread — same idiom as
+     * app/handlers.ts). Optional only so a caller with no Slack event context
+     * (none exist today) degrades to the pre-thread-anchor recency-only path
+     * instead of throwing.
+     */
+    messageTs?: string;
+    threadTs?: string;
   }
 ): Promise<boolean> {
   const allJobs = getOutreachJobsByColleague(params.senderId, params.profile.user.slack_user_id);
   if (allJobs.length === 0) return false;
 
-  // Classify against each active outreach — if nothing plausibly matches, let
-  // the message fall through as a new request.
-  const matches: OutreachJob[] = [];
-  for (const j of allJobs) {
-    const conv: Array<{ role: 'maelle' | 'colleague'; text: string }> =
-      j.conversation_json ? JSON.parse(j.conversation_json) : [];
-    const isReply = await isOutreachReplyByContext({
-      newReply: params.text,
-      originalMessage: j.message,
-      conversation: conv,
-      colleagueName: j.colleague_name,
-      assistantName: params.profile.assistant.name,
-    });
-    if (isReply) matches.push(j);
+  // gh#201-c — a genuine Slack thread reply names its own job outright.
+  // threadTs !== messageTs only when Slack itself reports this message as a
+  // reply inside an existing thread; dm_message_ts is the ts of the outbound
+  // DM that opened that job's thread (the 'continue' branch below already
+  // threads follow-ups off it). Thread identity is ground truth — skip the
+  // content guess entirely when Slack already told us which conversation
+  // this is.
+  let job: OutreachJob | undefined;
+  if (params.threadTs && params.messageTs && params.threadTs !== params.messageTs) {
+    job = allJobs.find(j => j.dm_message_ts === params.threadTs);
   }
 
-  if (matches.length === 0) {
-    logger.info('Outreach classifier — no match, treating as new request', {
-      senderId: params.senderId,
-      activeCount: allJobs.length,
-    });
-    return false;
-  }
+  if (!job) {
+    // No thread anchor — a fresh top-level message, the common case for a
+    // bare DM reply. Classify against each active outreach independently —
+    // if nothing plausibly matches, let the message fall through as a new
+    // request; if MORE THAN ONE genuinely matches, ask which one instead of
+    // silently guessing (gh#201-c bouncer restore — see isOutreachReplyByContext's
+    // own doc comment for why the comparative one-call replacement was reverted).
+    const matches: OutreachJob[] = [];
+    for (const j of allJobs) {
+      const conv: Array<{ role: 'maelle' | 'colleague'; text: string }> =
+        j.conversation_json ? JSON.parse(j.conversation_json) : [];
+      const isReply = await isOutreachReplyByContext({
+        newReply: params.text,
+        originalMessage: j.message,
+        conversation: conv,
+        colleagueName: j.colleague_name,
+        assistantName: params.profile.assistant.name,
+      });
+      if (isReply) matches.push(j);
+    }
 
-  let job: OutreachJob;
-  if (matches.length === 1) {
-    job = matches[0];
-  } else {
-    const lines = matches.map((j, i) => `${i + 1}. ${j.message.slice(0, 100)}${j.message.length > 100 ? '…' : ''}`).join('\n');
-    const dmChannel = await openDM(app, params.bot_token, params.senderId);
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: dmChannel,
-      text: formatForSlack(`I have a couple of open threads with you — which one is this about?\n${lines}`),
-    });
-    logger.info('Outreach classifier — multiple matches, asked to disambiguate', {
-      senderId: params.senderId,
-      matchCount: matches.length,
-    });
-    return true;
+    if (matches.length === 0) {
+      logger.info('Outreach classifier — no match, treating as new request', {
+        senderId: params.senderId,
+        activeCount: allJobs.length,
+      });
+      return false;
+    }
+
+    if (matches.length === 1) {
+      job = matches[0];
+    } else {
+      const lines = matches.map((j, i) => `${i + 1}. ${j.message.slice(0, 100)}${j.message.length > 100 ? '…' : ''}`).join('\n');
+      const dmChannel = await openDM(app, params.bot_token, params.senderId);
+      await app.client.chat.postMessage({
+        token: params.bot_token,
+        channel: dmChannel,
+        text: formatForSlack(`I have a couple of open threads with you — which one is this about?\n${lines}`),
+      });
+      logger.info('Outreach classifier — multiple matches, asked to disambiguate', {
+        senderId: params.senderId,
+        matchCount: matches.length,
+      });
+      return true;
+    }
   }
 
   logger.info('Outreach reply received', {
@@ -257,6 +301,23 @@ export async function handleOutreachReply(
       if (handled) return true;
     } catch (err) {
       logger.error('meeting_reschedule intent handler threw — falling through', { err: String(err), jobId: job.id });
+    }
+  }
+
+  // gh#201-d — intent-routed reply for a colleague reengaged after the owner's
+  // away period ended (see core/requests/colleagueOofReengage.ts).
+  if (job.intent === 'oof_reengage') {
+    try {
+      const { handleOofReengageReply } = await import('../../core/requests/colleagueOofReengage');
+      const handled = await handleOofReengageReply(app, {
+        job,
+        replyText: params.text,
+        profile: params.profile,
+        bot_token: params.bot_token,
+      });
+      if (handled) return true;
+    } catch (err) {
+      logger.error('oof_reengage intent handler threw — falling through', { err: String(err), jobId: job.id });
     }
   }
 

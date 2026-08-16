@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Regenerates the "Backlog" artifact page from the current state of GitHub issues.
 // Usage: node scripts/github-board.cjs <output-html-path>
-// Prints a JSON summary to stdout: { artifactUrl, opened, closed, relabeled, fixedLabels, warnings, itemCount }
+// Prints a JSON summary to stdout: { artifactUrl, opened, closed, relabeled, fixedLabels, needsClassification, warnings, itemCount }
 // Enforces one label rule on GitHub itself: a blocked item's tier label gets removed
-// if drift left one on it — everything else stays read-only, propose-only.
+// if drift left one on it. Surfaces (never decides) items that need a tier —
+// see SKILL.md step 1b: the agent running this skill classifies and applies those,
+// so nothing sits stale and untiered after a run.
 
 const fs = require('fs');
 const path = require('path');
@@ -15,11 +17,12 @@ const STATE_PATH = path.join(SKILL_DIR, 'state.json');
 
 const TYPE_LABELS = ['Feature', 'Improvement', 'Framework'];
 const TIER_LABELS = ['Next', 'Roadmap', 'Idea'];
-const TAG_LABELS = ['Skill', 'Transport', 'Paid API'];
+const TAG_LABELS = ['Skill', 'Transport', 'Paid API', 'Core'];
 const TAG_CSS = {
   Skill: { bg: '--tag-skill-bg', fg: '--tag-skill', text: 'SKILL' },
   Transport: { bg: '--tag-transport-bg', fg: '--tag-transport', text: 'TRANSPORT' },
   'Paid API': { bg: '--tag-paid-bg', fg: '--tag-paid', text: 'PAID API' },
+  Core: { bg: '--tag-core-bg', fg: '--tag-core', text: 'CORE' },
 };
 
 function gh(args) {
@@ -156,20 +159,24 @@ function main() {
   }
 
   const columns = { Next: [], Roadmap: [], Idea: [] };
-  const unclassified = [];
+  const needsClassification = [];
   for (const item of classified) {
     if (childNumbers.has(item.number)) continue; // rendered nested, not top-level
-    if (!item.type) warnings.push(`#${item.number} "${item.title}" has no Feature/Improvement/Framework label.`);
     if (!item.tier) {
-      unclassified.push(item);
+      // Not blocked, no tier — stale by definition (often: just lost its blocker).
+      // Never guessed here; the script has no reading comprehension. Surfaced with
+      // its body so the agent running this skill can classify it for real, then
+      // apply the labels — see SKILL.md step 1b. Nothing stays untiered after a run.
+      let body = '';
+      try {
+        body = JSON.parse(gh(['issue', 'view', String(item.number), '--json', 'body'])).body || '';
+      } catch { /* best-effort; agent can still open the issue itself */ }
+      needsClassification.push({ number: item.number, title: item.title, type: item.type, body: body.slice(0, 1500) });
       continue;
     }
     columns[item.tier].push(item);
   }
   for (const col of Object.values(columns)) col.sort((a, b) => a.number - b.number);
-  if (unclassified.length) {
-    warnings.push(`${unclassified.length} unblocked issue(s) have no Next/Roadmap/Idea tier and were left off the board: ${unclassified.map((i) => '#' + i.number).join(', ')}.`);
-  }
 
   const boardHtml = `<div class="board">
 
@@ -180,6 +187,24 @@ function main() {
       ${buildColumn('Idea', 'Not committed, may never happen.', columns.Idea, childrenByParent)}
 
     </div>`;
+
+  // Permanent visibility guarantee, independent of whether classification ran this
+  // pass: anything still in needsClassification when the page renders shows up here,
+  // so it can never sit invisible just because a run skipped step 1b.
+  const needsLabelHtml = needsClassification.length
+    ? `<div class="needs-label">
+    <h3>Needs a label</h3>
+    <p class="hint">Not blocked, no tier — and not yet classified. Bugs are triaged separately; anything else lands here until it's given a real type and tier.</p>
+    <div class="stack">
+      ${needsClassification
+        .map(
+          (item) =>
+            `<a class="card" href="${REPO_URL}/issues/${item.number}" target="_blank" rel="noopener"><div class="card-top"><span class="card-id">#${item.number}</span><span class="card-title">${esc(item.title)}</span></div></a>`
+        )
+        .join('\n      ')}
+    </div>
+  </div>`
+    : '';
 
   // Diff against last snapshot
   const prevSnapshot = state.snapshot || {};
@@ -192,8 +217,7 @@ function main() {
     .filter((c) => prevSnapshot[c.number] && (prevSnapshot[c.number].type !== c.type || prevSnapshot[c.number].tier !== c.tier))
     .map((c) => `#${c.number} ${c.title} (${prevSnapshot[c.number].type}/${prevSnapshot[c.number].tier} -> ${c.type}/${c.tier})`);
 
-  const itemCount = classified.length - unclassified.filter((u) => false).length; // total open issues considered
-  const renderedCount = classified.length - unclassified.length;
+  const renderedCount = classified.length - needsClassification.length;
 
   let footerNote = '<p>No changes since the last refresh.</p>';
   const bits = [];
@@ -206,6 +230,7 @@ function main() {
   let html = fs.readFileSync(TEMPLATE_PATH, 'utf8');
   html = html.replace('<!--ITEM_COUNT-->', String(renderedCount));
   html = html.replace('<!--BOARD-->', boardHtml);
+  html = html.replace('<!--NEEDS-LABEL-->', needsLabelHtml);
   html = html.replace('<!--FOOTER_NOTE-->', footerNote);
   fs.writeFileSync(outPath, html);
 
@@ -223,6 +248,7 @@ function main() {
         closed,
         relabeled,
         fixedLabels,
+        needsClassification,
         warnings,
       },
       null,

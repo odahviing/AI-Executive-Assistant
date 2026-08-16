@@ -2,6 +2,28 @@
 
 ---
 
+## 4.6.1 — A colleague's meeting request no longer disappears when you're away
+
+One reported incident — a colleague trying to book a meeting while the owner was away — traced back to four separate, real defects across two subsystems. Two of the four fixes were themselves caught and corrected by the pre-wrap safety pass before shipping.
+
+### Fixed
+
+- A colleague's meeting request that dead-ends on zero available slots during the owner's away period no longer just evaporates: Maelle now proactively re-engages the colleague once the owner is confirmed back (or the trip extends), asking if they still want to book — a "yes" resumes straight into a real booking session, a "no" or silence closes it as genuinely dead.
+- The owner discussing a colleague's pending meeting in his own DM thread no longer gets asked to pick a time on the colleague's behalf — the existing "relay to the colleague, confirm only" rule now covers this case too, not only the colleague-initiated one.
+- An inbound colleague reply that didn't use Slack's own reply-in-thread could be matched to the wrong open request. A real thread-identity check now covers the unambiguous case, and the disambiguation question ("which conversation is this about?") is confirmed still in place for a genuinely ambiguous one.
+- `get_person_memory` could return the wrong person's history on a full-name query — a name stored short (a first name only) was unreachable by a fuller query, and a bare-substring match could pick a different person's row entirely. Fixed with a word-boundary, bidirectional search.
+- A dead prompt reference to a social-directive mode the coda rewrite had already made unreachable.
+
+### Added
+
+- `get_person_memory` now surfaces a person's ongoing social subjects, live and dead, with a running merged summary per subject, not just interaction logs and notes.
+- The GitHub board artifact now classifies and tiers issues that went stale (most often: just lost their blocker) instead of silently dropping them, with a permanent "Needs a label" section for anything it genuinely can't place.
+
+### Invariants preserved
+
+- Colleague-facing text produced by the new proactive re-engagement path is gated through the same output-gate stack (leak/spoof, owner-fact-check, human gate, date verifier, availability floor) as every other colleague-facing reply — the first draft of this mechanism skipped that stack entirely and was caught before shipping.
+- The re-engagement trigger checks the real authenticated sender, not room-derived role — the owner asking about his own availability in a shared channel can no longer be mistaken for the colleague he was asking about.
+
 ## 4.6.0 — The social layer, rebuilt: she only speaks when she has something real to say
 
 The proactive social system is replaced, not patched. Until now Maelle picked a conversation topic with `Math.random()` over a hardcoded list of bare category names, and the composer was then explicitly forbidden from saying anything specific about the one it landed on — so a vague, unanchored question was the system working as designed, not a bug in it. Topics are now grounded in a live, geo-relevant search or in a fact already on file about that person, and when neither exists she says nothing. Four separate places could open a conversation; one can now.

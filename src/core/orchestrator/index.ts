@@ -1060,6 +1060,59 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           err: String(err).slice(0, 200), tool: toolUse.name,
         });
       }
+
+      // gh#201-d — the ONE case maybeOpenInFlightMeetingRequest deliberately
+      // excludes: a colleague-initiated find_available_slots search that
+      // dead-ends purely because the owner is in a known away period. That
+      // exclusion is still correct for every other colleague reason (those
+      // route through message_colleague/create_approval already); this is
+      // the new path for the one reason that had none. See
+      // core/requests/colleagueOofReengage.ts for the full mechanism.
+      //
+      // gh#201-d (D2 fix, bouncer overturn) — gated on `input.authority`, NOT
+      // `input.senderRole`. `senderRole` is CONTEXT-derived: processMessage.ts
+      // clamps it to 'colleague' for the owner himself in any MPIM/channel
+      // (room security — colleague-level tools/narration in a shared surface),
+      // so `senderRole !== 'owner'` reads true for the owner asking about
+      // availability in his own room during his own away period. `authority`
+      // is the authenticated Slack sender, never clamped by surface (see its
+      // own doc comment above in OrchestratorInput) — the genuine identity
+      // check this trigger needs.
+      //
+      // gh#201-d (bouncer second pass) — `authority` alone still misses one
+      // case: processMessage.ts's debounce merge clamps `effectiveAuthority`
+      // to 'colleague' for the WHOLE turn whenever the merged batch spans
+      // multiple senders, even when the runner (`input.userId`) is the owner's
+      // own Slack id landing in the same room thread as a colleague's message
+      // inside the debounce window. Compare the authenticated identity
+      // directly, same pattern as core/requests/runner.ts:449, so that case
+      // is covered too. Together these mean the owner can never open a
+      // tracking row keyed to his own slack id or get proactively DM'd as if
+      // he were the colleague he was asking about.
+      if (
+        toolUse.name === 'find_available_slots'
+        && input.authority !== 'owner'
+        && input.userId !== profile.user.slack_user_id
+      ) {
+        try {
+          const oof = require('../requests/colleagueOofReengage') as
+            typeof import('../requests/colleagueOofReengage');
+          await oof.maybeTrackColleagueOofDeadEnd({
+            ownerUserId: profile.user.slack_user_id,
+            colleagueSlackId: input.userId,
+            colleagueName: input.senderName,
+            threadTs: input.threadTs,
+            channel: input.channelId,
+            toolInput: toolUse.input as Record<string, unknown>,
+            toolResult: result,
+            profile,
+          });
+        } catch (err) {
+          logger.warn('maybeTrackColleagueOofDeadEnd threw — non-fatal', {
+            err: String(err).slice(0, 200), tool: toolUse.name,
+          });
+        }
+      }
     }
 
     messages.push({ role: 'user', content: toolResults });

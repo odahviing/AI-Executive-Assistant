@@ -31,7 +31,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 // item. The last reader was calendarHealth's reschedule-ping dedup
 // (`intent='meeting_reschedule' AND status='sent'`, INVERTED polarity: a match
 // SUPPRESSES the overlap autofix); it moved to `getOpenRescheduleOutreach(ownerUserId)`
-// filtered to the event id (skills/calendarHealth/handlers/checkHealth.ts:864-889 —
+// filtered to the event id (skills/calendarHealth/handlers/checkHealth.ts:891-902 —
 // live before/after: old probe 1 row, spine reader 0, and that 1 row was the
 // un-closeable request_id-NULL row that suppressed the autofix for its event forever).
 // With it gone the two cascade writes went too, in reader-then-writer order:
@@ -192,6 +192,12 @@ export function createOutreachJob(
     // reads owner_user_id/colleague_slack_id/followup_closed_at directly off
     // outreach_jobs, no join, no request required.
     skipRequestBridge?: boolean;
+    // gh#201-d — link the paired request as a CHILD of an existing request
+    // (e.g. the dead-end tracking row a colleague_oof_recheck resolves into
+    // an outreach). Purely for hierarchy/traceability (requests.parent_
+    // request_id) — the child still gets its own full lifecycle; closing the
+    // parent with skipChildren:true leaves it untouched.
+    parentRequestId?: string;
   },
 ): string {
   const db = getDb();
@@ -267,6 +273,7 @@ export function createOutreachJob(
       ownerUserId: params.owner_user_id,
       initiatedBy: params.owner_user_id,
       initiatedByRole: 'system',
+      parentRequestId: params.parentRequestId,
       kind: 'outreach',
       subkind: params.intent ?? undefined,
       subject: subjectPreview || `Outreach to ${params.colleague_name}`,

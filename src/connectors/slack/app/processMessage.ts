@@ -223,6 +223,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // read before the framing split — requests owns what this reads.
           senderId, text: framedText, profile,
           bot_token: assistant.slack.bot_token,
+          // gh#201-c — thread identity anchor: threadTs !== ts only when this
+          // is a genuine Slack thread reply (handlers.ts's own idiom), so the
+          // matcher can prefer a job's own dm_message_ts over a content guess.
+          messageTs: ts, threadTs,
         });
         if (outreachHandled) {
           logger.info('Message handled as outreach reply', { senderId, channelId });

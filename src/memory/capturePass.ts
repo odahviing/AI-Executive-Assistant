@@ -68,6 +68,7 @@ import {
   isCategoryActiveForPerson,
   markSubjectDead,
   threadHadSocialTurn,
+  updateSubjectSummary,
   type SubjectToucher,
 } from '../db/socialSubjects';
 
@@ -780,6 +781,17 @@ Chat covers "wrapped up Stormvale Saga last night, ending was wild" AND "Ophir h
 
 Two decisions, two categories, beats stay properly scoped. Never collapse cross-category content into one decision.
 
+## Running summary — MERGE, never overwrite
+
+Each subject in the active list may show a "current summary" — everything learned about it across every past conversation, in prose. For every "match" or "create" decision, also output a "summary" field: the FULL updated summary for that subject, 5-10 sentences, in prose.
+
+This is a MERGE, not a replacement with just this chat's news:
+  - If a "current summary" is shown, your output must carry forward everything still true in it AND fold in whatever this chat added or changed (progress, a changed plan, a new detail). The result should read as one coherent, up-to-date account of the whole subject, not a diff.
+  - If this chat genuinely added nothing beyond what the current summary already says, you may re-emit it unchanged.
+  - If there is no "current summary" (a brand-new subject, or one this chat "create"s), write the summary from this chat's content alone.
+  - Keep it to roughly 5-10 sentences — specific and concrete (what's actually happened, been said, or been decided), not vague ("they like gaming"). There is room to be generous; do not compress away real detail to hit the low end.
+  - A "reject" never carries a summary.
+
 ## Your output
 
 For each subject this chat touched:
@@ -789,6 +801,7 @@ For each subject this chat touched:
   - subject_label: ONLY when action="create" — short umbrella label (2-6 words ideally)
   - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat (irrelevant for "reject"; default "neutral")
   - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat — always empty for "reject"
+  - summary: the merged running summary described above — required for "match"/"create", omitted for "reject"
 
 You may output zero decisions (if the chat had no social content and no work to reject), one decision (typical), or several (if the chat spanned multiple subjects across one or more categories).
 
@@ -809,6 +822,7 @@ interface SubjectDecision {
   subject_label?: string;     // when create
   sentiment: 'positive' | 'negative' | 'neutral';
   topic_beats: string[];
+  summary?: string;           // merged running summary — match/create only (item 3)
 }
 
 interface ReconcileOutput {
@@ -844,6 +858,7 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
         subject_label: typeof r.subject_label === 'string' ? r.subject_label.trim() : undefined,
         sentiment,
         topic_beats,
+        summary: typeof r.summary === 'string' && r.summary.trim() ? r.summary.trim() : undefined,
       });
     }
     return { decisions };
@@ -894,8 +909,14 @@ async function runSubjectReconciliation(
         const beatsStr = beats.length > 0
           ? `\n      recent topics: ${beats.map(b => `"${b.label}"`).join(', ')}`
           : '';
+        // item 3 (2026-08-16) — the existing merged summary, shown so Haiku
+        // MERGES into it rather than starting from the beats alone. Absent
+        // until the social_subjects.summary column lands (needs-dependency,
+        // Handyman) — s.summary reads undefined until then and this line
+        // simply doesn't render, no different from a subject with no summary yet.
+        const summaryStr = s.summary ? `\n      current summary: "${s.summary}"` : '';
         const cat = s.category_id.replace(/^cat_global_/, '');
-        lines.push(`    [${s.id}] "${s.label}" — category=${cat}, last touched ${s.last_touched_at}${beatsStr}`);
+        lines.push(`    [${s.id}] "${s.label}" — category=${cat}, last touched ${s.last_touched_at}${summaryStr}${beatsStr}`);
       }
       return lines.join('\n');
     })();
@@ -926,7 +947,12 @@ async function runSubjectReconciliation(
 
     const resp = await anthropic.messages.create({
       model: HAIKU_MODEL,
-      max_tokens: 1500,
+      // 1500 → 3000 (item 3, 2026-08-16): each match/create decision now also
+      // carries a 5-10 sentence merged summary (up to ~1800 chars). The old
+      // budget covered labels + beats only; a multi-subject chat would now
+      // risk truncating mid-JSON. Same call, same model tier — no new call,
+      // no tier change, just headroom for the larger existing response.
+      max_tokens: 3000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
     });
@@ -1076,6 +1102,23 @@ async function runSubjectReconciliation(
         logger.info('runSubjectReconciliation: created subject', {
           threadTs, personSlackId, subjectId, category: category.label, label: d.subject_label,
         });
+      }
+
+      // Item 3 (2026-08-16) — write the MERGED running summary. Rides this
+      // same reconciliation call (no second LLM call): Haiku already saw the
+      // current summary in the active-subjects block above and returned the
+      // complete merged text, so this is a plain write, not a merge decision.
+      // Wrapped separately from topic-beat recording below so a summary write
+      // failure (e.g. the column not existing yet) can never block beats that
+      // otherwise would have landed.
+      if (subjectId && d.summary) {
+        try {
+          updateSubjectSummary(subjectId, d.summary);
+        } catch (err) {
+          logger.warn('runSubjectReconciliation: updateSubjectSummary threw', {
+            subjectId, err: String(err).slice(0, 200),
+          });
+        }
       }
 
       // Record topic beats under whichever subject (matched or created),

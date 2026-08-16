@@ -112,6 +112,13 @@ export interface SocialSubject {
   created_by: SubjectToucher;
   created_at: string;
   updated_at: string;
+  // gh#(item-3, 2026-08-16) — running per-subject summary, MERGED across every
+  // reconciliation that touches this subject (never overwritten wholesale).
+  // NEEDS `ALTER TABLE social_subjects ADD COLUMN summary TEXT` — see the
+  // migration note above `updateSubjectSummary` below. Optional/nullable:
+  // `SELECT *` on a DB that hasn't run that migration yet simply omits the
+  // key, so every reader here treats it as "no summary yet", not an error.
+  summary?: string | null;
 }
 
 export interface SocialTopicBeat {
@@ -128,6 +135,12 @@ export interface SocialTopicBeat {
 
 export const MAX_ACTIVE_SUBJECTS_PER_CATEGORY = 5;
 export const MAX_TOPIC_BEATS_PER_SUBJECT = 10;
+
+// Owner asked for "5-10 sentences... cap the size but we have room" — generous
+// per L18, but not unbounded: a defensive code-side ceiling so a runaway Haiku
+// merge can't grow one subject's summary without limit. ~1800 chars covers 10
+// generous sentences with room to spare.
+export const MAX_SUBJECT_SUMMARY_CHARS = 1800;
 
 // A subject dies after this many raises in a row that got no reply. Keyed on
 // the existing last_assistant_initiated_at stamp: every raise clears to NULL
@@ -399,6 +412,23 @@ export function getActiveSubjectsForPerson(personSlackId: string): SocialSubject
 }
 
 /**
+ * EVERY subject for this person, live or dead, live-first then most
+ * recently touched. Used by get_person_memory (item 2, 2026-08-16) — a dead
+ * subject is real memory ("we used to talk about X"), not a row to hide, and
+ * 4.6.0 already made revival-on-mention a designed behaviour (L15). Distinct
+ * from `getActiveSubjectsForPerson`, which stays live-only for every
+ * proactive-social caller that must never raise a dead topic.
+ */
+export function getAllSubjectsForPerson(personSlackId: string): SocialSubject[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM social_subjects
+    WHERE person_slack_id = ?
+    ORDER BY CASE WHEN status = 'live' THEN 0 ELSE 1 END, last_touched_at DESC
+  `).all(personSlackId) as SocialSubject[];
+}
+
+/**
  * Subject most recently raised by the assistant (for the raise-feedback
  * signal). Used by the orchestrator on the NEXT inbound from this person to
  * judge whether they engaged with the raise.
@@ -590,6 +620,71 @@ export function getRecentTopicBeats(subjectId: string, limit: number = 5): Socia
     ORDER BY created_at DESC
     LIMIT ?
   `).all(subjectId, limit) as SocialTopicBeat[];
+}
+
+/**
+ * Write the MERGED running summary for a subject (item 3, 2026-08-16) —
+ * called from capturePass.ts's `runSubjectReconciliation`, the SAME Haiku
+ * call that already decides match/create/reject, never a second call. The
+ * caller is responsible for the merge itself (Haiku sees the current summary
+ * in its prompt context and returns the complete updated text); this is a
+ * plain overwrite of that already-merged value, capped defensively so a
+ * runaway response can't grow the row without bound.
+ *
+ * REQUIRES the `social_subjects.summary` column — see the migration note on
+ * `SocialSubject.summary` above. Until that column exists this throws
+ * "no such column"; every caller here runs inside `runSubjectReconciliation`'s
+ * existing try/catch (fire-and-forget, logged, never fatal).
+ */
+export function updateSubjectSummary(subjectId: string, summary: string): void {
+  const db = getDb();
+  const trimmed = summary.trim().slice(0, MAX_SUBJECT_SUMMARY_CHARS);
+  if (!trimmed) return;
+  db.prepare(`
+    UPDATE social_subjects SET summary = @summary, updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ id: subjectId, summary: trimmed });
+}
+
+// ── Read-side shaping for get_person_memory (item 2, 2026-08-16) ────────────
+
+export interface PersonSocialSubjectView {
+  category: string;
+  label: string;
+  summary: string | null;
+  recent_beats: string[];
+}
+
+export interface PersonSocialSummary {
+  live: PersonSocialSubjectView[];
+  dead: PersonSocialSubjectView[];
+}
+
+/**
+ * Shaped, capped social memory for one person — subjects + their merged
+ * summary (once the item-3 column exists) or, until then, their recent
+ * topic-beat labels as the fallback content. Dead subjects are included and
+ * marked, never dropped (L15) — "we used to talk about X" is real memory.
+ * Capped (not every row) per the owner's own proportionality note: this
+ * payload already runs to 24KB for a well-known person before social data is
+ * added at all.
+ */
+export function getPersonSocialSummary(
+  personSlackId: string,
+  maxLive: number = 10,
+  maxDead: number = 5,
+): PersonSocialSummary {
+  const all = getAllSubjectsForPerson(personSlackId);
+  const shape = (s: SocialSubject): PersonSocialSubjectView => ({
+    category: s.category_id.replace(/^cat_global_/, ''),
+    label: s.label,
+    summary: s.summary ?? null,
+    recent_beats: getRecentTopicBeats(s.id, 3).map(b => b.label),
+  });
+  return {
+    live: all.filter(s => s.status === 'live').slice(0, maxLive).map(shape),
+    dead: all.filter(s => s.status === 'dead').slice(0, maxDead).map(shape),
+  };
 }
 
 // gh#198 — `pickLeastRecentlyUsedTopicBeat` / `markTopicBeatUsed` deleted.

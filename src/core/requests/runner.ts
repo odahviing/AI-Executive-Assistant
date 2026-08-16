@@ -27,6 +27,7 @@ import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface } from './types';
 import { getConnection } from '../../connections/registry';
 import { logActivity } from './logActivity';
+import { runColleagueOofRecheck, runOofReengageReask } from './colleagueOofReengage';
 import logger from '../../utils/logger';
 
 /**
@@ -127,6 +128,13 @@ async function dispatchHandler(
 
     case 'send_scheduled_outreach':
       return runSendScheduledOutreach(row, profile);
+
+    // gh#201-d
+    case 'colleague_oof_recheck':
+      return runColleagueOofRecheck(row, profile);
+
+    case 'oof_reengage_reask':
+      return runOofReengageReask(row, profile);
 
     default:
       logger.warn('dispatchHandler — unknown handler, clearing timer', {

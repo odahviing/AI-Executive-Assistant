@@ -548,7 +548,8 @@ function initSchema(db: Database.Database): void {
       last_assistant_initiated_at TEXT,                         -- when assistant last raised this (NULL = never raised since last cleared)
       created_by        TEXT NOT NULL DEFAULT 'owner',
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      summary           TEXT                                     -- accumulating merged summary (~1800-char cap enforced in code); NULL = no summary yet
     );
     CREATE INDEX IF NOT EXISTS idx_social_subjects_person ON social_subjects(person_slack_id, status);
     CREATE INDEX IF NOT EXISTS idx_social_subjects_owner_person ON social_subjects(owner_user_id, person_slack_id);
@@ -596,6 +597,13 @@ function initSchema(db: Database.Database): void {
     db.prepare(`UPDATE social_subjects SET status = 'live' WHERE status = 'active'`).run();
     db.prepare(`UPDATE social_subjects SET status = 'dead' WHERE status = 'dormant'`).run();
   } catch (_) {}
+
+  // Subject-memory summary (#187) — accumulating merged summary per subject,
+  // written by the existing reconciliation Haiku call (no new LLM call).
+  // Nullable, no default, no backfill: absent reads as "no summary yet"
+  // everywhere by design. Additive column is a no-op once present, including
+  // every fresh install (which gets it straight from the CREATE TABLE above).
+  try { db.exec(`ALTER TABLE social_subjects ADD COLUMN summary TEXT`); } catch (_) {}
 
   // Slot holds (#30) — a tentative reservation on a slot someone picked but
   // hasn't confirmed (or the owner explicitly parked). Internal state ONLY,

@@ -84,7 +84,16 @@ export type NextCheckHandler =
   | 'send_scheduled_outreach' // fire a future-dated outreach DM
   | 'reminder_fire'          // fire a reminder DM at due_at
   | 'research_run'           // run a research prompt through the agent loop, DM the result
-  | 'reschedule_reask';      // colleague said "checking" → re-ping them ONCE at +24h, then re-arm to outreach_expiry
+  | 'reschedule_reask'       // colleague said "checking" → re-ping them ONCE at +24h, then re-arm to outreach_expiry
+  // gh#201-d — a colleague's meeting search dead-ended on the owner's away
+  // period (owner_out_of_office). Fires when the tracked away period should
+  // have ended: re-verifies the owner is actually back (or bumps the check to
+  // the newly-discovered end date if the period was extended), then sends the
+  // colleague a reengagement DM. See core/requests/colleagueOofReengage.ts.
+  | 'colleague_oof_recheck'
+  // gh#201-d — the reengagement DM's colleague said "checking" → re-ping them
+  // ONCE at +24h, then re-arm to outreach_expiry (mirrors reschedule_reask).
+  | 'oof_reengage_reask';
 
 export interface RequestRow {
   // Identity

@@ -13,6 +13,60 @@
   "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here.",
   "pendingOverflow": [
     {
+      "id": "findavailableslots-drops-context-on-colleague-oof-deadend",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "findAvailableSlots.ts's early-return (rawSlots fallback) drops day_summary/top_reasons on a colleague dead-end search that has no attendee-email warning or soft-block hint (e.g. owner fully OOF) -- Sonnet gets a bare [] with zero explanation to relay to the colleague in the moment.",
+      "evidence": "Surfaced 2026-08-16 building gh#201-d (registrar). The new proactive-reengagement fix doesn't depend on this (it verifies OOF independently), but Sonnet's live reply to the colleague in that exact turn is currently ungrounded until this is fixed."
+    },
+    {
+      "id": "oof-reengage-dm-not-tz-gated-to-colleague-hours",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "unclear",
+      "source": "verify",
+      "symptom": "gh#201-d's new proactive reengagement DM (colleagueOofReengage.ts) fires as soon as the owner is confirmed back, not gated to the colleague's own local work hours -- could land at 3am for a colleague in a different timezone.",
+      "evidence": "Flagged by registrar while building gh#201-d, 2026-08-16 -- explicitly not built there since no existing precedent in this codebase gates any outreach send-time to the colleague's own timezone (every existing outreach fires immediately or on a flat schedule). Would be new scope, not a repair."
+    },
+    {
+      "id": "authority-clamp-affects-every-consumer-not-just-oof-trigger",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "processMessage.ts:684's debounce-merge clamp (spansMultipleSenders -> effectiveAuthority:'colleague') affects EVERY consumer that gates on input.authority, not just gh#201-d's reengagement trigger -- confirmed during gh#201-d's narrow re-verify. A merged batch can present authority:'colleague' while userId is still the owner's to any such consumer.",
+      "evidence": "Surfaced 2026-08-16 during gh#201-d's second bouncer pass. Worth a repo-wide sweep of authority-gated call sites in a later run; only the one OOF-reengage trigger was checked here."
+    },
+    {
+      "id": "owner-facing-reply-text-not-logged",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "unclear",
+      "source": "logs",
+      "symptom": "gh#201 re-trace: Maelle's own outbound reply text to the OWNER isn't written to structured logs at all (only flagged claim-checker rewrites are) -- when a turn goes wrong, what she actually said to Idan has to be inferred from tool results and his reaction rather than read verbatim, which is what happened investigating gh#201-b.",
+      "evidence": "Surfaced 2026-08-16 re-examining gh#201's 08:05/08:39/08:57 turns -- had to infer her reply content, could not quote it. Worth a look for handyman (logging), not confirmed as worth building yet."
+    },
+    {
+      "id": "createmeeting-classifier-may-mislabel-external-meeting-as-interview",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "unclear",
+      "source": "logs",
+      "symptom": "gh#201 trace: create_meeting's category classifier labelled a routine external-attendee booking (Gidon Pely, gmail) 'Interview' on an LLM judgment call, not a hardcoded rule (detectCategory.ts has no Interview branch) -- classifierVerdict:'Interview' was applied to the actual calendar write.",
+      "evidence": "Surfaced 2026-08-16 during the gh#201 editor trace, planMeeting verdict at 08:59:50 on the Aug 30 Gidon booking. Not one of gh#201's four numbered complaints, no proof of user-facing harm yet -- worth a look, not confirmed."
+    },
+    {
+      "id": "create-meeting-final-duration-not-logged",
+      "lane": "handyman",
+      "severity": "low",
+      "clarity": "unclear",
+      "source": "logs",
+      "symptom": "gh#201 trace: the Gidon booking was discussed at 40 minutes but the find_available_slots call immediately before create_meeting searched 25 minutes -- no create_meeting call-entry log line exists to confirm which duration was actually booked (only find_available_slots logs an entry).",
+      "evidence": "Surfaced 2026-08-16 during the gh#201 editor trace. Could not independently confirm the final booked length without live-DB access. A log addition at create_meeting's own call site (mirroring find_available_slots') would make this traceable next time."
+    },
+    {
       "id": "deferred-replay-uses-stale-pre-rename-snapshot",
       "lane": "registrar",
       "severity": "medium",

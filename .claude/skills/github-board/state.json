@@ -59,11 +59,6 @@
     "42": {
       "title": "Support multiple calendars",
       "type": "Feature",
-      "tier": "Roadmap"
-    },
-    "44": {
-      "title": "Enrich social openers with web search",
-      "type": "Improvement",
       "tier": "Idea"
     },
     "45": {
@@ -75,11 +70,6 @@
       "title": "VIP semantics and privileges",
       "type": "Feature",
       "tier": "Idea"
-    },
-    "82": {
-      "title": "Handle blocked LinkedIn fetch",
-      "type": "Improvement",
-      "tier": "Roadmap"
     },
     "87": {
       "title": "Microsoft Teams transport",
@@ -114,7 +104,7 @@
     "108": {
       "title": "Support cross-midnight work hours",
       "type": "Improvement",
-      "tier": "Roadmap"
+      "tier": "Idea"
     },
     "110": {
       "title": "Meeting prep skill",
@@ -135,11 +125,6 @@
       "title": "Rebuild the calendar health skill",
       "type": "Improvement",
       "tier": "Roadmap"
-    },
-    "178": {
-      "title": "Charter management",
-      "type": "Framework",
-      "tier": "Next"
     },
     "182": {
       "title": "Detect regressions in ledger lookup",
@@ -164,17 +149,17 @@
     "186": {
       "title": "Coda reads the task turn's mood",
       "type": "Improvement",
-      "tier": null
+      "tier": "Roadmap"
     },
     "187": {
       "title": "Closing turn keeps tone context",
       "type": "Improvement",
-      "tier": null
-    },
-    "198": {
-      "title": "Redesign social and coda system",
-      "type": "Improvement",
       "tier": "Roadmap"
+    },
+    "199": {
+      "title": "Move to Vertex-hosted Claude",
+      "type": "Improvement",
+      "tier": "Next"
     }
   }
 }
