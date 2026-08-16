@@ -11,13 +11,26 @@
  * the 24h-per-person cadence gate in the picker — it is a property of the turn
  * and only the turn can judge it. WRITING is this file's, and it happens LATER:
  * the orchestrator hands over a `PendingSocialCoda` and the transport calls
- * `composeSocialCoda` inside the 10s beat it already waits before posting. The
+ * `composeSocialCoda` inside the beat it already waits before posting. The
  * work answer never waits on a social line (L10).
  *
  * v2.2.4 — language hint passed through so the coda matches the conversation's
  * actual language; discovery-mode for raise_new with no existing topics (ask
  * something concrete-and-discoverable rather than fabricating an "offsite next
  * month" topic that doesn't exist).
+ *
+ * gh#198 (answer 2/3/10/13) — GROUNDING. Nothing this composer raises is ever
+ * guessed: before writing a line it grounds the candidate via `groundCoda`
+ * below — ONE live Tavily search per coda (not one per category, not one per
+ * subject), asking what's new in the person's territory, plus a re-read of
+ * the person's ACTUAL past messages (not a topic-beat label) for a subject
+ * being continued. Either source alone is sufficient — a search result is
+ * enough to open with someone Maelle has no history for (answer 10); past
+ * chat alone is enough even when the search contributes nothing (answer 3).
+ * No grounding found → the coda does not fire; silence is the correct
+ * outcome, not a fallback to a generic line. This supersedes the old
+ * least-recently-used topic-beat hook, which grounded nothing — it only
+ * picked a label to avoid repeating itself.
  *
  * The output is ONE short sentence, delivered by the transport as its OWN
  * in-thread message a beat after the task reply — never concatenated onto it,
@@ -31,13 +44,11 @@
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
 import type { UserProfile } from '../../config/userProfile';
-import type { LegacySocialDirectiveShape as SocialDirective } from './stateMachine';
+import type { SocialDirective } from './stateMachine';
 import logger from '../../utils/logger';
-import {
-  getRecentTopicBeats,
-  pickLeastRecentlyUsedTopicBeat,
-  markTopicBeatUsed,
-} from '../../db/socialSubjects';
+import { tavilySearch } from '../../skills/general';
+import { getPersonMemory, getRecentChannelMessages } from '../../db';
+import { getCategoryByLabel, recordCategoryRaiseAttempt } from '../../db/socialSubjects';
 
 /**
  * Everything the coda needs, decided during the turn but COMPOSED later.
@@ -47,9 +58,11 @@ import {
  * on `OrchestratorOutput.socialCoda`. No text: composing it there put a Sonnet
  * call plus a claim-check between "answer ready" and "answer posted", so the
  * person waited two extra round-trips for their WORK answer to produce a line
- * the transport then deliberately posts 10 seconds later (L10 — social never
- * delays real work). Composition now runs inside that 10s beat, which is dead
- * time, so it costs no user-visible latency anywhere.
+ * the transport then deliberately posts a beat later (L10 — social never
+ * delays real work). Composition now runs inside that beat, which is dead
+ * time, so it costs no user-visible latency anywhere — including the
+ * grounding search and message re-read added by gh#198 (answer 12: the beat
+ * is a range precisely so a slower compose never has to race a fixed window).
  */
 export interface PendingSocialCoda {
   directive: SocialDirective;
@@ -57,9 +70,127 @@ export interface PendingSocialCoda {
   personSlackId: string;
   /** Absent on `raise_new` codas — there is no subject row yet. */
   subjectId?: string;
+  /**
+   * gh#198 — the DM channel this coda posts into, threaded through so
+   * `groundCoda` can re-read this person's ACTUAL past messages via
+   * SlackMaster's channel-scoped reader (`getRecentChannelMessages`) rather
+   * than a topic-beat label. Absent only if the orchestrator ever fails to
+   * populate it; grounding degrades to search-only in that case.
+   */
+  channelId?: string;
   senderRole: 'owner' | 'colleague';
   senderFirstName: string;
   language: 'he' | 'en';
+}
+
+/** What grounded this coda — at least one of the two must be present, or the
+ *  coda does not fire (see `groundCoda`). */
+export interface CodaGrounding {
+  /** A snippet from the ONE live Tavily search run for this coda. */
+  searchSnippet: string | null;
+  /** A real excerpt from this person's own past messages (never the beat label). */
+  pastChatSnippet: string | null;
+}
+
+// gh#198 (answer 16) — most specific location ON FILE, never inferred: a
+// city/place in `people_memory.state` if present, else a coarse country
+// derived from the IANA timezone. Only covers the zones actually seen in the
+// person store; an unmapped zone returns null rather than guessing — this
+// feeds a search QUERY, not a stored fact, but "never infer a city from a
+// timezone" (people.ts:1506) still holds, so the fallback stays country-level
+// and conservative (unmapped → omit location from the query entirely).
+const TZ_COUNTRY: Record<string, string> = {
+  'Asia/Jerusalem': 'Israel',
+  'America/New_York': 'the US',
+  'America/Los_Angeles': 'the US',
+  'America/Chicago': 'the US',
+  'America/Denver': 'the US',
+  'Australia/Sydney': 'Australia',
+  'Australia/Melbourne': 'Australia',
+  'Australia/Canberra': 'Australia',
+  'Europe/London': 'the UK',
+  'Europe/Brussels': 'Belgium',
+  'Europe/Paris': 'France',
+  'Europe/Berlin': 'Germany',
+  'Europe/Amsterdam': 'the Netherlands',
+  'Europe/Madrid': 'Spain',
+  'Europe/Rome': 'Italy',
+};
+
+function resolvePersonLocationForSearch(personSlackId: string): string | null {
+  try {
+    const person = getPersonMemory(personSlackId);
+    if (!person) return null;
+    if (person.state) return person.state;
+    if (person.timezone) return TZ_COUNTRY[person.timezone] ?? null;
+    return null;
+  } catch (err) {
+    logger.warn('Coda geo lookup threw — proceeding without location', { err: String(err).slice(0, 200) });
+    return null;
+  }
+}
+
+/**
+ * Ground the candidate BEFORE composing. ONE live search (answer 3), plus a
+ * re-read of this person's actual past messages when a subject/category
+ * hint is available to search for (answer 13). Fails open per-source (a
+ * thrown search or a thrown DB read just drops that one source) but fails
+ * CLOSED overall: if neither source produced anything, returns null and the
+ * coda does not fire — silence, per answer 3/10, is the correct outcome, not
+ * a fallback to an ungrounded generic line.
+ */
+async function groundCoda(params: {
+  directive: SocialDirective;
+  personSlackId: string;
+  channelId?: string;
+}): Promise<CodaGrounding | null> {
+  const { directive, personSlackId, channelId } = params;
+
+  const topicHint = directive.categoryLabel ?? directive.subjectLabel ?? null;
+  const location = resolvePersonLocationForSearch(personSlackId);
+  const query = topicHint
+    ? `${topicHint} — what's new or trending right now${location ? `, ${location}` : ''}`
+    : location
+      ? `What's new or trending in ${location} this week`
+      : null;
+
+  let searchSnippet: string | null = null;
+  if (query) {
+    try {
+      const result = await tavilySearch(query, 'basic', 14) as { results?: Array<{ title?: string; content?: string }> };
+      const first = (result.results ?? [])[0];
+      const text = (first?.content || first?.title || '').trim();
+      if (text) searchSnippet = text.slice(0, 300);
+    } catch (err) {
+      logger.warn('Coda grounding search threw — proceeding without it', { err: String(err).slice(0, 200) });
+    }
+  }
+
+  // Cross-reference with the past chat WITH this person (answer 13) — the raw
+  // thread text is already durable in conversation_threads; this is a plain
+  // channel-scoped read over it, never a new index or backfill. A hit here can
+  // ground the coda entirely on its own even when the search above contributed
+  // nothing (answer 3).
+  //
+  // gh#198 (198-LIB-8) — role === 'user' ONLY. getRecentChannelMessages returns
+  // BOTH roles, and every posted coda is itself appended to conversation_threads
+  // as role:'assistant' (postReply.ts) — without this filter the snippet handed
+  // to Sonnet under "Something they actually said before" could be Maelle's OWN
+  // prior coda quoted back at the person as if they had said it.
+  let pastChatSnippet: string | null = null;
+  const needle = (directive.subjectLabel ?? directive.categoryLabel ?? '').trim().toLowerCase();
+  if (channelId && needle) {
+    try {
+      const msgs = getRecentChannelMessages(channelId, 60, 20);
+      const hit = msgs.filter(m => m.role === 'user' && m.content.toLowerCase().includes(needle)).slice(-1)[0];
+      if (hit) pastChatSnippet = hit.content.slice(0, 300);
+    } catch (err) {
+      logger.warn('Coda past-message re-read threw — proceeding without it', { err: String(err).slice(0, 200) });
+    }
+  }
+
+  if (!searchSnippet && !pastChatSnippet) return null;
+  return { searchSnippet, pastChatSnippet };
 }
 
 async function generateSocialCoda(params: {
@@ -67,6 +198,9 @@ async function generateSocialCoda(params: {
   directive: SocialDirective;
   senderRole: 'owner' | 'colleague';
   senderFirstName: string;
+  /** What grounded this coda (search result / actual past message). Required
+   *  whenever mode is 'continue' or 'raise_new' — see `groundCoda`. */
+  grounding: CodaGrounding;
   /**
    * v2.2.4 — language hint for the coda. The orchestrator passes the
    * dominant language of the current conversation. Sonnet's prompt is
@@ -77,64 +211,60 @@ async function generateSocialCoda(params: {
    */
   language?: 'he' | 'en';
 }): Promise<string | null> {
-  const { profile, directive, senderRole, senderFirstName, language } = params;
+  const { profile, directive, senderRole, senderFirstName, grounding, language } = params;
   if (directive.mode === 'none') return null;
 
   const isOwner = senderRole === 'owner';
   const ownerFirst = profile.user.name.split(' ')[0];
 
-  // v2.6.7 — for continue mode on an existing subject, pull a least-recently-
-  // used topic-beat as a concrete hook (avoids spamming the same beat). Mark
-  // it used so next time a different beat is preferred. Variety baked in.
-  let topicBeatHook: string | null = null;
-  if (directive.mode === 'continue' && directive.subjectId) {
-    try {
-      const lru = pickLeastRecentlyUsedTopicBeat(directive.subjectId);
-      if (lru) {
-        topicBeatHook = lru.label;
-        markTopicBeatUsed(lru.id);
-      } else {
-        // No beats yet — fall back to a recent-beats list (likely also empty
-        // but safe). Coda generator handles missing hook gracefully.
-        const recent = getRecentTopicBeats(directive.subjectId, 3);
-        if (recent.length > 0) topicBeatHook = recent[0].label;
-      }
-    } catch (err) {
-      logger.warn('coda topic-beat picker threw — proceeding without hook', {
-        err: String(err).slice(0, 200),
-      });
-    }
-  }
+  // gh#198 — the grounding line. Never both empty when mode is continue/
+  // raise_new (composeSocialCoda already returned null upstream if so).
+  const groundingLine = [
+    grounding.pastChatSnippet
+      ? `Something they actually said before, to ground this on — memory, not wording to echo verbatim: "${grounding.pastChatSnippet}"`
+      : null,
+    grounding.searchSnippet
+      ? `Something real and current you found: ${grounding.searchSnippet}`
+      : null,
+  ].filter(Boolean).join(' ');
 
+  // gh#198 (answer 11) — the shape is the model's and the topic's call: a
+  // question, an observation, or a plain share are all legal for `continue`
+  // and `raise_new`. Lifting the old "must be a question" mandate is the
+  // change here — the anti-fabrication guards (NEVER assume/invent beyond
+  // the grounding) and the audience framing below are untouched, because a
+  // statement asserts facts a question doesn't and stays just as exposed to
+  // the claim-check downstream.
   let intent: string;
-  if (directive.mode === 'continue' && directive.topicLabel) {
-    const hookLine = topicBeatHook
-      ? ` Recent beat to lean on: "${topicBeatHook}" — same caveat, and only use it if it actually fits the moment, otherwise just ask in your own way.`
-      : '';
-    // Subject labels and topic beats are free text a Haiku pass derived from the
-    // DM transcript, and they're written as MEMORY labels — filed from the
+  if (directive.mode === 'continue' && directive.subjectLabel) {
+    // Subject labels are free text a Haiku pass derived from the DM
+    // transcript, and they're written as MEMORY labels — filed from the
     // outside, about a person ("Idan's Boston trip" is a real row). Echoed
     // verbatim into a coda sent to that same person, that becomes the
     // third-person audience slip humanGate drops. Say the label is filing, not
     // phrasing.
-    intent = `Follow up briefly on "${directive.topicLabel}" — that's a memory label, not wording to echo; if it names the person you're writing to, ask about the thing itself, never about them by name. One short natural line — don't interrogate, don't recap what was said before.${hookLine}`;
+    intent = `Follow up briefly on "${directive.subjectLabel}" — that's a memory label, not wording to echo; if it names the person you're writing to, engage with the thing itself, never with them by name. One short natural line — a question, an observation, or a plain share are all fair game; don't interrogate, don't recap what was said before. ${groundingLine}`;
   } else if (directive.mode === 'raise_new') {
     // v2.2.4 (bug 1B) — discovery mode. Without an existing topic to continue,
     // a "raise_new" coda was free to fabricate ("Are you joining the offsite
-    // next month?"). Re-frame: ask a concrete, *discoverable* question whose
-    // answer is a real fact we'd save to memory.
+    // next month?"). Re-frame: ground it in something concrete and real,
+    // whatever shape — question, observation or share — that takes.
     // v3.2.6 — anchor to a CONCRETE category the picker chose (music / weekend
     // / travel …) instead of a generic "how's your week". Owner liked the
     // category-anchored ping ("any good music lately?"). Still must NOT invent
-    // specifics — ask an open question ABOUT that category, discovering what
-    // they're into, not assuming a particular item/event exists.
+    // specifics beyond the grounding.
     const cat = directive.categoryLabel;
     intent = cat
-      ? `Ask ONE plain, open question about their interest in "${cat}" — discover what they're into in that area (e.g. ${cat} = music → what they've been listening to; travel → any trips coming up; weekend → plans this weekend; pets → whether they have any). NEVER assume a specific item/event exists ("that concert", "the marathon you mentioned") — ask open.`
-      : `Ask ONE plain, open human question — something whose answer is a real fact about them you don't already know (what they do outside work, whether they're traveling). NEVER invent a specific event or shared context that doesn't exist.`;
-  } else if (directive.mode === 'celebrate') {
-    intent = `Briefly celebrate the ${directive.topicLabel ?? 'news'} they shared earlier.`;
+      ? `Bring up "${cat}" — a question, an observation, or a plain share are all fair game; the goal is genuine curiosity about what they're into in that area, your call how. Ground it in what's below; NEVER assume a specific item/event beyond it. ${groundingLine}`
+      : `Open with something plainly human — a question, an observation, or a share, whichever fits; aimed at a real fact about them you don't already know. Ground it in what's below; NEVER invent beyond it. ${groundingLine}`;
   } else {
+    // Only 'continue' and 'raise_new' ever reach this composer (composeSocialCoda's
+    // only caller is the coda-eligible orchestrator path, which never produces a
+    // PendingSocialCoda for any other mode — orchestrator/index.ts:1411). 'celebrate'
+    // and 'engage' belong to the separate in-prompt directive (directiveForPersonSocial,
+    // rendered by formatDirectiveForPromptBlock into the system prompt, never routed
+    // through this file) — deleted here as unreachable (gh#198 answer 0). This branch
+    // is a defensive fallback for 'continue' with no subjectLabel, not a live mode.
     intent = 'One short warm human follow-up.';
   }
 
@@ -219,12 +349,12 @@ Output the coda sentence only. No quotes, no label.`;
  * the pipes have. It stays here, where it is already at home, and nothing but
  * the finished sentence ever leaves.
  *
- * Called from the transport INSIDE the 10s beat, after the lull checks and
- * before the coda gates — so a coda the lull already killed costs nothing, and
- * `markTopicBeatUsed` (inside the generator, for `continue` mode) no longer
- * burns a topic beat on a line that never ships. Same reasoning that moved
- * `recordCodaDelivered` to delivery: social bookkeeping is charged on the thing
- * actually happening, not on intending it.
+ * Called from the transport INSIDE the beat, after the lull checks and before
+ * the coda gates — so a coda the lull already killed costs nothing, including
+ * the grounding search/message re-read below, which now run in the exact same
+ * spot the topic-beat picker they replace used to. Same reasoning that moved
+ * `recordCodaDelivered` to delivery: social bookkeeping is charged on the
+ * thing actually happening, not on intending it.
  *
  * Returns null on anything short of a usable, vetted sentence. Never throws.
  */
@@ -233,14 +363,58 @@ export async function composeSocialCoda(
   profile: UserProfile,
 ): Promise<string | null> {
   try {
+    // gh#198 — ground the candidate BEFORE composing. Only 'continue' and
+    // 'raise_new' ever reach this composer (the orchestrator's coda-eligible
+    // path only produces those two modes), and both require grounding — no
+    // grounding found means the beat silently does not fire (answer 3/10).
+    let grounding: CodaGrounding = { searchSnippet: null, pastChatSnippet: null };
+    if (pending.directive.mode === 'continue' || pending.directive.mode === 'raise_new') {
+      const ground = await groundCoda({
+        directive: pending.directive,
+        personSlackId: pending.personSlackId,
+        channelId: pending.channelId,
+      });
+      if (!ground) {
+        logger.info('Coda not composed — no grounding found (silence is correct)', {
+          personSlackId: pending.personSlackId, mode: pending.directive.mode,
+        });
+        return null;
+      }
+      grounding = ground;
+    }
+
     const coda = await generateSocialCoda({
       profile,
       directive: pending.directive,
       senderRole: pending.senderRole,
       senderFirstName: pending.senderFirstName,
+      grounding,
       language: pending.language,
     });
     if (!coda || coda.trim().length === 0) return null;
+
+    // Bounce fix (gh#198) — mark this category "already suggested" the
+    // moment there's an actual candidate sentence for it, so
+    // pickDormantCategory (stateMachine.ts) never re-offers the same
+    // untouched category tomorrow. Deliberately BEFORE the validator below:
+    // even a candidate the validator later drops used up this category's one
+    // free rotation slot, which is a harmless trade against the alternative
+    // (re-asking the same thing on a loop). No-op for `continue` — only
+    // `raise_new` ever names a category with nothing behind it yet.
+    if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
+      try {
+        const category = getCategoryByLabel(pending.directive.categoryLabel);
+        if (category) {
+          recordCategoryRaiseAttempt({
+            ownerUserId: profile.user.slack_user_id,
+            personSlackId: pending.personSlackId,
+            categoryId: category.id,
+          });
+        }
+      } catch (err) {
+        logger.warn('Coda category-tried marker threw — proceeding', { err: String(err).slice(0, 200) });
+      }
+    }
 
     // v2.3.2 (2B) — validate against people_memory before it ships. Catches the
     // "shares my name" / "marathon training" hallucinations (invented facts) and
@@ -253,8 +427,6 @@ export async function composeSocialCoda(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { checkReplyClaims } = require('../../utils/claimChecker') as
         typeof import('../../utils/claimChecker');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getPersonMemory } = require('../../db') as typeof import('../../db');
       const personRow = getPersonMemory(pending.personSlackId);
       // A compact text snapshot of what we know about the recipient — the inputs
       // Sonnet should have been riffing on. Built and consumed inside this

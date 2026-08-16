@@ -5,7 +5,7 @@ import { buildSystemPromptParts } from './systemPrompt';
 import { classifyTurn, type OwnerIntentClassification } from '../social/classifyTurn';
 import { chooseSocialDirective, formatDirectiveForPromptBlock, type SocialDirective, noDirective } from '../social/stateMachine';
 import { getSkillTools, WRITE_TOOLS } from '../../skills/registry';
-import { buildSocialContextBlock, buildPersonWorkContextBlock, getSummarySessionByThread, getOutreachLifecycle } from '../../db';
+import { buildSocialContextBlock, buildPersonWorkContextBlock, getSummarySessionByThread, getOutreachLifecycle, markThreadHadSocialTurn } from '../../db';
 import { getActiveJobsForThread } from '../../tasks';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
@@ -158,8 +158,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // (routine/system) turn; a scheduled report isn't a conversation.
   // v4.3.0 (#24 row 131) — nor on a non-Slack transport. Both consumers keyed
   // off this flag are Slack-only concepts: chooseSocialDirective below (feeds
-  // the system prompt and, on mode:'continue', calls markSubjectRaised
-  // immediately — not gated on delivery) and the end-of-turn coda in
+  // the system prompt only — the in-prompt directive never stamps a raise;
+  // only a confirmed-delivered coda does, via recordCodaDelivered) and the
+  // end-of-turn coda in
   // orchestrator/index.ts (gated on socialClassification?.kind === 'task',
   // which stays null whenever needIntent is false — see the return at the
   // bottom of this function). A coda is composed and delivered by the
@@ -248,6 +249,22 @@ export async function buildTurnContext(input: OrchestratorInput) {
 
       if (needIntent) {
         socialClassification = turnResult.intent;
+        // gh#198-LIB-6 (answer 19) — persist the per-turn kind so the
+        // end-of-chat reconciler (capturePass.ts) has a deterministic
+        // code-side signal for whether THIS thread ever had a social turn,
+        // rather than trusting its own prompt alone to keep work out of
+        // social_subjects. Reuses classifyTurn's existing kind — no new
+        // LLM call, no keyword blocklist. Only stamps on 'social'; 'task'/
+        // 'other' turns leave the thread's row as-is (a thread needs the OR
+        // of every turn it ever saw, never a downgrade from one task-shaped
+        // message in an otherwise social thread).
+        if (threadTs && socialClassification.kind === 'social') {
+          try {
+            markThreadHadSocialTurn(threadTs);
+          } catch (err) {
+            logger.warn('markThreadHadSocialTurn threw — non-fatal', { threadTs, err: String(err).slice(0, 200) });
+          }
+        }
         // v3.0 follow-up — subject decisions + engagement signals + topic-beat
         // recording moved to end-of-chat (`runSubjectReconciliation` in
         // src/memory/capturePass.ts). Per-turn classifier still produces
@@ -306,32 +323,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
           ownerTimezone: profile.user.timezone,
           hasOperationalRelay,
         });
-        // Stamp the subject as raised the moment we commit to surfacing it
-        // proactively. last_assistant_initiated_at is the linchpin the picker's
-        // 72h re-raise defer, the raise→ignored decay, and the daily/24h
-        // initiation gates all key on. The old stamp site lived in the
-        // task-turn coda block, which got hard-disabled (codaEligible=false);
-        // the proactive-directive path that replaced it never picked up the
-        // marking, so every subject sat at last_assistant_initiated_at=NULL and
-        // the whole rotation/decay machinery was dead. (raise_new has no
-        // subject yet — it's stamped when reconciliation creates the subject.)
-        // gh#154-W3 fix — gated on `!isRoom` to match `socialDirectiveBlock` below,
-        // which suppresses the render wholesale on any room surface. Before
-        // this the stamp ran unconditionally, so a room turn recorded a
-        // "raise" that was never actually rendered — corrupting the re-raise
-        // defer, the decay and the initiation gate, all keyed on this stamp.
-        if (!isRoom && socialDirective.mode === 'continue' && socialDirective.subjectId) {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { markSubjectRaised } = require('../../db/socialSubjects') as
-              typeof import('../../db/socialSubjects');
-            markSubjectRaised(socialDirective.subjectId);
-          } catch (err) {
-            logger.warn('markSubjectRaised (proactive directive) threw — continuing', {
-              err: String(err).slice(0, 200),
-            });
-          }
-        }
+        // The in-prompt directive (continue/celebrate/engage) never stamps a
+        // raise — it is a rendered suggestion Sonnet may or may not act on,
+        // and there is no way to detect from here whether it survived into
+        // the actual reply. Only a confirmed-delivered coda increments the
+        // raise counter, via recordCodaDelivered → markSubjectRaised
+        // (core/social/logEngagement.ts, gated on postReply.ts's delivery
+        // confirmation). Removed 2026-08-15 (gh#198): the old stamp here
+        // fired the moment `continue` was chosen, before Sonnet had written
+        // anything, so a directive that never made it into the reply (or
+        // whose surrounding message never posted) still burned the person's
+        // raise and parked the subject for the 72h re-raise defer.
       }
     } catch (err) {
       logger.warn('classifyTurn pre-pass threw — continuing without directive / scopes', { err: String(err).slice(0, 300) });
@@ -657,8 +659,13 @@ export async function buildTurnContext(input: OrchestratorInput) {
   //   - WORK context (recent work exchanges + bookings) — on for a colleague's
   //     OWN 1:1 DM. It is what makes Maelle competent with this person; L6
   //     forbids gating work-competence behind the optional social skill.
-  //   - SOCIAL context (engagement rank, initiation cadence, personal notes) —
+  //   - SOCIAL context (engagement rank, subjects/topics talked about) —
   //     gated on the toggle (v2.2.3 #3), which is what the toggle is for.
+  //     gh#198 — the unconditional "find ONE natural moment to check in"
+  //     line and the initiation-cadence lines that used to render alongside
+  //     it were a third, ungrounded proactive-origination surface; deleted,
+  //     not gated. Proactive social now originates only from the coda
+  //     (grounded, generateCoda.ts) or the in-prompt directive below.
   // v4.5.x (#154) — both ALSO suppressed wholesale on a room surface (MPIM or
   // channel), never only trimmed. `isOwnerTyping` answers "who is the human on
   // this turn" (identity), `isRoom` answers "who else can read the answer"
@@ -673,7 +680,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
     : buildPersonWorkContextBlock(input.userId);
   const socialBlock = (isOwnerTyping || isRoom || !socialActive)
     ? ''
-    : buildSocialContextBlock(input.userId, input.profile.user.timezone, input.profile.assistant.name);
+    : buildSocialContextBlock(input.userId);
 
   // v2.2 — Social Directive block. Populated by the pre-pass above.
   // When mode === 'none' this is empty and has no effect on the prompt.

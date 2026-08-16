@@ -326,40 +326,29 @@ export async function initProfile(
     logger.warn('Legacy engagement_level migration threw — continuing', { err: String(err) });
   }
 
-  // v2.2 — Social Engine: ensure a social_decay task exists. Self-perpetuating
-  // cadence — the dispatcher reschedules itself 7 days out on completion.
-  // We only need to plant the seed once. Idempotent via skill_ref uniqueness
-  // (the dispatcher won't create a duplicate if one is already pending).
+  // gh#198 (2026-08-15) — the weekly social_decay seed is REMOVED (answer 5:
+  // subjects no longer carry a score to decay; a subject now dies on 2
+  // unanswered raises or an explicit reject, never on a clock — see
+  // socialSubjects.ts / capturePass.ts). Drain any lingering pending/new rows
+  // of this now-dispatcher-less type once, same pattern as the cold-open
+  // drain below — the dispatcher is gone, so the runner would otherwise just
+  // mark them 'failed'. Idempotent — a no-op after the first clean pass.
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getDb } = require('../db') as typeof import('../db');
-    const existing = getDb().prepare(`
-      SELECT id FROM tasks
+    const res = getDb().prepare(`
+      UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
       WHERE type = 'social_decay'
         AND owner_user_id = ?
         AND status IN ('new', 'scheduled', 'in_progress')
-      LIMIT 1
-    `).get(profile.user.slack_user_id);
-    if (!existing) {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { createTask } = require('../tasks') as typeof import('../tasks');
-      const firstDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-      createTask({
-        owner_user_id: profile.user.slack_user_id,
-        owner_channel: dmChannel,
-        type: 'social_decay',
-        status: 'new',
-        title: 'Social weekly decay pass',
-        description: 'System maintenance — decays active topics untouched 7+ days.',
-        due_at: firstDue,
-        skill_ref: `social_decay_${profile.user.slack_user_id}`,
-        context: '{}',
-        who_requested: 'system',
+    `).run(profile.user.slack_user_id);
+    if (res.changes > 0) {
+      logger.info('Social decay tasks drained (weekly decay pass removed, gh#198)', {
+        ownerUserId: profile.user.slack_user_id, cancelled: res.changes,
       });
-      logger.info('Social decay task seeded', { ownerUserId: profile.user.slack_user_id, firstDue });
     }
   } catch (err) {
-    logger.warn('Social decay task seeding threw — continuing', { err: String(err) });
+    logger.warn('Social decay task drain threw — continuing', { err: String(err) });
   }
 
   // v3.2.5 — cold-open proactive outreach (the hourly `social_outreach_tick`)

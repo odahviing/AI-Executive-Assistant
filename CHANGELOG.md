@@ -2,6 +2,56 @@
 
 ---
 
+## 4.6.0 — The social layer, rebuilt: she only speaks when she has something real to say
+
+The proactive social system is replaced, not patched. Until now Maelle picked a conversation topic with `Math.random()` over a hardcoded list of bare category names, and the composer was then explicitly forbidden from saying anything specific about the one it landed on — so a vague, unanchored question was the system working as designed, not a bug in it. Topics are now grounded in a live, geo-relevant search or in a fact already on file about that person, and when neither exists she says nothing. Four separate places could open a conversation; one can now.
+
+### Changed — how a topic is chosen
+
+- Three independent `Math.random()` decision points are gone. Selection is deterministic and reproducible from stored state.
+- A proactive topic is legal only when it traces to a live search result or to something already recorded about that person. No grounding means silence, which is the preferred outcome rather than a fallback.
+- One search per coda, scoped to the most specific location actually on file — a city where one is recorded, otherwise a country derived from the timezone. A city is never inferred from a timezone.
+- Someone Maelle has no history with can now be opened with on a search result alone, so a new colleague is no longer permanently unreachable socially.
+- The hardcoded 14-name "safe opener" subset is deleted; all 30 categories are eligible.
+- A coda is no longer required to be a question. An observation or a plain remark is equally legal, and the topic decides.
+- Before continuing a subject she re-reads what was actually said about it, from real past messages rather than a compressed label — so she stops re-asking what she already asked.
+- The coda's delivery beat is a 5–15s range instead of a fixed 10s. A metronome reads as a bot.
+
+### Changed — what she remembers, and how it dies
+
+- Engagement scoring moves from per-subject (0–5) to a real per-person, per-category score (0–3). Category standing was previously a runtime average blended across every person sharing a label.
+- Subjects lose their score entirely and become live-or-dead.
+- All time-based decay is deleted. A topic dies because it was raised twice with no answer, or because the person waved it off — never because a week went by.
+- Whether a raise went unanswered is now judged at the moment the next one would fire, reading a stored fact rather than an elapsed-time guess. Two earlier attempts at this used a fixed grace window and were both refused: the bookkeeping that erased the evidence ran roughly 23 hours before the check that needed it.
+- A dead category the person themselves raises comes back at one point above where it died.
+- At most three live categories per person, refused at the creation site rather than discouraged by a probability schedule that a busy relationship could walk straight past.
+
+### Fixed
+
+- She could quote her own previous coda back at someone under the label "something they actually said" — every posted coda is written into the conversation history as her own turn, and the read had no role filter.
+- A reply could be lost behind two unrelated early returns and then counted against the person as silence.
+- An in-prompt directive counted as a raise the moment it was drafted, before the model had written anything — so subjects were penalised for raises that never happened.
+- Work content filed as social interest is now refused in code, keyed on a turn classification that already runs, rather than by a prompt rule the model had visibly ignored.
+
+### Removed
+
+- The weekly decay sweep and its dispatcher, the 30-day rank-0 revival that rode on it, and the queued rows both left behind.
+- Three of the four origination surfaces, including one that lived only in the system prompt and told her "if you never start, you're a transaction surface" on every turn.
+- Dead code the rewrite exposed: two engagement-signal columns written on every interaction and read by nothing, a social mode advertised to the model that no code path could produce, a retired no-op dispatcher, a legacy alias mirror, and a second competing 17-name category vocabulary.
+
+### Migration
+
+- Two migrations, run in order at boot: five work-shaped rows are purged before the re-base so they cannot seed the new store, then category scores are backfilled from the old subject scores, clamped to the new ceiling. Only subjects that ever saw real person interaction carry over.
+- The per-person cadence state is untouched, so the deploy does not reset anyone's clock or produce a burst of codas.
+
+### Not changed
+
+- Social remains Slack-internal only; email and dormant channels never reach it.
+- Nothing initiates contact. A coda still rides a reply, in a one-to-one DM, at most once a day per person.
+- The known non-English AI-disclosure gap in coda output (4.5.8) is still open, and is now due for the re-check that release deferred to this one.
+
+---
+
 ## 4.5.8 — Honest AI disclosure, a floating-block charter rule, and a backlog of concurrent fixes
 
 Two threads in one wrap: a security-gate fix that took three real bounces to get right, and a bundle of independently-verified fixes from concurrent bug-fixing sessions tonight, held uncommitted until now.

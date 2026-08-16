@@ -39,27 +39,8 @@ import {
   appendPersonInteraction,
   recordSocialMoment,
 } from '../db';
+import { FIXED_CATEGORIES } from '../db/socialSubjects';
 import logger from '../utils/logger';
-
-const SOCIAL_TOPIC_ENUM = [
-  'family',       // spouse, kids, parents, relationships
-  'health',       // fitness, illness, medical
-  'sport',        // team sports, running, gym, watching sports
-  'hobby',        // music, art, gaming, cooking, reading, photography
-  'travel',       // trips, places visited, upcoming travel
-  'mood',         // emotional state, vibe, energy level
-  'food',         // dietary preferences, favourite restaurants, cuisine
-  'culture',      // movies, shows, books, music they like
-  'pets',         // animals they have or love
-  'goals',        // personal ambitions, things they're working toward
-  'weekend',      // what they do on weekends, recent activities
-  'humor',        // running jokes, things that make them laugh
-  'education',    // studying, degrees, learning something new
-  'language',     // preferred language, how they communicate
-  'local',        // neighbourhood, where they live, commute
-  'news',         // current events they mentioned or care about
-  'other',        // anything that doesn't fit the above
-] as const;
 
 export class SocialSkill implements Skill {
   id = 'social' as const;
@@ -98,8 +79,8 @@ Do NOT call this for purely work-related facts (those go in manage_preference(ac
             note:               { type: 'string', description: 'What you learned, in plain English. Be specific — vague notes are useless later.' },
             topic: {
               type: 'string',
-              description: 'Broad enum category. Pair this with a specific subject (see below).',
-              enum: [...SOCIAL_TOPIC_ENUM],
+              description: 'Category — same 30-category vocabulary the social engine scores against. Pair this with a specific subject (see below).',
+              enum: [...FIXED_CATEGORIES],
             },
             subject: {
               type: 'string',
@@ -134,8 +115,8 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
             note: { type: 'string', description: 'What you learned, in plain English. Be specific — vague notes are useless later.' },
             topic: {
               type: 'string',
-              enum: [...SOCIAL_TOPIC_ENUM],
-              description: 'Broad enum category. Pair with a specific subject below.',
+              enum: [...FIXED_CATEGORIES],
+              description: 'Category — same 30-category vocabulary the social engine scores against. Pair with a specific subject below.',
             },
             subject: {
               type: 'string',

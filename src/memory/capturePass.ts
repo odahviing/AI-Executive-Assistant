@@ -58,11 +58,16 @@ import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 import {
   FIXED_CATEGORIES,
+  MAX_ACTIVE_CATEGORIES_PER_PERSON,
   getActiveSubjectsForPerson,
   getCategoryByLabel,
   getRecentTopicBeats,
   createSubject,
   recordTopicBeat,
+  countActiveCategoriesForPerson,
+  isCategoryActiveForPerson,
+  markSubjectDead,
+  threadHadSocialTurn,
   type SubjectToucher,
 } from '../db/socialSubjects';
 
@@ -395,6 +400,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         await runSubjectReconciliation(
           profile, anthropic, row.thread_ts,
           ownerSlackId, ownerName, ownerName,
+          row.captured_at,
         );
         markThreadCaptured(row.thread_ts);
         continue;
@@ -438,20 +444,29 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       const delta = parseDelta(text);
 
       if (!delta || Object.keys(delta).length === 0) {
-        // Haiku said "nothing new to learn" — mark and move on.
+        // Haiku said "nothing new to learn" on the person-PROFILE side — but
+        // subject reconciliation (step 6 below) is an INDEPENDENT judgment
+        // ("did they answer a subject Maelle raised?") and must never be
+        // skipped just because this unrelated pass produced no profile
+        // delta. gh#198-LIB-9: an empty delta used to `continue` here,
+        // which meant runSubjectReconciliation never ran for the thread, so
+        // a person who replied (without teaching Haiku a new profile fact)
+        // still had the raise counted against them at the next coda
+        // trigger. Reconciliation is the ONLY writer of an answered raise
+        // (recordSubjectAnswered/recordSubjectTouch have no other caller),
+        // so it must run regardless of this branch's outcome — log and
+        // fall through instead of bailing.
         logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
-        markThreadCaptured(row.thread_ts);
-        continue;
+      } else {
+        // 5. Apply deltas to DB + md mirror.
+        await applyDelta(profile, colleagueId, personRow.name, delta);
+
+        logger.info('capturePass: applied deltas', {
+          threadTs: row.thread_ts,
+          colleague: personRow.name,
+          deltaKeys: Object.keys(delta),
+        });
       }
-
-      // 5. Apply deltas to DB + md mirror.
-      await applyDelta(profile, colleagueId, personRow.name, delta);
-
-      logger.info('capturePass: applied deltas', {
-        threadTs: row.thread_ts,
-        colleague: personRow.name,
-        deltaKeys: Object.keys(delta),
-      });
 
       // 6. v3.0 follow-up — subject reconciliation for THE COLLEAGUE's
       // own subjects. Colleagues talking with Maelle about their gaming /
@@ -461,6 +476,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       await runSubjectReconciliation(
         profile, anthropic, row.thread_ts,
         colleagueId, personRow.name, ownerName,
+        row.captured_at,
       );
 
       // 7. Stamp captured_at.
@@ -668,15 +684,18 @@ async function runSelfCapture(
 // against existing matched subject IDs, but no longer CREATES rows or
 // records topic beats. Those writes happen here, where Haiku sees:
 //   - the FULL conversation transcript
-//   - the person's complete active-subjects list (id, label, score,
-//     last_touched, recent topic_beats) — rich context, not just labels
+//   - the person's complete active-subjects list (id, label, last_touched,
+//     recent topic_beats) — rich context, not just labels
 //   - the 3-level model (category > subject > topic) + the 30 fixed categories
 //   - 3 example shapes covering different category granularities
 //
 // Haiku returns ID-based decisions: `{ action: 'match', subject_id }` (must be
-// an ID from the shown list) OR `{ action: 'create', category, label }` (must
-// be one of the 30 categories). Each decision carries the topic_beats touched
-// in this chat. Code applies the writes deterministically.
+// an ID from the shown list), `{ action: 'create', category, label }` (must
+// be one of the 30 categories), or `{ action: 'reject', subject_id? }` — gh#198
+// (answer 7+8) — an explicit "not relevant/stop" (with subject_id, kills that
+// row) or work content wrongly headed for a category (no subject_id, no row
+// created). Each match/create decision carries the topic_beats touched in
+// this chat; reject never does. Code applies the writes deterministically.
 //
 // Closes the 2026-05-22 "בידוק" duplicate bug: label-drift can't fork rows
 // anymore because matching is by ID, not by label string. Same as the
@@ -708,11 +727,20 @@ Social subjects are the person's PERSONAL life — hobbies, family, interests, p
 
 Three ways a topic can show up that are NOT the colleague's social subject:
 
-  - **It's WORK, not personal life.** This is the most common mistake. NEVER create or match a subject from work content: meetings, scheduling, calls, syncs, "the call with X", projects, POCs, interviews, candidates, deadlines, code, customers, launches, deliverables, status updates. Work is the JOB, not a hobby — it's never a social subject, no matter how often it comes up. Do NOT force work into a social category (e.g. "Idan call scheduling" is NOT a 'partner' subject; "the Ido interview" is NOT a 'learning' subject; "Brainrocket POC" is NOT a 'side_projects' subject). If the only thing the chat revealed about the person is work, output ZERO decisions.
-  - **It's Maelle's, not theirs.** Topics Maelle brings up about HERSELF — her name, where it comes from, her origin/lore, how she works — are never the colleague's subjects, even when the colleague replies to them. Example: the colleague asks "what does your name mean?" and Maelle explains she's named after a character in some game. That game is MAELLE's lore — it says nothing about the colleague's interests. Create nothing for the colleague from it. (Same for anything the OWNER raised about himself that the colleague merely heard.)
-  - **They're just reacting, not invested.** A polite one-off reply, a passing question, or "oh I don't really know that / not my thing" is not a subject — there's no ongoing interest of theirs to track. A subject needs THEIR genuine, repeated investment.
+  - **It's WORK, not personal life.** This is the most common mistake. NEVER create or match a subject from work content: meetings, scheduling, calls, syncs, "the call with X", projects, POCs, interviews, candidates, deadlines, code, customers, launches, deliverables, status updates. Work is the JOB, not a hobby — it's never a social subject, no matter how often it comes up (e.g. "Idan call scheduling" is NOT a 'partner' subject; "the Ido interview" is NOT a 'learning' subject; "Brainrocket POC" is NOT a 'side_projects' subject). Work content always gets an explicit "reject" decision (see below) — never silence, never match/create.
+  - **It's Maelle's, not theirs.** Topics Maelle brings up about HERSELF — her name, where it comes from, her origin/lore, how she works — are never the colleague's subjects, even when the colleague replies to them. Example: the colleague asks "what does your name mean?" and Maelle explains she's named after a character in some game. That game is MAELLE's lore — it says nothing about the colleague's interests. Output nothing for it (not even a reject — it was never a candidate). (Same for anything the OWNER raised about himself that the colleague merely heard.)
+  - **They're just reacting, not invested.** A polite one-off reply, a passing question, or "oh I don't really know that / not my thing" is not a subject — there's no ongoing interest of theirs to track. A subject needs THEIR genuine, repeated investment. Output nothing for it.
 
-Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs AND personal (not work) → capture it. When it's work, Maelle's lore, or a passing mention they didn't own → skip it.
+Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs AND personal (not work) → capture it. When it's Maelle's lore or a passing mention they didn't own → output nothing. When it's work → reject it explicitly (below).
+
+## Explicit rejection — "reject"
+
+Two, and only two, situations use action: "reject":
+
+  1. **The person explicitly waves something off.** They say (in any words) that an existing subject isn't relevant any more, ask Maelle to stop bringing it up, or otherwise clearly signal "not this." Set subject_id to the existing row being rejected — this KILLS that subject; Maelle won't raise it again.
+  2. **The chat's content is work**, not personal life (see above) — something that might otherwise look like it belongs to a category but is actually the job. Leave subject_id empty.
+
+A "reject" never carries topic_beats — there's nothing to file them under.
 
 ## Pairing invariant — CRITICAL
 
@@ -755,14 +783,14 @@ Two decisions, two categories, beats stay properly scoped. Never collapse cross-
 ## Your output
 
 For each subject this chat touched:
-  - category: ALWAYS REQUIRED (one of the 30). For action="match", echo the category of the matched row. For action="create", pick the right one of the 30.
-  - action: "match" or "create"
-  - subject_id: ONLY when action="match" — must be EXACTLY one of the IDs shown in the active list (no inventing, no modifying)
+  - category: REQUIRED for action="match"/"create" (one of the 30) — echo the matched row's category, or pick the right one of the 30 to create under. Omit for a work "reject" (there's no category to name); for a "reject" of an existing subject, echo its category.
+  - action: "match", "create", or "reject"
+  - subject_id: when action="match" — must be EXACTLY one of the IDs shown in the active list (no inventing, no modifying). Also set when action="reject" targets an existing subject (situation 1 above); leave empty for a work reject (situation 2).
   - subject_label: ONLY when action="create" — short umbrella label (2-6 words ideally)
-  - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat
-  - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat
+  - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat (irrelevant for "reject"; default "neutral")
+  - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat — always empty for "reject"
 
-You may output zero decisions (if the chat had no social content), one decision (typical), or several (if the chat spanned multiple subjects across one or more categories).
+You may output zero decisions (if the chat had no social content and no work to reject), one decision (typical), or several (if the chat spanned multiple subjects across one or more categories).
 
 ## Important rules
 
@@ -775,9 +803,9 @@ You may output zero decisions (if the chat had no social content), one decision 
 Output JSON only. No prose, no markdown fences.`;
 
 interface SubjectDecision {
-  category: string;           // ALWAYS — one of 30
-  action: 'match' | 'create';
-  subject_id?: string;        // when match
+  category: string;           // required for match/create (one of 30); optional for reject
+  action: 'match' | 'create' | 'reject';
+  subject_id?: string;        // when match, or when reject targets an existing subject
   subject_label?: string;     // when create
   sentiment: 'positive' | 'negative' | 'neutral';
   topic_beats: string[];
@@ -798,9 +826,11 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
       if (!raw || typeof raw !== 'object') continue;
       const r = raw as Record<string, unknown>;
       const action = r.action;
-      if (action !== 'match' && action !== 'create') continue;
+      if (action !== 'match' && action !== 'create' && action !== 'reject') continue;
       const category = typeof r.category === 'string' ? r.category.toLowerCase().trim() : '';
-      if (!category) continue;  // category is structurally required — drop the decision rather than guess
+      // category is structurally required for match/create; a "reject" of
+      // work content has none to give (gh#198 — work is never a category).
+      if (!category && action !== 'reject') continue;
       const sentimentRaw = typeof r.sentiment === 'string' ? r.sentiment.toLowerCase().trim() : 'neutral';
       const sentiment: 'positive' | 'negative' | 'neutral' =
         sentimentRaw === 'positive' || sentimentRaw === 'negative' ? sentimentRaw : 'neutral';
@@ -829,6 +859,13 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
  * this — `personSlackId` scopes which person's subjects are reconciled.
  *
  * Fire-and-forget: any error caught + logged, never propagates.
+ *
+ * `priorCapturedAt` — gh#198 (answer 21a) — this thread's `captured_at` from
+ * BEFORE this tick's processing (i.e. its previous capture, or null if never
+ * captured). Threaded through so the raise-feedback pivot guard below can
+ * tell "this is the very first reconciliation to see the raise" (the coda's
+ * own delivery is what made this thread capture-ready) from "a genuinely
+ * later cycle" — see logEngagement.ts's `allowPivotDetection`.
  */
 async function runSubjectReconciliation(
   profile: UserProfile,
@@ -837,6 +874,7 @@ async function runSubjectReconciliation(
   personSlackId: string,
   personName: string,
   ownerName: string,
+  priorCapturedAt: string | null,
 ): Promise<void> {
   try {
     // 1. Active subjects with rich context (recent topic beats per subject)
@@ -857,7 +895,7 @@ async function runSubjectReconciliation(
           ? `\n      recent topics: ${beats.map(b => `"${b.label}"`).join(', ')}`
           : '';
         const cat = s.category_id.replace(/^cat_global_/, '');
-        lines.push(`    [${s.id}] "${s.label}" — category=${cat}, score=${s.engagement_score}, last touched ${s.last_touched_at}${beatsStr}`);
+        lines.push(`    [${s.id}] "${s.label}" — category=${cat}, last touched ${s.last_touched_at}${beatsStr}`);
       }
       return lines.join('\n');
     })();
@@ -898,8 +936,19 @@ async function runSubjectReconciliation(
       .join('')
       .trim();
     const output = parseReconcileOutput(text);
-
-    if (!output || output.decisions.length === 0) {
+    const decisions = output?.decisions ?? [];
+    if (decisions.length === 0) {
+      // gh#198 (answer 20) — a zero-decision chat is NOT resolved here. An
+      // earlier pass fell through to step 5 on this branch so an ignored
+      // raise's unanswered-raise counter would move — but that patched the
+      // RECONCILIATION path, and the owner's ruling is explicit: "do not
+      // also patch the reconciliation path... only the absence of an answer
+      // moves [to the coda trigger]." Resolving it here fires on whatever
+      // chat happens to conclude next, however soon and however unrelated to
+      // the raised subject — not on the 24h/next-coda cadence the owner
+      // specified. The single resolve-on-read pass now lives in
+      // `directiveForProactiveSlot` (stateMachine.ts), which runs lazily, only
+      // when the 24h gate reopens and a new coda is about to be considered.
       logger.info('runSubjectReconciliation: no subject decisions', { threadTs, personSlackId });
       return;
     }
@@ -912,11 +961,39 @@ async function runSubjectReconciliation(
     }
     let matchedCount = 0;
     let createdCount = 0;
+    let rejectedCount = 0;
     let beatsRecorded = 0;
     const matchedSubjectIds: Array<{ id: string; sentiment: 'positive'|'negative'|'neutral' }> = [];
 
-    for (const d of output.decisions) {
+    for (const d of decisions) {
       let subjectId: string | null = null;
+
+      if (d.action === 'reject') {
+        // gh#198 (answer 7+8) — ONE mechanism for both an explicit "not
+        // relevant/stop" and work content wrongly routed here. With a
+        // subject_id, kill that existing row outright (not the raise
+        // counter — immediate). Without one (work content, no row to
+        // begin with), there's nothing to do but skip it — the point of
+        // this branch is that match/create below never sees it.
+        if (d.subject_id && subjectCategoryById.has(d.subject_id)) {
+          try {
+            markSubjectDead(d.subject_id);
+          } catch (err) {
+            logger.warn('runSubjectReconciliation: markSubjectDead threw', {
+              threadTs, subjectId: d.subject_id, err: String(err).slice(0, 200),
+            });
+          }
+          logger.info('runSubjectReconciliation: subject rejected (explicit stop)', {
+            threadTs, personSlackId, subjectId: d.subject_id,
+          });
+        } else {
+          logger.info('runSubjectReconciliation: work content rejected — no row created', {
+            threadTs, personSlackId,
+          });
+        }
+        rejectedCount++;
+        continue;  // never records topic beats
+      }
 
       if (d.action === 'match') {
         // ID-based safety: Haiku must return an ID from the shown list.
@@ -954,6 +1031,36 @@ async function runSubjectReconciliation(
         if (!category) {
           logger.warn('runSubjectReconciliation: category not in fixed set, skipping', {
             threadTs, claimed: d.category,
+          });
+          continue;
+        }
+        // gh#198-LIB-6 (answer 19) — deterministic code-side work gate. The
+        // reconciler's own prompt is asked to reject work content (see the
+        // "read who OWNS the topic" section above), but a thread whose turns
+        // never classified as 'social' (classifyTurn, persisted per-turn via
+        // markThreadHadSocialTurn in buildTurnContext.ts) cannot produce a
+        // subject regardless of what the reconciler's prompt returns. Not a
+        // second LLM call — classifyTurn already ran on every interactive
+        // turn in this thread; not a keyword blocklist — it reads the same
+        // classification the social directive itself already trusted.
+        if (!threadHadSocialTurn(threadTs)) {
+          logger.info('runSubjectReconciliation: blocked create — thread never classified as social', {
+            threadTs, personSlackId, wouldBeCategory: category.label, label: d.subject_label,
+          });
+          continue;
+        }
+        // gh#198 (answer 15) — hard cap of 3 active categories per person,
+        // enforced HERE at the creation site, not the picker. A 4th is
+        // refused outright (block, never rotate an existing one out).
+        // "Active" = the category already has real per-person standing
+        // (social_person_category_scores.score > 0) — only gates a BRAND
+        // NEW category; adding another subject to a category the person is
+        // already active in is unaffected (the existing 5-per-category cap,
+        // socialSubjects.ts createSubject, still applies independently).
+        if (!isCategoryActiveForPerson(personSlackId, category.id)
+            && countActiveCategoriesForPerson(personSlackId) >= MAX_ACTIVE_CATEGORIES_PER_PERSON) {
+          logger.info('runSubjectReconciliation: blocked create — person already at the active-category cap', {
+            threadTs, personSlackId, wouldBeCategory: category.label, cap: MAX_ACTIVE_CATEGORIES_PER_PERSON,
           });
           continue;
         }
@@ -996,10 +1103,13 @@ async function runSubjectReconciliation(
     // 5. Engagement signals — applied at end-of-chat instead of per-turn.
     // For each MATCHED subject this chat touched:
     //   - If it's the recently-raised subject (Maelle initiated last) → fire
-    //     raise-feedback signal (positive/negative/neutral per the decision's sentiment).
-    //   - Otherwise → fire organic-match signal (+1, capped at 5).
-    // Created subjects start at the createSubject default score; no extra
-    // signal needed.
+    //     raise-feedback signal (moves the CATEGORY score, resets the
+    //     subject's unanswered-raise counter).
+    //   - Otherwise → fire organic-match signal (moves the CATEGORY score
+    //     +1/-1, capped 0..3).
+    // Created subjects already moved their category's score by +1 inside
+    // createSubject (socialSubjects.ts) — no extra signal needed. Rejected
+    // decisions never reach this point (handled + `continue`d above).
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { applyRaiseFeedbackForMatches, applyOrganicMatchSignal } = require('../core/social/logEngagement') as
@@ -1013,10 +1123,19 @@ async function runSubjectReconciliation(
       const { getMostRecentRaisedSubject } = require('../db/socialSubjects') as
         typeof import('../db/socialSubjects');
       const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
+      // gh#198 (answer 21a) — GUARD THE PIVOT. Only let a non-match count as
+      // "unanswered" once this thread has already been reconciled at least
+      // once SINCE the raise happened (priorCapturedAt >= raise timestamp) —
+      // i.e. this is a genuinely separate later cycle, not the coda's own
+      // delivery-triggered first capture. A factual data check, not a clock.
+      const allowPivotDetection = !raised
+        || (priorCapturedAt != null
+          && new Date(priorCapturedAt).getTime() >= new Date(raised.last_assistant_initiated_at!).getTime());
       applyRaiseFeedbackForMatches({
         ownerUserId,
         personSlackId,
         matchedSubjects: matchedSubjectIds,
+        allowPivotDetection,
       });
       // Organic match — fire per matched subject that ISN'T the raised one
       // (raise-feedback already handled the raised case above).
@@ -1037,7 +1156,7 @@ async function runSubjectReconciliation(
     }
 
     logger.info('runSubjectReconciliation: complete', {
-      threadTs, personSlackId, matchedCount, createdCount, beatsRecorded,
+      threadTs, personSlackId, matchedCount, createdCount, rejectedCount, beatsRecorded,
     });
   } catch (err) {
     logger.warn('runSubjectReconciliation: threw — non-fatal', {

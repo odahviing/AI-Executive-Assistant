@@ -49,15 +49,6 @@
       "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the gh#189/calendar-issues-schema-lacks-axis-column fix."
     },
     {
-      "id": "ignored-raise-decay-only-fires-picked-category",
-      "lane": "librarian",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "audit",
-      "symptom": "applyIgnoredRaiseDecay only fires for the randomly-picked category each sweep, so an ignored subject in an unpicked category still only decays at the slower weekly rate.",
-      "evidence": "Bouncer discovery, 2026-08-10 combined wave pass, on the coda-topic-decay-no-negative-feedback fix. Directionally correct, just slower than intended."
-    },
-    {
       "id": "runReminderFire-same-invisibility-as-research",
       "lane": "registrar",
       "severity": "low",
@@ -160,7 +151,6 @@
     "findAvailableSlots.ts has no sixth exclusion path: the only other reads of args.moving_event_ids are the entry log (:216) and the same-day ranking preference (:1333), neither of which subtracts from the busy pool.",
     "findMeetingOwner admits an id via the Graph-organizer fallback (findMeetingOwner.ts:103-126) as well as via a requests row, and returns requesterSlackId null when neither resolves — so the organizing-not-attending gate cannot admit a stranger's event, though its comment names only the requests spine.",
     "requester_is_attending is a live tool arg on find_available_slots (meetings.ts:361) with an explicit EA/organiser instruction at :1238 — the organizing-not-attending branch is model-reachable, not dead.",
-    "appendToConversation stores only role+content (src/db/conversations.ts:37-41) and all three assistant call sites omit ts (postReply.ts:350, postReply.ts:512, handlers.ts:898) — an assistant row can never match dbTimestamps, and it evaluates to 0 in any parseFloat(ts||'0') sort.",
     "Both defrag abut helpers set fix_failed AND fix_error on every failure path (autoMove.ts:378 pull, :442/:475 push, plus the shared executeInternalAutoMove at :152/:208), so checkHealth.ts:1075's preservation branch is reachable; pull's :378 and push's :475 messages are byte-identical, which is what its `!==` guard exists to suppress.",
     "verify.got is a pre-formatted human string in the owner's zone (\"EEE d MMM 'at' HH:mm\", calendarReads.ts:1333), not a raw ISO — the auto-move read-back message is readable as written.",
     "requests.idempotency_key is UNIQUE (src/db/client.ts:774) and createRequest honours input.idempotencyKey (requests.ts:53), while createOutreachJob mints its own id at jobs.ts:185 before the bridge — the collision this wave removed was real, and the per-job key cannot cause a duplicate real-world send because the Slack send and the outreach_jobs INSERT are independent of the bridge.",
@@ -186,29 +176,28 @@
     "BOUNCER 2026-08-10 (retry verification): isChannel threads cleanly from handlers.ts/processMessage.ts through postOrchestratorReply into OutputGateContext at postReply.ts:472 — the backstop's !ctx.isChannel exclusion is real, not a dead field.",
     "BOUNCER 2026-08-10 (retry verification): context.authority is a required, unclamped field on SkillContext (skills/types.ts:105) — freeform-escalation-refused-silently-drops-owner-question's context.authority!=='colleague' gate is correct in both directions (room-clamped owner skips, real colleague in DM or room still fires).",
     "BOUNCER 2026-08-10 (retry verification): approval-amend-routes-through-reschedule-not-merge's two named exits are both real — resolving the approval drops it from getAwaitingOwnerRequests, and messaging from another thread fails the owner_dm_thread_ts/terminal_dm_msg_ts===context.threadTs test. Neither is a guess.",
-    "BOUNCER 2026-08-10 (retry verification): coda-repeats-and-merges-with-action-confirmations's turnReportedActionResult flag is set as a sibling of turnLeftWorkPending inside the success branch (index.ts:986), so a create_meeting/delete_meeting success:true reaches it — traced end to end on an actual booking-success turn, not asserted.",
     "BOUNCER 2026-08-10 (retry verification): the owner-path hasOperationalRelay narrowing to thread-bound (buildTurnContext.ts) cannot false-match — threadTs is a required string on OrchestratorInput (index.ts:16), no null===null false positive against unset request columns."
   ],
   "_carryNote": "The last run's own counts, copied off its manifest the moment it returned. A number the engine did not emit is null — never omitted and never estimated, because absent must read as not-recorded.",
   "carry": {
-    "editorRan": 3, "fromEditor": null, "fromQueue": null, "fromBacklog": null,
-    "buildable": 27, "dispatched": 27, "built": 27,
-    "confirmedOtherLane": 0, "alreadyFixed": 1, "needsOwner": 0,
-    "stillBlocked": 0, "neverDispatched": 2,
-    "newlyVerbed": 0, "newlyVerbedBuild": 0, "rounds": 2,
-    "onHisDesk": 6, "decisionBudget": null, "overBudget": 0,
-    "verifyRan": true, "fixesToCheck": 27, "waveFilesNamed": 34,
-    "overturned": 9, "discoveries": 8, "ticketsTouched": 27,
-    "verifiedCleanReturned": 14, "priorCleanDropped": null,
-    "earnedRules": 0, "invariantsTagged": 0, "invariantsOf": 27,
-    "bounced": 9, "bounceEligible": 27, "bounceRecheckRan": true,
-    "jointTraced": 6, "jointCandidates": 6
+    "editorRan": 0, "fromEditor": null, "fromQueue": null, "fromBacklog": null,
+    "buildable": 17, "dispatched": 17, "built": 5,
+    "confirmedOtherLane": 3, "alreadyFixed": 9, "needsOwner": 0,
+    "stillBlocked": 0, "neverDispatched": 0,
+    "newlyVerbed": 0, "newlyVerbedBuild": 0, "rounds": 1,
+    "onHisDesk": 1, "decisionBudget": 12, "overBudget": 0,
+    "verifyRan": true, "fixesToCheck": 5, "waveFilesNamed": 3,
+    "overturned": 0, "discoveries": 2, "ticketsTouched": 1,
+    "verifiedCleanReturned": 11, "priorCleanDropped": 0,
+    "earnedRules": 0, "invariantsTagged": 0, "invariantsOf": 17,
+    "bounced": 1, "bounceEligible": 1, "bounceRecheckRan": true,
+    "jointTraced": null, "jointCandidates": null
   },
   "lastRun": {
-    "id": "manual-2026-08-12-yaelwave",
+    "id": "wf_05b7d7cc-4d6",
     "status": "complete",
-    "startedAt": "2026-08-12T00:00:00+03:00",
-    "note": "Workflow tool still broken (Claude Code platform/client permission-handler bug, external to this repo) — all of today's runs (manual-2026-08-12, manual-2026-08-12-followup, manual-2026-08-12-yaelwave) executed by hand dispatch. The yaelwave run was triggered by a real incident the owner reported live (a wrong-event calendar move he caught and walked through in chat): editor triage on the transcript -> atomic tickets to matchmaker/instructor -> combined bouncer pass -> per-ticket retries -> owner rulings expanded scope twice (root-cause id-resolution fix instead of guard-only; then a full undo-against-history feature plus an outreach-reliability investigation that found and fixed a real false 'colleague never replied' report, including a manual production DB fix on the live VM). All bounced items resolved on retry, 0 unresolved escalations. Wrapped as v4.5.6 together with the day's two earlier runs.",
+    "startedAt": "2026-08-15T22:00:00+03:00",
+    "note": "gh#198 social/coda subsystem rewrite — a FEATURE wave on feature.js, not a bug loop. Plan mode ran TWICE: the first decomposition assumed the scoring re-base was deferred, the owner reversed that, and the second plan run folded sixteen owner constraints into recon via args.constraints. Build ran over four rounds on ONE run id (resumeFromRunId), growing 14 -> 17 pieces as the verify found unowned seams. Two verify overturns were resolved by owner rulings, not lane guesses: the work-gate brief demanded a code-level guarantee while forbidding every code-level mechanism (resolved by reusing classifyTurn's already-computed per-turn kind), and the resolve-on-read ordering took three attempts because two used a fixed grace window against a ~23h gap (resolved by a stored-fact check). The owner also verified the finished plan against the product goal himself, which added three pieces the decomposition had missed. Final round: ownSpec.complete=true, 0 warnings, 0 overturned, 0 needs-owner. Wrapped as v4.6.0.",
     "notBuilt": []
   }
 }

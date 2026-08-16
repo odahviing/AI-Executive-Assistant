@@ -14,7 +14,6 @@
  * not LLM-judgment. The live deltas (v2.2; trimmed as the ping system retired):
  *
  *   any live social reply within 24h                    → +1  (reply_engaged)
- *   revival after a quiet stretch                        → +1  (reviveStaleRankZero)
  *   owner directive                                      → setEngagementRank
  *
  * Down-rank is owner-directive or revival-aging only — never from a colleague's
@@ -42,7 +41,6 @@ export type RankChangeReason =
   | 'colleague_deflected'
   | 'owner_directive'
   | 'migration_from_legacy'
-  | 'revival_retry'
   | 'manual';
 
 // Reasons that record an OWNER-authored change to the rank — an editorial
@@ -214,40 +212,8 @@ export function migrateLegacyEngagementLevel(): void {
   }
 }
 
-/**
- * Revival sweep (v3.2.6 — owner directive). A person who drifted to rank 0
- * (the proactive opt-out) gets ONE more chance after a quiet stretch: if they
- * dropped to 0, it's been ≥ maxAgeDays since Maelle last raised social with
- * them, and they've ever actually interacted, bump 0 → 1 so the coda picker
- * will consider them again. With the new scoring (ignoring a coda is free),
- * they only fall back to 0 on a fresh explicit deflection — so this fires at
- * most once per quiet stretch per person, not in a loop.
- *
- * Returns the number of people revived. Called from the weekly social_decay
- * sweep. Single-tenant in practice; people_memory is not owner-scoped, so this
- * walks all rank-0 rows.
- */
-export function reviveStaleRankZero(maxAgeDays: number = 30): number {
-  const db = getDb();
-  const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
-  const rows = db.prepare(`
-    SELECT slack_id FROM people_memory
-    WHERE engagement_rank = 0
-      AND slack_id IS NOT NULL
-      AND slack_id NOT LIKE 'SELF:%'
-      AND interaction_log IS NOT NULL
-      AND interaction_log != ''
-      AND interaction_log != '[]'
-      AND (last_initiated_at IS NULL OR last_initiated_at < ?)
-  `).all(cutoff) as Array<{ slack_id: string }>;
-
-  let revived = 0;
-  for (const r of rows) {
-    setEngagementRank(r.slack_id, 1, 'revival_retry');
-    revived++;
-  }
-  if (revived > 0) {
-    logger.info('engagement_rank revival sweep', { revived, maxAgeDays });
-  }
-  return revived;
-}
+// gh#198 (answer 5) — `reviveStaleRankZero` (the 30-day second chance for a
+// rank-0 opt-out) is DELETED along with the weekly social_decay job that was
+// its only caller, not rehomed. A rank-0 opt-out is now only ever revived by
+// the person raising something themselves (their own reply already lifts
+// their rank via `adjustEngagementRank`'s `reply_engaged` path above).

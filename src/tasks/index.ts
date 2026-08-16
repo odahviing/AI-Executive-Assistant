@@ -44,23 +44,19 @@ export function createTask(params: Omit<Task, 'id' | 'created_at' | 'updated_at'
     target_slack_id: params.target_slack_id ?? null,
     target_name: params.target_name ?? null,
   });
-  // The recurring system tick (social_decay) self-rearms every 7 days. Its
-  // creation is deterministic from the dispatcher's own behavior — logging it
-  // adds zero signal and floods the live log. Skip entirely. Everything
-  // user-facing (reminders, follow-ups, outreach, coord) stays at info.
-  const isSystemTick = params.type === 'social_decay';
-  if (!isSystemTick) {
-    logger.info('Task created', {
-      id,
-      type: params.type,
-      title: params.title,
-      skill_origin: params.skill_origin,
-      skill_ref: params.skill_ref,
-      due_at: params.due_at,
-      status: params.status,
-      target_slack_id: params.target_slack_id,
-    });
-  }
+  // gh#198 — the recurring system tick this suppressed (social_decay,
+  // self-rearming every 7 days) is gone; every remaining task type is
+  // user-facing, so task creation always logs now.
+  logger.info('Task created', {
+    id,
+    type: params.type,
+    title: params.title,
+    skill_origin: params.skill_origin,
+    skill_ref: params.skill_ref,
+    due_at: params.due_at,
+    status: params.status,
+    target_slack_id: params.target_slack_id,
+  });
   // v4.2.x — the create-with-status='completed' react hook that used to sit here
   // went with its only caller. message_colleague was the one path that created a
   // task already completed (fire-and-forget send) purely to trigger the ✅ tick;

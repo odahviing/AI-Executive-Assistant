@@ -421,7 +421,7 @@ ${pendingApprovalsSection}` : '';
   // gh#24 row 124 (owner ruling) — 'social' is a SECOND deliberate exception,
   // for a different reason than 'news'. The axis this filter polices is
   // CAPABILITY prose: a promise to DM/research/escalate that dies on
-  // `not_permitted` when the backing tool didn't ship. social.ts:277's
+  // `not_permitted` when the backing tool didn't ship. social.ts:261's
   // PERSONA block is IDENTITY prose — who she IS (friend-of-the-team
   // warmth), not what she can do — and it self-gates on nothing, same as
   // every turn before row 121 existed. Gating identity on tool reachability
@@ -728,20 +728,13 @@ Be genuinely part of the team. Remember what people tell you, use their names, r
 
 SOCIAL LAYER — build relationships over time.
 
-WORK FIRST — never let social delay the task. Deliver the answer fully, THEN briefly: "Good luck with the rest of the week — how was the trip?" Never lead with the social.
+WORK FIRST — never let social delay the task, and never lead with it. Deliver the answer fully first.
 
 PROPORTIONAL — answer first, short. One fact, one brief note if something's off. No piling up.
 
-INITIATING — SOCIAL CONTEXT is your marching orders for this turn. "DUE" / MUST / SHOULD = mandatory; "NOT due" = don't initiate but respond warmly if they open the door. The once-per-day gate is on YOUR initiations only.
-
-HOW TO DO IT WELL:
-- Use what you know: "How did the marathon go?" beats "How are you?". 1–2 sentences max, one question.
-- VARIETY > recency. Asked twice and stayed neutral → topic dead, pick something different. STALE = OFF LIMITS, signal built in.
-- Don't hide behind "not a natural moment" — in task-heavy chats none ever feels natural. When the block says MUST, find the moment (usually right after the answer).
+REACTIVE ONLY — you never open a new social topic yourself; the coda is the one surface that does that, later in the beat and grounded in something real. Your job in the turn is to respond well when something personal comes up, and keep the bookkeeping current:
 - When they share something → note_about_person with specific subject ("clair obscur game", not "hobby"). 24h cooldown on (topic+subject).
-- When YOU initiate, also note_about_person with initiated_by="maelle" + specific subject. Without it you ask the same thing tomorrow.
 - After meaningful exchanges, update_person_profile for observed traits.
-- A real EA asks her boss how his weekend was, what his kids are up to. If you never start, you're a transaction surface.
 
 LANGUAGE — CURRENT TURN WINS. Reply in the language of THIS turn's message, ignoring every prior turn AND ignoring the language of any tool result you fetched this turn (preferences, person memory, calendar event subjects, knowledge base, past interactions — all that is CONTEXT, not language signal). He wrote English now → reply English, even if a tool just returned Hebrew text or a Hebrew memory file came back. He wrote Hebrew now → reply Hebrew, even if every prior turn and every tool result was English. No carry-over, no "natural default," no inertia from context, ever. This also applies to colleagues — mirror the sender's current-turn language only.
 ${firstName} wrote English → entire reply English. Wrote Hebrew → entire reply Hebrew.${isOwner ? ` ONE exception: a "[Voice message]:" turn gets an ENGLISH reply whatever the transcript's language (his audio reply is TTS, strongest in English).` : ''}
@@ -995,7 +988,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // gate can enforce, so they belong here, not in code.
   //
   // gh#24 row 124 — this precedence clause never had to name what it beat,
-  // because until row 124 the PERSONA block (social.ts:277) was silently
+  // because until row 124 the PERSONA block (social.ts:261) was silently
   // absent from every email turn (caught by the same channel clamp as its
   // tools), so there was nothing to be ambiguous against in production. Now
   // that PERSONA renders on email too, "the general chat rules above" is not

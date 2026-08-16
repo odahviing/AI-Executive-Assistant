@@ -1,32 +1,32 @@
 /**
- * Engagement signal applier (v2.6.7 redesign).
+ * Engagement signal applier.
  *
- * Pre-redesign: append-only `social_engagements` log with score deltas decided
- * here (positive=+3, neutral=-1, negative=-3 etc). Mismatch with the live
- * Sonnet-driven flow led to subjects camping at top scores while real
- * engagement quality didn't show through.
+ * v4.5.9 (#198) — rebased onto the per-person CATEGORY score
+ * (social_person_category_scores, 0..3) instead of a per-subject score.
+ * Subjects no longer carry a score at all; they carry `status` (live|dead)
+ * and `unanswered_raises` (dies at 2 — see socialSubjects.ts). Rules:
  *
- * Redesign rules (per the 2026-05-10 design conversation, EC4):
- *   - Person spontaneously matches existing subject (no recent assistant raise) → +1
- *   - Assistant raised + person's NEXT message:
- *       · matches subject + non-negative sentiment → +1
- *       · matches subject + negative sentiment    → −1
- *       · doesn't match (pivot) → no signal (marker left alive; weekly decay ages it)
- *   - Floor 0 → status='dormant'. Cap 5.
+ *   - Person spontaneously matches an existing subject (no recent assistant
+ *     raise) → the subject's CATEGORY moves +1 (−1 if negative sentiment).
+ *   - Assistant raised + person's NEXT chat:
+ *       · matches the raised subject + non-negative sentiment → category +1,
+ *         subject's unanswered_raises resets to 0 (it was answered)
+ *       · matches + negative sentiment                        → category −1,
+ *         same reset (still answered — a grievance is engagement, not silence)
+ *       · doesn't match (pivot)  → no category movement; the SUBJECT's
+ *         unanswered_raises +1, dies at 2 (recordSubjectUnanswered)
  *
- * The signal applier reads `last_assistant_initiated_at` on the most-recently-
- * raised subject for this person, then compares against the classifier's verdict
- * for the current inbound. Always clears the raise marker after processing
- * so we don't double-apply on subsequent turns.
- *
- * Single source of truth: subjects.engagement_score. No append-only log.
+ * No time-based movement anywhere (answer 14) — a score or a death only ever
+ * happens in response to something that actually occurred in a chat.
  */
 
 import {
-  applyScoreDelta,
-  clearSubjectRaisedMarker,
   getMostRecentRaisedSubject,
-  incrementCategorySignals,
+  getSubjectById,
+  recordSubjectAnswered,
+  recordSubjectUnanswered,
+  recordSubjectTouch,
+  adjustCategoryScore,
   type SocialSubject,
 } from '../../db/socialSubjects';
 import { adjustEngagementRank } from '../../db/engagementRank';
@@ -35,65 +35,92 @@ import logger from '../../utils/logger';
 const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * v3.0 follow-up — raise-feedback signal applied at end-of-chat (not per-turn).
- *
- * Inputs: the matched subjects from this chat (subject_id + per-decision
- * sentiment). Looks at the most-recently-raised subject for this person; if
- * any matched subject equals the raised one, apply the appropriate score
- * delta (positive sentiment → +1, negative → −1) and clear the raise marker.
- * If the raised subject was NOT touched in this chat (pivot path), leave
- * the marker alone — weekly decay handles aging.
- *
- * No classification dependency anymore (per-turn `subject_match` was
- * stripped in v3.0 follow-up; subject decisions only happen at end-of-chat).
+ * v3.0 follow-up — raise-feedback signal applied at end-of-chat (not
+ * per-turn). Inputs: the matched subjects from this chat (subject_id +
+ * per-decision sentiment). Looks at the most-recently-raised subject for
+ * this person; if any matched subject equals the raised one, apply the
+ * appropriate category-score delta and reset the subject's unanswered-raise
+ * counter (it was answered). If the raised subject was NOT touched in this
+ * chat (pivot path), record it as an unanswered raise — the subject dies at
+ * MAX_UNANSWERED_RAISES, never on a clock.
  */
 export function applyRaiseFeedbackForMatches(params: {
   ownerUserId: string;
   personSlackId: string;
   matchedSubjects: Array<{ id: string; sentiment: 'positive' | 'negative' | 'neutral' }>;
+  /**
+   * gh#198 (answer 21a) — GUARD THE PIVOT. A coda's own delivery appends a
+   * message to the thread it was posted in, which is what makes end-of-chat
+   * reconciliation pick that same thread up ~30-35 min later (capturePass's
+   * SILENCE_MINUTES=30 + the 5-min background tick) — almost always BEFORE
+   * the person has had any real chance to respond. Left unguarded, that
+   * reconciliation pass sees "matched subjects" drawn from whatever the
+   * thread already contained (frequently none of them the just-raised one)
+   * and calls this a pivot — so a raise was routinely marked unanswered
+   * inside the very chat it was delivered in, pre-empting the 24h resolve-
+   * on-read mechanism this counter is supposed to run on.
+   *
+   * The caller (capturePass.ts) sets this false when the thread's OWN prior
+   * captured_at predates the raise — i.e. this is the first reconciliation
+   * pass to see the raise at all, not a genuinely separate later cycle. A
+   * factual data check ("has this thread actually been captured since the
+   * raise?"), never an elapsed-time guess. Defaults true so any other
+   * caller (there are none today) keeps the original pivot behavior.
+   */
+  allowPivotDetection?: boolean;
 }): { subject: SocialSubject | null; delta: number; reason: string } {
-  const { ownerUserId, personSlackId, matchedSubjects } = params;
+  const { ownerUserId, personSlackId, matchedSubjects, allowPivotDetection = true } = params;
 
   const raised = getMostRecentRaisedSubject(ownerUserId, personSlackId);
   if (!raised) return { subject: null, delta: 0, reason: 'no_raised_subject' };
 
   const raisedMatch = matchedSubjects.find(m => m.id === raised.id);
   if (!raisedMatch) {
-    // Pivot path — chat didn't touch the raised subject. Per owner direction
-    // (v2.6.7 option C): no score change, no marker clear. The raise stays
-    // alive — if a later chat matches it, the +1 still fires. Raises age
-    // naturally via the weekly social_decay dispatcher.
-    logger.info('Engagement signal — raised pivot (no signal applied)', {
+    if (!allowPivotDetection) {
+      // This reconciliation pass is the coda's own first capture cycle —
+      // leave the raise marker standing. The next reconciliation cycle (a
+      // genuine later chat) or the 24h resolve-on-read will judge it.
+      logger.info('Engagement signal — raised pivot suppressed (same capture cycle as the raise)', {
+        raisedId: raised.id, raisedLabel: raised.label,
+      });
+      return { subject: raised, delta: 0, reason: 'raised_pivot_suppressed_same_capture_cycle' };
+    }
+    // Pivot — the chat didn't touch the raised subject. This IS the
+    // unanswered-raise signal: +1 to unanswered_raises, dies at 2. Replaces
+    // both the old 72h-window ignored-raise decay and the weekly decay pass
+    // — neither exists any more.
+    const updated = recordSubjectUnanswered(raised.id);
+    logger.info('Engagement signal — raised pivot (unanswered raise recorded)', {
       raisedId: raised.id, raisedLabel: raised.label,
+      unansweredRaises: updated?.unanswered_raises, status: updated?.status,
     });
-    return { subject: raised, delta: 0, reason: 'raised_pivot_no_signal' };
+    return { subject: updated ?? raised, delta: 0, reason: 'raised_pivot_unanswered' };
   }
 
   const sentiment = raisedMatch.sentiment;
   const delta = sentiment === 'negative' ? -1 : +1;
   const reason = sentiment === 'negative' ? 'raised_match_negative' : 'raised_match_engaged';
 
-  const updated = applyScoreDelta(raised.id, delta, 'assistant');
-  if (sentiment === 'positive') incrementCategorySignals(raised.category_id, 'positive');
-  if (sentiment === 'negative') incrementCategorySignals(raised.category_id, 'negative');
-  clearSubjectRaisedMarker(raised.id);
+  // The raise got a real reply — move the CATEGORY's per-person standing
+  // (subjects no longer carry a score) and reset the subject's
+  // unanswered-raise counter; it was answered, live or not.
+  adjustCategoryScore({ ownerUserId, personSlackId, categoryId: raised.category_id, delta });
+  const updated = recordSubjectAnswered(raised.id, 'assistant');
 
   logger.info('Engagement signal applied (raised)', {
-    raisedId: raised.id, raisedLabel: raised.label, delta, reason,
-    newScore: updated?.engagement_score, status: updated?.status,
+    raisedId: raised.id, raisedLabel: raised.label, delta, reason, status: updated?.status,
   });
   return { subject: updated ?? raised, delta, reason };
 }
 
 /**
  * Apply the organic-match signal: person spontaneously matched an existing
- * subject (no pending assistant raise on it). +1, capped at 5.
+ * subject (no pending assistant raise on it). Moves that subject's CATEGORY
+ * +1 (−1 if venting negatively about it), capped 0..3, and records the touch
+ * on the subject itself.
  *
  * v3.0 follow-up — called from the end-of-chat reconciliation pass for
- * each matched subject that isn't the recently-raised one. Pre-v3.0
- * this fired per-turn from the orchestrator based on the per-turn
- * classifier's subject_match output; that path was stripped because it
- * produced wrong-row writes on label drift.
+ * each matched subject that isn't the recently-raised one.
  */
 export function applyOrganicMatchSignal(params: {
   ownerUserId: string;
@@ -102,12 +129,15 @@ export function applyOrganicMatchSignal(params: {
   initiator: 'owner' | 'colleague';
   sentiment: 'positive' | 'negative' | 'neutral';
 }): SocialSubject | null {
-  const { matchedSubjectId, initiator, sentiment } = params;
-  // Negative organic mention also -1 (person is venting about it).
+  const { ownerUserId, personSlackId, matchedSubjectId, initiator, sentiment } = params;
+  const subject = getSubjectById(matchedSubjectId);
+  if (!subject) return null;
+
   const delta = sentiment === 'negative' ? -1 : +1;
-  const updated = applyScoreDelta(matchedSubjectId, delta, initiator);
+  adjustCategoryScore({ ownerUserId, personSlackId, categoryId: subject.category_id, delta });
+  const updated = recordSubjectTouch(matchedSubjectId, initiator);
   logger.info('Engagement signal applied (organic)', {
-    subjectId: matchedSubjectId, delta, sentiment, newScore: updated?.engagement_score,
+    subjectId: matchedSubjectId, categoryId: subject.category_id, delta, sentiment,
   });
   return updated;
 }
@@ -123,9 +153,9 @@ export function applyOrganicMatchSignal(params: {
  * Once the coda became its own message posted a beat later, generation stopped
  * implying delivery: the transport drops it on a leak hit, a prep throw, the
  * person speaking again inside the beat, another turn answering first, or a failed
- * post. Every drop still burned that person's one ping for the day AND parked the
- * subject for 72h (the picker's re-raise defer, stateMachine.ts) for a line nobody
- * ever saw. Delivery is the only event that should move either field.
+ * post. Every drop still burned that person's one ping for the day AND left the
+ * subject marked as raised for a line nobody ever saw. Delivery is the only
+ * event that should move either field.
  *
  * Two writes, guarded SEPARATELY and in this order on purpose:
  *   1. `recordSocialMoment` → `people_memory.last_initiated_at`. This is the
@@ -134,8 +164,9 @@ export function applyOrganicMatchSignal(params: {
  *      `raise_new` coda it is the ONLY gate — there is no subject row yet — so it
  *      goes first and a failure in the second write cannot cost us the gate.
  *   2. `markSubjectRaised` → `social_subjects.last_assistant_initiated_at`, which
- *      drives the 72h re-raise defer, the raise→ignored decay, and (for `continue`
- *      codas) a second independent read of the daily gate. Absent on `raise_new`.
+ *      drives the raise→ignored/answered signal on the person's next chat and
+ *      (for `continue` codas) a second independent read of the daily gate.
+ *      Absent on `raise_new`.
  *
  * NEVER throws. The caller is a `setTimeout` in the transport where an escaped
  * rejection is an unhandled one, and a social aside is optional by definition —
@@ -176,7 +207,7 @@ export function recordCodaDelivered(params: {
         typeof import('../../db/socialSubjects');
       markSubjectRaised(subjectId);
     } catch (err) {
-      logger.warn('Coda raise-marker write threw — engagement signal + 72h defer lost for this subject', {
+      logger.warn('Coda raise-marker write threw — raise-feedback signal lost for this subject', {
         personSlackId, subjectId, err: String(err).slice(0, 200),
       });
     }
@@ -230,4 +261,3 @@ export function adjustRankFromColleagueResponse(params: {
   // a colleague's own words. `sentiment` is intentionally no longer consulted.
   adjustEngagementRank(params.colleagueSlackId, 1, 'reply_engaged');
 }
-

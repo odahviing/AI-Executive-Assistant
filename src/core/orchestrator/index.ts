@@ -179,8 +179,9 @@ export interface OrchestratorOutput {
    * This is a directive, not a sentence. Composing it here meant awaiting a
    * Sonnet call plus a claim-check between "answer ready" and "answer posted" —
    * two round-trips of latency on the WORK answer, for a line the transport
-   * then deliberately holds 10 seconds anyway (L10 — social never delays real
-   * work). The transport calls `composeSocialCoda` inside that beat instead.
+   * then deliberately holds for a beat anyway (5-15s, varied per delivery —
+   * L10, social never delays real work). The transport calls
+   * `composeSocialCoda` inside that beat instead.
    *
    * It carries its two ids because the social bookkeeping — the once-per-day
    * cadence gate and the subject raise-marker — is stamped on DELIVERY, not on
@@ -1325,13 +1326,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         replyText: userMessage,
         sentiment: socialClassification.social.sentiment,
       });
-      // Bump last_social_at on a genuine colleague social reply. The 48h coda
-      // rank-check (socialPingRankCheck) measures engagement as
-      // `last_social_at > coda_at`, but that field is otherwise only moved by
-      // the note_about_* tools — a plain warm reply ("thanks, you too!") left
-      // it frozen at coda-send time, so engaged colleagues were scored
-      // "no response" and ranked DOWN. 'person' bumps last_social_at only
+      // Bump last_social_at on a genuine colleague social reply. That field
+      // is otherwise only moved by the note_about_* tools — a plain warm
+      // reply ("thanks, you too!") left it frozen, so a colleague who
+      // engaged looked untouched. 'person' bumps last_social_at only
       // (NOT last_initiated_at), so the daily-ping cadence gate is unaffected.
+      // (gh#198 — the old 48h coda rank-check this comment used to describe,
+      // socialPingRankCheck.ts, is deleted; rank now moves only via
+      // adjustRankFromColleagueResponse above and engagement signals.)
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { recordSocialMoment } = require('../../db') as typeof import('../../db');
       recordSocialMoment(input.userId, 'person');
@@ -1343,7 +1345,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // The coda DUE this turn, handed to the transport to compose and post
   // SEPARATELY (see OrchestratorOutput.socialCoda). Every gate below still runs
   // here — eligibility is a property of the turn, and only the turn knows it —
-  // but nothing is awaited: the writing happens in the transport's 10s beat.
+  // but nothing is awaited: the writing happens in the transport's post-reply beat.
   let socialCoda: PendingSocialCoda | null = null;
   // v2.2.1 Pattern 1 — slack-available task turns → social coda.
   // Task always wins, BUT if the task produced a "parking" tool call (coord
@@ -1415,18 +1417,23 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           const codaLang: 'he' | 'en' = /[֐-׿]/.test(input.userMessage ?? '') ? 'he' : 'en';
           // Eligibility is settled HERE — it is a property of this turn and
           // nothing downstream can re-derive it. The SENTENCE is not written
-          // here: `composeSocialCoda` runs in the transport's existing 10s beat,
-          // so the two LLM round-trips it costs land on dead time instead of
+          // here: `composeSocialCoda` runs in the transport's existing
+          // post-reply beat (a 5-15s range, not a fixed wait — see
+          // CODA_DELAY_MIN_MS/MAX_MS in postReply.ts), so the LLM round-trips
+          // and grounding lookups it costs land on dead time instead of
           // between the work answer being ready and the person seeing it.
           // Nothing is stamped either — the cadence gate
           // (people_memory.last_initiated_at) and the subject raise-marker are
           // written by `recordCodaDelivered` once the transport confirms the
-          // post, and now the topic-beat marker follows the same rule by virtue
-          // of living inside the composer.
+          // post.
+          // gh#198 — channelId threaded through so the composer's grounding
+          // pass can re-read this person's actual past messages (SlackMaster's
+          // getRecentChannelMessages) rather than a topic-beat label.
           socialCoda = {
             directive: codaDirective,
             personSlackId: turnPersonSlackId,
             subjectId: codaDirective.subjectId ?? undefined,
+            channelId: input.channelId,
             senderRole: turnSenderRole,
             senderFirstName: turnSenderRole === 'owner'
               ? profile.user.name.split(' ')[0]
@@ -1436,7 +1443,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           logger.info('Social coda DUE on a task turn — transport composes and posts it separately', {
             personSlackId: turnPersonSlackId,
             mode: codaDirective.mode,
-            topic: codaDirective.topicLabel,
+            topic: codaDirective.subjectLabel,
             subjectId: codaDirective.subjectId ?? null,
           });
         }

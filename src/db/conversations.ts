@@ -49,18 +49,29 @@ export function appendToConversation(
  * is how Maelle confidently misdescribed the Yael conversation (#125).
  * Thread order approximates chronology via updated_at; messages keep their
  * within-thread order.
+ *
+ * v4.5.8 (#198) — this is also the channel-scoped read path for re-reading a
+ * subject's actual past messages (the social coda's LIB-side grounding calls
+ * it via `../../db`). Answer 13: no new message table, no index, no backfill
+ * — the raw text is already durable in `conversation_threads` and this is the
+ * one reader over it. `maxThreads` was added (default unchanged at 5, so the
+ * recall caller above is untouched) purely so a caller needing more of a
+ * channel's history than the last 5 threads can ask for it without a second
+ * copy of this query. A DM's channel_id is 1:1 with the person, so this never
+ * widens what a caller sees beyond that person's own thread history.
  */
 export function getRecentChannelMessages(
   channelId: string,
   maxMessages: number = 10,
+  maxThreads: number = 5,
 ): Array<ConversationMessage & { thread_ts: string }> {
   const db = getDb();
   const rows = db.prepare(`
     SELECT thread_ts, context FROM conversation_threads
      WHERE channel_id = ?
      ORDER BY updated_at DESC
-     LIMIT 5
-  `).all(channelId) as Array<{ thread_ts: string; context: string }>;
+     LIMIT ?
+  `).all(channelId, maxThreads) as Array<{ thread_ts: string; context: string }>;
   const all: Array<ConversationMessage & { thread_ts: string }> = [];
   for (const row of rows.reverse()) {  // oldest thread first
     try {

@@ -37,19 +37,14 @@ export type TaskType =
   // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
   // DMs the assignee asking for a status update; the reply flows back to the
   // owner via the existing outreach reply pipeline.
-  | 'summary_action_followup'
-  // v2.2 — weekly decay pass for the Social Engine. Walks every owner's
-  // active topics and subtracts 1 from each topic not touched in the last
-  // 7 days. Topics hitting score 0 flip to dormant (Maelle stops raising
-  // them; owner can still revive). System task, auto-reschedules every 7d.
-  | 'social_decay'
-  // RETIRED in v3.2.6 — engagement_rank now moves only on live reply
-  // (`adjustRankFromColleagueResponse`, anchored on last_initiated_at). The
-  // 48h scheduled rank-check is no longer created; the dispatcher remains as
-  // a no-op drain for in-flight rows from before the retirement. Remove
-  // the type member + dispatcher registration once the queue is reliably
-  // drained. See `dispatchers/socialPingRankCheck.ts`.
-  | 'social_ping_rank_check';
+  | 'summary_action_followup';
+  // gh#198 (2026-08-15) — 'social_decay' (the weekly per-subject decay pass)
+  // and 'social_ping_rank_check' (RETIRED v3.2.6, a no-op drain) are both
+  // REMOVED. Subjects no longer carry a score to decay — a subject now dies
+  // on 2 unanswered raises or an explicit reject (socialSubjects.ts,
+  // capturePass.ts), never on a clock — and the ping-rank-check queue was
+  // confirmed fully drained (0 pending rows) before removal. No dispatcher
+  // remains for either type; do not re-add rows of these types.
 
 export type TaskStatus =
   | 'new'                // created, not started yet (may have a future due_at)

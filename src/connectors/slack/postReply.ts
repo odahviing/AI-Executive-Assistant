@@ -169,13 +169,30 @@ function shadowPreview(s: string | undefined): string {
 // ── Social coda — a separate message, not a last line ───────────────────────
 
 /**
- * How long after the reply LANDS the coda follows. Owner's call: 10 seconds —
- * long enough to read as a second thought rather than a swerve in the first
- * one. Measured from delivery of the reply, not from the inbound message: a
- * turn can take 30s, so anchoring on the inbound would collapse the beat to
- * zero and reproduce the very run-on the split exists to fix.
+ * How long after the reply LANDS the coda follows. Owner's ruling (answer 12,
+ * 2026-08): a FIXED wait reads as a metronome — "It even good if it sometimes
+ * 5 sec and sometimes 15 sec." So this is a range, not a constant: each
+ * delivery picks its own beat between the two bounds below, long enough to
+ * read as a second thought rather than a swerve in the first one, short
+ * enough to still land inside the same lull. Measured from delivery of the
+ * reply, not from the inbound message: a turn can take 30s, so anchoring on
+ * the inbound would collapse the beat to zero and reproduce the very run-on
+ * the split exists to fix.
+ *
+ * A slow compose (the Sonnet call inside `composeSocialCoda`, plus the
+ * claim-check) does NOT get raced against this window — nothing here ever
+ * drops the coda for taking too long; the two lull checks (fire-time +
+ * post-compose) are the only things that drop it. Widening the range only
+ * widens when the timer FIRES, never turns a slow compose into a silent
+ * discard.
  */
-const CODA_DELAY_MS = 10_000;
+const CODA_DELAY_MIN_MS = 5_000;
+const CODA_DELAY_MAX_MS = 15_000;
+
+/** One beat, picked fresh per delivery — see CODA_DELAY_MIN_MS/MAX_MS above. */
+function pickCodaDelayMs(): number {
+  return CODA_DELAY_MIN_MS + Math.floor(Math.random() * (CODA_DELAY_MAX_MS - CODA_DELAY_MIN_MS + 1));
+}
 
 /**
  * Deliver the social coda as its OWN in-thread message, a beat after the reply.
@@ -196,7 +213,8 @@ const CODA_DELAY_MS = 10_000;
  * - Scheduled only from a delivery-SUCCESS point, so a reply that failed to send
  *   can never be followed by a cheerful aside about someone's weekend.
  * - Dropped if the person has typed again by the time it fires — the coda's
- *   premise is a lull, and a lull broken inside 10s wasn't one.
+ *   premise is a lull, and a lull broken inside the beat (5-15s, see
+ *   CODA_DELAY_MIN_MS/MAX_MS) wasn't one.
  * - 1:1 DM only (S4/S6). The orchestrator already restricts it; asserted again
  *   here so no future caller can put personal small-talk in a shared surface.
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
@@ -249,11 +267,11 @@ function scheduleSocialCoda(opts: {
   // of them inside the ack branch's try, where a throw would fall through to the
   // fallback text send and duplicate an already-acked reply. It has to stay out
   // here: it is the BASELINE the fire-time check compares against, so reading it
-  // 10s later would compare the thread to itself and never detect a new turn.
+  // a beat later would compare the thread to itself and never detect a new turn.
   let replyTsAtSchedule: string | null;
   try {
     // The reply we are trailing. Two cheap lookups at fire time decide whether
-    // the lull survived the 10s: the inbound queue answers "is a turn running or
+    // the lull survived the beat: the inbound queue answers "is a turn running or
     // queued RIGHT NOW" (the person typed and we are already answering), and
     // this snapshot answers "did a whole turn come and go" — a fast follow-up
     // (the deterministic approval auto-resolve returns in ~300ms) can start and
@@ -267,6 +285,7 @@ function scheduleSocialCoda(opts: {
     return;
   }
 
+  const delayMs = pickCodaDelayMs();
   setTimeout(() => {
     void (async () => {
       try {
@@ -291,8 +310,9 @@ function scheduleSocialCoda(opts: {
         // It used to be composed during the turn, which put two round-trips
         // between "answer ready" and "answer posted": the person waited on their
         // WORK reply so that a social aside could be written — one the transport
-        // then deliberately sits on for 10 seconds. Social never delays real
-        // work. The 10s beat is dead time and is the right place to spend it.
+        // then deliberately sits on for a beat (5-15s, varied per delivery so it
+        // reads as a person, not a metronome). Social never delays real work.
+        // The beat is dead time and is the right place to spend it.
         //
         // ONE call into the social lane, by design. Composing and vetting are its
         // job, and the vet needs the person's notes; splitting the two would have
@@ -310,8 +330,8 @@ function scheduleSocialCoda(opts: {
         if (text.length === 0) return;
 
         // Guard-owned ship/drop verdict, LAST so it is never spent on a coda the
-        // lull checks above already killed. Inside the timer on purpose: the 10s
-        // beat is dead time, so the check adds nothing to any user-visible path —
+        // lull checks above already killed. Inside the timer on purpose: the beat
+        // is dead time, so the check adds nothing to any user-visible path —
         // not the reply (already delivered), not the turn (fire-and-forget).
         const gate = await runCodaGates(text, { profile, role });
         if (!gate.ship) {
@@ -349,7 +369,7 @@ function scheduleSocialCoda(opts: {
         // confirmation, not on a question about someone's weekend.
         appendToConversation(threadTs, channelId, { role: 'assistant', content: text });
         logger.info('Social coda posted as its own in-thread message', {
-          threadTs, role, delayMs: CODA_DELAY_MS, codaPreview: text.slice(0, 80),
+          threadTs, role, delayMs, codaPreview: text.slice(0, 80),
         });
 
         // Owner receipt (owner's call: "I do want to see the coda in the shadow
@@ -388,7 +408,7 @@ function scheduleSocialCoda(opts: {
         });
       }
     })();
-  }, CODA_DELAY_MS);
+  }, delayMs);
 }
 
 export async function postOrchestratorReply(input: PostReplyInput): Promise<void> {

@@ -108,7 +108,7 @@ MPIM thread mentions are handled by the MPIM owner-in-group authority model else
 
 ## 10. Catch-up's `markProcessed(msgTs)` fires BEFORE the reply post
 
-Where: `core/background.ts:782` (inside `replayMissedMessage`). The mark happens before `chat.postMessage`. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
+Where: `core/background.ts:746` (inside `replayMissedMessage`, which starts at `:740`). The mark happens before `chat.postMessage`. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
 
 Why it matters: even with C-4's Phase-2-before-Phase-3 ordering, the dedup Set is the line of defense against any future race where catch-up + live overlap.
 

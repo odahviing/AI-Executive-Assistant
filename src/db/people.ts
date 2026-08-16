@@ -1468,7 +1468,7 @@ export function setPersonTimezoneByEmail(
  * block for the dynamic prompt section. Used by the colleague-path system
  * prompt so Sonnet sees email / tz / gender as DATA (no rules, no "never
  * ask"), and stops defensively asking the colleague for facts already on
- * file. Pre-fix, the handler-side auto-fill at meetings/ops.ts:1175 covered
+ * file. Pre-fix, the handler-side auto-fill at meetings/ops/handlers/createMeeting.ts:412 covered
  * the WRITE side (filling missing emails from people_memory at create_meeting
  * time) but Sonnet's draft sometimes asked anyway because the prompt didn't
  * surface known data — root of the 2026-05-18 Maayan ask.
@@ -1800,7 +1800,7 @@ export function buildPersonWorkContextBlock(slackId: string): string {
 /**
  * The SOCIAL half of the per-person block, injected on COLLEAGUE turns only when
  * `skills.social` is on (owner turns use the Social Engine directive instead).
- * The initiation cadence gate, recent social moments, and the subjects/topics
+ * The engagement-rank tone line, recent social moments, and the subjects/topics
  * Maelle built up from talking WITH this person directly — the parts that
  * genuinely belong to the optional friend-of-the-team layer.
  *
@@ -1817,15 +1817,18 @@ export function buildPersonWorkContextBlock(slackId: string): string {
  * but only when `engagement_rank_log`'s latest reason for this person shows
  * the value is Maelle's own auto-derived signal, not an owner override (see
  * the inline comment at the read site).
+ * gh#198 — the unconditional "find ONE natural moment to check in after the
+ * work is done" line, and the initiation-cadence (24h gate) lines that only
+ * existed to pick between it and its else-branch, are DELETED — a leftover,
+ * ungrounded third proactive-origination surface (owner ruling: "everything
+ * should be connected to what we build"). Proactive social now originates
+ * only from the grounded coda (generateCoda.ts) or the in-prompt directive
+ * (buildTurnContext.ts). `timezone`/`assistantName` params dropped — nothing
+ * left in this function needs them.
  */
-export function buildSocialContextBlockById(personId: string, timezone: string, assistantName: string = 'Assistant'): string {
+export function buildSocialContextBlockById(personId: string): string {
   const person = getPersonById(personId);
   if (!person) return '';
-
-  const now              = DateTime.now().setZone(timezone);
-  const lastInitiatedAt  = person.last_initiated_at ? DateTime.fromISO(person.last_initiated_at) : null;
-  const hoursAgoInit     = lastInitiatedAt ? now.diff(lastInitiatedAt, 'hours').hours : Infinity;
-  const canMaelleInitiate = hoursAgoInit >= 24;
 
   // v4.5.x (#154, corrected o#229) — numeric engagement rank is read here to
   // GATE behavior always. Whether it's also narrated as a tone line depends
@@ -1837,7 +1840,7 @@ export function buildSocialContextBlockById(personId: string, timezone: string, 
   // owner-curated field, so it is owner-authored too even though no owner
   // action fired the MIGRATION step itself — which must not be relayed back
   // to that same person (L9); every other reason (reply_engaged,
-  // revival_retry, colleague_initiated, or no log row at all) is Maelle's own
+  // colleague_initiated, or no log row at all) is Maelle's own
   // auto-derived signal and is safe to narrate as tone guidance. The rank-0
   // opt-out gate is unconditional either way — L11 forbids Maelle-initiated
   // social with this person regardless of who set the rank.
@@ -1863,16 +1866,6 @@ export function buildSocialContextBlockById(personId: string, timezone: string, 
     } else if (rankValue === 3) {
       lines.push(`Engagement level: loves to chat. Be warm and reciprocate their energy; they'll carry the conversation.`);
     }
-  }
-
-  if (canMaelleInitiate) {
-    const ago = lastInitiatedAt
-      ? (hoursAgoInit >= 48 ? `${Math.round(hoursAgoInit / 24)} days ago` : 'yesterday')
-      : 'never';
-    lines.push(`${assistantName}-initiated check-in: DUE (you last started one ${ago})`);
-  } else {
-    const h = Math.round(24 - hoursAgoInit);
-    lines.push(`${assistantName}-initiated check-in: NOT due — you already started one recently (${h}h until next). If THEY bring up personal topics, respond freely — just don't YOU start it.`);
   }
 
   const { relational } = readInteractionLog(person.interaction_log);
@@ -1902,17 +1895,11 @@ export function buildSocialContextBlockById(personId: string, timezone: string, 
     }
   }
 
-  if (canMaelleInitiate) {
-    lines.push(`→ Find ONE natural moment to check in after the work is done. One short human question, not pushy.`);
-  } else {
-    lines.push(`→ If they bring up something personal, respond warmly. Do NOT start a social topic yourself on this turn — you already initiated recently.`);
-  }
-
   return lines.join('\n');
 }
 
 /** Slack-keyed convenience — resolves to the surrogate id, then delegates. */
-export function buildSocialContextBlock(slackId: string, timezone: string, assistantName: string = 'Assistant'): string {
+export function buildSocialContextBlock(slackId: string): string {
   const pid = personIdForSlackId(slackId);
-  return pid ? buildSocialContextBlockById(pid, timezone, assistantName) : '';
+  return pid ? buildSocialContextBlockById(pid) : '';
 }

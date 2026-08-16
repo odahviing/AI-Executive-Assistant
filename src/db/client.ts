@@ -9,6 +9,8 @@ import { runPersonStoreMigration } from './migrations/v3_2_0_person_store';
 import { runDedupePeopleByEmail } from './migrations/v4_0_4_dedupe_people_email';
 import { runSocialProvenanceBackfill } from './migrations/v4_4_9_social_provenance_backfill';
 import { runCalendarIssuesAxisMigration } from './migrations/v4_5_3_calendar_issues_axis';
+import { runPurgeWorkShapedSocialSubjects } from './migrations/v4_5_9_purge_work_subjects';
+import { runSocialCategoryScoreRebase } from './migrations/v4_5_9_social_category_scores';
 
 let db: Database.Database;
 
@@ -72,6 +74,22 @@ export function getDb(): Database.Database {
       runCalendarIssuesAxisMigration(db, config.DB_PATH);
     } catch (err) {
       logger.error('v4.5.3 calendar-issues axis migration threw — continuing', { err: String(err) });
+    }
+    // v4.5.9 (#198) — Social Engine redesign. Purge work-shaped social_subjects
+    // rows FIRST (they must not seed the new per-person category score
+    // table), then rebase engagement_score onto social_person_category_scores
+    // and drop the superseded scoring columns. Idempotent; no-ops on a fresh
+    // install (which gets the final shape straight from initSchema) and on
+    // every boot after the first successful run.
+    try {
+      runPurgeWorkShapedSocialSubjects(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v4.5.9 purge-work-subjects migration threw — continuing', { err: String(err) });
+    }
+    try {
+      runSocialCategoryScoreRebase(db, config.DB_PATH);
+    } catch (err) {
+      logger.error('v4.5.9 social-category-score rebase migration threw — continuing', { err: String(err) });
     }
     logger.info('Database initialized', { path: config.DB_PATH });
   }
@@ -455,46 +473,76 @@ function initSchema(db: Database.Database): void {
   // data reset. New schema is two tables under the existing global categories:
   //
   //   social_subjects — meaningful unit (renamed from social_topics_v2 conceptually).
-  //                     Carries engagement_score (0..5), status, last_touched_at,
-  //                     last_assistant_initiated_at. One subject = one durable thing
-  //                     ("Clair Obscur Expedition 33").
+  //                     One subject = one durable thing ("Clair Obscur Expedition 33").
   //
   //   social_topics   — beats under a subject. No score; just labels Sonnet uses
   //                     as hooks for codas. Cap of 10 per subject; LRU eviction.
   //
   //   social_engagements — DROPPED. The append-only log was unused by the new
   //                        feedback signal; scoring is direct on subjects.
+  //
+  // v4.5.9 (#198) — Social Engine redesign #2. Subjects lose their score
+  // entirely: `engagement_score` (0..5, decay-driven) is gone, replaced by a
+  // `status` of live|dead (repurposed from active|dormant) and a new
+  // `unanswered_raises` counter — a subject dies on the reject action or
+  // after 2 unanswered raises, never on a time-based decay. Category standing
+  // moves per-person into the new `social_person_category_scores` table
+  // (0..3, directly queryable — no more on-the-fly AVG); `social_categories`
+  // stays the GLOBAL label catalog only, so `care_level`/`signals_positive`/
+  // `signals_negative` (seeded, never meaningfully read at the category
+  // level) are dropped too. Existing installs are migrated by
+  // v4_5_9_purge_work_subjects.ts (five named work-shaped rows removed first)
+  // then v4_5_9_social_category_scores.ts (backfills the new table from the
+  // old engagement_score, clamped to the new 3 ceiling, then drops the
+  // superseded columns) — both idempotent, no-ops on a fresh install, which
+  // gets the shape below directly.
   try { db.exec(`DROP TABLE IF EXISTS social_topics_v2`); } catch (_) {}
   try { db.exec(`DROP TABLE IF EXISTS social_engagements`); } catch (_) {}
 
   db.exec(`
     -- Global fixed list of 30 top-level interest categories. Seeded once on
-    -- startup; no runtime creation. Shared across owner + colleagues.
+    -- startup; no runtime creation. Shared across owner + colleagues. Carries
+    -- no per-person state — see social_person_category_scores for that.
     CREATE TABLE IF NOT EXISTS social_categories (
       id                TEXT PRIMARY KEY,
       owner_user_id     TEXT NOT NULL DEFAULT 'global',
       label             TEXT NOT NULL,
-      care_level        TEXT NOT NULL DEFAULT 'unknown',
-      signals_positive  INTEGER NOT NULL DEFAULT 0,
-      signals_negative  INTEGER NOT NULL DEFAULT 0,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(owner_user_id, label)
     );
     CREATE INDEX IF NOT EXISTS idx_social_categories_owner ON social_categories(owner_user_id);
 
-    -- Subjects: meaningful unit, scored. Per-(owner, person, category).
+    -- Per-(owner, person, category) standing, 0..3. Directly queryable — no
+    -- runtime aggregation. The global category catalog above is unaffected;
+    -- this sits alongside it, one row per person who has ever engaged with
+    -- that category.
+    CREATE TABLE IF NOT EXISTS social_person_category_scores (
+      id                TEXT PRIMARY KEY,
+      owner_user_id     TEXT NOT NULL,
+      person_slack_id   TEXT NOT NULL,
+      category_id       TEXT NOT NULL,
+      score             INTEGER NOT NULL DEFAULT 0,   -- 0..3
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(owner_user_id, person_slack_id, category_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_person_cat_scores_person
+      ON social_person_category_scores(person_slack_id, category_id);
+
+    -- Subjects: meaningful unit, live|dead (no score). Per-(owner, person, category).
     -- Created on first mention by either side; LLM classifier merges sub-beats
     -- of the same subject (no Jaccard hack). Cap 5 active per (person, category)
-    -- with lowest-score eviction.
+    -- with lowest-priority eviction. Dies on the reject action or after 2
+    -- unanswered raises (unanswered_raises) — no time-based decay.
     CREATE TABLE IF NOT EXISTS social_subjects (
       id                TEXT PRIMARY KEY,
       owner_user_id     TEXT NOT NULL,
       person_slack_id   TEXT NOT NULL,
       category_id       TEXT NOT NULL,
       label             TEXT NOT NULL,
-      engagement_score  INTEGER NOT NULL DEFAULT 3,
-      status            TEXT NOT NULL DEFAULT 'active',         -- active | dormant
+      status            TEXT NOT NULL DEFAULT 'live',           -- live | dead
+      unanswered_raises INTEGER NOT NULL DEFAULT 0,             -- dies at 2
       last_touched_at   TEXT NOT NULL DEFAULT (datetime('now')),
       last_touched_by   TEXT NOT NULL DEFAULT 'owner',          -- owner | colleague | assistant
       last_assistant_initiated_at TEXT,                         -- when assistant last raised this (NULL = never raised since last cleared)
@@ -521,7 +569,33 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_social_topics_subject ON social_topics(subject_id);
     CREATE INDEX IF NOT EXISTS idx_social_topics_lru ON social_topics(subject_id, last_used_at);
+
+    -- v4.5.9 (#198, gh#198-LIB-6, "answer 19") — persists classifyTurn's
+    -- existing per-turn kind ('task' | 'social') per thread, so the
+    -- end-of-chat reconciler (capturePass.ts) can consult a deterministic
+    -- code-side signal before writing a social_subjects row. This is NOT a
+    -- new LLM call (classifyTurn already runs on every interactive turn) and
+    -- NOT a keyword blocklist — it just gives the reconciler's create branch
+    -- something durable to read back. A thread with had_social_turn=0 blocks
+    -- subject creation outright regardless of the reconciler's own verdict.
+    -- New table (no prior data) — no migration/backfill needed.
+    CREATE TABLE IF NOT EXISTS social_thread_turn_kind (
+      thread_ts       TEXT PRIMARY KEY,
+      had_social_turn INTEGER NOT NULL DEFAULT 0,
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+
+  // v4.5.9 (#198) upgrade path for installs that already had social_subjects
+  // before this redesign: add the new column, remap the repurposed `status`
+  // values. Both idempotent — additive column is a no-op once present; the
+  // remap matches nothing once no 'active'/'dormant' rows remain (including
+  // every fresh install, which is created with 'live' directly above).
+  try { db.exec(`ALTER TABLE social_subjects ADD COLUMN unanswered_raises INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+  try {
+    db.prepare(`UPDATE social_subjects SET status = 'live' WHERE status = 'active'`).run();
+    db.prepare(`UPDATE social_subjects SET status = 'dead' WHERE status = 'dormant'`).run();
+  } catch (_) {}
 
   // Slot holds (#30) — a tentative reservation on a slot someone picked but
   // hasn't confirmed (or the owner explicitly parked). Internal state ONLY,

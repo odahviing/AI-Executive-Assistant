@@ -257,11 +257,11 @@ in WhatsApp JID form** (`<phone>@c.us`).
 
 ### 4.3 Identity — phone ↔ person (THE core hard part)
 
-`resolvePerson` (`db/people.ts:635`) matches `slack_id → email → fuzzy name` and
+`resolvePerson` (`db/people.ts:1291`) matches `slack_id → email → fuzzy name` and
 **does not take phone today**, even though `people_memory.phone` already exists
 (`client.ts:784`). Extend it:
 
-- Add `phone?` to `ResolvePersonInput` (`people.ts:603`) and a `getPersonByPhone`
+- Add `phone?` to `ResolvePersonInput` (`people.ts:1247`) and a `getPersonByPhone`
   helper.
 - Insert a **phone match step** in `resolvePerson` (after slack_id, alongside
   email — phone is a strong logical key like email). Merge-by-attach: if matched
@@ -319,7 +319,7 @@ is one continuous conversation. The spine and the orchestrator assume a
 - `message.reply()` (quoted reply) MAY be used for the immediate answer, but
   continuity is by chat id, not by quote.
 - **`channel: 'whatsapp'`** — already a legal `ChannelId` value
-  (`skills/types.ts:109`). Replace the placeholder's `channel:'slack'` hack with
+  (`skills/types.ts:179`). Replace the placeholder's `channel:'slack'` hack with
   the real value and audit any code that branches on `channel === 'slack'`
   assuming Slack semantics (status indicator, markdown, thread behavior).
 
@@ -429,13 +429,13 @@ The placeholder is single-tenant. Fix all of it:
   whatsapp branch end-to-end once a real connection is registered.
 - `src/connectors/slack/app.ts:77-78,111-112` — the `registerConnection` +
   `getSenderRole` patterns to mirror.
-- `src/db/people.ts:603,635` — add `phone` to `ResolvePersonInput` + a phone match
+- `src/db/people.ts:1247,1291` — add `phone` to `ResolvePersonInput` + a phone match
   step + `getPersonByPhone`. `people_memory.phone` column exists
   (`src/db/client.ts:784`).
 - `src/core/orchestrator/index.ts:217,219,376-385` — orchestrator already takes
   `channel: ChannelId`, `senderRole`, and flips role for MPIM; feed it
   `channel:'whatsapp'` + group inputs. Audit `channel === 'slack'` assumptions.
-- `src/skills/types.ts:109` — `ChannelId` already includes `'whatsapp'`.
+- `src/skills/types.ts:179` — `ChannelId` already includes `'whatsapp'`.
 - `src/index.ts` — wire `startWhatsApp(profile)` into startup (gated on config);
   extend the transient-error survive list.
 - `src/config/index.ts:46` — `WHATSAPP_OWNER_PHONE` exists; add profile-YAML
