@@ -454,6 +454,14 @@ export async function composeSocialCoda(
         coda: {
           recipientName,
           recipientFactsSnapshot: snapshot.length > 0 ? snapshot.join('\n') : '(no notes / topics on record)',
+          // coda-grounding-not-shown-to-validator (2026-08-16) — hand the
+          // validator the same grounding the writer used (`grounding`, built
+          // above by `groundCoda`), so a coda correctly grounded in a live
+          // search result or the recipient's own past message is judged
+          // against the evidence it was actually built from, not against
+          // people_memory notes alone.
+          groundingSearchSnippet: grounding.searchSnippet,
+          groundingPastChatSnippet: grounding.pastChatSnippet,
         },
       });
       if (verdict.claimed_action === true) {

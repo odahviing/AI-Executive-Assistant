@@ -32,6 +32,7 @@ The proactive social system is replaced, not patched. Until now Maelle picked a 
 - A reply could be lost behind two unrelated early returns and then counted against the person as silence.
 - An in-prompt directive counted as a raise the moment it was drafted, before the model had written anything — so subjects were penalised for raises that never happened.
 - Work content filed as social interest is now refused in code, keyed on a turn classification that already runs, rather than by a prompt rule the model had visibly ignored.
+- The validator that vets a finished coda now sees the grounding the coda was built from. It was judging every line against the person's stored notes alone — so quoting back something the person had actually told her read as a fabricated fact and got dropped, which is precisely the source added above to stop her re-asking what she already asked. News-grounded lines were already safe; past-chat-grounded ones were not.
 
 ### Removed
 

@@ -175,6 +175,25 @@ export interface ClaimCheckInput {
      *  treats anything stated in the coda but not present here as an
      *  invented fact. */
     recipientFactsSnapshot: string;
+    /**
+     * coda-grounding-not-shown-to-validator (2026-08-16) — the two
+     * `CodaGrounding` fields `composeSocialCoda` (generateCoda.ts) already
+     * computes and hands to the WRITER (`groundCoda`'s `searchSnippet` /
+     * `pastChatSnippet`) but never passed to this VALIDATOR. Both are
+     * optional and frequently absent (a coda can ground on one source, the
+     * other, or neither) — absence must read as "no such evidence", never as
+     * "evidence that disproves". Kept OUT of `recipientFactsSnapshot` on
+     * purpose: that field's own doc comment scopes it to people_memory data
+     * and the prompt below headers it "(from our memory)" — stuffing a live
+     * web-search result or a past-chat quote in there would make that label
+     * false by construction.
+     */
+    groundingSearchSnippet?: string | null;
+    /** See `groundingSearchSnippet` above — the recipient's OWN past-message
+     *  excerpt half of the same grounding pair. A fact from the recipient's
+     *  own prior words is a fact about their own life sourced from them, not
+     *  an invented one, even though it is not in `recipientFactsSnapshot`. */
+    groundingPastChatSnippet?: string | null;
   };
   /**
    * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
@@ -308,6 +327,10 @@ export async function checkReplyClaims(input: ClaimCheckInput): Promise<ClaimChe
   // callers don't branch on the result type), different judgment criteria.
   // Detects (a) facts stated about the recipient that aren't in our snapshot,
   // (b) commentary about a third party named in the coda. Either → drop coda.
+  const codaGroundingBlock = input.coda && (input.coda.groundingSearchSnippet || input.coda.groundingPastChatSnippet)
+    ? `\nOTHER VALID EVIDENCE (not stored memory, but equally valid grounding — a claim backed by EITHER block above or below is NOT invented):\n${input.coda.groundingSearchSnippet ? `- LIVE SEARCH RESULT (subject-matter grounding, e.g. a news story or fact the recipient raised):\n  ${input.coda.groundingSearchSnippet}\n` : ''}${input.coda.groundingPastChatSnippet ? `- ${input.coda.recipientName}'S OWN PAST MESSAGE (something they themselves said earlier — a fact about their own life sourced from their own words):\n  ${input.coda.groundingPastChatSnippet}\n` : ''}`
+    : '';
+
   const codaPrompt = input.mode === 'coda' && input.coda
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
@@ -317,7 +340,7 @@ RECIPIENT: ${input.coda.recipientName}
 
 WHAT WE ACTUALLY KNOW ABOUT ${input.coda.recipientName} (from our memory):
 ${input.coda.recipientFactsSnapshot}
-
+${codaGroundingBlock}
 DRAFT CODA:
 """
 ${input.reply}
@@ -325,12 +348,12 @@ ${input.reply}
 
 Two failure modes — flag if EITHER is present:
 
-(1) INVENTED FACT — the coda asserts something specific about ${input.coda.recipientName}'s OWN life (their activities, plans, relationships, work, family) that is NOT in the memory snapshot above. Examples:
-- "How's the marathon training going?" when training isn't in their memory
+(1) INVENTED FACT — the coda asserts something specific about ${input.coda.recipientName}'s OWN life (their activities, plans, relationships, work, family) that is NOT in the memory snapshot above AND NOT in the other valid evidence above (when present). Examples:
+- "How's the marathon training going?" when training isn't in their memory or the other evidence
 - "Kind of wild that she shares my name" when no such overlap is in memory (and isn't a real overlap a sane reader would see)
-- "Excited for your trip to Boston" when no Boston trip is in memory
-- "Hope the kitchen reno wraps up soon" when no kitchen reno is in memory
-Generic open questions ("anything fun outside work lately?", "how was the weekend?", "any travel coming up?") are NOT invented facts — they don't claim anything, they ask. Don't flag those.
+- "Excited for your trip to Boston" when no Boston trip is in memory or the other evidence
+- "Hope the kitchen reno wraps up soon" when no kitchen reno is in memory or the other evidence
+A claim matching the OTHER VALID EVIDENCE block (a live search result, or something ${input.coda.recipientName} said themselves in a past message) is GROUNDED, not invented — even though it is absent from the memory snapshot. Generic open questions ("anything fun outside work lately?", "how was the weekend?", "any travel coming up?") are NOT invented facts — they don't claim anything, they ask. Don't flag those.
 
 CRITICAL — subject-matter facts are NOT invented facts. This rule is ONLY about fabricated facts concerning ${input.coda.recipientName}'s personal life. It is NOT about whatever TOPIC the conversation is about. When ${input.coda.recipientName} is discussing a movie, book, show, company, product, news story, or any external subject, facts about THAT subject — a film's genre, an actor's role, a company's funding, a product's spec — are the subject matter (the assistant's general knowledge or this turn's web_search/web_research), NOT claims about ${input.coda.recipientName}. NEVER flag those. Example that must PASS: helping identify a film — "if it's a rape-revenge film, does he play the father?" asserts things about the MOVIE, not about ${input.coda.recipientName} — claimed_action=false. Only flag a claim that asserts something about ${input.coda.recipientName}'s own life that we have no basis for.
 
