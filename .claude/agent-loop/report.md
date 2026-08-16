@@ -16,6 +16,4 @@ your 4 rows await you: 1 from tonight · 2 re-surfaced · 1 found by the loop
 | `gh#187` · instructor · pending owner — recommend build · tonight | "Closing a conversation kills tone guidance entirely — even when the sign-off line itself carries the real content." | `conversation_state === 'closing'` returns `noDirective()` outright, so a message like "heading out, but that's rough about your mom" gets no tone guidance at all. | Let a closing turn carry a brief acknowledgment of content already on the table, without introducing anything new. Unblocked by gh#198 — the surface it needs survived the rewrite. | `stateMachine.ts` was substantially rewritten in 4.6.0; a builder must re-read the current file rather than the line numbers in the ticket. |
 | `gh#199` · handyman · pending owner — recommend defer · re-surfaced (2026-08-12) | — | Unchanged since it was raised. | Blocked on a console-side Google action only the owner can perform. | None. Nothing in the tree moves this. |
 
-**Built and uncommitted — this is what a wrap ships (2):** `coda-grounding-not-shown-to-validator` call-site wire-up · `coda-grounding-gatekeeper` validator evidence contract
-
-Already shipped in 4.6.0 (`025f6b5`): `gh#198` and its four lane rows.
+Everything built this run is shipped: `gh#198` and its four lane rows in `025f6b5`, the two coda-grounding rows in `fbf9f9a`. Both commits are v4.6.0 — the owner ruled no second bump.
