@@ -598,7 +598,7 @@ function initSchema(db: Database.Database): void {
     db.prepare(`UPDATE social_subjects SET status = 'dead' WHERE status = 'dormant'`).run();
   } catch (_) {}
 
-  // Subject-memory summary (#187) — accumulating merged summary per subject,
+  // Subject-memory summary (item 3, 2026-08-16) — accumulating merged summary per subject,
   // written by the existing reconciliation Haiku call (no new LLM call).
   // Nullable, no default, no backfill: absent reads as "no summary yet"
   // everywhere by design. Additive column is a no-op once present, including

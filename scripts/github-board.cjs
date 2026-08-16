@@ -17,7 +17,7 @@ const STATE_PATH = path.join(SKILL_DIR, 'state.json');
 
 const TYPE_LABELS = ['Feature', 'Improvement', 'Framework'];
 const TIER_LABELS = ['Next', 'Roadmap', 'Idea'];
-const TAG_LABELS = ['Skill', 'Transport', 'Paid API', 'Core'];
+const TAG_LABELS = ['Skill', 'Transport', 'Core', 'Paid API'];
 const TAG_CSS = {
   Skill: { bg: '--tag-skill-bg', fg: '--tag-skill', text: 'SKILL' },
   Transport: { bg: '--tag-transport-bg', fg: '--tag-transport', text: 'TRANSPORT' },
