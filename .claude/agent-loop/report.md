@@ -1,19 +1,20 @@
 # Agent-loop report
 
-**4 rows await you** — v4.6.0 wrapped, 2 new from this wrap. Standing backlog: **4 open rows** across 4 bugs · 2 still-real · 2 need a re-read · 0 cite no file · **4 rulable · 0 queued for the next build** (`node scripts/ledger-stats.cjs --open`).
+```
+Run wf_05b7d7cc-4d6 — in: 1 tickets · 0 day(s) of logs · 1 backlog re-reads
+out: 5 built · 9 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 0 queued
+board: net -9 → 5 open rows — 2 still-real · 3 need a re-read · 0 cite no file · 5 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+your 5 rows await you: 1 from tonight · 2 re-surfaced · 2 found by the loop
+```
 
-out: 1 built · 0 already-fixed · 0 built-with-gap · 3 bounced (2 cleared, 1 resolved by owner ruling) · 0 converted · 2 discoveries filed
+### Pending owner (5)
 
-**Built and shipped in 4.6.0 (1):** `gh#198` — the social/coda subsystem rewrite, 17 pieces across 4 lanes (librarian · handyman · instructor · slackmaster) over four build rounds.
+| # · Lane · Status | The chat problem | The issue | The solution | Risk |
+|---|---|---|---|---|
+| `coda-grounding-not-shown-to-validator` · librarian · pending owner — recommend build · loop | — (verify discovery, nobody complained) | The coda's grounding reaches the composer but never the validator that vets the finished sentence, so a real claim can be dropped as invented and an invented one is never compared against a source. | `src/core/social/generateCoda.ts:456` — pass the search snippet and past-message excerpt into the coda claim-check alongside the composed text. | Sharper after 4.6.0 than before it: a coda may now be a statement, and a statement asserts facts a question did not. |
+| `coda-ai-disclosure-non-english-gap` · gatekeeper · pending owner — recommend build · re-surfaced (2026-08-14) | — (raised by the 4.5.8 wave, parked pending this rewrite) | `scanForLeaks`' `self_ai_claim*` patterns are English-only regex, so the same claim in Hebrew or French passes. `runHumanGate` is the only language-agnostic backstop. | `src/utils/guards/runOutputGates.ts:726-749` — its deferral condition has fired; re-read confirms 4.6.0 changed what a coda says, never what vets it. | The exposure grew with 4.6.0: lifting the must-be-a-question rule makes a self-disclosure statement more natural to produce. |
+| `persona-block-describes-dead-raise-new-mode` · instructor · pending owner — recommend build · loop | — (verify discovery) | The PERSONA block still tells Sonnet the in-turn directive can be `raise_new`, a mode the picker can no longer produce outside the coda. | `src/skills/social.ts:267` — delete the `raise_new` description, matching what INS-1 already did in the mode rules. | Low. Describes an unreachable mode rather than authorising a wrong action, but it is the second-copy class this wave's one-system rule exists to remove. |
+| `gh#187` · instructor · pending owner — recommend build · tonight | "Closing a conversation kills tone guidance entirely — even when the sign-off line itself carries the real content." | `conversation_state === 'closing'` returns `noDirective()` outright, so a message like "heading out, but that's rough about your mom" gets no tone guidance at all. | Let a closing turn carry a brief acknowledgment of content already on the table, without introducing anything new. Unblocked by gh#198 — the surface it needs survived the rewrite. | `stateMachine.ts` was substantially rewritten in 4.6.0; a builder must re-read the current file rather than the line numbers in the ticket. |
+| `gh#199` · handyman · pending owner — recommend defer · re-surfaced (2026-08-12) | — | Unchanged since it was raised. | Blocked on a console-side Google action only the owner can perform. | None. Nothing in the tree moves this. |
 
-This was a FEATURE wave (`feature.js`), not a nightly bug loop: plan mode ran twice — once against the raw ticket, then again with sixteen owner constraints folded in after the first decomposition proved to be built on a deferred-scoring assumption the owner reversed. The owner ruled every design question in-session and then verified the finished plan against the product goal himself, which added three pieces the decomposition had missed (coda shape no longer forced to be a question, bootstrap from a search result alone, variable delivery beat).
-
-Two verify overturns were resolved by owner rulings rather than by a lane guessing. The work-gate brief contained a genuine contradiction — it demanded a code-level guarantee while forbidding every code-level mechanism — and the lane correctly escalated instead of shipping a prompt rule; resolved by reusing `classifyTurn`'s already-computed per-turn `kind`. The resolve-on-read ordering took three attempts: two used a fixed grace window and were both refused, because the bookkeeping that erased the evidence runs ~23 hours before the check that needed it; the owner chose a stored-fact check over a clock.
-
-The wave also surfaced a fourth origination surface nobody had named — `systemPrompt.ts`'s SOCIAL LAYER block, telling her *"if you never start, you're a transaction surface"* on every turn, owned by no piece because no Librarian piece may edit that file and none of the three Instructor pieces covered it.
-
-**Awaiting you (4):**
-- `coda-grounding-not-shown-to-validator` (librarian, medium) — the coda's grounding is handed to the composer but never to the validator that vets the finished sentence. Sharper after 4.6.0, since a coda may now be a statement. Recommend build.
-- `coda-ai-disclosure-non-english-gap` (gatekeeper) — deferred in 4.5.8 pending this rewrite; the condition has now fired and it is DUE. Re-read confirmed it is untouched by 4.6.0 and the exposure is larger.
-- `persona-block-describes-dead-raise-new-mode` (instructor, low) — a second copy of the dead-mode text INS-1 removed. Recommend build.
-- `gh#199` (handyman) — unchanged, blocked on a console-side Google action. Recommend defer.
+**Built and shipped in 4.6.0 (5):** `gh#198` social/coda subsystem rewrite · `gh#198-librarian` grounding, picker, scoring, reject path · `gh#198-handyman` schema, two migrations, decay retirement · `gh#198-instructor` mode rules, taxonomy, coda shape, fourth surface · `gh#198-slackmaster` variable beat, conversation read helper
