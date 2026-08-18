@@ -1160,9 +1160,14 @@ async function runClaimCheckAndMaybeRewrite(
                 initiatedBy: ctx.senderId,
                 initiatedByRole: 'colleague',
                 kind: 'reminder',
-                // subkind marks this row the same way flagUnresolvedFreeformForOwner
-                // (src/tasks/skill.ts:311) marks its sibling: getPendingRequestCountForColleague
-                // (src/db/jobs.ts:92) excludes kind='reminder' AND subkind IN ('freeform_owner_flag',
+                // subkind is this backstop's own value, distinct from its sibling
+                // flagUnresolvedFreeformForOwner's (src/tasks/skill.ts:311, subkind
+                // 'freeform_owner_ask' as of chris-kelley-oof-block-c round 3,
+                // 2026-08-18 — split apart once the shared value proved not unique
+                // enough for that sibling's own dedup lookup to tell the two backstops'
+                // rows apart). The two now share only the pending-cap exclusion:
+                // getPendingRequestCountForColleague (src/db/jobs.ts:92) excludes
+                // kind='reminder' AND subkind IN ('freeform_owner_flag',
                 // 'freeform_owner_ask') from the colleague's pending-cap count. This row is a durable backstop DM to
                 // the OWNER, not a tracked item the colleague asked for — without this it silently
                 // spends one of their two pending slots (bouncer fix,
