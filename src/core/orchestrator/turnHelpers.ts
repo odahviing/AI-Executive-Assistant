@@ -252,7 +252,31 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const to = (input as any).search_to;
         const window = from && to ? ` ${String(from).slice(0, 16)}→${String(to).slice(0, 16)}` : '';
         if (slots.length === 0) {
-          return `[find_available_slots${window} dur=${dur}m: 0 slots]`;
+          // gh#chris-kelley-oof-block-a — a zero-result day_summary (the
+          // rejection reason for EVERY date, e.g. owner_out_of_office) used
+          // to be dropped here: only slot count reached the summary, so
+          // claimChecker's owner_fact mode had nothing in TOOL ACTIVITY to
+          // ground a true "he's away" statement against and hedged it into
+          // a false-sounding non-answer. Surface the top reason (+ the OOF
+          // span end, already formatted by the walker) when present.
+          const daySummary: Array<{ top_reasons?: string[]; oof_until_display?: string }> =
+            (result && typeof result === 'object' && Array.isArray((result as any).day_summary))
+              ? (result as any).day_summary
+              : [];
+          let reasonPart = '';
+          if (daySummary.length > 0) {
+            const reasonCounts = new Map<string, number>();
+            let oofUntil: string | undefined;
+            for (const day of daySummary) {
+              for (const r of day.top_reasons ?? []) reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + 1);
+              if (!oofUntil && day.oof_until_display) oofUntil = day.oof_until_display;
+            }
+            const topReason = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+            if (topReason) {
+              reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
+            }
+          }
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}]`;
         }
         const more = slots.length > 5 ? ` +${slots.length - 5} more` : '';
         return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${more}]`;

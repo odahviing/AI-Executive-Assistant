@@ -253,6 +253,15 @@ meetings:
   # issue_exclusions:
   #   subjects: ["Family Time", "Home Time"]
 
+  # Contacts your assistant always treats as private / personal — spouse,
+  # kids, family. Any meeting where one of these emails is on the invite is
+  # forced to the "Personal" category in code (a deterministic check, before
+  # the LLM classifier even runs) — never inferred from a description
+  # written for the model to read. Default: none.
+  #
+  # private_emails:
+  #   - "family.member@example.com"
+
 
 
 # ─── OUTLOOK CATEGORIES ──────────────────────────────────────────────
@@ -274,7 +283,11 @@ meetings:
 #     sets_sensitivity_private: true     # mark as private in Outlook
 #
 #   - name: "Personal"
-#     description: "Personal or family events — not work-related at all."
+#     description: "Personal or family events — not work-related at all. A
+#       solo block with no one else invited and a blank/vague subject also
+#       leans Personal over a generic fallback — a clearly work-related
+#       subject (e.g. 'draft Q3 budget') stays Work regardless of attendee
+#       count; check the subject first."
 #     sets_sensitivity_private: true
 #     no_issue_tracking: true            # don't flag conflicts on these
 

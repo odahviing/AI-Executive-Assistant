@@ -2,6 +2,23 @@
 
 ---
 
+## 4.6.2 — When something needs you, it actually reaches you
+
+Two more real incidents, both about something silently failing to reach the owner, or reporting a status that wasn't true. A colleague pushing for an urgent exception during a declared vacation was quietly deferred past the whole vacation; a colleague's decisive reply to an outreach thread was acknowledged in words and then never acted on, with the later status report claiming otherwise.
+
+### Fixed
+
+- A colleague's search that dead-ends purely because the owner is away no longer produces a hedged, self-contradicting answer — the real reason now reaches both the honesty check and the reply itself, and a badly-timed social aside can no longer interrupt an unresolved exchange.
+- An escalation that needs the owner's judgment now always reaches him immediately, the same way a real approval already does — never deferred behind an ordinary reminder's "wait for work hours" timer, which could silently push an urgent ask past an entire vacation. A genuine delivery failure now retries on a short, bounded schedule instead of silently giving up forever.
+- A colleague's decisive reply to an outreach thread ("let's do Wednesday") could be acknowledged in text and never acted on. That reply-handling path now hands off to Maelle's full toolset instead of drafting a promise it can't keep, and the request correctly closes once the reply is actually resolved rather than reporting a false "never came back" days later.
+- Fixed a collision where two independent owner-safety backstops could be mistaken for each other, which could silently swallow a second, unrelated urgent ask raised in the same conversation.
+- `get_person_memory` could return the wrong person's history on a full-name query; fixed with a word-boundary, bidirectional search. It now also surfaces a person's ongoing social subjects with a running, merged summary.
+- A private contact's identity is no longer interpolated into the model's prompt via a YAML description — it now lives in structured config, checked deterministically before a meeting including them is classified.
+
+### Changed
+
+- The GitHub board artifact now classifies and tiers issues that went stale instead of silently dropping them, with a permanent "needs a label" section for anything it can't confidently place.
+
 ## 4.6.1 — A colleague's meeting request no longer disappears when you're away
 
 One reported incident — a colleague trying to book a meeting while the owner was away — traced back to four separate, real defects across two subsystems. Two of the four fixes were themselves caught and corrected by the pre-wrap safety pass before shipping.

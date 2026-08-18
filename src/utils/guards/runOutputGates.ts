@@ -1161,9 +1161,9 @@ async function runClaimCheckAndMaybeRewrite(
                 initiatedByRole: 'colleague',
                 kind: 'reminder',
                 // subkind marks this row the same way flagUnresolvedFreeformForOwner
-                // (src/tasks/skill.ts:251) marks its sibling: getPendingRequestCountForColleague
-                // (src/db/jobs.ts:78-87) excludes kind='reminder' AND subkind='freeform_owner_flag'
-                // from the colleague's pending-cap count. This row is a durable backstop DM to
+                // (src/tasks/skill.ts:311) marks its sibling: getPendingRequestCountForColleague
+                // (src/db/jobs.ts:92) excludes kind='reminder' AND subkind IN ('freeform_owner_flag',
+                // 'freeform_owner_ask') from the colleague's pending-cap count. This row is a durable backstop DM to
                 // the OWNER, not a tracked item the colleague asked for — without this it silently
                 // spends one of their two pending slots (bouncer fix,
                 // gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions,
@@ -1174,11 +1174,11 @@ async function runClaimCheckAndMaybeRewrite(
                 description: ctx.userMessage,
                 state: 'in_flight',
                 // Match the identical-shape precedent (flagUnresolvedFreeformForOwner,
-                // src/tasks/skill.ts:245-288): this row's OWN nextCheckHandler
+                // src/tasks/skill.ts:311-433): this row's OWN nextCheckHandler
                 // ('reminder_fire') is its notification path — it will DM the owner
                 // directly when its timer fires. informed=0 is for "the brief hasn't
                 // told him yet", which would ALSO surface this same flagged relay in
-                // getRequestsForBrief (src/db/requests.ts:432) while it's still
+                // getRequestsForBrief (src/db/requests.ts:481) while it's still
                 // in_flight — a second, redundant notification for one event.
                 informed: 1,
                 requesterSlackId: ctx.senderId,

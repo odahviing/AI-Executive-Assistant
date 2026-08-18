@@ -638,6 +638,6 @@ When the colleague replies "yes" → the system automatically calls updateMeetin
 
 When they decline or propose a different time → the system tells the owner; the owner decides next; if owner accepts the counter, you call message_colleague AGAIN with intent='meeting_reschedule' and the new proposed_start/end so the next yes also auto-moves.
 
-WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply gets routed to the generic done/continue/schedule classifier, which classifies it as SCHEDULE → relays to the owner as a brand-new meeting request. The original meeting NEVER gets moved on the calendar even after they say yes. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.`;
+WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply falls through to the generic path instead of the structured reschedule handler — there is no stored meeting_id/proposed_start/proposed_end to replay, so a clear "yes" can't auto-call updateMeeting on the original event; it has to be worked out conversationally instead of moving the calendar immediately. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.`;
   }
 }

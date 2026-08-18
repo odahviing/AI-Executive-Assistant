@@ -67,13 +67,17 @@ export function getOutreachJobByRequestId(requestId: string): OutreachJob | null
 // the colleague rate-limit gate (max 2 pending requests per colleague). Reads
 // the requests spine (the lifecycle owner), independent of any side table.
 //
-// EXCLUDES subkind='freeform_owner_flag' (bouncer fix,
-// pending-cap-blocks-unrelated-questions, 2026-08-10, widened
+// EXCLUDES subkind IN ('freeform_owner_flag', 'freeform_owner_ask') (bouncer
+// fix, pending-cap-blocks-unrelated-questions, 2026-08-10, widened
 // gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions):
-// those rows are minted by two identical-shape backstops — tasks/skill.ts's
+// those rows are minted by two DIFFERENT backstops — runOutputGates.ts's
+// claim-checker relay backstop (an unconfirmed "I told him" relay claim,
+// subkind='freeform_owner_flag') and tasks/skill.ts's
 // `flagUnresolvedFreeformForOwner` (an ambiguous freeform ask that can't be
-// confidently routed) and runOutputGates.ts's claim-checker relay backstop
-// (an unconfirmed "I told him" relay claim) — both durable DMs to the owner
+// confidently routed, subkind='freeform_owner_ask' as of chris-kelley-oof-
+// block-c round 3, 2026-08-18 — split from the shared value once it proved
+// NOT unique enough for the latter's own dedup lookup, getLatestFreeformOwnerFlag,
+// to tell the two backstops' rows apart) — both durable DMs to the owner
 // that must fire regardless of the colleague's own pending count (R4: each
 // exists precisely to stop a drop, so neither can itself be the thing that
 // gets dropped). Counting either here would silently eat a genuine slot of
@@ -85,7 +89,7 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
     WHERE owner_user_id = ?
     AND state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
     AND (requester_slack_id = ? OR target_slack_id = ?)
-    AND NOT (kind = 'reminder' AND subkind IS 'freeform_owner_flag')
+    AND NOT (kind = 'reminder' AND (subkind IS 'freeform_owner_flag' OR subkind IS 'freeform_owner_ask'))
   `).get(ownerUserId, colleagueSlackId, colleagueSlackId) as any)?.cnt ?? 0;
   return count;
 }
@@ -99,14 +103,19 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * cascade, and neither function persists it — the physical column is gone (see the
  * ONE SPINE block at the top of this file).
  *
- * These four are the only values any caller passes — verified by grep over all 19
- * call sites 2026-07-26: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
+ * These four are the only values any caller passes — verified by grep 2026-07-26,
+ * with one change since (gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop,
+ * 2026-08-17): 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
  * skills/meetingReschedule.ts:570), 'pending_scheduled' (skills/outreach.ts:216),
- * 'replied' (connectors/slack/coordinator.ts:322,363 + six sites in
- * skills/meetingReschedule.ts), 'cancelled' (skills/outreach.ts:322,332,445,
- * skills/meetingReschedule.ts:594). The old union also carried 'done', 'expired',
- * 'failed' and 'no_response' with ZERO producers — the branches keyed on them were
- * unreachable and went with the column.
+ * 'replied' (several sites in skills/meetingReschedule.ts and
+ * core/requests/colleagueOofReengage.ts — connectors/slack/coordinator.ts's own
+ * two 'replied' sites are GONE: its no-routed-intent path stopped classifying
+ * done/continue/schedule and closing on 'done'/'schedule', and now re-arms the
+ * request's reply-deadline instead of transitioning outreach_jobs at all),
+ * 'cancelled' (skills/outreach.ts:322,332,445, skills/meetingReschedule.ts:594).
+ * The old union also carried 'done', 'expired', 'failed' and 'no_response' with
+ * ZERO producers — the branches keyed on them were unreachable and went with the
+ * column.
  */
 export type OutreachTransition = 'sent' | 'pending_scheduled' | 'replied' | 'cancelled';
 

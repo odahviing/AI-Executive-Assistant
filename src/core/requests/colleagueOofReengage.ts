@@ -533,8 +533,8 @@ Classify by MEANING, in any language:
 /**
  * Main entry, dispatched from connectors/slack/coordinator.ts's intent
  * routing (mirrors handleRescheduleReply). Returns true if handled; false if
- * the caller should fall through to the generic done/continue/schedule
- * classifier (e.g. intent isn't ours).
+ * the caller should fall through to the generic no-routed-intent path (the
+ * full orchestrator — e.g. intent isn't ours).
  *
  * NEW LLM CALL (flagged per W12.2): `classifyOofReengageReply` above, Haiku,
  * ~30 output tokens. Fires at most once per colleague reengagement — i.e.

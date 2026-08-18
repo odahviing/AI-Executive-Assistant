@@ -246,6 +246,54 @@ export function getRecentOutreachOwnerThread(
 }
 
 /**
+ * chris-kelley-oof-block-c round 2 (2026-08-18) — the LATEST freeform-owner-
+ * flag row (tasks/skill.ts's flagUnresolvedFreeformForOwner) raised by this
+ * colleague in this thread, ANY state. That function's own idempotency key
+ * only ever matches the FIRST row it ever inserts for a given thread — once
+ * a genuinely new ask mints its own fresh key (so the UNIQUE constraint
+ * doesn't block it), getRequestByIdempotencyKey(baseKey) keeps finding that
+ * same original row forever and can never see the most recent one. This
+ * finds it directly, scoped to exactly this backstop, never a real
+ * approval/outreach/reminder that happens to share the same thread.
+ *
+ * Round 3 (bouncer overturn, 2026-08-18): round 2 scoped on
+ * `kind='reminder' AND subkind='freeform_owner_flag'`, but that shape is NOT
+ * unique to this backstop — runOutputGates.ts's claim-checker relay backstop
+ * mints the identical kind/subkind for an entirely different alert (both are
+ * merely co-excluded from the colleague pending-cap count, per jobs.ts:70-80
+ * — that's a shared EXCLUSION CATEGORY, never a shared mechanism identity).
+ * A claim-checker row in the same thread was matching here and getting
+ * treated as "still delivering"/"recently delivered", silently swallowing a
+ * later, genuinely different real ask. Scoped instead on `subkind =
+ * 'freeform_owner_ask'` — a value only flagUnresolvedFreeformForOwner ever
+ * writes — so this can never match the claim-checker's rows again. (The
+ * shared 'freeform_owner_flag' value is untouched on the claim-checker's own
+ * rows; it stays load-bearing there for the same pending-cap exclusion.)
+ * `next_check_handler` was considered and rejected as the discriminator
+ * instead: this backstop's own confirmed-delivery path (the common case)
+ * never sets one, and closeRequest unconditionally nulls it on every
+ * terminal transition — it can't tell a `logged`/`cancelled` row apart from
+ * anything else.
+ */
+export function getLatestFreeformOwnerFlag(
+  ownerUserId: string,
+  requesterSlackId: string,
+  threadTs: string,
+): RequestRow | null {
+  const row = getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ?
+      AND requester_slack_id = ?
+      AND origin_thread_ts = ?
+      AND kind = 'reminder'
+      AND subkind = 'freeform_owner_ask'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(ownerUserId, requesterSlackId, threadTs) as RequestRow | undefined;
+  return row ?? null;
+}
+
+/**
  * Pending owner-decision requests — drives the system-prompt injection block.
  * Top-level rows only; awaiting_owner state.
  */

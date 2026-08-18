@@ -1019,7 +1019,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // (which hands the owner a pick to make) slipped past and the social
           // coda rode on it — the "spelling of Zoe's name" mid-scheduling
           // non-sequitur. A pending slate of slots IS an open decision.
-          || Array.isArray(r.slots);
+          || Array.isArray(r.slots)
+          // gh#chris-kelley-oof-block-a — find_available_slots's zero-result
+          // branch returns the BARE array itself (findAvailableSlots.ts's
+          // `return rawSlots` / `return []`), not `{ slots: [...] }` — on
+          // that shape `r.slots` is undefined (arrays have no `.slots`
+          // property) and the check above never fires, so the "still
+          // mid-exchange" guard silently never armed for a dead-ended
+          // search. A bare-array result is find_available_slots's own
+          // result, not any other tool's — gate on the tool name so a bare
+          // array from a different read (get_calendar's own bare-array
+          // shape) is never mistaken for a pending slot slate.
+          || (toolUse.name === 'find_available_slots' && Array.isArray(result));
         // A mutating meeting op that didn't close, or any tool that errored.
         const mutators = new Set(['create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
         const failedMutation = mutators.has(toolUse.name)

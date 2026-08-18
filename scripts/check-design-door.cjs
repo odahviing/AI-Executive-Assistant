@@ -884,13 +884,21 @@ const main = async () => {
   // duplicated copy, or a lane could build without ever reading the source and
   // nothing downstream would show it. Both get a fixture — the first is a
   // static read, the second drives the real engines.
+  //
+  // 2026-08-16 · W13 (measure, never estimate) landed 2026-08-15 (the "13
+  // charters" consolidation) and this assertion's hardcoded [1..12] went
+  // stale the same day — exactly the class of defect this file exists to
+  // catch, just pointed at its own fixture instead of the engine. The count
+  // is DERIVED from the file below, never hand-typed a second time, so the
+  // next W-rule cannot cause the same drift silently.
   // ══════════════════════════════════════════════════════════════════════════
-  section('29 · THE WORKSHOP FILE — ONE SOURCE, W1 THROUGH W12, NOTHING DUPLICATED  (fires on the bad input, silent on the good one)')
+  section('29 · THE WORKSHOP FILE — ONE SOURCE, W1 THROUGH WN, NOTHING DUPLICATED  (fires on the bad input, silent on the good one)')
   const WORKSHOP_FILE = path.join(ROOT, '.claude', 'WORKSHOP.md')
   const workshopSrc = fs.readFileSync(WORKSHOP_FILE, 'utf8')
   ok('WORKSHOP.md exists and is non-trivial', workshopSrc.length > 2000, workshopSrc.length)
   const workshopTags = [...workshopSrc.matchAll(/^- \*\*W([0-9]+) ·/gm)].map((m) => Number(m[1])).sort((a, b) => a - b)
-  ok('WORKSHOP.md carries exactly W1 through W12, no gaps, no repeats', JSON.stringify(workshopTags) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), workshopTags)
+  const workshopExpected = Array.from({ length: workshopTags.length ? Math.max(...workshopTags) : 0 }, (_, i) => i + 1)
+  ok(`WORKSHOP.md carries exactly W1 through W${workshopExpected.length || '?'}, no gaps, no repeats`, JSON.stringify(workshopTags) === JSON.stringify(workshopExpected) && workshopTags.length > 0, workshopTags)
 
   // A charter is WORKSHOP-CLEAN when it (a) carries no duplicate of the old
   // block — the "## Shared charter" heading every copy used to open with —

@@ -18,7 +18,7 @@ import {
   getSummarySessionByThread,
 } from '../../../db';
 import { detectAndSaveGender } from '../../../utils/genderDetect';
-import { handleOutreachReply, findSlackUser } from '../coordinator';
+import { handleOutreachReply, findSlackUser, closeOutreachReplyIfResolvedThisTurn } from '../coordinator';
 import { describeImage, downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
@@ -178,6 +178,17 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     // for a fetch that never succeeded (146a — a transient failure must never
     // overwrite a stored real name with the raw Slack ID).
     let colleagueSenderUser: any;
+    // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop — set below when
+    // handleOutreachReply matched an open outreach job with no routed intent.
+    // Carries what THAT job asked into the orchestrator call further down (as
+    // priorOutboundContext) so a decisive reply gets a real, tool-backed,
+    // gated turn instead of coordinator.ts drafting an unenforced text reply.
+    let outreachJobPriorContext: string | undefined;
+    // round 2 (2026-08-18) — the matched job's id, carried alongside
+    // priorOutboundContext so the post-orchestrator closure check
+    // (closeOutreachReplyIfResolvedThisTurn) knows WHICH outreach this turn's
+    // reply was answering.
+    let outreachReplyJobId: string | undefined;
     if (role === 'colleague' && !isOwnerInGroup && !isOwnerInChannel) {
       // Step 1: Resolve persona — always do this before anything else so we know who we're talking to
       let colleagueIdentified = false;
@@ -218,7 +229,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
 
       // Step 2: Check if this is a reply to an active outreach job
       try {
-        const outreachHandled = await handleOutreachReply(app, {
+        const outreachResult = await handleOutreachReply(app, {
           // framedText, so the reply matcher's input is byte-identical to what it
           // read before the framing split — requests owns what this reads.
           senderId, text: framedText, profile,
@@ -228,9 +239,17 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // matcher can prefer a job's own dm_message_ts over a content guess.
           messageTs: ts, threadTs,
         });
-        if (outreachHandled) {
+        if (outreachResult.handled) {
           logger.info('Message handled as outreach reply', { senderId, channelId });
           return;
+        }
+        // Only for the true 1:1 colleague-DM surface, matching
+        // recentOutboundContext's own scope below — a room surface (MPIM /
+        // channel) never gets this injected (those have their own continuity
+        // surfaces, and this is provenance from a private outreach thread).
+        if (outreachResult.priorOutboundContext && !isMpim && !isChannel) {
+          outreachJobPriorContext = outreachResult.priorOutboundContext;
+          outreachReplyJobId = outreachResult.matchedJobId;
         }
       } catch (_) { /* non-critical */ }
 
@@ -575,6 +594,16 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // failure handler at the bottom of this closure.
           let delivered = false;
           try {
+            // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop — a job
+            // handleOutreachReply already matched (thread anchor or its own
+            // classifier) wins outright: it's a stronger, already-verified
+            // signal than the lookup below, which exists for the DIFFERENT
+            // case (no matched job at all). Never run both — the lookup below
+            // is `recentOutboundContext.ts`'s own separate, shorter-window
+            // mechanism, and routing an already-matched job's reply through
+            // it too risks that shorter window closing/misreading what the
+            // real 24-working-hour deadline (responseDeadline.ts) still owns.
+            let priorOutboundContext: string | undefined = outreachJobPriorContext;
             // v2.6.1 — recent-outbound context lookup for colleague 1:1 DMs.
             // When a colleague replies to Maelle in their DM (top-level OR thread
             // reply on a Maelle-sent message), check for an open outbound from
@@ -584,8 +613,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // heads-up landing as "Hey, what can I help you with?"). Skipped
             // for owner DMs, MPIMs, channels, and owner-in-group contexts —
             // those have their own continuity surfaces.
-            let priorOutboundContext: string | undefined;
-            if (role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
+            if (!priorOutboundContext && role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
               try {
                 const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock } =
                   await import('../recentOutboundContext');
@@ -688,6 +716,11 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               });
             }
             logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext, spansMultipleSenders });
+            // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop (round 2) —
+            // captured so closeOutreachReplyIfResolvedThisTurn (below) can tell
+            // a fresh approval THIS turn raised apart from one that was already
+            // open in the thread before it.
+            const turnStartedAt = new Date().toISOString();
             const result = await runOrchestrator({
               userMessage: mergedText,
               conversationHistory: history,
@@ -712,6 +745,30 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               priorOutboundContext,
             });
             logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
+
+            // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop (round 2,
+            // 2026-08-18) — this turn was routed through handleOutreachReply's
+            // generic no-intent branch (outreachReplyJobId set). Close the
+            // outreach it answered if the turn actually resolved it (a
+            // mutation landed, or the reply got escalated into a fresh
+            // approval) — see closeOutreachReplyIfResolvedThisTurn's own doc
+            // comment (coordinator.ts) for why this can't live inside
+            // handleOutreachReply itself (the orchestrator hasn't run yet at
+            // that point) nor inside any individual tool (none of them know
+            // about the outreach that prompted them).
+            if (outreachReplyJobId) {
+              try {
+                await closeOutreachReplyIfResolvedThisTurn({
+                  ownerUserId: profile.user.slack_user_id,
+                  threadTs,
+                  jobId: outreachReplyJobId,
+                  turnStartedAt,
+                  result,
+                });
+              } catch (err) {
+                logger.warn('closeOutreachReplyIfResolvedThisTurn threw', { err: String(err).slice(0, 200) });
+              }
+            }
 
             // ── Reply pipeline (v1.6.2) ──────────────────────────────────────────────
             // normalize → owner claim-check (+ retry) → colleague security gate →

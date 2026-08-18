@@ -81,6 +81,14 @@ export interface SocialDirective {
   categoryLabel: string | null;
   toneCue: string;
   subject: SocialSubject | null;
+  /**
+   * v4.6.2 (#187) — true only for the closing-turn acknowledgment path below.
+   * `formatDirectiveForPromptBlock` branches its engage bullet on this flag:
+   * acknowledge-and-stop instead of progress-and-stay-open, since this
+   * directive exists precisely to react to what was just said, not to keep
+   * the subject open.
+   */
+  closingAck: boolean;
 }
 
 // ── Person-initiated social turn ─────────────────────────────────────────────
@@ -92,9 +100,16 @@ export function directiveForPersonSocial(params: {
   const social = classification.social;
   if (!social) return noDirective();
 
-  if (classification.conversation_state === 'closing') {
-    return noDirective();
-  }
+  // v4.6.2 (#187) — closing no longer means "say nothing." `social` here is
+  // already-computed classifier output (sentiment/direction/category_hint)
+  // for what THIS message contains — closing suppresses ORIGINATION only
+  // (the proactive-slot path stays gated at chooseSocialDirective:397 /
+  // directiveForProactiveSlot, untouched by this change: no dormant subject
+  // continues, nothing new opens). This function only ever reacts to content
+  // already in the message, so a closing turn gets the same celebrate/engage
+  // shape as an open one — brief acknowledgment only, via a tighter toneCue,
+  // never a reason to go quiet on "that's rough about your mom."
+  const isClosing = classification.conversation_state === 'closing';
 
   // v3.0 follow-up — per-turn directive no longer knows the matched subject
   // (subject decisions moved to end-of-chat). Directive uses category + tone
@@ -107,13 +122,24 @@ export function directiveForPersonSocial(params: {
       subjectId: null,
       subjectLabel: categoryLabel,
       categoryLabel,
-      toneCue: 'match the energy; a real congrats, not a pivot to tasks',
+      toneCue: isClosing
+        ? 'one brief, genuine line of congrats before they go — no follow-up question, let the goodbye stand'
+        : 'match the energy; a real congrats, not a pivot to tasks',
       subject: null,
+      closingAck: isClosing,
     };
   }
 
   let toneCue: string;
-  if (social.sentiment === 'negative') {
+  if (isClosing) {
+    if (social.direction === 'ask_assistant') {
+      toneCue = 'answer briefly and warmly, then let the goodbye stand — no question back, this is the closing turn';
+    } else if (social.sentiment === 'negative') {
+      toneCue = 'one warm, brief line acknowledging what they just said — no advice, no follow-up question, let the goodbye stand';
+    } else {
+      toneCue = 'one brief acknowledgment of what they just said, then let the goodbye stand — no follow-up question';
+    }
+  } else if (social.sentiment === 'negative') {
     toneCue = 'commiserate, light empathy; no solutions unless asked';
   } else if (social.direction === 'ask_assistant') {
     toneCue = 'answer warmly, like a colleague who\'s been around';
@@ -128,6 +154,7 @@ export function directiveForPersonSocial(params: {
     categoryLabel,
     toneCue,
     subject: null,
+    closingAck: isClosing,
   };
 }
 
@@ -306,6 +333,7 @@ export function directiveForProactiveSlot(params: {
     categoryLabel: pickDormantCategory(personSlackId, activeLabels, triedLabels),
     toneCue: 'one plain, natural question about this category — invite a real fact about the person; no preamble',
     subject: null,
+    closingAck: false,
   });
 
   // Highest-scoring active category with an eligible subject wins (ties
@@ -336,6 +364,7 @@ export function directiveForProactiveSlot(params: {
         categoryLabel: cat.category_label,
         toneCue: 'one short, natural follow-up on this subject; lean on the recent topic-beats Maelle has logged',
         subject: choice,
+        closingAck: false,
       };
     }
     return null;
@@ -366,6 +395,7 @@ export function noDirective(): SocialDirective {
     categoryLabel: null,
     toneCue: '',
     subject: null,
+    closingAck: false,
   };
 }
 
@@ -411,7 +441,13 @@ export function formatDirectiveForPromptBlock(directive: SocialDirective): strin
   lines.push('');
   lines.push('Mode rules:');
   lines.push('- celebrate: acknowledge the win first. No "what do you need" pivot. A real congrats, specific to what was shared.');
-  lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the subject — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that subject — never pivot to "anything work-related" or "let me know if you need anything." The subject stays open until THEY close it.');
+  if (directive.closingAck) {
+    // v4.6.2 (#187) — closing turn: acknowledge-and-stop replaces
+    // progress-and-stay-open. See closingAck's doc comment above.
+    lines.push('- engage: this is a closing turn. Acknowledge briefly what they just said, then let the goodbye stand — no follow-up question, nothing new introduced, no invitation to keep talking.');
+  } else {
+    lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the subject — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that subject — never pivot to "anything work-related" or "let me know if you need anything." The subject stays open until THEY close it.');
+  }
   lines.push('- continue: one short follow-up on a subject from a prior day. Don\'t overdo it. Same rule as engage — progress the subject, never pivot to work.');
   // v4.5.9 (#198-LIB-1) — no `raise_new` rule line: this block only ever
   // renders what chooseSocialDirective produces, and the in-prompt directive

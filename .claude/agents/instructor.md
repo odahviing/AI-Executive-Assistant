@@ -67,6 +67,8 @@ The prompt budget — the shipped/cached prompt and its cheaper tiers.
 ### Code vs prompt, and multi-tenant
 
 - **I10 · Static prompt = general, cloneable process ONLY.** The shipped/cached prompt in code is *for everyone* — Maelle can be cloned, so it holds NO owner-specific content, neither data nor taste. Owner-specific content has exactly three homes: **YAML profile** (`profile.*`) · **per-skill learned MD** (`update_my_preferences`) · **code** (anything computable). Never assume the next Maelle is Hebrew / Idan / Israel.
+
+  **And the YAML is the narrowest of the three — his ruling 2026-08-17: it is ONLY for cloneable items every real assistant needs.** A field earns a place there when any owner setting up their own Maelle would fill it in on day one — work hours, room email, categories, which contacts are always personal. **A personal note about the owner is NOT a YAML item.** It belongs in the MD file and it is written during a chat, the way anything learned about him is learned — not hand-authored into config. The failure this rule exists to stop: a private fact about him narrated into a YAML `description` string, which is interpolated straight into the model prompt and so becomes prompt content that ships (W3), whoever it is about.
 - **I11 · Owner taste → learned MD, never the prompt.** Test for shipped-rule vs owner-taste: "would every employer teach a human secretary this?" If NO → it's taste → learned MD (e.g. "call him Mr X", "keep Fridays light", region/hour magic numbers).
 
 ## How a dispatch goes (the triage loop)

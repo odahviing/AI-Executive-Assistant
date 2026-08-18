@@ -416,7 +416,50 @@ if (argv.includes('--already-built')) {
   const dropped = candidates.filter(sweptByWrap);
   const kept = candidates.filter((r) => !sweptByWrap(r));
 
-  const shape = kept.map((r) => ({ ref: r.ref, symptom: r.finding, rootCause: r.rootCause, invariant: r.invariant, state: r.state }));
+  // ── the REGRESSION signal, carried onto the shape itself ────────────────────
+  // Same operational definition `--index` uses further down this file (an
+  // identity carrying both an open AND a closed ref right now) — computed here
+  // directly off `latest` rather than depending on `--index`'s own machinery,
+  // since this branch `process.exit`s long before `canonInvariant`/`scoped`/
+  // `showIndex` are even defined. Grouped by `parentRef` so a `>dep` leg folds
+  // into its parent, matching `--index`'s own collapse. Deliberately does NOT
+  // apply the small `INVARIANT_ALIAS` table (defined only later in this file,
+  // covering three known duplicate slugs): a false negative there costs one
+  // un-flagged regression a full `--index` read would still catch; a false
+  // positive would be worse, and aliasing only ever CONSOLIDATES identities,
+  // never invents a pairing that is not there. Same reasoning for skipping
+  // `verdictOf`'s RETIRED-verdict remap (also defined only later): its one
+  // entry (`flagged-for-owner`→`queued-next-run`) is OPEN either way it is
+  // read, so the open/closed split below is identical with or without it.
+  const parentRefKey = (ref) => String(ref || '').replace(/(>dep)+$/, '');
+  const byParent = new Map();
+  for (const r of latest.values()) {
+    const key = parentRefKey(r.ref);
+    const e = byParent.get(key) || { invariants: new Set(), verdict: '' };
+    if (r.invariant) e.invariants.add(r.invariant);
+    if (r.verdict) e.verdict = r.verdict;
+    byParent.set(key, e);
+  }
+  const invStatus = new Map(); // invariant -> {open, closed}
+  for (const e of byParent.values()) {
+    const isOpen = !CLOSED.has(e.verdict);
+    for (const inv of e.invariants) {
+      const s = invStatus.get(inv) || { open: 0, closed: 0 };
+      isOpen ? s.open++ : s.closed++;
+      invStatus.set(inv, s);
+    }
+  }
+  const regressedInvariants = new Set([...invStatus].filter(([, s]) => s.open > 0 && s.closed > 0).map(([inv]) => inv));
+
+  const shape = kept.map((r) => ({
+    ref: r.ref,
+    symptom: r.finding,
+    rootCause: r.rootCause,
+    invariant: r.invariant,
+    state: r.state,
+    lane: r.lane || '',
+    regression: Boolean(r.invariant && regressedInvariants.has(r.invariant)),
+  }));
   if (jsonOut) {
     console.log(JSON.stringify(shape));
   } else {
@@ -427,8 +470,11 @@ if (argv.includes('--already-built')) {
         (dropped.length ? `: ${dropped.map((r) => r.ref).join(', ')}` : '') +
         ')',
     );
-    for (const r of shape) console.log(`  ${r.ref}  ${String(r.symptom || '').slice(0, 96)}`);
-    console.log(`\nPass --json to get [{ref, symptom, rootCause, invariant, state}] directly for \`args.alreadyBuilt\`.\n`);
+    for (const r of shape) console.log(`  ${r.ref}${r.regression ? '  [REGRESSION]' : ''}  ${String(r.symptom || '').slice(0, 96)}`);
+    const regressedShown = shape.filter((r) => r.regression);
+    if (regressedShown.length)
+      console.log(`\n  ${regressedShown.length} of these carr${regressedShown.length === 1 ? 'ies' : 'y'} an identity \`--index\` marks [REGRESSION] — closed and open again: ${regressedShown.map((r) => r.ref).join(', ')}`);
+    console.log(`\nPass --json to get [{ref, symptom, rootCause, invariant, state, lane, regression}] directly for \`args.alreadyBuilt\`.\n`);
   }
   process.exit(0);
 }

@@ -263,6 +263,18 @@ const UserProfileSchema = z.object({
     issue_exclusions: z.object({
       subjects: z.array(z.string()).default([]),
     }).optional(),
+    // 2026-08-16 — attendee emails that always mean personal / off-work time
+    // (spouse, kids, family). Replaces an earlier narrative sentence that was
+    // embedded directly in the "Personal" category's own `description` (e.g.
+    // "attendee X = wife → always Personal") and rendered verbatim into
+    // detectCategory's LLM prompt — a privacy + cloneability violation (any
+    // other tenant's yaml would have inherited literal prose naming someone
+    // else's spouse). The CONCEPT survives as structured config — "which
+    // contacts should always be treated as private" is exactly what any
+    // owner would tell a new EA on day one — but detectCategory checks this
+    // list in CODE, deterministically, before the LLM call even runs. Never
+    // rendered into the prompt itself. Default: none.
+    private_emails: z.array(z.string().email()).default([]),
   }).default({
     allowed_durations: [25, 50],
     buffer_minutes: 0,

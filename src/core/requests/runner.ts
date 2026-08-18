@@ -28,6 +28,7 @@ import { parseDetails, deriveOriginSurface } from './types';
 import { getConnection } from '../../connections/registry';
 import { logActivity } from './logActivity';
 import { runColleagueOofRecheck, runOofReengageReask } from './colleagueOofReengage';
+import { postOwnerDecision } from '../../utils/ownerDailyThread';
 import logger from '../../utils/logger';
 
 /**
@@ -135,6 +136,9 @@ async function dispatchHandler(
 
     case 'oof_reengage_reask':
       return runOofReengageReask(row, profile);
+
+    case 'freeform_flag_retry':
+      return runFreeformFlagRetry(row, profile);
 
     default:
       logger.warn('dispatchHandler — unknown handler, clearing timer', {
@@ -681,4 +685,84 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     });
     return 'rearmed';
   }
+}
+
+/**
+ * chris-kelley-oof-block-b round 2 (2026-08-18) — tasks/skill.ts's
+ * flagUnresolvedFreeformForOwner's immediate postOwnerDecision attempt failed
+ * (thread post AND the DM fallback both failed), so the row landed
+ * `in_flight` with this handler armed instead of being born-terminal
+ * `logged`. Bounded, SHORT linear backoff (5m, 10m, 15m…) — deliberately NOT
+ * workTimeBaseFromNow/nextOwnerWorkdayStart (that would defer an urgent
+ * escalation past a whole away period, the exact bug this backstop exists to
+ * avoid). Gives up only after FREEFORM_FLAG_MAX_RETRY_ATTEMPTS, closing
+ * 'cancelled' — never 'logged' — so a permanently-failed delivery can never
+ * read, to getRecentActivityForOwner or a later dedup check
+ * (getLatestFreeformOwnerFlag), as though it actually reached him. A
+ * 'cancelled' close still lands informed=0, so the next brief gets one more
+ * chance to surface it.
+ */
+const FREEFORM_FLAG_MAX_RETRY_ATTEMPTS = 4;
+
+async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Promise<'closed' | 'rearmed'> {
+  // Something else already moved this off in_flight (shouldn't happen —
+  // nothing else touches this row — but stale-timer safety matches every
+  // other handler in this file).
+  if (row.state !== 'in_flight') {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return 'closed';
+  }
+  const details = parseDetails<Record<string, unknown>>(row) ?? {};
+  const message = typeof details.message === 'string' && details.message
+    ? details.message
+    : (row.description ?? row.subject);
+  const attempts = (typeof details.send_attempts === 'number' ? details.send_attempts : 0) + 1;
+
+  let posted: { ok: boolean; channel?: string; threadTs?: string; ts?: string; reason?: string } = { ok: false };
+  try {
+    const conn = getConnection(profile.user.slack_user_id, 'slack');
+    if (conn) {
+      posted = await postOwnerDecision({ profile, conn, text: message, label: 'freeform escalation flag (retry)' });
+    }
+  } catch (err) {
+    logger.warn('runFreeformFlagRetry — retry threw', { requestId: row.id, attempt: attempts, err: String(err).slice(0, 200) });
+  }
+
+  if (posted.ok) {
+    updateRequest(row.id, {
+      ownerDmChannel: posted.channel,
+      ownerDmThreadTs: posted.threadTs,
+      terminalDmMsgTs: posted.ts,
+    });
+    closeRequest({
+      id: row.id,
+      state: 'logged',
+      closureReason: 'freeform_escalation_flag_delivered',
+      closedBy: 'system',
+    });
+    logger.info('runFreeformFlagRetry — delivered on retry', { requestId: row.id, attempts });
+    return 'closed';
+  }
+
+  if (attempts >= FREEFORM_FLAG_MAX_RETRY_ATTEMPTS) {
+    logger.error('runFreeformFlagRetry — exhausted retries, giving up (owner never got this flag)', {
+      requestId: row.id, attempts,
+    });
+    closeRequest({
+      id: row.id,
+      state: 'cancelled',
+      closureReason: 'freeform_escalation_flag_delivery_failed',
+      closedBy: 'system',
+    });
+    return 'closed';
+  }
+
+  // Short linear backoff (5m, 10m, 15m) — retries SOON, not after a whole
+  // away period. See the header comment above.
+  updateRequest(row.id, {
+    details: { ...details, send_attempts: attempts },
+    nextCheckAt: DateTime.now().plus({ minutes: 5 * attempts }).toUTC().toISO(),
+    nextCheckHandler: 'freeform_flag_retry',
+  });
+  return 'rearmed';
 }

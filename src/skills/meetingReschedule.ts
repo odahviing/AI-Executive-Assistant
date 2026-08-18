@@ -5,7 +5,8 @@
  * context_json payload carrying { meeting_id, proposed_start, proposed_end },
  * the outreach job records that intent. Later, when the colleague replies,
  * connectors/slack/coordinator.ts dispatches the reply to this handler
- * instead of the generic processOutreachReply classifier.
+ * instead of falling through to the full orchestrator (the generic,
+ * no-routed-intent path — see coordinator.ts's handleOutreachReply).
  *
  * Three outcomes:
  *   - approved  → call updateMeeting to MOVE the existing event, DM colleague
@@ -125,8 +126,8 @@ Tie-break: a genuine NON-answer (they haven't decided, "I'll get back to you", t
 
 /**
  * Main entry. Returns true if the reply was handled as a reschedule; false if
- * the caller should fall through to the generic processOutreachReply classifier
- * (e.g. intent missing or context unparseable).
+ * the caller should fall through to the generic no-routed-intent path (the
+ * full orchestrator — e.g. intent missing or context unparseable).
  */
 export async function handleRescheduleReply(
   _app: App,

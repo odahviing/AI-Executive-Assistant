@@ -11,6 +11,7 @@ import {
   updateRequest,
   buildIdempotencyKey,
   getRequestByIdempotencyKey,
+  getLatestFreeformOwnerFlag,
   getRecentOutreachOwnerThread,
   isKnownRequestThreadAnchor,
   getMeetingsRequestedBy,
@@ -70,7 +71,7 @@ const anthropic = getAnthropicClient();
 // caught it (R4), so refusing it would recreate exactly the silent-drop bug
 // it was built to close. It is equally deliberately EXCLUDED from
 // `getPendingRequestCountForColleague`'s own count (via
-// `subkind: 'freeform_owner_flag'`) — bouncer fix, 2026-08-10 — so it can
+// `subkind: 'freeform_owner_ask'`) — bouncer fix, 2026-08-10 — so it can
 // never itself eat one of the colleague's two real slots (found: it minted
 // uncapped but still counted against the cap, the worst of both).
 const COLLEAGUE_PENDING_CAP = 2;
@@ -224,9 +225,72 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * colleague-raised ask that needs the OWNER'S read can't depend on the model
  * self-correcting in the same turn, so the one-shot text gets a durable
  * backstop on the ONE spine (R2/R4): a `reminder` request that DMs the owner
- * the real question, inside his work hours, whether or not the model's
- * in-turn ask lands. Idempotency-keyed on (owner, requester, thread, text) so
- * the same ambiguous ask re-firing in the same thread doesn't stack DMs.
+ * the real question.
+ *
+ * Dedup is decided against `getLatestFreeformOwnerFlag` — the most recent row
+ * THIS backstop raised in this exact thread, any state — NOT against a bare
+ * idempotency-key lookup (bouncer overturn round 2, chris-kelley-oof-block-c,
+ * 2026-08-18): a thread-scoped key only ever matches the FIRST row ever
+ * inserted for a thread (a later new ask mints its own fresh key so the
+ * UNIQUE constraint doesn't block it), so `getRequestByIdempotencyKey` can
+ * never see anything past that first row once a second one exists. A match is
+ * treated as a duplicate — skip, no new DM — only when it is either still
+ * being delivered (state='in_flight', a live retry in progress a second
+ * attempt would only race) or was delivered within
+ * FREEFORM_FLAG_DEDUP_WINDOW_MINUTES. Anything older, OR a prior attempt that
+ * gave up without ever delivering (state='cancelled', see below), is treated
+ * as a fresh ask — never permanently blackholed (round 1 of this same fix
+ * collapsed retries onto one row but then blocked every later, genuinely
+ * different ambiguous ask in a long-lived thread forever; round 2 of this
+ * same fix must not let a permanently-failed delivery masquerade as "already
+ * handled" either).
+ *
+ * Round 3 (bouncer overturn, chris-kelley-oof-block-c, 2026-08-18): round 2's
+ * lookup matched on `kind='reminder' AND subkind='freeform_owner_flag'`
+ * alone, which is NOT unique to this backstop — runOutputGates.ts's
+ * claim-checker relay backstop mints the identical kind/subkind shape (see
+ * db/jobs.ts:70-80's own comment: both are excluded from the colleague
+ * pending-cap count as two DIFFERENT "must never be dropped" alerts, never
+ * because they're one mechanism). That let an unrelated claim-checker row
+ * in the same thread get treated as "still delivering"/"recently delivered"
+ * and silently swallow a genuinely different real ask. This backstop's own
+ * rows now carry `subkind: 'freeform_owner_ask'` instead — a value only
+ * `flagUnresolvedFreeformForOwner` ever writes — so `getLatestFreeformOwnerFlag`
+ * can no longer cross paths with the claim-checker's rows. `next_check_handler`
+ * was considered and rejected as the discriminator: this function's own
+ * CONFIRMED-delivery path (the common case) never sets one at all, and
+ * `closeRequest` unconditionally nulls it on every terminal transition
+ * (closeRequest.ts's `nextCheckHandler: null`), so it can't distinguish a
+ * `logged`/`cancelled` row either way. The shared `subkind='freeform_owner_flag'`
+ * value stays untouched on the claim-checker's own rows — it is still load-
+ * bearing there for the same pending-cap exclusion (jobs.ts:92 now excludes
+ * both values).
+ *
+ * Delivery is IMMEDIATE, via the same `postOwnerDecision` DM path a real
+ * approval ask uses (skill.ts createApprovalRequest, ~1194-1259) — never
+ * deferred through `workTimeBaseFromNow` (chris-kelley-oof-block-b, live
+ * incident 2026-08-17: Chris Kelley's urgent ask landed during the owner's
+ * declared vacation and wasn't scheduled to reach him until the vacation
+ * ended). Owner ruling, verbatim: "approval flow is always approval, nothing
+ * should block people to raise alarm as ask for approval." This backstop
+ * stands in for an approval under routing ambiguity, so it gets the same
+ * always-immediate delivery — `workTimeBaseFromNow`/`nextOwnerWorkdayStart`
+ * stay correct and untouched for the ordinary reminder class they're meant
+ * for (R5's "reach a person inside their own work hours" default is about a
+ * REMINDER's nag cadence, not about an escalation standing in for an
+ * approval).
+ *
+ * On a CONFIRMED delivery the row is created already `logged` (born-terminal)
+ * — the DM IS the action, nothing is left to wait on. On a genuine delivery
+ * FAILURE (bouncer overturn round 2: both the thread post and the DM fallback
+ * failed), the row is created `in_flight` with a short, bounded, re-fireable
+ * retry timer instead (runner.ts's `freeform_flag_retry`) — NEVER
+ * workTimeBaseFromNow/nextOwnerWorkdayStart, the exact deferred-past-vacation
+ * timer this function exists to avoid. A born-terminal `logged` row on a
+ * failed send would have (a) permanently blocked every later retry that
+ * dedups against it, (b) shown up in getRecentActivityForOwner (state=
+ * 'logged' only) as though it had actually reached him, and (c) had no timer
+ * at all to ever try again — the exact hole round 1 of this fix introduced.
  *
  * Owner-initiated calls skip this — if create_approval was raised from the
  * owner's OWN conversation, he's already the one Maelle is talking to; there
@@ -242,30 +306,70 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * surface (resolve_approval's own gates at 1434/1483/1705 already rely on the
  * same distinction), so it's the correct "is this genuinely the owner" check.
  */
-function flagUnresolvedFreeformForOwner(
+const FREEFORM_FLAG_DEDUP_WINDOW_MINUTES = 60;
+
+async function flagUnresolvedFreeformForOwner(
   context: SkillContext,
   ownerUserId: string,
   flagText: string,
-): void {
+): Promise<void> {
   if (context.authority !== 'colleague') return;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { workTimeBaseFromNow } = require('../utils/workHours') as typeof import('../utils/workHours');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getPersonMemory } = require('../db/people') as typeof import('../db/people');
     const requesterFirst = (getPersonMemory(context.userId)?.name ?? 'A colleague').split(' ')[0];
+
+    const latest = getLatestFreeformOwnerFlag(ownerUserId, context.userId, context.threadTs);
+    if (latest) {
+      const createdMs = Date.parse(latest.created_at.replace(' ', 'T') + 'Z');
+      const ageMinutes = Number.isFinite(createdMs) ? (Date.now() - createdMs) / 60_000 : Infinity;
+      const stillDelivering = latest.state === 'in_flight';
+      const deliveredRecently = latest.state === 'logged' && ageMinutes < FREEFORM_FLAG_DEDUP_WINDOW_MINUTES;
+      if (stillDelivering || deliveredRecently) return;
+      // Else: past the window, or the last attempt is 'cancelled' (gave up
+      // without ever delivering) — fall through and raise a fresh one.
+    }
+
+    const flagMessage = `${requesterFirst} raised something I couldn't confidently route on my own, and I didn't want it to just sit unanswered: "${flagText}". Flagging it for you directly rather than risk it getting lost.`;
+
+    // Deliver NOW, the same immediate path a real approval ask uses
+    // (createApprovalRequest, ~1194-1259) — no work-hours/away-day gating.
+    // See the header comment above (chris-kelley-oof-block-b).
+    let posted: { ok: boolean; channel?: string; threadTs?: string; ts?: string; reason?: string } = { ok: false };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+      const conn = getConnection(ownerUserId, 'slack');
+      if (conn) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { postOwnerDecision } = require('../utils/ownerDailyThread') as typeof import('../utils/ownerDailyThread');
+        posted = await postOwnerDecision({ profile: context.profile, conn, text: flagMessage, label: 'freeform escalation flag' });
+        if (!posted.ok) {
+          logger.error('create_approval — freeform escalation flag DM to owner failed', {
+            ownerUserId, requesterSlackId: context.userId, reason: posted.reason,
+          });
+        }
+      } else {
+        logger.warn('create_approval — no Slack connection registered for freeform escalation flag', { ownerUserId });
+      }
+    } catch (err) {
+      logger.error('create_approval — freeform escalation flag DM threw', { err: String(err).slice(0, 200) });
+    }
+
+    // Identity for DB uniqueness only, NOT for dedup (that's
+    // getLatestFreeformOwnerFlag above) — always fresh, so a fresh row here
+    // never collides with an older row's key.
     const idempotencyKey = buildIdempotencyKey({
       ownerUserId,
       requesterSlackId: context.userId,
       kind: 'reminder',
-      subject: `freeform_unsure ${context.threadTs} ${flagText}`,
+      subject: `freeform_unsure ${context.threadTs} ${Date.now()}`,
     });
-    if (getRequestByIdempotencyKey(idempotencyKey)) return;
-    createRequest({
+    const shared = {
       ownerUserId,
       initiatedBy: context.userId,
-      initiatedByRole: 'colleague',
-      kind: 'reminder',
+      initiatedByRole: 'colleague' as const,
+      kind: 'reminder' as const,
       // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
       // marks this row so getPendingRequestCountForColleague (db/jobs.ts)
       // excludes it from the colleague's pending-cap count. This is a
@@ -273,10 +377,15 @@ function flagUnresolvedFreeformForOwner(
       // asked for — it must mint regardless of their cap (never gated
       // through colleaguePendingCapRefusal, see the header comment above),
       // so it must not silently spend one of their two slots either.
-      subkind: 'freeform_owner_flag',
+      // 'freeform_owner_ask', NOT the shared 'freeform_owner_flag' value —
+      // this subkind is written ONLY here, so getLatestFreeformOwnerFlag's
+      // dedup lookup can never match runOutputGates.ts's claim-checker
+      // backstop, which mints the same kind under the shared subkind
+      // (round 3 fix, chris-kelley-oof-block-c, 2026-08-18 — see the header
+      // comment above).
+      subkind: 'freeform_owner_ask',
       subject: `Needs your read: ${flagText.slice(0, 80)}`,
       description: flagText,
-      state: 'in_flight',
       informed: 1,
       requesterSlackId: context.userId,
       requesterName: requesterFirst,
@@ -284,15 +393,40 @@ function flagUnresolvedFreeformForOwner(
       originThreadTs: context.threadTs,
       originIsMpim: context.surface === 'room',
       idempotencyKey,
-      nextCheckAt: workTimeBaseFromNow(context.profile),
-      nextCheckHandler: 'reminder_fire',
-      details: { message: `${requesterFirst} raised something I couldn't confidently route on my own, and I didn't want it to just sit unanswered: "${flagText}". Flagging it for you directly rather than risk it getting lost.` },
-    });
-    logger.info('create_approval — opened durable fallback reminder for a refused freeform escalation', {
-      ownerUserId, requesterSlackId: context.userId, preview: flagText.slice(0, 80),
+    };
+
+    if (posted.ok) {
+      // Confirmed delivery — born terminal (R2's `logged` state): the DM
+      // above already IS the action, and nobody is waiting on a decision —
+      // same shape as runReminderFire's own closeRequest call for a fired
+      // reminder. This row exists for the audit trail (recent-activity read,
+      // getLatestFreeformOwnerFlag dedup on retry), not to be picked up by
+      // the sweep.
+      createRequest({
+        ...shared,
+        state: 'logged',
+        ownerDmChannel: posted.channel,
+        ownerDmThreadTs: posted.threadTs,
+        terminalDmMsgTs: posted.ts,
+        details: { message: flagMessage },
+      });
+    } else {
+      // Genuine delivery failure — do NOT create a dead born-terminal row
+      // (chris-kelley-oof-block-b round 2): land it `in_flight` with a short,
+      // bounded, re-fireable retry instead. See the header comment above.
+      createRequest({
+        ...shared,
+        state: 'in_flight',
+        nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(),
+        nextCheckHandler: 'freeform_flag_retry',
+        details: { message: flagMessage, send_attempts: 1 },
+      });
+    }
+    logger.info('create_approval — flagged unresolved freeform escalation to owner', {
+      ownerUserId, requesterSlackId: context.userId, preview: flagText.slice(0, 80), posted: posted.ok,
     });
   } catch (err) {
-    logger.warn('create_approval — failed to open fallback reminder for a refused freeform escalation', {
+    logger.warn('create_approval — failed to flag unresolved freeform escalation to owner', {
       err: String(err).slice(0, 200),
     });
   }
@@ -468,7 +602,7 @@ export async function createApprovalRequest(
             // gh#freeform-escalation-refused-silently-drops-owner-question —
             // don't let this refusal ride ONLY on the model asking someone in
             // this same turn; back it with a durable fallback DM to the owner.
-            flagUnresolvedFreeformForOwner(context, ownerUserId, [s, q, c].filter(part => part.trim()).join(' — ').slice(0, 500));
+            await flagUnresolvedFreeformForOwner(context, ownerUserId, [s, q, c].filter(part => part.trim()).join(' — ').slice(0, 500));
             return {
               error: 'freeform_needs_clarification',
               reason: `I can't tell whether this is a calendar change or a genuine non-calendar decision, and it matters: a calendar change (book / move / reschedule / attendee edit / cancel) MUST go through the tool → policy_exception so it actually executes on approve; a real non-calendar yes/no is fine as freeform. Do NOT raise the approval yet, and do NOT claim you've already asked or sent anything — you haven't. If the conversation makes it clear, route it now (tool → policy_exception if it touches a meeting; freeform if not). If it's genuinely unclear, ask the requester plainly — e.g. "just so I route this right, are you asking me to change something on your calendar, or is it something else?" — then act on the answer. I've also flagged the raw ask for the owner directly as a backstop, in case it needs his read and this doesn't get sorted out in conversation.`,

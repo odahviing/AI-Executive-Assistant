@@ -3,7 +3,12 @@
  *
  * What lives here:
  *   - handleOutreachReply: triggered by app.ts when a colleague replies to an
- *     outreach — classifies (continue/done/schedule) and progresses the job
+ *     outreach — matches the reply to its job (thread anchor or Sonnet
+ *     classifier), routes it to the job's own intent handler when it has one
+ *     (meeting_reschedule, oof_reengage), and otherwise hands it to the full
+ *     orchestrator instead of drafting a reply itself (see the generic-branch
+ *     comment inside the function for why — gh#daniel-sharabi-decisive-reply-
+ *     stuck-in-continue-loop)
  *   - findSlackUser / openDM: Slack utilities
  *
  * `findSlackChannel` was here too and is GONE (v4.2.x): zero callers, and it was a
@@ -30,13 +35,12 @@ import { App } from '@slack/bolt';
 import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
-import { updateRequest } from '../../db/requests';
+import type { OrchestratorOutput } from '../../core/orchestrator';
+import { updateRequest, getOpenRequestsForThread } from '../../db/requests';
 import { calcResponseDeadline } from '../../utils/responseDeadline';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
-  logEvent,
-  appendToConversation,
   type OutreachJob,
 } from '../../db';
 import logger from '../../utils/logger';
@@ -101,99 +105,40 @@ async function isOutreachReplyByContext(params: {
 }
 
 /**
- * Given a colleague reply, decide: done (report to owner), continue (ping
- * colleague back), or schedule (hand off to coord).
+ * Structured description of a matched outreach job with no routed intent,
+ * handed to the full orchestrator as `priorOutboundContext` (same injection
+ * point `recentOutboundContext.ts`'s `buildContextBlock` uses) instead of
+ * this module drafting the colleague's reply itself.
+ * (gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop) — sourced from
+ * the job THIS module already matched (thread anchor or
+ * `isOutreachReplyByContext` above), never from `recentOutboundContext.ts`'s
+ * own, separate, shorter-window mechanism.
  */
-async function processOutreachReply(params: {
-  originalMessage: string;
-  conversation: Array<{ role: 'maelle' | 'colleague'; text: string }>;
-  newReply: string;
-  colleagueName: string;
-  ownerName: string;
-  assistantName: string;
-}): Promise<
-  | { action: 'done'; summary: string }
-  | { action: 'continue'; response: string }
-  | { action: 'schedule'; summary: string; details: { subject: string; preferredDay?: string; preferredTime?: string; durationMin: number; isOnline: boolean } }
-> {
-  const anthropic = getAnthropicClient();
-
-  const historyText = params.conversation.length > 0
-    ? '\n\nConversation so far:\n' + params.conversation
-        .map(m => `${m.role === 'maelle' ? params.assistantName : params.colleagueName}: ${m.text}`)
-        .join('\n')
-    : '';
-
-  // v2.2.4 (bug 4) — anchor today's date in the prompt so date references in
-  // the colleague's reply ("Wed 17 Jun") resolve to the right year. Without
-  // this anchor Sonnet has been parsing "17 Jun" as 2025 even when the
-  // conversation is happening in 2026.
-  const todayIso = new Date().toISOString().slice(0, 10);
-
-  const prompt = `You are ${params.assistantName}, executive assistant to ${params.ownerName}.
-
-Today is ${todayIso}. Resolve any partial dates in the reply against today — never assume a past year.
-
-You sent this message to ${params.colleagueName} on behalf of ${params.ownerName}:
-"${params.originalMessage}"${historyText}
-
-${params.colleagueName} just replied: "${params.newReply}"
-
-Decide what to do:
-- If the conversation has turned into SCHEDULING A NEW MEETING (colleague mentions specific days, times, availability for a new meeting they want to set up) → reply with: SCHEDULE: [subject]|[preferred_day or ""]|[preferred_time like "10:00" or ""]|[duration_min guess 30-60]|[online: true/false]
-- If the colleague gave feedback, suggestions, or edits that ${params.ownerName} now needs to act on → reply with: DONE: [summary + "Want me to apply these now?"]
-- If the task is fully resolved with no further work implied → reply with: DONE: [1-2 sentence summary, no trailing question]
-- If the colleague asked a question or needs more info, OR the reply is about MOVING an existing meeting (counter-times for an event that already exists on the calendar — including "can't make any slot" with a counter-suggestion when we were already moving an existing meeting), OR the reply is a brief acknowledgment that doesn't ask for a new meeting → reply with: CONTINUE: [your natural response to them, as ${params.assistantName}]
-
-CRITICAL: Reschedule conversations are CONTINUE, NOT SCHEDULE. If the original message ${params.assistantName} sent was about moving an existing meeting (you'll see phrasing like "asked to relay", "move", "shift", "doesn't fit", or it references a specific existing meeting subject), then any counter-time reply is the continuation of that reschedule — not a new meeting request. Use CONTINUE; ${params.ownerName} will decide on the counter through the normal reschedule path.
-
-SCHEDULE is for fresh meeting requests only — colleague says "let's set up time" or "I'd like to grab 30 min" with no existing event being discussed.
-
-Reply with ONLY "DONE: ...", "CONTINUE: ...", or "SCHEDULE: ..." — nothing else.`;
-
-  try {
-    const resp = await anthropic.messages.create({
-      ...SONNET,
-      max_tokens: 300,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    const text = (resp.content[0] as Anthropic.TextBlock).text.trim();
-
-    if (text.startsWith('SCHEDULE:')) {
-      const parts = text.slice(9).trim().split('|').map(s => s.trim());
-      return {
-        action: 'schedule',
-        summary: `${params.colleagueName} wants to schedule: ${parts[0] || 'meeting'}`,
-        details: {
-          subject: parts[0] || 'Meeting',
-          preferredDay: parts[1] || undefined,
-          preferredTime: parts[2] || undefined,
-          durationMin: parseInt(parts[3]) || 30,
-          isOnline: parts[4] === 'true',
-        },
-      };
-    } else if (text.startsWith('DONE:')) {
-      return { action: 'done', summary: text.slice(5).trim() };
-    } else if (text.startsWith('CONTINUE:')) {
-      return { action: 'continue', response: text.slice(9).trim() };
-    } else {
-      return { action: 'done', summary: `${params.colleagueName} replied — ${text.slice(0, 150)}` };
-    }
-  } catch (err) {
-    logger.error('processOutreachReply Sonnet call failed', { err: String(err) });
-    return { action: 'done', summary: `${params.colleagueName} replied: "${params.newReply.slice(0, 200)}"` };
-  }
+function buildOutreachJobContextBlock(job: OutreachJob): string {
+  const preview = job.message.slice(0, 400);
+  return [
+    `AN OUTREACH YOU SENT THIS COLLEAGUE ON THE OWNER'S BEHALF IS STILL OPEN`,
+    `You asked ${job.colleague_name}: "${preview}${job.message.length > preview.length ? '…' : ''}"`,
+    `Their message just now is almost certainly the reply to that. If it resolves what was asked (a time, a yes/no, an edit), use your real tools to act on it now — never just acknowledge it in words. If it needs the owner's judgment, route it through the normal approval flow.`,
+  ].join('\n');
 }
 
 /**
  * Primary entry for colleague replies on DM. Called by app.ts before the
- * general orchestrator runs. If this returns true, the orchestrator is
- * skipped — the reply was handled as part of an outreach conversation.
+ * general orchestrator runs. `handled: true` means the orchestrator is
+ * skipped entirely — the reply was fully handled here (disambiguation DM, or
+ * an intent-routed handler). `handled: false` means the caller should fall
+ * through to the normal orchestrator call; when a matched job carried no
+ * routed intent, `priorOutboundContext` is set so that call sees what this
+ * job already asked (gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop
+ * — see the generic branch below for why this module stopped drafting that
+ * reply itself).
  *
  * Side effects:
- *   - Marks the outreach job replied/continued/handed-off to coord
- *   - Closes / continues the linked task (v1.6 — also cancels any
- *     outreach_expiry task for this outreach)
+ *   - Marks the outreach job continued (conversation_json + reply_text) or
+ *     hands off to an intent handler (which owns its own terminal closure)
+ *   - Re-arms / clears the linked request's reply-deadline timer as needed
+ *     (never left un-resolvable — see R4/R5 in the Registrar charter)
  *   - Logs an event
  */
 export async function handleOutreachReply(
@@ -214,16 +159,15 @@ export async function handleOutreachReply(
     messageTs?: string;
     threadTs?: string;
   }
-): Promise<boolean> {
+): Promise<{ handled: boolean; priorOutboundContext?: string; matchedJobId?: string }> {
   const allJobs = getOutreachJobsByColleague(params.senderId, params.profile.user.slack_user_id);
-  if (allJobs.length === 0) return false;
+  if (allJobs.length === 0) return { handled: false };
 
   // gh#201-c — a genuine Slack thread reply names its own job outright.
   // threadTs !== messageTs only when Slack itself reports this message as a
   // reply inside an existing thread; dm_message_ts is the ts of the outbound
-  // DM that opened that job's thread (the 'continue' branch below already
-  // threads follow-ups off it). Thread identity is ground truth — skip the
-  // content guess entirely when Slack already told us which conversation
+  // DM that opened that job's thread. Thread identity is ground truth — skip
+  // the content guess entirely when Slack already told us which conversation
   // this is.
   let job: OutreachJob | undefined;
   if (params.threadTs && params.messageTs && params.threadTs !== params.messageTs) {
@@ -256,7 +200,7 @@ export async function handleOutreachReply(
         senderId: params.senderId,
         activeCount: allJobs.length,
       });
-      return false;
+      return { handled: false };
     }
 
     if (matches.length === 1) {
@@ -273,7 +217,7 @@ export async function handleOutreachReply(
         senderId: params.senderId,
         matchCount: matches.length,
       });
-      return true;
+      return { handled: true };
     }
   }
 
@@ -286,7 +230,7 @@ export async function handleOutreachReply(
 
   // v1.8.4 — intent-routed outreach replies. If the outreach was tagged with
   // a recognized intent (meeting_reschedule for now), dispatch to the skill's
-  // dedicated handler instead of the generic done/continue/schedule classifier.
+  // dedicated handler instead of the generic no-intent fallback below.
   // Handler returns true if it handled the reply; false if we should fall
   // through (e.g. context_json missing or unparseable).
   if (job.intent === 'meeting_reschedule') {
@@ -298,7 +242,7 @@ export async function handleOutreachReply(
         profile: params.profile,
         bot_token: params.bot_token,
       });
-      if (handled) return true;
+      if (handled) return { handled: true };
     } catch (err) {
       logger.error('meeting_reschedule intent handler threw — falling through', { err: String(err), jobId: job.id });
     }
@@ -315,173 +259,143 @@ export async function handleOutreachReply(
         profile: params.profile,
         bot_token: params.bot_token,
       });
-      if (handled) return true;
+      if (handled) return { handled: true };
     } catch (err) {
       logger.error('oof_reengage intent handler threw — falling through', { err: String(err), jobId: job.id });
     }
   }
 
+  // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop — a matched job
+  // with NO routed intent used to be classified in-house right here
+  // (done/continue/schedule, via the now-deleted `processOutreachReply`) and
+  // answered with a Sonnet-drafted TEXT reply: no tool access, no
+  // `runOutputGates` coverage, and no owner-facing trace at all. That is
+  // exactly how a decisive "let's do Wednesday" turned into an unexecuted,
+  // untraceable promise ("I'll move it to Wednesday") — confirmed via a live
+  // DB query, nothing was logged anywhere for the owner. That classifier and
+  // its draft are gone. The reply now falls through (below, `handled: false`)
+  // to the FULL orchestrator, with real tools and real gate coverage, via
+  // `priorOutboundContext` — carrying what THIS module already matched, never
+  // `recentOutboundContext.ts`'s own, separate, shorter-window mechanism
+  // (its 24h *calendar*-hour tracking is shorter than the real reply
+  // deadline — routing through it would silently reintroduce the false
+  // "never replied" closure, cfd5bbc/wrap-4.5.6).
   const conversation: Array<{ role: 'maelle' | 'colleague'; text: string }> =
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
   conversation.push({ role: 'colleague', text: params.text });
+  // round 2 (2026-08-18) — persist reply_text HERE, unconditionally, the
+  // moment a real reply lands, regardless of what the orchestrator turn below
+  // goes on to do with it. This is what buildTurnContext's hasReply reads
+  // (the OWNER's own "has X replied yet" thread block, buildTurnContext.ts:512)
+  // — without it that block stays "sent, waiting for reply" even after a real
+  // reply already landed (the old done/schedule branches set it; this generic
+  // path never did). See closeOutreachReplyIfResolvedThisTurn below for the
+  // separate question of whether the reply also RESOLVED the ask.
+  updateOutreachJob(job.id, { conversation_json: JSON.stringify(conversation), reply_text: params.text });
 
-  const decision = await processOutreachReply({
-    originalMessage: job.message,
-    conversation: conversation.slice(0, -1),
-    newReply: params.text,
-    colleagueName: job.colleague_name,
-    ownerName: params.profile.user.name,
-    assistantName: params.profile.assistant.name,
-  });
-
-  // v3.1.1 — a reply of any kind kills the CURRENT expiry timer for this
-  // outreach. Path 2 moved that timer off the (deleted) `outreach_expiry`
-  // TASK onto the linked request's next_check; clear it here so an
-  // actively-replying colleague is never falsely marked no_response.
-  // Closing branches (below) close the request outright, which is its own
-  // terminal clear.
+  // Lifecycle bookkeeping — re-arm the SAME reply-deadline this outreach
+  // already carries, identical formula/window to a fresh send
+  // (calcResponseDeadline) and to what the old `continue` branch did: the
+  // colleague just re-engaged, so the clock restarts from now. Never close
+  // here — this module no longer classifies "fully resolved" vs "needs
+  // another round" itself (that judgment moved to the orchestrator; see
+  // closeOutreachReplyIfResolvedThisTurn below, called by the caller AFTER
+  // the orchestrator turn completes), and re-arming is the safe default
+  // either way: if nothing further happens, this expires on its own and BOTH
+  // sides are told (R4 — runner.ts's runOutreachExpiryOrDecision; phase
+  // 'outreach:re_engaged' makes that read "replied but never came back"
+  // rather than "never replied" — see outreach-expiry-tombstone-says-never-
+  // replied, 2026-08-12); if the reply resolves into a real action this same
+  // turn, closeOutreachReplyIfResolvedThisTurn supersedes this re-arm with a
+  // real closure. Never a silent drop either way (R4/R5).
   if (job.request_id) {
-    updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
-  }
-
-  if (decision.action === 'continue') {
-    // outreach-row-missing-expiry-timer (2026-08-09, req_1786285877993_rytmp)
-    // — the request DOESN'T close here (CONTINUE means the colleague asked a
-    // question or gave a non-decisive reply, R5's "let me check and come back
-    // to you" case: not a decline, the ask stays open for one more re-ask).
-    // The clear above wiped its expiry unconditionally, and nothing re-armed
-    // one for this branch — the request was left in awaiting_colleague with
-    // next_check_at/handler both NULL forever, unable to ever expire or close
-    // on its own (R4). Re-arm a fresh deadline off THIS reply, same formula
-    // and window a brand-new outreach gets (calcResponseDeadline, 24 working
-    // hours) — the colleague just re-engaged, so the clock restarts from now,
-    // not from the original send.
-    if (job.request_id) {
-      const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
-      // outreach-expiry-tombstone-says-never-replied (2026-08-12) — stamp
-      // phase='outreach:re_engaged' so a second silence after THIS re-arm
-      // reads correctly at expiry time (runner.ts's runOutreachExpiryOrDecision):
-      // `state` alone stays 'awaiting_colleague' across this re-arm, so without
-      // this marker a real reply followed by renewed silence is indistinguishable
-      // from never having replied at all.
-      updateRequest(job.request_id, {
-        nextCheckAt: freshDeadline,
-        nextCheckHandler: 'outreach_expiry',
-        phase: 'outreach:re_engaged',
-      });
-    }
-    // v2.2.4 (bug 6) — preserve thread context. v2.1.5 added dm_message_ts +
-    // dm_channel_id so follow-ups can land in the same DM thread the outreach
-    // started in. The continue branch was opening a fresh DM and posting at
-    // top level, breaking out of the thread the colleague was reading. Use
-    // the Connection registry with threadTs when we have it; fall back to
-    // sendDirect (no thread) for legacy rows that pre-date the columns.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
-    const conn = getConnection(params.profile.user.slack_user_id, 'slack');
-    if (conn) {
-      const sendOpts = job.dm_message_ts
-        ? { threadTs: job.dm_message_ts }
-        : undefined;
-      await conn.sendDirect(params.senderId, decision.response, sendOpts);
-    } else {
-      // Final fallback — the Connection registry should always be populated
-      // at startup, but if not, post via raw client as before so we don't
-      // silently swallow the reply.
-      const dmChannel = await openDM(app, params.bot_token, params.senderId);
-      await app.client.chat.postMessage({
-        token: params.bot_token,
-        channel: dmChannel,
-        text: formatForSlack(decision.response),
-      });
-    }
-    conversation.push({ role: 'maelle', text: decision.response });
-    updateOutreachJob(job.id, { conversation_json: JSON.stringify(conversation) });
-    logger.info('Outreach conversation continued', {
-      jobId: job.id,
-      response: decision.response.slice(0, 80),
-    });
-    return true;
-  }
-
-  // Scheduling turn — RELAY TO OWNER. The colleague's reply has turned into a
-  // request to set up a new meeting. We do NOT auto-find slots or coordinate
-  // here (the multi-party coord subsystem was removed). Instead: close the
-  // outreach as replied, complete its task, and DM the owner with the gist so
-  // he can decide and book through the normal direct path (find_available_slots
-  // → create_meeting).
-  if (decision.action === 'schedule') {
-    logger.info('Outreach → scheduling relay to owner', { jobId: job.id, details: decision.details });
-
-    updateOutreachJob(job.id, {
-      status: 'replied',
-      reply_text: `[Schedule] ${decision.summary}`,
-      conversation_json: JSON.stringify(conversation),
-    });
-
-    const { preferredDay, preferredTime, subject, durationMin } = decision.details;
-    const dayPart = preferredDay ? ` on ${preferredDay}` : '';
-    const timePart = preferredTime ? ` around ${preferredTime}` : '';
-    const relayMsg = `${job.colleague_name} wants to meet${dayPart}${timePart} for "${subject}" (${durationMin} min). Want me to find a time and book it?`;
-    await app.client.chat.postMessage({
-      token: params.bot_token,
-      channel: job.owner_channel,
-      thread_ts: job.owner_thread_ts ?? undefined,
-      text: formatForSlack(relayMsg),
-    });
-    if (job.owner_thread_ts) {
-      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: relayMsg });
-    }
-    logEvent({
-      ownerUserId: params.profile.user.slack_user_id,
-      type: 'outreach_reply',
-      title: `${job.colleague_name} — scheduling request`,
-      detail: relayMsg,
-      actor: job.colleague_name,
-      refId: job.id,
-    });
-
-    logger.info('Outreach → scheduling relay complete', {
-      jobId: job.id,
-      colleague: job.colleague_name,
-      subject,
-    });
-    return true;
-  }
-
-  // decision.action === 'done'
-  updateOutreachJob(job.id, {
-    status: 'replied',
-    reply_text: params.text,
-    conversation_json: JSON.stringify(conversation),
-  });
-  await app.client.chat.postMessage({
-    token: params.bot_token,
-    channel: job.owner_channel,
-    thread_ts: job.owner_thread_ts ?? undefined,
-    text: formatForSlack(decision.summary),
-  });
-  logEvent({
-    ownerUserId: params.profile.user.slack_user_id,
-    type: 'outreach_reply',
-    title: `${job.colleague_name} — outreach complete`,
-    detail: decision.summary,
-    actor: job.colleague_name,
-    refId: job.id,
-  });
-
-  if (job.owner_thread_ts) {
-    appendToConversation(job.owner_thread_ts, job.owner_channel, {
-      role: 'assistant',
-      content: decision.summary,
+    const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
+    updateRequest(job.request_id, {
+      nextCheckAt: freshDeadline,
+      nextCheckHandler: 'outreach_expiry',
+      phase: 'outreach:re_engaged',
     });
   }
 
-  logger.info('Outreach complete — summarised for owner', {
+  logger.info('Outreach reply — no routed intent, handing to full orchestrator', {
     jobId: job.id,
-    summary: decision.summary.slice(0, 100),
+    colleague: job.colleague_name,
   });
-  return true;
+
+  return { handled: false, priorOutboundContext: buildOutreachJobContextBlock(job), matchedJobId: job.id };
+}
+
+/**
+ * gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop (round 2, 2026-08-18)
+ * — called by the caller (processMessage.ts) AFTER the full orchestrator
+ * finishes the turn `handleOutreachReply` handed to it above (generic
+ * no-intent branch, `matchedJobId` returned). Decides whether THIS turn
+ * actually took a resolving action on the colleague's reply, and if so closes
+ * the outreach it answered. "Whatever tool acts now owns its own closure"
+ * isn't true of anything in the tree today — create_meeting / move_meeting /
+ * create_approval only ever touch THEIR OWN row, never the outreach request
+ * that prompted them — so this is the one place that does it.
+ *
+ * Mirrors the pattern the deleted `done`/`schedule` branches used:
+ * `updateOutreachJob(job.id, { status: 'replied' })` is a TRANSITION SIGNAL
+ * (db/jobs.ts) that itself closes the linked request, writes the
+ * interaction_log history line, and closes the followup tracker — the one
+ * place that already owns all three, so this never re-derives a second
+ * closure path. `reply_text` is already persisted (handleOutreachReply,
+ * above) by the time this runs, so the interaction_log line reads correctly
+ * even though this call passes no data fields of its own.
+ *
+ * Gated on genuine resolving evidence, never "any reply arrived" —
+ * recentOutboundContext.ts closes on that alone, and routing this job
+ * through that blunter rule is exactly the shorter-window regression the
+ * generic branch above exists to avoid. Two signals count:
+ *   - a calendar mutation landed this turn (mutationActions has an ok:true
+ *     entry, or bookingOccurred) — "orchestrator moves the meeting".
+ *   - the reply was escalated into a FRESH approval now awaiting the owner:
+ *     kind='approval', created in the SAME thread, at or after this turn
+ *     started — "relays an approval [for] the owner [to answer]". Scoped to
+ *     kind='approval' so it never trips on the freeform-owner-flag backstop
+ *     (tasks/skill.ts's flagUnresolvedFreeformForOwner mints kind='reminder'
+ *     rows — those are a DIFFERENT escalation for a DIFFERENT bug and must
+ *     never be read as "this outreach got resolved").
+ * A turn that only replied in words trips neither signal and leaves the
+ * request exactly as handleOutreachReply already re-armed it (R5's "let me
+ * check and come back to you" case, or any other non-decisive reply).
+ */
+export async function closeOutreachReplyIfResolvedThisTurn(params: {
+  ownerUserId: string;
+  threadTs: string;
+  jobId: string;
+  /** ISO instant captured immediately before the orchestrator call. */
+  turnStartedAt: string;
+  result: Pick<OrchestratorOutput, 'mutationActions' | 'bookingOccurred'>;
+}): Promise<void> {
+  const mutated = params.result.mutationActions?.some(m => m.ok) ?? false;
+  const booked = params.result.bookingOccurred === true;
+  let freshApproval = false;
+  if (!mutated && !booked) {
+    const turnStartMs = Date.parse(params.turnStartedAt);
+    freshApproval = getOpenRequestsForThread(params.ownerUserId, params.threadTs).some(r => {
+      if (r.kind !== 'approval') return false;
+      // created_at is a bare SQLite-UTC datetime ('YYYY-MM-DD HH:MM:SS') —
+      // normalize to a parseable instant before comparing (same idiom as
+      // colleagueOofReengage.ts).
+      const createdMs = Date.parse(r.created_at.replace(' ', 'T') + 'Z');
+      return Number.isFinite(createdMs) && Number.isFinite(turnStartMs) && createdMs >= turnStartMs;
+    });
+  }
+  if (!mutated && !booked && !freshApproval) return;
+
+  try {
+    updateOutreachJob(params.jobId, { status: 'replied' });
+    logger.info('Outreach reply resolved this turn — linked request closed', {
+      jobId: params.jobId, mutated, booked, freshApproval,
+    });
+  } catch (err) {
+    logger.warn('closeOutreachReplyIfResolvedThisTurn — close failed', {
+      jobId: params.jobId, err: String(err).slice(0, 200),
+    });
+  }
 }
 
 // ── Slack utilities ──────────────────────────────────────────────────────────

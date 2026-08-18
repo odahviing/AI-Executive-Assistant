@@ -70,6 +70,24 @@
  * `gcloud alpha services quota` with a role that isn't 403'd) before
  * re-running the smoke test, to tell "still zero" from "increased but not
  * yet enough."
+ *
+ * RESOLVED 2026-08-17 (gh#199): the 429 was specific to the REGIONAL quota
+ * pool (`us-east5`) — Vertex's `global` endpoint has its own, separately
+ * provisioned quota and is not blocked. Confirmed with a real rawPredict call
+ * (same VM SA) against
+ * `https://aiplatform.googleapis.com/v1/projects/reflectiz-ai-backoffice/locations/global/publishers/anthropic/models/claude-sonnet-5:rawPredict`
+ * — HTTP 200, real completion — and then again from inside the running app's
+ * own `getAnthropicClient()` (same cached singleton, same dotenv-loaded
+ * config, same ADC auth chain the live process uses). `.env` on the VM now
+ * carries `LLM_PROVIDER=vertex`, `VERTEX_PROJECT_ID=reflectiz-ai-backoffice`,
+ * `VERTEX_REGION=global` — Maelle is live on Vertex/global as of this date.
+ * `AnthropicVertex` (`@anthropic-ai/vertex-sdk`) natively supports
+ * `region: 'global'`: it routes to the bare `aiplatform.googleapis.com/v1`
+ * host (no region prefix) instead of `${region}-aiplatform.googleapis.com`.
+ * `config.VERTEX_REGION` is a plain `z.string()` (no enum), so `'global'`
+ * needed no code change. Rollback: remove the three `LLM_PROVIDER`/`VERTEX_*`
+ * keys from the VM's `.env` (back to `ANTHROPIC_API_KEY` only) and restart —
+ * defaults back to Anthropic-direct.
  */
 export const MODEL_SONNET = 'claude-sonnet-5';
 

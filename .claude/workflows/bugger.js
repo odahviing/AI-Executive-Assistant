@@ -293,6 +293,27 @@ const refKey = (v) => String(v || '').toLowerCase().replace(/^gh#|^#/, '').trim(
 const overflowArg = asArray('pendingOverflow', A.pendingOverflow)
 const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? o : o.ref)).filter(Boolean))
 const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' ? b : b.ref)).filter(Boolean))
+// A9 · ONE lookup for "does this ref carry a `built` ledger row", reused at
+// every door an item can enter through — the editor's own triage match below,
+// and the preset/paste door further down — so `regression`/`rootCause`/`lane`
+// travel with a match instead of the bare yes/no `builtRefs` gives. Fields
+// come from `ledger-stats.cjs --already-built --json`, which is the only
+// producer of `regression`/`lane` on this shape; an older caller that has not
+// upgraded simply omits them, and every consumer below already treats a
+// missing `regression` as false and a missing `lane` as "leave it dropped".
+const builtByKey = new Map(ALREADY_BUILT.filter((b) => b && typeof b === 'object' && b.ref).map((b) => [refKey(b.ref), b]))
+// A regression match must never just vanish, wherever it entered: the ledger's
+// own [REGRESSION] signal (`ledger-stats --index`, surfaced on this shape by
+// `--already-built --json`'s `regression` field) means the OLD fix has already
+// proven incomplete once. Dropping tonight's rediscovery of it a second time
+// would let the same promise break forever with nothing ever re-opening it.
+// Reframes the investigation per editor.md E11: not "what is the root cause"
+// but "why did the previous fix not hold" — the old fix's proven line travels
+// forward instead of being re-derived from zero.
+const regressionNote = (entry) =>
+  `[REGRESSION — matches alreadyBuilt ref ${entry.ref}${entry.invariant ? `, identity ${entry.invariant}` : ''}] ` +
+  `The earlier fix at ${entry.rootCause || '(unknown line)'} is proven incomplete — \`ledger-stats --index\` marks this identity closed-and-open-again. ` +
+  `Investigate WHY it did not hold before writing a new one; do not re-derive the root cause from scratch.`
 // X176 · a Manager mistake handing the SAME ref to a DROP list and this CONFIRM
 // list would tell the editor two contradictory things about one bug in one brief
 // — drop it here rather than leave it to whichever instruction gets read last.
@@ -346,9 +367,55 @@ if (carriedDeferred.length)
       .map((i) => i.id || i.ref || '(no id)')
       .join(', ')}. A deferral is a ONE-RUN skip and this run is the skip. **Now delete \`"state":"deferred"\` from those entries in \`state.pendingOverflow\`** — the skip has been served, so the next build takes them. An uncleared marker parks the item forever, which is the failure this reads for.`,
   )
+// 2026-08-16 · THE PRESET DOOR HAD NO SCREEN AT ALL. `overflowArg` above is
+// checked against `parkedRefs`/`builtRefs` before it drains; `presetArg` —
+// `args.issues`, the SAME door a raw paste and an owner-approved report row
+// both walk through, structurally identical on arrival — was concatenated raw.
+// A cheap ref-match costs nothing (a Set lookup, never an LLM call), so there
+// is no "needless re-triage" cost to weigh against running it on every preset
+// item, screened or not.
+//
+// The two lists get OPPOSITE treatment, same as everywhere else in this file:
+// `builtRefs` is a pure engineering fact (the code exists, just not deployed)
+// — always drop, unless the match is flagged REGRESSION (see `regressionNote`
+// above), in which case it is reframed and kept rather than silently lost a
+// second time. `parkedRefs` (openKnown: converted/declined) is a past DECISION
+// — naming it directly in a preset is his own current act, which per E12/E2 is
+// exactly what overrides a decline, so it is never dropped here, only NAMED so
+// the override is visible.
+const presetParked = presetArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
+if (presetParked.length)
+  argWarnings.push(
+    `${presetParked.length} preset item(s) match an \`openKnown\` (parked/declined) ref and were KEPT, not dropped: ${presetParked.map((i) => i.id || i.ref || '(no id)').join(', ')}. Naming it directly in a preset is his own act and overrides a decline/conversion (E12) — this was never checked before now.`,
+  )
+const presetBuiltAll = presetArg.filter((i) => i && builtRefs.has(refKey(i.id || i.ref)))
+const presetRegression = presetBuiltAll.filter((i) => {
+  const e = builtByKey.get(refKey(i.id || i.ref))
+  return e && e.regression
+})
+const presetSettled = presetBuiltAll.filter((i) => !presetRegression.includes(i))
+if (presetSettled.length)
+  argWarnings.push(
+    `${presetSettled.length} preset item(s) match an \`alreadyBuilt\` ref and were DROPPED, not (re)dispatched: ${presetSettled
+      .map((i) => i.id || i.ref || '(no id)')
+      .join(', ')}. A raw paste and an owner-approved report row are structurally identical on this door, so both are now checked — dispatching either would have cost a full turn to be told "already-fixed".`,
+  )
+if (presetRegression.length)
+  log(
+    `Preset: ${presetRegression.length} item(s) match an \`alreadyBuilt\` ref flagged [REGRESSION] — kept, reframed to "why did the fix not hold" rather than dropped: ${presetRegression
+      .map((i) => i.id || i.ref)
+      .join(', ')}`,
+  )
+const presetClean = presetArg
+  .filter((i) => !presetSettled.includes(i))
+  .map((i) => {
+    if (!presetRegression.includes(i)) return i
+    const e = builtByKey.get(refKey(i.id || i.ref))
+    return { ...i, notes: `${i.notes ? `${i.notes} ` : ''}${regressionNote(e)}`.trim() }
+  })
 // X25's guard reads the MERGED list below, so a carried row still flagged
 // `awaitingOwner` is refused exactly like a pasted one.
-const PRESET = presetArg.length ? [...carriedIn, ...presetArg] : null
+const PRESET = presetArg.length ? [...carriedIn, ...presetClean] : null
 if (carriedIn.length)
   log(
     presetArg.length
@@ -393,6 +460,11 @@ const describeBuilt = (b) =>
     : `  • ${b.ref ? `**ref ${b.ref}** — ` : ''}${b.symptom || '(no symptom)'}` +
       `${b.rootCause ? `\n      root cause already fixed at: ${b.rootCause}` : ''}` +
       `${b.invariant ? `\n      identity: ${b.invariant}` : ''}` +
+      `${
+        b.regression
+          ? `\n      **[REGRESSION] this identity is closed AND open again elsewhere (\`ledger-stats --index\`) — drop it in \`droppedAsAlreadyBuilt\` as usual; a REF match is reinstated by the engine automatically, reframed to "why did the fix not hold" (E11). If your match is by symptom only, with no clean ref, reinstate it yourself instead of a silent drop.**`
+          : ''
+      }` +
       `${b.state === 'awaiting-owner' ? `\n      **state: awaiting-owner — DROP any finding for this ref, even if more work looks available**` : ''}`
 // X176 · shares `describeOpen`'s shape (ref/symptom/state/invariant/note) but adds
 // the root-cause line `describeBuilt` shows for a built row — a still-open row
@@ -994,6 +1066,13 @@ const INVARIANT_NOTE = KNOWN_INVARIANTS.length
     `If it is an instance of a general rule NOT in that list, coin one short slug and use it for every issue in this batch that breaks the same rule. Leave it out for a genuinely local bug.`
   : ''
 
+// 2026-08-16 · printed only when THIS batch actually carries one, same gating
+// as WHERE_NOTE above. `source: 'regression'` is the engine's own marker (see
+// `regressionNote`/`builtByKey`) — never emitted by a lane, only read by one.
+const REGRESSION_NOTE =
+  `\n\nAn issue carrying \`source: "regression"\` was reinstated from the \`alreadyBuilt\` list because its identity is marked [REGRESSION] in \`ledger-stats --index\` — closed once, open again. ` +
+  `Its \`whyHypothesis\`/\`notes\` name the PRIOR fix's \`file:line\`: investigate WHY that fix did not hold, never re-derive the root cause from zero (editor.md E11).`
+
 // X73 · A NUMBER THAT BOUNDS A DURATION IS THE ONE FIX THAT CANNOT BE SETTLED
 // FROM THE CODE. gh#166's news budget went 20s → 8s → 14s across three runs and
 // nobody ever timed the path: the handyman dispatch that changed it made ZERO
@@ -1045,7 +1124,7 @@ const dispatch = (lane, issues, asBounce) => {
   const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
   if (!asBounce) dispatchedLanesOnce.add(lane)
   return agent(
-    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}${OBSERVABLE_NOTE}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
+    `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}${OBSERVABLE_NOTE}${issues.some((i) => i.source === 'regression') ? REGRESSION_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
     // No `model` here: the tier lives on the lane's charter frontmatter, so a
     // hand-dispatched lane gets it too. Setting it in the engine only made it
     // true on the engine path, which is the shape of failure this framework
@@ -1249,6 +1328,34 @@ log(`Editor: ${findingsSeen} raw finding(s) from ${SOURCES.join(' + ')} → ${al
 if (declinedOverridden.length) log(`Reopened ${declinedOverridden.length} previously-declined item(s) by the owner's own act: ${declinedOverridden.join(', ')}`)
 if (BACKLOG) log(`Backlog: ${backlogReread.length} of ${backlogSeen} stale row(s) re-read — ${backlogReread.filter((b) => b.state === 'fixed').length} fixed, ${backlogReread.filter((b) => b.state === 'moved').length} moved, ${backlogReread.filter((b) => b.state === 'still-real').length} still real`)
 if (OPEN_BACKLOG.length) log(`Open backlog: ${matchedOpenBacklog.length} of ${OPEN_BACKLOG.length} row(s) matched by tonight's fresh findings — confirmed, not dropped.`)
+// 2026-08-16 · A REGRESSION MATCH IS NEVER A PURE DROP, same carve-out as the
+// preset door above. `droppedAsAlreadyBuilt` entries are bare strings (ref OR
+// symptom, per the editor's own schema), so only a REF match is checkable
+// here — a symptom-only drop stays a drop, the same limitation `builtRefs`
+// already has everywhere else in this file.
+const regressionReinstated = triageDropped
+  .map((d) => builtByKey.get(refKey(String(d))))
+  .filter((entry) => entry && entry.regression)
+  .map((entry) => ({
+    id: `${entry.ref}>regression`,
+    lane: entry.lane || '',
+    severity: 'high',
+    clarity: 'clear',
+    source: 'regression',
+    kind: 'atomic',
+    symptom: entry.symptom || `${entry.ref} recurring`,
+    evidence: entry.rootCause || '',
+    whyHypothesis: regressionNote(entry),
+    notes: regressionNote(entry),
+  }))
+if (regressionReinstated.length) {
+  allIssues = allIssues.concat(regressionReinstated)
+  log(
+    `Regression: ${regressionReinstated.length} \`alreadyBuilt\` match(es) marked [REGRESSION] in the ledger index — reinstated instead of dropped: ${regressionReinstated
+      .map((r) => r.id)
+      .join(', ')}`,
+  )
+}
 }
 
 // X98 · a backlog re-read that comes back `fixed` CLOSES a ledger row with no

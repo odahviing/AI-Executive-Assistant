@@ -124,7 +124,7 @@
     "155": {
       "title": "Rebuild the calendar health skill",
       "type": "Improvement",
-      "tier": "Roadmap"
+      "tier": "Idea"
     },
     "182": {
       "title": "Detect regressions in ledger lookup",
@@ -148,18 +148,13 @@
     },
     "186": {
       "title": "Coda reads the task turn's mood",
-      "type": "Improvement",
-      "tier": "Roadmap"
+      "type": "Feature",
+      "tier": "Idea"
     },
     "187": {
       "title": "Closing turn keeps tone context",
       "type": "Improvement",
       "tier": "Roadmap"
-    },
-    "199": {
-      "title": "Move to Vertex-hosted Claude",
-      "type": "Improvement",
-      "tier": "Next"
     }
   }
 }

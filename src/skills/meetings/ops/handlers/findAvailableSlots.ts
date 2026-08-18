@@ -1433,7 +1433,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
             }
             if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
-              if (attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning) {
+              if (
+                (diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0)
+                || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning
+              ) {
                 return {
                   slots: rawSlots,
                   ...(diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0

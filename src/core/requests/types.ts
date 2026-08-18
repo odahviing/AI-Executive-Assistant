@@ -93,7 +93,13 @@ export type NextCheckHandler =
   | 'colleague_oof_recheck'
   // gh#201-d — the reengagement DM's colleague said "checking" → re-ping them
   // ONCE at +24h, then re-arm to outreach_expiry (mirrors reschedule_reask).
-  | 'oof_reengage_reask';
+  | 'oof_reengage_reask'
+  // chris-kelley-oof-block-b round 2 (2026-08-18) — flagUnresolvedFreeformForOwner's
+  // immediate postOwnerDecision attempt failed (thread post AND the DM
+  // fallback both failed). Bounded, short linear-backoff retry — never
+  // workTimeBaseFromNow/nextOwnerWorkdayStart, the deferred-past-vacation
+  // timer this backstop exists to avoid. See runner.ts's runFreeformFlagRetry.
+  | 'freeform_flag_retry';
 
 export interface RequestRow {
   // Identity

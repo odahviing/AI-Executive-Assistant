@@ -1,10 +1,13 @@
 /**
- * detectCategory (v2.7.0) — single-event LLM classification.
+ * detectCategory (v2.7.0) — single-event LLM classification, with one
+ * deterministic pre-check ahead of it.
  *
  * autoCategorize.ts already does this for batches (overnight 7-day sweep);
  * this is the per-booking version called by planMeeting before location +
- * rule application. Runs ONE Sonnet pass against the proposed subject /
- * attendees / body and returns the best yaml-category match or null.
+ * rule application. First checks `profile.meetings.private_emails` in code
+ * (a hard override, no LLM call needed when it fires — see below); otherwise
+ * runs ONE Sonnet pass against the proposed subject / attendees / body and
+ * returns the best yaml-category match or null.
  *
  * Conservative: returns null when no category clearly fits, so the
  * pipeline falls back to default rules (day-type / external defaults).
@@ -46,6 +49,44 @@ export interface DetectCategoryResult {
 export async function detectCategory(input: DetectCategoryInput): Promise<DetectCategoryResult> {
   const cats = input.profile.categories ?? [];
   if (cats.length === 0) return { category: null, reason: 'no categories defined in profile' };
+
+  // 2026-08-16 — deterministic private-contact override (W3: code before
+  // prompt). profile.meetings.private_emails (userProfile.ts) is a list of
+  // attendee emails that are always personal, never work — spouse, kids,
+  // family. When any attendee matches, force the tenant's private/sensitive
+  // category here in CODE, before the LLM call even runs — no relationship
+  // claim or email list is ever rendered into the prompt below for the model
+  // to pattern-match against. Unconditional: a private contact does not
+  // attend work meetings, so a work-sounding subject does not lift the
+  // override (unlike the solo-block heuristic in the Personal category's own
+  // description, which is a much weaker signal and does yield to a clear
+  // work subject).
+  //
+  // The category is found by its schema-defined `sets_sensitivity_private:
+  // true` flag (userProfile.ts:312), never by the literal name "Personal" —
+  // category names are tenant-configurable YAML (the whole `categories` list
+  // is user-defined), so matching on the name would silently stop firing for
+  // any tenant who named their equivalent category something else (e.g.
+  // "Family"), reintroducing exactly the naming-coupling private_emails was
+  // built to avoid. YAML order is priority order (categories schema above,
+  // and the classifier prompt below: "first match wins"), so if more than
+  // one category carries the flag — an unusual config — the first one wins,
+  // same tie-break as everywhere else categories are ordered. When NO
+  // category has the flag configured, `personal` is undefined and this
+  // override no-ops, falling through to the LLM pass below.
+  const privateEmails = new Set((input.profile.meetings?.private_emails ?? []).map(e => e.toLowerCase()));
+  if (privateEmails.size > 0) {
+    const matched = input.attendees
+      .map(a => (a.email ?? '').toLowerCase())
+      .find(e => e && privateEmails.has(e));
+    if (matched) {
+      const personal = cats.find(c => c.sets_sensitivity_private === true);
+      if (personal) {
+        return { category: personal.name, reason: `attendee ${matched} is on the private_emails list` };
+      }
+    }
+  }
+
   if (!config.ANTHROPIC_API_KEY) {
     return { category: null, reason: 'no Anthropic key' };
   }
