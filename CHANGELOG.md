@@ -6,6 +6,8 @@
 
 A downtime reconnect could leave group conversations behind — DMs got caught up, group chats did not, even when she'd been directly addressed while offline. And a real honesty-guard gap closes: testing found the language-agnostic backstop against Maelle describing herself as AI/a bot caught zero of four French/Spanish/German casual-aside cases — its own prompt never actually stated that a bare identity claim is a violation on its own, only the infrastructure-framing half of the rule existed.
 
+**Minor, not patch, on purpose.** The product side alone would be a patch — three real fixes, no new capability. What makes this a minor is the other half: every one of the thirteen agent charters that build Maelle got reviewed and, in two cases, fully rewritten. That's a genuine framework makeover riding alongside the bug wave, not a routine patch day, and it deserves its own version line to mark where "before" and "after" the framework overhaul sit.
+
 ### Fixed
 - **A colleague's message sent while Maelle was offline could go unanswered forever if it arrived in a group, not a DM.** Downtime catch-up now covers MPIMs and channels too, mention-gated the same way she'd have responded live, and a thread now counts as resolved if anyone — not just her — already replied in it.
 - **A reconnect-catch-up reply could leak Maelle's own raw Slack ID into a colleague-visible message.** The replay path now resolves `<@ID>` mentions exactly like every live handler does before drafting — the same class of fix that closed a real leak once before, missing on this one path.
