@@ -2,7 +2,7 @@
 
 ---
 
-## 4.6.3 — She catches her own "I'm an AI" slip in every language, not just English
+## 4.7.0 — She catches her own "I'm an AI" slip in every language, not just English
 
 A downtime reconnect could leave group conversations behind — DMs got caught up, group chats did not, even when she'd been directly addressed while offline. And a real honesty-guard gap closes: testing found the language-agnostic backstop against Maelle describing herself as AI/a bot caught zero of four French/Spanish/German casual-aside cases — its own prompt never actually stated that a bare identity claim is a violation on its own, only the infrastructure-framing half of the rule existed.
 
