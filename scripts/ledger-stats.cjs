@@ -33,6 +33,7 @@
  *   node scripts/ledger-stats.cjs --index         # one line per identity — recurrence, regressions, coverage
  *   node scripts/ledger-stats.cjs --wrap 4.5.0    # this release's own rows, BUILT->WRAPPED, GITHUB sync, PHANTOM CANDIDATES
  *   node scripts/ledger-stats.cjs --open --json   # machine-readable open set — feeds --wrap's phantom check, nothing else consumes it
+ *   node scripts/ledger-stats.cjs --closed-refs --json   # exact-ref screen for state.pendingOverflow (bugger.js args.closedRefs) — never for intake dedup
  *
  * `--open` exists because the backlog IS the ledger — every row whose verdict is
  * not `built` is still open, so a separate backlog file is a second copy that
@@ -475,6 +476,63 @@ if (argv.includes('--already-built')) {
     if (regressedShown.length)
       console.log(`\n  ${regressedShown.length} of these carr${regressedShown.length === 1 ? 'ies' : 'y'} an identity \`--index\` marks [REGRESSION] — closed and open again: ${regressedShown.map((r) => r.ref).join(', ')}`);
     console.log(`\nPass --json to get [{ref, symptom, rootCause, invariant, state, lane, regression}] directly for \`args.alreadyBuilt\`.\n`);
+  }
+  process.exit(0);
+}
+
+// ── `--closed-refs` — the EXACT-REF screen for `state.pendingOverflow`,
+// deliberately NOT `--already-built`. `--already-built` sweeps a ref the
+// moment ANY wrap has landed since it shipped, which is the right caution for
+// a FRESH github/logs finding (rediscovering an old symptom past a wrap might
+// be a genuine regression, so intake keeps investigating it rather than
+// silently dropping it) — but the pendingOverflow queue never carries a fresh,
+// fuzzy finding. Every entry is the EXACT ref of one specific tracked bug the
+// engine already knows about, re-injected verbatim, so there is no "maybe
+// it's a new regression" question to protect: once that ref is closed in the
+// ledger, in ANY way `CLOSED` recognises, it must never re-enter a dispatch,
+// however many wraps have landed since.
+//
+// Measured 2026-08-19 (wf_b3690654-f4b): 5 of 11 queued items had shipped via
+// a hand-dispatched backlog run on 2026-08-14 and were swept out of
+// `--already-built` by the 4.6.0/4.6.1 wraps that landed after — so
+// bugger.js's queue screen, which reused `alreadyBuilt` for both jobs, went
+// blind for exactly the entries it exists to catch, and all 5 rode into a
+// full lane dispatch that came back `already-fixed`.
+//
+// Deliberately bare — `[ref, ref, …]`, no shape at all. An exact-match screen
+// needs nothing else, and X186 already measured what a fuller shape costs
+// when it does not need to be paid.
+if (argv.includes('--closed-refs')) {
+  const ledgerPath = argOf('--ledger') || LEDGER;
+  if (!fs.existsSync(ledgerPath)) {
+    console.error(`No ledger at ${ledgerPath}`);
+    process.exit(1);
+  }
+  const all = fs
+    .readFileSync(ledgerPath, 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const latest = new Map();
+  for (const r of all) {
+    if (!r.ref) continue; // unindexed rows can never collapse or be matched by ref
+    latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r });
+  }
+  const refs = [...latest.values()].filter((r) => CLOSED.has(r.verdict)).map((r) => r.ref);
+  if (jsonOut) {
+    console.log(JSON.stringify(refs));
+  } else {
+    console.log(
+      `\nCLOSED REFS — ${refs.length} ref(s) closed in the ledger by any verdict (built, wrapped, confirmed-other-lane, already-fixed, declined, converted, audit).`,
+    );
+    console.log(`This is the EXACT-REF screen for \`state.pendingOverflow\` — never the intake dedup list. Pass --json for ["ref1","ref2",…] directly as \`args.closedRefs\`.\n`);
   }
   process.exit(0);
 }

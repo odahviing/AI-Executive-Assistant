@@ -293,6 +293,23 @@ const refKey = (v) => String(v || '').toLowerCase().replace(/^gh#|^#/, '').trim(
 const overflowArg = asArray('pendingOverflow', A.pendingOverflow)
 const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? o : o.ref)).filter(Boolean))
 const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' ? b : b.ref)).filter(Boolean))
+// X-CLOSEDREFS · a SECOND, narrower ref set — `ledger-stats.cjs --closed-refs`,
+// never `--already-built`. `alreadyBuilt`'s whole design (X186-188) SWEEPS a
+// ref the moment any wrap has landed since it shipped, because a FRESH
+// github/logs finding rediscovering an old symptom past a wrap might be a
+// real regression — correct caution for intake, where the match is fuzzy.
+// `state.pendingOverflow` never carries a fuzzy match: every entry is the
+// EXACT ref of one specific tracked bug, re-injected verbatim, so there is no
+// "maybe it's a new regression" question to protect — a closed ref is closed,
+// however many wraps have landed since. Reusing `builtRefs` for both jobs is
+// what went blind: measured 2026-08-19 (wf_b3690654-f4b), 5 of 11 queued
+// items had shipped via a hand-dispatched backlog run on 2026-08-14 and were
+// swept out of `alreadyBuilt` by the 4.6.0/4.6.1 wraps that landed after —
+// so `carriedBuilt` below could not catch any of them and all 5 rode into a
+// full lane dispatch that came back `already-fixed`. `closedRefs` is deliberately
+// bare (`[ref, ref, …]`, no shape) — an exact-match screen needs nothing else.
+const closedRefsArg = asArray('closedRefs', A.closedRefs)
+const closedRefSet = new Set(closedRefsArg.map(refKey).filter(Boolean))
 // A9 · ONE lookup for "does this ref carry a `built` ledger row", reused at
 // every door an item can enter through — the editor's own triage match below,
 // and the preset/paste door further down — so `regression`/`rootCause`/`lane`
@@ -326,7 +343,7 @@ if (openBacklogOverlap.length)
       .join(', ')}. A ref cannot be both DROP and CONFIRM in the same brief.`,
   )
 const carriedDropped = overflowArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
-const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) && builtRefs.has(refKey(i.id || i.ref)))
+const carriedBuilt = overflowArg.filter((i) => i && !carriedDropped.includes(i) && (builtRefs.has(refKey(i.id || i.ref)) || closedRefSet.has(refKey(i.id || i.ref))))
 // X88 · A DEFERRAL HE MAKES ON A CARRIED ITEM. A queued discovery drains at the
 // head of the next build by construction, so his `defer` on one had NOWHERE to be
 // expressed and was silently ignored — the item rode into that build anyway. Same
@@ -355,7 +372,7 @@ if (carriedDropped.length)
   )
 if (carriedBuilt.length)
   argWarnings.push(
-    `${carriedBuilt.length} \`pendingOverflow\` entr${carriedBuilt.length === 1 ? 'y' : 'ies'} matched an \`alreadyBuilt\` ref and were DROPPED, not re-built: ${carriedBuilt
+    `${carriedBuilt.length} \`pendingOverflow\` entr${carriedBuilt.length === 1 ? 'y' : 'ies'} matched an \`alreadyBuilt\` or \`closedRefs\` ref and were DROPPED, not re-built: ${carriedBuilt
       .map((i) => i.id || i.ref || '(no id)')
       .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
   )
@@ -1576,6 +1593,16 @@ if (MODE === 'collect') {
       findings: findingsSeen,
       atomic: allIssues.length,
       buildable: buildable.length + pending.length,
+      // X-BUILDABLEMIX · `buildable` is a SUM of three sources with three very
+      // different meanings — tonight's own intake, a stale queue re-injecting
+      // itself, and a backlog row promoted by its own `recommend`. Printed as
+      // one opaque number, "buildable: 12" cannot be told apart from "12 fresh
+      // bugs tonight", and wf_b3690654-f4b was the former (1 fresh, 11 carried)
+      // read as if it were the latter. These three ALWAYS sum to `buildable`
+      // by construction (the dedup pass above assigns each item to exactly one).
+      fromEditor,
+      fromQueue,
+      fromBacklog,
       dispatched: 0, // by design: collect mode records and returns, it never dispatches
       built: 0,
       alreadyFixed: 0,
@@ -2974,6 +3001,11 @@ return {
     findings: findingsSeen,
     atomic: allIssues.length,
     buildable: buildable.length + pending.length,
+    // X-BUILDABLEMIX · the same three-way split as the collect-mode return
+    // above — see that comment. Always sums to `buildable`.
+    fromEditor,
+    fromQueue,
+    fromBacklog,
     dispatched: buildable.length,
     built: verified.filter((r) => r.verdict === 'built').length,
     // X66 · a row another lane delivered. NOT added to `built` — one change

@@ -1115,6 +1115,130 @@ const main = async () => {
   // which is the same distinction the code makes: fact 1 resolves at the
   // ledger's own bookkeeping, fact 2 is what the printed list names by ref.
   ok('the human view names what fact 2 dropped, not just a count', /fix-old-1/.test(abText), abText)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // `--closed-refs` — the EXACT-REF screen for `state.pendingOverflow`.
+  // Deliberately proven on the SAME kind of row `--already-built` sweeps away
+  // (an old `built` ref with a real wrap since), on the SAME real git history,
+  // so the two commands' disagreement on that one row is asserted directly —
+  // that disagreement is the entire reason bugger.js needs both lists.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('36 · `--closed-refs` — CLOSED by any verdict, no wrap-sweep  (fires on the bad input, silent on the good one)')
+  const crTmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'closed-refs-')), 'ledger.jsonl')
+  const crRows = [
+    // Old enough that a real wrap has landed since — `--already-built` sweeps
+    // this away, but it is still CLOSED and `--closed-refs` must say so.
+    { date: '2026-04-01', runId: 'test', lane: 'matchmaker', ref: 'shipped-old', finding: 'x', verdict: 'built', state: 'built' },
+    { date: '2026-08-01', runId: 'test', lane: 'gatekeeper', ref: 'declined-ref', finding: 'y', verdict: 'declined', state: 'declined' },
+    { date: '2026-08-01', runId: 'test', lane: 'librarian', ref: 'still-open-ref', finding: 'z', verdict: 'needs-owner-decision', state: 'open', recommend: 'build — later' },
+    { date: '2026-08-01', runId: 'test', lane: 'handyman', finding: 'refless, ignored', verdict: 'built', state: 'built' },
+  ]
+  fs.writeFileSync(crTmp, crRows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  const crJson = JSON.parse(execFileSync(process.execPath, [STATS, '--closed-refs', '--json', '--ledger', crTmp], { encoding: 'utf8' }))
+  ok('an OLD built ref that `--already-built` would sweep still counts as CLOSED  (fires on the bad input)', crJson.includes('shipped-old'), crJson)
+  ok('a declined ref counts as CLOSED too — any verdict in CLOSED, not just `built`', crJson.includes('declined-ref'), crJson)
+  ok('a genuinely open ref is NOT reported closed  (silent on the good one)', !crJson.includes('still-open-ref'), crJson)
+  ok('a ref-less row never appears; exactly the two closed refs reached the payload', crJson.length === 2, crJson)
+  const crAlreadyBuilt = JSON.parse(execFileSync(process.execPath, [STATS, '--already-built', '--json', '--ledger', crTmp], { encoding: 'utf8' }))
+  ok(
+    '`--already-built` sweeps the SAME old ref away on the SAME ledger — proving the two commands genuinely disagree, which is why bugger.js needs both',
+    !crAlreadyBuilt.some((r) => r.ref === 'shipped-old'),
+    crAlreadyBuilt,
+  )
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Measured 2026-08-19 (wf_b3690654-f4b): 5 of 11 `state.pendingOverflow`
+  // items had shipped via a hand-dispatched backlog run and were swept out of
+  // `alreadyBuilt` by the wraps that landed after, so bugger.js's queue screen
+  // (which reused `alreadyBuilt` for both jobs) missed all 5 and each rode
+  // into a full, wasted lane dispatch. `closedRefs` is the fix.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('37 · pendingOverflow queue — `closedRefs` catches what `alreadyBuilt` swept away  (fires on the bad input, silent on the good one)')
+  const staleQueueItem = { id: 'stale-queue-ref', lane: 'slackmaster', severity: 'medium', clarity: 'clear', source: 'verify', symptom: 'a queued fix that already shipped via a hand dispatch, later swept out of --already-built by a wrap' }
+  const caughtBugger = await runBugger(
+    { issues: [BUG_ISSUE], pendingOverflow: [staleQueueItem], alreadyBuilt: [], closedRefs: ['stale-queue-ref'], verify: false },
+    { 'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] } },
+  )
+  ok('no throw', !caughtBugger.err, caughtBugger.err && caughtBugger.err.message)
+  ok(
+    'the swept-but-shipped queue item is DROPPED, never dispatched a second time  (fires on the bad input)',
+    caughtBugger.calls.some((c) => c.label === 'slackmaster(1)') && !caughtBugger.calls.some((c) => c.label === 'slackmaster(2)'),
+    caughtBugger.calls.map((c) => c.label),
+  )
+  ok('named in manifest.carry.droppedAsBuiltRefs', caughtBugger.out && caughtBugger.out.manifest.carry.droppedAsBuiltRefs.includes('stale-queue-ref'), caughtBugger.out && caughtBugger.out.manifest.carry)
+
+  const openQueueItem = { id: 'genuinely-open-ref', lane: 'slackmaster', severity: 'medium', clarity: 'clear', source: 'verify', symptom: 'a queued fix that has not shipped yet' }
+  const notCaughtBugger = await runBugger(
+    { issues: [BUG_ISSUE], pendingOverflow: [openQueueItem], alreadyBuilt: [], closedRefs: [], verify: false },
+    {
+      'slackmaster(2)': {
+        results: [
+          { id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] },
+          { id: 'genuinely-open-ref', verdict: 'built', filesTouched: ['src/y.ts'] },
+        ],
+      },
+    },
+  )
+  ok('no throw', !notCaughtBugger.err, notCaughtBugger.err && notCaughtBugger.err.message)
+  ok(
+    'a genuinely still-open queue item IS dispatched alongside the fresh issue  (silent on the good one)',
+    notCaughtBugger.calls.some((c) => c.label === 'slackmaster(2)'),
+    notCaughtBugger.calls.map((c) => c.label),
+  )
+  ok('not named in droppedAsBuiltRefs', notCaughtBugger.out && notCaughtBugger.out.manifest.carry.droppedAsBuiltRefs.length === 0, notCaughtBugger.out && notCaughtBugger.out.manifest.carry)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Task 2 — `counts.fromEditor/fromQueue/fromBacklog` always sum to
+  // `counts.buildable`, so the Manager can print the split instead of one
+  // opaque number. Proven on the same caught/not-caught runs above: no new
+  // dispatch needed, just read the counts already returned.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('38 · `counts.buildable` is a MIX, and the split is on the return — proven on a DISCOVERY run (`sources`, not a preset `build`), the exact shape wf_b3690654-f4b was  (fires on the bad input, silent on the good one)')
+  const discoveryEditor = {
+    filesRead: [],
+    cutoffUtc: '',
+    turnsAfterCutoff: 0,
+    findingsSeen: 1,
+    droppedAsOpenKnown: [],
+    overriddenDeclined: [],
+    droppedAsAlreadyBuilt: [],
+    matchedOpenBacklog: [],
+    ticketComplaints: [],
+    issues: [{ id: 'fresh-1', symptom: 'the reminder fires twice', lane: 'slackmaster', severity: 'high', clarity: 'clear', source: 'github' }],
+  }
+  const zeroMixBugger = await runBugger(
+    { sources: ['github'], pendingOverflow: [staleQueueItem], alreadyBuilt: [], closedRefs: ['stale-queue-ref'], verify: false },
+    { editor: discoveryEditor, 'slackmaster(1)': { results: [{ id: 'fresh-1', verdict: 'built', filesTouched: ['src/x.ts'] }] } },
+  )
+  ok('no throw', !zeroMixBugger.err, zeroMixBugger.err && zeroMixBugger.err.message)
+  ok(
+    'a discovery run with 1 fresh finding and 1 dropped queue item reports fromEditor:1, fromQueue:0  (the drop never inflates fromQueue)',
+    zeroMixBugger.out && zeroMixBugger.out.counts.fromEditor === 1 && zeroMixBugger.out.counts.fromQueue === 0 && zeroMixBugger.out.counts.buildable === 1,
+    zeroMixBugger.out && zeroMixBugger.out.counts,
+  )
+  const mixedBugger = await runBugger(
+    { sources: ['github'], pendingOverflow: [openQueueItem], alreadyBuilt: [], closedRefs: [], verify: false },
+    {
+      editor: discoveryEditor,
+      'slackmaster(2)': {
+        results: [
+          { id: 'fresh-1', verdict: 'built', filesTouched: ['src/x.ts'] },
+          { id: 'genuinely-open-ref', verdict: 'built', filesTouched: ['src/y.ts'] },
+        ],
+      },
+    },
+  )
+  ok('no throw', !mixedBugger.err, mixedBugger.err && mixedBugger.err.message)
+  ok(
+    'a discovery run with 1 fresh finding and 1 surviving queue item reports fromEditor:1, fromQueue:1, buildable:2  (fires on the bad input — wf_b3690654-f4b\'s "buildable:12" hid exactly this split)',
+    mixedBugger.out && mixedBugger.out.counts.fromEditor === 1 && mixedBugger.out.counts.fromQueue === 1 && mixedBugger.out.counts.buildable === 2,
+    mixedBugger.out && mixedBugger.out.counts,
+  )
+  ok(
+    'the three sources always sum to `buildable`  (silent on the good one — the invariant holds, not just the individual numbers)',
+    mixedBugger.out && mixedBugger.out.counts.fromEditor + mixedBugger.out.counts.fromQueue + mixedBugger.out.counts.fromBacklog === mixedBugger.out.counts.buildable,
+    mixedBugger.out && mixedBugger.out.counts,
+  )
 }
 
 main().then(
