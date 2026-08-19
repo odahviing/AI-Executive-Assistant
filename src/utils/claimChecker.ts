@@ -137,7 +137,7 @@ export interface ClaimCheckInput {
    * one. A thread can carry 2+ requests, and gating on the latest row's
    * state alone inverted a TRUE "he approved it" about an OLDER, resolved
    * row into a false claim whenever a newer, unrelated request was still
-   * pending — corrupting a correct reply (G6). 'resolved' is the ONLY
+   * pending — corrupting a correct reply (G5). 'resolved' is the ONLY
    * state an owner APPROVE produces (a reject sets 'cancelled', never
    * 'resolved'; see core/requests/resolver.ts), so it is a reliable
    * "granted somewhere in this thread" signal. Absent/undefined → the new
@@ -731,7 +731,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * next turn. See runOutputGates.ts's call site for the exact scope guards.
  *
  * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — reused
- * (G2: reuse, don't add a parallel rewriter with its own fail-safe machinery)
+ * (G1: reuse, don't add a parallel rewriter with its own fail-safe machinery)
  * for a SECOND, unrelated flag shape: `actionType === 'invented_fact'`, from
  * claimChecker's 'owner_fact' mode. Framing differs — there is no "un-done
  * action" to own, so the STEP 1/STEP 2 prompt and the self-attestation field
@@ -890,7 +890,7 @@ ${opts.draft}`;
       text.trim().length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(text);
 
     // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
-    // retry) — the scoped fallback for invented_fact mode (G2/G6): before
+    // retry) — the scoped fallback for invented_fact mode (G1/G5): before
     // reaching for the full-reply-replacing genericHonestHedge, try the
     // model's own minimal-redaction candidate — the draft with ONLY the
     // flagged claim removed, everything else untouched, so a single false

@@ -112,10 +112,13 @@ Single line change. Verify it with `grep version package.json`.
 ### Invariants preserved (if architectural work)
 ### Not changed (if worth calling out)
 ### Migration (if any schema/config change)
+### Framework (other chats, bundled)
+(architect/framework-only work shipped alongside this version — engines, charters, the Manager skill, agent-loop tooling. Never Maelle's own behavior.)
 ```
 
 **Rules:**
 - One CHANGELOG entry per version bump — not per commit. Group the day's triage fixes under the same version as the owner's work.
+- **Always use the `### Framework` heading for architect/framework-only work, never fold it into `Changed`/`Added`.** This is what lets a future charter review grep one heading across releases instead of reading every entry's full prose to find undecided product decisions — the architect ledger already tracks these separately; this is the changelog's own mirror of that split.
 - Topic-level description, not function-level. "create_meeting idempotent across turns" beats "added duplicate check in ops.ts".
 - No date lines (git history has that).
 - No bold on the section labels — the section header carries the emphasis.

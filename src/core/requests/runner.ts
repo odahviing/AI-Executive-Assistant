@@ -152,7 +152,7 @@ async function dispatchHandler(
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /**
- * Generic expiry — close the request as expired + tell BOTH sides (R4).
+ * Generic expiry — close the request as expired + tell BOTH sides (R3).
  *
  * v2.9.1 — also notify the REQUESTER on approval-kind expiry (scenario A:
  * someone asks, owner never answers → without this the requester is left
@@ -163,7 +163,7 @@ async function dispatchHandler(
  * the owner has already decided and the request sits on the COLLEAGUE. Telling
  * the owner "I never heard back from you" and the requester "I couldn't get a
  * read from him" would then be a double lie about who ghosted whom — the exact
- * wrong-outcome failure R4 names. One expiry path, two truthful stories.
+ * wrong-outcome failure R3 names. One expiry path, two truthful stories.
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
   // Read the side BEFORE closing — closeRequest moves state to 'expired'.
@@ -266,7 +266,7 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
     return 'rearmed';
   }
 
-  // R5 — an owner-facing ping respects his work hours. The midpoint is plain
+  // R4 — an owner-facing ping respects his work hours. The midpoint is plain
   // wall-clock arithmetic laid over a WORKDAY-aware expiry (tasks/skill.ts), so
   // the two disagree the moment a weekend sits between them: a Thursday ask whose
   // 2-workday deadline lands on Monday midpoints onto SATURDAY, and the nag fired
@@ -282,7 +282,7 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
   // NOW when he is inside work hours, else the next work-time start.
   //
   // Only the NUDGE defers. Expiry does not — a closure is an outcome both sides
-  // are owed on time (R4), not a nudge that can wait for Sunday.
+  // are owed on time (R3), not a nudge that can wait for Sunday.
   const nextWorkTime = workTimeBaseFromNow(profile);
   const deferMs = Date.parse(nextWorkTime);
   if (Number.isFinite(deferMs) && deferMs > Date.now() + 60_000) {
@@ -700,7 +700,11 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
  * read, to getRecentActivityForOwner or a later dedup check
  * (getLatestFreeformOwnerFlag), as though it actually reached him. A
  * 'cancelled' close still lands informed=0, so the next brief gets one more
- * chance to surface it.
+ * chance to surface it. R3 (2026-08-18) — the give-up path also tells the
+ * REQUESTER their backstop flag never landed, mirroring runExpiry's own
+ * requester loop-close: they were promised "I've also flagged the raw ask
+ * for the owner directly" at raise time, and a silent permanent failure here
+ * would leave that promise uncorrected.
  */
 const FREEFORM_FLAG_MAX_RETRY_ATTEMPTS = 4;
 
@@ -754,6 +758,34 @@ async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Prom
       closureReason: 'freeform_escalation_flag_delivery_failed',
       closedBy: 'system',
     });
+    // R3 — mirror runExpiry's requester loop-close (above). skill.ts's
+    // flagUnresolvedFreeformForOwner tells the requester up front "I've also
+    // flagged the raw ask for the owner directly as a backstop" — if that
+    // backstop itself never reached him after every retry, staying silent
+    // here turns that line into an uncorrected false promise (the same harm
+    // class gh#194-b-promised-resend-never-fired already ruled on).
+    if (row.requester_slack_id) {
+      try {
+        const conn = getConnection(profile.user.slack_user_id, 'slack');
+        if (conn) {
+          const requesterFirst = row.requester_name?.split(' ')[0] ?? 'there';
+          const ownerFirst = profile.user.name.split(' ')[0];
+          const body = `Hey ${requesterFirst} — I flagged your ask for ${ownerFirst} as a backstop, but couldn't actually get it to him after several tries. Worth reaching him directly if it's still open.`;
+          const target = row.origin_is_mpim && row.origin_channel
+            ? { channel: row.origin_channel }
+            : { dm: row.requester_slack_id };
+          await sendTracked(
+            conn, target, body,
+            { threadTs: row.origin_thread_ts ?? undefined },
+            'runFreeformFlagRetry requester loop-close', row.id,
+          );
+        }
+      } catch (err) {
+        logger.warn('runFreeformFlagRetry — requester loop-close DM failed', {
+          requestId: row.id, err: String(err).slice(0, 200),
+        });
+      }
+    }
     return 'closed';
   }
 

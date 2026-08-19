@@ -130,7 +130,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // offline wrapper (skills/calendarHealth.ts → meetings/calendarOffline) turns it
         // into "his calendar is offline". The old local catch swallowed EVERY fault
         // into `Failed to fetch calendar events.` — a mechanical non-answer with no
-        // cause, no retry and no instruction (M11), competing with the written
+        // cause, no retry and no instruction (M9), competing with the written
         // refusal the meeting tools return for the same outage. Fail-closed is
         // unchanged: no events read → no health verdict, and a deterministic fault
         // (403 consent, 404 mailbox, malformed window) still travels up with its own

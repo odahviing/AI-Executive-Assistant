@@ -295,7 +295,7 @@ export function deriveOriginSurface(
  * spoke in. An explicit offset / `Z` already denotes an instant and is preserved.
  * Unparseable → null, so the caller REFUSES instead of arming a timer that can
  * never fire (SQLite `datetime()` of a bad string is NULL → the row is invisible
- * to the sweep forever, which is the silent-hang R4 forbids).
+ * to the sweep forever, which is the silent-hang R3 forbids).
  */
 export function toTimerInstant(raw: string, ownerTimezone: string): string | null {
   const dt = DateTime.fromISO(raw, { zone: ownerTimezone });

@@ -2,6 +2,22 @@
 
 ---
 
+## 4.6.3 — She catches her own "I'm an AI" slip in every language, not just English
+
+A downtime reconnect could leave group conversations behind — DMs got caught up, group chats did not, even when she'd been directly addressed while offline. And a real honesty-guard gap closes: testing found the language-agnostic backstop against Maelle describing herself as AI/a bot caught zero of four French/Spanish/German casual-aside cases — its own prompt never actually stated that a bare identity claim is a violation on its own, only the infrastructure-framing half of the rule existed.
+
+### Fixed
+- **A colleague's message sent while Maelle was offline could go unanswered forever if it arrived in a group, not a DM.** Downtime catch-up now covers MPIMs and channels too, mention-gated the same way she'd have responded live, and a thread now counts as resolved if anyone — not just her — already replied in it.
+- **A reconnect-catch-up reply could leak Maelle's own raw Slack ID into a colleague-visible message.** The replay path now resolves `<@ID>` mentions exactly like every live handler does before drafting — the same class of fix that closed a real leak once before, missing on this one path.
+- **A bare "I'm an AI" aside in French, Spanish, German or Hebrew could ship unrewritten.** The honesty gate's own prompt now states the identity-claim rule explicitly and language-independently, with real non-English examples — live-tested at 3/3 catches, 0 false positives on ordinary non-disclosure text in the same languages.
+- **A colleague who raised an ambiguous ask, told "I've flagged this for the owner," could be left in permanent silence if every delivery attempt to the owner failed.** The give-up path now tells the requester directly, closing the same class of broken promise already fixed once for a different backstop.
+- Several stale doc comments and charter citations corrected — a claim-checker relay backstop's own precedent comment, two outreach-transition producer lists, a gatekeeper charter ownership citation, and a charter rule's line-number drift.
+
+### Framework (other chats, bundled)
+All thirteen agent charters reviewed and finalized against a new shared process (`.claude/skills/charter-review/SKILL.md`): the eight builders (Matchmaker, Registrar, Gatekeeper, Librarian, Instructor, SlackMaster, Diplomat, Handyman) and the five non-builders (Editor, Framer, Bouncer, Cleaner, Architect). Handyman's charter was rewritten around a new identity — builds whatever genuinely has nowhere else to build. Architect's charter was fully redesigned into five groups (Identity, Economy, Guardrails, Shipping a change, Agent management), gained a fourth charter-quality check (scope-verification, alongside altitude/lane-bleed/decision) and a direct lane-to-architect escalation path for framework problems. Stale citations swept across every charter and the scripts that reference them. The CHANGELOG itself now carries this standing `### Framework` heading so a future charter review can find this class of work by grep instead of reading every release's full prose.
+
+---
+
 ## 4.6.2 — When something needs you, it actually reaches you
 
 Two more real incidents, both about something silently failing to reach the owner, or reporting a status that wasn't true. A colleague pushing for an urgent exception during a declared vacation was quietly deferred past the whole vacation; a colleague's decisive reply to an outreach thread was acknowledged in words and then never acted on, with the later status report claiming otherwise.

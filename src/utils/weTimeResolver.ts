@@ -154,7 +154,7 @@ export function renderWeDualClock(
  * the reader framing already resolved, so a caller renders an instant by handing
  * over the instant and nothing else.
  *
- * Exists because M14 is about two surfaces never printing one instant two ways,
+ * Exists because M13 is about two surfaces never printing one instant two ways,
  * and the binding (which travel context, second person vs named) is exactly where
  * that drift would enter. It was written out inline in planMeeting and needed a
  * second time the moment the point-check started offering alternatives; two

@@ -36,7 +36,7 @@ import { logActivity } from '../core/requests/logActivity';
 // THIS one, not the parent mutation's — undo then targets the shift, never
 // the meeting that caused it. No precedence/undo-chaining logic against the
 // triggering action is needed, even a non-revertible one like delete_meeting
-// (matchmaker.md M16): the block's post-rebalance position carries no
+// (matchmaker.md M15): the block's post-rebalance position carries no
 // ranking, so logging this row and stopping is the whole job. subkind is
 // literally 'move_meeting' (not a
 // bespoke tag) so the EXISTING move_meeting revert path

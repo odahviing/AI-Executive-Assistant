@@ -25,9 +25,9 @@
  * event.subject directly with intent; they just must not pass that raw
  * subject downstream into Slack-bound data.
  *
- * ── WHO is looking (v4.1.x — M12, both halves) ───────────────────────────────
+ * ── WHO is looking (v4.1.x — M10, both halves) ───────────────────────────────
  * Masking is an AUTHORIZATION decision, so it needs the authenticated caller,
- * not just the event. Pre-fix the predicate took no viewer, which broke M12 in
+ * not just the event. Pre-fix the predicate took no viewer, which broke M10 in
  * BOTH directions at once:
  *   • the OWNER's own get_calendar came back with his interviews titled
  *     "[Private]" (he must always see everything — he is the one who marked it);
@@ -129,7 +129,7 @@ export function subjectViewerFor(
  * Returns `undefined` for anyone this doesn't apply to (displaySubject keeps
  * its old, private-flag-only behaviour, so every caller that never opts in is
  * unaffected); `null` for a genuine colleague whose email didn't resolve —
- * M12's default, unclear identity means return less, so that reads as "mask
+ * M10's default, unclear identity means return less, so that reads as "mask
  * unconditionally", not "skip the check".
  *
  * o#217 — gated on BOTH `senderRole === 'colleague'` AND
@@ -226,7 +226,7 @@ function isEventAttendee(event: SubjectableEvent, viewerEmailLower: string): boo
  *
  * `viewerEmail` is the v4.4.9 (#154) attendee-aware half, and it is OPT-IN:
  *   - omitted (`undefined`) → today's behaviour: mask only when the event is
- *     privacy-flagged, else the raw subject (M12's original default — used by
+ *     privacy-flagged, else the raw subject (M10's original default — used by
  *     callers that have already scoped the event list to this viewer's own
  *     meetings, or that aren't colleague-facing at all).
  *   - passed (a colleague's email, or `null` when it didn't resolve) → a

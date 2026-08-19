@@ -72,7 +72,7 @@ const anthropic = getAnthropicClient();
 //                  is DETERMINISTIC: strip the token, keep the answer and its
 //                  language (redactIdentifiers). Replacing a correct, on-language
 //                  reply with an English canned line here would be CORRUPTION rather
-//                  than a safe miss (G6) — and shipping it unchanged, which is what
+//                  than a safe miss (G5) — and shipping it unchanged, which is what
 //                  this branch did until v4.2.x, is the leak itself.
 type TriggerClass = 'disclosure' | 'identifier';
 const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerClass }> = [
@@ -109,9 +109,9 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // Structured INTERNAL IDENTIFIERS — raw Slack IDs and request/task IDs must
   // never cross to a colleague (2026-07-01 Oran leak: a failed find_slack_user
   // made the model narrate "U0ARK5814PQ… I have him as U0F28CK6H" straight to
-  // Oran). Regex on structured IDs is language-safe (G7).
+  // Oran). Regex on structured IDs is language-safe (G8).
   //
-  // v4.1.x (G2/G6) — the account-id trigger DEFERS to textScrubber, which owns
+  // v4.1.x (G1/G5) — the account-id trigger DEFERS to textScrubber, which owns
   // this token (RAW_SLACK_ID_RE, the one definition). The old pair here fired on a
   // PROPER `<@U…>` mention — the exact form the scrubber manufactures one step
   // earlier in the same pipeline (formatForSlack → scrubInternalLeakage, run at
@@ -143,7 +143,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // matters: an 'identifier' is a token that means nothing to the reader, but a
   // rendered link IS a channel name, so redactIdentifiers deleted the fact the
   // sentence was about ("Posted to #general with Alex tagged" → "Posted to with Alex
-  // tagged") with no fact-preservation veto in the way — G6 corruption, not a safe
+  // tagged") with no fact-preservation veto in the way — G5 corruption, not a safe
   // miss. And nothing on the other side of the ledger: ZERO fires in every log on
   // disk, against a Sonnet rewrite (1.5-2.8s measured) on every colleague reply that
   // named a channel.
@@ -179,9 +179,9 @@ function allTriggersAreIdentifiers(triggers: string[]): boolean {
  * language it was written in — alone.
  *
  * It re-uses the SAME patterns that fired, so there is no second list of what an
- * internal token looks like and nothing to keep in sync (G2): each identifier
+ * internal token looks like and nothing to keep in sync (G1): each identifier
  * trigger's own pattern spans exactly the text that must go. Trigger and action are
- * both deterministic and structured, so this is a legal destructive action (G4/G7),
+ * both deterministic and structured, so this is a legal destructive action (G3/G8),
  * and its worst failure is a reply missing an opaque token — never a missing fact.
  *
  * This is what the pre-4.2 fail-open ASSUMED was already happening. It shipped the
@@ -231,7 +231,7 @@ function isAiIdentityTrigger(name: string): boolean {
  * what Maelle wrote back — so this reads `recentUserMessages`, the same input the
  * identity-spoof judge below reads for a different question.
  *
- * Structured JSON verdict only (G5). Fails SAFE toward "not asked": the trigger
+ * Structured JSON verdict only (G4). Fails SAFE toward "not asked": the trigger
  * stays caught, the same protective default this class has always had — no fact
  * is lost by declining an unclear case, because there is no confirmed fact to
  * preserve until the judge actually clears one.
@@ -688,7 +688,7 @@ export async function filterColleagueReply(opts: {
     return { reply: rewritten, filtered: true, triggers, aiIdentityCleared };
   }
 
-  // v4.2.x (G4/G6) — the rewriter failed. What ships now depends on the trigger
+  // v4.2.x (G3/G5) — the rewriter failed. What ships now depends on the trigger
   // CLASS, because the two classes have different REMEDIES available:
   //   identifier-only → strip the tokens deterministically and ship the answer, and
   //     fall back to the canned line only when that can't be done cleanly. The reply

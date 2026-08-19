@@ -183,7 +183,7 @@ Only send messages the user explicitly asks for — never reach out to people on
 
         // gh#Yael-25min — an owner reply in the SAME thread as an approval THIS
         // colleague raised is presumptively about deciding that approval, never
-        // a fresh outbound message to them (R3: replay the decision, never
+        // a fresh outbound message to them (R2: replay the decision, never
         // re-derive it). Pre-fix, a free-text amend to an undecided approval
         // ("not tonight, Tuesday! 25 mins at 22:45", replying in the approval's
         // own daily thread) got sent here as a brand-new — and wrong-context —
@@ -194,7 +194,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         // rules already told Sonnet to call resolve_approval here and it didn't.
         //
         // approval-amend-routes-through-reschedule-not-merge (bouncer overturn,
-        // 2026-08-10) — `owner_dm_thread_ts` is the SHARED daily thread (R10 —
+        // 2026-08-10) — `owner_dm_thread_ts` is the SHARED daily thread (R8 —
         // every ask of the day nests under one root, ownerDailyThread.ts), so a
         // genuinely unrelated "tell Yael I'll be late" typed there hits this
         // block too, with the old error text falsely promising a retry would
@@ -290,7 +290,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           // forks on isFuture; this one didn't, so a send_at already in the past
           // sent the DM immediately AND still armed send_scheduled_outreach at that
           // past instant — the sweep then sent it a SECOND time, and the row sat in
-          // phase 'outreach:scheduled' forever (R4: never twice).
+          // phase 'outreach:scheduled' forever (R3: never twice).
           scheduled_at: isFuture ? sendAt : undefined,
           intent,
           context_json: contextPayload,

@@ -2,7 +2,7 @@
  * Nearby compliant alternatives (v4.2.x) — THE one "that time doesn't work, here
  * is one that does" computation, and the point-check's use of it.
  *
- * ── WHY THIS FILE EXISTS (M2) ───────────────────────────────────────────────
+ * ── WHY THIS FILE EXISTS (M1) ───────────────────────────────────────────────
  * Three surfaces answer the same question — "can this named time hold a
  * meeting?" — and all three run the SAME validator (`checkSlot`):
  *
@@ -21,8 +21,8 @@
  * ask permission to look: "want me to pull other options that week instead, or
  * should I lock in Tuesday or Wednesday anyway?". The owner's answer was "all
  * those dates are booked and I didn't know it, where is my options?" — and he is
- * right twice over: M2, because one decision gave two answers depending on which
- * surface asked it, and M4, because a question whose answer is always yes is a
+ * right twice over: M1, because one decision gave two answers depending on which
+ * surface asked it, and M3, because a question whose answer is always yes is a
  * wasted round, not service.
  *
  * So the computation lives once, here, and both callers get the same instants
@@ -84,10 +84,10 @@ const FORWARD_WORKDAYS = 2;
 export interface NearbyAlternative {
   start: string;
   end: string;
-  /** The dual clock, rendered ONCE by the producer (M14) — quote it verbatim. */
+  /** The dual clock, rendered ONCE by the producer (M13) — quote it verbatim. */
   label: string;
   /**
-   * M3 — set when this slot is only free because a SKIPPABLE Working-Elsewhere
+   * M2 — set when this slot is only free because a SKIPPABLE Working-Elsewhere
    * commitment is treated as optional. It is bookable, but it is the fallback
    * tier: Free first, Optional only when there is no Free. Carried so a narrating
    * surface can order and mark it; `checkSlot` masks a private subject before it
@@ -333,7 +333,7 @@ export async function blockedSlotAlternativesBlock(params: {
   });
 
   const ownerFirst = profile.user.name.split(' ')[0];
-  // M3 — Free before Optional, in the narration too. `pickSpreadSlots` already
+  // M2 — Free before Optional, in the narration too. `pickSpreadSlots` already
   // orders the clean tier first; the note carries the priority to the reader
   // without naming the mechanism behind it (colleague surface — never a rule
   // name, never the blocking event).

@@ -482,8 +482,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // (planMeeting.ts's PlanMeetingInput.ownerRoomBend / the alternatives
         // skip / the escalate_approval return), ever ran — making that route
         // unreachable dead code. Only a genuine colleague needs Guards A/B;
-        // the owner keeps his authority on every surface (M10) and falls
-        // through to the ONE rule check (planMeeting/checkSlot, M2) below.
+        // the owner keeps his authority on every surface (M8) and falls
+        // through to the ONE rule check (planMeeting/checkSlot, M1) below.
         if (context.authority !== 'owner') {
           // v2.6 Bug 4 — early idempotency probe BEFORE Guards A and B. When a
           // colleague's continuing chat causes Sonnet to re-attempt create_meeting after the
@@ -577,7 +577,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     const matchStart = DateTime.fromISO(match.start.dateTime, {
                       zone: match.start.timeZone ?? 'utc',
                     }).setZone(timezone).toFormat("EEEE d MMM 'at' HH:mm");
-                    // #175 (M12) — this whole branch is colleague-path only (the
+                    // #175 (M10) — this whole branch is colleague-path only (the
                     // `context.senderRole === 'colleague'` gate a few lines up), so
                     // subjectViewerFor(context) is always 'other' here. match.subject
                     // is the RAW Graph subject; an interview or sensitive 1:1 must not
@@ -782,8 +782,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // time, named the harmless block instead of the actual
                 // conflict and steered add_attendees at the wrong event. Reusing
                 // checkSlot's own finding removes the second predicate entirely —
-                // one occupancy scan, one answer (M2) — and costs no extra Graph
-                // call. Subject is already privacy-masked (M12) by the `viewer`
+                // one occupancy scan, one answer (M1) — and costs no extra Graph
+                // call. Subject is already privacy-masked (M10) by the `viewer`
                 // passed into runSlotCheck above.
                 const conflictingEvent = brokenRule === 'owner_busy_collision'
                   ? diagnostics.conflictingEvent
@@ -794,7 +794,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // suppress the steer and say the true fact instead. Keyed on the
                 // broad `isAllDay` (any all-day commitment), not the narrower
                 // `allDayOutOfOffice` — the WORDING below still only claims
-                // "out of office" when that's confirmed (M11: a held all-day
+                // "out of office" when that's confirmed (M9: a held all-day
                 // block that isn't actually OOF is not "he's away").
                 const isAllDayCollision = conflictingEvent?.isAllDay === true;
                 const brokenRuleLabel = (brokenRule === 'owner_busy_collision' && conflictingEvent?.allDayOutOfOffice)
@@ -878,7 +878,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             const predecessor = await getEventEndInstant(userEmail, mustBeAfterId, timezone);
             if (predecessor) {
               if (requestedStart.toMillis() < predecessor.end.toMillis()) {
-                // o#178 (M12) — this refusal is reachable on a colleague-readable
+                // o#178 (M10) — this refusal is reachable on a colleague-readable
                 // path (the requester need not be the owner), so the predecessor's
                 // RAW subject must not leak if it's marked private. Same masking
                 // helper Guard B already uses (:431) — one path, not a second.
@@ -1048,7 +1048,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 .setZone(timezone).toFormat('EEE d MMM HH:mm');
               // This check runs on BOTH paths (unlike the colleague-gated block
               // above), so a colleague-facing refusal must mask a private sibling
-              // exactly like every other subject this file hands back (M12) — same
+              // exactly like every other subject this file hands back (M10) — same
               // helper as :546, viewer resolved the same way.
               const maskedSiblingSubject = displaySubject(sibling, context.profile, subjectViewerFor(context), viewerEmail);
               logger.info('create_meeting — reschedulable sibling found; surfacing move-instead-of-create', {
@@ -1167,7 +1167,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // `message`. Falling through to the generic (non-room-bend)
               // escalate_approval return below would be wrong here — that
               // path is written for a genuine colleague ask, where saying
-              // "I'll check with him" is the correct, expected answer (M9);
+              // "I'll check with him" is the correct, expected answer (M7);
               // this is the owner bending his own rule from a room, where he
               // must never learn it was even tried, success or failure.
               _note: `Raising this in ${context.profile.user.name.split(' ')[0]}'s private approval DM failed internally — do NOT call create_approval yourself for this, and do NOT tell this room that anything was escalated, sent for approval, needs sign-off, bent a rule, or failed — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); try the request again in a bit.`,
@@ -1358,7 +1358,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // #188 — the candidate can now land on either side of the
                     // request (earlierConnectiveStart searches both), so the
                     // reason/note must name the side that actually moved —
-                    // a fixed "earlier" wording would be a false reason (M11)
+                    // a fixed "earlier" wording would be a false reason (M9)
                     // half the time.
                     const isLater = cand > rs.toMillis();
                     return {
@@ -1862,7 +1862,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // v3.0.6 — write a "Booked X" line to each non-owner attendee's
           // person_memory md so future reads have the venue/subject/date.
           // Fire-and-forget; never blocks the response. Every human attendee is
-          // recorded regardless of who initiated (L3 — a booking IS active
+          // recorded regardless of who initiated (L1 — a booking IS active
           // engagement); non-humans are filtered in recordBooking.ts.
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports

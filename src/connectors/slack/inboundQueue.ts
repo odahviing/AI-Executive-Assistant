@@ -53,7 +53,7 @@ interface PendingMessage {
   text: string;
   arrivedAt: number;
   /**
-   * The authenticated Slack sender id (S7) — never a claim in the text.
+   * The authenticated Slack sender id (S6) — never a claim in the text.
    * Tracked per-message so scheduleRun can tell whether a batch mixes two
    * different people before it lets ANY one of their runners' authority
    * apply to the merged text. See `spansMultipleSenders` below.
@@ -130,7 +130,7 @@ function getOrCreate(key: string): ThreadState {
  * Exported because the RUNNER has to ask the same question the queue asks, and
  * two copies of the predicate would eventually disagree. A runner that reports
  * a failure to the person must consult this FIRST and re-throw on true: an
- * aborted turn was superseded on purpose (S8), a fresh turn is already queued
+ * aborted turn was superseded on purpose (S7), a fresh turn is already queued
  * behind it, and a superseded turn apologising would be a brand-new bug.
  *
  * `signal.aborted` is part of the test, not just the error shape: an abort can
@@ -162,7 +162,7 @@ export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
  *
  * `spansMultipleSenders` — gh#F1. The runner is always the LAST message's
  * closure (freshest context — see scheduleRun), so its captured `authority`
- * is THAT sender's, authenticated (S7). When the batch merged more than one
+ * is THAT sender's, authenticated (S6). When the batch merged more than one
  * distinct sender's text (an MPIM/channel where a colleague's message and
  * the owner's landed in the same debounce window), that authority must NOT
  * govern the whole merged turn — a colleague's instruction would otherwise
@@ -198,7 +198,7 @@ export function enqueueMessage(params: {
   /** True for 1:1 DMs (owner ↔ Maelle, colleague ↔ Maelle). False for MPIMs and channel mentions. */
   isOneOnOneDm: boolean;
   text: string;
-  /** The authenticated Slack sender id (S7). Never derived from the text. */
+  /** The authenticated Slack sender id (S6). Never derived from the text. */
   senderId: string;
   senderName?: string;
   meta: Record<string, unknown>;

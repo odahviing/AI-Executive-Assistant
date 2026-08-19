@@ -124,7 +124,7 @@ export async function closeMeetingArtifacts(params: {
    * that call carries no `_fulfilling_request_id` — and a brand-new event has
    * no pre-existing meeting_id for the id/details_json matches above to find
    * either. Thread-match cannot help here by design: a colleague-initiated
-   * approval's `origin_thread_ts` is the colleague's own thread (R10), never
+   * approval's `origin_thread_ts` is the colleague's own thread (R8), never
    * the owner's decision thread this booking landed in. Matching on subject +
    * exact requested start (both read off the approval's own stored
    * `deferred_action`, never re-derived) closes the gap without touching that
@@ -361,7 +361,7 @@ export async function closeMeetingArtifacts(params: {
       // match above nor the thread-match below can ever find it: the event is
       // brand new (no pre-existing meeting_id to match on) and, for a colleague-
       // initiated approval, the owner's decision thread is never the colleague's
-      // own origin thread (R10) the way `bookingThreadTs` above assumes. Matches
+      // own origin thread (R8) the way `bookingThreadTs` above assumes. Matches
       // on subject + exact requested start, both read off the approval's OWN
       // stored `deferred_action` — never re-derived. SINGLE-CANDIDATE GUARD, same
       // discipline as the thread-match: ambiguous → log, leave open, never guess.
@@ -613,7 +613,7 @@ async function relayVoidedNotices(
 
   // Not a hand-rolled send: the SAME function that sent the notice being corrected.
   // So the correction writes an outreach_job + its paired request (one spine, one
-  // expiry, one close-loop — R2/R4), is tagged intent='meeting_reschedule' +
+  // expiry, one close-loop — R1/R3), is tagged intent='meeting_reschedule' +
   // already_moved so a "that doesn't work" reply still routes through
   // handleRescheduleReply back to the owner, and cancels itself through the spine
   // if the DM never lands.

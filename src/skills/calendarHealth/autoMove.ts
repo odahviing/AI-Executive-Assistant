@@ -116,7 +116,7 @@ export async function executeInternalAutoMove(params: {
   // gh#180 (private-mask) — three audiences read a subject derived HERE: the
   // owner (fix_detail / fix_error / shadowNotify — check_calendar_health's
   // summary is an owner-only surface), the colleague notified of the move
-  // NOW (notifyColleagueOfMove's DM, M12-gated — its OWN stored
+  // NOW (notifyColleagueOfMove's DM, M10-gated — its OWN stored
   // ctx.meeting_subject is what a later revert's correction actually quotes,
   // via closeMeetingArtifacts's relayVoidedNotices), and the owner again
   // LATER if he reverts (handleRevertAction, ops/handlers/calendarReads.ts,
@@ -172,7 +172,7 @@ export async function executeInternalAutoMove(params: {
       outcomeJson: {
         original_start: mStart.toISO(), original_end: mEnd.toISO(),
         new_start: newStartIso, new_end: newEndIso, subject: subj,
-        // gh#180 (bounce 2) — colleague_subject is the M12-masked view, stored
+        // gh#180 (bounce 2) — colleague_subject is the M10-masked view, stored
         // ALONGSIDE the owner's real `subject`. gh#52 (52-U4b): the revert
         // dispatch (calendarReads.ts's handleRevertAction) reads this ONLY as
         // a last-resort fallback if its own live calendar probe fails — its

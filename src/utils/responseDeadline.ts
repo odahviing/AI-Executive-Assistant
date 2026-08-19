@@ -80,7 +80,7 @@ function addWorkingHours(start: DateTime, hours: number, window: WorkWindow): Da
   return dt;
 }
 
-/** How long a colleague has to reply before an outreach expires (R5 — a reminder, not a chase). */
+/** How long a colleague has to reply before an outreach expires (R4 — a reminder, not a chase). */
 const RESPONSE_DEADLINE_WORKING_HOURS = 24;
 
 /**

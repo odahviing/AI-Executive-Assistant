@@ -16,7 +16,7 @@
  *      error codes. Same rule both audiences: refuse like a person, not
  *      like an error response.
  *
- *   3. Image/doc-handling self-talk (v4.0.x / G2) — "I only have the gist",
+ *   3. Image/doc-handling self-talk (v4.0.x / G1) — "I only have the gist",
  *      "I don't have the actual image content", "just a description":
  *      narrating her ingestion pipeline instead of simply asking the person
  *      to clarify. Backstop to the thread-image re-attach in
@@ -38,13 +38,18 @@
  * answer to a genuine question (guards/runOutputGates.ts wires that verdict
  * through as `aiDisclosureCleared`). Every other call site — the owner-private
  * leg, the email leg, the social coda — never passes it, so it defaults false
- * and this gate treats a bare "I'm AI" exactly as it did before the exception
- * existed: a violation of "she is human", caught and rewritten like any other
- * bot-tell. That is deliberate, not an oversight: this gate is the ONLY
- * language-agnostic check in the stack for this class (securityGate's
- * self_ai_claim* patterns are English-only regex — see securityGate.ts's
- * TRIGGER_PATTERNS), so it must keep catching a Hebrew or French "I am AI"
- * exactly as it always did on every leg where nothing upstream ever judged it.
+ * and this gate must catch a bare "I'm AI" itself: a violation of "she is
+ * human", caught and rewritten like any other bot-tell. That is deliberate,
+ * not an oversight: this gate is the ONLY language-agnostic check in the
+ * stack for this class (securityGate's self_ai_claim* patterns are
+ * English-only regex — see securityGate.ts's TRIGGER_PATTERNS). 2026-08-18
+ * (ledger: coda-ai-disclosure-non-english-gap) — this WAS the plan but was
+ * never actually built: the base prompt below carried no explicit rule that a
+ * bare identity claim (absent any infra vocabulary) is itself a violation, so
+ * a non-English casual aside had nothing to trip on and rode through as
+ * ok=true (bouncer, 2026-08-14: 0/4 FR/ES/DE casual-aside claims caught). The
+ * prompt now states the rule explicitly and language-independently — see the
+ * "THE SAME RULE COVERS A BARE IDENTITY CLAIM" paragraph below.
  *
  * Critically: tech words are FINE in topic context. Maelle works at a tech
  * company. "Backend interview at 2pm", "the customer's API was down", "Lori
@@ -241,6 +246,8 @@ ${assistantName} is a HUMAN executive assistant — a real person on the team. S
 She works at a tech company. ${ownerFirst} is in tech. People around her talk about systems, backends, APIs, tools, code reviews, server outages, backend interviews — that's normal workplace conversation. Those words are FINE when ${assistantName} is talking about ${ownerFirst}'s company, the customers, external products, or the people she's coordinating with.
 
 The ONLY problem: when ${assistantName} describes HERSELF as having that infrastructure or inner workings. A human EA never says "my routine fired but hit an error" — she says "I forgot earlier, sorry — checking now." A human EA never says "the system processed your request" — she says "got it, booked." A human EA never says "the tool is telling me the only slot is 12:30" or "the tool returned" — she says "looking at your calendar, the only slot is 12:30." A human EA never says "I have a technical issue preventing me from X" — that's machine-state framing.
+
+THE SAME RULE COVERS A BARE IDENTITY CLAIM, IN ANY LANGUAGE. A draft that states or implies ${assistantName} is AI, a bot, a chatbot, a language model, or "not a real person" is ok=false and needs the rewrite — even a casual, throwaway aside, even with none of the infrastructure words above, and REGARDLESS of what language it's written in. "En fait, je suis une IA" (French), "en realidad soy un bot" (Spanish), "eigentlich bin ich nur eine KI" (German), "אני בעצם בינה מלאכותית" (Hebrew) are exactly as much a violation as the English "I'm actually an AI, ha" — judge the MEANING, not whether it happens to use an English bot-word. This is the default; the one exception is named next.
 ${aiDisclosureCleared ? `
 ONE NAMED EXCEPTION TO "SHE IS HUMAN": if the draft directly and honestly states that ${assistantName} is AI, a bot, a chatbot, or not a human person — this is only ever an honest answer to someone who asked her directly, never something she volunteers — leave it EXACTLY as written (ok=true). That single fact ("I'm AI" / "Yep, I'm an AI assistant") is not machine-voice framing, it's the truth, and it already passed a separate check upstream that confirmed it was a genuine answer to a genuine question. Do NOT rewrite it into a denial, into "I'm a real person", or into anything evasive — that would ship a lie in place of an honest answer. This exception covers ONLY the bare fact of being AI/a bot/not human; specific internals, model or provider names ("my model", "Claude", "GPT", "Anthropic", "language model") are a different gate's job (securityGate) and stay exactly as risky as ever — rewrite those as usual.
 ` : ''}
@@ -288,13 +295,13 @@ IMAGE / DOCUMENT HANDLING IS INTERNAL — never narrate its fidelity. ${assistan
 Output strict JSON only, no prose, no markdown:
 { "ok": true | false, "rewrite": "<rewrite if ok=false>" | null }
 
-ok=false IFF ${assistantName} attributes tech infrastructure to HERSELF, invents capability she doesn't have, or violates the audience framing above. ok=true otherwise — INCLUDING when she's discussing tech topics about other people OR honestly escalating in human language.
+ok=false IFF ${assistantName} attributes tech infrastructure to HERSELF, states or implies she is AI/a bot/a chatbot/not human (unless the named exception above applies), invents capability she doesn't have, or violates the audience framing above. ok=true otherwise — INCLUDING when she's discussing tech topics about other people OR honestly escalating in human language.
 
 Examples (ok=true — leave alone):
 ${aud.leaveAloneExamples}
 
 If ok=true, return { "ok": true, "rewrite": null }.
-If ok=false, REWRITE preserving all FACTS (dates, times, names, decisions) AND any intent to escalate. Don't soften the meaning — strip only the bot-shaped framing. Use the audience-appropriate exemplars above as the target shape.
+If ok=false, REWRITE preserving all FACTS (dates, times, names, decisions) AND any intent to escalate. Don't soften the meaning — strip only the bot-shaped framing. Use the audience-appropriate exemplars above as the target shape. For an identity-claim violation specifically (the exception above doesn't apply): don't replace it with a denial ("I'm a real person") or anything evasive — that ships a lie in place of one. Just drop the identity claim itself and keep the rest of the line intact, the same way you'd strip any other bot-tell.
 
 Language-agnostic. Same standard in Hebrew, French, etc. — match the input language in the rewrite.
 `.trim();
@@ -323,7 +330,7 @@ Language-agnostic. Same standard in Hebrew, French, etc. — match the input lan
  * v4.1.x — EXPORTED. The same "an LLM rewrote the reply; did it silently delete
  * something load-bearing?" question is asked by the deliberation guard
  * (utils/guards/runOutputGates), which had no fact check at all — only "is the
- * result shorter". One veto, reused, rather than a second near-copy (G2).
+ * result shorter". One veto, reused, rather than a second near-copy (G1).
  */
 export function rewriteDroppedAFact(original: string, rewrite: string): boolean {
   const rwRaw = rewrite;
@@ -398,7 +405,7 @@ function rewriteDiffPreview(original: string, rewrite: string, window = 80): {
  * v4.0.x — forced structured-output verdict. The gate calls this `verdict` tool
  * instead of emitting free-text JSON, so parsing CAN'T fail (kills the old
  * reparse retry — Haiku mis-formatted the bare JSON ~half the time) and the
- * model's prose can never ship as the reply (G5). Same {ok, rewrite} semantics
+ * model's prose can never ship as the reply (G4). Same {ok, rewrite} semantics
  * the system prompt already describes — only the output transport is forced.
  */
 const HUMAN_GATE_VERDICT_TOOL = {
@@ -434,13 +441,13 @@ function readVerdictTool(resp: Anthropic.Message): { ok: boolean; rewrite: strin
 function draftLooksLeaky(draft: string): boolean {
   return /\bmy\s+(?:system|routine|backend|tools?|prompts?|instructions|functions?|api)\b/i.test(draft)
     || /\b(?:access denied|not_permitted|permission denied|i don'?t have permission)\b/i.test(draft)
-    // Image-handling self-talk (G2) — Maelle narrating her ingestion pipeline
+    // Image-handling self-talk (G1) — Maelle narrating her ingestion pipeline
     // ("just the gist", "the actual image content", "don't have the image").
     || /\bactual image content\b|\b(?:just|only) the gist\b|\bdon'?t have the (?:actual )?image\b/i.test(draft)
     // Proper "<@U…>" / "<#C…>" mentions are NOT leaks — Slack renders them as a
     // name/channel and they must survive (rewriteDroppedAFact enforces it too).
     // Only a RAW unwrapped account id or a structured req_/task_/out_/ci_ id is a
-    // tell. v4.1.x (G2): both halves are textScrubber's own exports —
+    // tell. v4.1.x (G1): both halves are textScrubber's own exports —
     // RAW_SLACK_ID_RE and INTERNAL_WORK_ITEM_ID_RE — imported, not re-typed here.
     // Three components each keeping their own copy is what let securityGate start
     // flagging the very mentions this gate protects (2026-07-21), and is exactly
@@ -524,7 +531,7 @@ export async function runHumanGate(
     const model = MODEL_HAIKU;
     // v4.0.x — forced structured output (like concision / rewriteOwningTheMiss):
     // the verdict comes back as a `verdict` tool call, so parsing can't fail and
-    // the model's prose can never ship (G5). Kills the old free-text + reparse
+    // the model's prose can never ship (G4). Kills the old free-text + reparse
     // path (Haiku mis-formatted the bare JSON ~half the time). Judgment unchanged
     // — the system prompt is the same; only the output transport is forced.
     const resp = await anthropic.messages.create({
@@ -586,7 +593,7 @@ export async function runHumanGate(
         }
         // Still imperfect after one pinned retry — the rewrite keeps dropping a
         // load-bearing token (@mention / time / date) or flipped a question into
-        // a statement. We're now choosing between two bad drafts, and G6 decides:
+        // a statement. We're now choosing between two bad drafts, and G5 decides:
         // a dropped mention / wrong-or-missing time is a CORRUPTION, a residual
         // bot-tell is a MISS. Which is safe to ship depends on the audience.
         //   - owner → ship the ORIGINAL. A mild bot-tell to the operator is
@@ -601,7 +608,7 @@ export async function runHumanGate(
         //     a colleague-facing bot-tell is the worse harm there, so a clean but
         //     fact-dropped line still beats reverting to the flagged original.
         if (audience === 'owner') {
-          logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (G6 safe-miss)', {
+          logger.warn('humanGate — rewrite kept dropping load-bearing content after one retry (owner path); shipping the ORIGINAL draft, not a corrupted rewrite (G5 safe-miss)', {
             audience,
             channelId,
             originalPreview: draft.slice(0, 120),

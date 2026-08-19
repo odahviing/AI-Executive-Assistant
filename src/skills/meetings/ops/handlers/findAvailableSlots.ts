@@ -161,9 +161,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   const { context, userEmail, timezone } = ctx;
   // v4.1.x — resolved ONCE per call from the authenticated sender.
   //   leadHours: owner 1h vs colleague 4h, previously a literal at four sites
-  //     and enforced only inside the slot walker (M2).
-  //   viewer:    owner-DM-only sees a private optional event's real subject (M12).
-  //   offerCount: the M6 offered-slot budget, previously a literal 5.
+  //     and enforced only inside the slot walker (M1).
+  //   viewer:    owner-DM-only sees a private optional event's real subject (M10).
+  //   offerCount: the M4 offered-slot budget, previously a literal 5.
   //
   // `isOwnerPath` is the STRICT, post-clamp definition (senderRole alone) — the
   // effective authority + data scope. It is deliberately NOT
@@ -908,7 +908,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // (the main branch below, a LIST of options) deliberately does NOT
           // auto-pass — coord/main-branch use annotateSlotsWithAttendeeStatus
           // to TAG slots with status instead, so a colleague's search never
-          // silently loses an option to an attendee conflict (M6).
+          // silently loses an option to an attendee conflict (M4).
           const attendeeBusyEmails = (isOwnerInitiatedSearch && !ignoreAttendeeBusy && attendeeEmails.length > 0)
             ? attendeeEmails
             : undefined;
@@ -916,18 +916,18 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // 2026-07-29 (row 161, the Levana "she has something" incident) —
           // candidate_slots (point validation: "is X free at exactly Y?") is
           // NOT a spread search — there is no list of options a busy-subtract
-          // could silently thin out (M6 doesn't apply to a single instant).
+          // could silently thin out (M4 doesn't apply to a single instant).
           // Gating this on isOwnerInitiatedSearch meant a colleague-path (or
           // MPIM-clamped owner) point-check only ever consulted the named
           // attendee's generic stored WORK HOURS (loadAttendeeAvailabilityForEmails
           // is explicitly TZ+hours only, never busy/free) and the OWNER's own
           // calendar — never the attendee's actual calendar — so "available:
           // true" was asserted without ever being checked, and every re-ask
-          // ("are you sure?") repeated the same unverified answer (M2: the
+          // ("are you sure?") repeated the same unverified answer (M1: the
           // point-check must give the SAME real answer the spread search
-          // would; M11: a stated availability fact must be verified, not
+          // would; M9: a stated availability fact must be verified, not
           // guessed). Sharing a NAMED attendee's free/busy (no detail, no
-          // subject) with a colleague is exactly what M12 allows, so this
+          // subject) with a colleague is exactly what M10 allows, so this
           // reuses the identical attendee_busy_collision plumbing the owner
           // path already has — only the explicit override (ignoreAttendeeBusy)
           // still turns it off.
@@ -1148,7 +1148,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // `available:false` is a factual claim about his calendar
                 // ("that time doesn't work"). When the calendar can't be read,
                 // that claim is unfounded and reads to the requester exactly
-                // like "he's busy" — the confident wrong "no" M11 forbids.
+                // like "he's busy" — the confident wrong "no" M9 forbids.
                 // Refuse the whole batch instead of answering every candidate
                 // with a fabricated verdict.
                 if (err instanceof CalendarOfflineError) throw err;
@@ -1660,10 +1660,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const preferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
               ? args.preferred_slot.trim()
               : null;
-            // v4.1.x (M10/M11) — set when the named time is NOT offerable, so the
+            // v4.1.x (M8/M9) — set when the named time is NOT offerable, so the
             // result can say WHY instead of letting the model infer "unavailable"
             // from absence. Never merged into `slots`: an excluded slot is still
-            // excluded (#142d / M3 — a slot a real commitment already holds is
+            // excluded (#142d / M2 — a slot a real commitment already holds is
             // deliberately never PROPOSED, whoever else is on it). The bug was the
             // silence, not the drop.
             let preferredSlotStatus: Record<string, unknown> | undefined;
@@ -1686,7 +1686,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // Pre-fix this branch logged and did NOTHING — the named time
                 // vanished from the payload and the model inferred it was
                 // "not available", so the owner could not override a block he
-                // was never told about (M10: the override must reach the SEARCH
+                // was never told about (M8: the override must reach the SEARCH
                 // surface too). Re-check that ONE slot through the SAME engine
                 // the sibling candidate_slots branch uses and hand back its real
                 // reason. Convergence, not a second path.
@@ -1991,7 +1991,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // SECOND per-slot signal (`attendee_status`) explained only in the
             // system prompt, and asking the model to also cross-reference a
             // free-text top-level note against "which slot" for a second,
-            // unrelated fact is exactly the class of gap M14 exists to close for
+            // unrelated fact is exactly the class of gap M13 exists to close for
             // timezone strings: don't narrate from data, quote a rendered string
             // verbatim. `less_preferred_label` is that string, attached directly
             // to the slot it describes — same pattern as `presentation_local` /
@@ -2018,7 +2018,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // walker emits `broken_rule_label` for the owner's own view only, so a
             // note that promised it unconditionally would, on any other view, tell
             // the model to quote a field that isn't there — and a model told to name
-            // a reason it cannot read is a model that invents one (M11).
+            // a reason it cannot read is a model that invents one (M9).
             const hasBrokenRuleLabel = annotatedSlots.some((s: any) => typeof s.broken_rule_label === 'string' && s.broken_rule_label.length > 0);
             // `attendee_status` (per-slot, from the annotation above) ships bare on
             // a plain colleague-initiated search. Its per-slot semantics are
@@ -2043,7 +2043,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // dropped into a bare slots array Sonnet has no reason to
               // re-examine.
               if (movingEventIdMismatchWarning) Object.assign(result, movingEventIdMismatchWarning);
-              // v4.1.x (M10/M11) — the named time that did NOT make the list, with
+              // v4.1.x (M8/M9) — the named time that did NOT make the list, with
               // its real reason. Present only when a preferred_slot was asked for
               // and could not be offered.
               if (preferredSlotStatus) result.preferred_slot_status = preferredSlotStatus;

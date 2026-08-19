@@ -180,7 +180,7 @@ export interface OrchestratorOutput {
    * Sonnet call plus a claim-check between "answer ready" and "answer posted" —
    * two round-trips of latency on the WORK answer, for a line the transport
    * then deliberately holds for a beat anyway (5-15s, varied per delivery —
-   * L10, social never delays real work). The transport calls
+   * L7, social never delays real work). The transport calls
    * `composeSocialCoda` inside that beat instead.
    *
    * It carries its two ids because the social bookkeeping — the once-per-day
@@ -1453,7 +1453,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // is reporting an executed action's result (a booking/cancel/move that
     // actually succeeded — `turnReportedActionResult`, coda-repeats-and-
     // merges-with-action-confirmations): that confirmation is the thing the
-    // person is reading right now, and L10 puts a coda stacked on top of it in
+    // person is reading right now, and L7 puts a coda stacked on top of it in
     // the "never in the way" bucket even though the work did resolve.
     //
     // History: the original piggyback (v2.2.1) fired on parking turns but the

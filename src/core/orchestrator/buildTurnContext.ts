@@ -657,7 +657,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // Per-person context on COLLEAGUE turns (owner turns use the Social Engine
   // directive below instead). TWO blocks, gated differently:
   //   - WORK context (recent work exchanges + bookings) — on for a colleague's
-  //     OWN 1:1 DM. It is what makes Maelle competent with this person; L6
+  //     OWN 1:1 DM. It is what makes Maelle competent with this person; L3
   //     forbids gating work-competence behind the optional social skill.
   //   - SOCIAL context (engagement rank, subjects/topics talked about) —
   //     gated on the toggle (v2.2.3 #3), which is what the toggle is for.
@@ -828,7 +828,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (offered && offered.length > 0) {
         // Email vs. colleague-chat phrasing: on email the "requester" reading
         // this is the owner relaying an external's pick from a forwarded
-        // chain, not a colleague typing directly — say so accurately (M11).
+        // chain, not a colleague typing directly — say so accurately (M9).
         const whoPicks = input.channel === 'email'
           ? 'whoever the forwarded chain quotes as picking a time'
           : 'this colleague';

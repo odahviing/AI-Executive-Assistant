@@ -204,7 +204,7 @@ function pickCodaDelayMs(): number {
  * not a sentence. Composition and delivery both happen here, inside the beat.
  *
  * Contract:
- * - SAME thread (S3), always — never a new top-level message. It is a follow-on
+ * - SAME thread (S2), always — never a new top-level message. It is a follow-on
  *   to the reply, not a new topic.
  * - TEXT, never audio, even when the turn came in as a voice note. TTS exists so
  *   an answer comes back in the modality it was asked in; the coda was not asked
@@ -215,7 +215,7 @@ function pickCodaDelayMs(): number {
  * - Dropped if the person has typed again by the time it fires — the coda's
  *   premise is a lull, and a lull broken inside the beat (5-15s, see
  *   CODA_DELAY_MIN_MS/MAX_MS) wasn't one.
- * - 1:1 DM only (S4/S6). The orchestrator already restricts it; asserted again
+ * - 1:1 DM only (S3/S5). The orchestrator already restricts it; asserted again
  *   here so no future caller can put personal small-talk in a shared surface.
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
  *   path is ever awaited by the person's reply — composition included, which is
@@ -473,7 +473,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // pointer cannot rot, a duplicated enumeration did. Don't re-add one here.
   //
   // What the delivery pipeline is entitled to assume, and no more: the call returns
-  // the text to send, and nothing in there re-enters the orchestrator (G4). Since
+  // the text to send, and nothing in there re-enters the orchestrator (G3). Since
   // guard's P26 it also always DOES return — every await and every rewrite on both
   // legs now sits inside a try. But returning is not the same as returning the
   // DRAFT, and the two unavailability cases were given deliberately different

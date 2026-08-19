@@ -26,7 +26,7 @@ const CONFORMANCE = {
       items: {
         type: 'object',
         properties: {
-          rule: { type: 'string', description: 'the rule tag + short name, e.g. "M2 · One meeting spine"' },
+          rule: { type: 'string', description: 'the rule tag + short name, e.g. "M1 · One meeting spine"' },
           verdict: {
             type: 'string',
             enum: ['code-violates', 'charter-wrong', 'cannot-verify'],

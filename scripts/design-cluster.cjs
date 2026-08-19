@@ -33,7 +33,7 @@
  * with `agent`/`parallel`/`log`/`phase` and no `require`, so an engine physically
  * cannot read the ledger. The alternative was an agent dispatch to grep a file,
  * which is a model doing arithmetic. This is deterministic, costs one node start,
- * and is checkable in one command (A11).
+ * and is checkable in one command (A12).
  *
  * WHY NOT IN `ledger-stats.cjs`: that file's contract, in its own header, is
  * "Read-only. Never writes." The join-back writes. A reader that sometimes writes

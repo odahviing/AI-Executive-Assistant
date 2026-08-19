@@ -56,8 +56,8 @@ export interface RunDeferredActionInput {
    * book_floating_block carry no channel_id/thread_ts in their input_schema
    * (verified 2026-08-03), so a `args.channel_id`/`args.thread_ts` fallback is
    * not "best-effort", it is unconditionally empty. Used only for shadow
-   * notifications during replay (S5) — never for the booking's own
-   * parameters, which come from `args` alone (R3).
+   * notifications during replay (S4) — never for the booking's own
+   * parameters, which come from `args` alone (R2).
    */
   originChannel: string | null;
   originThreadTs: string | null;
@@ -69,7 +69,7 @@ export interface RunDeferredActionInput {
    * regardless of who raised the original ask — grantRelaxed's
    * `senderRole === 'owner'` fast path is untouched by this), but a room- or
    * colleague-DM-originated ask still narrates back into that same surface
-   * (S5): she always speaks, the restriction is at the tool layer, never
+   * (S4): she always speaks, the restriction is at the tool layer, never
    * silence (owner ruling). Also feeds `isMpim` on the synthetic SkillContext
    * below, so `subjectViewerFor`/`viewerEmailFor` (utils/displaySubject.ts —
    * which key off `isMpim`, not this field directly) stop reading EVERY
@@ -111,7 +111,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // Build a minimal SkillContext that the tool handlers will accept. The
   // owner-path identity is what we need (planMeeting checks initiator='owner'
   // for the override path). channelId/threadTs are the request's OWN origin
-  // thread (S5, 2026-08-03 ruling) — an approved action replays into the same
+  // thread (S4, 2026-08-03 ruling) — an approved action replays into the same
   // thread the ask was raised in, not a blind void. The meeting handlers use
   // them for shadow notifications + closeMeetingArtifacts' thread-fallback
   // match; SkillContext.threadTs is a required string, so an owner-internal

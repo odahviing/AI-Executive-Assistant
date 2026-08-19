@@ -606,7 +606,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         const dayStr = startDt.toFormat('yyyy-MM-dd');
         const timeStr = startDt.toFormat("EEEE, d MMMM 'at' HH:mm");
 
-        // v4.1.x (M12) — this tool exists for COLLEAGUE asks, so every subject it
+        // v4.1.x (M10) — this tool exists for COLLEAGUE asks, so every subject it
         // echoes back is masked unless the owner himself is asking in his own DM.
         const joinViewer = subjectViewerFor(context);
         // v4.4.9 (#154) — the attendee-aware half of that same mask: the
@@ -629,7 +629,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // events, so a failed read is the same blind spot the search and write
         // paths have; the local catch used to answer `Could not check calendar.`,
         // a mechanical non-answer that told the colleague nothing about whether
-        // the problem was him, his day, or Maelle (M11).
+        // the problem was him, his day, or Maelle (M9).
         const events = await getOwnerEventsForDecision(
           userEmail,
           startDt.startOf('week').toFormat('yyyy-MM-dd'),
@@ -650,7 +650,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         const fb = require('../utils/floatingBlocks') as typeof import('../utils/floatingBlocks');
         const floatingBlocks = fb.getFloatingBlocks(profile);
 
-        // ── THE validator (M2) ────────────────────────────────────────────────
+        // ── THE validator (M1) ────────────────────────────────────────────────
         // v4.1.x — this handler used to be a complete SECOND rule engine: its own
         // overlap math, its own buffer arithmetic (re-applying the between-meeting
         // buffer as a widening conflict window — the exact `owner_buffer_collision`
@@ -712,13 +712,13 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // no exclude list on either side), so it can never be non-empty while
         // `overCommitment` is undefined. Keeping it in the condition would be a
         // second opinion that can only ever agree — the shape this handler is
-        // being taken OUT of (M2). It still earns its place below as the
+        // being taken OUT of (M1). It still earns its place below as the
         // partial-join carve data, which needs every overlapping event's own
         // bounds; `overCommitment` reports only the first one.
         const ownerIsBusy = !!joinCheck.overCommitment;
 
         // v2.1 — floating blocks that apply on this day.
-        // v4.1.x (M2) — the FEASIBILITY VERDICT ("is there still room for lunch
+        // v4.1.x (M1) — the FEASIBILITY VERDICT ("is there still room for lunch
         // after this?") is no longer decided here: that is checkSlot rule 6, and
         // this handler's private copy could disagree with it. What this pass now
         // produces is join-SPECIFIC and exists nowhere else: WHICH block event
@@ -852,7 +852,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const movesLine = movesDone.length > 0
             ? ` I ${movesDone.join(' and ')} to make room.`
             : '';
-          // M3 — "free" can still mean "free over an optional-join event". Say so
+          // M2 — "free" can still mean "free over an optional-join event". Say so
           // rather than presenting it as a clean slot; the validator already
           // masked the subject for this caller.
           const optionalLine = joinCheck.overOptional
@@ -873,7 +873,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // ── He is committed ─────────────────────────────────────────────────────
         // Occupancy is answered BEFORE the rule ladder — inside checkSlot now, so
         // this handler is no longer a second validator that could disagree with
-        // the booking path (M2). What stays local is join-SPECIFIC presentation
+        // the booking path (M1). What stays local is join-SPECIFIC presentation
         // the validator has no reason to produce: the PARTIAL-join window, which
         // needs every overlapping event and their individual bounds
         // (`overCommitment` reports only the first one, plus its subject/window).
@@ -883,7 +883,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             // the literal PRIVATE_MASK string ("[Private]") for a private event
             // to a non-owner viewer; that string is truthy, so `|| 'a meeting'`
             // never caught it and the raw mask word reached a colleague's reply
-            // (M12: a colleague gets free/busy only for a private meeting, not
+            // (M10: a colleague gets free/busy only for a private meeting, not
             // even the fact that it's flagged private). Same fallback fix as
             // scheduleRules.ts's overOptional/overCommitment subjects.
             const subj = displaySubject(ev, profile, joinViewer, joinViewerEmail);
@@ -926,7 +926,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           // shows its real subject; anything they're not confirmed on, or
           // ANY meeting mentioned in a room (unbounded audience — gh#154-R4,
           // 2026-08-06), reads "[Private]"/"a meeting" instead — never the
-          // real title for someone who isn't verifiably the sole reader (M12).
+          // real title for someone who isn't verifiably the sole reader (M10).
           const conflictNames = directConflicts.map(ev => {
             const subj = displaySubject(ev, profile, joinViewer, joinViewerEmail);
             return (subj && subj !== PRIVATE_MASK) ? subj : 'a meeting';
@@ -949,7 +949,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           // `violation_label`, because the label belongs to whichever rule
           // reported and that is not always this one (a past all-day slot reports
           // "that time has already passed", which is not the answer to "is he
-          // free?"). Subject is viewer-scoped by the validator (M12).
+          // free?"). Subject is viewer-scoped by the validator (M10).
           const held = joinCheck.overCommitment;
           return {
             can_join: false,
@@ -986,7 +986,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // time" and then fail at booking.
         // Deliberately NOT the booking lead time: that is a write-path rule and
         // this tool writes nothing (see the checkSlot call above).
-        // M11 — the reason travels in human terms (checkSlot's own label), so the
+        // M9 — the reason travels in human terms (checkSlot's own label), so the
         // colleague can understand it and, if it matters, trigger an approval.
         const joinViolation = joinCheck.violation_label ?? 'one of his scheduling rules';
         return {

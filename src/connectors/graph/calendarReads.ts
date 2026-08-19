@@ -70,7 +70,7 @@ export type SpreadSlot = {
 
 // A slot's start read in the caller's zone. The ISO itself is offset-bearing
 // (the walker emits `cursorLocal.toISO()`), so the instant never depends on the
-// server clock — only the rendering zone does (M13).
+// server clock — only the rendering zone does (M11).
 //
 // It used to consult a per-slot `away_tz` override. That field had NO producer
 // anywhere in the tree — the walker never emitted it — and round 3 carried it
@@ -99,7 +99,7 @@ export function slotLocalDay(slot: SpreadSlot, timezone: string): string {
  *   • At most `count` total — the caller's offered-slot budget
  *     (profile.meetings.offered_slot_count via offeredSlotCount). REQUIRED:
  *     the old `count = 5` default was a second, silent bound competing with
- *     the config (M6).
+ *     the config (M4).
  *   • ≥1h gap between same-day picks (relaxed on the final fill pass)
  *   • Day-diversity first — one pick per day per round, then depth
  *
@@ -210,7 +210,7 @@ export function pickSpreadSlots(
   // v3.6.4 — TIER: clean slots FIRST. An optional-join (WE-soft) slot never
   // surfaces while clean slots satisfy the spread; only if the clean tier comes
   // up short do we complete the quota from WE-soft (each tagged "over your
-  // optional …"). Explicit priority: clean › book-over-optional (M3). (The
+  // optional …"). Explicit priority: clean › book-over-optional (M2). (The
   // relaxed recovery — break a real rule — is a separate, lower tier upstream.)
   //
   // #Ayala (2026-07-23) — the third pass is the RELAXED FILL. The ≥1h spread gap
@@ -354,7 +354,7 @@ export class CalendarOfflineError extends Error {
  * `profile.user.email`, a 400 from a malformed window, and our own TypeErrors all
  * into "I can't reach his calendar right now — try again shortly": advice that
  * cannot help, for a cause that is wrong. A wrong reason misleads the very
- * decision it exists to inform (M11), and none of those four get better on a
+ * decision it exists to inform (M9), and none of those four get better on a
  * retry.
  *
  * IN — the fault is in the pipe or the service:
@@ -736,7 +736,7 @@ export async function getFreeBusy(
   // but the REASON is opposite, and `unresolved`'s consumers state that reason out
   // loud ("these addresses do NOT exist in the company directory", create_meeting
   // / find_available_slots). Saying that about a live mailbox because the window
-  // was malformed is a confidently wrong reason, which is the M11 failure this fix
+  // was malformed is a confidently wrong reason, which is the M9 failure this fix
   // exists to remove — not a smaller version of it.
   diagnostics?: { unresolved?: string[]; notChecked?: string[] },
 ): Promise<Record<string, FreeBusySlot[]>> {
@@ -798,7 +798,7 @@ export async function getFreeBusy(
   // so a day booked solid 09:00–18:00 came back FREE with `notChecked` empty — the
   // failure above reached by a different route. So the recognizer is on the INSTANT
   // now, not on the spelling: start === end AND that instant is midnight IN THE
-  // CALLER'S ZONE (`timezone`, never the server's — M13) is a whole day however it
+  // CALLER'S ZONE (`timezone`, never the server's — M11) is a whole day however it
   // was typed. A REAL instant carries a time and is not midnight
   // (availabilityPreCheck normalizing "יש משהו אחרי 17:00?" to one moment is
   // untouched, still the instant branch); '…T00:00:00Z' is 03:00 in Jerusalem, a
@@ -833,7 +833,7 @@ export async function getFreeBusy(
   // meeting length is not guessed (there is no meeting), and a block that merely
   // starts later inside the widened hour is dropped, so no false "busy" either.
   // A block ENDING exactly at the instant is not a conflict (back-to-back is the
-  // preferred shape, M7), hence `start <= t < end`.
+  // preferred shape, M5), hence `start <= t < end`.
   if (parsedEnd.toMillis() === parsedStart.toMillis()) {
     const widenedEnd = parsedStart.plus({ minutes: 60 }).toISO()!;
     const wide = await getFreeBusy(callerEmail, emails, startDate, widenedEnd, timezone, freshness, diagnostics);

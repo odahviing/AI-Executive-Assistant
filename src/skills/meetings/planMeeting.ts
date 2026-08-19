@@ -21,7 +21,7 @@
  *   4. CHECK RULES         via utils/scheduleRules
  *   5. DECIDE ACTION       branches on initiator + ownership + rule result
  *
- * ── ONE ROUND, NOT FOUR (v4.1.x — M4) ───────────────────────────────────────
+ * ── ONE ROUND, NOT FOUR (v4.1.x — M3) ───────────────────────────────────────
  * Steps 3–5 used to `return` on the FIRST gate that needed input, which made
  * the pipeline single-question-per-call by construction: the location question
  * returned before the rule check had run, which returned before the
@@ -135,7 +135,7 @@ export interface PlanMeetingInput {
   preloadedEvents?: CalendarEvent[];
 
   /**
-   * v4.1.x (M12) — WHO will read the strings this plan produces. checkSlot's
+   * v4.1.x (M10) — WHO will read the strings this plan produces. checkSlot's
    * owner_busy label embeds the colliding meeting's subject, and on a
    * COLLEAGUE-initiated create_meeting that label is handed back as
    * `violation_label` + `suggested_ask_text` — straight into a colleague turn's
@@ -203,7 +203,7 @@ export function planInputFromBookingRequest(
     // that surface (`colleague_dm`), so the old check returned 'owner' where
     // `subjectViewerFor` (keyed on the replay's real surface) correctly
     // returns 'other'. Owner alone, in his own DM → he sees everything
-    // (M12); owner in an MPIM/room, or any replay not actually surfaced back
+    // (M10); owner in an MPIM/room, or any replay not actually surfaced back
     // to his own DM, masks like any colleague turn.
     viewer: subjectViewerFor({ senderRole: req.initiator, surface: req.context.surface, channel: req.context.channel }),
     // v4.4.9 (#154) — the attendee-aware half of that same mask, resolved
@@ -215,7 +215,7 @@ export function planInputFromBookingRequest(
 // ── Plan output ─────────────────────────────────────────────────────────────
 
 /**
- * M4 — every question this booking still needs answered, in one list. The
+ * M3 — every question this booking still needs answered, in one list. The
  * action kind is the highest-precedence gate (so existing handler branches keep
  * working); `openQuestions` is the complete set, and `suggestedAskText` is that
  * same set joined for a single message. Length 1 is the common case.
@@ -233,7 +233,7 @@ export type PlanAction =
       reasoning: string;
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
       /**
-       * M3 — the booking LEVEL this write lands on. 'free' is the preferred
+       * M2 — the booking LEVEL this write lands on. 'free' is the preferred
        * place to book; 'optional' means it sits over a skippable
        * Working-Elsewhere commitment; 'unfiltered' means it sits over a real
        * commitment. Pre-fix the write path had no notion of the tier at all, so
@@ -396,10 +396,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     };
   }
 
-  // ── M4 gate accumulator ─────────────────────────────────────────────────
+  // ── M3 gate accumulator ─────────────────────────────────────────────────
   // Each gate is a question this booking still needs answered. They are
   // COLLECTED, not returned one at a time (see the header note). `whenText` is
-  // the ONE clock renderer for every user-facing time string below — M14: the
+  // the ONE clock renderer for every user-facing time string below — M13: the
   // dual clock is quoted verbatim, never re-derived. Pre-fix these strings were
   // formatted with a bare `.toFormat("EEEE 'at' HH:mm")` pinned to the owner's
   // HOME zone, so on an away-override day the ask stated one hour while the
@@ -415,7 +415,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // about someone else's trip. Unknown viewer → named (the colleague-safe
   // reading), never "you". The binding lives in the WE spine because the
   // nearby-alternatives search renders the same instants for the same reader, and
-  // two identical closures are one edit away from disagreeing (M14).
+  // two identical closures are one edit away from disagreeing (M13).
   const whenText = profileDualClock(profile, input.viewer);
 
   // ── Resolve location ────────────────────────────────────────────────────
@@ -433,11 +433,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // and the group's too large for the small-room fallback — booked without the
   // room (not double-booked), with a heads-up so he grabs space himself.
   let roomBusyNotice: string | undefined;
-  // M3 — set when the write lands on a slot held by a skippable Working-Elsewhere
+  // M2 — set when the write lands on a slot held by a skippable Working-Elsewhere
   // commitment (level 'optional'): the owner must be told he's booking over it,
   // not handed a confirmation that reads identical to a genuinely free slot.
   let optionalLevelNotice: string | undefined;
-  // M3 — set when the write lands on a REAL commitment (level 'unfiltered') and
+  // M2 — set when the write lands on a REAL commitment (level 'unfiltered') and
   // proceeds anyway (owner override / approved replay). Distinct from a soft
   // own-day rule: it names WHAT is being double-booked and whether other people
   // are on it.
@@ -504,7 +504,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // (v2.8.2) ask_owner_online_or_physical: caller must ask, never auto-pick.
     // Owner-path AND colleague-path both surface the question; colleague-path
     // routes through create_approval so Sonnet doesn't try to resolve it locally.
-    // v4.1.x (M4) — recorded as a GATE and the pipeline keeps going, so the
+    // v4.1.x (M3) — recorded as a GATE and the pipeline keeps going, so the
     // rule check and the attendee free/busy check run in the SAME call and
     // their questions ride out with this one.
     if (locationVerdict.kind === 'ask_owner_online_or_physical') {
@@ -532,17 +532,17 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
       allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
-      // v4.1.x (M2) — the booking lead time is now a real rule in THE validator,
+      // v4.1.x (M1) — the booking lead time is now a real rule in THE validator,
       // keyed on who is asking, so the write path enforces the same floor the
       // search does. Pre-fix a colleague naming "3pm today" at 2pm was refused
       // by find_available_slots and accepted by create_meeting.
       leadTimeHours: bookingLeadTimeHours(profile, initiator),
-      // v4.1.x (M12) — the owner_busy label embeds the colliding subject.
+      // v4.1.x (M10) — the owner_busy label embeds the colliding subject.
       viewer: input.viewer,
       // v4.4.9 (#154) — the attendee-aware half of that same mask.
       viewerEmail: input.viewerEmail,
     });
-    // M3 — the tier this slot sits on, whatever the rule verdict was.
+    // M2 — the tier this slot sits on, whatever the rule verdict was.
     bookingLevel = ruleResult.level;
     if (!input.isFloatingBlock && ruleResult.level === 'optional' && ruleResult.overOptional) {
       // Bookable, no approval — but never silently. A floating block booking is
@@ -551,7 +551,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
     if (!input.isFloatingBlock && ruleResult.overCommitment) {
       // THE double-booking notice, on every path that reaches a write. Booking
-      // over a real commitment is M3's Unfiltered tier — say WHAT is being
+      // over a real commitment is M2's Unfiltered tier — say WHAT is being
       // double-booked and who else is on it, not just "a rule".
       //
       // The gate used to be `ruleResult.passes`, i.e. "only when the owner-busy
@@ -612,7 +612,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // A reported collision is NOT re-stated here: `unfilteredLevelNotice`
       // above already carries that same fact with the attendee count the label
       // doesn't have, and both would ride the one `overrideNotice` string — the
-      // owner reading the same heads-up twice in one sentence (M9). Suppressing
+      // owner reading the same heads-up twice in one sentence (M7). Suppressing
       // it can never leave him with nothing: `owner_busy_collision` is only
       // returned when `overCommitment` is set and isFloatingBlock is false,
       // which is exactly the condition that set that notice.
@@ -623,7 +623,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       ruleViolationLabel = ruleResult.violation_label ?? 'rule violated';
       const label = ruleViolationLabel;
       const subj = input.subject ?? 'this meeting';
-      // M14 — the ONE dual-clock renderer. This string used to be formatted in
+      // M13 — the ONE dual-clock renderer. This string used to be formatted in
       // the owner's HOME zone with no zone label, while the `label` beside it
       // was rendered by checkSlot in the day's EFFECTIVE zone: on a trip day the
       // same message carried two different clocks for one instant.
@@ -657,7 +657,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           ?? Math.max(15, Math.round(DateTime.fromISO(input.slotEndIso).diff(DateTime.fromISO(input.slotStartIso), 'minutes').minutes));
         // THE nearby-alternatives search (nearbyAlternatives.ts) — shared with the
         // colleague point-check, which had been answering the same failing-slot
-        // question with a verdict and no options at all (M2, the 2026-07-27
+        // question with a verdict and no options at all (M1, the 2026-07-27
         // incident). It owns the workday-counted forward reach, the single
         // window, the spreader's 'exhaustive' anchor mode for a named day, and
         // the same-bars guarantee (lead time / category / exclusions) that keeps
@@ -725,7 +725,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // the owner "Simon is busy then" silently said nothing. Handled as a
           // NOTICE, not a block — an unread calendar is not evidence of a clash
           // either, and turning it into a confirm round would be #137 in reverse
-          // (and would cost an M4 round on every Graph hiccup).
+          // (and would cost an M3 round on every Graph hiccup).
           const fbDiag: { notChecked?: string[] } = {};
           // Always live. This used to read fresh ONLY on an override/replay
           // (`input.allowRelaxed`), so every ordinary booking decided whether to
@@ -783,7 +783,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // SAME mechanism Guard B / move_meeting's colleague-path already
           // call for this exact purpose (attendeeAvailability + a single-slot
           // findAvailableSlots read) instead of re-deriving hours/tz math
-          // here — one spine, M2. Only check attendees not already flagged
+          // here — one spine, M1. Only check attendees not already flagged
           // busy above; a busy attendee's heads-up already covers them.
           const hoursCheckEmails = internalEmails.filter(e => !busyAttendees.includes(e));
           const hoursBlockedEmails: string[] = [];
@@ -839,7 +839,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             if (busyAttendees.length > 0) {
               const who = joinNames(busyAttendees);
               // No "at this time" here — the ask below appends the actual
-              // whenText once for the WHOLE combined label (M14: one dual
+              // whenText once for the WHOLE combined label (M13: one dual
               // clock, quoted, never repeated per-phrase); the notice usage
               // (booked-through) already sits next to a confirmation that
               // states the time itself.
@@ -863,9 +863,9 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               attendeeBusyNotice = label;
             } else {
               // First-pass BOOK — flag ONCE; owner's "book anyway" comes back relaxed.
-              // M4 — recorded as a gate, so if the location question is also open
+              // M3 — recorded as a gate, so if the location question is also open
               // it goes out in the SAME message instead of a second round.
-              // M14 — one dual clock, quoted, never re-derived per string.
+              // M13 — one dual clock, quoted, never re-derived per string.
               const subj = input.subject ?? 'this meeting';
               const askText = `Heads up — ${label} at ${whenText(input.slotStartIso, input.slotEndIso)}. Book "${subj}" anyway, or pick a different time?`;
               attendeeBusyLabel = label;
@@ -877,7 +877,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             // out looking verified. Rides the SAME notice channel a busy attendee
             // uses on the override/move path, so it books and the owner hears the
             // truth — "I couldn't check" — rather than a silence that reads as
-            // "everyone's free" (M11).
+            // "everyone's free" (M9).
             const who = notChecked.map(e => e.split('@')[0]).join(', ');
             logger.warn('planMeeting — attendee free/busy was never read for this slot', {
               notChecked, slot: input.slotStartIso,
@@ -973,7 +973,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
   }
 
-  // ── ONE combined ask (M4) ───────────────────────────────────────────────
+  // ── ONE combined ask (M3) ───────────────────────────────────────────────
   // Every gate that could be evaluated has been. If any is open, return a
   // SINGLE action carrying ALL of the questions — the action KIND is the
   // highest-precedence gate so existing handler branches are unchanged, and
@@ -1047,7 +1047,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     category,
     level: bookingLevel,
     reasoning: `category=${category ?? 'none'} (${categoryReason}); location=${locationVerdict?.reasoning ?? 'n/a'}; level=${bookingLevel ?? 'n/a'}`,
-    // M3 — the level notices ride the SAME heads-up channel as #127's rule
+    // M2 — the level notices ride the SAME heads-up channel as #127's rule
     // notice, so "booked over your optional standup" and "this double-books you
     // over X with 2 people on it" reach the owner instead of a confirmation
     // that reads identical to booking a genuinely free slot.

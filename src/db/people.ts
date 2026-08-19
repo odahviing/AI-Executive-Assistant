@@ -182,7 +182,7 @@ function genderRank(setBy?: CoreFieldSetBy | null, confirmed?: number | null): n
 //
 // That blanket strip made the booking timeline write-only: recordBooking has
 // been appending entries no reader could ever surface, so "we booked yesterday"
-// — first-class work context under L6 — was unrecallable from the store. The
+// — first-class work context under L3 — was unrecallable from the store. The
 // fix is a freshness rule instead of a blanket strip: a booking recorded in the
 // last BOOKING_RECALL_DAYS renders WITH an explicit as-booked frame that names
 // the calendar as authoritative; older ones stay out, because that is exactly
@@ -1435,9 +1435,9 @@ export type SetPersonTimezoneOutcome = CoreFieldWrite | 'invalid_email' | 'inval
  * the caller's (`by` is required, never defaulted).
  *
  * Resolves through `resolvePerson` (the identity chokepoint) — find-or-create
- * by email, so a repeated external accumulates ONE row (L2), never a
+ * by email, so a repeated external accumulates ONE row (L11), never a
  * duplicate. Writes through `setCoreFieldWithProvenanceById` (owner > person >
- * auto — L4/#46), so a caller passing `by:'auto'` (inferred from chain prose)
+ * auto — L2/#46), so a caller passing `by:'auto'` (inferred from chain prose)
  * can never clobber a stronger stored value, while `by:'owner'` (the owner
  * said so in his forwarding note) always wins. Also refreshes
  * `working_hours_auto` off whichever zone actually landed (the write above may
@@ -1698,7 +1698,7 @@ export function formatPeopleMemoryForPrompt(
 
     // v2.3.4 kept booking snapshots out because a moved meeting made them lie;
     // readInteractionLog replaces that blanket strip with a freshness rule so
-    // "we booked yesterday" is recallable (L6) while stale snapshots still are
+    // "we booked yesterday" is recallable (L3) while stale snapshots still are
     // not. See BOOKING_SNAPSHOT_FRAME.
     const { relational: relationalLog, recentBookings } = readInteractionLog(p.interaction_log);
 
@@ -1769,7 +1769,7 @@ const SOCIAL_INTERACTION_TYPES = new Set(['social_chat', 'social_ping']);
  * Split out of buildSocialContextBlock (which was gated entirely on the optional
  * `skills.social` toggle) because none of this is social: role, reports_to,
  * response speed, collaboration notes and the recent work exchanges are what
- * make her COMPETENT with this person, and L6 forbids gating work-competence
+ * make her COMPETENT with this person, and L3 forbids gating work-competence
  * behind the social budget. A tenant that runs Maelle task-only used to lose all
  * of it as collateral. This block is unconditional on a colleague turn; the
  * social half below is what the toggle governs.
@@ -1784,7 +1784,7 @@ const SOCIAL_INTERACTION_TYPES = new Set(['social_chat', 'social_ping']);
  * the strip closed nothing while making Maelle measurably less competent
  * about people whose `.md` has no mirror at all. The line is back.
  *
- * Scope note (L9): this is built for the AUTHENTICATED speaker, about
+ * Scope note (L6): this is built for the AUTHENTICATED speaker, about
  * themselves — tier 2, they may read everything about themselves. It is never
  * built for a third party. The caller (buildTurnContext.ts) never invokes this
  * on a room surface (MPIM / channel) at all — v4.5.x (#154) moved the old
@@ -1880,10 +1880,10 @@ export function buildSocialContextBlockById(personId: string): string {
   // forward the legacy `profile_json.engagement_level`, itself an
   // owner-curated field, so it is owner-authored too even though no owner
   // action fired the MIGRATION step itself — which must not be relayed back
-  // to that same person (L9); every other reason (reply_engaged,
+  // to that same person (L6); every other reason (reply_engaged,
   // colleague_initiated, or no log row at all) is Maelle's own
   // auto-derived signal and is safe to narrate as tone guidance. The rank-0
-  // opt-out gate is unconditional either way — L11 forbids Maelle-initiated
+  // opt-out gate is unconditional either way — L8 forbids Maelle-initiated
   // social with this person regardless of who set the rank.
   const rank = (person as any).engagement_rank as number | undefined;
   const rankValue = typeof rank === 'number' ? rank : 2;

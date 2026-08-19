@@ -35,8 +35,8 @@
  *     draft entirely about Monday 3 August; only the rewriter's keep-veto stopped it
  *     (:784). Closed: `in_the_past` no longer arms, and the ledger holds future
  *     instants only.
- * The two vetoes did their job, which is the G6 design working — but a destructive
- * rewriter with no proven catch has not yet earned its active form (G9). Whether it
+ * The two vetoes did their job, which is the G5 design working — but a destructive
+ * rewriter with no proven catch has not yet earned its active form (G6). Whether it
  * keeps that form, or should only ever rewrite to "I can't confirm that time", is an
  * open owner decision; this file states its own record so that decision is made on
  * data instead of on the story above.
@@ -50,14 +50,14 @@
  * is voice (humanGate), leak (securityGate) and weekday↔date (dateVerifier).
  * Nothing checked the reply against the calendar facts of the same turn.
  *
- * WHY this is a guard at all, and not a prompt fix (G1). The pre-check already
+ * WHY this is a guard at all, and not a prompt fix (W3). The pre-check already
  * carries its verdicts UPSTREAM into the drafting context, which is where the
  * happy path belongs — and the same incident shows the limit of that: a verdict
  * injected as prose is a verdict the drafter can reinterpret. The floor is the
  * last resort behind it, not the mechanism: on a correct turn it is a no-op that
  * costs nothing (the stash is empty).
  *
- * SHAPE (G4/G5/G6/G7/G8):
+ * SHAPE (G3/G4/G5/G8/G10):
  *   - Ground truth is DETERMINISTIC and pre-established: the entries come from
  *     `checkSlot` — the same validator the booking path runs — on that exact
  *     instant, recorded by availabilityPreCheck at the moment it computed them.
@@ -66,17 +66,17 @@
  *     already committed, a non-working day, in the past. The owner-overridable
  *     tier — outside his hours, day-load protection, category caps — is
  *     deliberately NOT armed: those are legitimately push-through-able and
- *     flattening one into a refusal would be the G6 corruption this guard exists
+ *     flattening one into a refusal would be the G5 corruption this guard exists
  *     to avoid.
- *   - Detection is an LLM (G7 — "works on his end" has no language-neutral
+ *   - Detection is an LLM (G8 — "works on his end" has no language-neutral
  *     pattern, and Maelle answers in Hebrew / Russian / Spanish too), gated
  *     behind a free structural pre-filter (is there a fresh established block at
- *     all?), read as STRUCTURED FIELDS ONLY (G5) — the detector's prose can
+ *     all?), read as STRUCTURED FIELDS ONLY (G4) — the detector's prose can
  *     never reach a reader.
- *   - The remedy is one tool-less, bounded, fact-preserving rewrite (G4). It
+ *   - The remedy is one tool-less, bounded, fact-preserving rewrite (G3). It
  *     cannot fire a tool, cannot persist anything, and fails OPEN at every step:
  *     any error, any empty or fact-dropping rewrite ships the original draft
- *     (G6 — a rare defect through, never a corrupted correct reply).
+ *     (G5 — a rare defect through, never a corrupted correct reply).
  *
  * REASON VISIBILITY — owner decision 2026-07-27, "reason by CLASS, in-thread, no
  * identifying detail". The narration states the CLASS of the blocker and nothing
@@ -105,7 +105,7 @@ import { renderClockInZone } from './timezoneConvert';
  *
  * Shared by the pre-check's prompt block and this gate's rewriter on purpose —
  * one vocabulary, so the drafting context and the floor can never disagree about
- * what a blocked slot is allowed to say (G2/G3).
+ * what a blocked slot is allowed to say (G1/G2).
  */
 export function hardBlockClassPhrase(
   kind: string | undefined,
@@ -251,7 +251,7 @@ export interface HardBlockedSlot {
  * INVALIDATION — the TTL is the LAST line, never the only one. An entry is a claim
  * about a live calendar, so anything that proves it wrong must remove it, and a
  * stale entry is not a missed catch but a FALSE REFUSAL — the one failure this guard
- * may not commit (G6). Six rules. Five are grounded in a fresh calendar read; rule 5
+ * may not commit (G5). Six rules. Five are grounded in a fresh calendar read; rule 5
  * is not (see its own paragraph) and is a scope safeguard, not a calendar fact:
  *   1. A fresh verdict for that exact instant that is NOT a hard block deletes it —
  *      bookable, soft / owner-overridable, or a kind nobody has classified. Same
@@ -458,7 +458,7 @@ type SlotTreatment = 'presented_available' | 'presented_blocked' | 'not_mentione
  *
  * Haiku + forced tool. The model NEVER supplies a time, a date or a reason — it
  * only classifies each of OUR instants into one of three enum values, and we read
- * nothing else (G5). So a hallucinated slot cannot enter the decision, and the
+ * nothing else (G4). So a hallucinated slot cannot enter the decision, and the
  * detector's prose cannot reach a reader.
  *
  * SCOPE — the exact listed instants, never a day. Since the point-check started
@@ -472,12 +472,12 @@ type SlotTreatment = 'presented_available' | 'presented_blocked' | 'not_mentione
  *
  * WHERE THE HARM LINE IS — being told a taken slot is free, not the word
  * "push". So a draft that STATES the clash and then asks whether to book over it
- * anyway is `presented_blocked`: that is the M3 one-step book-through, the owner is
+ * anyway is `presented_blocked`: that is the M2 one-step book-through, the owner is
  * entitled to override his own calendar, and rewriting his confirmation question
- * into a flat "that doesn't work" would put the guard in the flow's way (G1). The
+ * into a flat "that doesn't work" would put the guard in the flow's way (G5). The
  * distinction is not available deterministically at output time — the confirmation
  * turn carries no completed-mutation marker by design (turnHelpers.ts:141), and
- * re-deriving it from a list of calendar tool names is exactly the guessing G3
+ * re-deriving it from a list of calendar tool names is exactly the guessing G2
  * removed from the claim-checker's shield — so it is drawn where it is genuinely a
  * question of meaning: in the spec below. A hedge that never says the slot is taken
  * ("tighter than his usual, workable if you push through" — the 2026-07-27 wording)
@@ -574,7 +574,7 @@ Report one entry per numbered time by calling the report tool.`;
 /**
  * One tool-less bounded rewrite. Sonnet, forced `verdict` tool — same shape as
  * rewriteOwningTheMiss, and for the same reason: only the structured fields can
- * become the reply, so the model's reasoning can never ship (G5).
+ * become the reply, so the model's reasoning can never ship (G4).
  *
  * The rewriter gets the CLASS PHRASE and is forbidden to add any other reason,
  * which is what keeps the correction from becoming a second fabrication. When the

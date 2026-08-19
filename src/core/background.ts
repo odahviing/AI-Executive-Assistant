@@ -11,6 +11,15 @@ import logger from '../utils/logger';
 // unread THREAD (a person with two separate unanswered threads gets both),
 // posted in-thread. The legacy 24h LOOKBACK_HOURS was removed — the watermark
 // IS the window.
+//
+// 2026-08-18 (S9, gh#downtime-catchup-groups) — widened off DM-only. A DM
+// counts any missed message (nothing else could have gated it live); an MPIM
+// or channel counts a missed message ONLY when it @-mentioned her — the same
+// bar S3 uses to decide whether she'd have been active on it at all. A group
+// message with no mention was never hers and stays untouched. Per-thread
+// "unanswered" now also treats a reply from a PERSON (not just from her) as
+// resolved — a colleague or the owner may have handled it in the room while
+// she was down, and S8 (one answer, ever) means she must not pile on.
 
 // ── Background timer ─────────────────────────────────────────────────────────
 
@@ -499,28 +508,48 @@ export async function catchUpMissedMessages(
   // came back up and answered nobody). processIfMissed replies to at most the
   // ONE latest-unanswered message per DM, so this stays bounded to ≤1 reply
   // per conversation even across a long outage.
-  const channels = new Set<string>([ownerChannel]);
+  //
+  // 2026-08-18 — widened to MPIMs and channels the bot has joined (`is_member`),
+  // one combined `conversations.list` call across all four types. DMs keep the
+  // no-mention-needed scan below; MPIM/channel entries are scanned separately
+  // (mention-gated — see findUnansweredMentionInThread).
+  const dmChannels = new Set<string>([ownerChannel]);
+  const mpimChannels = new Set<string>();
+  const groupChannels = new Set<string>();
   try {
     let cursor: string | undefined;
     let pages = 0;
     do {
       const list = await app.client.conversations.list({
-        token: botToken, types: 'im', limit: 200, cursor,
+        token: botToken, types: 'im,mpim,public_channel,private_channel', limit: 200, cursor,
       });
       for (const c of (list.channels ?? []) as Array<Record<string, unknown>>) {
-        if (typeof c.id === 'string' && !c.is_user_deleted) channels.add(c.id);
+        if (typeof c.id !== 'string') continue;
+        if (c.is_im === true) { if (!c.is_user_deleted) dmChannels.add(c.id); continue; }
+        if (c.is_mpim === true) { mpimChannels.add(c.id); continue; }
+        if (c.is_member === true) groupChannels.add(c.id);
       }
       cursor = (list.response_metadata?.next_cursor as string | undefined) || undefined;
       pages++;
     } while (cursor && pages < 5);
   } catch (err) {
-    logger.warn('Catch-up: could not list DMs — falling back to owner DM only', { err: String(err) });
+    logger.warn('Catch-up: could not list conversations — falling back to owner DM only', { err: String(err) });
   }
 
   if (!isHeartbeat || shouldLogHeartbeatScan()) {
-    logger.info('Catch-up: scanning DMs for missed messages', { dmCount: channels.size, sinceMs });
+    logger.info('Catch-up: scanning for missed messages', {
+      dmCount: dmChannels.size, mpimCount: mpimChannels.size, channelCount: groupChannels.size, sinceMs,
+    });
   }
-  await runWithConcurrency([...channels], CATCHUP_SCAN_CONCURRENCY, async (channelId) => {
+
+  type CatchUpEntry = { channelId: string; surface: 'dm' | 'mpim' | 'channel' };
+  const entries: CatchUpEntry[] = [
+    ...[...dmChannels].map(channelId => ({ channelId, surface: 'dm' as const })),
+    ...[...mpimChannels].map(channelId => ({ channelId, surface: 'mpim' as const })),
+    ...[...groupChannels].map(channelId => ({ channelId, surface: 'channel' as const })),
+  ];
+
+  await runWithConcurrency(entries, CATCHUP_SCAN_CONCURRENCY, async ({ channelId, surface }) => {
     const opts: CheckOpts = {
       app, profile, botToken, botUserId,
       channelId,
@@ -539,25 +568,47 @@ export async function catchUpMissedMessages(
     // why her message was never recovered on 2026-06-12. A panel parent is a
     // top-level message, so it always surfaces in history; we check its replies.)
     const candidates: UnansweredCandidate[] = [];
-    try {
-      const top = await findUnansweredTopLevel(opts);
-      if (top) candidates.push(top);
-    } catch (err) {
-      logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
-    }
-    try {
-      for (const parentTs of await discoverThreadParents(app, botToken, channelId)) {
-        try {
-          const c = await findUnansweredInThread(opts, parentTs);
-          if (c) candidates.push(c);
-        } catch (err) {
-          logger.warn('Catch-up: per-panel-thread error, continuing', {
-            channelId, threadTs: parentTs, err: String(err).slice(0, 200),
-          });
-        }
+    if (surface === 'dm') {
+      try {
+        const top = await findUnansweredTopLevel(opts);
+        if (top) candidates.push(top);
+      } catch (err) {
+        logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
       }
-    } catch (err) {
-      logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
+      try {
+        for (const parentTs of await discoverThreadParents(app, botToken, channelId)) {
+          try {
+            const c = await findUnansweredInThread(opts, parentTs);
+            if (c) candidates.push(c);
+          } catch (err) {
+            logger.warn('Catch-up: per-panel-thread error, continuing', {
+              channelId, threadTs: parentTs, err: String(err).slice(0, 200),
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
+      }
+    } else {
+      // MPIM / channel — mention-gated (S3): a group message was only ever
+      // hers to answer if it @-mentioned her. Roots are top-level messages
+      // that either mention her themselves (own ts becomes the thread, S2) or
+      // carry replies (a mention could be buried mid-thread).
+      try {
+        const roots = await discoverThreadParents(app, botToken, channelId, { includeMentionsOf: botUserId, cap: 20 });
+        for (const rootTs of roots) {
+          try {
+            const c = await findUnansweredMentionInThread(opts, rootTs, surface);
+            if (c) candidates.push(c);
+          } catch (err) {
+            logger.warn('Catch-up: per-mention-thread error, continuing', {
+              channelId, threadTs: rootTs, err: String(err).slice(0, 200),
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('Catch-up: mention discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
+      }
     }
     if (candidates.length === 0) return;
     // Dedup by thread — keep the latest unanswered message per distinct thread,
@@ -568,9 +619,28 @@ export async function catchUpMissedMessages(
       const existing = byThread.get(c.postThreadTs);
       if (!existing || c.userTs > existing.userTs) byThread.set(c.postThreadTs, c);
     }
+    // MPIM group context (participant roster) needs member ids — fetched once
+    // per channel, only when there's actually something to reply to.
+    let mpimMemberIds: string[] | undefined;
+    if (surface === 'mpim' && byThread.size > 0) {
+      try {
+        const membersRes = await app.client.conversations.members({ token: botToken, channel: channelId });
+        mpimMemberIds = ((membersRes.members as string[]) ?? []).filter(id => id !== botUserId);
+      } catch (err) {
+        logger.warn('Catch-up: could not fetch MPIM members — replying without group context', {
+          channelId, err: String(err).slice(0, 200),
+        });
+      }
+    }
     for (const c of byThread.values()) {
       try {
-        await replayMissedMessage(opts, c.message, { postThreadTs: c.postThreadTs, source: c.source });
+        await replayMissedMessage(opts, c.message, {
+          postThreadTs: c.postThreadTs,
+          source: c.source,
+          isMpim: surface === 'mpim' ? true : undefined,
+          isChannel: surface === 'channel' ? true : undefined,
+          mpimMemberIds,
+        });
       } catch (err) {
         logger.warn('Catch-up: replay error, continuing', { channelId, threadTs: c.postThreadTs, err: String(err).slice(0, 200) });
       }
@@ -578,32 +648,51 @@ export async function catchUpMissedMessages(
   });
 }
 
-/** A thread's latest unanswered message (top-level DM stream or a panel thread). */
+/** A thread's latest unanswered message (top-level DM stream, a panel thread, or a mentioned MPIM/channel thread). */
 interface UnansweredCandidate {
   message: Record<string, unknown>;
   postThreadTs: string;
-  source: 'dm' | 'assistant_panel';
+  source: 'dm' | 'assistant_panel' | 'mpim' | 'channel';
   userTs: number;
 }
 
+/** Literal Slack @-mention of the bot — structured token, not natural language (W4). */
+function mentionsBot(text: unknown, botUserId: string): boolean {
+  return typeof text === 'string' && text.includes(`<@${botUserId}>`);
+}
+
 /**
- * Find assistant-panel thread parents in a DM by reading the channel's recent
- * top-level history (NO registry, NO `oldest` — an active thread's parent can
- * be old while its replies are recent, so we must see old parents too). A
- * parent is any returned message with replies. Returns their ts (deduped),
- * newest-first, capped. The reply-recency gate happens later in
- * processAssistantThreadIfMissed via `oldest`.
+ * Find thread roots in a conversation by reading its recent top-level history
+ * (NO registry, NO `oldest` — an active thread's parent can be old while its
+ * replies are recent, so we must see old parents too). Returns their ts
+ * (deduped), newest-first, capped.
+ *
+ *   - Default (no `opts`): assistant-panel discovery in a DM — a root is any
+ *     message with replies. The reply-recency gate happens later via
+ *     `oldest` inside findUnansweredInThread.
+ *   - `includeMentionsOf` (MPIM/channel catch-up, 2026-08-18): ALSO treat a
+ *     top-level message as a root when it @-mentions the bot itself, even
+ *     with zero replies — its own ts becomes the thread the moment she
+ *     replies (S2). Ordinary chatter with neither replies nor a mention is
+ *     never a root, so the mention-gated scan below never even looks at it.
  */
-async function discoverThreadParents(app: App, botToken: string, channelId: string): Promise<string[]> {
+async function discoverThreadParents(
+  app: App, botToken: string, channelId: string,
+  opts?: { includeMentionsOf?: string; cap?: number },
+): Promise<string[]> {
   try {
-    const res = await app.client.conversations.history({ token: botToken, channel: channelId, limit: 50 });
+    const res = await app.client.conversations.history({
+      token: botToken, channel: channelId, limit: opts?.includeMentionsOf ? 100 : 50,
+    });
     const msgs = (res.messages ?? []) as Array<Record<string, unknown>>;
     const parents: string[] = [];
     for (const m of msgs) {
+      if (typeof m.ts !== 'string') continue;
       const replyCount = typeof m.reply_count === 'number' ? m.reply_count : 0;
-      if (replyCount > 0 && typeof m.ts === 'string') parents.push(m.ts);
+      const selfMention = opts?.includeMentionsOf ? mentionsBot(m.text, opts.includeMentionsOf) : false;
+      if (replyCount > 0 || selfMention) parents.push(m.ts);
     }
-    return parents.slice(0, 10);  // bound — realistic DMs have 0-1 active panels
+    return parents.slice(0, opts?.cap ?? 10);  // bound — realistic DMs have 0-1 active panels
   } catch {
     return [];  // no access / no history — nothing to discover
   }
@@ -717,6 +806,47 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
   return { message: latestUserMsg, postThreadTs: threadTs, source: 'assistant_panel', userTs };
 }
 
+// 2026-08-18 (S9) — MPIM/channel mention-gated catch-up. A group message is
+// only "hers to answer" if it @-mentioned her — the same bar that would have
+// made her active on it live (S3's "quiet unless mentioned"). Scans one
+// thread (a root ts from discoverThreadParents) for the LATEST message that
+// mentions the bot; if anything landed in the thread after that mention —
+// her own reply OR a person's — someone already handled it and she must not
+// pile on (S8: one answer, ever; generalized here because a colleague or the
+// owner resolving it in the room counts the same as her own reply would).
+// Media is excluded (`!m.subtype`): MPIM's owner-only image rule and the
+// channel file owner-presence gate live in the live handlers, not re-derived
+// here — a mentioned image is left for a live re-mention.
+async function findUnansweredMentionInThread(
+  opts: CheckOpts, rootTs: string, source: 'mpim' | 'channel',
+): Promise<UnansweredCandidate | null> {
+  const { app, botToken, channelId, botUserId, oldest } = opts;
+
+  let messages: Array<Record<string, unknown>>;
+  try {
+    const result = await app.client.conversations.replies({
+      token: botToken, channel: channelId, ts: rootTs, limit: 200,
+    });
+    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
+  } catch {
+    return null;  // no access / no history — nothing to discover
+  }
+
+  const latestMention = latestByTs(
+    messages,
+    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId && mentionsBot(m.text, botUserId),
+  );
+  if (!latestMention?.ts) return null;  // never mentioned in this thread — never hers (S3)
+
+  const mentionTs = parseFloat(latestMention.ts as string);
+  if (mentionTs < parseFloat(oldest)) return null;  // the mention predates the downtime gap
+
+  const answeredAfter = messages.some(m => typeof m.ts === 'string' && parseFloat(m.ts) > mentionTs);
+  if (answeredAfter) return null;  // bot OR a person already handled it — don't pile on
+
+  return { message: latestMention, postThreadTs: rootTs, source, userTs: mentionTs };
+}
+
 // Newest message matching `pred`, by ts. Order-independent — works for both
 // conversations.history (newest-first) and conversations.replies (oldest-first).
 function latestByTs(
@@ -740,7 +870,13 @@ function latestByTs(
 async function replayMissedMessage(
   opts: CheckOpts,
   latestUserMsg: Record<string, unknown>,
-  post: { postThreadTs: string; source: 'dm' | 'assistant_panel' },
+  post: {
+    postThreadTs: string;
+    source: UnansweredCandidate['source'];
+    isMpim?: boolean;
+    isChannel?: boolean;
+    mpimMemberIds?: string[];
+  },
 ): Promise<void> {
   const { profile, channelId } = opts;
   const msgTs = latestUserMsg.ts as string;
@@ -802,6 +938,9 @@ async function replayMissedMessage(
       channelId,
       postThreadTs: post.postThreadTs,
       source: post.source,
+      isMpim: post.isMpim,
+      isChannel: post.isChannel,
+      mpimMemberIds: post.mpimMemberIds,
     });
   } catch (err) {
     logger.error('Catch-up: inbound replay failed', { channelId, err: String(err) });

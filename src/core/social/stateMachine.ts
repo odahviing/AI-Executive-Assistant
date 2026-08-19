@@ -415,7 +415,7 @@ export function chooseSocialDirective(params: {
    * message, prob a bug as we said coda is separate"), which is also what
    * broke the #179-b language-match rule (systemPrompt.ts:347-354). Checked
    * FIRST, ahead of `kind`, so it suppresses celebrate/engage too — not just
-   * the proactive slot — because the relay always outranks a social aside (L10).
+   * the proactive slot — because the relay always outranks a social aside (L7).
    */
   hasOperationalRelay?: boolean;
 }): SocialDirective {

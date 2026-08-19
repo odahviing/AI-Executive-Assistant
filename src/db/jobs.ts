@@ -78,7 +78,7 @@ export function getOutreachJobByRequestId(requestId: string): OutreachJob | null
 // block-c round 3, 2026-08-18 — split from the shared value once it proved
 // NOT unique enough for the latter's own dedup lookup, getLatestFreeformOwnerFlag,
 // to tell the two backstops' rows apart) — both durable DMs to the owner
-// that must fire regardless of the colleague's own pending count (R4: each
+// that must fire regardless of the colleague's own pending count (R3: each
 // exists precisely to stop a drop, so neither can itself be the thing that
 // gets dropped). Counting either here would silently eat a genuine slot of
 // the colleague's quota for something they never asked to have tracked.
@@ -103,16 +103,31 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * cascade, and neither function persists it — the physical column is gone (see the
  * ONE SPINE block at the top of this file).
  *
- * These four are the only values any caller passes — verified by grep 2026-07-26,
- * with one change since (gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop,
- * 2026-08-17): 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
- * skills/meetingReschedule.ts:570), 'pending_scheduled' (skills/outreach.ts:216),
- * 'replied' (several sites in skills/meetingReschedule.ts and
- * core/requests/colleagueOofReengage.ts — connectors/slack/coordinator.ts's own
- * two 'replied' sites are GONE: its no-routed-intent path stopped classifying
- * done/continue/schedule and closing on 'done'/'schedule', and now re-arms the
- * request's reply-deadline instead of transitioning outreach_jobs at all),
- * 'cancelled' (skills/outreach.ts:322,332,445, skills/meetingReschedule.ts:594).
+ * These four are the only values any caller passes — verified by grep
+ * 2026-08-18, with two changes since the 2026-07-26 baseline:
+ * (1) gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop, 2026-08-17 —
+ * connectors/slack/coordinator.ts's OLD two 'replied' sites (its
+ * no-routed-intent path unconditionally classifying done/continue/schedule
+ * and closing on 'done'/'schedule') are GONE; `handleOutreachReply`'s
+ * generic no-routed-intent branch now re-arms the request's reply-deadline
+ * instead of transitioning outreach_jobs at all.
+ * (2) round 2, same day — that removal left a real gap (a reply that
+ * resolves the ask in the SAME turn had nothing to close it), so
+ * coordinator.ts grew ONE NEW, GATED 'replied' site instead:
+ * `closeOutreachReplyIfResolvedThisTurn` (coordinator.ts:390, called by
+ * processMessage.ts after the orchestrator turn finishes), which transitions
+ * ONLY when that turn produced genuine resolving evidence (a calendar
+ * mutation, a booking, or a fresh approval) — every other reply still takes
+ * the re-arm path from (1). So coordinator.ts is NOT a zero-producer site;
+ * it is a conditional one.
+ * Current producers: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
+ * skills/meetingReschedule.ts:591, core/requests/colleagueOofReengage.ts:386,
+ * skills/outreach.ts:286 — the isFuture ternary there also produces
+ * 'pending_scheduled', so it belongs in both lists),
+ * 'pending_scheduled' (skills/outreach.ts:286), 'replied' (several sites in
+ * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:617, and
+ * coordinator.ts:390 above), 'cancelled' (skills/outreach.ts:378,388,513,
+ * skills/meetingReschedule.ts:616, core/requests/colleagueOofReengage.ts:402,607).
  * The old union also carried 'done', 'expired', 'failed' and 'no_response' with
  * ZERO producers — the branches keyed on them were unreachable and went with the
  * column.

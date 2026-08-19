@@ -62,7 +62,7 @@
  * at the release it shipped in, a handoff says where something stood on the
  * day it was written, and neither claims to track HEAD. Flagging those would
  * not be a real defect, it would be the tool crying wolf at the one place
- * "stale" is the design, and that is the exact failure A13 is written
+ * "stale" is the design, and that is the exact failure A10 is written
  * against (a check firing on its own healthy path).
  *
  * Usage:

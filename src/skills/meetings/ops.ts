@@ -67,7 +67,7 @@ export class SchedulingSkill {
     const relaxedGrant = toolName === 'find_available_slots' ? grantRelaxed(args, context) : undefined;
     const result = await this.dispatch(toolName, args, context, relaxedGrant);
 
-    // o#222 / G2 (2026-08-06, owner ruling: "stay quiet ... its long strange
+    // o#222 / G1 (2026-08-06, owner ruling: "stay quiet ... its long strange
     // that she explains other people why I cant meet with them") — a
     // room-clamped rule-bend on find_available_slots (relaxedReason ===
     // 'owner_room_bend') used to attach `owner_override_not_applied`, a

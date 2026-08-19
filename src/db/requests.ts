@@ -361,13 +361,13 @@ export function getLatestRequestForThread(ownerUserId: string, threadTs: string)
  * OLDER row was approved while a NEWER one is still pending,
  * getLatestRequestForThread's newest-row state alone made a TRUTHFUL "he
  * approved it" claim about the older row look false and get rewritten away —
- * inverting a correct reply, the one failure G6 forbids outright. Until the
+ * inverting a correct reply, the one failure G5 forbids outright. Until the
  * checker can bind a claim to the SPECIFIC request row a sentence is about
  * (real NLP work, not a query), the safe ground truth is "was ANY request in
  * this thread EVER resolved" — a true grant anywhere in the thread's history
  * makes a "he approved it" claim plausible and must never be inverted. This
  * only under-catches the rarer case of a false claim about a *different*,
- * still-pending request in the same thread, which is a safe MISS (G6), not a
+ * still-pending request in the same thread, which is a safe MISS (G5), not a
  * corrupted reply.
  */
 export function anyRequestResolvedForThread(ownerUserId: string, threadTs: string): boolean {

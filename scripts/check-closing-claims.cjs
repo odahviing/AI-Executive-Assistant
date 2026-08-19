@@ -26,7 +26,7 @@
  * differently-phrased sentences about the same fact often share few words in
  * common, so this is scored by CONTAINMENT (shared content-word count over
  * the SMALLER side, after stripping stopwords and light suffix-stemming),
- * not a stricter measure — and it can be wrong in both directions. Per A7
+ * not a stricter measure — and it can be wrong in both directions. Per A5
  * ("bias toward blocking — a false block costs one pass, a false pass
  * ships"), a coincidental match costs one re-read; a real one caught here is
  * the whole reason this file exists. It ALSO isolates the negated CLAUSE on

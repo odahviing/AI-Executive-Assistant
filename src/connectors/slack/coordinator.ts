@@ -15,7 +15,7 @@
  * second copy of connections/slack/messaging.findChannelByName — same
  * conversations.list, same substring filter — which meant a second, separately
  * maintained path that listed private channels. One listing path is enough, and it
- * belongs behind the Connection (S12), not in the connector.
+ * belongs behind the Connection (W11), not in the connector.
  *
  * What used to live here but is gone in 1.6:
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:
@@ -138,7 +138,7 @@ function buildOutreachJobContextBlock(job: OutreachJob): string {
  *   - Marks the outreach job continued (conversation_json + reply_text) or
  *     hands off to an intent handler (which owns its own terminal closure)
  *   - Re-arms / clears the linked request's reply-deadline timer as needed
- *     (never left un-resolvable — see R4/R5 in the Registrar charter)
+ *     (never left un-resolvable — see R3/R4 in the Registrar charter)
  *   - Logs an event
  */
 export async function handleOutreachReply(
@@ -302,12 +302,12 @@ export async function handleOutreachReply(
   // closeOutreachReplyIfResolvedThisTurn below, called by the caller AFTER
   // the orchestrator turn completes), and re-arming is the safe default
   // either way: if nothing further happens, this expires on its own and BOTH
-  // sides are told (R4 — runner.ts's runOutreachExpiryOrDecision; phase
+  // sides are told (R3 — runner.ts's runOutreachExpiryOrDecision; phase
   // 'outreach:re_engaged' makes that read "replied but never came back"
   // rather than "never replied" — see outreach-expiry-tombstone-says-never-
   // replied, 2026-08-12); if the reply resolves into a real action this same
   // turn, closeOutreachReplyIfResolvedThisTurn supersedes this re-arm with a
-  // real closure. Never a silent drop either way (R4/R5).
+  // real closure. Never a silent drop either way (R3/R4).
   if (job.request_id) {
     const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
     updateRequest(job.request_id, {
@@ -359,7 +359,7 @@ export async function handleOutreachReply(
  *     rows — those are a DIFFERENT escalation for a DIFFERENT bug and must
  *     never be read as "this outreach got resolved").
  * A turn that only replied in words trips neither signal and leaves the
- * request exactly as handleOutreachReply already re-armed it (R5's "let me
+ * request exactly as handleOutreachReply already re-armed it (R4's "let me
  * check and come back to you" case, or any other non-decisive reply).
  */
 export async function closeOutreachReplyIfResolvedThisTurn(params: {

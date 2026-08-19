@@ -1865,7 +1865,7 @@ if (verifyRan && outcomeUntraced.length)
   featureWarnings.push(
     `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} piece(s) this wave claims built were NOT traced: ${outcomeUntraced
       .map((c) => c.id)
-      .join(', ')}. A fix that cannot be traced back to its own requirement IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these pieces.`,
+      .join(', ')}. A fix that cannot be traced back to its own requirement IS the finding (bouncer.md B1) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these pieces.`,
   )
 // ── 2026-08-06-PARITY · THE MEASURED OBSERVABLE'S GATE ───────────────────────
 // Build-time, not verify-time — same discipline and same reasoning as

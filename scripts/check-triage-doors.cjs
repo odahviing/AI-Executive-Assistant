@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * check-triage-doors — the A13 fixture for bugger.js's two triage mechanisms
- * added 2026-08-16 under the "fourth kind" (architect.md A1, 2026-08-16 ruling):
+ * check-triage-doors — the A10 fixture for bugger.js's two triage mechanisms
+ * added 2026-08-16 under the "fourth kind" (architect.md A4, 2026-08-16 ruling):
  *
  *   1. A REGRESSION reinstatement — an `alreadyBuilt` match whose identity is
  *      marked [REGRESSION] by `ledger-stats --index` (surfaced on the shape by
@@ -14,7 +14,7 @@
  *      structurally identical on arrival — both could re-dispatch an
  *      already-fixed symptom. Now screened the same way the queue already was.
  *
- * A13: both halves are required — FIRES on the bad input, STAYS SILENT on the
+ * A10: both halves are required — FIRES on the bad input, STAYS SILENT on the
  * good one. Every section below states which half it is.
  *
  * HOW IT RUNS THE ENGINE — same method as check-design-door.cjs (X182's own
@@ -50,7 +50,7 @@ const ok = (name, cond, saw) => {
 }
 const section = (s) => console.log(`\n${s}`)
 
-// ── the engine harness — vm.compileFunction, same method A13 mandates ───────
+// ── the engine harness — vm.compileFunction, same method A10 mandates ───────
 const blank = (m) => ' '.repeat(m.length)
 const neutralise = (src) =>
   src

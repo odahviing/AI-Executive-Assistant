@@ -13,7 +13,7 @@ import { PRIVATE_MASK } from '../../../utils/displaySubject';
 type UserProfileType = import('../../../config/userProfile').UserProfile;
 
 /**
- * v4.1.x (M4) — the plan's complete set of open questions, shaped for a tool
+ * v4.1.x (M3) — the plan's complete set of open questions, shaped for a tool
  * result. planMeeting now evaluates EVERY gate it can before returning, so a
  * booking that needs both a location decision and an attendee-conflict
  * acknowledgement carries both here instead of costing two round-trips. Emitted
@@ -119,7 +119,7 @@ export function recordProposedAlternatives(params: {
  * LENIENT — normalized equality, containment, or one shared non-trivial word
  * all pass — because the two strings are almost always the SAME string read
  * twice; the bar is only to catch a CLEAR mismatch (zero shared content),
- * never to second-guess a real rename or a punctuation/case difference (M4 —
+ * never to second-guess a real rename or a punctuation/case difference (M3 —
  * don't manufacture a re-ask over a title that merely differs cosmetically).
  * Structural string normalization only (Unicode-aware, no meaning extraction)
  * — same class as the exact-match subject comparisons already used by

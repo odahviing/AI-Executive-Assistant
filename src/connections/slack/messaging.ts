@@ -408,7 +408,7 @@ export async function findUserByName(
  *
  * ⚠️ OPEN — owner's call, not settled here. `types` still lists `private_channel`,
  * so a private channel the BOT belongs to can be matched by a fuzzy name search and
- * its name handed to the model; on a colleague-readable surface (S6 — the owner is
+ * its name handed to the model; on a colleague-readable surface (S5 — the owner is
  * not the owner in an MPIM) that name can then be read out to the room. Narrowing to
  * `public_channel` closes it and also removes posting to private channels entirely.
  * Never invoked in any log to date, so this is hardening, not an incident.

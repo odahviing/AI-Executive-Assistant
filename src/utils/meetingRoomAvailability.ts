@@ -48,7 +48,7 @@ export async function checkMeetingRoomAvailability(params: {
   try {
     // P15 — `notChecked` means the free/busy read never happened for this window
     // (malformed window / Graph rejected it), which used to come back as `{}` and
-    // land on `room_free`. "The room's free" is one of M11's own examples of a
+    // land on `room_free`. "The room's free" is one of M9's own examples of a
     // reason that has to be TRUE; an unread calendar is not evidence of a free
     // room. Same outcome as the throw path below, which already declines to guess.
     const fbDiag: { notChecked?: string[] } = {};

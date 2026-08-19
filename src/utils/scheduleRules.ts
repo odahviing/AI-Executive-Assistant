@@ -60,7 +60,7 @@
  *     decides how a bend is HANDLED, never which rules apply.
  *   • SEARCH — unaffected either way: the walker's own workday gate skips
  *     off-days before checkSlot is ever called, relaxed or not, so the two
- *     cannot disagree (M2).
+ *     cannot disagree (M1).
  *
  * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
  * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
@@ -69,14 +69,14 @@
  * preferred shape, not a violation. (Prior wave had rule (9)
  * `owner_buffer_collision`; deleted v2.7.1.)
  *
- * ── THE UNCONDITIONAL FACTS (v4.1.x — M3; ordering fixed v4.2.x) ────────────
+ * ── THE UNCONDITIONAL FACTS (v4.1.x — M2; ordering fixed v4.2.x) ────────────
  * Two things are computed BEFORE the ladder and reported on EVERY verdict,
  * whichever rule ended up returning: the slot's OCCUPANCY and whether it sits
  * inside the day's work band. Both are facts about the slot rather than
  * consequences of which rule tripped first, so no consumer has to infer one from
  * the label it happened to get — the pattern that produced both bugs below.
  *
- * (a) `level` — the M3 booking tier, from a single scan of the owner's events:
+ * (a) `level` — the M2 booking tier, from a single scan of the owner's events:
  *   free       — nothing holds this slot
  *   optional   — a TIMED workingElsewhere event holds it (join-if-free, soft)
  *   unfiltered — a real commitment holds it
@@ -95,10 +95,10 @@
  *   • the colleague pre-check treated the same slot as `within_lead_time`, i.e.
  *     "NOT a hard conflict and it's Idan's to override", across a 4h window;
  *   • check_join_availability had to carry a PRIVATE second occupancy scan to
- *     answer "is he busy?" at all — a second validator, which is the M2 bug.
+ *     answer "is he busy?" at all — a second validator, which is the M1 bug.
  * Now: scan → rule 0 (a past slot is past, whatever holds it) → the hard
  * collision → then the soft ladder. `level` is ALWAYS present, so no caller can
- * claim a slot is clear without having looked (M11).
+ * claim a slot is clear without having looked (M9).
  *
  * (b) `outsideWorkHours` — the slot does not fit inside ANY of the day's
  * effective work windows (an off day has none, so it is true there too). Rule 5
@@ -123,7 +123,7 @@
  * in-hours truth. One work-hours decision still, taken here: the walker's own
  * `slotTotalMin` is computed in the SEARCH timezone, which differs from the
  * day's effective zone on an away override, so re-deriving it out there would be
- * a second answer that can disagree (M2).
+ * a second answer that can disagree (M1).
  */
 
 import { DateTime } from 'luxon';
@@ -148,7 +148,7 @@ export type RuleViolationKind =
   | 'attendee_busy_collision'
   | 'focus_time_floor';
 
-/** M3 booking level — what already holds the slot, independent of the rules. */
+/** M2 booking level — what already holds the slot, independent of the rules. */
 export type BookingLevel = 'free' | 'optional' | 'unfiltered';
 
 // ── v3.1.2 (C) — Shared daily-focus-time helper ─────────────────────────────
@@ -241,7 +241,7 @@ export interface RuleCheckInput {
    */
   effectiveDay?: EffectiveWorkDay;
   /**
-   * v4.1.x (M12) — WHO the produced `violation_label` is for. The label embeds
+   * v4.1.x (M10) — WHO the produced `violation_label` is for. The label embeds
    * the colliding meeting's subject, and on a COLLEAGUE-initiated create_meeting
    * that label travels back as `violation_label` + `suggested_ask_text`, i.e.
    * straight into a colleague turn's model context. Scoped at the producer, so
@@ -259,7 +259,7 @@ export interface RuleCheckInput {
    */
   viewerEmail?: string | null;
   /**
-   * v4.1.x (M2) — booking lead time in hours for THIS caller
+   * v4.1.x (M1) — booking lead time in hours for THIS caller
    * (bookingLeadTimeHours: owner vs colleague). Pre-fix this rule lived ONLY in
    * the slot walker, so a colleague naming "3pm today" at 2pm was rejected by
    * the search yet accepted by create_meeting and by the colleague pre-check.
@@ -267,7 +267,7 @@ export interface RuleCheckInput {
    */
   leadTimeHours?: number;
   /**
-   * v4.1.x (M2) — explicit travel padding in minutes for this call (the search's
+   * v4.1.x (M1) — explicit travel padding in minutes for this call (the search's
    * `travel_buffer_minutes` arg). Omitted → resolved from the category flag +
    * profile.meetings.travel_buffer_minutes via travelBufferMinutesFor. Pre-fix
    * checkSlot hardcoded 30 and ignored the caller's value entirely.
@@ -280,7 +280,7 @@ export interface RuleCheckResult {
   violation_kind?: RuleViolationKind;
   violation_label?: string;          // short human phrase suitable for an approval ask_text
   /**
-   * M3 tier of the slot — what holds it. Orthogonal to passes/violation, and
+   * M2 tier of the slot — what holds it. Orthogonal to passes/violation, and
    * ALWAYS present: the scan is unconditional and runs before the rule ladder,
    * so there is no verdict for which "we didn't look" is the honest answer.
    * (It used to be optional, absent on every early return — which is exactly
@@ -302,7 +302,7 @@ export interface RuleCheckResult {
   /**
    * level==='unfiltered' — the real commitment sitting on this slot, so the
    * caller can say WHAT it is booking over and whether other people are on it
-   * (M3: booking over a real commitment is never the same as breaking a soft
+   * (M2: booking over a real commitment is never the same as breaking a soft
    * own-day rule). Subject is viewer-scoped.
    */
   overCommitment?: {
@@ -329,7 +329,7 @@ export interface RuleCheckResult {
      * all-day `busy`), so a caller that needs "is this an all-day thing" (to
      * suppress a nonsensical "add attendees to it" steer) must not depend on
      * the narrower OOF-only signal. `allDayOutOfOffice` stays OOF-only because
-     * IT drives a "he's out of office" CLAIM (M11) — a held all-day block
+     * IT drives a "he's out of office" CLAIM (M9) — a held all-day block
      * (conference / offsite) is not that, and saying so would be a confident
      * wrong reason. Set from the same `ev.isAllDay` read that produces
      * `window` below — never re-derive by string-matching `window`.
@@ -402,7 +402,7 @@ export function travelBufferMinutesFor(
 
 /**
  * offeredSlotCount — THE single source for "how many options do we offer"
- * (M6). Also the per-day candidate cap in the slot walker, so one viable day
+ * (M4). Also the per-day candidate cap in the slot walker, so one viable day
  * can fill the whole offer instead of being culled to 4 before the spreader
  * ever sees it. Profile-less callers (degenerate no-profile search) get the
  * same default rather than a second literal.
@@ -444,7 +444,7 @@ export function requiredFreeMinutesForWorkDay(
  *   ignore     — cancelled, a free-show (FYI / "Not Me"), a floating block
  *                (lunch / gym slides; rule 6 owns the "no room to shift" case),
  *                or an ALL-DAY workingElsewhere marker (P32, below)
- *   optional   — a TIMED workingElsewhere event: join-if-free, skippable (M3)
+ *   optional   — a TIMED workingElsewhere event: join-if-free, skippable (M2)
  *   commitment — everything else, INCLUDING an all-day busy / oof
  *
  * P32 — an ALL-DAY `workingElsewhere` event is NOT a commitment. It used to be,
@@ -453,13 +453,13 @@ export function requiredFreeMinutesForWorkDay(
  * NOT a block", findAvailableSlots.ts) and its free/busy pass skips every
  * `workingElsewhere` status, so the walker held the day open while this predicate
  * made checkSlot reject all 40 of its slots as `owner_busy_collision` — one
- * decision, two answers, which is the M2 bug regardless of which answer is right.
+ * decision, two answers, which is the M1 bug regardless of which answer is right.
  * The right one is the walker's, on the merits: the full-day WE travel spine was
- * DELETED in 4.0.0 (M14) and away days are per-date `owner_schedule_overrides`
+ * DELETED in 4.0.0 (M13) and away days are per-date `owner_schedule_overrides`
  * (#143) carrying their own hours and zone, so what is left on the calendar is a
  * marker for a day he is WORKING, just elsewhere. Blocking it would refuse every
  * booking on a WFH-marked day with "you're already busy" — a false reason for a
- * total refusal (M11). `optional` would be wrong too: that tier means a skippable
+ * total refusal (M9). `optional` would be wrong too: that tier means a skippable
  * MEETING, and it would tag every slot of the day "you'd skip it".
  *
  * Rule 7 used to skip none of these — only `isCancelled` + excludeEventIds —
@@ -506,7 +506,7 @@ export type OccupancyRole = 'ignore' | 'optional' | 'commitment';
  * It does NOT change bookability — `occupancyRoleOf` already calls an all-day
  * OOF a `commitment`, so every slot on the day collides. What it changes is what
  * is SAID: a day off reported as forty separate "already busy" hits narrates as
- * "fully booked", which is a false reason for a true refusal (M11).
+ * "fully booked", which is a false reason for a true refusal (M9).
  *
  * P29 — takes the three fields it actually reads, not `CalendarEvent`, so
  * `analyzeCalendar`'s ProcessedEvent (Graph events already parsed for narration)
@@ -620,7 +620,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // v4.4.9 (#154) — see the field doc on RuleCheckInput.viewerEmail.
   const viewerEmail = input.viewerEmail;
   const ownerFirst = profile.user.name.split(' ')[0];
-  // M11 — WHO reads the label this validator produces. The owner reads his own
+  // M9 — WHO reads the label this validator produces. The owner reads his own
   // heads-up (planMeeting's one-step `overrideNotice`), a colleague reads about
   // him. Pre-fix every label was third person, so the lead-time rule told Idan
   // "Idan needs at least 1h notice for a new booking".
@@ -645,7 +645,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
 
   // ── OCCUPANCY SCAN (rule 8's data) — unconditional, BEFORE the ladder ────
   // ONE scan answers two questions that used to be answered in two places:
-  //   (a) the M3 LEVEL of this slot — free / optional / unfiltered. The slot
+  //   (a) the M2 LEVEL of this slot — free / optional / unfiltered. The slot
   //       walker used to re-derive the optional tier itself from the same
   //       events (its own `softOccupied` pass) while the write path derived
   //       nothing at all, which is why a named-time booking straight over the
@@ -756,9 +756,9 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // ── (8) owner busy collision — the HARD truth, ahead of the soft rules ──
   // Position, not the check itself, is the fix. "Is he already committed?" is a
   // fact about the calendar; reporting a soft rule instead — because it happens
-  // to sit earlier in the ladder — is a confident WRONG reason (M11) and, on
+  // to sit earlier in the ladder — is a confident WRONG reason (M9) and, on
   // the owner's one-step book-through, books a double-booking he was never told
-  // about (M3). Every consumer that already branches on `owner_busy_collision`
+  // about (M2). Every consumer that already branches on `owner_busy_collision`
   // (the join tool, the colleague pre-check's escalatable set, the approval
   // re-derive, planMeeting) now gets the truthful verdict with no change of
   // its own — which is the point: one validator, one answer.
@@ -790,14 +790,14 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   }
 
   // ── (0b) booking lead time ──────────────────────────────────────────────
-  // v4.1.x (M2) — the owner's "how much notice do I need" floor. This lived
+  // v4.1.x (M1) — the owner's "how much notice do I need" floor. This lived
   // ONLY inside the slot walker (`minBufferHours`), so search and book gave
   // DIFFERENT answers for the same slot: the search dropped a colleague's
   // "3pm today" asked at 2pm as `within_lead_time`, while the colleague
   // pre-check and create_meeting both accepted it — silently defeating the
   // 4-hour colleague lead time. Now it is a real rule here, keyed on the
   // caller's role via bookingLeadTimeHours, and the walker READS it from here.
-  // Instant-only comparison (no zone inference — M13 forbids the server clock
+  // Instant-only comparison (no zone inference — M11 forbids the server clock
   // for zones, not for "what time is it now").
   if (!input.allowRelaxed && isWithinBookingLeadTime(slotStart.toMillis(), input.leadTimeHours)) {
     return {
@@ -994,7 +994,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // Bypassed under allowRelaxed — owner override is total (rule 11), and the
   // search loop likewise skips its buffer check in relaxed mode, so the two
   // stay aligned (a relaxed owner search must still return the slot).
-  // v4.1.x (M2) — length resolved by the ONE helper: the caller's explicit
+  // v4.1.x (M1) — length resolved by the ONE helper: the caller's explicit
   // travel_buffer_minutes wins, else the category flag draws the configured
   // length. Pre-fix this was a hardcoded 30 that ignored the caller entirely,
   // so a `travel_buffer_minutes: 60` search dropped slots the write path then

@@ -85,7 +85,7 @@ function mutationOutcome(result: unknown): { ok: boolean; reason?: string; event
 }
 
 /**
- * v4.1.x (G3) — THE mutation marker. Which tools change state, and in which
+ * v4.1.x (G2) — THE mutation marker. Which tools change state, and in which
  * domain, is knowledge that belongs HERE: this is the one place that holds the
  * tool name and its result at the same time, so it is the only place that can say
  * "a real state change happened" instead of guessing it later from a string.
@@ -94,7 +94,7 @@ function mutationOutcome(result: unknown): { ok: boolean; reason?: string; event
  * downstream by matching tool NAMES out of the rendered summary text — four
  * action_type branches over a 5-tool, a 2-tool and a 14-tool alternation, each
  * grown after a distinct incident, and every new mutating tool had to be
- * remembered in it or it would produce a false phantom-action flag (G2). The
+ * remembered in it or it would produce a false phantom-action flag (G1). The
  * shield now reads ONE field. Name-matching is gone from the guard entirely.
  *
  * The domain vocabulary is deliberately the claim-checker's own `action_type`
@@ -300,7 +300,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // so the claim-checker couldn't verify "renamed to X" / "added Yael" and
         // inferred the change failed → fabricated a "not done yet" on a done
         // action (2026-07-08). On success, render the tool's OWN action_summary —
-        // it enumerates the actual post-change values (G3: the log carries what
+        // it enumerates the actual post-change values (G2: the log carries what
         // HAPPENED, not the stale label used to find the meeting).
         if (toolName === 'update_meeting' && outcome.ok) {
           const changes = typeof (result as { action_summary?: unknown }).action_summary === 'string'
@@ -312,7 +312,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           // can't be matched against the summary and the checker inverted a TRUE
           // add. The email is already in the tool result (added_attendees) — carry
           // it into the log the checker reads so a claim in EITHER form matches
-          // (G3: carry the truth, don't make the checker guess a name↔email bridge).
+          // (G2: carry the truth, don't make the checker guess a name↔email bridge).
           const addedEmails = Array.isArray((result as { added_attendees?: unknown }).added_attendees)
             ? ((result as { added_attendees: unknown[] }).added_attendees.filter(e => typeof e === 'string') as string[])
             : [];
@@ -362,7 +362,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // replay' would otherwise read to the checker as a replay). Only the
         // EXPLICIT no-op is marked "NO calendar change"; an unknown resolve shape
         // (reject / amend / expired) stays neutral so the checker never
-        // manufactures a flag off it (G6 safe-miss).
+        // manufactures a flag off it (G5 safe-miss).
         const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string };
         if (r.ok === false) {
           return `[resolve_approval — not resolved${typeof r.reason === 'string' ? `: ${r.reason.slice(0, 60)}` : ''}]`;
@@ -389,7 +389,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // against, and flagged the TRUE claim as unconfirmed (false positive,
         // unnecessary rewrite cycle). Render the tool's own result fields
         // (calendarReads.ts handleSetWorkScheduleOverride) instead of guessing
-        // from input (G3) — EXCEPT `note` (see below). FAILED (owner_only /
+        // from input (G2) — EXCEPT `note` (see below). FAILED (owner_only /
         // bad_date / bad_range / nothing_to_set) is already handled by the
         // generic error-string check at the top of this function — those are
         // all `{ error: '<code>' }`.

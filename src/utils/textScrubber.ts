@@ -106,7 +106,7 @@ function humanizeIanaToken(match: string): string {
 }
 
 /**
- * v4.2.x (G2/G3) — THE shape of a Slack account id, written ONCE.
+ * v4.2.x (G1/G2) — THE shape of a Slack account id, written ONCE.
  *
  * Both regexes below are built from it: the WRAPPER that turns a naked id into a
  * rendered mention, and the READER (`RAW_SLACK_ID_RE`) that the output gates use to
@@ -136,7 +136,7 @@ const SLACK_ID_SHAPE = '[UW](?=[A-Z0-9]*\\d)[A-Z0-9]{7,}';
 const RENDERED_MENTION = `<@${SLACK_ID_SHAPE}(?:\\|[^>\\n]*)?>`;
 
 /**
- * v4.2.x (G2) — THE predicate: "an account id that is NOT a rendered mention".
+ * v4.2.x (G1) — THE predicate: "an account id that is NOT a rendered mention".
  * One string, both jobs — the WRAPPER below replaces every hit, the READER
  * (`RAW_SLACK_ID_RE`) tests for one.
  *
@@ -167,11 +167,11 @@ const UNRENDERED_SLACK_ID =
 // model sometimes echoes the id bare (Alex Wiggins → "@U09DGGSJJP9 …", 2026-07-21).
 // This deterministic scrub is the path-agnostic fix (runs on every outbound via
 // formatForSlack). Wrap → <@id> so Slack renders the display name. Structured
-// token → the allowed kind of regex (G7).
+// token → the allowed kind of regex (G8).
 const BARE_SLACK_ID_RE = new RegExp(UNRENDERED_SLACK_ID, 'g');
 
 /**
- * v4.1.x (G2) — THE single definition of "a raw Slack account id shown as literal
+ * v4.1.x (G1) — THE single definition of "a raw Slack account id shown as literal
  * text", i.e. an id this scrubber did NOT turn into a rendered `<@…>` mention.
  *
  * This module OWNS the slack-id token: it is the one component that acts on it

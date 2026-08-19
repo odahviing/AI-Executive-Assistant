@@ -148,7 +148,7 @@ export function recordOfferedSlots(params: {
 }): void {
   // No per-call `slice(0, 6)`. It was a second, silent bound competing with
   // MAX_OFFERED (the real cap, applied to the merged union below) and with the
-  // configured offered_slot_count (M6): a profile offering 8 slots recorded 6,
+  // configured offered_slot_count (M4): a profile offering 8 slots recorded 6,
   // and a proposed-alternatives payload — requested-day options THEN the widening
   // — dropped exactly the widened ones, so a pick from the second list came back
   // "I never offered you that". One cap, at the end, on the union.

@@ -128,7 +128,7 @@ async function checkSameSubjectCollision(
       if (chosenSeriesKey && sSeriesKey && sSeriesKey === chosenSeriesKey) return false;
       const attendeeEmails = (s.attendees ?? []).map(a => (a.emailAddress?.address ?? '').toLowerCase());
       const askerIsOn = !!askerEmail && attendeeEmails.includes(askerEmail);
-      // M12 — a private sibling a colleague isn't on is invisible to
+      // M10 — a private sibling a colleague isn't on is invisible to
       // them either way; never let it surface (as a redirect target
       // or in the ambiguous list) just because the subject collided.
       if (isEventPrivate({ sensitivity: s.sensitivity, categories: s.categories }, context.profile) && !askerIsOn) return false;
@@ -889,7 +889,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // this case (planMeeting.ts's PlanMeetingInput.ownerRoomBend) never
         // executed either. Same fix as resolve_approval's authority gate
         // (tasks/skill.ts:1278): the owner keeps his move authority on every
-        // surface (M10); only a genuine colleague needs this membership/rule
+        // surface (M8); only a genuine colleague needs this membership/rule
         // check.
         if (context.authority !== 'owner') {
           // v3.5.x — colleague-requested move gate (replaces the v3.1.4
@@ -1088,7 +1088,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // 4.2.0 added, so a Friday target, a past target and a
                   // travel-buffer rejection all humanized to 'unknown' and the
                   // colleague was told "it doesn't pass his scheduling rules and I
-                  // can't tell which one" — the mechanical non-answer M11 forbids.
+                  // can't tell which one" — the mechanical non-answer M9 forbids.
                   const labelFor = (reason: string | undefined): string =>
                     humanizeViolationLabel(reason, ownerFirst);
                   const nameForEmail = (em: string): string =>
@@ -1197,7 +1197,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // report the VACATED slot (the time that just opened up). Lets a
         // follow-up "move X into the freed slot" resolve without Maelle
         // re-asking what time the moved meeting used to be at.
-        // #52 (M2) — pre-state for the audit row (original_start/original_end/
+        // #52 (M1) — pre-state for the audit row (original_start/original_end/
         // original_tz below). `getEventType` sends no `Prefer: outlook.timezone`
         // header, so Graph answers in UTC and `startTimeZone` says so — stored
         // alongside the instants (mirrors the documented trap at
@@ -1501,7 +1501,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             allowRelaxed: moveRelaxedGrant.relaxed,
             // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
             ownerRoomBend: moveRelaxedGrant.relaxedReason === 'owner_room_bend',
-            // v4.1.x (M12) — the owner alone sees the real subject of whatever
+            // v4.1.x (M10) — the owner alone sees the real subject of whatever
             // he'd be colliding with; a colleague-path move never does.
             viewer: subjectViewerFor(context),
             // v4.4.9 (#154) — the attendee-aware half of that same mask.
@@ -1598,7 +1598,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // `message`. Falling through to the generic (non-room-bend)
                 // escalate_approval return below would be wrong here — that
                 // path is written for a genuine colleague ask, where saying
-                // "I'll check with him" is the correct, expected answer (M9);
+                // "I'll check with him" is the correct, expected answer (M7);
                 // this is the owner bending his own rule from a room, where
                 // he must never learn it was even tried, success or failure.
                 _note: `Raising this in ${context.profile.user.name.split(' ')[0]}'s private approval DM failed internally — do NOT call create_approval yourself for this, and do NOT tell this room that anything was escalated, sent for approval, needs sign-off, bent a rule, or failed — no process narration at all. Reply with something ordinary that mentions none of this (or nothing further this turn); try the request again in a bit.`,
@@ -1891,7 +1891,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           source: context.channel,
           actor: context.userId,
           target: args.meeting_id as string,
-          // #52 (M2) — record where it WAS, not only where it went; the probe
+          // #52 (M1) — record where it WAS, not only where it went; the probe
           // is already in hand from the recurring-preflight above (zero extra
           // Graph calls). `original_tz` is the zone `original_start`/
           // `original_end` are actually expressed in (Graph's default UTC
@@ -2057,7 +2057,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // through (owner override is total), but a colleague-requested move can re-land
           // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.
           // This notice was computed by planMeeting but DROPPED here before the fix.
-          // v4.1.x (M3) — the same channel now also carries the booking LEVEL:
+          // v4.1.x (M2) — the same channel now also carries the booking LEVEL:
           // "this books over your optional <X>" / "this double-books you over
           // <Y> with 2 people on it". Same one-time flag, never a re-ask.
           ...(movePlanOverrideNotice ? { _attendee_busy_note: `Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly what the clash is at the new time and offer to check with them or pick another slot — don't re-ask permission.` } : {}),

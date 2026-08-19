@@ -174,7 +174,7 @@ One deployment can host several executives. Each tenant is a YAML file at `confi
 
 ## Person store / social engine
 
-- **`db/people.ts`** — one `people_memory` table for everyone (internal/external/self), keyed by `slack_id` (schema `db/client.ts:327-338`, extended with ~25 `ALTER TABLE` migrations through the file for gender, travel, VIP, core-field provenance, language). `resolvePerson()` (line 1219) is the identity chokepoint: slack_id → email → fuzzy-name, find-or-create-or-merge.
+- **`db/people.ts`** — one `people_memory` table for everyone (internal/external/self), keyed by `slack_id` (schema `db/client.ts:327-338`, extended with ~25 `ALTER TABLE` migrations through the file for gender, travel, VIP, core-field provenance, language). `resolvePerson()` (line 1332) is the identity chokepoint: slack_id → email → fuzzy-name, find-or-create-or-merge.
 - **`memory/capturePass.ts`** — the end-of-chat capture pass (5-min tick): for DM threads gone quiet, one Haiku call extracts deltas from the conversation against current state and writes them (profile fields + `.md` file mirrors) — the deterministic backstop for a colleague-volunteered fact the live turn's prompt didn't prompt Sonnet to save.
 - **`core/social/{classifyTurn,stateMachine,generateCoda,logEngagement}.ts`** — the social engine, gated behind `skills.social` (off by default). `stateMachine.ts`'s `chooseSocialDirective` is pure TypeScript (no LLM, no DB writes) picking ONE mode (`celebrate | engage | revive_ack | continue | raise_new | none`) per turn from the active-subjects picker; `generateCoda.ts` composes the actual line; the coda ships as its own message a beat after the real reply, gated by `runCodaGates` (see Security posture), never inline with the answer.
 

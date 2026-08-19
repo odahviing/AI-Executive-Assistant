@@ -2,7 +2,7 @@
 /**
  * check-design-door — the fixture for the framer's DESIGN door.
  *
- * A13: a change that alters behaviour ships with a BEFORE/AFTER proof, and BOTH
+ * A10: a change that alters behaviour ships with a BEFORE/AFTER proof, and BOTH
  * halves are required — it must FIRE ON THE BAD INPUT and STAY SILENT ON THE GOOD
  * ONE. A check that goes off on the healthy path is the one mistake this framework
  * is written against, so every assertion below is stated in both directions.
@@ -164,7 +164,7 @@ const CLUSTER_ARGS = JSON.parse(execFileSync(process.execPath, [CLUSTERER, 'gh#1
 // N is DERIVED, never literal. gh#154 held 9 refs from 5 lanes when this was
 // written and a tenth conversion onto it is a legitimate act — a fixture that
 // red-lines on one would be a check firing on the healthy path, which is the
-// mistake A13 exists to prevent. The floor is asserted, the exact count is not.
+// mistake A10 exists to prevent. The floor is asserted, the exact count is not.
 const N = CLUSTER_ARGS.cluster.refs.length
 const LANES = CLUSTER_ARGS.cluster.lanes.length
 
@@ -817,12 +817,12 @@ const main = async () => {
         discoveries: [],
         ticketCoverage: [],
         verifiedClean: [],
-        // B2's own carve-out — an explicit, named exemption, never a silent skip.
+        // B1's own carve-out — an explicit, named exemption, never a silent skip.
         outcomeTraces: [{ id: 'p1', verdict: 'no-symptom', notes: 'pure scaffolding another piece depends on — no behavioural outcome of its own' }],
       },
     },
   )
-  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B2\'s carve-out, not a loophole', noSymptomFeature.out && noSymptomFeature.out.manifest.outcome.untraced === 0, noSymptomFeature.out && noSymptomFeature.out.manifest.outcome)
+  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B1\'s carve-out, not a loophole', noSymptomFeature.out && noSymptomFeature.out.manifest.outcome.untraced === 0, noSymptomFeature.out && noSymptomFeature.out.manifest.outcome)
   ok('no warning on the honest no-symptom wave — this is the failure the phantom check made tonight, avoided here', noSymptomFeature.out && !noSymptomFeature.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), noSymptomFeature.out && noSymptomFeature.out.warnings)
 
   section('28 · QUESTION 1 (X182) — BUGGER.JS, THE SAME MECHANISM, THE SAME TWO DIRECTIONS')
@@ -873,7 +873,7 @@ const main = async () => {
       },
     },
   )
-  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B2\'s carve-out, not a loophole', noSymptomBugger.out && noSymptomBugger.out.manifest.outcome.untraced === 0, noSymptomBugger.out && noSymptomBugger.out.manifest.outcome)
+  ok('an HONEST no-symptom acknowledgment ALSO clears the candidate — B1\'s carve-out, not a loophole', noSymptomBugger.out && noSymptomBugger.out.manifest.outcome.untraced === 0, noSymptomBugger.out && noSymptomBugger.out.manifest.outcome)
   ok('no warning on the honest no-symptom wave', noSymptomBugger.out && !noSymptomBugger.out.warnings.some((w) => /QUESTION 1 IS UNCOVERED/.test(w)), noSymptomBugger.out && noSymptomBugger.out.warnings)
 
   // ══════════════════════════════════════════════════════════════════════════

@@ -137,7 +137,7 @@ export const MAX_ACTIVE_SUBJECTS_PER_CATEGORY = 5;
 export const MAX_TOPIC_BEATS_PER_SUBJECT = 10;
 
 // Owner asked for "5-10 sentences... cap the size but we have room" — generous
-// per L18, but not unbounded: a defensive code-side ceiling so a runaway Haiku
+// per L14, but not unbounded: a defensive code-side ceiling so a runaway Haiku
 // merge can't grow one subject's summary without limit. ~1800 chars covers 10
 // generous sentences with room to spare.
 export const MAX_SUBJECT_SUMMARY_CHARS = 1800;
@@ -415,7 +415,7 @@ export function getActiveSubjectsForPerson(personSlackId: string): SocialSubject
  * EVERY subject for this person, live or dead, live-first then most
  * recently touched. Used by get_person_memory (item 2, 2026-08-16) — a dead
  * subject is real memory ("we used to talk about X"), not a row to hide, and
- * 4.6.0 already made revival-on-mention a designed behaviour (L15). Distinct
+ * 4.6.0 already made revival-on-mention a designed behaviour (L12). Distinct
  * from `getActiveSubjectsForPerson`, which stays live-only for every
  * proactive-social caller that must never raise a dead topic.
  */
@@ -664,7 +664,7 @@ export interface PersonSocialSummary {
  * Shaped, capped social memory for one person — subjects + their merged
  * summary (once the item-3 column exists) or, until then, their recent
  * topic-beat labels as the fallback content. Dead subjects are included and
- * marked, never dropped (L15) — "we used to talk about X" is real memory.
+ * marked, never dropped (L12) — "we used to talk about X" is real memory.
  * Capped (not every row) per the owner's own proportionality note: this
  * payload already runs to 24KB for a well-known person before social data is
  * added at all.

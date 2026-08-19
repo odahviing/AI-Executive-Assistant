@@ -2,7 +2,7 @@
  * logActivity (gh#52 piece 52-U2) — the ONE writer for `logged`-state activity
  * rows: the record of something Maelle actually DID that needed no decision
  * from the owner (a colleague DM, a resolved approval, a research run). Thin
- * wrapper over createRequest — reuse the one spine (R2), never a second table.
+ * wrapper over createRequest — reuse the one spine (R1), never a second table.
  *
  * Scope (owner's ruling) — OUTWARD-EFFECT tools only: calendar mutations,
  * colleague messages/DMs, approvals, research. NOT internal writes (a note, a

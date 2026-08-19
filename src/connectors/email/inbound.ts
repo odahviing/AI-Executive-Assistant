@@ -218,7 +218,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // enforced upstream; this loop just earns the row for exactly that
   // (now-filtered) set. Fires here — independent of whether a booking ever
   // happens — because being addressed on the chain she was asked to act on
-  // IS the engagement (L3), the same "found → upserted" shape the Slack
+  // IS the engagement (L1), the same "found → upserted" shape the Slack
   // directory search uses (connections/slack/index.ts:308).
   for (const email of externalParticipants) {
     try {

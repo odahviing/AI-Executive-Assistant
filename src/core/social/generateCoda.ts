@@ -12,7 +12,7 @@
  * and only the turn can judge it. WRITING is this file's, and it happens LATER:
  * the orchestrator hands over a `PendingSocialCoda` and the transport calls
  * `composeSocialCoda` inside the beat it already waits before posting. The
- * work answer never waits on a social line (L10).
+ * work answer never waits on a social line (L7).
  *
  * v2.2.4 — language hint passed through so the coda matches the conversation's
  * actual language; discovery-mode for raise_new with no existing topics (ask
@@ -58,7 +58,7 @@ import { getCategoryByLabel, recordCategoryRaiseAttempt } from '../../db/socialS
  * on `OrchestratorOutput.socialCoda`. No text: composing it there put a Sonnet
  * call plus a claim-check between "answer ready" and "answer posted", so the
  * person waited two extra round-trips for their WORK answer to produce a line
- * the transport then deliberately posts a beat later (L10 — social never
+ * the transport then deliberately posts a beat later (L7 — social never
  * delays real work). Composition now runs inside that beat, which is dead
  * time, so it costs no user-visible latency anywhere — including the
  * grounding search and message re-read added by gh#198 (answer 12: the beat
@@ -288,12 +288,23 @@ async function generateSocialCoda(params: {
   // coda silently stops arriving. Stating the frame on both paths is the root fix.
   //
   // No gendered pronoun for the reader anywhere below: the output may be Hebrew,
-  // where second person inflects by gender, and langLine owns that (L12 — never
+  // where second person inflects by gender, and langLine owns that (L2 — never
   // guess a gendered form).
   const audienceLine = isOwner
     ? `You're writing TO ${ownerFirst} — the person you work for is the one reading this. Address them directly; never name them or describe them from the outside, the way you would when speaking to someone else ("any trips coming up?", never "does ${ownerFirst} have any trips coming up?").`
     : `You're writing TO ${senderFirstName}, not to ${ownerFirst} — ${ownerFirst} isn't in this conversation. Address ${senderFirstName} directly; never name them or describe them from the outside.`;
 
+  // 2026-08-18 (I10 / ledger:coda-ai-disclosure-non-english-gap) — this call
+  // is a wholly separate prompt from systemPrompt.ts, so the main reply
+  // path's "never volunteer that you're AI" line never reached it: nothing
+  // below stopped an unprompted coda from volunteering an AI/bot claim, in
+  // any language. runCodaGates' humanGate pass is the enforcement backstop
+  // for that and is separately documented as unreliable on non-English
+  // casual-aside claims (runOutputGates.ts:737-747) — that gap is
+  // Gatekeeper's to close. This is the prevention half: don't generate the
+  // claim to begin with, regardless of what language the coda lands in.
+  // Folded into the existing "real human EA" bullet below rather than a new
+  // one (same category — sounding like a colleague, not software).
   const prompt = `You're ${profile.assistant.name}, ${ownerFirst}'s executive assistant. ${audienceLine}
 
 The task you just handled is either closed, or handed off and you're waiting on someone else. Either way it's off your plate for now and there's a quiet moment.
@@ -302,7 +313,7 @@ Compose one small human line to send into that quiet moment. It is NOT part of t
 - Be ONE short sentence, not two — warm and complete, not a clipped fragment
 - Stand entirely alone. It arrives as a separate message, so the break itself is the transition: a connective ("Also" / "By the way" / "PS" / "speaking of") explains what the reader can already see and reads like padding — drop it. Equally, nothing that leans back on the task reply ("that too?", "as I said") — someone reading this line by itself has to understand it.
 - ${intent}
-- Feel like something a real human EA would send unprompted — never "let me know if you need anything!", never tool-leak
+- Feel like something a real human EA would send unprompted — never "let me know if you need anything!", never tool-leak, never a hint that you're AI, a bot, or software, in whatever language this lands in
 - Match the register of a DM in the middle of a workday
 ${langLine ? `- ${langLine}` : ''}
 
@@ -344,7 +355,7 @@ Output the coda sentence only. No quotes, no label.`;
  * Deliberately one function rather than two. The validator needs a snapshot of
  * what Maelle knows about the recipient — their state, timezone and free-text
  * personal notes — and that is people-lane data under a confidentiality rule
- * (L9). Splitting generate and validate would have made the transport assemble
+ * (L6). Splitting generate and validate would have made the transport assemble
  * that snapshot, putting a person's private notes in the pipes for no reason
  * the pipes have. It stays here, where it is already at home, and nothing but
  * the finished sentence ever leaves.
@@ -442,7 +453,7 @@ export async function composeSocialCoda(
           } catch { /* ignore */ }
         }
       }
-      // The person store is the naming authority (L2) — prefer its canonical
+      // The person store is the naming authority (L11) — prefer its canonical
       // name over the transport's display name, fall back to what we were given.
       const recipientName = personRow?.name || pending.senderFirstName || pending.personSlackId;
       const verdict = await checkReplyClaims({

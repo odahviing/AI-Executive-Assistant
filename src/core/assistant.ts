@@ -824,7 +824,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         if (row) {
           try { notes = JSON.parse(row.notes || '[]'); } catch { notes = []; }
           // Booking snapshots used to be stripped here outright, which made
-          // "we booked yesterday" unrecallable from the store (L6). They come
+          // "we booked yesterday" unrecallable from the store (L3). They come
           // back with a freshness rule + an explicit as-booked frame instead —
           // see readInteractionLog / BOOKING_SNAPSHOT_FRAME in db/people.ts.
           const split = readInteractionLog(row.interaction_log);
@@ -848,9 +848,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // topic-beats, plus item 3's merged per-subject summary once that
         // column exists) was entirely invisible to this tool, so "what do
         // you know about me" never saw what the coda picker already learned.
-        // Owner-only tool (isOwner enforced above) — no L9 read-authority
+        // Owner-only tool (isOwner enforced above) — no L6 read-authority
         // concern: the owner reads everything, about anyone, including
-        // himself. Dead subjects are included and marked, never dropped (L15
+        // himself. Dead subjects are included and marked, never dropped (L12
         // — "we used to talk about X" is real memory).
         const social = slackId ? getPersonSocialSummary(slackId) : { live: [], dead: [] };
         const hasSocial = social.live.length > 0 || social.dead.length > 0;
@@ -1013,7 +1013,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // v4.4.x (#170) — travel is a person_id-keyed write (setCurrentTravelById /
         // clearCurrentTravelById), so — unlike the auto-working-hours refresh and
         // engagement_rank below, which really are Slack-only — it applies to
-        // externals too (L4: "I'm in Boston this week" has to land for them the
+        // externals too (L2: "I'm in Boston this week" has to land for them the
         // same as anyone else). Parsed once here and applied by person_id so
         // both branches below share one path instead of duplicating it.
         const travelArg = args.currently_traveling as
@@ -1050,11 +1050,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             setCurrentTravelById(personId, { location: travelArg.location, from: travelArg.from, until: untilIso });
           }
         };
-        // L4 — provenance is derived from the AUTHENTICATED sender, never
+        // L2 — provenance is derived from the AUTHENTICATED sender, never
         // assumed. The colleague branch above force-rewrites the target to the
         // requester's own row, so a colleague reaching here is a person stating
         // a fact about THEMSELVES ('person'), not the owner stating it. Writing
-        // 'owner' on every path recorded a false source in the very column L4's
+        // 'owner' on every path recorded a false source in the very column L2's
         // stated-beats-derived rule reads. Same one-expression shape as
         // confirm_gender.
         const setBy = isOwner ? 'owner' : 'person';
@@ -1118,7 +1118,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             const { setPersonVipById } = require('../db') as typeof import('../db');
             setPersonVipById(target.personId, args.vip);
           }
-          // v4.4.x (#170) — travel (externals travel too; L4's own example).
+          // v4.4.x (#170) — travel (externals travel too; L2's own example).
           applyTravel(target.personId);
           logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);

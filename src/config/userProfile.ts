@@ -184,7 +184,7 @@ const UserProfileSchema = z.object({
     min_slot_buffer_hours: z.number().min(0).max(12).default(4),                      // Booking LEAD TIME for a colleague-initiated slot. Read ONLY via bookingLeadTimeHours (scheduleRules) — the single source for search, checkSlot rule 1, and the colleague pre-check.
     owner_min_slot_buffer_hours: z.number().min(0).max(12).default(1),                // Same lead time for the OWNER's own bookings. Was a literal `1` in four call sites; centralized so search and book can't drift.
     travel_buffer_minutes: z.number().min(0).max(240).default(30),                    // Padding each side of a category flagged requires_travel_buffer. Was a literal 30 in scheduleRules AND in the slot walker (the schema comment already claimed this field existed).
-    offered_slot_count: z.number().int().min(1).max(20).default(8),                   // M6 — how many options a slot search offers, and the per-day candidate cap feeding the spreader. Was a literal 5 at each pickSpreadSlots call plus a hidden MAX_PER_DAY=4 that culled candidates BEFORE the spread.
+    offered_slot_count: z.number().int().min(1).max(20).default(8),                   // M4 — how many options a slot search offers, and the per-day candidate cap feeding the spreader. Was a literal 5 at each pickSpreadSlots call plus a hidden MAX_PER_DAY=4 that culled candidates BEFORE the spread.
     physical_meetings_require_office_day: z.boolean().default(false),                 // Force in-person meetings to office days only
     room_email: z.string().email().optional(),                                         // Meeting-room mailbox for room booking
     // v2.8.2 — three labels for the three output flavors of the location

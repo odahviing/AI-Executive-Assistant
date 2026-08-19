@@ -272,15 +272,15 @@ if (argv.includes('--architect')) {
   const counts = {};
   for (const r of rows) counts[r.verdict] = (counts[r.verdict] || 0) + 1;
   console.log(`  ${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([v, n]) => `${v}:${n}`).join(' · ')}`);
-  // A14 · THE MARK. A row built without his approval carries the literal string
-  // `AUTO-BUILT (A14)` at the start of its `built` field — this is the only place
+  // A13 · THE MARK. A row built without his approval carries the literal string
+  // `AUTO-BUILT (A13)` at the start of its `built` field — this is the only place
   // that reads it, so "what got built without me" is a headline every run,
   // never a manual search. Printed even at zero: silence and "checked, none"
-  // must never look the same (A5).
+  // must never look the same (A14).
   const builtRows = rows.filter((r) => r.verdict === 'built');
-  const autoBuilt = builtRows.filter((r) => /^AUTO-BUILT \(A14\)/.test(String(r.built || '')));
+  const autoBuilt = builtRows.filter((r) => /^AUTO-BUILT \(A13\)/.test(String(r.built || '')));
   console.log(
-    `  ${autoBuilt.length} of ${builtRows.length} built row(s) are AUTO-BUILT (A14) — built without his approval` +
+    `  ${autoBuilt.length} of ${builtRows.length} built row(s) are AUTO-BUILT (A13) — built without his approval` +
       (autoBuilt.length ? `: ${autoBuilt.map((r) => r.id).join(', ')}` : '.'),
   );
 
@@ -723,7 +723,7 @@ if (argOf('--wrap')) {
 // `ZERO built` above four `built` rows, alive four hours fifty-six minutes across
 // nine row-level edits, because every edit flipped a status and none touched the
 // count. A hand-written count is a hand-written count; the layer that fixes it is
-// a check (A7), not more prose.
+// a check (A5), not more prose.
 //
 // It NEVER writes. `report.md` belongs to whoever is mid-wave.
 if (argv.includes('--report')) {
@@ -962,7 +962,7 @@ if (argv.includes('--report')) {
   // i.e. a check firing on the healthy path, which is the one mistake this whole
   // file is written against. Caught on a fixture before it ever ran on his wrap.
   //
-  // THE REAL GATE IS ONE LAYER UP AND IT ALREADY EXISTS (A7): `bugger.js` derives
+  // THE REAL GATE IS ONE LAYER UP AND IT ALREADY EXISTS (A5): `bugger.js` derives
   // the candidates for the run it is executing and WARNS when any pair comes back
   // untraced, at the moment the verify can still be sent back. This line's job is
   // only to make sure the number reaches his desk.
@@ -997,7 +997,7 @@ if (argv.includes('--report')) {
   // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7
   // wraps skipped it — it stood at 4.3.7 while 4.3.8 and 4.4.0 shipped) and the
   // `runId: wrap-<version>` ledger stamp (2 of 7). A skipped stamp is not
-  // cosmetic — it silently OVER-SCOPES both readers: `cleaner.md` C10 re-scans
+  // cosmetic — it silently OVER-SCOPES both readers: `cleaner.md` C4 re-scans
   // commits it has already judged, and the built-list check above counts every
   // `built` row back to the last stamp, which is how it reported 42.
   //
@@ -1073,7 +1073,7 @@ if (argv.includes('--report')) {
     const ledgerBehind = rowsAtWrap > 0 && !wrapRunIds.has(lastRelease.v);
     if (isoBehind || ledgerBehind) {
       console.log(`\n  ! WRAP MARKER(S) SKIPPED — the newest release commit is ${lastRelease.sha} \`${lastRelease.v}\` at ${lastRelease.date}:`);
-      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C10 scopes off this, so the next cleaner re-scans commits it already judged. Set it to \`git log -1 --date=iso-strict --format=%ad\`.`);
+      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C4 scopes off this, so the next cleaner re-scans commits it already judged. Set it to \`git log -1 --date=iso-strict --format=%ad\`.`);
       if (ledgerBehind)
         console.log(
           `      the report held ${rowsAtWrap} row(s) at ${lastRelease.sha}^ and NO ledger row is stamped \`runId: wrap-${lastRelease.v}\` — they were appended unstamped, so \`--wrap ${lastRelease.v}\` cannot name them and the built-list count above reaches back past the release. Stamp \`runId:"wrap-<version>"\` on every row appended.`,
@@ -1984,7 +1984,7 @@ if (showIndex) {
     console.log(`      refs: ${[...c.refs].join(' | ')}`);
     if (c.files.size) console.log(`      files: ${[...c.files.values()].slice(0, 6).join(' ')}`);
   }
-  // A5: the view that indexes 23% of the ledger while looking complete IS the
+  // A14: the view that indexes 23% of the ledger while looking complete IS the
   // failure this whole file is written against — same discipline as
   // `--by-invariant`'s own coverage line, stated the same way.
   //
@@ -2043,7 +2043,7 @@ if (byInvariant) {
     if (list.length > 1)
       console.log(`    → ${list.length} places, ONE rule. Fix the root once; ${list.length} symptom fixes is the failure this view exists to catch.`);
   }
-  // A5: the tag is optional, so its own coverage must be visible — otherwise this
+  // A14: the tag is optional, so its own coverage must be visible — otherwise this
   // view prints "no invariants" on a ledger nobody tagged and reads like good news.
   console.log(`\n  ${untagged} of ${scoped.length} row(s) carry NO \`invariant\` tag. This view sees only what was tagged.`);
 }

@@ -128,7 +128,7 @@ export function processCalendarEvents(
   timezone: string,
   profile: UserProfile,
   /**
-   * v4.1.x (M12, the "owner always sees everything" half) — WHO this list is
+   * v4.1.x (M10, the "owner always sees everything" half) — WHO this list is
    * being built for. Pre-fix the masking predicate took no caller, so the
    * OWNER's own get_calendar in his own DM came back with his interviews and
    * personal appointments titled "[Private]" — Maelle unable to name his own
@@ -138,7 +138,7 @@ export function processCalendarEvents(
    */
   viewer: SubjectViewer = 'other',
   // colleague-subject-permissive-half-not-built — the attendee-aware half of
-  // M12's mask (utils/displaySubject.ts's opt-in `viewerEmail` test, v4.4.9
+  // M10's mask (utils/displaySubject.ts's opt-in `viewerEmail` test, v4.4.9
   // #154). Threaded through by callers that can be READ on a room/shared
   // surface without being pre-scoped to one colleague's own meetings (see
   // handleAnalyzeCalendar). Omitted → today's privacy-flag-only behaviour,

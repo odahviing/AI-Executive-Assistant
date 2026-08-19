@@ -582,7 +582,7 @@ const row = {
   verdict: 'open',
   note,
 }
-// A11 · an id names its parent. Recorded as a field rather than left in the
+// A12 · an id names its parent. Recorded as a field rather than left in the
 // terminal output, so the link survives the chat that noticed it.
 if (amends && amends !== 'none') row.amends = amends
 

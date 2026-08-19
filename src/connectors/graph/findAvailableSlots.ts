@@ -189,9 +189,9 @@ export async function findAvailableSlots(params: {
   // Now the decision is here, above the cap, reading the validator's own
   // `outsideWorkHours` fact rather than a second copy of the window arithmetic
   // (which, computed in the SEARCH zone instead of the day's effective zone,
-  // could disagree with checkSlot on an away day — M2).
+  // could disagree with checkSlot on an away day — M1).
   keepWorkHours?: boolean;
-  // v4.1.x (M12) — WHO the returned annotations are for. The only annotation
+  // v4.1.x (M10) — WHO the returned annotations are for. The only annotation
   // that carries free text is `over_optional` (the optional-join event's
   // subject), and find_available_slots is colleague-allowed, so a private
   // optional event would otherwise name itself to a colleague. Threaded into
@@ -275,7 +275,7 @@ export async function findAvailableSlots(params: {
   const maxSearchDays = params.maxSearchDays ?? 21;
   // v2.5.4 — category-driven travel buffer: the buffer FACT belongs to the
   // category ("if it's Outside, we need buffer"), the LENGTH is config.
-  // v4.1.x (M2) — resolved by travelBufferMinutesFor, the SAME helper checkSlot
+  // v4.1.x (M1) — resolved by travelBufferMinutesFor, the SAME helper checkSlot
   // uses, so search and book can never pad by different amounts (pre-fix the
   // walker honored any caller value while checkSlot hardcoded 30).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -345,7 +345,7 @@ export async function findAvailableSlots(params: {
       // P15 — a read that never happened, kept SEPARATE from "Graph says this
       // mailbox doesn't exist". Both mean "no data, don't call them free", but the
       // handler states the reason out loud, and telling the owner an address is a
-      // typo when the window was malformed is the M11 failure in a smaller font.
+      // typo when the window was malformed is the M9 failure in a smaller font.
       params.diagnosticsOut.attendeesNotChecked = (fbDiag.notChecked ?? []).filter(e => e !== ownerLower);
     }
 
@@ -577,7 +577,7 @@ export async function findAvailableSlots(params: {
     // daily standup the owner joins only if free) is not a hard block: it's
     // avoided when clean slots exist, but bookable-over as a fallback, and it
     // stays visible.
-    // v4.1.x (M2/M3) — this walker used to re-derive that tier from a private
+    // v4.1.x (M1/M2) — this walker used to re-derive that tier from a private
     // `softOccupied` pass over the same events the validator reads, so the
     // OPTIONAL level existed in search and nowhere else. It now comes back on
     // the checkSlot verdict (`overOptional`, already privacy-masked for the
@@ -763,7 +763,7 @@ export async function findAvailableSlots(params: {
     // in 15-min increments. Two-stage approach gives both day-diversity AND
     // nice intra-day spacing ("10, 10:30, 11:30, 14:00" not "10, 10:15,
     // 10:30, 10:45").
-    // v4.1.x (M6) — the cap was a literal 4, applied BEFORE pickSpreadSlots
+    // v4.1.x (M4) — the cap was a literal 4, applied BEFORE pickSpreadSlots
     // ever saw the day, so a single wide window (a cross-TZ overlap band, or
     // "anytime Tuesday") could only ever yield 4 candidates from that day —
     // fewer than the 5 we then tried to offer, and a 5th viable slot was culled
@@ -1034,7 +1034,7 @@ export async function findAvailableSlots(params: {
       // still COUNTED and labelled truthfully: a fully-elapsed window would
       // otherwise produce zero rejections, and the single-window validation
       // callers read `Object.keys(rejectedCounts)[0]` for their reason — an empty
-      // map humanizes to 'unknown', the mechanical non-answer M11 forbids.
+      // map humanizes to 'unknown', the mechanical non-answer M9 forbids.
       // `in_the_past` is not a soft prefix and already humanizes to "that time has
       // already passed" (ops/violationLabels).
       if (cursor.getTime() < Date.now()) {
@@ -1119,7 +1119,7 @@ export async function findAvailableSlots(params: {
             continue;
           }
         }
-        // Travel buffer, ATTENDEE side only. v4.1.x (M2) — the OWNER side of
+        // Travel buffer, ATTENDEE side only. v4.1.x (M1) — the OWNER side of
         // this padding is checkSlot rule 7 (fed the same effective minutes
         // below), so it is no longer applied twice with two different lengths.
         // What remains here is the half checkSlot cannot see: an ATTENDEE's
@@ -1202,13 +1202,13 @@ export async function findAvailableSlots(params: {
           category: params.category ?? null,
           events: ownerEventsForFb,
           excludeEventIds: params.excludeEventIds,
-          // v4.1.x (M2) — the booking lead time comes from the ONE validator now,
+          // v4.1.x (M1) — the booking lead time comes from the ONE validator now,
           // fed the caller's role-resolved hours, instead of a walker-only gate
           // the write path knew nothing about.
           leadTimeHours: params.minBufferHours,
-          // v4.1.x (M2) — same padding the write path will apply, resolved once.
+          // v4.1.x (M1) — same padding the write path will apply, resolved once.
           travelBufferMinutes: effectiveTravelBufferMinutes,
-          // v4.1.x (M12) — masks a private optional event's subject before it
+          // v4.1.x (M10) — masks a private optional event's subject before it
           // can reach a colleague-facing `over_optional` tag.
           viewer: params.viewer,
           // v4.4.9 (#154) — the attendee-aware half of that same mask.
@@ -1241,12 +1241,12 @@ export async function findAvailableSlots(params: {
           cursor = new Date(cursor.getTime() + step);
           continue;
         }
-        // ── A PROPOSAL IS NEVER A TIME HE IS ALREADY COMMITTED ON (M3, #142d) ──
+        // ── A PROPOSAL IS NEVER A TIME HE IS ALREADY COMMITTED ON (M2, #142d) ──
         // `allowRelaxed` waives checkSlot rule 8 for the WRITE path — that waiver
         // is the owner's informed one-step book-through, where planMeeting turns
         // the same `overCommitment` into "booked, heads up, this double-books you
         // over X". The SEARCH must not inherit it: an offer carries no heads-up,
-        // and a time he cannot attend is not an option to choose from. M3's
+        // and a time he cannot attend is not an option to choose from. M2's
         // Unfiltered tier needs an approval, and a list of suggestions is not one.
         //
         // This reads the ONE validator's own occupancy fact. It REPLACES a
@@ -1278,7 +1278,7 @@ export async function findAvailableSlots(params: {
         }
         // A relaxed pass is the only one that returns a rule-BREAKING slot, so it
         // is the only one that owes the owner which rule. Ask the SAME validator
-        // the strict question and carry its sentence verbatim (M11/M14): pre-fix
+        // the strict question and carry its sentence verbatim (M9/M13): pre-fix
         // the payload said nothing per slot and pointed the model at
         // `day_summary.top_reasons` — a per-DAY top-2 from the STRICT pass, which
         // on the 2026-07-26 Maayan search was ["outside_attendee_work_hours",
@@ -1325,7 +1325,7 @@ export async function findAvailableSlots(params: {
       // surfaces it to fill the spread. A slot that ALSO breaks a real rule never
       // reaches here (dropped above) — real rule wins, so WE-soft is strictly
       // above the relaxed tier and strictly below clean. The subject comes from
-      // the validator's M3 level (v4.1.x), already masked for this caller.
+      // the validator's M2 level (v4.1.x), already masked for this caller.
       dayBuckets.get(dayKey)!.push({
         start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
         end: slotEndLocal.toISO()!,

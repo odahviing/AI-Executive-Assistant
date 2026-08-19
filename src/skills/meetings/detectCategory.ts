@@ -37,7 +37,7 @@ export interface DetectCategoryInput {
   // indicated" and got overridden to a generic Meeting — even though the caller's
   // OWN location argument said otherwise and resolveLocation (runs right after
   // this, given the category this call returns) independently agreed it was
-  // physical. Passed through verbatim, never parsed here (G7) — the model reads it.
+  // physical. Passed through verbatim, never parsed here (G8) — the model reads it.
   locationHint?: string;
 }
 

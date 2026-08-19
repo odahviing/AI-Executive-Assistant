@@ -49,7 +49,7 @@ const TIME_PATTERN = /\b(\d{1,2}):(\d{2})\b/g;
 const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
 
 // Language-NEUTRAL question mark (Latin + Hebrew share "?"; Arabic "؟"; CJK
-// "？"). Structural signal only — NO language words (G7). It just decides
+// "？"). Structural signal only — NO language words (G8). It just decides
 // whether to spend a Haiku call; the Haiku normalizer below is the real,
 // language-agnostic detector and returns empty for non-availability messages.
 // (Replaced the old English+Hebrew word regex — a clone-limiting check.)
@@ -92,7 +92,7 @@ function stripTransportEnvelope(text: string): string {
 interface NormalizedSlot {
   /**
    * The clock time EXACTLY as the colleague wrote it — `YYYY-MM-DDTHH:mm`, no
-   * offset, no `Z`. Deliberately NOT an instant: see the M14 note on
+   * offset, no `Z`. Deliberately NOT an instant: see the M13 note on
    * `normalizeAvailabilitySlotsWithHaiku` below. `wallClockOnly` strips anything
    * past the minutes, so a model that emits an offset anyway cannot smuggle its
    * own arithmetic back in.
@@ -105,7 +105,7 @@ interface NormalizedSlot {
    * named — and absent is not a fallback but a FORK: `resolveFrame` then treats
    * the clock as two candidate instants and both get their own verdict, because
    * the 2026-07-27 tape holds one colleague who meant his own clock and one who
-   * meant the owner's. Never the server's zone (M13).
+   * meant the owner's. Never the server's zone (M11).
    */
   stated_timezone?: string;
   /**
@@ -134,7 +134,7 @@ interface NormalizedSlot {
  * both the Boston number AND the parenthesized owner-local number — and tests
  * each as if it were owner-local, producing contradictory verdicts.
  *
- * v4.2.x (M14) — why it returns a WALL CLOCK + a ZONE NAME and not an instant.
+ * v4.2.x (M13) — why it returns a WALL CLOCK + a ZONE NAME and not an instant.
  * It used to return `instant_iso`, i.e. the MODEL did the offset arithmetic, and
  * on 2026-07-27 that put this pre-check an hour away from the search on the very
  * same phrase: "16:00 CET" reached `find_available_slots`, which converts in code
@@ -144,7 +144,7 @@ interface NormalizedSlot {
  * OWNER-local, one hour off, `owner_busy_collision`, recorded into the hard-block
  * ledger, and the output floor then rewrote an honest draft into a false
  * collision claim (log 2026-07-27 :682 vs :743). Two surfaces answering the same
- * question in two frames IS the bug (M2). So the model now only says WHAT was
+ * question in two frames IS the bug (M1). So the model now only says WHAT was
  * said and IN WHOSE FRAME; `resolveFrame` + luxon do every conversion, with
  * the same helper semantics every booking tool uses.
  *
@@ -185,7 +185,7 @@ async function normalizeAvailabilitySlotsWithHaiku(
   // the pre-check queried the CURRENT week (log :208, start 2026-07-26) while the
   // conversation was about 11-13 August. Two verdicts, both for the wrong days.
   // Structural strip of a machine-generated envelope, not natural language — the
-  // same shape processMessage.ts:434 already uses for the same preamble (G7).
+  // same shape processMessage.ts:434 already uses for the same preamble (G8).
   const threadBlock = (recentThread ?? [])
     .slice(-4)
     .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${stripTransportEnvelope(m.content).slice(0, 400)}`)
@@ -291,11 +291,11 @@ Output EXACTLY ONE call to normalize_slots.`;
 /**
  * Keep only the wall-clock head of an ISO-ish string: `YYYY-MM-DDTHH:MM`.
  *
- * The whole point of the M14 split above is that the model must not do timezone
+ * The whole point of the M13 split above is that the model must not do timezone
  * arithmetic — so an offset it emits anyway (habit, or a "helpful" conversion)
  * must not survive into the parse, or the frame this file chose would be silently
  * overridden by the model's. Structured ISO only; no natural language is matched
- * here (G7). Returns null when there is no parseable date+time head.
+ * here (G8). Returns null when there is no parseable date+time head.
  */
 const WALL_CLOCK_HEAD = /^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})/;
 function wallClockOnly(raw: string): string | null {
@@ -312,11 +312,11 @@ function wallClockOnly(raw: string): string | null {
  * FIXED-offset zones that never observe DST: `EST` (-05:00), `MST` (-07:00),
  * `HST` (-10:00). So a model that answers "EST" where it meant America/New_York
  * passes `isValidZone` and then lands an hour off for eight months of the year —
- * M14's most-repeated bug class arriving through the one door code still leaves
+ * M13's most-repeated bug class arriving through the one door code still leaves
  * open. Mapped to the real region zones here, before anything converts.
  * (`CET`/`EET`/`MET`/`WET` are bare IANA names too but DO carry the EU DST rules,
  * so they need no mapping; `UTC`/`GMT` are fixed on purpose.) A closed map over
- * IANA identifiers — no natural language is matched (G7).
+ * IANA identifiers — no natural language is matched (G8).
  */
 const LEGACY_FIXED_OFFSET_ZONES: Record<string, string> = {
   EST: 'America/New_York',
@@ -527,7 +527,7 @@ export async function precheckAvailability(params: {
    * hours... not a hard conflict" answered a question about Levana with a
    * fact about the owner, and repeated on every re-ask because the wrong-
    * subject verdict was already "confirmed" in context. Bail out here (fail
-   * open, per this file's own G6 philosophy) and let the normal tool path
+   * open, per this file's own G5 philosophy) and let the normal tool path
    * (find_available_slots / get_free_busy / check_join_availability) run its
    * real, attendee-aware check on the named person instead.
    */
@@ -562,12 +562,12 @@ export async function precheckAvailability(params: {
     return empty;
   }
 
-  // Language-NEUTRAL cheap gate (G7 — no language words): spend a Haiku call
+  // Language-NEUTRAL cheap gate (G8 — no language words): spend a Haiku call
   // only when the message carries a schedulable signal — a time, a TZ cue, or a
   // question mark. That's the whole gate; the Haiku normalizer is the real,
   // language-agnostic detector and returns empty for non-availability messages.
   // A miss here → no pre-check → she answers as before (status quo), never a
-  // wrong injection (G6).
+  // wrong injection (G5).
   const hasSchedulableSignal =
     QUESTION_MARK.test(params.message)
     || TZ_CUE_PATTERN.test(params.message)
@@ -594,7 +594,7 @@ export async function precheckAvailability(params: {
   // to TODAY — the wrong-day "13:30 works" verdict (#125). Regex stays below as
   // the fail-open fallback when Haiku errors/returns empty. Cost-bounded: one
   // Haiku call, only on messages carrying a schedulable signal.
-  // v4.2.x (M14) — the CONVERSION is here, not in Haiku. `resolveFrame` decides
+  // v4.2.x (M13) — the CONVERSION is here, not in Haiku. `resolveFrame` decides
   // whose clock a stated time is (or reports that it cannot) and luxon does the
   // arithmetic, so this pre-check and `find_available_slots` cannot land on two
   // different instants for one phrase the way they did on 2026-07-27.
@@ -757,7 +757,7 @@ export async function precheckAvailability(params: {
    * The rule-aware answer for ONE exact instant. Extracted (v4.2.2) so that the two
    * readings of an undecided frame are judged by the SAME code on the SAME meeting
    * length — a second, hand-written copy for the ambiguous branch is exactly how the
-   * two surfaces drifted apart in the first place (M2).
+   * two surfaces drifted apart in the first place (M1).
    */
   const evaluateInstant = async (
     date: string, time: string, gapQuery: boolean, snappedMin: number,
@@ -777,7 +777,7 @@ export async function precheckAvailability(params: {
       slotEndIso: startDt.plus({ minutes }).toISO()!,
       category: detectedCategory,   // enforce the SAME category cap the search does (was null → cap skipped)
       events,
-      // v4.1.x (M2) — this pre-check runs on the COLLEAGUE path, so it must
+      // v4.1.x (M1) — this pre-check runs on the COLLEAGUE path, so it must
       // hold the colleague booking lead time the search holds. Pre-fix it
       // didn't: "is Idan free at 3pm?" asked at 2pm answered BOOKABLE, the
       // colleague then booked it, and the 4-hour lead time was silently
@@ -892,7 +892,7 @@ export async function precheckAvailability(params: {
       // data?" was unanswerable from the tape. Behaviour is unchanged on purpose:
       // an unreadable owner calendar already has an owner — the refusal in the
       // meeting lane — and a second "I couldn't check" narration from here would be
-      // a competing voice for the same fact (G1/G2). Make it visible; leave the
+      // a competing voice for the same fact (G1). Make it visible; leave the
       // remedy where it lives.
       logger.warn('availabilityPreCheck — slot check threw; NO verdict emitted for this time', {
         date: pair.date, time: pair.time,
@@ -908,7 +908,7 @@ export async function precheckAvailability(params: {
   // the only place in the system where "this exact instant is not available for
   // the owner" is a settled, rule-aware fact rather than a narration, so it is the
   // right place to record it: the floor then reads a verdict `checkSlot` produced
-  // and never re-derives one (G3).
+  // and never re-derives one (G2).
   //
   // Recorded per OWNER rather than per thread on purpose: in the 2026-07-27
   // incident the fact was established on the owner's turn and the false statement
@@ -1237,7 +1237,7 @@ function formatSlotDisplay(date: string, time: string, tz: string, requesterTz?:
 }
 
 /**
- * The SAME instant in the asker's own zone, computed here (M14) so the reply can
+ * The SAME instant in the asker's own zone, computed here (M13) so the reply can
  * quote it instead of the model converting owner-local back by hand — the exact
  * arithmetic that produced three different "16:00"s in one 2026-07-27 thread.
  * '' when the asker is in the owner's zone or the render fails, and callers then
@@ -1265,12 +1265,12 @@ function requesterClock(date: string, time: string, ownerTz: string, requesterTz
 // US-evening or over-cap proposal got refused upfront and never reached the
 // owner's approval. Truly-hard states (owner genuinely busy, in the past)
 // still fall through to NOT BOOKABLE.
-// v4.1.x (M2/M11) — `within_lead_time` and `travel_buffer_collision` join
+// v4.1.x (M1/M9) — `within_lead_time` and `travel_buffer_collision` join
 // the set. Both are soft, owner-overridable protections that the SEARCH has
 // always treated that way (SOFT_REJECT_PREFIXES) and that planMeeting
 // escalates on the colleague path; without them here a "3pm today" ask at
 // 2pm renders as a bare "NOT BOOKABLE" with no reason at all — a mechanical
-// no, which is precisely what M11 forbids.
+// no, which is precisely what M9 forbids.
 //
 // v4.2.2 — hoisted to module scope. It was rebuilt inside the per-verdict map, and
 // the tier split is now read in two places (the renderer and the injected-verdicts
@@ -1322,7 +1322,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
       return `NOT CLEAN — ${why}; NOT a hard conflict and it's ${ownerFirst}'s to override. Phrase it high-level to the colleague (never name the rule or the limit). If they INSIST on this exact time, raise create_approval(kind=policy_exception) so ${ownerFirst} decides — don't refuse outright, don't book.`;
     }
     // ── HARD block ──────────────────────────────────────────────────────────
-    // v4.2.x — carry the class `checkSlot` ESTABLISHED (G3). This line used to be
+    // v4.2.x — carry the class `checkSlot` ESTABLISHED (G2). This line used to be
     // the bare string "NOT BOOKABLE" for every hard kind except the all-day OOO:
     // checkSlot had returned violation_kind, violation_label, level:'unfiltered'
     // and overCommitment, and the renderer dropped all of it. So the ONE tier that

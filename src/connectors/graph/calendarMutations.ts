@@ -317,7 +317,7 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
       source: 'graph_api',
       actor: 'assistant',
       target: created.id,
-      // #52 (M1) — key must match the delete row's `event_start_iso`
+      // #52 — key must match the delete row's `event_start_iso`
       // (calendarReads.ts) so get_calendar's empty-window recall filter
       // (`inWindow`, calendarReads.ts) can find create rows too. Was `start`,
       // which the reader never looked for — relevantCreates was always empty.

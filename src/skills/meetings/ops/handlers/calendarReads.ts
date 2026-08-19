@@ -202,7 +202,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
           // slot finder reads instead of a parallel spelling of the same day.
           args.force_refresh === true ? 'force' : 'cached',
         );
-        // v4.1.x (M12) — the owner reading his OWN calendar in his own DM sees
+        // v4.1.x (M10) — the owner reading his OWN calendar in his own DM sees
         // his real subjects; every other surface (colleague, or the owner in an
         // MPIM where colleagues read along) keeps the [Private] mask.
         const processed = processCalendarEvents(
@@ -345,7 +345,7 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
  * closeMeetingArtifacts cascade (its relayVoidedNotices step), not a
  * bespoke resend loop — it already reads back the ORIGINAL notice's own
  * (masked, when the meeting is private) stored subject before falling back
- * to what this call passes, so M12 masking survives the swap.
+ * to what this call passes, so M10 masking survives the swap.
  */
 export async function handleRevertAction(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
@@ -390,7 +390,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
   // `viewSubject` itself) is that every returned/narrated string uses the
   // masked view; "not revertible" / "already passed" / "record incomplete"
   // all name the meeting too, so leaving them on raw `rec.subject` was the
-  // same M12 leak wearing three different error codes.
+  // same M10 leak wearing three different error codes.
   let oc: Record<string, unknown> = {};
   try { oc = rec.outcome_json ? JSON.parse(rec.outcome_json) as Record<string, unknown> : {}; } catch { /* keep empty */ }
   // auto_move stamps the event id onto the row's own column; move_meeting/
@@ -417,9 +417,9 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
   // subjectViewerFor(context), viewerEmailFor(context)) resolution move_meeting's
   // seriesMaster refusal and delete_meeting's success label already use, which
   // renders the real subject on the owner's own DM (subjectViewerFor → 'owner')
-  // and masks it in a room (viewerEmailFor → null) — exactly M12's rule, not a
+  // and masks it in a room (viewerEmailFor → null) — exactly M10's rule, not a
   // blanket mask. Falls back to PRIVATE_MASK, never the raw subject, if even
-  // the live probe fails (M12's "permission unclear → return less" default).
+  // the live probe fails (M10's "permission unclear → return less" default).
   const rawSubject = probe?.subject ?? (typeof oc.subject === 'string' ? oc.subject : rec.subject);
   const viewSubject = probe
     ? displaySubject(
@@ -754,7 +754,7 @@ export async function handleAnalyzeCalendar(args: Record<string, unknown>, ctx: 
           args.end_date as string,
           timezone,
         );
-        // v4.1.x (M12) — owner-only tool, but still masked when he runs it in an
+        // v4.1.x (M10) — owner-only tool, but still masked when he runs it in an
         // MPIM (colleagues read that transcript). colleague-subject-permissive-
         // half-not-built — that room audience isn't pre-scoped to any one
         // colleague's own meetings (unlike get_calendar's colleague branch), so
@@ -994,7 +994,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           // the flow carried on: the organizer lookup failed too, so the plan
           // fell to the attendee branch, and the raw Graph 404 surfaced as
           // `[delete_meeting FAILED: The specified object was not found in the
-          // store]` — a leaked mechanism string (M11) that the model then
+          // store]` — a leaked mechanism string (M9) that the model then
           // folded into "all 11 declined". Stop here with the real reason and
           // change nothing. Only NOT-FOUND takes this exit; a transient Graph
           // fault still falls through so a live meeting is never reported gone.
@@ -1181,7 +1181,7 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           bookingThreadTs: context.threadTs,
           fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
-        // #147.2 / M13-M14 — resolve the cancelled occurrence's instant ONCE, in
+        // #147.2 / M11-M13 — resolve the cancelled occurrence's instant ONCE, in
         // code, and reuse it for every consumer below (the floating-block day, the
         // narration label). `getEventType` sends no `Prefer: outlook.timezone`
         // header, so Graph answers in UTC and says so in `startTimeZone` — bind to

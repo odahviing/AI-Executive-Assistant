@@ -68,7 +68,7 @@ const anthropic = getAnthropicClient();
 // `reminder` row when a freeform approval can't be confidently routed. It is
 // deliberately NEVER gated through `colleaguePendingCapRefusal` — it exists
 // to guarantee an ambiguous ask reaches the owner even when nothing else
-// caught it (R4), so refusing it would recreate exactly the silent-drop bug
+// caught it (R3), so refusing it would recreate exactly the silent-drop bug
 // it was built to close. It is equally deliberately EXCLUDED from
 // `getPendingRequestCountForColleague`'s own count (via
 // `subkind: 'freeform_owner_ask'`) — bouncer fix, 2026-08-10 — so it can
@@ -224,7 +224,7 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * nothing re-fires the actual ask, and the owner never heard the question. A
  * colleague-raised ask that needs the OWNER'S read can't depend on the model
  * self-correcting in the same turn, so the one-shot text gets a durable
- * backstop on the ONE spine (R2/R4): a `reminder` request that DMs the owner
+ * backstop on the ONE spine (R1/R3): a `reminder` request that DMs the owner
  * the real question.
  *
  * Dedup is decided against `getLatestFreeformOwnerFlag` — the most recent row
@@ -276,7 +276,7 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * stands in for an approval under routing ambiguity, so it gets the same
  * always-immediate delivery — `workTimeBaseFromNow`/`nextOwnerWorkdayStart`
  * stay correct and untouched for the ordinary reminder class they're meant
- * for (R5's "reach a person inside their own work hours" default is about a
+ * for (R4's "reach a person inside their own work hours" default is about a
  * REMINDER's nag cadence, not about an escalation standing in for an
  * approval).
  *
@@ -396,7 +396,7 @@ async function flagUnresolvedFreeformForOwner(
     };
 
     if (posted.ok) {
-      // Confirmed delivery — born terminal (R2's `logged` state): the DM
+      // Confirmed delivery — born terminal (R1's `logged` state): the DM
       // above already IS the action, and nobody is waiting on a decision —
       // same shape as runReminderFire's own closeRequest call for a fired
       // reminder. This row exists for the audit trail (recent-activity read,
@@ -477,11 +477,11 @@ const REASON_FIELDS: Record<ApprovalSubkind, string> = {
 };
 
 /**
- * THE approval gate (R6 + R7) — the one place that decides whether an ask is
+ * THE approval gate (R5) — the one place that decides whether an ask is
  * allowed to reach the owner at all. Runs before dedup, before the row, before
  * the DM. Returns null to let the ask through, or the refusal to hand back.
  *
- * R6 — an approval is a DEVIATION. A `policy_exception` overrides a specific
+ * R5 — an approval is a DEVIATION. A `policy_exception` overrides a specific
  * calendar action, so it must CARRY that action (`payload.deferred_action`).
  * That stamp is not decoration: the orchestrator copies it from the meeting
  * tool's own `_deferred_action_hint`, which only exists because a tool actually
@@ -504,7 +504,7 @@ const REASON_FIELDS: Record<ApprovalSubkind, string> = {
  * "Did a tool refuse this?" is the fact; "would checkSlot refuse it?" is a
  * second opinion, and it belongs where it already is — labelling, not gating.
  *
- * R7 — no reason, no approval. Every kind must state WHY it reached him, in the
+ * R5 — no reason, no approval. Every kind must state WHY it reached him, in the
  * field its own payload contract names, so he decides on data rather than gut.
  * The two honest outcomes when there is none are exactly the two refusals below:
  * the action was allowed (do it), or the reason isn't understood yet (find it).
@@ -648,7 +648,7 @@ export async function createApprovalRequest(
         // `rule: owner_busy_collision`.)
         delete payload.honest_hard_reason;
 
-        // ── The gate (R6 + R7) ────────────────────────────────────────────────
+        // ── The gate (R5) ────────────────────────────────────────────────
         // Nothing below this line runs for an ask that shouldn't reach him: no
         // row, no dedup, no DM, no slot in his signature book. See gateApprovalAsk.
         {
@@ -829,7 +829,7 @@ export async function createApprovalRequest(
               slotEndIso: payload.end as string,
               category: typeof payload.category === 'string' ? payload.category : null,
               events,
-              // M12 — this label is OWNER-BOUND by construction: it lands on
+              // M10 — this label is OWNER-BOUND by construction: it lands on
               // payload.rule_label and, for a hard collision, leads his approval
               // DM. Nothing colleague-facing reads it (the colleague-path prompt
               // block surfaces subject/slots only, and the requester relay reads
@@ -869,7 +869,7 @@ export async function createApprovalRequest(
                 // buildTurnContext.ts uses for "MEETINGS YOU REQUESTED" — using
                 // the request row's OWN subject (not the owner-viewer-scoped
                 // check.overCommitment.subject, which nothing colleague-facing
-                // may read per the M12 note above) since it is already the
+                // may read per the M10 note above) since it is already the
                 // requester's own ask. On a match this is not a deviation, it's
                 // a missed update_meeting call — refuse here the same way
                 // gateApprovalAsk refuses an unproven deviation, before a second
@@ -1946,7 +1946,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             //    posted message (terminal_dm_msg_ts) — always safe, since no
             //    other approval can share one message's own Slack ts.
             //  - dailyThreadAnchored: the reply landed in the shared "one
-            //    thread a day" book (R10 — owner_dm_thread_ts is the SAME
+            //    thread a day" book (R8 — owner_dm_thread_ts is the SAME
             //    value for every approval asked or resurfaced that day, by
             //    design; see ownerDailyThread.ts). gh#194 (2026-08-10) — this
             //    arm used to fire on thread equality ALONE. Because that

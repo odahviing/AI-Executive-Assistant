@@ -218,7 +218,7 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
   // we BACK OFF: correct nothing, log it. We don't rewrite the dates either —
   // the guard can't map report lines to calendar events, so choosing an axis is
   // a guess; a wrong date number with content on the RIGHT weekday is the safe
-  // miss (G6). Single / non-uniform mismatches still get the weekday fix — the
+  // miss (G5). Single / non-uniform mismatches still get the weekday fix — the
   // guard's core job (the "written Friday, it's Thursday" class) is untouched.
   if (mismatches.length >= 2 && offsets[0] !== 0 && offsets.every(o => o === offsets[0])) {
     logger.warn('dateVerifier: uniform weekday/date shift across all pairs — the DATE column is drifted, not per-word typos; backing off (NOT rewriting weekdays, which would slide the content a day)', {
@@ -239,5 +239,5 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
 // booked-date honesty backstop was a 4th output-path LLM call per booking reply
 // whose reference instant (booked_start) wasn't reliably ISO, so it false-
 // corrected a correct reply (2026-07-05). Its job — the wrong-day WRITE — is
-// already handled upstream by the meeting-core weekday guard. Retired: G2
-// fewer-stronger-guards, G8 fewer LLM calls on the output path.)
+// already handled upstream by the meeting-core weekday guard. Retired: G1
+// fewer-stronger-guards, G10 fewer LLM calls on the output path.)

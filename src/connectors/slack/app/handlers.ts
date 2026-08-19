@@ -27,13 +27,22 @@ import type { SlackAppContext } from './context';
   // processMessage), the SAME guarded pipeline the live DM handler uses, so a
   // suspicious colleague image caught up after downtime is scanned and refused
   // exactly like a live one, never attached unscanned. One path, two callers.
+  // 2026-08-18 (S9) — the same replay carries MPIM/channel candidates now
+  // (background.ts's mention-gated scan): isMpim/isChannel/mpimMemberIds flow
+  // through to processMessage exactly as a live @mention would, so the
+  // addressee gate, authority and surface all resolve the same way.
 export function registerInboundReplayHandler(ctx: SlackAppContext): void {
-  const { app, processMessage, processImageFileShare } = ctx;
+  const { app, processMessage, processImageFileShare, resolveSlackMentions } = ctx;
   const { assistant, user } = ctx.profile;
-  registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs }) => {
+  registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs, isMpim, isChannel, mpimMemberIds }) => {
     const senderId = message.user as string | undefined;
     if (!senderId) return;
     const ts = (message.ts as string) ?? postThreadTs;
+    // Media (audio/video/image) candidates only ever come from the DM/panel
+    // scan — background.ts's MPIM/channel mention discovery excludes any
+    // `subtype` (so it never has to re-derive MPIM's owner-only image rule or
+    // the channel file owner-presence gate here). isMpim/isChannel are unset
+    // on every path that reaches the branches below.
     const files = (message.files as Array<Record<string, unknown>> | undefined) ?? [];
 
     let text = (message.text as string) ?? '';
@@ -106,10 +115,58 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
       });
     };
 
+    // 2026-08-18 (S9) — an MPIM catch-up candidate carries the group's member
+    // ids; build the same `<<GROUP DM …>>` participant preamble the live MPIM
+    // handler declares as framing (never fused into `text` — see
+    // ProcessMessageParams.framing's own doc comment), so a colleague
+    // reconnect-catch-up reply still knows who else is in the room.
+    let groupContext = '';
+    if (isMpim && mpimMemberIds?.length) {
+      try {
+        const nameEntries: string[] = [];
+        for (const id of mpimMemberIds) {
+          if (id === senderId) continue;
+          try {
+            const info = await app.client.users.info({ token: assistant.slack.bot_token, user: id });
+            const u = info.user as any;
+            nameEntries.push(`${u?.real_name || u?.name || id} (slack_id: ${id})`);
+          } catch { nameEntries.push(id); }
+        }
+        if (nameEntries.length > 0) {
+          groupContext =
+            `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
+            `All participants can see everything you write. ` +
+            `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
+            `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`;
+        }
+      } catch (err) {
+        logger.warn('inboundReplay — MPIM group context build failed, replying without it', { err: String(err).slice(0, 200) });
+      }
+    }
+
+    // Resolve <@ID> mentions exactly like every live handler does before
+    // calling processMessage — not just cosmetic here: an MPIM/channel
+    // candidate's text always CARRIES the very <@BOTID> that qualified it
+    // (background.ts's mention gate), and resolveSlackMentions is what turns
+    // the bot's own mention into just its name instead of leaking its raw
+    // slack_id into the model's context and, from there, back into a reply a
+    // colleague can read (the exact Ayala 2026-06-12 leak this resolver
+    // exists to prevent — see helpers.ts's own comment).
+    const resolvedText = await resolveSlackMentions(text);
+
+    // isMpim/isChannel replay a mention-gated group candidate exactly as the
+    // live app_mention handler would (see registerMentionHandler's own
+    // `isExplicitMention: true`) — background.ts only ever produces one of
+    // these when the message @-mentioned the bot, so the addressee gate must
+    // be skipped here too rather than re-classifying text she was already
+    // deterministically shown to be addressed by.
     await processMessage({
-      senderId, text, channelId, ts, threadTs: postThreadTs,
+      senderId, text: resolvedText, channelId, ts, threadTs: postThreadTs,
+      framing: groupContext ? { prefix: groupContext } : undefined,
       say: catchUpSay as unknown as Function, client: app.client,
-      isChannel: false, isMpim: false,
+      isChannel: isChannel ?? false, isMpim: isMpim ?? false,
+      isExplicitMention: (isMpim || isChannel) ? true : undefined,
+      mpimMemberIds,
       voiceInput,
     });
   });

@@ -15,7 +15,7 @@ export function humanizeViolationLabel(reason: string | undefined, ownerFirst: s
   // The walker tags per-attendee rejections as `<reason>:<email>` so day_summary
   // can attribute blame. Strip the suffix (structured string, not natural
   // language) — otherwise every attendee-blamed reason humanized to "unknown",
-  // which is exactly the mechanical non-answer M11 forbids.
+  // which is exactly the mechanical non-answer M9 forbids.
   const kind = typeof reason === 'string' && reason.includes(':') ? reason.split(':')[0] : reason;
   switch (kind) {
     case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;

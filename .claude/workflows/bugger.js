@@ -259,7 +259,7 @@ if (openKnownDeferred.length)
 const OPEN_BACKLOG_RAW = asArray('openBacklog', A.openBacklog)
 // X22 · THE SLUG VOCABULARY, harvested rather than passed. A tag only earns its
 // keep if three lanes name one principle the SAME way — otherwise `--by-invariant`
-// groups nothing and the writer produces noise, which is the decoration A5 forbids.
+// groups nothing and the writer produces noise, which is the decoration A14 forbids.
 // No new arg for it: all three lists above are already derived from `ledger.jsonl`,
 // so carrying each row's `invariant` through makes them the vocabulary too. Empty on
 // a run that passes none, and then the lanes coin new slugs — correct, that is how
@@ -429,7 +429,7 @@ if (carriedIn.length)
 // these could implement a dependency of something he is about to decline.
 // Refused HERE because nothing has spawned yet: a loud stop costs one
 // re-invocation (X11), and once he rules, DELETING the flag from the row is the
-// approval. Without this read the field was decoration, which A5 forbids.
+// approval. Without this read the field was decoration, which A14 forbids.
 const undecidedPreset = (PRESET || []).filter((i) => i && i.awaitingOwner)
 if (undecidedPreset.length)
   throw new Error(
@@ -943,9 +943,9 @@ const VERIFY_OUT = {
     // THE ENGINE NAMES THE DENOMINATOR, never the bouncer: every row this wave
     // marks `built` is a candidate, because every issue this engine ever
     // dispatches carries a `symptom` field (schema-required on `issues` above)
-    // — bouncer.md B2's own words are "everything a person reported, and
+    // — bouncer.md B1's own words are "everything a person reported, and
     // everything carrying a `Seen:` line, gets traced". The one thing left to
-    // judgement is B2's own carve-out (a one-line comment fix has no
+    // judgement is B1's own carve-out (a one-line comment fix has no
     // behavioural symptom) — and that must be STATED as `no-symptom`, never a
     // silent omission, exactly as an un-traceable 1b pair is `unproven` and
     // never just missing.
@@ -967,7 +967,7 @@ const VERIFY_OUT = {
         required: ['id', 'verdict'],
       },
       description:
-        'ONE ENTRY PER ROW THIS WAVE CLAIMS FIXED — question 1, the outcome trace. A row you leave out is reported as UNTRACED and named to the owner. A row whose symptom cannot be established at all is not this field\'s job — refuse it as an overturn in `results` instead (B2\'s third case). Empty array only when no row was built this wave.',
+        'ONE ENTRY PER ROW THIS WAVE CLAIMS FIXED — question 1, the outcome trace. A row you leave out is reported as UNTRACED and named to the owner. A row whose symptom cannot be established at all is not this field\'s job — refuse it as an overturn in `results` instead (B1\'s third case). Empty array only when no row was built this wave.',
     },
     // ── X144 · THE JOINT TRACE, question 1b, AND ITS DENOMINATOR ──────────────
     // 1b exists for his stated fear: *"if a bug had two lanes, two agents, and for
@@ -2607,7 +2607,7 @@ if (VERIFY && verifyRan && outcomeUntraced.length)
   warnings.push(
     `QUESTION 1 IS UNCOVERED — ${outcomeUntraced.length} of ${outcomeCandidates.length} row(s) this wave claims fixed were NOT traced: ${outcomeUntraced
       .map((c) => c.id)
-      .join(', ')}. A fix that cannot be traced back to its reported symptom IS the finding (bouncer.md B2) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these rows.`,
+      .join(', ')}. A fix that cannot be traced back to its reported symptom IS the finding (bouncer.md B1) and nothing else in the loop checks it. Do not wrap on this; send the verify back for these rows.`,
   )
 // ── 2026-08-06 · THE MEASURED OBSERVABLE'S GATE ──────────────────────────────
 // Build-time, not verify-time: whether the verify ran or not, a lane that

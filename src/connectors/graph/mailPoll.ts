@@ -255,7 +255,7 @@ async function notifyOwnerOfRevokedMailAuth(profileName: string, profile: UserPr
  * revoked token, a sustained listNewMessages failure needs no owner action to
  * resume (polling keeps retrying on its own every tick) — this exists purely
  * so "mail intake has been down for a while" is a fact he can see instead of
- * silence, per D4: a state that persists until something changes earns a
+ * silence, per D3: a state that persists until something changes earns a
  * message, a one-off transient failure does not.
  *
  * Never throws, same as notifyOwnerOfRevokedMailAuth — a lost notification is
@@ -320,7 +320,7 @@ async function notifyOwnerOfSustainedListFailure(
  * provably dead forever, only that repeated force-clears happened with no
  * recovery yet. If the stuck generation never finishes (a genuine
  * indefinite hang), a restart is the only way out; if it does finish,
- * polling resumes on the very next tick with no restart needed. Per D4: a
+ * polling resumes on the very next tick with no restart needed. Per D3: a
  * state that persists until something changes earns a message even when
  * "something changes" may be automatic recovery rather than owner action —
  * silence here is still the worse failure.

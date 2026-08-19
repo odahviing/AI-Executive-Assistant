@@ -15,7 +15,7 @@
  * back?"). Yes → resume straight into a normal booking flow. No / silence →
  * the request is genuinely dead, closed cleanly, nobody nagged.
  *
- * This is R2 applied, not a new spine: the durable record is a `follow_up`
+ * This is R1 applied, not a new spine: the durable record is a `follow_up`
  * request (same kind maybeOpenInFlightMeetingRequest already uses for
  * in-flight tracking); the reengagement DM is a normal `outreach` request via
  * the existing `createOutreachJob` bridge (same await_reply / reply_deadline
@@ -253,7 +253,7 @@ export async function maybeTrackColleagueOofDeadEnd(input: MaybeTrackOofInput): 
 
 /** Bounded re-verification — never re-arm forever on a stuck Graph read. */
 const MAX_RECHECK_ATTEMPTS = 6;
-/** Safety valve (R4) — never let this wait past a bound, even mid-extension. */
+/** Safety valve (R3) — never let this wait past a bound, even mid-extension. */
 const MAX_TOTAL_WAIT_DAYS = 60;
 
 export async function runColleagueOofRecheck(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'closed'> {
@@ -306,7 +306,7 @@ export async function runColleagueOofRecheck(row: RequestRow, profile: UserProfi
     // Bouncer non-blocking finding (gh#201-d) — the safety valve (60 days)
     // tripped while the owner is STILL genuinely away. Falling through to
     // sendOofReengagement here would tell the colleague "Idan is back now" —
-    // false, and exactly the outcome R4 forbids (never the wrong outcome).
+    // false, and exactly the outcome R3 forbids (never the wrong outcome).
     // Close honestly instead of stopping re-verification with a lie.
     return closeSafetyValveExpired(row, profile, details);
   }
@@ -408,7 +408,7 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
 
   // Bouncer non-blocking finding (gh#201-d) — without this, the child
   // outreach request's `owner_dm_channel` is NULL, so a later silent-expiry
-  // tombstone (runner.ts's runOutreachExpiryOrDecision, R4's "tell BOTH
+  // tombstone (runner.ts's runOutreachExpiryOrDecision, R3's "tell BOTH
   // sides") has nowhere to post and the owner never learns the colleague
   // went quiet on the reengagement. Same pattern as the two sibling outreach
   // call sites (skills/outreach.ts, skills/meetingReschedule.ts): resolve the
@@ -576,7 +576,7 @@ export async function handleOofReengageReply(
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
   conversation.push({ role: 'colleague', text: replyText });
 
-  // ── checking → not a decline (R5); keep open for exactly one re-ask ──────
+  // ── checking → not a decline (R4); keep open for exactly one re-ask ──────
   if (status === 'checking') {
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
     if (job.request_id) {
@@ -626,7 +626,7 @@ export async function handleOofReengageReply(
     const { runOutputGates } = await import('../../utils/guards/runOutputGates');
     const attendeeList = Array.isArray(ctx.attendee_emails) && ctx.attendee_emails.length > 0
       ? ctx.attendee_emails.join(', ') : '';
-    // R3-adjacent: state the ORIGINAL ask's facts explicitly rather than
+    // R2-adjacent: state the ORIGINAL ask's facts explicitly rather than
     // leaving Sonnet to re-derive them from a bare "yes" — subject, duration
     // and attendees carry through byte-for-byte from what the colleague
     // originally asked for.
@@ -662,7 +662,7 @@ export async function handleOofReengageReply(
       // owner-fact-check-and-rewrite, humanGate, dateVerifier, the
       // availability floor), the exact class runOutputGates' own header
       // (:260-269) records as retired in v4.1.x for re-running the
-      // orchestrator on the reply path (G4). Same minimal shape inbound.ts
+      // orchestrator on the reply path (G3). Same minimal shape inbound.ts
       // uses: gate the draft, then send whatever it returns.
       const gatedReply = await runOutputGates(result.reply, {
         profile, result,

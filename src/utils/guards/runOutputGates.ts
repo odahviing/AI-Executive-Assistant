@@ -48,7 +48,7 @@
  * construction, so there is nothing for an axis test to derive. See that
  * function's own doc comment for what runs and what does not.
  *
- * NOTHING here re-runs the orchestrator (G4). Every remedy is either a
+ * NOTHING here re-runs the orchestrator (G3). Every remedy is either a
  * deterministic edit or a single tool-less rewrite pass. And since v4.2.x nothing
  * here writes to conversation history either: postReply persists ONCE, on the text
  * this returns (its Step 3b), so a corrected reply is simply what gets stored
@@ -56,7 +56,7 @@
  *
  * NOTHING here throws, and nothing here can cost a person their message. Every
  * gate call is individually try/caught. A VERDICT gate fails OPEN — an error leaves
- * the draft it was handed, so the worst case is that a rare defect ships (G6's safe
+ * the draft it was handed, so the worst case is that a rare defect ships (G5's safe
  * miss). The colleague leg's LEAK gate is the one that may not fail open, because
  * handing a colleague an unvetted draft is the exact failure it exists to prevent,
  * so it fails SAFE: the catch swaps the reply for a fixed line of our own text
@@ -213,7 +213,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // on this side of the wire (processMessage.ts:122 computes one and never
   // passes it). Keyed on the authenticated identity in code, this covers every
   // present and future surface without a third flag to plumb or forget (shared
-  // rule 10, G2). It can only ADD the honesty check, never drop it: `role ===
+  // rule 10, G1). It can only ADD the honesty check, never drop it: `role ===
   // 'owner'` and `isOwnerInGroup` both already imply senderId is the owner's,
   // so this predicate is a strict superset of the pair it replaces.
   //
@@ -234,7 +234,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // there (systemPrompt.ts:526 "SPEAK TO THE GROUP"), and 'internal' endorses
   // that shape verbatim (humanGate.ts:171). Every other rule in the gate is
   // identical across the two frames, so on a group reply the 'owner' frame could
-  // only ever rewrite correct text — a G6 corruption, not a safe miss.
+  // only ever rewrite correct text — a G5 corruption, not a safe miss.
   const audience: HumanGateAudience = colleagueReadable ? 'internal' : 'owner';
 
   // ── The availability floor — BOTH legs, before every rewriter ─────────────
@@ -255,20 +255,20 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // (booked_start sometimes arrives as a display string → a false correction of
   // a correct reply, 2026-07-05), and its job — the wrong-day WRITE — is already
   // stopped upstream by the meeting-core weekday guard. Backstop with a bad data
-  // source + zero real catches + one false alarm = not worth the call. G2 / G8.)
+  // source + zero real catches + one false alarm = not worth the call. G1 / G10.)
 
   // (v4.1.x — the v1.8.4 colleague "mutation-contradiction" step is RETIRED, and
-  // it is the clearest G4 violation the stack had: its remedy was
+  // it is the clearest G3 violation the stack had: its remedy was
   // `runOrchestrator(...)`, a SECOND full agentic turn on the reply path, to
-  // reword a draft. G4 names re-running the orchestrator as never allowed — an
+  // reword a draft. G3 names re-running the orchestrator as never allowed — an
   // unbounded regeneration can differ from the vetted draft in any way, and it
   // cost seconds of latency plus a whole turn's tokens on the colleague path.
   // Its trigger was also English-only natural-language regex ("flagged it for",
-  // "he'll decide") — G7-banned, and useless in Hebrew or Russian. And it never
+  // "he'll decide") — G8-banned, and useless in Hebrew or Russian. And it never
   // caught anything: ZERO `Colleague draft defers to owner after mutation
   // succeeded` warns across every log on disk.
   //
-  // The job it was doing is owned UPSTREAM, where it belongs (G1/G3): the
+  // The job it was doing is owned UPSTREAM, where it belongs (W3/G2): the
   // mutation tools return their own `action_summary` / `_must_reply_with` for the
   // drafting turn to narrate (skills/outreach.ts:348, :496) and the pinned action
   // tape replays confirmed mutations into the system prompt (turnHelpers.ts
@@ -355,7 +355,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // addressing") is reachable on no other path, so dropping it here would make
     // that branch dead. Its owner-only-ness (claimChecker.ts:22) is a statement
     // of scope, not of safety: the remedy is a tool-less own-the-miss rewrite
-    // with its own keep-veto, so a wrong fire is a safe miss (G4/G6). Running it
+    // with its own keep-veto, so a wrong fire is a safe miss (G3/G5). Running it
     // FIRST also means its Sonnet-written prose is scrubbed and voice-checked by
     // the two gates below, which the owner-private leg cannot offer it.
     // v4.4.x (#154) — the room-approval honesty check. Owner ruling: she
@@ -363,7 +363,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // approval thread, so the only fabricable claim on that path is a room
     // reply asserting the decision already came back when it hasn't — INCLUDING
     // a decision that came back NEGATIVE (cancelled/expired), which is the same
-    // fabrication in different clothes. Cheap, deterministic pre-filter (G8):
+    // fabrication in different clothes. Cheap, deterministic pre-filter (G10):
     // the vast majority of colleague turns carry no request at all in this
     // thread, ever, and those never reach the checker (getLatestRequestForThread
     // returns null on the first, single-query check below). Runs regardless of
@@ -613,7 +613,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // gate whose subject a REWRITER can introduce, and neither rewriter's
     // fact-preservation veto looks at weekday words (humanGate.ts:306 checks
     // mentions, clock times, numeric dates and questions — a weekday is a WORD, and
-    // regex on weekday names is banned anyway, G7). Verifying the pre-rewrite draft
+    // regex on weekday names is banned anyway, G8). Verifying the pre-rewrite draft
     // verified a string nobody received.
     //
     // Safe to run after the leak scrub, and the only gate of which that is true: it
@@ -719,9 +719,9 @@ export interface CodaGateVerdict {
  *
  * What DOES apply is the pair of checks that judge the text itself. Both run in
  * DETECT-ONLY form: this function's return type carries no text, so it is
- * structurally incapable of corrupting a correct coda (G6). The only action is
+ * structurally incapable of corrupting a correct coda (G5). The only action is
  * DROP, and dropping a social aside costs nothing — that asymmetry is what makes
- * an LLM verdict safe to act on here (G4: tool-less + miss-safe).
+ * an LLM verdict safe to act on here (G3: tool-less + miss-safe).
  *
  *  1. scanForLeaks — the HARD-IDENTIFIER half: raw Slack ids, req_/task_ ids,
  *     provider/model self-reference (Claude, GPT, Anthropic), JSON / tool-tag
@@ -733,20 +733,23 @@ export interface CodaGateVerdict {
  *     clear it, and it has none of the conversational context that judge would
  *     need anyway — a coda that ever claims AI/bot/human identity should never
  *     ship, full stop. Only the IDENTIFIER patterns here (raw Slack ids,
- *     req_/task_ ids) are structured and language-neutral (G7); the DISCLOSURE
+ *     req_/task_ ids) are structured and language-neutral (G8); the DISCLOSURE
  *     patterns (self_ai_claim*, self_internals, model leaks, JSON/tool-tag
  *     echoes) are English-only regex on natural language and miss the same
  *     claim in Hebrew or French. runHumanGate (step 2) runs unconditionally on
- *     every coda regardless of what this scan found, and since round 3 it is
- *     INTENDED as the language-agnostic backstop for that gap (no
- *     `aiDisclosureCleared` is ever passed on this path, so the exception never
- *     opens here and a bare disclosure is always treated as a violation) — but
- *     bouncer testing (2026-08-14) proved the intent does not hold: 0/4
- *     casual-aside AI-disclosure claims in French/Spanish/German were caught.
- *     The honest current scope is English-regex-reliable only; a non-English
- *     casual-aside disclosure can still ship. Known gap, DEFERRED — the owner
- *     is rewriting the coda system separately, so this is not being patched
- *     here (ledger: coda-ai-disclosure-non-english-gap). This scan is free, so it still runs
+ *     every coda regardless of what this scan found, and is the
+ *     language-agnostic backstop for that gap (no `aiDisclosureCleared` is
+ *     ever passed on this path, so the exception never opens here and a bare
+ *     disclosure is always treated as a violation) — bouncer testing
+ *     (2026-08-14) proved this DIDN'T hold in practice: 0/4 casual-aside
+ *     AI-disclosure claims in French/Spanish/German were caught, because
+ *     runHumanGate's own prompt never actually said "a bare identity claim,
+ *     with no infra vocabulary, is itself a violation" — only the
+ *     infrastructure-framing rule existed, and a casual "en fait je suis une
+ *     IA" trips none of it. Fixed 2026-08-18 (ledger:
+ *     coda-ai-disclosure-non-english-gap): humanGate.ts's system prompt now
+ *     states that rule explicitly and language-independently, so this is now
+ *     a real backstop rather than an aspirational one. This scan is free, so it still runs
  *     first and a hit costs no LLM call. It is NOT redundant
  *     with the coda's inputs being "just a topic label": those labels and topic
  *     beats are free text Haiku derived from the DM transcript (social_subjects /
@@ -878,20 +881,20 @@ async function runClaimCheckAndMaybeRewrite(
     // them RAW for this reason: formatForSlack would strip the tool names this
     // shield matches on), so the matching tool's marker is in ctx.history — scan it
     // too. Over-suppressing a genuinely-phantom claim in a thread where a similar
-    // tool ran earlier is a safe MISS (G6); denying real work is not.
+    // tool ran earlier is a safe MISS (G5); denying real work is not.
     const priorAssistantText = (ctx.history ?? [])
       .filter(h => h.role === 'assistant')
       .map(h => h.content)
       .join(' ');
     const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
 
-    // v4.1.x (G2/G3) — READ the carried marker; do not re-derive it.
+    // v4.1.x (G1/G2) — READ the carried marker; do not re-derive it.
     //
     // This used to be four action_type branches over a 5-tool, a 2-tool and a
     // 14-tool name alternation, each one added after a distinct incident, and each
     // new mutating tool anywhere in the codebase had to be remembered here or the
     // guard would manufacture a false phantom-action flag. That is the exact
-    // maintenance shape G2 exists to prevent, and it was the guard GUESSING at a
+    // maintenance shape G1 exists to prevent, and it was the guard GUESSING at a
     // fact the tool layer already knew.
     //
     // summarizeToolCall now stamps `mutated=<domain>` on every call that actually
@@ -964,7 +967,7 @@ async function runClaimCheckAndMaybeRewrite(
     // was EVER resolved" (not the latest row's state alone) is the binding: a
     // true grant about an older resolved row must never be inverted, so when
     // isResolved is true we NEVER rewrite here, full stop — a safe miss if the
-    // checker somehow still flagged it, never a corrupted reply (G6).
+    // checker somehow still flagged it, never a corrupted reply (G5).
     // Only when isResolved is false (no request in this thread was EVER
     // resolved — the claim can only be describing a still-open or rejected
     // escalation) is a declarative "he approved it" provably false, and the
@@ -1069,7 +1072,9 @@ async function runClaimCheckAndMaybeRewrite(
         // Backstop: reuse the SAME durable reminder spine registrar's
         // flagUnresolvedFreeformForOwner (src/tasks/skill.ts) uses for the
         // identical shape — a colleague-raised ask the owner must see, opened
-        // on the ONE requests spine, fired by the existing runner regardless
+        // on the ONE requests spine and delivered immediately via
+        // postOwnerDecision (a bounded runner retry only on genuine delivery
+        // failure — chris-kelley-oof-block-b/c, 2026-08-18), regardless
         // of what the model does this turn or how the confession is phrased.
         // Firing unconditionally (not gated on the rewrite's wording) is
         // deliberate: whether the honest text says "that hasn't gone out
@@ -1144,7 +1149,6 @@ async function runClaimCheckAndMaybeRewrite(
         if (verdict.action_type === 'message' && isRealColleagueOneOnOneDm && targetIsOwner) {
           try {
             const { createRequest, buildIdempotencyKey, getRequestByIdempotencyKey } = await import('../../db/requests');
-            const { workTimeBaseFromNow } = await import('../workHours');
             const { getPersonMemory } = await import('../../db');
             const ownerUserId = profile.user.slack_user_id;
             const requesterFirst = (getPersonMemory(ctx.senderId)?.name ?? 'A colleague').split(' ')[0];
@@ -1155,11 +1159,47 @@ async function runClaimCheckAndMaybeRewrite(
               subject: `claim_checker_relay_backstop ${ctx.threadTs} ${ctx.userMessage}`,
             });
             if (!getRequestByIdempotencyKey(idempotencyKey)) {
-              createRequest({
+              const flagMessage = `${requesterFirst} asked me to pass this along and I couldn't confirm it actually went through, so flagging it directly: "${ctx.userMessage}"`;
+
+              // chris-kelley-oof-block-b/c (2026-08-18) — deliver NOW, the same
+              // immediate postOwnerDecision path the identical-shape sibling
+              // backstop (flagUnresolvedFreeformForOwner, src/tasks/skill.ts:311)
+              // now uses, never a workTimeBaseFromNow/reminder_fire timer: that
+              // shape is exactly the deferred-past-vacation bug the owner ruled on
+              // ("approval flow is always approval, nothing should block people to
+              // raise alarm as ask for approval") — an unconfirmed "I told him"
+              // claim raised during a declared away period must reach him
+              // immediately, not wait for the away period to end. Shared shape,
+              // NOT shared code across a lane boundary: skill.ts is Registrar's
+              // file, so this call sequence is written here, in Gatekeeper's own
+              // file, mirroring skill.ts's three-round fix rather than importing
+              // from it.
+              let posted: { ok: boolean; channel?: string; threadTs?: string; ts?: string; reason?: string } = { ok: false };
+              try {
+                const { getConnection } = await import('../../connections/registry');
+                const conn = getConnection(ownerUserId, 'slack');
+                if (conn) {
+                  const { postOwnerDecision } = await import('../ownerDailyThread');
+                  posted = await postOwnerDecision({ profile, conn, text: flagMessage, label: 'claim-checker relay backstop' });
+                  if (!posted.ok) {
+                    logger.error('claim_checker_rewrite — relay-to-owner backstop DM failed', {
+                      ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs, reason: posted.reason,
+                    });
+                  }
+                } else {
+                  logger.warn('claim_checker_rewrite — no Slack connection registered for relay backstop', { ownerUserId });
+                }
+              } catch (postErr) {
+                logger.error('claim_checker_rewrite — relay-to-owner backstop DM threw', {
+                  err: String(postErr).slice(0, 200),
+                });
+              }
+
+              const shared = {
                 ownerUserId,
                 initiatedBy: ctx.senderId,
-                initiatedByRole: 'colleague',
-                kind: 'reminder',
+                initiatedByRole: 'colleague' as const,
+                kind: 'reminder' as const,
                 // subkind is this backstop's own value, distinct from its sibling
                 // flagUnresolvedFreeformForOwner's (src/tasks/skill.ts:311, subkind
                 // 'freeform_owner_ask' as of chris-kelley-oof-block-c round 3,
@@ -1177,14 +1217,6 @@ async function runClaimCheckAndMaybeRewrite(
                 subkind: 'freeform_owner_flag',
                 subject: `Needs your read: ${requesterFirst} asked me to pass this to you`,
                 description: ctx.userMessage,
-                state: 'in_flight',
-                // Match the identical-shape precedent (flagUnresolvedFreeformForOwner,
-                // src/tasks/skill.ts:311-433): this row's OWN nextCheckHandler
-                // ('reminder_fire') is its notification path — it will DM the owner
-                // directly when its timer fires. informed=0 is for "the brief hasn't
-                // told him yet", which would ALSO surface this same flagged relay in
-                // getRequestsForBrief (src/db/requests.ts:481) while it's still
-                // in_flight — a second, redundant notification for one event.
                 informed: 1,
                 requesterSlackId: ctx.senderId,
                 requesterName: requesterFirst,
@@ -1192,13 +1224,45 @@ async function runClaimCheckAndMaybeRewrite(
                 originThreadTs: ctx.threadTs,
                 originIsMpim: false,
                 idempotencyKey,
-                nextCheckAt: workTimeBaseFromNow(profile),
-                nextCheckHandler: 'reminder_fire',
-                details: { message: `${requesterFirst} asked me to pass this along and I couldn't confirm it actually went through, so flagging it directly: "${ctx.userMessage}"` },
-              });
-              logger.info('claim_checker_rewrite — opened durable backstop reminder for an unconfirmed relay-to-owner claim', {
-                ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
-              });
+              };
+
+              if (posted.ok) {
+                // Confirmed delivery — born terminal, same as the sibling's
+                // 'logged' row (skill.ts:398-412): the DM above IS the action,
+                // nothing is left to wait on. No nextCheckAt/nextCheckHandler —
+                // a terminal row is never picked up by the sweep.
+                createRequest({
+                  ...shared,
+                  state: 'logged',
+                  ownerDmChannel: posted.channel,
+                  ownerDmThreadTs: posted.threadTs,
+                  terminalDmMsgTs: posted.ts,
+                  details: { message: flagMessage },
+                });
+                logger.info('claim_checker_rewrite — delivered relay-to-owner backstop immediately', {
+                  ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
+                });
+              } else {
+                // Genuine delivery failure — reuse the sibling's own bounded,
+                // SHORT retry timer (runFreeformFlagRetry, src/core/requests/
+                // runner.ts:711) rather than a fresh handler: it already reads
+                // details.message generically and retries via the identical
+                // postOwnerDecision call, so this row rearms itself in 5m
+                // instead of falling back to a deferred, away-period-spanning
+                // wait. Never workTimeBaseFromNow/nextOwnerWorkdayStart — the
+                // exact shape this fix removes.
+                const { DateTime } = await import('luxon');
+                createRequest({
+                  ...shared,
+                  state: 'in_flight',
+                  nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(),
+                  nextCheckHandler: 'freeform_flag_retry',
+                  details: { message: flagMessage, send_attempts: 1 },
+                });
+                logger.info('claim_checker_rewrite — relay-to-owner backstop delivery failed, armed short retry', {
+                  ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
+                });
+              }
             }
           } catch (backstopErr) {
             logger.warn('claim_checker_rewrite — failed to open the relay-to-owner backstop reminder', {
@@ -1230,11 +1294,11 @@ async function runClaimCheckAndMaybeRewrite(
  * own ownerIsActing/approvalGrantContext scoping. Uses claimChecker's
  * dedicated 'owner_fact' mode (its own small prompt, same JSON shape and
  * `invented_fact` action_type coda mode already established) rather than a
- * clause inside RULE A's 'action' prompt — G2: this keeps RULE A's own,
+ * clause inside RULE A's 'action' prompt — G1: this keeps RULE A's own,
  * separately-reasoned scoping untouched by this fix.
  *
  * Remedy reuses rewriteOwningTheMiss's tool-less, Sonnet-veto, fail-open
- * machinery (G2 — reuse, don't add a parallel rewriter): a fact-preserving
+ * machinery (G1 — reuse, don't add a parallel rewriter): a fact-preserving
  * rewrite that hedges or drops the specific unfounded claim, never a
  * confession framing ("that didn't go through") that would make no sense for
  * a stated fact rather than an un-done action.
@@ -1272,7 +1336,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // invented when it has no such origin anywhere. See claimChecker.ts's
     // `recentHistorySnippet` doc comment. Capped (last 12 turns, 220 chars
     // each) to bound prompt size on a check that runs every colleague-
-    // readable turn (G8) — this is the same history window, just formatted.
+    // readable turn (G10) — this is the same history window, just formatted.
     const recentHistorySnippet = (ctx.history ?? [])
       .slice(-12)
       .map(h => `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${(h.content ?? '').slice(0, 220)}`)
@@ -1325,9 +1389,9 @@ async function runOwnerFactCheckAndMaybeRewrite(
  *     the owner says "book it anyway", create_meeting fires, the draft truthfully
  *     says "booked Tuesday 11:30" — and a ledger entry from two minutes ago still
  *     says that instant is blocked. Correcting a true confirmation is exactly the
- *     G6 corruption this guard must never commit, so a changed calendar stands the
+ *     G5 corruption this guard must never commit, so a changed calendar stands the
  *     floor down entirely. Read off the carried `mutated=` marker
- *     (summarizeToolCall) and `bookingOccurred`, not a tool-name list (G3).
+ *     (summarizeToolCall) and `bookingOccurred`, not a tool-name list (G2).
  *  3. There is a draft to check.
  *
  * Then ONE Haiku classification; on a flag, a live re-verification of each
@@ -1401,7 +1465,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
     // read, immediately before the destructive rewrite — the last possible moment
     // to catch a stale fact rather than ship a corrected reply that corrects nothing.
     // Any slot the checkSlot call actually RAN and found no longer blocked is
-    // dropped and forgotten rather than rewritten (G6 — a safe miss, never a
+    // dropped and forgotten rather than rewritten (G5 — a safe miss, never a
     // corruption of a now-true reply). A recheck that could not run at all
     // (below) is a different case and does not drop the entry — see its catch.
     const stillBlocked: typeof affirmed = [];
@@ -1623,7 +1687,7 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
 
 // ── Deliberation guard (was the v2.2.5 "concision finalizer") ────────────────
 //
-// v4.1.x (G1) — this pass was NOT a backstop, it was a routine second drafting
+// v4.1.x (W3) — this pass was NOT a backstop, it was a routine second drafting
 // stage sitting on the critical path of every reply, and it was rewriting correct
 // answers into shorter ones. It fired on three shape heuristics — ≥2 question
 // marks, ≥2 English "if" branches, or >600 chars of non-list prose — sent the whole
@@ -1633,13 +1697,13 @@ async function runDateVerifierAndMaybeRetry(ctx: OutputGateContext, initialReply
 // the fuller answer could not be recovered on the next turn. In the 07-19→07-23
 // logs it fired 14 times, and only 2 of those were the deliberation case; the rest
 // were length/shape — including a 193-char reply cut to 109 and a 983-char one cut
-// to 157. G1: reply length is DRAFTING behavior and belongs to whatever writes the
+// to 157. W3: reply length is DRAFTING behavior and belongs to whatever writes the
 // draft (prompt / orchestrator output policy), not to a guard.
 //
 // What survives is the one genuine output-time concern: Sonnet emitting her
 // derivation into the user-facing text ("wait, that breaks the order", "let me
 // find", "OK definitive clean proposal"). That is a REASONING LEAK — the same
-// family as G5 — and the reader should never see it. So:
+// family as G4 — and the reader should never see it. So:
 //   - the length and self-coherence triggers are GONE (with their helpers),
 //   - the prompt no longer asks for compression, only for the journey to be cut,
 //   - and a wrong fire is now a safe MISS: the rewrite must survive the same
@@ -1700,7 +1764,7 @@ ${trim}`,
     // Removing narration can only make the text shorter; a longer or near-empty
     // result means the model did something else. Keep the original.
     if (cleaned.length >= trim.length || cleaned.length < 10) return trim;
-    // G6 — the veto that makes a wrong fire a safe MISS. Same deterministic,
+    // G5 — the veto that makes a wrong fire a safe MISS. Same deterministic,
     // free, narrow check humanGate applies to ITS rewrites: an @mention, clock
     // time, numeric date or question that the original carried and the rewrite
     // does not means content was deleted, not narration. Ship the original.
