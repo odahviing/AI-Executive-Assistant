@@ -291,7 +291,7 @@ interface DayAnalysis {
    * untouched work window as focus time and told the owner he had "8h free"
    * on a day he was away.
    *
-   * P30 — a WORK-DAY-row fact, deliberately never set on a `day_off` row, and
+   * A WORK-DAY-row fact, deliberately never set on a `day_off` row, and
    * that is the whole contract: it exists to correct a work day's free-time
    * arithmetic. A day-off row has no arithmetic to correct (`isWorkDay:false`,
    * `freeMinInWorkHours` hard 0, no `no_buffer` issue), and its only structured
@@ -431,7 +431,7 @@ export function analyzeCalendar(
     // would swap the `oof_with_meetings` issue for `work_on_day_off` and
     // rewrite issue classes #146 depends on. It only gates the free-time
     // maths at the end.
-    // P29 — the span is built from THE predicate (scheduleRules.isAllDayOutOfOffice),
+    // The span is built from THE predicate (scheduleRules.isAllDayOutOfOffice),
     // not a local copy of its three-way test — see the `oofSpans` computation above.
     const coveringOofSpan = oofSpans.find(s => s.startDate <= dateStr && dateStr < s.endDateExclusive);
     const outOfOfficeAllDay = coveringOofSpan !== undefined;
@@ -443,7 +443,7 @@ export function analyzeCalendar(
     // checkHealth.ts:234's own detector still does (`dayEvents.filter(e =>
     // e.showAs === 'oof')`) — narrowing to all-day-only here silently dropped a
     // timed OOF block with meetings on top of it, and disagreed with that other
-    // surface (the exact P29 drift this predicate exists to prevent).
+    // surface (the exact drift this predicate exists to prevent).
     const anyOofToday = myEvents.find(e => e.showAs === 'oof');
     if (coveringOofSpan && nonAllDayMeetings.length > 0) {
       // gh#200 — accumulate rather than emit here, so a meeting on day 5 of a

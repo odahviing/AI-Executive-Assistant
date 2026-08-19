@@ -253,7 +253,7 @@ export async function findAvailableSlots(params: {
     // (their "busy" was empty by nonexistence, not by freedom). Owner email
     // excluded. Caller decides how to warn (ops.ts flags owner-domain ones).
     unresolvedAttendees?: string[];
-    // P15 (v4.2.x) — attendees whose free/busy was never READ for this window:
+    // (v4.2.x) — attendees whose free/busy was never READ for this window:
     // the request was malformed or Graph rejected it, so their "busy" was empty
     // because nobody asked. Owner email excluded. Same "don't call them free"
     // consequence as `unresolvedAttendees`, opposite cause — a bad address is the
@@ -342,7 +342,7 @@ export async function findAvailableSlots(params: {
     if (params.diagnosticsOut) {
       const ownerLower = params.userEmail.toLowerCase();
       params.diagnosticsOut.unresolvedAttendees = (fbDiag.unresolved ?? []).filter(e => e !== ownerLower);
-      // P15 — a read that never happened, kept SEPARATE from "Graph says this
+      // A read that never happened, kept SEPARATE from "Graph says this
       // mailbox doesn't exist". Both mean "no data, don't call them free", but the
       // handler states the reason out loud, and telling the owner an address is a
       // typo when the window was malformed is the M9 failure in a smaller font.
@@ -807,7 +807,7 @@ export async function findAvailableSlots(params: {
     // narration is unchanged after the validator unification.
     const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
       switch (kind) {
-        // P13 (v4.2.x) — NOT folded into `within_lead_time` any more. They are not
+        // (v4.2.x) — NOT folded into `within_lead_time` any more. They are not
         // the same fact: "too soon" is one of the owner's rules and he can waive
         // it, "already happened" is not and nobody can. Folding them put elapsed
         // times inside SOFT_REJECT_PREFIXES, and the colleague hint downstream
@@ -846,7 +846,7 @@ export async function findAvailableSlots(params: {
         ...(oc.allDayOutOfOfficeUntilDisplay ? { allDayOutOfOfficeUntilDisplay: oc.allDayOutOfOfficeUntilDisplay } : {}),
       };
     };
-    // P25 — `outOfWorkHours` is the VALIDATOR's own fact about this slot
+    // `outOfWorkHours` is the VALIDATOR's own fact about this slot
     // (`checkSlot(...).outsideWorkHours`), not a re-derivation out here. The global
     // `rejectedCounts` / `rejectedExamples` keep the true per-slot reason — the
     // single-window validation callers read `Object.keys(rejectedCounts)[0]` for
@@ -869,11 +869,13 @@ export async function findAvailableSlots(params: {
     };
 
     // All workweek days regardless of meetingMode filter — used to detect
-    // when a workday was excluded specifically because of the requested mode
-    // (e.g. Monday is a home day; meetingMode='in_person' excludes it). We
-    // surface this as `wrong_day_type` in daySummary so Sonnet can narrate
-    // "Monday is a home day, in-person needs an office day" instead of
-    // fabricating "Monday is a day off."
+    // (a) a workday excluded specifically because of the requested mode
+    // (e.g. Monday is a home day; meetingMode='in_person' excludes it), and
+    // (b) a workday taken off entirely by a per-date override (vacation, sick
+    // day). Both surface as `wrong_day_type` in daySummary so Sonnet can
+    // narrate "Monday is a home day, in-person needs an office day" or
+    // "Tuesday, he's off" instead of fabricating a reason. A plain weekend
+    // (never in this list) stays silent — that needs no explanation.
     const allWorkweekDays: string[] = profile
       ? [...officeDayNames, ...homeDayNames]
       : workDays;
@@ -975,8 +977,24 @@ export async function findAvailableSlots(params: {
       // Workday gate. effectiveDay folds in per-date off/on overrides (profile
       // path); no-profile falls back to the yaml/meetingMode day-name set. No
       // override → byte-identical to the old name gate.
+      //
+      // findavailableslots-drops-context-on-colleague-oof-deadend (2026-08-16)
+      // — a normal workweek day taken off by a per-date override (vacation,
+      // sick day — no all-day OOF calendar event, so the earlier oofDayKeys
+      // branch above never sees it) used to `continue` here with NOTHING
+      // recorded: not trackReject, not even a bare dayReasons entry. A search
+      // window that is ENTIRELY such days left both rejectedCounts and
+      // dayReasons empty, so the gate below never ran and diagnosticsOut.
+      // daySummary was never set — a colleague dead-end search returned a
+      // bare `[]` with zero explanation to relay. Same `wrong_day_type`
+      // bucket the in-person/home-day mismatch below already uses for the
+      // narrower case, and the same collapse mapVerdictToRejectLabel applies
+      // to checkSlot's own `vacation_or_off_day` verdict.
       const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
       if (!dayIsWorkday) {
+        if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
+          dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
+        }
         cursor = new Date(cursor.getTime() + step);
         continue;
       }
@@ -1013,7 +1031,7 @@ export async function findAvailableSlots(params: {
         }
       }
       // ── (a) THE PAST — a universal floor on the OFFER, not a rule ──────────
-      // P13 (v4.2.x) — this floor used to apply only when `relaxed`; every other
+      // (v4.2.x) — this floor used to apply only when `relaxed`; every other
       // search let past slots fall through to checkSlot, whose rule 0 returns
       // `in_the_past`, which `mapVerdictToRejectLabel` collapsed into
       // `within_lead_time`. `within_lead_time` is a SOFT_REJECT_PREFIX, so the
@@ -1223,7 +1241,7 @@ export async function findAvailableSlots(params: {
           trackReject(
             mapVerdictToRejectLabel(verdict.violation_kind, dayType),
             cursorDt.toISO()!,
-            // P25 — the day narration counts in-hours slots only; which rule won on
+            // The day narration counts in-hours slots only; which rule won on
             // an out-of-hours slot is irrelevant to "why was this day empty".
             verdict.outsideWorkHours === true,
           );
@@ -1398,7 +1416,19 @@ export async function findAvailableSlots(params: {
     // tells WHICH RULE rejected what. Grep `findAvailableSlots — rejection
     // breakdown` in maelle-YYYY-MM-DD.log to debug "why was 17:45 not
     // proposed?".
-    if (Object.keys(rejectedCounts).length > 0) {
+    //
+    // findavailableslots-drops-context-on-colleague-oof-deadend (2026-08-16)
+    // — daySummary is built from `dayReasons`, not `rejectedCounts`, but the
+    // two day-type branches above (`wrong_day_type`) write straight into
+    // `dayReasons` without going through `trackReject` — deliberately: they
+    // are a whole-day skip, not a per-slot rejection, so they don't belong in
+    // the per-reason log/counts. A window whose ONLY story is a day-type skip
+    // (e.g. a vacation-only week, nothing else ever rejected) left
+    // `rejectedCounts` empty, so this gate never ran and `daySummary` was
+    // never set at all — silently dropping the one fact a dead-end colleague
+    // search had to give. Check both maps: either one having content means
+    // there is something to report.
+    if (Object.keys(rejectedCounts).length > 0 || dayReasons.size > 0) {
       logger.info('findAvailableSlots — rejection breakdown', {
         searchFrom: params.searchFrom,
         searchTo: currentTo.toISO(),
@@ -1422,7 +1452,7 @@ export async function findAvailableSlots(params: {
         // surviving all rules per day; top_reasons=top 2 rejection causes when
         // accepted=0. `outside_owner_work_hours` is iteration noise (every
         // quarter-hour outside work hours gets tracked) — excluded from
-        // top_reasons. P25 — every out-of-hours rejection now arrives under that one
+        // top_reasons. Every out-of-hours rejection now arrives under that one
         // label whatever rule reported it (see trackReject), so the filter matches
         // the fact instead of matching whichever rule happened to win. When a day
         // has NOTHING else (a window entirely outside his hours) the empty-ranking

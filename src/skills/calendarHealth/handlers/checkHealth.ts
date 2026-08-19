@@ -122,7 +122,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             ? args.mode
             : (profile.behavior.calendar_health_mode ?? 'passive');
 
-        // P24 — through the SHARED owner-event read (one fresh retry, then a
+        // Through the SHARED owner-event read (one fresh retry, then a
         // typed `CalendarOfflineError` for an outage-shaped fault only), and with no
         // local catch. This scan decides autonomous auto-moves and tells the owner
         // his day is clean, so an unreadable calendar is the same blind spot the

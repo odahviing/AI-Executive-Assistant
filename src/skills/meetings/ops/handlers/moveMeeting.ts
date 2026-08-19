@@ -1490,7 +1490,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             // physical signal and resolveLocation defaults to day-type rules.
             locationHint: args.location as string | undefined,
             isOnlineHint: typeof args.is_online === 'boolean' ? args.is_online : undefined,
-            // P22 (v4.2.x) — THE grant, not a local read of args.relaxed. This
+            // (v4.2.x) — THE grant, not a local read of args.relaxed. This
             // line used to be `args.relaxed === true` with no sender check, the
             // only site in the codebase that set allowRelaxed without one — so
             // the invariant "allowRelaxed implies the owner" (scheduleRules.ts,

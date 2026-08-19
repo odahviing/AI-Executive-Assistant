@@ -47,7 +47,7 @@ export async function annotateSlotsWithAttendeeStatus<S extends { start: string;
 
   let busyRanges: Array<{ start: number; end: number; status: string }> = [];
   try {
-    // P15 — `notChecked` = the read never happened for this window (malformed
+    // `notChecked` = the read never happened for this window (malformed
     // window / Graph rejected it). It used to come back as `{}`, which this
     // function's `?? []` below turned into "no busy blocks" and then into
     // `attendeeStatus: 'free'` on every slot — a recipient told "you look free"

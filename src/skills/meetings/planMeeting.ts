@@ -719,7 +719,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       }
       if (internalEmails.length > 0) {
         try {
-          // P15 — `notChecked` = the read never happened for this window. It used
+          // `notChecked` = the read never happened for this window. It used
           // to come back as `{}`, `fb[email] ?? []` read it as "free", and the
           // booking went through with no heads-up at all: the ONE place that tells
           // the owner "Simon is busy then" silently said nothing. Handled as a
@@ -872,7 +872,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               gates.push({ kind: 'attendee_busy', ask: askText });
             }
           } else if (notChecked.length > 0) {
-            // P15 — nobody's calendar was read, so there is nothing to say about a
+            // Nobody's calendar was read, so there is nothing to say about a
             // clash, and saying nothing is what made this a bug: the booking went
             // out looking verified. Rides the SAME notice channel a busy attendee
             // uses on the override/move path, so it books and the owner hears the

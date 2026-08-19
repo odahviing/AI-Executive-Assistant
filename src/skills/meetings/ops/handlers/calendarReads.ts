@@ -812,7 +812,7 @@ export async function handleAnalyzeCalendar(args: Record<string, unknown>, ctx: 
 export async function handleGetFreeBusy(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
         try {
-          // P15 — `notChecked` = the read never happened (malformed window / Graph
+          // `notChecked` = the read never happened (malformed window / Graph
           // rejected it). Pre-fix this tool returned `{}`, which is the literal
           // wire shape of "nobody has a single busy block" — so the answer to "is
           // he free?" was an unqualified yes, from a call that never reached his

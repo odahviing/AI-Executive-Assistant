@@ -563,7 +563,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
    * Every meeting tool the model can call arrives here, including the ones
    * this class delegates to SchedulingSkill, so an unreadable owner calendar
    * becomes ONE written refusal instead of a raw Graph string no handler owns.
-   * P24 — the refusal itself moved to `meetings/calendarOffline` so the
+   * The refusal itself moved to `meetings/calendarOffline` so the
    * calendar-health dispatcher rides the same one (it reaches the same reads);
    * that file carries the full note.
    */

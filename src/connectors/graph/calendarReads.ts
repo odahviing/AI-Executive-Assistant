@@ -696,7 +696,7 @@ function logNothingChecked(
  * One free/busy answer, whole: the busy blocks per address, the addresses Graph
  * could not RESOLVE, and the addresses nobody was able to ASK about. The three
  * travel together because they are one answer — a caller handed `{}` without
- * knowing which of the three it is reads it as "everyone is free", which is P15's
+ * knowing which of the three it is reads it as "everyone is free", which is the
  * entire lesson. Keeping them in one cache entry also means the `unresolved` list
  * can no longer be evicted independently of the data it describes.
  */
@@ -729,7 +729,7 @@ export async function getFreeBusy(
   // as FULLY FREE — the "elinor.avny@" slots were offered without ever checking
   // the real Elinor.
   //
-  // `notChecked` — P15 (v4.2.x). Addresses NOBODY asked Graph about, because the
+  // `notChecked` — (v4.2.x). Addresses NOBODY asked Graph about, because the
   // request could not be made at all (the two branches below, and the
   // ErrorInvalidTimeInterval catch). Deliberately a SECOND list, not folded into
   // `unresolved`: the consequence is the same ("no data — do not read as free")
@@ -747,7 +747,7 @@ export async function getFreeBusy(
   // inverted windows on edge cases (off-by-one when search_from was at the
   // boundary of an iteration).
   //
-  // P15 (v4.2.x) — every branch here used to `return {}`, and `{}` is
+  // (v4.2.x) — every branch here used to `return {}`, and `{}` is
   // indistinguishable from "asked about everyone, nobody is busy". So a
   // malformed window read as "the whole company is free", which is the single
   // most dangerous wrong answer this function can give. Two different problems
@@ -770,7 +770,7 @@ export async function getFreeBusy(
   // themselves. Graph's own window rejection cannot: it happens inside the
   // MEMOIZED fetch, where a side-effect write would leave a second caller in the
   // same turn holding `{}` with no notChecked list — i.e. reading it as "everyone
-  // is free", the exact P15 failure. That one returns the list instead, and the
+  // is free", the exact failure described above. That one returns the list instead, and the
   // single exit at the bottom applies it.
   const nothingChecked = (why: string): Record<string, FreeBusySlot[]> => {
     const notChecked = logNothingChecked(why, startDate, queryEnd, emails);
@@ -805,7 +805,7 @@ export async function getFreeBusy(
   // genuine instant there, and keeps that reading.
   //
   // WIDENED, not refused. A whole-day question wearing an instant's shape needs
-  // answering (P15's own reasoning) and this one can be answered exactly: the
+  // answering (that same reasoning) and this one can be answered exactly: the
   // window IS that day, so nothing is invented, and `notChecked`'s claim — "the
   // window could not be queried" — would simply be false. Widened IN PLACE, not by
   // re-entry: nothing above this line depends on the end, every branch below reads
@@ -821,7 +821,7 @@ export async function getFreeBusy(
     queryEnd = parsedEnd.toISO()!;
   }
   let windowMinutes = parsedEnd.diff(parsedStart, 'minutes').minutes;
-  // P15 — an INSTANT, i.e. start === end. This is the branch with all the real
+  // An INSTANT, i.e. start === end. This is the branch with all the real
   // traffic: availabilityPreCheck normalizes a colleague's "יש משהו אחרי 17:00?"
   // to a single instant with no end and calls straight through, so a
   // zero-length window arrived four times per turn and every attendee came back
@@ -911,7 +911,7 @@ export async function getFreeBusy(
     if (hit) {
       if (diagnostics) {
         diagnostics.unresolved = hit.unresolved;
-        // P15 — only a SUCCESSFUL read is ever cached, so a hit means everyone in
+        // Only a SUCCESSFUL read is ever cached, so a hit means everyone in
         // this window was checked. Stated rather than left undefined: a caller
         // reusing one diagnostics object across windows must not inherit a
         // previous window's "not checked" and refuse to trust good data.
@@ -1040,18 +1040,18 @@ async function getFreeBusyImpl(
     // Graph rejected the window. Still returns rather than throwing: the slot
     // finder iterates windows and a throw here killed the whole search, and #137
     // is the standing lesson that a deterministic 400 must never be dressed up as
-    // a scheduling verdict. P15 — but it reports every requested address as NOT
+    // a scheduling verdict — it reports every requested address as NOT
     // CHECKED, because that is what happened. Before, this was the third path by
     // which a malformed request read as "they are all free"; the difference matters
     // most here, since a caller can retry a window it now knows was never read.
     //
-    // A2 — BOTH window rejections, one branch. `ErrorInvalidMergedFreeBusyInterval`
+    // BOTH window rejections, one branch. `ErrorInvalidMergedFreeBusyInterval`
     // is the OTHER way this call can be refused for its window: Graph's minimum
     // availabilityViewInterval is 5 min AND the interval must be under the window,
     // so a 1–5 minute window has no valid interval at all and the derivation above
     // floors at 5 and gets a 400. Nothing to prevent — no real meeting is under 10
     // minutes and widening a caller's window would invent a question nobody asked —
-    // so it gets P15's treatment rather than a third path: no throw, everyone
+    // so it gets the same treatment rather than a third path: no throw, everyone
     // reported unchecked, the caller free to say "I could not check" and retry a
     // sane window. It failed CLOSED before (uncaught → up through the walker's
     // non-outage rethrow → a raw Graph code in her context), which is why there is

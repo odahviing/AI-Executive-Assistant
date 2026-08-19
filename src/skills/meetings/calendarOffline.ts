@@ -15,7 +15,7 @@
  *
  * So it lives here, as a wrapper both dispatchers call: one message, one log line,
  * one taxonomy. Not a second outage voice — the SAME voice, reachable from the
- * second dispatcher (P24 — this file already owns the outage-refusal voice, so
+ * second dispatcher (this file already owns the outage-refusal voice, so
  * ride it rather than writing a second one).
  *
  * Deliberately NOT a catch-all for Graph errors. Only the typed

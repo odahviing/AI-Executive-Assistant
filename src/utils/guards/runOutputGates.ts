@@ -531,7 +531,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // through because the gate is unavailable would ship a colleague-facing reply
     // that nothing vetted for the classes only this gate covers (self-as-AI,
     // internals, model/provider, payload echoes, req_/task_ ids, spoof) — the exact
-    // fail-open P3 closed one layer down. formatForSlack has already run on this
+    // fail-open closed one layer down. formatForSlack has already run on this
     // draft (postReply Step 2) and it is NOT a substitute: it knows about graph ids,
     // account ids, tz strings and tool names, and nothing else on that list.
     //

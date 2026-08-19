@@ -95,7 +95,7 @@ export interface BookingRequest {
   priorSlotEndIso?: string;
 
   // Owner-explicit override path, already gated on the authenticated sender.
-  // Handlers NEVER set this from raw args — they call `grantRelaxed` (P22).
+  // Handlers NEVER set this from raw args — they call `grantRelaxed`.
   relaxed: boolean;
   /**
    * v4.4.x (#154) — 'owner_room_bend' added. The authenticated owner asked
@@ -175,7 +175,7 @@ export async function normalizeBookingRequest(
   // ── Sensitivity — colleague-path gate ──
   const sensitivity = await gateSensitivity(args, context, participants);
 
-  // ── relaxed — THE grant, shared with every non-normalizing path (P22) ──
+  // ── relaxed — THE grant, shared with every non-normalizing path ──
   const { relaxed, relaxedReason } = grantRelaxed(args, context);
 
   // ── Cross-cutting context ──
@@ -415,7 +415,7 @@ export async function gateSensitivity(
  * THE only place `relaxed` is granted — for EVERY meeting path, not just the
  * ones that route through this normalizer.
  *
- * P22 (v4.2.x) — exported, and every caller now reads `args.relaxed` through
+ * (v4.2.x) — exported, and every caller now reads `args.relaxed` through
  * here. It used to be private to `normalizeBookingRequest`, so the paths that
  * never normalized (move_meeting) or that gate before normalizing
  * (find_available_slots) each re-derived the same authorization inline. Six

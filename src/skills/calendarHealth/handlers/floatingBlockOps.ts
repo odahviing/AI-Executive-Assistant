@@ -95,7 +95,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
         }
 
         // Get events for the day to find a free slot in the block window.
-        // P24 — the SHARED owner-event read, no local catch. This read decides
+        // The SHARED owner-event read, no local catch. This read decides
         // WHERE the block lands and whether it collides, so an unreadable calendar
         // is a blind spot, not a placement. It sat BEFORE the planMeeting call
         // below, so its own mechanical `Failed to fetch calendar events.` was what

@@ -48,7 +48,7 @@
  *     double-book notice rides ALONGSIDE it (planMeeting.ts) instead of being
  *     suppressed by the same `passes:false`.
  *   • COLLEAGUE path — NO combination reaches here with `relaxed:true` and
- *     `initiator:'colleague'`, and as of P22 (v4.2.x) that is enforced by
+ *     `initiator:'colleague'`, and as of v4.2.x that is enforced by
  *     construction, not by inspection: `bookingRequest.grantRelaxed` is the ONE
  *     function that turns `args.relaxed` into an override, it grants only on
  *     `senderRole === 'owner'` (the authenticated sender, post-clamp), and every
@@ -105,7 +105,7 @@
  * is the rule that REPORTS it; this field is the fact, present even when a
  * higher-ranked rule reported instead.
  *
- * P25 — the day narration needs the fact, not the label. `find_available_slots`
+ * The day narration needs the fact, not the label. `find_available_slots`
  * walks every quarter-hour in the window, so on any full-day search most
  * rejections are simply "that hour isn't in his day"; the per-day reason summary
  * therefore treats `outside_owner_work_hours` as noise and reports what blocked
@@ -294,7 +294,7 @@ export interface RuleCheckResult {
    * REPORTS it, this is the fact, so it is present even when a higher-ranked rule
    * returned first. `find_available_slots` reads it to file that rejection under
    * the day-narration noise label instead of inferring out-of-hours-ness from the
-   * label it received (P25 — see the header's UNCONDITIONAL FACTS note).
+   * label it received (see the header's UNCONDITIONAL FACTS note).
    */
   outsideWorkHours?: true;
   /** level==='optional' — the optional-join event's viewer-scoped subject. */
@@ -443,11 +443,11 @@ export function requiredFreeMinutesForWorkDay(
  *
  *   ignore     — cancelled, a free-show (FYI / "Not Me"), a floating block
  *                (lunch / gym slides; rule 6 owns the "no room to shift" case),
- *                or an ALL-DAY workingElsewhere marker (P32, below)
+ *                or an ALL-DAY workingElsewhere marker (below)
  *   optional   — a TIMED workingElsewhere event: join-if-free, skippable (M2)
  *   commitment — everything else, INCLUDING an all-day busy / oof
  *
- * P32 — an ALL-DAY `workingElsewhere` event is NOT a commitment. It used to be,
+ * An ALL-DAY `workingElsewhere` event is NOT a commitment. It used to be,
  * and the SAME search said the opposite one screen away: the walker's own
  * owner-event pass skips it explicitly ("an all-day Working Elsewhere marker is
  * NOT a block", findAvailableSlots.ts) and its free/busy pass skips every
@@ -498,7 +498,7 @@ export type OccupancyRole = 'ignore' | 'optional' | 'commitment';
  *                                 imported travel row than a day off. Calling a
  *                                 held day "he's out" is a confident wrong reason.
  *   • all-day `workingElsewhere`— explicitly NOT this: it is a WORKING day, just
- *                                 elsewhere. `occupancyRoleOf` agrees now (P32) —
+ *                                 elsewhere. `occupancyRoleOf` agrees now —
  *                                 it `ignore`s the marker instead of blocking the
  *                                 day, so the two no longer contradict.
  *   • `free` / cancelled        — not a block at all.
@@ -508,7 +508,7 @@ export type OccupancyRole = 'ignore' | 'optional' | 'commitment';
  * is SAID: a day off reported as forty separate "already busy" hits narrates as
  * "fully booked", which is a false reason for a true refusal (M9).
  *
- * P29 — takes the three fields it actually reads, not `CalendarEvent`, so
+ * Takes the three fields it actually reads, not `CalendarEvent`, so
  * `analyzeCalendar`'s ProcessedEvent (Graph events already parsed for narration)
  * calls THIS instead of carrying an inline copy of the same three-way test. Two
  * copies that agree today are one edit away from disagreeing about whether the
@@ -591,7 +591,7 @@ export function occupancyRoleOf(
   // finder TAG a slot over it as WE-soft instead of dropping it, and lets a
   // booking sit over it with no conflict flag.
   if (!ev.isAllDay && ev.showAs === 'workingElsewhere') return 'optional';
-  // P32 — an ALL-DAY WE marker is a working day elsewhere, not a commitment and
+  // An ALL-DAY WE marker is a working day elsewhere, not a commitment and
   // not a skippable meeting. Ignored, which is what the walker always did.
   if (ev.showAs === 'workingElsewhere') return 'ignore';
   // A movable floating block (lunch / focus / gym) is NOT a hard collision:
@@ -630,7 +630,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
 
   // ── (b) WORK-BAND FIT (rule 5's data) — unconditional, BEFORE the ladder ──
   // The arithmetic rule 5 reports on, computed once so it can be reported as a
-  // FACT on every verdict (P25 — see the header). Windows come from the effective
+  // FACT on every verdict (see the header). Windows come from the effective
   // day, and the slot's minute-of-day is evaluated in the day's EFFECTIVE
   // timezone: for an away override ("Boston 9-5 EST") the windows are stated in
   // that zone, so the instant is converted there before the fit check. No
@@ -927,7 +927,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         // the owner drops the optional to keep lunch, so it never occupies the
         // window for feasibility. Keeps this rule consistent with the search /
         // health pools that also treat timed-WE as reclaimable free time.
-        // P32 — the ALL-DAY marker yields too. It occupies no clock time at all, so
+        // The ALL-DAY marker yields too. It occupies no clock time at all, so
         // leaving it in filled the whole lunch window and would have turned every
         // slot on a WFH-marked day into `floating_block_overlap` the moment the
         // occupancy scan stopped masking it with a collision.

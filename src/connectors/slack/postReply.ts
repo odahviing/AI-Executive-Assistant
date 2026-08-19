@@ -469,12 +469,12 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // WHICH gates run on which leg, in WHAT order, and what a verdict may do about
   // the text are that module's policy, not this pipeline's — canonical note in its
   // own module header. This comment used to carry a COPY of the order, and it went
-  // stale the moment guard moved date-verify last on the colleague leg (P20): a
+  // stale the moment guard moved date-verify last on the colleague leg: a
   // pointer cannot rot, a duplicated enumeration did. Don't re-add one here.
   //
   // What the delivery pipeline is entitled to assume, and no more: the call returns
   // the text to send, and nothing in there re-enters the orchestrator (G3). Since
-  // guard's P26 it also always DOES return — every await and every rewrite on both
+  // the guard fix, it also always DOES return — every await and every rewrite on both
   // legs now sits inside a try. But returning is not the same as returning the
   // DRAFT, and the two unavailability cases were given deliberately different
   // behaviours that this pipeline must not flatten: the spoof-input db read fails
@@ -659,6 +659,19 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       logger.warn('Inbound-colleague shadow notify threw — continuing', { err: String(err) });
     }
   }
+
+  // gh#handyman-owner-reply-not-logged — the outbound TEXT itself never hit
+  // structured logs. Step 4.6 above mirrors it for a COLLEAGUE turn (into the
+  // owner's shadow DM), and the ack short-circuit at Step 4.5 logs a 40-char
+  // preview at debug — but the normal owner-facing send had no log line
+  // carrying the reply at all, so a bad owner turn could only be reconstructed
+  // from tool results and the owner's own reaction, never read verbatim
+  // (traced re-examining gh#201's 08:05/08:39/08:57 turns). Bounded preview,
+  // same shape as the ack-replacement log a few lines up and handlers.ts's
+  // voice-transcript preview — never the raw unbounded text.
+  logger.info('postOrchestratorReply — sending reply', {
+    senderId, threadTs, channelId, role, replyPreview: shadowPreview(cleanReply),
+  });
 
   // Step 5 — audio vs text. The answer itself; everything below is a trailer.
   await sendReply({

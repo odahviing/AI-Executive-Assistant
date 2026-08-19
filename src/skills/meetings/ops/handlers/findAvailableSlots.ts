@@ -56,7 +56,7 @@ import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvaila
  *
  * unresolvedAttendees (#124h): an internal address Graph can't resolve reads
  * as fully-free — never offer it as checked; did_you_mean comes from
- * people_memory. attendeesNotChecked (P15): a free/busy read that never
+ * people_memory. attendeesNotChecked: a free/busy read that never
  * happened (bad window / Graph rejection), same "don't call them free"
  * consequence but the OPPOSITE cause — a bad address is the model's to fix,
  * a bad window is not, so the wording must not blame the address.
@@ -173,7 +173,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // share. His sub-lead-time booking in a group goes through the approval flow,
   // not through re-granting authority in the group.
   const isOwnerPath = context.senderRole === 'owner';
-  // P22 (v4.2.x) — THE grant, resolved ONCE per call. Five sites below used to
+  // (v4.2.x) — THE grant, resolved ONCE per call. Five sites below used to
   // spell `args.relaxed === true && context.senderRole === 'owner'` inline (and
   // one of them as `&& isOwnerInitiatedSearch`, the same predicate under a
   // second name). All five were correct; the problem was that a sixth copy of

@@ -1250,7 +1250,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // already decided the exact time; never counter-offer over it.
         //
         // A3 — `bookingRequest.relaxed`, not `args.relaxed`. This was the last raw
-        // read of that arg anywhere in the subsystem (P22 made `grantRelaxed` the one
+        // read of that arg anywhere in the subsystem (`grantRelaxed` is now the one
         // grant, keyed on the AUTHENTICATED sender). It granted nothing, so no rule
         // was waived by it — but it waived an owner PROTECTION, and it waived it on
         // an arg the model fills from message content rather than on identity. The
@@ -1501,6 +1501,30 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             }
           }
         }
+
+        // create-meeting-final-duration-not-logged (2026-08-19) — mirrors
+        // find_available_slots' entry log (findAvailableSlots.ts:226) but placed
+        // HERE, not at the top of this handler: args.start/end/attendees are
+        // rewritten multiple times above (anchor-to-event-end snap, WE
+        // resolveStatedInstant, quarter-grid align, requester add/scrub, room
+        // attendee) so only right before the write are they the values that
+        // actually land on the calendar. Computed durationMinutes from the
+        // final start/end rather than args.duration_minutes — that field is
+        // only ever populated for the anchor-duration path and is otherwise
+        // absent, so it can't stand in for "the final duration" on its own.
+        logger.info('create_meeting — call entry (final resolved args, pre-write)', {
+          subject: args.subject,
+          start: args.start,
+          end: args.end,
+          durationMinutes: (() => {
+            const s = DateTime.fromISO(args.start as string, { zone: timezone });
+            const e = DateTime.fromISO(args.end as string, { zone: timezone });
+            return s.isValid && e.isValid ? Math.round(e.diff(s, 'minutes').minutes) : undefined;
+          })(),
+          attendeeEmails: attendees.map(a => a.email).filter(Boolean),
+          meetingMode: effectiveIsOnline ? 'online' : 'in_person',
+          category: args.category,
+        });
 
         return createMeeting({
           userEmail,
