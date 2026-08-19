@@ -831,8 +831,14 @@ if (argv.includes('--report')) {
     }
     if (isSep(l)) return;
     if (isSep(lines[i + 1])) return; // the column header, not a row
-    // The first cell is `# · lane · status`, which is where the recommendation lives.
-    if (cur) { cur.rows += 1; cur.cells.push(String(l).split('|')[1] || ''); }
+    // X206 · the table is `Lane · ref | What happened | Your options | Risk` —
+    // the THIRD cell (index 3 after the leading empty from the split) is where
+    // the recommendation lives now. It used to be the first cell (`# · lane ·
+    // status`, index 1) before the 2026-08-19 4-column redesign moved Status
+    // out of a per-row cell and into "Your options" — reading index 1 here
+    // after that reshape would find "Lane · ref" text, which never contains
+    // `recommend`, and every pending row would false-fail forever.
+    if (cur) { cur.rows += 1; cur.cells.push(String(l).split('|')[3] || ''); }
     else loose += 1;
   });
 

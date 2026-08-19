@@ -3025,9 +3025,10 @@ return {
   // he approves via `args.issues`, where the preset path exempts them.
   needsShaping,
   // X70 · needs-shaping items whose `shapingQuestion` is missing or a stub. They
-  // are STILL his rows and still rendered — but as `pending owner — nobody has
-  // read the code yet`, never as a shaping question, because asking him to rule
-  // on an unexamined row is how gh#164 spent two runs on his desk unchanged.
+  // are STILL his rows and still rendered (Pending owner group) — but with
+  // `Recommend: unclear — nobody has read the code yet` in the Your-options
+  // cell, never a shaping question, because asking him to rule on an
+  // unexamined row is how gh#164 spent two runs on his desk unchanged.
   unshaped,
   pending,
   // Persist under "Verified clean" in report.md and pass straight back as
