@@ -797,8 +797,8 @@ export async function sendMorningBriefing(
         new Promise<undefined>(r => { const t = setTimeout(() => r(undefined), BRIEF_HEALTH_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
       ]);
       // Read the tool's own `vacuous` flag ("nothing worth saying" —
-      // checkHealth.ts:1440), the same structured signal dispatchRoutine rides
-      // (routine.ts:197). Pre-fix the brief threw the flag away and re-derived
+      // checkHealth.ts:1558), the same structured signal dispatchRoutine rides
+      // (dispatchers/routine.ts:30). Pre-fix the brief threw the flag away and re-derived
       // it with an English regex over the composed prose, which broke the
       // moment a template was reworded or an issue description happened to
       // contain "looks good" — and the brief itself is composed in the owner's

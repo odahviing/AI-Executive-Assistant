@@ -22,6 +22,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, updateRequest } from '../../db/requests';
 import { getOutreachJobByRequestId } from '../../db/jobs';
 import { workTimeBaseFromNow } from '../../utils/workHours';
+import { colleagueWorkTimeBaseFromNow } from '../../utils/responseDeadline';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface } from './types';
@@ -533,6 +534,18 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   if (!conn) {
     updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
     return 'noop';
+  }
+  // registrar fix (colleague-outreach-not-gated-to-recipient-work-hours-or-week,
+  // o#245/o#246) — defer this re-ask to the colleague's own next work-time
+  // start rather than firing on the raw +24h timer regardless of their clock.
+  const colleagueTz = job!.colleague_tz || profile.user.timezone;
+  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
+  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
+    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'reschedule_reask' });
+    logger.info('runRescheduleReask — outside colleague work hours, deferring re-ask', {
+      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+    });
+    return 'rearmed';
   }
   let ctx: { meeting_subject?: string; proposed_start?: string } = {};
   try { ctx = job!.context_json ? JSON.parse(job!.context_json) : {}; } catch { /* fall back to generic */ }

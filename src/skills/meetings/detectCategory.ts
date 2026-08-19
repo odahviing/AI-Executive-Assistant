@@ -137,7 +137,8 @@ ${categoryBlock}
 
 RULES:
 - Walk top-down; first match wins.
-- If NOTHING fits clearly, output "UNMATCHED" (case-sensitive).${input.requestedCategory ? `
+- If NOTHING fits clearly, output "UNMATCHED" (case-sensitive).
+- A category's own description may name a condition under which you should NOT guess — e.g. "when ambiguous, ask" / "confirm before assuming". If this meeting matches that named ambiguous condition, that category does NOT count as a match even though it's the closest fit — output "UNMATCHED" instead of picking it anyway. Only pick a category when nothing in its own description tells you to hold off.${input.requestedCategory ? `
 - The requester SUGGESTED "${input.requestedCategory}". Honor it ONLY if it genuinely fits this meeting's description above. If it clearly does not fit — e.g. a physical/in-person category for a meeting with no physical address, or a category whose description plainly describes a different situation — IGNORE the suggestion and classify by the descriptions. Your classification wins over the suggestion.` : ''}
 
 MEETING:

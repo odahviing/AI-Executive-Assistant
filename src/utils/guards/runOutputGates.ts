@@ -1148,7 +1148,7 @@ async function runClaimCheckAndMaybeRewrite(
 
         if (verdict.action_type === 'message' && isRealColleagueOneOnOneDm && targetIsOwner) {
           try {
-            const { createRequest, buildIdempotencyKey, getRequestByIdempotencyKey } = await import('../../db/requests');
+            const { buildIdempotencyKey, getRequestByIdempotencyKey } = await import('../../db/requests');
             const { getPersonMemory } = await import('../../db');
             const ownerUserId = profile.user.slack_user_id;
             const requesterFirst = (getPersonMemory(ctx.senderId)?.name ?? 'A colleague').split(' ')[0];
@@ -1163,37 +1163,19 @@ async function runClaimCheckAndMaybeRewrite(
 
               // chris-kelley-oof-block-b/c (2026-08-18) — deliver NOW, the same
               // immediate postOwnerDecision path the identical-shape sibling
-              // backstop (flagUnresolvedFreeformForOwner, src/tasks/skill.ts:311)
-              // now uses, never a workTimeBaseFromNow/reminder_fire timer: that
+              // backstop (flagUnresolvedFreeformForOwner, src/tasks/skill.ts)
+              // uses, never a workTimeBaseFromNow/reminder_fire timer: that
               // shape is exactly the deferred-past-vacation bug the owner ruled on
               // ("approval flow is always approval, nothing should block people to
               // raise alarm as ask for approval") — an unconfirmed "I told him"
               // claim raised during a declared away period must reach him
-              // immediately, not wait for the away period to end. Shared shape,
-              // NOT shared code across a lane boundary: skill.ts is Registrar's
-              // file, so this call sequence is written here, in Gatekeeper's own
-              // file, mirroring skill.ts's three-round fix rather than importing
-              // from it.
-              let posted: { ok: boolean; channel?: string; threadTs?: string; ts?: string; reason?: string } = { ok: false };
-              try {
-                const { getConnection } = await import('../../connections/registry');
-                const conn = getConnection(ownerUserId, 'slack');
-                if (conn) {
-                  const { postOwnerDecision } = await import('../ownerDailyThread');
-                  posted = await postOwnerDecision({ profile, conn, text: flagMessage, label: 'claim-checker relay backstop' });
-                  if (!posted.ok) {
-                    logger.error('claim_checker_rewrite — relay-to-owner backstop DM failed', {
-                      ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs, reason: posted.reason,
-                    });
-                  }
-                } else {
-                  logger.warn('claim_checker_rewrite — no Slack connection registered for relay backstop', { ownerUserId });
-                }
-              } catch (postErr) {
-                logger.error('claim_checker_rewrite — relay-to-owner backstop DM threw', {
-                  err: String(postErr).slice(0, 200),
-                });
-              }
+              // immediately, not wait for the away period to end. Shared shape
+              // AND, as of 2026-08-19 (o#249, bouncer finding
+              // `freeform-owner-flag-delivery-duplicated-across-two-lanes`),
+              // shared code: the send-then-persist mechanics live in
+              // `deliverAndRecordOwnerFlag` (src/utils/ownerDailyThread.ts,
+              // Handyman's connective-plumbing file) so this lane and
+              // Registrar's no longer carry two copies of the same ~50 lines.
 
               const shared = {
                 ownerUserId,
@@ -1201,7 +1183,7 @@ async function runClaimCheckAndMaybeRewrite(
                 initiatedByRole: 'colleague' as const,
                 kind: 'reminder' as const,
                 // subkind is this backstop's own value, distinct from its sibling
-                // flagUnresolvedFreeformForOwner's (src/tasks/skill.ts:311, subkind
+                // flagUnresolvedFreeformForOwner's (src/tasks/skill.ts, subkind
                 // 'freeform_owner_ask' as of chris-kelley-oof-block-c round 3,
                 // 2026-08-18 — split apart once the shared value proved not unique
                 // enough for that sibling's own dedup lookup to tell the two backstops'
@@ -1226,39 +1208,29 @@ async function runClaimCheckAndMaybeRewrite(
                 idempotencyKey,
               };
 
+              // Send + persist (born 'logged' on confirmed delivery, 'in_flight'
+              // with a bounded 5m retry — runFreeformFlagRetry, src/core/
+              // requests/runner.ts — on genuine failure) is the shared helper;
+              // see its doc comment for why both backstops need it identically.
+              const { deliverAndRecordOwnerFlag } = await import('../ownerDailyThread');
+              const posted = await deliverAndRecordOwnerFlag({
+                profile,
+                ownerUserId,
+                flagMessage,
+                label: 'claim-checker relay backstop',
+                messages: {
+                  dmFailed: 'claim_checker_rewrite — relay-to-owner backstop DM failed',
+                  noConnection: 'claim_checker_rewrite — no Slack connection registered for relay backstop',
+                  threw: 'claim_checker_rewrite — relay-to-owner backstop DM threw',
+                },
+                dmFailedExtra: { requesterSlackId: ctx.senderId, threadTs: ctx.threadTs },
+                shared,
+              });
               if (posted.ok) {
-                // Confirmed delivery — born terminal, same as the sibling's
-                // 'logged' row (skill.ts:398-412): the DM above IS the action,
-                // nothing is left to wait on. No nextCheckAt/nextCheckHandler —
-                // a terminal row is never picked up by the sweep.
-                createRequest({
-                  ...shared,
-                  state: 'logged',
-                  ownerDmChannel: posted.channel,
-                  ownerDmThreadTs: posted.threadTs,
-                  terminalDmMsgTs: posted.ts,
-                  details: { message: flagMessage },
-                });
                 logger.info('claim_checker_rewrite — delivered relay-to-owner backstop immediately', {
                   ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
                 });
               } else {
-                // Genuine delivery failure — reuse the sibling's own bounded,
-                // SHORT retry timer (runFreeformFlagRetry, src/core/requests/
-                // runner.ts:711) rather than a fresh handler: it already reads
-                // details.message generically and retries via the identical
-                // postOwnerDecision call, so this row rearms itself in 5m
-                // instead of falling back to a deferred, away-period-spanning
-                // wait. Never workTimeBaseFromNow/nextOwnerWorkdayStart — the
-                // exact shape this fix removes.
-                const { DateTime } = await import('luxon');
-                createRequest({
-                  ...shared,
-                  state: 'in_flight',
-                  nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(),
-                  nextCheckHandler: 'freeform_flag_retry',
-                  details: { message: flagMessage, send_attempts: 1 },
-                });
                 logger.info('claim_checker_rewrite — relay-to-owner backstop delivery failed, armed short retry', {
                   ownerUserId, requesterSlackId: ctx.senderId, threadTs: ctx.threadTs,
                 });

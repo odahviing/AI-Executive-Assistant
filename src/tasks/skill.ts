@@ -78,7 +78,16 @@ const COLLEAGUE_PENDING_CAP = 2;
 async function colleaguePendingCapRefusal(
   context: SkillContext, ownerUserId: string,
 ): Promise<{ error: string; reason: string } | null> {
-  if (context.authority !== 'colleague') return null;
+  // gh#handyman-authority-clamp-sweep (third consumer, 2026-08-19) — `authority`
+  // alone still isn't enough: processMessage.ts's debounce merge clamps
+  // `effectiveAuthority` to 'colleague' for the WHOLE turn whenever the merged
+  // batch spans multiple senders, even when the owner spoke last and
+  // `context.userId` is still his own Slack id (same case buildTurnContext.ts:739
+  // and orchestrator/index.ts:1106 already guard). Without the identity check,
+  // the owner's own create_approval/create_task got refused under his
+  // colleagues' pending-request cap, which is documented above as never
+  // applying to him. Compare the authenticated identity directly.
+  if (context.authority !== 'colleague' || context.userId === ownerUserId) return null;
   const pending = getPendingRequestCountForColleague(ownerUserId, context.userId);
   if (pending < COLLEAGUE_PENDING_CAP) return null;
 
@@ -292,6 +301,13 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * 'logged' only) as though it had actually reached him, and (c) had no timer
  * at all to ever try again — the exact hole round 1 of this fix introduced.
  *
+ * The delivery-then-persist mechanism itself (post via `postOwnerDecision`,
+ * then create the `logged`/`in_flight` row) is `deliverAndRecordOwnerFlag`
+ * (src/utils/ownerDailyThread.ts) — extracted 2026-08-19 (o#249) as the one
+ * shared implementation of this exact shape, since runOutputGates.ts's
+ * claim-checker relay backstop needs it identically. This function still owns
+ * the dedup/subkind decisions above; only the send+record mechanics are shared.
+ *
  * Owner-initiated calls skip this — if create_approval was raised from the
  * owner's OWN conversation, he's already the one Maelle is talking to; there
  * is no cross-party drop to guard against.
@@ -313,7 +329,15 @@ async function flagUnresolvedFreeformForOwner(
   ownerUserId: string,
   flagText: string,
 ): Promise<void> {
-  if (context.authority !== 'colleague') return;
+  // gh#handyman-authority-clamp-sweep (third consumer, 2026-08-19) — same
+  // merged-batch clamp as colleaguePendingCapRefusal above: a debounce merge
+  // spanning multiple senders clamps `authority` to 'colleague' for the whole
+  // turn even when the owner spoke last, so `authority` alone can't tell
+  // "genuinely a colleague" from "owner, clamped by the merge". Compare the
+  // authenticated identity directly (matches buildTurnContext.ts:739).
+  // Without this, the owner got DM'd "a colleague raised something" about
+  // his own message, with the requester resolved to his own id.
+  if (context.authority !== 'colleague' || context.userId === ownerUserId) return;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getPersonMemory } = require('../db/people') as typeof import('../db/people');
@@ -331,30 +355,6 @@ async function flagUnresolvedFreeformForOwner(
     }
 
     const flagMessage = `${requesterFirst} raised something I couldn't confidently route on my own, and I didn't want it to just sit unanswered: "${flagText}". Flagging it for you directly rather than risk it getting lost.`;
-
-    // Deliver NOW, the same immediate path a real approval ask uses
-    // (createApprovalRequest, ~1194-1259) — no work-hours/away-day gating.
-    // See the header comment above (chris-kelley-oof-block-b).
-    let posted: { ok: boolean; channel?: string; threadTs?: string; ts?: string; reason?: string } = { ok: false };
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
-      const conn = getConnection(ownerUserId, 'slack');
-      if (conn) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { postOwnerDecision } = require('../utils/ownerDailyThread') as typeof import('../utils/ownerDailyThread');
-        posted = await postOwnerDecision({ profile: context.profile, conn, text: flagMessage, label: 'freeform escalation flag' });
-        if (!posted.ok) {
-          logger.error('create_approval — freeform escalation flag DM to owner failed', {
-            ownerUserId, requesterSlackId: context.userId, reason: posted.reason,
-          });
-        }
-      } else {
-        logger.warn('create_approval — no Slack connection registered for freeform escalation flag', { ownerUserId });
-      }
-    } catch (err) {
-      logger.error('create_approval — freeform escalation flag DM threw', { err: String(err).slice(0, 200) });
-    }
 
     // Identity for DB uniqueness only, NOT for dedup (that's
     // getLatestFreeformOwnerFlag above) — always fresh, so a fresh row here
@@ -395,33 +395,27 @@ async function flagUnresolvedFreeformForOwner(
       idempotencyKey,
     };
 
-    if (posted.ok) {
-      // Confirmed delivery — born terminal (R1's `logged` state): the DM
-      // above already IS the action, and nobody is waiting on a decision —
-      // same shape as runReminderFire's own closeRequest call for a fired
-      // reminder. This row exists for the audit trail (recent-activity read,
-      // getLatestFreeformOwnerFlag dedup on retry), not to be picked up by
-      // the sweep.
-      createRequest({
-        ...shared,
-        state: 'logged',
-        ownerDmChannel: posted.channel,
-        ownerDmThreadTs: posted.threadTs,
-        terminalDmMsgTs: posted.ts,
-        details: { message: flagMessage },
-      });
-    } else {
-      // Genuine delivery failure — do NOT create a dead born-terminal row
-      // (chris-kelley-oof-block-b round 2): land it `in_flight` with a short,
-      // bounded, re-fireable retry instead. See the header comment above.
-      createRequest({
-        ...shared,
-        state: 'in_flight',
-        nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(),
-        nextCheckHandler: 'freeform_flag_retry',
-        details: { message: flagMessage, send_attempts: 1 },
-      });
-    }
+    // Delivery + persistence (post now, then record `logged`/`in_flight`) is
+    // the shared helper extracted 2026-08-19 (o#249) — see its doc comment in
+    // ownerDailyThread.ts. This row's audit trail (recent-activity read,
+    // getLatestFreeformOwnerFlag dedup on retry) is what the `logged` state
+    // exists for; a failed send lands `in_flight` with a short retry rather
+    // than a dead born-terminal row (chris-kelley-oof-block-b round 2).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { deliverAndRecordOwnerFlag } = require('../utils/ownerDailyThread') as typeof import('../utils/ownerDailyThread');
+    const posted = await deliverAndRecordOwnerFlag({
+      profile: context.profile,
+      ownerUserId,
+      flagMessage,
+      label: 'freeform escalation flag',
+      messages: {
+        dmFailed: 'create_approval — freeform escalation flag DM to owner failed',
+        noConnection: 'create_approval — no Slack connection registered for freeform escalation flag',
+        threw: 'create_approval — freeform escalation flag DM threw',
+      },
+      dmFailedExtra: { requesterSlackId: context.userId },
+      shared,
+    });
     logger.info('create_approval — flagged unresolved freeform escalation to owner', {
       ownerUserId, requesterSlackId: context.userId, preview: flagText.slice(0, 80), posted: posted.ok,
     });

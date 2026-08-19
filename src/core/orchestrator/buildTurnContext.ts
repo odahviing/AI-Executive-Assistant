@@ -724,7 +724,22 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // the owner keeps direct tool access even in a room, so Sonnet calls
   // find_available_slots itself rather than leaning on this eyeball-mismatch
   // guard the way a colleague's more restricted tool access does.
-  if (input.authority === 'colleague' && userMessage && userMessage.trim().length > 0) {
+  //
+  // gh#handyman-authority-clamp-sweep — `authority` alone still misses one
+  // case, the SAME one gh#201-d found and fixed at orchestrator/index.ts's
+  // find_available_slots tracking call: processMessage.ts's debounce merge
+  // clamps `effectiveAuthority` to 'colleague' for the WHOLE turn whenever the
+  // merged batch spans multiple senders, even when `input.userId` is still
+  // the owner's own Slack id. Without the identity check below, that merge
+  // reopens the exact "addressed him as a colleague in his own turn" bug the
+  // v4.4.x comment above describes fixing. Compare the authenticated identity
+  // directly, same pattern as orchestrator/index.ts's find_available_slots
+  // gate and core/requests/runner.ts:453.
+  if (
+    input.authority === 'colleague'
+    && input.userId !== profile.user.slack_user_id
+    && userMessage && userMessage.trim().length > 0
+  ) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { precheckAvailability } = require('../../utils/availabilityPreCheck') as

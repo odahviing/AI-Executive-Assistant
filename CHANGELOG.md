@@ -2,6 +2,26 @@
 
 ---
 
+## 4.7.1 — A colleague on the other side of the world stops getting messaged at 3am
+
+Three more silent misfires, all about the wrong person being treated as the wrong role. A colleague's real 16:30 slot got called "already booked" because a stated foreign clock time was never converted into the owner's zone before the check ran; a merged batch of Slack messages could clamp the owner into being treated as his own colleague, refusing his own request under a cap that's documented as never applying to him; and every scheduled outreach nag fired on the owner's clock, with zero regard for what time it actually was where the recipient lived.
+
+### Fixed
+- **A colleague asking about a specific time in their own timezone could be told it was already booked when it was actually free.** `preferred_slot` was the one clock-time argument in the availability search that skipped the same timezone conversion every other argument in the file already got — a naive foreign-zone time was silently misread as owner-local, checking the wrong instant entirely.
+- **A debounced batch of merged Slack messages could clamp the owner into being treated as one of his own colleagues.** Two more consumers of the same authority-clamp flag found tonight, on top of the one already fixed this release: the owner's own request could be refused under a colleague-only pending-request cap, and Maelle could DM him "a colleague raised something" about his own message.
+- **Colleague-facing outreach — reminders, re-asks, re-engagement DMs — fired the instant an internal timer tripped, with no regard for the recipient's own local hours or workweek.** These sends now defer to the colleague's own next work-time start, computed from their timezone, the same way an owner-facing reminder already respects the owner's hours.
+- **A colleague's decisive reply to an outreach thread that didn't book or mutate anything reached nobody.** The rewritten outreach-reply path closed the request correctly but dropped the proactive summary the old code used to push into the owner's own channel — restored, scoped to replies that actually change something so a trivial "let me check" doesn't get chatty.
+- **A private contact's meeting silently lost its double-booking check.** Forcing a mixed meeting private (an owner-approved change) also carried an unrelated category flag that skipped conflict detection entirely — split apart so privacy and conflict-checking are independent again.
+- A routine external booking could be mislabelled "Interview" on the real calendar by an ambiguous LLM judgment call, consuming that category's daily limit for no reason.
+- A validator-caught fabricated personal fact about a real person could be regenerated indefinitely — dropping a coda before send now feeds the same negative-feedback counter a sent-then-ignored raise already uses.
+- Maelle's own background self-capture pass could write owner standing preferences onto her own identity row, contradicting the pass's own prompt rule; it now self-classifies each note before writing, and 35 already-polluted notes were removed from her live record.
+- A duplicated ~50-line owner-notification delivery sequence, present identically in two files, is now one shared implementation.
+
+### Framework (other chats, bundled)
+The nightly report table redesigned from five columns to four, moving file:line citations and mechanism jargon out of the owner's daily view into the ledger row alone. The Manager's `pendingOverflow` queue no longer silently loses a discovery when a wrap runs mid-drain, and a backfill script's "confirmed against production" claim can no longer mean a stale local database copy. A concurrent-architect-session collision risk (two sessions editing the same charter row) gets a documented pre-write check. Stale-citation detection no longer flags a symbol cited at its use site, only a truly drifted one; the `P` rule-tag is now fully retired from source comments.
+
+---
+
 ## 4.7.0 — She catches her own "I'm an AI" slip in every language, not just English
 
 A downtime reconnect could leave group conversations behind — DMs got caught up, group chats did not, even when she'd been directly addressed while offline. And a real honesty-guard gap closes: testing found the language-agnostic backstop against Maelle describing herself as AI/a bot caught zero of four French/Spanish/German casual-aside cases — its own prompt never actually stated that a bare identity claim is a violation on its own, only the infrastructure-framing half of the rule existed.

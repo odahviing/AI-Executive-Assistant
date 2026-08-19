@@ -98,3 +98,22 @@ export function calcResponseDeadline(colleagueTz: string): string {
   const workStart = nextWorkingHourStart(colleagueTz, window);
   return addWorkingHours(workStart, RESPONSE_DEADLINE_WORKING_HOURS, window).toUTC().toISO()!;
 }
+
+/**
+ * Colleague-shaped analogue of workHours.ts's `workTimeBaseFromNow` — same
+ * shape (NOW if already inside work hours, else the ISO of the next
+ * work-time start), but keyed off a COLLEAGUE's own timezone-inferred
+ * workweek+hours (`defaultWorkingHoursForTz`), never the owner's YAML
+ * schedule. Owner ruling (o#245/o#246, 2026-08-19): a human agent can't
+ * ignore work times — the owner's OR anyone else's — so every colleague-
+ * facing proactive send (reengagement DMs, re-asks) must land inside the
+ * RECIPIENT's own hours and workweek, which may differ from the owner's
+ * (e.g. Sun-Thu vs Mon-Fri). Reuses `nextWorkingHourStart`, the exact
+ * day/hour walk `calcResponseDeadline` above already runs for the same
+ * colleague — no second implementation of "is this a workday for them."
+ */
+export function colleagueWorkTimeBaseFromNow(colleagueTz: string | null | undefined): string {
+  const tz = colleagueTz || 'UTC';
+  const window = defaultWorkingHoursForTz(tz);
+  return nextWorkingHourStart(tz, window).toUTC().toISO()!;
+}

@@ -24,11 +24,19 @@
  *
  * `postOwnerDecision` (below) is THE post path for anything decision-shaped.
  * Call it instead of `conn.sendDirect(owner, …)` — a bare DM escapes the book.
+ *
+ * `deliverAndRecordOwnerFlag` (below) layers the persistence half on top: post
+ * via `postOwnerDecision`, then record the outcome as a `request` row (born
+ * `logged` on confirmed delivery, `in_flight` with a bounded retry on failure).
+ * It is the one shared implementation of the "flag this to the owner NOW"
+ * backstop shape used by both Registrar's freeform-ask flag and Gatekeeper's
+ * claim-checker relay backstop — see its own doc comment for why.
  */
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { Connection } from '../connections/types';
+import type { CreateRequestInput } from '../core/requests/types';
 import { getEffectiveToday } from './effectiveToday';
 import { getDb } from '../db/client';
 import logger from './logger';
@@ -188,4 +196,86 @@ export async function postOwnerDecision(opts: {
     });
     return { ok: false, reason: 'threw' };
   }
+}
+
+/**
+ * Deliver-and-record for the "flag this to the owner NOW, immediately" reminder
+ * shape — extracted 2026-08-19 (bouncer finding
+ * `freeform-owner-flag-delivery-duplicated-across-two-lanes`, o#249) after the
+ * same ~50-line delivery+persistence sequence was found built twice in
+ * Registrar's `flagUnresolvedFreeformForOwner` (src/tasks/skill.ts) and
+ * Gatekeeper's claim-checker relay backstop (src/utils/guards/
+ * runOutputGates.ts). Both back a colleague-raised ask the owner must see
+ * regardless of work-hours/away-day gating (chris-kelley-oof-block-b/c,
+ * 2026-08-18 — "approval flow is always approval, nothing should block people
+ * to raise alarm as ask for approval"), so both need the exact same delivery +
+ * persistence contract: post via `postOwnerDecision` now, then persist the
+ * outcome as a `request` row — born `logged` (terminal) on confirmed delivery,
+ * or `in_flight` with a short 5-minute `freeform_flag_retry` timer on a genuine
+ * send failure (never a `workTimeBaseFromNow`/`nextOwnerWorkdayStart` deferral —
+ * that's the exact deferred-past-vacation shape this backstop exists to avoid).
+ *
+ * Caller supplies the log message text (both call sites narrate the miss
+ * differently — "freeform escalation flag" vs "relay-to-owner backstop" — and
+ * that wording difference is real, kept exactly as each site had it) and the
+ * request-row shape minus the outcome-dependent fields (`state`,
+ * `ownerDmChannel`, `ownerDmThreadTs`, `terminalDmMsgTs`, `details`,
+ * `nextCheckAt`, `nextCheckHandler`), which this function fills in from the
+ * delivery outcome. Never throws — a send that can't even attempt still
+ * returns `{ ok: false }` so the caller's own idempotency/dedup bookkeeping
+ * still runs.
+ */
+export async function deliverAndRecordOwnerFlag(opts: {
+  profile: UserProfile;
+  ownerUserId: string;
+  flagMessage: string;
+  /** Passed through to postOwnerDecision — traces a miss to the call site. */
+  label: string;
+  messages: { dmFailed: string; noConnection: string; threw: string };
+  /** Extra fields merged into the dmFailed error log, beyond {ownerUserId, reason}. */
+  dmFailedExtra?: Record<string, unknown>;
+  shared: Omit<CreateRequestInput, 'state' | 'ownerDmChannel' | 'ownerDmThreadTs' | 'terminalDmMsgTs' | 'details' | 'nextCheckAt' | 'nextCheckHandler'>;
+}): Promise<OwnerDecisionPost> {
+  const { profile, ownerUserId, flagMessage, label, messages, dmFailedExtra, shared } = opts;
+
+  let posted: OwnerDecisionPost = { ok: false };
+  try {
+    const { getConnection } = await import('../connections/registry');
+    const conn = getConnection(ownerUserId, 'slack');
+    if (conn) {
+      posted = await postOwnerDecision({ profile, conn, text: flagMessage, label });
+      if (!posted.ok) {
+        logger.error(messages.dmFailed, { ownerUserId, reason: posted.reason, ...dmFailedExtra });
+      }
+    } else {
+      logger.warn(messages.noConnection, { ownerUserId });
+    }
+  } catch (err) {
+    logger.error(messages.threw, { err: String(err).slice(0, 200) });
+  }
+
+  const { createRequest } = await import('../db/requests');
+  if (posted.ok) {
+    // Confirmed delivery — born terminal: the DM above IS the action, nothing
+    // is left to wait on.
+    createRequest({
+      ...shared,
+      state: 'logged',
+      ownerDmChannel: posted.channel,
+      ownerDmThreadTs: posted.threadTs,
+      terminalDmMsgTs: posted.ts,
+      details: { message: flagMessage },
+    });
+  } else {
+    // Genuine delivery failure — do NOT create a dead born-terminal row: land
+    // it `in_flight` with a short, bounded, re-fireable retry instead.
+    createRequest({
+      ...shared,
+      state: 'in_flight',
+      nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(),
+      nextCheckHandler: 'freeform_flag_retry',
+      details: { message: flagMessage, send_attempts: 1 },
+    });
+  }
+  return posted;
 }

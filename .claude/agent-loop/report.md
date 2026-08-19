@@ -1,23 +1,15 @@
-# Agent-loop report
+# Report — cumulative since the 4.7.1 wrap
 
 ```
-Wrap v4.6.3 — in: gatekeeper + registrar charter-conformance self-audits, one round each
-out: 8 built · 0 bounced · 0/0 joint-traced
-6 rows await you — v4.6.2 wrapped, 0 new from this wrap
-board: 6 open rows — 6 still-real · 0 need a re-read · 0 cite no file · 6 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+Empty — v4.7.1 wrapping: 0 built · 0 already-fixed · 0 built-with-gap · 1 bounced · 0/0 outcome-traced · 0/0 joint-traced · 0 converted · 0 queued, 0 new from this wrap
+board: 2 open rows — 0 still-real · 1 need a re-read · 1 cite no file · 2 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+2 rows await you — standing backlog only, both QUEUED discoveries that self-drain at the next build.
 ```
 
-**Built and uncommitted — this is what a wrap ships (8):** `runoutputgates-claimchecker-relay-same-deferred-delivery-bug` claim-checker relay backstop now delivers immediately instead of via a deferred reminder timer · `coda-ai-disclosure-non-english-gap` a bare AI/bot identity claim is now caught and rewritten in any language, not just English · `freeform-flag-retry-exhausted-requester-never-told` the requester now hears about it when all delivery retries to the owner exhaust, instead of silence · `gatekeeper-charter-tool-log-file-citation-wrong` charter ownership citation corrected · `gatekeeper-g1-citation-line-drift` charter rule citation corrected · `outreach-jobs-replied-producer-comment-stale-coordinator` stale doc comment corrected · `outreach-jobs-sent-producer-missing-outreach-ts-286` stale doc comment corrected · `runoutputgates-relay-backstop-precedent-comment-now-stale` stale doc comment corrected
+### Pending owner (0)
 
-### Pending owner (6)
+Nothing to show yet — v4.7.1 is wrapping now.
 
-| # · Lane · Status | The issue | The solution | Risk |
-|---|---|---|---|
-| `closeOutreachReplyIfResolvedThisTurn-mpim-channel-gap` · registrar · QUEUED — recommend build | Room-surface (MPIM/channel) outreach replies have no closure path — `matchedJobId` is dropped for MPIM/channel surfaces. | Thread `matchedJobId` through for MPIM/channel the same way it now works for 1:1. | Low — narrower surface than the originally reported incident. |
-| `generic-outreach-branch-no-proactive-owner-relay` · registrar · pending owner — recommend decide | The deleted generic no-intent branch used to proactively relay a summary into the owner's channel; the new path doesn't. | Your call: is losing the proactive relay on a words-only outreach reply acceptable, or does it need its own nudge too. | Low — nothing is lost silently forever, just not pushed actively. |
-| `colleague-facing-reask-ignores-work-hours` · registrar · pending owner — recommend needs-dependency | Correctly refused to build a local reimplementation of work-hours logic — no reusable colleague-shaped analogue exists yet. | Matchmaker: expose a reusable analogue of `isWithinOwnerWorkHours`/`workTimeBaseFromNow` for a colleague. | Re-confirmed still real, 2026-08-19 — no code changed yet. |
-| `daniel-sharabi-continue-branch-no-owner-trace` · registrar · NO-CHANGE-NEEDED — recommend decline | Superseded, not built — the cited continue branch was deleted (not patched) by an earlier fix this same wave. | No action needed. | None. |
-| `private-emails-override-forces-mixed-meeting-private` · librarian · pending owner — recommend decide | A meeting is forced fully private (and dropped from conflict-flagging) whenever ANY attendee is on the private-contacts list. | Your call: keep any-attendee-triggers, or narrow it to when the private contact is the primary/sole attendee. | Medium — an ordinary work meeting that includes a private contact currently loses conflict-flagging entirely. |
-| `freeform-owner-flag-delivery-duplicated-across-two-lanes` · handyman · pending owner — recommend decide | Bouncer discovery: a ~50-line owner-escalation delivery sequence is duplicated across `skill.ts` and `runOutputGates.ts`. | Your call: extract a shared "deliver this owner-facing escalation immediately, retry-on-failure" helper, or leave the duplication. | Re-confirmed still real, 2026-08-19 — extraction explicitly left as your call, not built. |
+**Built and uncommitted — this is what a wrap ships (9):** `o#240` external booking mislabelled "Interview" · `o#241` coda repeating a fabricated fact · `o#242` merged batch treated the owner as a colleague · `o#249` shared owner-flag delivery helper · `o#252` self-capture identity-row pollution guard · `o#253` Dirk-thread timezone bug · `o#245+246` colleague outreach hours+workweek gate · `o#247+248` colleague words-only reply now reaches owner · `o#250` private-meeting conflict check restored
 
-Say "build the `<lane>` ones" to dispatch that lane directly, or rule on any row by name and it's recorded.
+- **`o#239`, `o#243`, `o#244` already shipped** in a prior ad-hoc commit (`bc1236c`) before this wrap — their ledger rows still read `built`, not `wrapped`, and get their wrap-companion rows stamped against that commit's own sha, not this wrap's.

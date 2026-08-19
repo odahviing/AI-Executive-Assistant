@@ -331,6 +331,23 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               .filter(c => c.no_issue_tracking === true)
               .map(c => c.name),
           );
+          // 2026-08-19 — private-emails-override-forces-mixed-meeting-private>dep.
+          // detectCategory.ts's private_emails override (2026-08-16) forces the
+          // sets_sensitivity_private category onto ANY meeting with a matching
+          // attendee, unconditionally — including a real work meeting that also
+          // has colleagues on the invite (a "mixed" meeting), not just a genuine
+          // solo/family block. That same category also carries no_issue_tracking
+          // in this owner's yaml (idan.yaml), so exclusion 5 below was silently
+          // dropping double-booking detection for those mixed meetings too — the
+          // colleagues' time on it still matters and a real conflict is worth
+          // flagging. Scoped narrowly: only a GENUINELY private invite (every
+          // non-owner attendee is on private_emails, or there are none) honors
+          // the no_issue_tracking skip; one carrying an attendee who ISN'T a
+          // private contact still gets tracked like any other work meeting.
+          const privateEmailsLower = new Set(
+            (profile.meetings?.private_emails ?? []).map(pe => pe.toLowerCase()),
+          );
+          const ownerEmailLowerForTracking = profile.user.email.toLowerCase();
 
           const nonAllDay = dayEvents.filter(e => {
             if (e.isAllDay) return false;
@@ -346,9 +363,17 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               ),
             );
             if (matchesAnyBlock) return false;
-            // Exclusion 5: yaml category flagged no_issue_tracking
+            // Exclusion 5: yaml category flagged no_issue_tracking — unless this
+            // is a mixed meeting (see the note above the filter).
             const eCats = e.categories ?? [];
-            if (eCats.some(c => noTrackCategories.has(c))) return false;
+            if (eCats.some(c => noTrackCategories.has(c))) {
+              const nonOwnerAttendees = (e.attendees ?? [])
+                .map(a => (a.emailAddress?.address ?? '').toLowerCase())
+                .filter(addr => addr && addr !== ownerEmailLowerForTracking);
+              const isMixedMeeting = privateEmailsLower.size > 0
+                && nonOwnerAttendees.some(addr => !privateEmailsLower.has(addr));
+              if (!isMixedMeeting) return false;
+            }
             // Exclusion 4: entirely outside work-hours (start >= workEnd OR end <= workStart)
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
@@ -392,10 +417,13 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 // seriesMasterId. Owner direction: when a different occurrence
                 // of the same recurring event overlaps with something new, that
                 // IS worth re-flagging — the prior dismissal was for one
-                // specific pair, not a blanket rule for the series. Personal-
-                // category events are skipped from the detector entirely
-                // (exclusion 5 above); recurring non-personal overlaps flag
-                // per occurrence as intended.
+                // specific pair, not a blanket rule for the series. A genuinely
+                // personal Personal-category event (nobody but the owner and/or
+                // his private_emails contacts on it) is skipped from the
+                // detector entirely (exclusion 5 above); a MIXED Personal-
+                // category meeting (a private contact alongside someone who
+                // isn't) is not skipped, and recurring non-personal overlaps
+                // flag per occurrence as intended.
                 issues.push({
                   type: 'double_booking',
                   date: dayStr,

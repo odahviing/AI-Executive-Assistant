@@ -1657,9 +1657,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // clean" by absence-inference even though 11:30 passed all
             // rules. Force-include the preferred slot when it's in the
             // candidate set but missing from picks.
-            const preferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
+            //
+            // Dirk-Clemens bug (2026-08-18) — the SAME conversion candidate_slots[].start
+            // gets at :1017 (search_window_timezone → owner tz, the #136/Ayala fix) and
+            // search_from/search_to get at :298-299 was never applied here. A colleague's
+            // "16:30 CET" arrived as a naive `preferred_slot` with no offset, got parsed
+            // straight as owner-local (Asia/Jerusalem) further down, and the tool checked
+            // the WRONG instant — surfacing a false "already booked for Idan" to an
+            // external colleague when Idan was actually free at the real (converted)
+            // instant; the true conflict was on the colleague's own calendar. Reinterpret
+            // it the same way every other clock-time argument in this file already is.
+            const rawPreferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
               ? args.preferred_slot.trim()
               : null;
+            const preferredSlot = rawPreferredSlot && searchWindowTz
+              ? reinterpretClockInZone(rawPreferredSlot, searchWindowTz, timezone)
+              : rawPreferredSlot;
             // v4.1.x (M8/M9) — set when the named time is NOT offerable, so the
             // result can say WHY instead of letting the model infer "unavailable"
             // from absence. Never merged into `slots`: an excluded slot is still

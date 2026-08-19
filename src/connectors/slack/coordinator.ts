@@ -36,11 +36,14 @@ import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import type { OrchestratorOutput } from '../../core/orchestrator';
-import { updateRequest, getOpenRequestsForThread } from '../../db/requests';
+import { updateRequest, getOpenRequestsForThread, getRequest } from '../../db/requests';
 import { calcResponseDeadline } from '../../utils/responseDeadline';
+import { getConnection } from '../../connections/registry';
 import {
   updateOutreachJob,
   getOutreachJobsByColleague,
+  getLinkedRequestIdForOutreach,
+  logEvent,
   type OutreachJob,
 } from '../../db';
 import logger from '../../utils/logger';
@@ -361,6 +364,27 @@ export async function handleOutreachReply(
  * A turn that only replied in words trips neither signal and leaves the
  * request exactly as handleOutreachReply already re-armed it (R4's "let me
  * check and come back to you" case, or any other non-decisive reply).
+ *
+ * registrar fix (generic-outreach-branch-no-proactive-owner-relay, o#247/o#248,
+ * 2026-08-19) — the deleted `done`/`schedule` branches (dab6f25) also
+ * proactively posted a summary into the owner's own outreach-conversation
+ * thread PLUS `logEvent`, whenever a colleague's reply needed him; this
+ * replacement closed the job but dropped both, leaving zero owner-visible
+ * trace even on the SAME resolving signals (mutated/booked/freshApproval)
+ * this function already computes. Wired below, gated on the identical two
+ * signals — never on "any reply arrived" — so a trivial reply that leaves the
+ * request open (R4's "checking" case) stays silent exactly as before.
+ *
+ * round 2 (bouncer, 2026-08-19) — the Slack post below only fires on
+ * mutated/booked, NOT on freshApproval. When the reply escalates into a
+ * fresh approval, `createApprovalRequest` (tasks/skill.ts ~1330) already
+ * looks up this SAME colleague's SAME recent outreach
+ * (`getRecentOutreachOwnerThread`, keyed on `target_slack_id` + kind
+ * 'outreach') and posts the approval ask itself into this exact
+ * `owner_dm_channel`/`owner_dm_thread_ts` — so a second post here would be
+ * the owner seeing two messages about the identical event (R3's "never
+ * twice"). `logEvent` still fires for both signals: it's a durable trace
+ * (surfaced only via get_briefing), never a second live notification.
  */
 export async function closeOutreachReplyIfResolvedThisTurn(params: {
   ownerUserId: string;
@@ -393,6 +417,41 @@ export async function closeOutreachReplyIfResolvedThisTurn(params: {
     });
   } catch (err) {
     logger.warn('closeOutreachReplyIfResolvedThisTurn — close failed', {
+      jobId: params.jobId, err: String(err).slice(0, 200),
+    });
+  }
+
+  // Owner-visible trace/relay — see the doc comment above. A durable
+  // `logEvent` row always; a real Slack message into the outreach's own
+  // owner-conversation thread ONLY on mutated/booked — freshApproval's own
+  // owner-facing post already happened inside createApprovalRequest, so
+  // posting again here would double him up on the same event (R3).
+  try {
+    const linkedRequestId = getLinkedRequestIdForOutreach(params.jobId);
+    const requestRow = linkedRequestId ? getRequest(linkedRequestId) : null;
+    const who = requestRow?.target_name ?? requestRow?.requester_name ?? 'They';
+    const subject = requestRow?.subject || 'that outreach';
+    const detail = (mutated || booked)
+      ? `${who} replied to "${subject}" and it's handled — I acted on it directly.`
+      : `${who} replied to "${subject}" and it needed your call, so I've raised a fresh approval for it.`;
+    if ((mutated || booked) && requestRow?.owner_dm_channel) {
+      const conn = getConnection(params.ownerUserId, 'slack');
+      if (conn) {
+        await conn.postToChannel(requestRow.owner_dm_channel, detail, {
+          threadTs: requestRow.owner_dm_thread_ts ?? undefined,
+        });
+      }
+    }
+    logEvent({
+      ownerUserId: params.ownerUserId,
+      type: 'outreach_reply',
+      title: (mutated || booked) ? `${who} — outreach resolved` : `${who} — outreach escalated`,
+      detail,
+      actor: who,
+      refId: params.jobId,
+    });
+  } catch (err) {
+    logger.warn('closeOutreachReplyIfResolvedThisTurn — owner relay failed', {
       jobId: params.jobId, err: String(err).slice(0, 200),
     });
   }

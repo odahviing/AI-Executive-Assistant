@@ -552,14 +552,21 @@ WHO SAID IT MATTERS: only ${ownerName}'s words teach. ${assistantName}'s own mes
 DEDUP RULE — strict: compare against the notes on file. A fact re-confirmed with new wording or extra colour = skip, unless the new context adds something genuinely substantive.
 
 Output strict JSON. No prose, no markdown fences:
-{ "notes": ["fact 1", "fact 2", ...] }
+{ "notes": [{ "note": "fact 1", "about_identity": true }, ...] }
 
 Each note: 1-2 sentences, third-person about her ("Named after…", "Speaks plainly, never over-apologises…", "Built in…"). Be specific; vague notes ("seems friendly") are useless later.
 
+"about_identity" is a second, independent judgment on EACH note you output — true only if it is genuinely about who she IS (origin, identity facts, personality/voice, lore) per the rules above. Set it false if, on reflection, the note is actually a standing preference of ${ownerName}'s about a workflow, report shape, or output format (hard exclusion 2) or a capability description (hard exclusion 1) that slipped into the list. If you are unsure, set it false — a note this system drops costs nothing; a preference wrongly saved as her identity pollutes the record. A false-flagged note is discarded downstream, so do not omit a note from the list just because you'd mark it false — mark it false and include it, that is what the field is for.
+
 If nothing new was taught — the usual case — output { "notes": [] }.`;
 
+interface SelfCaptureNote {
+  note: string;
+  aboutIdentity: boolean;
+}
+
 interface SelfCaptureDelta {
-  notes: string[];
+  notes: SelfCaptureNote[];
 }
 
 function parseSelfDelta(raw: string): SelfCaptureDelta | null {
@@ -567,9 +574,23 @@ function parseSelfDelta(raw: string): SelfCaptureDelta | null {
     const match = extractFirstJsonObject(raw);
     if (!match) return null;
     const parsed = JSON.parse(match);
-    const notes = Array.isArray(parsed?.notes)
-      ? parsed.notes.filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0)
-      : [];
+    const rawNotes = Array.isArray(parsed?.notes) ? parsed.notes : [];
+    const notes: SelfCaptureNote[] = rawNotes
+      .map((n: unknown): SelfCaptureNote | null => {
+        if (typeof n === 'string') {
+          // Malformed / stale shape (missing the classification field
+          // entirely) — fail closed rather than trust an unclassified note.
+          return n.trim().length > 0 ? { note: n, aboutIdentity: false } : null;
+        }
+        if (n && typeof n === 'object') {
+          const obj = n as Record<string, unknown>;
+          const text = typeof obj.note === 'string' ? obj.note.trim() : '';
+          if (!text) return null;
+          return { note: text, aboutIdentity: obj.about_identity === true };
+        }
+        return null;
+      })
+      .filter((n: SelfCaptureNote | null): n is SelfCaptureNote => n !== null);
     return { notes };
   } catch {
     return null;
@@ -662,13 +683,32 @@ async function runSelfCapture(
       return;
     }
 
-    for (const note of delta.notes) {
+    // Code-side guard, not just the prompt's hard exclusions: the prompt has
+    // failed this twice (2026-07-23, 2026-08-19), writing standing owner
+    // preferences onto her identity row. Every note now carries its own
+    // `about_identity` self-classification from the same extraction call
+    // (W4 — meaning is a classifier field, never a keyword/regex check on
+    // free-flowing, potentially non-English text); this is the deterministic
+    // enforcement of the prompt's own hard exclusions, applied here in code
+    // so it can't be silently skipped.
+    const accepted = delta.notes.filter(n => n.aboutIdentity);
+    const rejected = delta.notes.filter(n => !n.aboutIdentity);
+
+    if (rejected.length > 0) {
+      logger.info('runSelfCapture: dropped note(s) self-classified as non-identity (standing preference / capability) — not written to SELF row', {
+        threadTs, count: rejected.length, notes: rejected.map(n => n.note.slice(0, 120)),
+      });
+    }
+
+    if (accepted.length === 0) return;
+
+    for (const { note } of accepted) {
       appendPersonNote(selfId, note);
     }
     // Logged with the text: this row is small, durable and prompt-visible on
     // every turn, so what lands on it is worth being able to audit from the log.
     logger.info('runSelfCapture: applied SELF identity notes', {
-      threadTs, count: delta.notes.length, notes: delta.notes.map(n => n.slice(0, 120)),
+      threadTs, count: accepted.length, notes: accepted.map(n => n.note.slice(0, 120)),
     });
   } catch (err) {
     logger.warn('runSelfCapture: threw — non-fatal', {

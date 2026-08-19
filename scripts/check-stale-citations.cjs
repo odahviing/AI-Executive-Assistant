@@ -17,9 +17,16 @@
  * TWO TIERS OF COVERAGE, stated plainly rather than overclaimed:
  *   STRONG — the citation names a symbol also declared in the target file
  *     (a nearby identifier that matches a function/const/class/type/interface
- *     declaration there). The symbol's OWN declaration line is compared to the
- *     cited line; if it has drifted more than TOLERANCE lines away, that is
- *     drift, flagged.
+ *     declaration there). It passes if EITHER: the cited line/range itself
+ *     literally contains that identifier in the target file today (a citation
+ *     to a genuine USE site — a call, an assignment — not just the
+ *     declaration), OR the symbol's OWN declaration line is within TOLERANCE
+ *     of the cited anchor. Only when neither holds is it drift, flagged.
+ *     (Before this, only the declaration-distance half existed, so a citation
+ *     correctly naming a call site far from its own declaration — `cleanReply`
+ *     declared at one line, cited 40+ lines later at the exact line it's
+ *     actually called — was flagged STALE on a citation that was never wrong;
+ *     see `gatekeeper.md`'s `cleanReply` citation, X199.)
  *   WEAK — no such symbol is found near the citation. All this can prove is
  *     that the cited line(s) still exist in the file (catches a citation
  *     pointing past EOF after a deletion). A citation that merely points at
@@ -280,7 +287,8 @@ for (const citingFile of allFiles) {
     const pairs = parseLineSpec(spec)
     if (!pairs.length) continue
     const targetAbs = path.join(ROOT, target)
-    const targetLineCount = fs.existsSync(targetAbs) ? fs.readFileSync(targetAbs, 'utf8').split(/\r?\n/).length : 0
+    const targetLines = fs.existsSync(targetAbs) ? fs.readFileSync(targetAbs, 'utf8').split(/\r?\n/) : []
+    const targetLineCount = targetLines.length
     const maxCited = Math.max(...pairs.map((p) => p.end))
     if (maxCited > targetLineCount) {
       findings.push({ citingFile, citingLine: lineIdx + 1, citation: `${citation}:${spec}`, target, reason: `points past EOF — ${target} has ${targetLineCount} line(s), citation reaches ${maxCited}` })
@@ -309,7 +317,23 @@ for (const citingFile of allFiles) {
       weak.push({ citingFile, citingLine: lineIdx + 1, citation: `${citation}:${spec}`, target })
       continue
     }
-    const withinTolerance = matchedSymbols.some((id) => symbols.get(id).some((decLine) => Math.abs(decLine - anchor) <= TOLERANCE))
+    // X199 · a citation can legitimately name a USE site (a call, an
+    // assignment) far from the symbol's OWN declaration — that is not drift,
+    // it is the citation doing its job. So this passes on EITHER signal:
+    // the cited line/range itself literally contains the identifier today
+    // (proof the citation still points at a real occurrence of it), or the
+    // declaration-proximity check that already existed. Only a citation
+    // matching NEITHER is drift.
+    const citedRangeHasSymbol = (id) => {
+      const re = new RegExp(`(?<![\\w$])${id.replace(/\$/g, '\\$')}(?![\\w$])`)
+      return pairs.some((p) => {
+        for (let ln = p.start; ln <= p.end; ln++) if (re.test(targetLines[ln - 1] || '')) return true
+        return false
+      })
+    }
+    const withinTolerance = matchedSymbols.some(
+      (id) => citedRangeHasSymbol(id) || symbols.get(id).some((decLine) => Math.abs(decLine - anchor) <= TOLERANCE),
+    )
     if (!withinTolerance) {
       const nearest = matchedSymbols
         .map((id) => ({ id, lines: symbols.get(id) }))

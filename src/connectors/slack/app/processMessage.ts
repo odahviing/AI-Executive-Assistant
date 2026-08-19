@@ -243,12 +243,25 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           logger.info('Message handled as outreach reply', { senderId, channelId });
           return;
         }
-        // Only for the true 1:1 colleague-DM surface, matching
-        // recentOutboundContext's own scope below — a room surface (MPIM /
-        // channel) never gets this injected (those have their own continuity
-        // surfaces, and this is provenance from a private outreach thread).
+        // priorOutboundContext injection stays scoped to the true 1:1
+        // colleague-DM surface, matching recentOutboundContext's own scope
+        // below — a room surface (MPIM / channel) never gets this injected
+        // (those have their own continuity surfaces, and this is provenance
+        // from a private outreach thread).
         if (outreachResult.priorOutboundContext && !isMpim && !isChannel) {
           outreachJobPriorContext = outreachResult.priorOutboundContext;
+        }
+        // registrar fix (closeOutreachReplyIfResolvedThisTurn-mpim-channel-gap,
+        // 2026-08-19) — `outreachReplyJobId` gates the POST-turn closure check
+        // below (closeOutreachReplyIfResolvedThisTurn), a completely different
+        // concern from the prompt-injection above: handleOutreachReply's
+        // generic branch already persists reply_text and re-arms the job's
+        // deadline for a matched job on ANY surface (coordinator.ts), so the
+        // closure check must run on any surface too, or a room-surface reply
+        // that resolves the ask (a mutation, a fresh approval) leaves the
+        // outreach job open forever with nothing left to drain it. Never
+        // gate this on isMpim/isChannel — only on whether a job matched.
+        if (outreachResult.matchedJobId) {
           outreachReplyJobId = outreachResult.matchedJobId;
         }
       } catch (_) { /* non-critical */ }

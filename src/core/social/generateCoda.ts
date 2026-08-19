@@ -48,7 +48,7 @@ import type { SocialDirective } from './stateMachine';
 import logger from '../../utils/logger';
 import { tavilySearch } from '../../skills/general';
 import { getPersonMemory, getRecentChannelMessages } from '../../db';
-import { getCategoryByLabel, recordCategoryRaiseAttempt } from '../../db/socialSubjects';
+import { getCategoryByLabel, recordCategoryRaiseAttempt, recordSubjectUnanswered } from '../../db/socialSubjects';
 
 /**
  * Everything the coda needs, decided during the turn but COMPOSED later.
@@ -480,6 +480,30 @@ export async function composeSocialCoda(
           reason: verdict.action_type, summary: verdict.action_summary,
           codaPreview: coda.slice(0, 120),
         });
+        // coda-repeats-invented-personal-fact-no-negative-feedback (2026-08-19)
+        // — a coda dropped here BEFORE send previously left no trace, so the
+        // exact same fabricated claim about a real `continue`-mode subject
+        // (e.g. presuming a finished game is still ongoing) was free to be
+        // regenerated in a later session (observed twice, 2 days apart, on
+        // Ghost of Tsushima — subj_U0F28CK6H_1784482213309_9vod, still `live`
+        // with unanswered_raises=0 after both drops). Feed the SAME
+        // negative-feedback counter a sent-then-ignored raise already uses
+        // (recordSubjectUnanswered — dies at MAX_UNANSWERED_RAISES) so a
+        // subject the model can't stop fabricating about eventually stops
+        // being offered, instead of retrying forever. Scoped to `continue`
+        // mode with a real subjectId and an actual invented-fact verdict
+        // (not `gossipy`, which isn't about this subject's own staleness) —
+        // `raise_new` has no subject row yet; its own pre-send cooldown is
+        // `recordCategoryRaiseAttempt` above.
+        if (pending.directive.mode === 'continue' && pending.subjectId && verdict.action_type === 'invented_fact') {
+          try {
+            recordSubjectUnanswered(pending.subjectId);
+          } catch (err) {
+            logger.warn('recordSubjectUnanswered (validator-dropped coda) threw — proceeding', {
+              err: String(err).slice(0, 200),
+            });
+          }
+        }
         return null;
       }
     } catch (err) {

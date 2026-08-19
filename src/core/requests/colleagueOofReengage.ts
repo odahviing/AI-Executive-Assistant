@@ -51,7 +51,7 @@ import { createOutreachJob, updateOutreachJob, getOutreachJobByRequestId, getLin
 import { getPersonMemory } from '../../db/people';
 import { getOwnerEventsForDecision } from '../../connectors/graph/calendarReads';
 import { isAllDayOutOfOffice, computeOofSpan, formatOofUntilDisplay } from '../../utils/scheduleRules';
-import { calcResponseDeadline } from '../../utils/responseDeadline';
+import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../../utils/responseDeadline';
 import { getConnection } from '../../connections/registry';
 import { logActivity } from './logActivity';
 import { closeRequest } from './closeRequest';
@@ -358,7 +358,7 @@ async function closeUnreachable(row: RequestRow, profile: UserProfile, details: 
  * over the awaiting-reply phase on the SAME spine, reusing the existing
  * await_reply / reply_deadline / outreach_expiry machinery wholesale.
  */
-async function sendOofReengagement(row: RequestRow, profile: UserProfile, details: ColleagueOofDetails): Promise<'closed'> {
+async function sendOofReengagement(row: RequestRow, profile: UserProfile, details: ColleagueOofDetails): Promise<'closed' | 'rearmed'> {
   const conn = getConnection(profile.user.slack_user_id, 'slack');
   const colleagueSlackId = details.colleague_slack_id;
   const colleagueName = details.colleague_name || row.requester_name || 'there';
@@ -371,8 +371,26 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
     return 'closed';
   }
 
-  const message = `Hi ${colleagueFirst}, ${ownerFirst} is back now — still want me to find a time for ${subjectLabel}? Let me know and I'll get it set up.`;
   const colleagueTz = details.colleague_tz ?? getPersonMemory(colleagueSlackId)?.timezone ?? profile.user.timezone;
+
+  // registrar fix (colleague-outreach-not-gated-to-recipient-work-hours-or-week,
+  // o#245/o#246) — this used to fire the instant the owner's resume timer
+  // tripped, on the OWNER's clock, ignoring the colleague's own hours/week
+  // entirely (R4 applies to every colleague-facing send, not only the
+  // owner's nag cadence). Defer to the colleague's own next work-time start
+  // instead; re-arming back through `colleague_oof_recheck` re-verifies owner
+  // coverage too, which is correct — an extended trip can still change the
+  // answer by the time the colleague's window opens.
+  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
+  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
+    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'colleague_oof_recheck' });
+    logger.info('sendOofReengagement — outside colleague work hours, deferring reengagement', {
+      requestId: row.id, colleagueSlackId, colleagueTz, deferredTo: colleagueBase,
+    });
+    return 'rearmed';
+  }
+
+  const message = `Hi ${colleagueFirst}, ${ownerFirst} is back now — still want me to find a time for ${subjectLabel}? Let me know and I'll get it set up.`;
   const ownerChannel = (await conn.resolveDirectChannelId?.(profile.user.slack_user_id)) ?? profile.user.slack_user_id;
 
   const jobId = createOutreachJob({
@@ -459,6 +477,18 @@ export async function runOofReengageReask(row: RequestRow, profile: UserProfile)
   if (!conn) {
     updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
     return 'noop';
+  }
+  // registrar fix (colleague-outreach-not-gated-to-recipient-work-hours-or-week,
+  // o#245/o#246) — defer this re-ask to the colleague's own next work-time
+  // start rather than firing on the raw +24h timer regardless of their clock.
+  const colleagueTz = job.colleague_tz || profile.user.timezone;
+  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
+  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
+    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'oof_reengage_reask' });
+    logger.info('runOofReengageReask — outside colleague work hours, deferring re-ask', {
+      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+    });
+    return 'rearmed';
   }
   let ctx: OofReengageContext = {};
   try { ctx = job.context_json ? JSON.parse(job.context_json) : {}; } catch { /* generic fallback below */ }
