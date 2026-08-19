@@ -1,7 +1,7 @@
 # Report — cumulative since the 4.7.1 wrap
 
 ```
-Empty — v4.7.1 wrapping: 0 built · 0 already-fixed · 0 built-with-gap · 1 bounced · 0/0 outcome-traced · 0/0 joint-traced · 0 converted · 0 queued, 0 new from this wrap
+Empty — v4.7.1 wrapping: 0 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 outcome-traced · 0/0 joint-traced · 0 converted · 0 queued, 0 new from this wrap
 board: 2 open rows — 0 still-real · 1 need a re-read · 1 cite no file · 2 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 2 rows await you — standing backlog only, both QUEUED discoveries that self-drain at the next build.
 ```
