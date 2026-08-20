@@ -23,7 +23,7 @@ Fixed this session (all verified against code, `tsc --noEmit` clean):
 - **Comments:** scheduleRules same-venue, workHours computeHealthCheckWindow docblock, postReply Haiku/retry, movingAnchorDay ±60, calendarReads dup Daniel-bug comment, graph/findAvailableSlots "line 420", floatingBlockOps ":1531", handlers.ts ×3 stale refs.
 
 Re-classified during fix (NOT dead — do not remove):
-- `buildSystemPrompt` (systemPrompt.ts) — KEPT. `scripts/measure-prompt.ts` + `measure-prompts.cjs` call it (src-only scan missed the scripts/ caller). Back-compat wrapper, intentional.
+- `buildSystemPrompt` (systemPrompt.ts) — KEPT. `scripts/measure-prompts.cjs` calls it (src-only scan missed the scripts/ caller). Back-compat wrapper, intentional. (`scripts/measure-prompt.ts`, the other caller at audit time, was deleted 2026-08-04 — see CHANGELOG.)
 - logEngagement `replyText` param (Agent-3 LOW) — SKIPPED. Its caller is `orchestrator/index.ts:1191`, an in-flight file owned by another chat; removing the param would force an edit there. Route to that chat.
 
 Commit caveat: the working tree also holds other chats' uncommitted work (orchestrator index/buildTurnContext, checkHealth, llm/modelId deletion) + CRLF re-normalization noise. At wrap, `git add` ONLY the ~28 files this session edited — never `-A`.

@@ -253,6 +253,43 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
   return sources;
 }
 
+// ── Entity-mention grounding (news-brief-entity-mention-not-grounded) ───────
+// A goal derived from a topic like news.md's "Reflectiz mentions" asks Tavily
+// for the owner's OWN company by name. Tavily's "advanced" search returns
+// topically-adjacent results even when the entity itself is absent (e.g. a
+// general third-party-script-risk piece that never names the company) — and
+// the compose prompt's soft "never assert a fact not in the sources"
+// instruction is pure LLM judgment, which is exactly how the brief once
+// invented "Reflectiz got a shout-out" in a post that never mentioned it.
+//
+// The fix is a literal, deterministic membership test, not another prompt
+// instruction: for a goal that names the owner's own configured company (from
+// `profile.user.company` — never a hardcoded string, so this holds for any
+// tenant's own configured entity), a source is only admitted if its title or
+// snippet actually contains that entity string. Sources for every OTHER goal
+// (competitors, market topics, meeting companies) are untouched — this only
+// guards the one shape of claim that's about the owner himself.
+function containsEntity(text: string | undefined, entity: string): boolean {
+  return !!text && text.toLowerCase().includes(entity);
+}
+
+/** `entity` must already be lowercased by the caller. */
+function isEntityMentionGoal(goal: string, entity: string): boolean {
+  return entity.length > 0 && goal.toLowerCase().includes(entity);
+}
+
+function filterUngroundedEntitySources(goal: string, sources: NewsSource[], ownerCompany: string): NewsSource[] {
+  const entity = ownerCompany.trim().toLowerCase();
+  if (!isEntityMentionGoal(goal, entity)) return sources; // not an "own company mention" goal — untouched
+  const grounded = sources.filter(s => containsEntity(s.title, entity) || containsEntity(s.snippet, entity));
+  if (grounded.length !== sources.length) {
+    logger.info('news — dropped ungrounded entity-mention source(s)', {
+      goal, before: sources.length, after: grounded.length,
+    });
+  }
+  return grounded;
+}
+
 /**
  * The shared news core. Assembles goals, runs ONE lightweight grounded search
  * per goal (best-effort, timed-out, dropped on failure), and returns a deduped
@@ -262,6 +299,7 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
   try {
     const recency = opts.recencyDays ?? NEWS_MORNING_RECENCY_DAYS;
     const prefs = parseNewsPrefs(readSkillPreferences(profile, 'news'));
+    const ownerCompany = (profile.user.company ?? '').trim();
 
     // Goal set: a narrowed topic short-circuits the planner (the owner asked for
     // ONE thing — search it broad, the compose weighs sources). Otherwise the LLM
@@ -288,8 +326,13 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     }
 
     // One search per goal, in parallel (cap is small). A goal that errors/times
-    // out resolves to [] and is dropped.
-    const perGoal = await Promise.all(goals.map(g => searchGoal(g, recency, steer)));
+    // out resolves to [] and is dropped. An "own company mention" goal is then
+    // grounded: a source that never actually names the entity is dropped
+    // before it ever reaches the brief-composition prompt as a candidate.
+    const perGoal = await Promise.all(goals.map(async g => {
+      const found = await searchGoal(g, recency, steer);
+      return filterUngroundedEntitySources(g, found, ownerCompany);
+    }));
 
     const sources: NewsSource[] = [];
     const seenUrl = new Set<string>();

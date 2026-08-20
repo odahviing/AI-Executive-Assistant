@@ -150,11 +150,6 @@
       "title": "Coda reads the task turn's mood",
       "type": "Feature",
       "tier": "Idea"
-    },
-    "187": {
-      "title": "Closing turn keeps tone context",
-      "type": "Improvement",
-      "tier": "Roadmap"
     }
   }
 }

@@ -658,10 +658,10 @@ One backticked ref per item, `·` between them, three or four words each — **`
 | `cleaned` | `built` | ledger only — the numbers go in the run summary, never as rows |
 | `needs-lane` | `queued-next-run` | ledger **plus a `state.pendingOverflow` entry** shaped for `args.issues`, or nothing drains it (X43) |
 | `needs-owner` | `needs-owner-decision` + `recommend` | ledger **and** a `pending owner` row on report.md — the YAML / config interface is his |
-| `audit` | `needs-owner-decision` + `recommend` | ledger **and** a `pending owner` row on report.md |
+| `needs-judgment` | `needs-owner-decision` + `recommend` | ledger **and** a `pending owner` row on report.md |
 | `nothing-to-do` | — | nothing at all |
 
-**Never write `verdict:"audit"` for a cleaner finding.** That spelling already means *a findings-only pass RAN* and `ledger-stats.cjs:197` counts it CLOSED — 16 rows carry it today — so the row would vanish from `--open` the moment the wrap emptied the report that held it. X23 on a new carrier. `source:"audit"` records that the sweep happened; the verdict says what it found.
+**Never write `verdict:"audit"` for a cleaner finding.** That spelling already means *a findings-only pass RAN* and `ledger-stats.cjs:198` counts it CLOSED — 21 rows carry it today — so the row would vanish from `--open` the moment the wrap emptied the report that held it. X23 on a new carrier. `source:"audit"` records that the sweep happened; the verdict says what it found.
 
 The two that reach report.md sit in the `pending owner` group and **carry a recommendation like every other row** — a sweep gets no exemption from the one bound there is. No code change is needed for either: `ledger-stats --report` reads the **Your options** cell and is blind to both the prefix and the lane.
 

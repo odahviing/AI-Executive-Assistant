@@ -34,60 +34,25 @@
  * Haiku 4.5 (`claude-haiku-4-5-20251001`) is the cheap/fast guard+classifier
  * tier — unchanged, doesn't support adaptive thinking, and is not routed here.
  *
- * Bare-ID shape on Vertex is STILL UNVERIFIED end-to-end for Sonnet, but the
- * blocker has moved. gh#199 retry (2026-08-11, same call shape as the first
- * smoke test, run from the VM's own service-account auth chain
- * `maelle-runner@reflectiz-ai-backoffice.iam.gserviceaccount.com`) against
- * `claude-sonnet-5` (bare) in `us-east5` no longer 404s — the model is now
- * recognized (Model Garden entitlement was evidently granted after the first
- * test). It now fails differently: HTTP 429 `RESOURCE_EXHAUSTED`, "Quota
- * exceeded for aiplatform.googleapis.com/online_prediction_input_tokens_per_minute_per_base_model
- * with base model: anthropic-claude-sonnet-5" — reproduced twice in a row
- * (a fresh 16-token and then an 8-token request, seconds apart, both denied
- * immediately), so this reads as a provisioned-at-zero per-model quota, not
- * a burst limit. Checking the actual quota value failed too: the runner SA
- * got 403 `PERMISSION_DENIED` calling `serviceusage.googleapis.com`
- * consumerQuotaMetrics, and `gcloud alpha services quota` isn't installed
- * and can't be added non-interactively from this session. The fix is a
- * Vertex AI quota increase request for that metric (base model
- * `anthropic-claude-sonnet-5`) — a console action, same as the original
- * "Enable" — the docs link Google returns in the error is
- * https://cloud.google.com/vertex-ai/docs/generative-ai/quotas-genai.
- * `claude-haiku-4-5` still returns a real completion in the same project —
- * so Haiku's quota is provisioned and Sonnet's is not. Until the quota
- * increase lands, do NOT flip LLM_PROVIDER=vertex on the live VM: the
- * entire Sonnet-backed orchestrator path would 429 every turn (100% failure,
- * strictly worse than staying on Anthropic-direct).
+ * Bare-ID shape on Vertex for Sonnet (gh#199) was blocked 2026-08-11 through
+ * 2026-08-17 by a REGIONAL quota: `us-east5` returned HTTP 429
+ * RESOURCE_EXHAUSTED on `online_prediction_input_tokens_per_minute_per_base_model`
+ * for `anthropic-claude-sonnet-5` (reproduced twice, both denied immediately —
+ * a provisioned-at-zero quota, not a burst limit), while `claude-haiku-4-5`
+ * kept returning real completions in the same project.
  *
- * Re-checked 2026-08-12 (gh#199, same rawPredict call, same VM SA
- * `maelle-runner@reflectiz-ai-backoffice.iam.gserviceaccount.com`, confirmed
- * as BOTH the VM's attached metadata identity and the active gcloud
- * credential on-box): identical 429 RESOURCE_EXHAUSTED on
- * `online_prediction_input_tokens_per_minute_per_base_model` for
- * `anthropic-claude-sonnet-5`. No `.env` change was made — this stays
- * Anthropic-direct until the quota increase actually lands. Next retry
- * should check the quota value directly (console, or `serviceusage`/
- * `gcloud alpha services quota` with a role that isn't 403'd) before
- * re-running the smoke test, to tell "still zero" from "increased but not
- * yet enough."
- *
- * RESOLVED 2026-08-17 (gh#199): the 429 was specific to the REGIONAL quota
- * pool (`us-east5`) — Vertex's `global` endpoint has its own, separately
- * provisioned quota and is not blocked. Confirmed with a real rawPredict call
- * (same VM SA) against
- * `https://aiplatform.googleapis.com/v1/projects/reflectiz-ai-backoffice/locations/global/publishers/anthropic/models/claude-sonnet-5:rawPredict`
- * — HTTP 200, real completion — and then again from inside the running app's
- * own `getAnthropicClient()` (same cached singleton, same dotenv-loaded
- * config, same ADC auth chain the live process uses). `.env` on the VM now
- * carries `LLM_PROVIDER=vertex`, `VERTEX_PROJECT_ID=reflectiz-ai-backoffice`,
+ * RESOLVED 2026-08-17: Vertex's `global` endpoint has its own, separately
+ * provisioned quota and is NOT blocked — confirmed with a real rawPredict call
+ * (VM SA `maelle-runner@reflectiz-ai-backoffice.iam.gserviceaccount.com`)
+ * against `.../locations/global/publishers/anthropic/models/claude-sonnet-5:rawPredict`
+ * — HTTP 200 — and again from the app's own `getAnthropicClient()`. The VM's
+ * `.env` now carries `LLM_PROVIDER=vertex`, `VERTEX_PROJECT_ID=reflectiz-ai-backoffice`,
  * `VERTEX_REGION=global` — Maelle is live on Vertex/global as of this date.
  * `AnthropicVertex` (`@anthropic-ai/vertex-sdk`) natively supports
- * `region: 'global'`: it routes to the bare `aiplatform.googleapis.com/v1`
- * host (no region prefix) instead of `${region}-aiplatform.googleapis.com`.
- * `config.VERTEX_REGION` is a plain `z.string()` (no enum), so `'global'`
- * needed no code change. Rollback: remove the three `LLM_PROVIDER`/`VERTEX_*`
- * keys from the VM's `.env` (back to `ANTHROPIC_API_KEY` only) and restart —
- * defaults back to Anthropic-direct.
+ * `region: 'global'` (routes to bare `aiplatform.googleapis.com/v1`, no region
+ * prefix); `config.VERTEX_REGION` is a plain `z.string()` so this needed no
+ * code change. Rollback: remove the three `LLM_PROVIDER`/`VERTEX_*` keys from
+ * the VM's `.env` (back to `ANTHROPIC_API_KEY` only) and restart.
  */
 export const MODEL_SONNET = 'claude-sonnet-5';
 
