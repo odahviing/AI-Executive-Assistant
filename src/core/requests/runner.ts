@@ -636,6 +636,25 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     closeRequest({ id: row.id, state: 'cancelled', closureReason: 'no_target_slack_id', closedBy: 'system' });
     return 'closed';
   }
+  // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-hours,
+  // wf_29a0d866-021) — o#245/o#246 gated the RE-ASK/RE-ENGAGEMENT timers
+  // (runRescheduleReask, sendOofReengagement) to the colleague's own work
+  // hours+workweek but left this handler — the FIRST send of a scheduled
+  // outreach — firing on the raw timer regardless of the colleague's clock.
+  // outreach.ts's message_colleague now gates the schedule itself, but a job
+  // can still sit here past that check (retry backoff, a stale send_at from
+  // before this fix shipped) — re-verify at actual fire time, same as every
+  // other colleague-facing send on this spine.
+  const job = getOutreachJobByRequestId(row.id);
+  const colleagueTz = job?.colleague_tz || profile.user.timezone;
+  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
+  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
+    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'send_scheduled_outreach' });
+    logger.info('runSendScheduledOutreach — outside colleague work hours, deferring send', {
+      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+    });
+    return 'rearmed';
+  }
   try {
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (!conn) {
@@ -643,7 +662,65 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       closeRequest({ id: row.id, state: 'cancelled', closureReason: 'no_slack_connection', closedBy: 'system' });
       return 'closed';
     }
-    const res = await conn.sendDirect(targetSlackId, message ?? '');
+
+    // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-
+    // hours, wf_29a0d866-021 round 2) — replay the stored decision literally
+    // (R2), not a downgraded reconstruction of it. Pre-fix this handler only
+    // ever called conn.sendDirect(targetSlackId, message), so a scheduled
+    // "post to #product and tag Anna" silently became a private DM once the
+    // colleague-hours gate above started pushing more sends through this
+    // deferred path, and a scheduled attachment was silently dropped either
+    // way — outreach.ts now persists channel_id/channel_name/attachments on
+    // the request's details for exactly this replay.
+    const channelId = typeof details.channel_id === 'string' ? details.channel_id : undefined;
+    const ownerId = profile.user.slack_user_id;
+    const MAX_SEND_ATTEMPTS = 3;
+    const attempts = (typeof details.send_attempts === 'number' ? details.send_attempts : 0) + 1;
+
+    if (channelId) {
+      const mention = `<@${targetSlackId}>`;
+      const outcome = await conn.postToChannel(channelId, `${mention} ${message ?? ''}`);
+      if (!outcome.ok) {
+        logger.warn('runSendScheduledOutreach — scheduled channel post failed', {
+          requestId: row.id, reason: outcome.reason, attempt: attempts, maxAttempts: MAX_SEND_ATTEMPTS,
+        });
+        if (attempts >= MAX_SEND_ATTEMPTS) {
+          closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_channel_post_failed', closedBy: 'system' });
+          return 'closed';
+        }
+        updateRequest(row.id, {
+          details: { ...details, send_attempts: attempts },
+          nextCheckAt: DateTime.now().plus({ minutes: 10 * attempts }).toUTC().toISO(),
+          nextCheckHandler: 'send_scheduled_outreach',
+        });
+        return 'rearmed';
+      }
+      // Channel posts ignore await_reply — same rule as outreach.ts's
+      // immediate path (no DM thread to await a reply in).
+      logActivity({
+        ownerUserId: ownerId,
+        kind: 'outreach',
+        subkind: 'channel_post',
+        subject: `Posted to #${typeof details.channel_name === 'string' ? details.channel_name : channelId} — mentioned ${row.target_name ?? 'colleague'}`,
+        initiatedBy: ownerId,
+        initiatedByRole: 'owner',
+        targetSlackId,
+        targetName: row.target_name ?? undefined,
+      });
+      closeRequest({
+        id: row.id,
+        state: 'resolved',
+        closureReason: 'outreach_sent_scheduled_channel_post',
+        closedBy: 'system',
+        skipChildren: true,
+      });
+      return 'closed';
+    }
+
+    const attachments = Array.isArray(details.attachments)
+      ? details.attachments as Array<{ sourceUrl: string; filename?: string }>
+      : undefined;
+    const res = await conn.sendDirect(targetSlackId, message ?? '', attachments?.length ? { attachments } : undefined);
     const sentTs = res.ok ? (res.ts ?? null) : null;
     // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
     // always true (0 !== false). Treat 0 as fire-and-forget; keep "missing = await".

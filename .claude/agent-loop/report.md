@@ -1,10 +1,12 @@
-# Report — cumulative since the 4.7.1 wrap
+# Report — cumulative since the 4.7.2 wrap
 
 ```
-board: net 0 → 2 open rows — 0 still-real · 1 need a re-read · 1 cite no file · 2 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
-2 rows await you: 0 from tonight · 2 standing, both QUEUED and self-draining on the next build — no decision needed
+out: 0 built · 0 already-fixed · 0 built-with-gap · 1 bounced · 0/0 joint-traced
+board: 3 open rows — 0 still-real · 3 need a re-read · 0 cite no file · 3 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 ```
 
-**Pending owner (0)** — nothing needs a decision from you; the 2 standing rows are queued and will build themselves.
+**Pending owner (0)** — nothing needs a decision from you.
+
+**3 rows await you** — but all 3 are QUEUED and self-drain at the next build, not yours to rule on.
 
 **Built and uncommitted (0):** nothing.

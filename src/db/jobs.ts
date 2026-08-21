@@ -222,6 +222,18 @@ export function createOutreachJob(
     // request_id) — the child still gets its own full lifecycle; closing the
     // parent with skipChildren:true leaves it untouched.
     parentRequestId?: string;
+    // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-
+    // hours, wf_29a0d866-021 round 2) — carried through to the request's
+    // `details` JSON below (never a new outreach_jobs column — this is
+    // payload, not lifecycle state, R1) so a SCHEDULED send's channel post /
+    // attachments survive to fire time. runSendScheduledOutreach reads them
+    // back and replays the decision literally (R2) instead of the deferred
+    // handler's old hardcoded conn.sendDirect(targetSlackId, message) — which
+    // silently turned a scheduled "post to #product and tag Anna" into a
+    // private DM, and silently dropped a scheduled attachment.
+    channel_id?: string;
+    channel_name?: string;
+    attachments?: Array<{ sourceUrl: string; filename?: string }>;
   },
 ): string {
   const db = getDb();
@@ -276,6 +288,9 @@ export function createOutreachJob(
       context_json: params.context_json,
       proposed_slots: params.proposed_slots,
       subject_keyword: params.subject_keyword,
+      channel_id: params.channel_id,
+      channel_name: params.channel_name,
+      attachments: params.attachments,
     };
     const subjectPreview = params.message.slice(0, 80).replace(/\s+/g, ' ').trim();
     // Explicit idempotency key, keyed on THIS job's own id — not the default

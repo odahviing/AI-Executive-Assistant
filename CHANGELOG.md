@@ -2,6 +2,19 @@
 
 ---
 
+## 4.7.2 — The dense-packing defrag stops moving meetings onto other meetings
+
+A meeting-density defrag pass could relocate a real work meeting on top of another real meeting, because an unrelated no-issue flag made it look empty. Separately, scheduled outreach sends (reminders, re-asks, re-engagement) now correctly respect the recipient's own hours and workweek without delaying an urgent send the owner typed himself right now.
+
+### Fixed
+- The dense-packing defrag could move a meeting on top of a real work meeting, because any event carrying a `no_issue` flag looked available for the same carve-out `checkHealth.ts` already uses for the double-booking check.
+- Scheduled outreach sends (reminders, re-asks, re-engagement) now defer to the recipient's own next work-time start, computed from their timezone and workweek — same as an owner-facing reminder already does. First attempt floored every send including an immediate owner-typed relay that should go out now; caught by the bouncer and corrected, along with two related gaps found in the same pass: a future send anchored to itself now floors correctly on a non-work day, and a scheduled channel post or attachment no longer silently arrives as a bare DM.
+
+### Framework (other chats, bundled)
+Cleaner's own `audit` verdict renamed to `needs-judgment` — it shared a spelling with an unrelated, pre-existing ledger verdict meaning "a findings-only pass ran." A new durable per-run history (`run-history.jsonl`) now records three progressive completion stamps for every Manager run, so an unattended run that dies partway names exactly where it got to instead of just "failed." A local nightly cron now triggers the Manager's bug loop headlessly, unattended, with a dollar-cap safety net.
+
+---
+
 ## 4.7.1 — A colleague on the other side of the world stops getting messaged at 3am
 
 Three more silent misfires, all about the wrong person being treated as the wrong role. A colleague's real 16:30 slot got called "already booked" because a stated foreign clock time was never converted into the owner's zone before the check ran; a merged batch of Slack messages could clamp the owner into being treated as his own colleague, refusing his own request under a cap that's documented as never applying to him; and every scheduled outreach nag fired on the owner's clock, with zero regard for what time it actually was where the recipient lived.

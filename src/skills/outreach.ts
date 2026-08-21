@@ -31,7 +31,7 @@ import { reactActivityComplete } from '../utils/threadActivity';
 import { updateRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
 import { toTimerInstant } from '../core/requests/types';
 import { logActivity } from '../core/requests/logActivity';
-import { calcResponseDeadline } from '../utils/responseDeadline';
+import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
 import logger from '../utils/logger';
 
@@ -250,9 +250,40 @@ Only send messages the user explicitly asks for — never reach out to people on
             message: `send_at "${sendAtRaw}" isn't a parseable ISO 8601 datetime. Pass an owner-local wall-clock ("2026-07-28T09:00:00") or an explicit offset.`,
           };
         }
-        const isFuture = sendAt ? Date.parse(sendAt) > Date.now() : false;
 
         const colleagueTzForDeadline = (args.colleague_tz as string | undefined) ?? context.profile.user.timezone;
+
+        // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-hours,
+        // wf_29a0d866-021, round 2 after bouncer overturn) — o#245/o#246 gated
+        // the RE-ASK/RE-ENGAGEMENT timers (runRescheduleReask,
+        // sendOofReengagement) to the colleague's own work hours+workweek.
+        // This gate is the SCHEDULED-send analogue: it applies ONLY when the
+        // caller actually asked for a future send_at, never to an immediate
+        // call (no send_at). Round 1 floored EVERY message_colleague call,
+        // including a real-time owner-typed relay with no send_at at all —
+        // o#245/o#246's ruling was answered for the three PROACTIVE timers
+        // only, and an immediate ask ("tell Yael the 08:00 is cancelled") is
+        // the owner's own explicit instruction, not a nudge Maelle chose to
+        // send — deferring it through this timer is the exact trade R10
+        // already refuses for an urgent escalation. So: no send_at, no floor,
+        // sent exactly as asked (unchanged from pre-fix behavior).
+        //
+        // The anchor for the floor search is also fixed here: it must walk
+        // forward from the REQUESTED instant (or now, whichever is later),
+        // not from "now" — searching from now only ever catches an overdue
+        // ask and lets a future send_at that lands on the colleague's
+        // non-work day (e.g. a Saturday for a Sun-Thu workweek) pass through
+        // unchanged, so the "I've scheduled it for Saturday" told to the
+        // owner would silently NOT be what actually fires (runner.ts
+        // re-floors at send time and would push it again).
+        let effectiveSendAt = sendAt;
+        if (sendAt) {
+          const anchorMs = Math.max(Date.parse(sendAt), Date.now());
+          const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs);
+          effectiveSendAt = Date.parse(colleagueBase) > Date.parse(sendAt) ? colleagueBase : sendAt;
+        }
+        const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
+
         const deadline = args.await_reply && !isFuture
           ? calcResponseDeadline(colleagueTzForDeadline)
           : undefined;
@@ -274,6 +305,29 @@ Only send messages the user explicitly asks for — never reach out to people on
           ? args.subject_keyword.trim()
           : undefined;
 
+        // v2.2.7 — optional file attachments. Tool schema uses snake_case
+        // slack_file_url for Sonnet ergonomics; SendOptions uses camelCase
+        // sourceUrl. Map at the boundary.
+        //
+        // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-
+        // hours, wf_29a0d866-021 round 2) — moved up from the DM-send branch
+        // below so a SCHEDULED send (isFuture) can stash channel_id/
+        // channel_name/attachments on the request too. Pre-fix, only
+        // `message` + `await_reply` survived onto a deferred job — a
+        // scheduled "post this to #product and tag Anna" or a scheduled DM
+        // carrying a file silently became a bare DM with no attachment when
+        // runSendScheduledOutreach later fired, because there was nowhere on
+        // the row to read the channel or the file back from (R2: replay the
+        // stored decision literally, never a downgraded reconstruction of it).
+        const attachmentsArg = Array.isArray(args.attachments)
+          ? (args.attachments as Array<{ slack_file_url: string; filename?: string }>).map(a => ({
+              sourceUrl: a.slack_file_url,
+              filename: a.filename,
+            }))
+          : undefined;
+        const channelIdArg = typeof args.channel_id === 'string' ? args.channel_id : undefined;
+        const channelNameArg = typeof args.channel_name === 'string' ? args.channel_name : undefined;
+
         const jobId = createOutreachJob({
           owner_user_id: userId,
           owner_channel: context.channelId,
@@ -291,11 +345,19 @@ Only send messages the user explicitly asks for — never reach out to people on
           // sent the DM immediately AND still armed send_scheduled_outreach at that
           // past instant — the sweep then sent it a SECOND time, and the row sat in
           // phase 'outreach:scheduled' forever (R3: never twice).
-          scheduled_at: isFuture ? sendAt : undefined,
+          scheduled_at: isFuture ? effectiveSendAt : undefined,
           intent,
           context_json: contextPayload,
           proposed_slots: proposedSlotsJson,
           subject_keyword: subjectKeywordArg,
+          // registrar fix (scheduled-first-outreach-send-not-gated-to-
+          // recipient-hours, wf_29a0d866-021 round 2) — only relevant when
+          // this is actually a scheduled send; runSendScheduledOutreach reads
+          // these back at fire time so a deferred channel-post/attachment
+          // replays literally instead of degrading to a plain DM.
+          channel_id: isFuture ? channelIdArg : undefined,
+          channel_name: isFuture ? channelNameArg : undefined,
+          attachments: isFuture ? attachmentsArg : undefined,
         });
 
         // v3.0.5 (Path 2 stage 1) — duplicate paired-request block deleted.
@@ -317,7 +379,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         });
 
         if (isFuture) {
-          const scheduledDt = DateTime.fromISO(sendAt!).setZone(context.profile.user.timezone);
+          const scheduledDt = DateTime.fromISO(effectiveSendAt!).setZone(context.profile.user.timezone);
           // v3.1 (Path 2 Stage 6) — the actual scheduled DM post is driven by
           // the spine timer: createOutreachJob set the paired request's
           // next_check_handler='send_scheduled_outreach' (see db/jobs.ts +
@@ -330,7 +392,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           return {
             scheduled: true,
             jobId,
-            scheduled_at: sendAt,
+            scheduled_at: effectiveSendAt,
             _status: 'scheduled_not_sent',
             _note: `Message is scheduled for ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} — NOT sent yet. Tell the user exactly this: "I've scheduled the message to ${args.colleague_name as string} for ${scheduledDt.toFormat('EEEE at HH:mm')}."`,
           };
@@ -417,16 +479,8 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
 
-        // DM branch: send directly to the colleague
-        // v2.2.7 — optional file attachments. Tool schema uses
-        // snake_case slack_file_url for Sonnet ergonomics; SendOptions uses
-        // camelCase sourceUrl. Map at the boundary.
-        const attachmentsArg = Array.isArray(args.attachments)
-          ? (args.attachments as Array<{ slack_file_url: string; filename?: string }>).map(a => ({
-              sourceUrl: a.slack_file_url,
-              filename: a.filename,
-            }))
-          : undefined;
+        // DM branch: send directly to the colleague. attachmentsArg computed
+        // above (moved up so a SCHEDULED send can persist it too).
 
         // v3.0.8 — thread continuity via requests spine. If there's an OPEN
         // request involving this colleague (as requester or target) and it

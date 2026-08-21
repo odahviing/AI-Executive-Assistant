@@ -28,8 +28,8 @@ function setClock(dt: DateTime, hhmm: string): DateTime {
  * Western default elsewhere — see `defaultWorkingHoursForTz`). Used by
  * calcResponseDeadline so reply timers never fire during someone's night.
  */
-function nextWorkingHourStart(timezone: string, window: WorkWindow): DateTime {
-  let dt = DateTime.now().setZone(timezone);
+function nextWorkingHourStart(timezone: string, window: WorkWindow, fromMs?: number): DateTime {
+  let dt = DateTime.fromMillis(fromMs ?? Date.now()).setZone(timezone);
 
   for (let i = 0; i < 10; i++) {
     if (isWorkDay(dt, window.workdays)) {
@@ -111,9 +111,18 @@ export function calcResponseDeadline(colleagueTz: string): string {
  * (e.g. Sun-Thu vs Mon-Fri). Reuses `nextWorkingHourStart`, the exact
  * day/hour walk `calcResponseDeadline` above already runs for the same
  * colleague — no second implementation of "is this a workday for them."
+ *
+ * `fromMs` (registrar bounce fix, scheduled-first-outreach-send-not-gated-
+ * to-recipient-hours, wf_29a0d866-021 round 2) — optional anchor instant,
+ * defaulting to now. Callers gating an explicit future ask (a send_at the
+ * colleague requested) must search forward from THAT instant, not from
+ * "now": searching from now only catches an ask that's already overdue,
+ * and silently lets a future instant that lands on the colleague's
+ * non-work day/hour (e.g. a Saturday for a Sun-Thu workweek) pass through
+ * unchanged — the exact defect this param exists to close.
  */
-export function colleagueWorkTimeBaseFromNow(colleagueTz: string | null | undefined): string {
+export function colleagueWorkTimeBaseFromNow(colleagueTz: string | null | undefined, fromMs?: number): string {
   const tz = colleagueTz || 'UTC';
   const window = defaultWorkingHoursForTz(tz);
-  return nextWorkingHourStart(tz, window).toUTC().toISO()!;
+  return nextWorkingHourStart(tz, window, fromMs).toUTC().toISO()!;
 }

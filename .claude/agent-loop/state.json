@@ -1,34 +1,43 @@
 {
   "_thisFileNote": "CURRENT STATE ONLY, and that is the rule this file lost: the keys documented in .claude/skills/manager/SKILL.md 'State you own', ONE operating note each, and the run in progress or the last one (its `note` = what went in, `_resultNote` = what came out). Everything older is HISTORY and history is ledger.jsonl, which is append-only and queryable. Reduced 2026-07-31 from 114 KB / 44 prose keys against 7 documented ones; every ruling in those 44 was verified to be a ledger row already before a byte was deleted. A `_previousRun*` key, a second note on one field, or a note about a run that has ended means it is regrowing - move it to the ledger and delete it. The wrap is where this is checked.",
-  "lastSeenIso": "2026-08-19T17:32:50+0300",
+  "lastSeenIso": "2026-08-20T16:15:00+0300",
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
   "lastWrapIso": "2026-08-20T14:20:56+02:00",
   "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C4.",
   "lastCleanSha": "0861721a96133af92518eaa92d6c63757ed0b824",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
-  "nextReportId": 254,
+  "nextReportId": 255,
   "_inFlightNote": "What is being worked RIGHT NOW — add on dispatch, remove on return, and check it before dispatching so one item is never sent twice. EMPTY THIS IN THE SAME TURN A RUN RETURNS: a stale entry is the STOP 1 lock and refuses the next run. It went stale for three consecutive rounds on 2026-08-06 because every return fed straight into the next dispatch instead of into this file, and the final bouncer pass is what caught it.",
   "inFlight": [],
   "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here.",
   "pendingOverflow": [
     {
-      "id": "scheduled-first-outreach-send-not-gated-to-recipient-hours",
+      "id": "deferred-send-may-drop-attachment-or-post-to-wrong-surface",
       "lane": "registrar",
       "severity": "medium",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "Only the re-ask/re-engagement timers got tonight's work-hours+workweek gate -- the SCHEDULED FIRST SEND (outreach.ts's message_colleague, runner.ts's runSendScheduledOutreach) still fires on the raw timer, which can land in a colleague's night or weekend.",
-      "evidence": "Bouncer discovery, run wf_29a0d866-021 (2026-08-19). Same gate (colleagueWorkTimeBaseFromNow) applied to the initial-send call sites closes this."
+      "symptom": "A message the owner asked Maelle to schedule for later can arrive as a plain DM with the attached file missing, or -- if he asked for a channel post -- as a private DM to the person instead, with no warning either way.",
+      "evidence": "Bouncer discovery, run wf_cedf925c-9aa (2026-08-20), src/core/requests/runner.ts:665. This wave fixed the WRITE side (createOutreachJob now stores channel_id/channel_name/attachments); the scheduled-fire READ side needs the same read-back path outreach.ts's immediate-send branch already has."
     },
     {
-      "id": "no-issue-tracking-hides-mixed-meeting-from-defrag",
-      "lane": "librarian",
+      "id": "isrealmeeting-private-rule-duplicated-in-checkhealth",
+      "lane": "matchmaker",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "The 'is this meeting genuinely private' rule now exists twice, word for word, in checkHealth.ts (nonAllDay's carve-out and isRealMeetingFb's new carve-out).",
+      "evidence": "Bouncer discovery, run wf_cedf925c-9aa (2026-08-20), checkHealth.ts:1274. Extract isMixedMeeting(event, privateEmailsLower, ownerEmailLower) as one shared helper."
+    },
+    {
+      "id": "channel-post-outreach-narrated-as-no-response",
+      "lane": "registrar",
       "severity": "medium",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "The dense-packing defrag can move a meeting on top of a real work meeting: checkHealth.ts:1263's occupancy filter drops any no_issue_tracking event, including a mixed meeting the private_emails override forced into that category.",
-      "evidence": "Bouncer discovery, run wf_29a0d866-021 (2026-08-19). Same isMixedMeeting narrowing o#250 already applied to Exclusion 5 closes this; ends in a calendar write, not just a missing flag."
+      "symptom": "Maelle DMs the owner 'X never replied' about a message she POSTED IN A CHANNEL -- any reply lands in-channel, where her DM-reply detection can never see it. The outreach closes 'expired' and the brief narrates a false no-response.",
+      "evidence": "Bouncer discovery, run wf_cedf925c-9aa (2026-08-20), src/skills/outreach.ts:287."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",
@@ -154,10 +163,22 @@
     "processMessage.ts's outreachReplyJobId assignment is now unconditional on surface; only the separate outreachJobPriorContext injection stays scoped to !isMpim && !isChannel -- the two concerns no longer share one guard.",
     "colleagueWorkTimeBaseFromNow (responseDeadline.ts) reuses the existing private nextWorkingHourStart/defaultWorkingHoursForTz machinery already used by calcResponseDeadline for the same colleague-tz concept -- no second implementation of workweek/hours logic.",
     "sendOofReengagement's return type is 'closed'|'rearmed' and its sole caller runColleagueOofRecheck already types for both -- the widened return cannot break a caller.",
-    "checkHealth.ts's isMixedMeeting gate is false whenever privateEmailsLower is empty (no private_emails configured), so the fix is byte-identical to pre-fix behavior for any tenant without the config key set.",
-    "checkHealth.ts's Exclusion 5 narrowing does not touch checkSlot/planMeeting's occupancy scan, which was never category-filtered and remains unaffected.",
     "coordinator.ts's closeOutreachReplyIfResolvedThisTurn Slack post now gates on (mutated||booked) only; logEvent remains unconditional across mutated/booked/freshApproval since it is a durable get_briefing-only trace, never a live notification.",
-    "npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json is clean across the whole working tree with all 7 files of the o#245/246/247/248/250 wave on disk, exit 0."
+    "npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json is clean across the whole working tree with all 7 files of the o#245/246/247/248/250 wave on disk, exit 0.",
+    "Immediate, in-hours message_colleague is byte-identical to pre-fix: colleagueBase is computed at outreach.ts:268 BEFORE requestedAtMs takes Date.now() at :269, so colleagueBase <= requestedAtMs, effectiveSendAt stays undefined and isFuture stays false. The fix cannot touch an in-hours send.",
+    "runner.ts:648-657 is reachable, not dead code by addition: outreach.ts's floor is anchored at DateTime.now() (responseDeadline.ts:32), so a send_at on a later non-work day passes it unchanged and only this branch catches it; the 10/20-min retry backoff at runner.ts:713-717 is a second live caller.",
+    "The runner's work-hours re-arm terminates: nextWorkingHourStart returns the current instant once inside the window, so the fire re-armed at colleagueBase fails its own >now+60s test and sends. An invalid tz degrades to Date.parse(...)=NaN -> false -> send, never a throw or a stuck row.",
+    "no_issue_tracking is referenced in exactly one file (checkHealth.ts, two sites) across all of src/ -- findAvailableSlots and attendeeAvailability never filter on it, so a mixed private meeting was already treated as busy by the slot finder and the defrag could not write a move on top of it even before this wave.",
+    "For this owner a mixed private meeting can never become an auto-move candidate: private_emails holds one external gmail address (config/users/idan.yaml:226), so isProtected always returns 'has external attendee' and checkHealth.ts:1326 / :1350 skip it. The carve-out can only add an occupant, never a movable.",
+    "npx tsc --noEmit -p E:/Code/Maelle/tsconfig.json exits 0 with all three wave files on disk (run once, after reading the full diff).",
+    "gh issue list --state open: 29 open issues, all Feature/Roadmap/Idea or Improvement+Idea; none is satisfied, partially satisfied or contradicted by this wave. #108 (cross-midnight work hours) is adjacent to the work-hours gate but is neither advanced nor contradicted by it.",
+    "outreach.ts's immediate (no send_at) path is behaviourally identical to pre-fix: the work-hours floor is enclosed by `if (sendAt)` at src/skills/outreach.ts:280, and the attachmentsArg hoist to :322 is a pure move of the same expression, still the sole feed into sendOpts at :559. Round 1's scope overreach is gone — confirmed against the one live message_colleague in 30 days (isFuture:false).",
+    "The schedule-time floor and the fire-time floor cannot disagree: both call colleagueWorkTimeBaseFromNow, and the timezone each resolves is the same value — outreach.ts:254 uses `args.colleague_tz ?? owner tz`, persists exactly that at :337, and runner.ts:649 reads it back as `job?.colleague_tz || owner tz`. So the owner-facing \"scheduled for X\" at outreach.ts:397 is the instant that actually fires.",
+    "The `fromMs` anchor works as claimed — EXECUTED, not read: npx tsx against the changed src/utils/responseDeadline.ts returns Sat 10:00 -> Mon 09:00, Tue 22:00 -> Wed 09:00, Tue 07:00 -> Tue 09:00, Tue 12:00 unchanged. The default (no fromMs) path is untouched, so calcResponseDeadline and the three o#245/o#246 proactive timers keep their existing behaviour.",
+    "The new channel-post / attachment replay in runSendScheduledOutreach is reachable, not dead code by addition: message_colleague's schema exposes send_at (outreach.ts:92) and channel_id (:84) on the same tool, the system prompt at :672 instructs both, outreach.ts:358-360 persists them when isFuture, jobs.ts:291-293 writes them into the request details, runner.ts:675 and :720 read them back.",
+    "The fire-time gate cannot re-defer a job it just scheduled, and cannot spin: nextWorkingHourStart returns the anchor itself when the anchor is inside the window, the 60s tolerance at runner.ts:651 absorbs sweep-vs-SQLite clock skew, and an unparseable timezone yields NaN which fails the comparison and sends (fail-open).",
+    "No shape change (B6 clean): the two new closure_reason values are free-form strings consumed by the brief's generic closure narration at src/tasks/briefs.ts:561-565 — no enum, no schema migration; channel_id/channel_name/attachments ride the existing request `details` JSON, deliberately not a new outreach_jobs column.",
+    "npm run typecheck (tsc --noEmit) is green across all four touched files."
   ],
   "_carryNote": "The last run's own counts, copied off its manifest the moment it returned. A number the engine did not emit is null — never omitted and never estimated, because absent must read as not-recorded.",
   "carry": {
@@ -201,10 +222,10 @@
     "observableClosed": 5
   },
   "lastRun": {
-    "id": "wf_29a0d866-021",
+    "id": "wf_cedf925c-9aa",
     "status": "complete",
-    "startedAt": "2026-08-19T21:30:00+03:00",
-    "note": "Owner-approved build: o#245+o#246 merged (colleague outreach hours+workweek gate, registrar, w/ Matchmaker dependency for the shared predicate), o#247+o#248 merged (generic outreach branch owner-trace, registrar), o#250 (private-emails conflict-flagging restore, librarian). Plus 2 pendingOverflow items drained (merged-batch-owner-treated-as-own-requester, closeOutreachReplyIfResolvedThisTurn-mpim-channel-gap). RETURNED: 5/5 issues built (2 merges closing 4 refs: o#245+o#246, o#247+o#248), 1 confirmed-other-lane (librarian->matchmaker dependency on o#250), 1 bounced-then-cleared (generic-outreach, R3 double-notify caught and fixed), 0 overturned. 2 queue items drained and built. 2 new verify discoveries queued for next build. Diffs spot-checked against 3 highest-risk claims (authority clamp, colleague work-hours gate, bounced fix) -- all matched exactly. Typecheck clean.",
+    "startedAt": "2026-08-20T16:15:00+03:00",
+    "note": "Full bug wave, all three sources (github+logs+backlog), owner-triggered /manager run. Log window 2026-08-19T17:32:50 -> now (~23h). Passed alreadyBuilt(1), closedRefs(~110), openKnown(17 trimmed for size, real declined/converted set), openBacklog(2, the two queued discoveries from wf_29a0d866-021), pendingOverflow(2, same two), priorClean(17 trimmed representative claims, full history preserved in ledger). RETURNED: 2/2 issues built (1 confirmed-other-lane hand-off matchmaker<-registrar dependency), 1 bounced-then-cleared (scope overreach caught: round 1 floored every send incl. immediate relays, round 2 scoped to explicit send_at only + 2 more bounce-named defects fixed), 0 overturned. 3 new verify discoveries queued for next build. Diffs spot-checked against all 3 highest-risk files (checkHealth.ts carve-out, outreach.ts gate scoping, responseDeadline.ts anchor) -- all matched exactly. Typecheck clean.",
     "notBuilt": []
   }
 }

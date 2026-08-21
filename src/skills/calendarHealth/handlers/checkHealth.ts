@@ -1254,13 +1254,31 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               const noTrackCatsFb = new Set(
                 (profile.categories ?? []).filter(c => c.no_issue_tracking === true).map(c => c.name),
               );
+              // no-issue-tracking-must-not-hide-mixed-meetings — same carve-out as
+              // the double-booking filter above (lines ~347-376): a no_issue_tracking
+              // category (e.g. sets_sensitivity_private) only skips the event if it's
+              // GENUINELY private — every non-owner attendee on private_emails, or
+              // none at all. A mixed meeting (a colleague also on it) still counts as
+              // a real meeting for the defrag's occupancy check, so it isn't treated
+              // as a free slot to pack another meeting into.
+              const privateEmailsLowerFb = new Set(
+                (profile.meetings?.private_emails ?? []).map(pe => pe.toLowerCase()),
+              );
+              const ownerEmailLowerFb = profile.user.email.toLowerCase();
               const isRealMeetingFb = (e: CalendarEvent): boolean => {
                 if (e.isCancelled || e.isAllDay) return false;
                 if (e.showAs === 'free' || e.showAs === 'workingElsewhere') return false;
                 const subj = (e.subject ?? '').toLowerCase();
                 if (exclSubjectsFb.some(s => subj.includes(s))) return false;
                 if (floatingBlocks.some(b => fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, b))) return false;
-                if ((e.categories ?? []).some(c => noTrackCatsFb.has(c))) return false;
+                if ((e.categories ?? []).some(c => noTrackCatsFb.has(c))) {
+                  const nonOwnerAttendeesFb = (e.attendees ?? [])
+                    .map(a => (a.emailAddress?.address ?? '').toLowerCase())
+                    .filter(addr => addr && addr !== ownerEmailLowerFb);
+                  const isMixedMeetingFb = privateEmailsLowerFb.size > 0
+                    && nonOwnerAttendeesFb.some(addr => !privateEmailsLowerFb.has(addr));
+                  if (!isMixedMeetingFb) return false;
+                }
                 return true;
               };
               let cursorFb = DateTime.fromISO(startDate, { zone: timezone });
