@@ -3,6 +3,11 @@
 # SKILL.md's cleaner entry: "no engine calls it"), so this stays simple: no
 # run-history stamps (those are scoped to bugger/feature Workflow runs only),
 # just a log file and an exit-code check.
+#
+# TIMEZONE: always Friday 4am wherever the owner (and this laptop) physically
+# is -- the Task Scheduler trigger itself does this, since a local weekly
+# trigger automatically follows the machine's own OS timezone if it changes
+# (e.g. he travels). No gating logic needed here.
 
 $repoPath = "E:\Code\Maelle"
 $logDir = Join-Path $repoPath ".claude\agent-loop\cron-logs"

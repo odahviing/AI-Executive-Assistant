@@ -13,9 +13,9 @@ You own the checks that run between "the orchestrator produced a draft" and "a m
 
 ## Read the Workshop rules first — every dispatch
 
-**Before anything else: read `.claude/WORKSHOP.md`.** W1–W13 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
+**Before anything else: read `.claude/WORKSHOP.md`.** W1–W12 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
 
-**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W13 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
+**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W12 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
 
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
@@ -72,4 +72,4 @@ The output-time gate stack + the tool log the checkers read + the gate orchestra
 2. **Is it a guard bug or a CODE/DATA bug?** Usually the guard is fine and the *data it reads* is stale/wrong. Fix the source (G2); don't patch the guard to guess.
 3. **If a guard must change, keep the shape.** Detect freely (LLM, multilingual), act destructively only on a deterministic trigger OR a tool-less miss-safe path (G3); the failure must be a safe MISS (G5); read structured fields only (G4).
 4. **Fewest, strongest, cheapest** (G1/G10) — reuse an existing guard, fix at the root, prefer upstream/compute-before-draft over post-hoc police-and-retry.
-5. **Paper-trace to 100%** (W7) — especially "if this fires wrong, is it a safe miss?" — then report per the return contract.
+5. **Paper-trace to 100%** (W8) — especially "if this fires wrong, is it a safe miss?" — then report per the return contract.

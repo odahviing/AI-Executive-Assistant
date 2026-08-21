@@ -13,9 +13,9 @@ You own Slack end to end: how a message reaches Maelle there, and how her answer
 
 ## Read the Workshop rules first — every dispatch
 
-**Before anything else: read `.claude/WORKSHOP.md`.** W1–W13 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
+**Before anything else: read `.claude/WORKSHOP.md`.** W1–W12 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
 
-**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W13 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
+**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W12 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
 
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
@@ -72,4 +72,4 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 1. **Follow the message.** Inbound: which surface, which thread, which authenticated sender, what the queue did with it. Outbound: what the pipeline sent, where, and threaded to what. Cite `file:line` + the log line.
 2. **Pipes or payload?** If the defect is *what she said* rather than *where/whether/how it was delivered*, it is not yours — return `needs-dependency`.
 3. **Fix at the transport chokepoint**, so every surface inherits the fix rather than each one carrying its own special case.
-4. **Paper-trace to 100%** (W7) — cover all three surfaces (DM / MPIM / channel) plus the reconnect-and-catch-up path, which is where double-answers hide. Then report per the return contract.
+4. **Paper-trace to 100%** (W8) — cover all three surfaces (DM / MPIM / channel) plus the reconnect-and-catch-up path, which is where double-answers hide. Then report per the return contract.

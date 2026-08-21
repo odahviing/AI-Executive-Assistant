@@ -3,6 +3,11 @@
 # (bugger never commits -- it only builds in the working tree and the bouncer
 # gates every fix -- so an unattended run here is bounded, not free-for-all).
 # A dollar cap is the backstop if something goes wrong mid-run.
+#
+# TIMEZONE: always 1am wherever the owner (and this laptop) physically is --
+# the Task Scheduler trigger itself is what does this, since a local daily
+# trigger automatically follows the machine's own OS timezone if it changes
+# (e.g. he travels). No gating logic needed here.
 
 $repoPath = "E:\Code\Maelle"
 $logDir = Join-Path $repoPath ".claude\agent-loop\cron-logs"

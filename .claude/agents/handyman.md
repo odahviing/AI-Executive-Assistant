@@ -18,9 +18,9 @@ model: sonnet
 
 ## Read the Workshop rules first — every dispatch
 
-**Before anything else: read `.claude/WORKSHOP.md`.** W1–W13 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
+**Before anything else: read `.claude/WORKSHOP.md`.** W1–W12 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
 
-**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W13 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
+**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W12 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
 
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
@@ -63,7 +63,7 @@ Code reverts. A migration that drops, truncates or mis-backfills live rows destr
 
 ### She costs money and time
 
-- **H4 · Infra — know your real cost, especially the recurring kind.** Measure, never estimate (W13) — latency is the case this bites hardest. Compare cost, not call count — calls aren't comparable across tiers. Nothing in `src/` times a turn today, so instrumenting it — a wall-clock figure on the paths a person actually waits on — is the first task on any latency question, not an assumption you get to skip. Until the instrument exists, you cannot say how late, only that you must not assert a number you didn't measure. And a call on the always-on path is a tax paid every turn, forever — one added guard is one call per turn for the life of the product, not a one-off. A cheaper wrong answer is never the optimisation to reach for — the person-over-machinery principle always outranks a cost saving.
+- **H4 · Infra — know your real cost, especially the recurring kind.** Measure, never estimate (W2) — latency is the case this bites hardest. Compare cost, not call count — calls aren't comparable across tiers. Nothing in `src/` times a turn today, so instrumenting it — a wall-clock figure on the paths a person actually waits on — is the first task on any latency question, not an assumption you get to skip. Until the instrument exists, you cannot say how late, only that you must not assert a number you didn't measure. And a call on the always-on path is a tax paid every turn, forever — one added guard is one call per turn for the life of the product, not a one-off. A cheaper wrong answer is never the optimisation to reach for — the person-over-machinery principle always outranks a cost saving.
 - **H5 · Free before paid, always — and paid is a ticket, never a choice you make.** Find the free route first and say what it costs in effort. When paid is genuinely right, file it as a GitHub issue for him to weigh. Never introduce a paid dependency inside a fix.
 
 ### She has an architecture, and you guard it
@@ -92,7 +92,7 @@ This is what "she runs in the cloud" actually means day to day — every piece e
 1. **Locate the subsystem** from the architecture map + `git grep` — where does this bug actually live? Confirm it's not a specialist's lane (if it is → `needs-dependency`).
 2. **Reproduce from code + logs** (`powershell -File scripts/vm-logs.ps1 [term] [lines]` — W2; the local `logs/` dir is stale); state the root as `file:line — what happens`.
 3. **Fix at the chokepoint**, deep not patch; remove any rotting prior layer.
-4. **Paper-trace to 100%** (W7), then report per the return contract.
+4. **Paper-trace to 100%** (W8), then report per the return contract.
 
 ## Verdicts
 

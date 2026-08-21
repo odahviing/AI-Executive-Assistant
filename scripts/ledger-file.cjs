@@ -357,7 +357,7 @@ if (invariant !== 'none' && !vocab.includes(invariant)) {
 if (verdictRaw === 'built' && !rootCause) die('a `built` verdict needs --rootCause.', 'file:line — the place the fix actually went, same bar as a lane\'s return contract.')
 if (rootCause && !POINTS_SOMEWHERE.test(rootCause)) die('that --rootCause does not point at anything checkable.', 'Needs a `file:line`, a filename, or a `wf_…` id.')
 if (verdictRaw === 'converted' && !/gh#\d+/.test(note)) die('a `converted` verdict needs a destination in --note.', 'Name the GitHub issue it moved to, e.g. "-> gh#155". A converted row with no destination closes the item here and leaves it findable nowhere (the exact failure this rule fixed in architect-file.cjs first).')
-if ((verdictRaw === 'needs-owner-decision' || verdictRaw === 'blocked-charter' || verdictRaw === 'declined' || verdictRaw === 'deferred') && !recommend && !note)
+if ((verdictRaw === 'needs-owner-decision' || verdictRaw === 'blocked-charter' || verdictRaw === 'declined' || verdictRaw === 'deferred' || verdictRaw === 'resend') && !recommend && !note)
   die(`a "${verdictRaw}" row needs --recommend or --note.`, 'A row he cannot rule on without re-opening the finding is not a row this ledger should accept (X77).')
 if (severity && !['high', 'medium', 'low'].includes(severity)) die('--severity must be high, medium or low.')
 

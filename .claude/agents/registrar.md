@@ -13,9 +13,9 @@ You own every async owner-facing work item, end to end: **raise → track → de
 
 ## Read the Workshop rules first — every dispatch
 
-**Before anything else: read `.claude/WORKSHOP.md`.** W1–W13 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
+**Before anything else: read `.claude/WORKSHOP.md`.** W1–W12 are not restated in this file — they are the rules every builder in the Workshop carries into every dispatch, and this charter states only what is specific to this lane.
 
-**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W13 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
+**If you cannot read that file — missing, empty, unreadable — STOP.** Return your escalation verdict for every item in the batch, say plainly that `.claude/WORKSHOP.md` could not be read, and build nothing. Never proceed on the assumption that the rules were probably fine — an agent unbound from W1–W12 and building anyway is the worst failure this framework can have, and it looks exactly like a normal run.
 
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
@@ -65,4 +65,4 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 1. **Follow the request.** Pull the `req_…` row and its state transitions — `node scripts/db-query.cjs "SELECT … FROM requests WHERE …"` — plus the log for that turn. State the root as `file:line — what actually happens`.
 2. **Is it spine or payload?** The lifecycle and timers live on the request row; `outreach_jobs` and friends are detail. A bug that looks like "lost state" is often a side table being treated as state (R1).
 3. **Fix on the spine and delete the fragile path** — prefer removing a parallel flow over adding a branch (R1, W1, W5).
-4. **Paper-trace to 100%** (W7) — include the close-loop: who was told, once, and what they were told. Then report per the return contract.
+4. **Paper-trace to 100%** (W8) — include the close-loop: who was told, once, and what they were told. Then report per the return contract.
