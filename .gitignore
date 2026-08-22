@@ -42,3 +42,7 @@ Thumbs.db
 
 # github-board — generated each run, never source
 .claude/skills/github-board/backlog.html
+
+# cron run transcripts — quote live production logs (real names/message text),
+# generated each run, never source
+.claude/agent-loop/cron-logs/

@@ -457,7 +457,7 @@ export async function findChannelByName(
  * Fire-and-forget; never blocks tool execution. Errors are logged at debug
  * (we expect transient mismatches when the tracker is stale post-restart).
  */
-export async function setAssistantStatus(
+async function sendAssistantStatus(
   app: App,
   botToken: string,
   params: { channelId: string; threadTs: string; status: string },
@@ -488,4 +488,93 @@ export async function setAssistantStatus(
       status: params.status, err: String(err).slice(0, 200),
     });
   }
+}
+
+// v4.7.2 — minimum display time (ledger `slack-status-min-display-time`).
+// On very quick tools, two statuses can fire within Slack's own render
+// window and the earlier one is overwritten before a human ever sees it.
+// Below tracks, per thread, the last time a status was FIRED (i.e. handed
+// to sendAssistantStatus — request/fire-decision time, not confirmed-
+// delivered time: the floor is measured between requests, not between
+// confirmed Slack renders) and defers a call that would follow it too
+// closely instead of firing it immediately or dropping it — the caller's
+// fire-and-forget contract (`void setAssistantStatus(...)`) is untouched;
+// all throttling lives in here.
+const STATUS_MIN_DISPLAY_MS = 250;
+
+// Bound on concurrently-tracked threads so a long-lived process doesn't
+// grow this map forever. Evicted as a simple LRU (Map insertion order):
+// any read/write moves a thread's entry to the end, so the least-recently
+// touched thread is dropped first once the cap is exceeded.
+const STATUS_STATE_MAX_THREADS = 500;
+
+interface ThreadStatusState {
+  lastFiredAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+  // The most recently requested call still waiting on the floor. A second
+  // call before the first fires REPLACES this — the newest status wins,
+  // never a queue of every intermediate one.
+  pending?: { app: App; botToken: string; channelId: string; threadTs: string; status: string };
+}
+
+// Keyed on `${channelId}:${threadTs}`, not threadTs alone — this map is
+// module-global across every tenant in the process, and a Slack ts is
+// unique per-workspace, not globally; a bare-threadTs key risks a
+// cross-tenant collision (dropped/delayed status, no data leak since each
+// pending entry carries its own app/botToken/channelId).
+const threadStatusState = new Map<string, ThreadStatusState>();
+
+function statusStateKey(channelId: string, threadTs: string): string {
+  return `${channelId}:${threadTs}`;
+}
+
+function touchThreadStatusState(key: string, state: ThreadStatusState): void {
+  threadStatusState.delete(key);
+  threadStatusState.set(key, state);
+  if (threadStatusState.size > STATUS_STATE_MAX_THREADS) {
+    const oldestKey = threadStatusState.keys().next().value;
+    if (oldestKey !== undefined) {
+      const oldest = threadStatusState.get(oldestKey);
+      if (oldest?.timer) clearTimeout(oldest.timer);
+      threadStatusState.delete(oldestKey);
+    }
+  }
+}
+
+export async function setAssistantStatus(
+  app: App,
+  botToken: string,
+  params: { channelId: string; threadTs: string; status: string },
+): Promise<void> {
+  const now = Date.now();
+  const key = statusStateKey(params.channelId, params.threadTs);
+  const state = threadStatusState.get(key);
+
+  if (!state || now - state.lastFiredAt >= STATUS_MIN_DISPLAY_MS) {
+    if (state?.timer) clearTimeout(state.timer);
+    touchThreadStatusState(key, { lastFiredAt: now });
+    await sendAssistantStatus(app, botToken, params);
+    return;
+  }
+
+  // Too soon since the last status was fired — queue this one to fire once
+  // the floor elapses, replacing whatever was already queued.
+  state.pending = { app, botToken, ...params };
+  if (!state.timer) {
+    const delay = STATUS_MIN_DISPLAY_MS - (now - state.lastFiredAt);
+    state.timer = setTimeout(() => {
+      const pending = state.pending;
+      state.timer = undefined;
+      state.pending = undefined;
+      if (!pending) return;
+      state.lastFiredAt = Date.now();
+      touchThreadStatusState(statusStateKey(pending.channelId, pending.threadTs), state);
+      void sendAssistantStatus(pending.app, pending.botToken, {
+        channelId: pending.channelId,
+        threadTs: pending.threadTs,
+        status: pending.status,
+      });
+    }, delay);
+  }
+  touchThreadStatusState(key, state);
 }

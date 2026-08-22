@@ -31,7 +31,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 // item. The last reader was calendarHealth's reschedule-ping dedup
 // (`intent='meeting_reschedule' AND status='sent'`, INVERTED polarity: a match
 // SUPPRESSES the overlap autofix); it moved to `getOpenRescheduleOutreach(ownerUserId)`
-// filtered to the event id (skills/calendarHealth/handlers/checkHealth.ts:929-930 —
+// filtered to the event id (skills/calendarHealth/handlers/checkHealth.ts:952-953 —
 // live before/after: old probe 1 row, spine reader 0, and that 1 row was the
 // un-closeable request_id-NULL row that suppressed the autofix for its event forever).
 // With it gone the two cascade writes went too, in reader-then-writer order:

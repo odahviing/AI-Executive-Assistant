@@ -440,7 +440,7 @@ export function analyzeCalendar(
     // gh#200 retry (bouncer overturn) — the `oof_with_meetings` gate must catch
     // ANY oof event on the day, timed included, not only an all-day span: HEAD
     // read `myEvents.find(e => e.showAs === 'oof')` with no isAllDay test, and
-    // checkHealth.ts:234's own detector still does (`dayEvents.filter(e =>
+    // checkHealth.ts:512's own detector still does (`dayEvents.filter(e =>
     // e.showAs === 'oof')`) — narrowing to all-day-only here silently dropped a
     // timed OOF block with meetings on top of it, and disagreed with that other
     // surface (the exact drift this predicate exists to prevent).

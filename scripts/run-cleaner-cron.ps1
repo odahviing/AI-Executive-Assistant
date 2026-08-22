@@ -16,6 +16,22 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $logFile = Join-Path $logDir "cleaner-run_$timestamp.log"
 
+# Self-explanatory title so a visible window (if one ever shows) isn't mistaken
+# for something stray and closed by accident -- it closes on its own when done.
+$host.UI.RawUI.WindowTitle = "Cleaner sweep -- $(Get-Date -Format 'h:mmtt, MMM d')"
+
+# AUTH: same fixed-price company-seat token as run-manager-cron.ps1 -- see
+# that file's comment for why (never interactive login, never a paid API key).
+if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
+    "=== Cleaner cron run ABORTED: CLAUDE_CODE_OAUTH_TOKEN is not set (regenerate with 'claude setup-token', ~1yr lifetime) ===" | Out-File -FilePath $logFile -Encoding utf8
+    exit 1
+}
+
+# Same fix as run-manager-cron.ps1 -- see that file's comment. Cleaner is a
+# single-agent dispatch (no Workflow), so this is cheap insurance, not the
+# primary fix, but there's no reason to leave it exposed to the same ceiling.
+$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "0"
+
 Set-Location $repoPath
 
 $prompt = "Run the cleaner hygiene sweep now (unscoped -- everything new since its own last watermark, state.lastCleanSha). This is an unattended weekly run: follow cleaner.md exactly, act on what's provable, report needs-lane/needs-owner/needs-judgment findings as usual, and leave everything uncommitted for the owner to review and wrap by hand later. Do not commit, do not push, do not wrap."

@@ -283,8 +283,17 @@ Only send messages the user explicitly asks for — never reach out to people on
           effectiveSendAt = Date.parse(colleagueBase) > Date.parse(sendAt) ? colleagueBase : sendAt;
         }
         const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
+        // channelIdArg is resolved here (before deadline) so awaitReplyEffective
+        // can zero it for channel posts — see the zeroing comment below.
+        const channelIdArg = typeof args.channel_id === 'string' ? args.channel_id : undefined;
+        // Channel posts can never receive a DM-thread reply, so await_reply is
+        // meaningless and must be zeroed here — the prompt instruction at line
+        // 57 is a hint to the model, not a code guarantee (W3). Zeroing at this
+        // chokepoint prevents both the reply deadline and the expiry timer from
+        // arming, so the outreach never closes 'expired' with a false no-response.
+        const awaitReplyEffective = channelIdArg ? false : !!args.await_reply;
 
-        const deadline = args.await_reply && !isFuture
+        const deadline = awaitReplyEffective && !isFuture
           ? calcResponseDeadline(colleagueTzForDeadline)
           : undefined;
 
@@ -325,7 +334,6 @@ Only send messages the user explicitly asks for — never reach out to people on
               filename: a.filename,
             }))
           : undefined;
-        const channelIdArg = typeof args.channel_id === 'string' ? args.channel_id : undefined;
         const channelNameArg = typeof args.channel_name === 'string' ? args.channel_name : undefined;
 
         const jobId = createOutreachJob({
@@ -336,7 +344,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           colleague_name: args.colleague_name as string,
           colleague_tz: args.colleague_tz as string | undefined,
           message: args.message as string,
-          await_reply: args.await_reply ? 1 : 0,
+          await_reply: awaitReplyEffective ? 1 : 0,
           status: isFuture ? 'pending_scheduled' : 'sent',
           sent_at: isFuture ? undefined : new Date().toISOString(),
           reply_deadline: deadline,
@@ -374,7 +382,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           jobId,
           colleague: args.colleague_name,
           isFuture,
-          await_reply: !!args.await_reply,
+          await_reply: awaitReplyEffective,
           skill_origin: 'outreach',
         });
 
@@ -422,7 +430,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         // hook: the tick fires only AFTER a confirmed send (the createTask call
         // ran before it, so a send that then failed still got a ✅), and an
         // await_reply send still gets no tick — nothing is done yet.
-        const tickThreadTs = args.await_reply ? undefined : context.threadTs;
+        const tickThreadTs = awaitReplyEffective ? undefined : context.threadTs;
 
         // v3.1 (Path 2 Stage 6) — reply-deadline expiry is a spine timer:
         // createOutreachJob armed the paired request's

@@ -29,7 +29,7 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   find_available_slots: 'Finding a time',
   check_join_availability: 'Checking who can make it',
   check_calendar_health: 'Reviewing the calendar',
-  get_work_schedule_overrides: 'Checking your schedule',
+  get_work_schedule_overrides: 'Checking the schedule exceptions',
 
   // Calendar — writing
   create_meeting: 'Setting up the meeting',
@@ -37,9 +37,9 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   update_meeting: 'Updating the meeting',
   delete_meeting: 'Cancelling the meeting',
   book_floating_block: 'Blocking the time',
-  set_event_category: 'Sorting the meeting',
+  set_event_category: 'Tagging the meeting',
   hold_slot: 'Holding the time',
-  set_work_schedule_override: 'Updating your schedule',
+  set_work_schedule_override: 'Updating a schedule exception',
   revert_last_auto_move: 'Putting it back',
 
   // Messaging / lookups
@@ -66,35 +66,36 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
 
   // Knowledge / web
   manage_knowledge: 'Going over my notes',    // v2.9 — get + ingest merged
-  web_search: 'Searching the web',
+  web_search: 'Looking online',
   web_extract: 'Reading the page',
-  web_research: 'Looking online',              // v3.1.8 grounded research loop
+  web_research: 'Doing research',              // v3.1.8 grounded research loop
   news: 'Catching up on the news',             // grounded news skill (owner-facing)
 
   // People / memory (v3.1.8 — were unmapped → showed the 'Working' placeholder)
   get_person_memory: 'Remembering',
-  recall_interactions: 'Checking the history',
+  recall_interactions: 'Checking past conversations',
   note_about_person: 'Making a note',
   note_about_self: 'Making a note',
   log_interaction: 'Keeping notes',
   update_person_memory: 'Making a note',
-  update_person_profile: 'Updating the details',
+  update_person_profile: 'Filling in their profile',
 
   // Meeting summary
   share_summary: 'Sending the recap',
   update_summary_draft: 'Editing the recap',
-  learn_summary_style: 'Learning your style',
+  learn_summary_style: 'Noting how recaps should look',
+  list_speaker_unknowns: "Checking who's still unnamed",
 
   // Preferences (v2.9 — merged)
-  manage_preference: 'Saving the preference',
-  update_my_preferences: 'Saving the preference',
+  manage_preference: 'Jotting that down',
+  update_my_preferences: 'Noting that for next time',
 
   // Calendar issues (v2.9 — merged)
   manage_calendar_issue: 'Sorting the calendar',
 
   // Venues (v2.9)
   find_venue: 'Finding a place',
-  rank_venue: 'Updating places list',
+  rank_venue: 'Rating the venue',
 };
 
 /**

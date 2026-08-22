@@ -1,0 +1,12 @@
+{"ts":"2026-08-21T23:00:07.228Z","failed":true,"trigger":"cron","exitcode":1,"note":"died after: never triggered"}
+{"ts":"2026-08-22T12:32:59.863Z","runId":"wf_74a3571e-69d","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-22T12:48:35.585Z","runId":"wf_74a3571e-69d","stamp":"results-in"}
+{"ts":"2026-08-22T12:53:56.266Z","runId":"wf_74a3571e-69d","stamp":"report-written","headline":"3 built · 0 bounced · bouncer approved · board clean","pendingOwner":0}
+{"ts":"2026-08-22T13:56:47.678Z","runId":"wf_0edd89a7-e0b","stamp":"triggered","trigger":"cron"}
+{"ts":"2026-08-22T14:01:24.666Z","runId":"wf_0edd89a7-e0b","stamp":"results-in"}
+{"ts":"2026-08-22T14:03:20.466Z","runId":"wf_0edd89a7-e0b","stamp":"report-written","headline":"Run wf_0edd89a7-e0b -- in: 0 tickets, 0 day(s) of logs, 0 backlog re-reads / out: 0 built, 0 already-fixed, 0 built-with-gap, 0 bounced, 0/0 joint-traced, 0 converted, 0 queued / board: net +0 -> 0 open rows / your 0 rows await you","pendingOwner":0}
+{"ts":"2026-08-22T18:01:42.276Z","runId":"wf_df2da5be-6a6","stamp":"triggered","trigger":"cron"}
+{"ts":"2026-08-22T21:18:00.459Z","failed":true,"trigger":"cron","exitcode":0,"note":"died after: never triggered"}
+{"ts":"2026-08-22T21:21:56.698Z","failed":true,"trigger":"cron","exitcode":0,"note":"died after: never triggered"}
+{"ts":"2026-08-22T21:31:33.791Z","runId":"wf_a97a95b0-655","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-22T21:41:39.123Z","failed":true,"trigger":"cron","exitcode":0,"note":"died after: triggered"}

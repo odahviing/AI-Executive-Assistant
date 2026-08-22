@@ -106,6 +106,36 @@ async function revalidateActiveOOOIssues(
   return survivors;
 }
 
+/**
+ * Shared predicate used by both the double-booking filter (~line 352) and
+ * the defrag occupancy filter (~line 1268): should this event be skipped
+ * from occupancy/conflict tracking because of its `no_issue_tracking`
+ * category? Three-way logic, collapsed to the one boolean each call site
+ * actually needs:
+ *   - no `no_issue_tracking` category on the event  -> false (don't skip)
+ *   - category present AND genuinely private (every non-owner attendee is
+ *     on private_emails, or there are none)          -> true (skip)
+ *   - category present AND mixed (a colleague also on the invite still
+ *     counts as a real meeting)                       -> false (don't skip)
+ *
+ * Two independent copies of this rule existed before extraction; a single
+ * helper prevents silent divergence if either caller is updated.
+ */
+function skipsIssueTracking(
+  e: CalendarEvent,
+  noTrackCats: Set<string>,
+  ownerEmailLower: string,
+  privateEmailsLower: Set<string>,
+): boolean {
+  if (!(e.categories ?? []).some(c => noTrackCats.has(c))) return false;
+  const nonOwnerAttendees = (e.attendees ?? [])
+    .map(a => (a.emailAddress?.address ?? '').toLowerCase())
+    .filter(addr => addr && addr !== ownerEmailLower);
+  const isMixedMeeting = privateEmailsLower.size > 0
+    && nonOwnerAttendees.some(addr => !privateEmailsLower.has(addr));
+  return !isMixedMeeting;
+}
+
 export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, self, profile, userEmail, timezone } = ctx;
         // v2.1.4 — default window is owner-rule-driven (today → end of
@@ -365,15 +395,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             if (matchesAnyBlock) return false;
             // Exclusion 5: yaml category flagged no_issue_tracking — unless this
             // is a mixed meeting (see the note above the filter).
-            const eCats = e.categories ?? [];
-            if (eCats.some(c => noTrackCategories.has(c))) {
-              const nonOwnerAttendees = (e.attendees ?? [])
-                .map(a => (a.emailAddress?.address ?? '').toLowerCase())
-                .filter(addr => addr && addr !== ownerEmailLowerForTracking);
-              const isMixedMeeting = privateEmailsLower.size > 0
-                && nonOwnerAttendees.some(addr => !privateEmailsLower.has(addr));
-              if (!isMixedMeeting) return false;
-            }
+            if (skipsIssueTracking(e, noTrackCategories, ownerEmailLowerForTracking, privateEmailsLower)) return false;
             // Exclusion 4: entirely outside work-hours (start >= workEnd OR end <= workStart)
             const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
             const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
@@ -1271,14 +1293,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 const subj = (e.subject ?? '').toLowerCase();
                 if (exclSubjectsFb.some(s => subj.includes(s))) return false;
                 if (floatingBlocks.some(b => fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, b))) return false;
-                if ((e.categories ?? []).some(c => noTrackCatsFb.has(c))) {
-                  const nonOwnerAttendeesFb = (e.attendees ?? [])
-                    .map(a => (a.emailAddress?.address ?? '').toLowerCase())
-                    .filter(addr => addr && addr !== ownerEmailLowerFb);
-                  const isMixedMeetingFb = privateEmailsLowerFb.size > 0
-                    && nonOwnerAttendeesFb.some(addr => !privateEmailsLowerFb.has(addr));
-                  if (!isMixedMeetingFb) return false;
-                }
+                if (skipsIssueTracking(e, noTrackCatsFb, ownerEmailLowerFb, privateEmailsLowerFb)) return false;
                 return true;
               };
               let cursorFb = DateTime.fromISO(startDate, { zone: timezone });

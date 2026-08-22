@@ -135,7 +135,7 @@ const ACTIVE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
  *     at `checkHealth.ts:350` — no row, no narration, no log line. A silent
  *     missed conflict, which is worse than the bug #148 fixed.
  *   • CLUSTERING / ROW IDENTITY — an uncategorized event that ALSO clashes emits
- *     both issues from the same `nonAllDay` set (checkHealth.ts:335), so they
+ *     both issues from the same `nonAllDay` set (checkHealth.ts:382), so they
  *     land in one cluster; the overlap anchors it (priority 3 vs 7) and
  *     the question's class, event and time notes are dropped. The question then
  *     has no row — exactly the no-memory state #148 exists to end — and, worse,

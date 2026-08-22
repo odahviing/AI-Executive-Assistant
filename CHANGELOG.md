@@ -2,6 +2,21 @@
 
 ---
 
+## 4.7.3 — Slack status text now reads like a real assistant at work
+
+The per-tool "working…" indicator in Slack's assistant panel used to describe mechanisms ("Saving the preference") instead of what a person would actually see her doing ("Jotting that down"); every entry was revisited against that bar, and very quick tools can now hold their status for at least 250ms so it's actually seen before the next one replaces it. Separately, two gaps from 4.7.2's outreach fix were closed: a scheduled channel post could still lose its attachment or get falsely narrated as "never replied," and the mixed-meeting calendar-health dedup that release shipped was only half-deduplicated.
+
+### Fixed
+- The Slack assistant-panel status text for every tool was revisited against one bar — does this read as a real EA's visible, in-the-moment action, or as a system description? Seven phrases were reworded (e.g. "Saving the preference" → "Jotting that down", "Sorting the meeting" → "Tagging the meeting"), one missing entry was added (`list_speaker_unknowns`), and all second-person "your"/"you" phrasing was removed so the same text reads correctly regardless of who's watching.
+- A very quick tool's status text could be overwritten by the next one before Slack's client ever rendered it. Each thread's status now holds for a minimum of 250ms; a status requested before that floor elapses is deferred rather than dropped, and a further request before the deferred one fires replaces it — the newest status is always what eventually shows.
+- A scheduled channel-post outreach could still arrive as a bare DM with its attachment silently missing, and a channel-posted outreach could get falsely narrated to the owner as "never replied" (a DM-reply detector watching a surface that can't receive DM replies). Both closed at the same chokepoint 4.7.2 introduced.
+- The mixed-meeting rule 4.7.2 deduplicated in the calendar-health checks was only half-deduplicated — the shared helper still made each call site re-check the same category membership itself. Now a single predicate answers the whole question; neither call site re-checks anything.
+
+### Framework (other chats, bundled)
+Both nightly/weekly cron scripts now fail loudly and immediately if their long-lived auth token is missing, and no longer hit `claude -p`'s default 600-second background-task ceiling — a real bug-loop run takes 45-54 minutes, so every headless run was previously guaranteed to be killed mid-dispatch regardless of any other fix. Whether the ceiling's removal needs a new wall-clock or cost backstop of its own (the stated `--max-budget-usd` cap may not apply to a fixed-price seat) is still open, not resolved here.
+
+---
+
 ## 4.7.2 — The dense-packing defrag stops moving meetings onto other meetings
 
 A meeting-density defrag pass could relocate a real work meeting on top of another real meeting, because an unrelated no-issue flag made it look empty. Separately, scheduled outreach sends (reminders, re-asks, re-engagement) now correctly respect the recipient's own hours and workweek without delaying an urgent send the owner typed himself right now.

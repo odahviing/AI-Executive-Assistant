@@ -15,6 +15,25 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out
 
 $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $logFile = Join-Path $logDir "manager-run_$timestamp.log"
+
+# Self-explanatory title so a visible window (if one ever shows) isn't mistaken
+# for something stray and closed by accident -- it closes on its own when done.
+$host.UI.RawUI.WindowTitle = "Bugger run -- $(Get-Date -Format 'h:mmtt, MMM d')"
+
+# AUTH: uses the fixed-price company seat via a one-year long-lived token
+# (`claude setup-token`), never an interactive login (expires unpredictably,
+# no auto-refresh headless) and never a pay-per-token API key (extra cost).
+# Fail loudly and immediately if it's ever missing/cleared, rather than
+# burning a $LASTEXITCODE=1/401 that looks identical to any other failure.
+if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
+    "=== Manager cron run ABORTED: CLAUDE_CODE_OAUTH_TOKEN is not set (regenerate with 'claude setup-token', ~1yr lifetime) ===" | Out-File -FilePath $logFile -Encoding utf8
+    exit 1
+}
+
+# `claude -p` force-kills a background Workflow task after 600s by default --
+# a real bugger run takes 45-54 min, so without this every headless run was
+# always going to get auto-killed mid-dispatch, no matter what else was fixed.
+$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "0"
 # The wall-clock window is the join key against run-history.jsonl below — cron
 # runs never overlap, so no run id needs pre-minting to find "this run's" rows.
 # ParseExact yields Kind=Unspecified, which .ToUniversalTime() treats as local —

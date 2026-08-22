@@ -676,10 +676,17 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     const ownerId = profile.user.slack_user_id;
     const MAX_SEND_ATTEMPTS = 3;
     const attempts = (typeof details.send_attempts === 'number' ? details.send_attempts : 0) + 1;
+    const attachments = Array.isArray(details.attachments)
+      ? details.attachments as Array<{ sourceUrl: string; filename?: string }>
+      : undefined;
 
     if (channelId) {
       const mention = `<@${targetSlackId}>`;
-      const outcome = await conn.postToChannel(channelId, `${mention} ${message ?? ''}`);
+      const outcome = await conn.postToChannel(
+        channelId,
+        `${mention} ${message ?? ''}`,
+        attachments?.length ? { attachments } : undefined,
+      );
       if (!outcome.ok) {
         logger.warn('runSendScheduledOutreach — scheduled channel post failed', {
           requestId: row.id, reason: outcome.reason, attempt: attempts, maxAttempts: MAX_SEND_ATTEMPTS,
@@ -717,9 +724,6 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       return 'closed';
     }
 
-    const attachments = Array.isArray(details.attachments)
-      ? details.attachments as Array<{ sourceUrl: string; filename?: string }>
-      : undefined;
     const res = await conn.sendDirect(targetSlackId, message ?? '', attachments?.length ? { attachments } : undefined);
     const sentTs = res.ok ? (res.ts ?? null) : null;
     // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
