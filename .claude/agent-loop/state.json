@@ -29,15 +29,6 @@
       "source": "verify",
       "symptom": "The 500-thread LRU eviction on threadStatusState clears an evicted entry's timer and deletes it with no log line -- a still-pending queued status is discarded silently.",
       "evidence": "Confirmed by slackmaster during bounce round 1 (2026-08-23), citation verified accurate (~lines 534-541)."
-    },
-    {
-      "id": "checkhealth-skipsissuetracking-doc-comment-stale-lines",
-      "lane": "matchmaker",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "skipsIssueTracking's doc comment cites its call sites as ~line 352/~1268; actually 398/1296. Comment-only.",
-      "evidence": "Found by bouncer's narrow recheck 2026-08-23."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",

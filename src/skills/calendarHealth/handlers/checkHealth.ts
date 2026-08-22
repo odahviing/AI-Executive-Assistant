@@ -107,8 +107,8 @@ async function revalidateActiveOOOIssues(
 }
 
 /**
- * Shared predicate used by both the double-booking filter (~line 352) and
- * the defrag occupancy filter (~line 1268): should this event be skipped
+ * Shared predicate used by both the double-booking filter (~line 398) and
+ * the defrag occupancy filter (~line 1296): should this event be skipped
  * from occupancy/conflict tracking because of its `no_issue_tracking`
  * category? Three-way logic, collapsed to the one boolean each call site
  * actually needs:
