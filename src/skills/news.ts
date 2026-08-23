@@ -16,10 +16,19 @@
  *     read/write/prune, fail-open. gatherNews NEVER throws. Code does NOT
  *     regex-parse news.md for domain steer (removed v3.4.0 — that regex was an
  *     implicit format contract on owner free-text); the LLM planner emits
- *     preferred/avoid domains that code hands to Tavily (M-7).
- *   - PROMPT (getSystemPromptSection): what's worth surfacing, the
- *     "already covered?" call, tone, citation, and weighing any source
- *     preferences the owner wrote in news.md. No enforcement.
+ *     preferred/avoid domains that code hands to Tavily (M-7). Also CODE
+ *     (v4.7.3): a classify pass drops a gathered source that's a semantic
+ *     repeat of something already in the seen-log BEFORE it ever reaches
+ *     compose — the compose-time "already covered?" prose instruction alone
+ *     proved unreliable (ref news-dedup-no-deterministic-backstop): the
+ *     write-pass judgment on the SAME seen-log text was demonstrably
+ *     reliable, compose's independent re-judgment of it was not, so gather
+ *     now filters using that same judgment before compose ever sees the
+ *     candidates.
+ *   - PROMPT (getSystemPromptSection / briefs.ts compose): what's worth
+ *     surfacing, tone, citation, weighing source preferences from news.md,
+ *     and a backstop "already covered" instruction for the rare case the
+ *     classify pass itself fails open (see classifyAlreadyCovered).
  *   - LEARNED MEMORY: news.md (free-text topics + source preferences), taught
  *     via update_my_preferences(skill='news'); the model reads it, code does
  *     not. The seen-log MD is code-maintained.
@@ -344,8 +353,21 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
       }
     }
 
-    logger.info('news — gather done', { goals: goals.length, sources: sources.length });
-    return { goals, sources };
+    // v4.7.3 (news-dedup-no-deterministic-backstop) — drop sources that are a
+    // semantic repeat of something already in the rolling seen-log BEFORE they
+    // ever become a compose candidate. Runs after URL-dedup and entity
+    // grounding, on whatever survived both.
+    const alreadyLogged = readSeenLog(profile);
+    const { novel, covered } = await classifyAlreadyCovered(sources, alreadyLogged);
+    if (covered.length > 0) {
+      logger.info('news — dropped already-covered source(s)', {
+        before: sources.length, after: novel.length,
+        dropped: covered.map(s => s.title ?? s.url),
+      });
+    }
+
+    logger.info('news — gather done', { goals: goals.length, sources: novel.length });
+    return { goals, sources: novel };
   } catch (err) {
     logger.warn('news — gatherNews failed, returning empty bundle', { err: String(err).slice(0, 200) });
     return { ...EMPTY_BUNDLE };
@@ -420,6 +442,54 @@ function pruneSeenLog(md: string, keepFromDate: string): string {
     if (keepCurrent) out.push(line);
   }
   return out.join('\n').trim();
+}
+
+/** Classify which just-gathered sources report a story ALREADY in the rolling
+ *  seen-log (semantic match — same underlying event, any outlet/wording), via
+ *  one cheap Haiku pass over the WHOLE candidate set (not the 6-8 slice
+ *  `summarizeBundleForSeenLog` uses for writing log lines — here every
+ *  candidate compose could pick from must be checked, not just a sample).
+ *  This is the gather-time half of the news-dedup-no-deterministic-backstop
+ *  fix: the same "already covered?" judgment the write-pass makes reliably
+ *  (see the ref), run here BEFORE compose so a recognized duplicate never
+ *  reaches compose as a candidate, instead of leaving compose to (unreliably)
+ *  re-judge novelty itself from the same seen-log prose.
+ *  Fail-open: no seen-log yet, no sources, or any error → nothing filtered
+ *  (compose still gets the "already covered" prose instruction as a backstop
+ *  — see formatSeenLogBlock). */
+async function classifyAlreadyCovered(
+  sources: NewsSource[],
+  alreadyLogged: string,
+): Promise<{ novel: NewsSource[]; covered: NewsSource[] }> {
+  if (!alreadyLogged.trim() || sources.length === 0) return { novel: sources, covered: [] };
+  const numbered = sources.map((s, i) => `${i}: ${s.title ?? s.url}${s.snippet ? ` — ${s.snippet}` : ''}`).join('\n');
+  try {
+    const res = await getAnthropicClient().messages.create({
+      model: NEWS_MODEL,
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `ALREADY COVERED (last 7 days) — do not treat a story here as new, even reworded or from a different outlet:
+${alreadyLogged.trim()}
+
+SOURCES gathered just now:
+${numbered}
+
+Which numbered sources report a story that is ALREADY in the covered list above (same underlying event/development)? Output ONLY a JSON array of the matching numbers, e.g. [0,3,5]. Output [] if none match.`,
+      }],
+    });
+    const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    const match = text.match(/\[[\d,\s]*\]/);
+    const coveredIdx = new Set<number>(match ? (JSON.parse(match[0]) as number[]) : []);
+    if (coveredIdx.size === 0) return { novel: sources, covered: [] };
+    return {
+      novel: sources.filter((_, i) => !coveredIdx.has(i)),
+      covered: sources.filter((_, i) => coveredIdx.has(i)),
+    };
+  } catch (err) {
+    logger.warn('news — already-covered classify failed, composing unfiltered', { err: String(err).slice(0, 160) });
+    return { novel: sources, covered: [] };
+  }
 }
 
 /** Turn a gathered bundle into one-line seen-log entries via a cheap Haiku pass.
