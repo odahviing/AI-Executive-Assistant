@@ -234,23 +234,81 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // not just the input duration. Pre-fix the compact string was
         // `[find_available_slots: duration_minutes=N]` — claim-checker
         // couldn't verify specific time claims in the draft because the
-        // summary carried no slot data. Now lists up to 5 slots so the
-        // checker can audit "draft says 12:00 fits" against tool output.
+        // summary carried no slot data.
+        //
+        // proposed-slot-not-grounded-in-search-result (2026-08-24) — list
+        // EVERY slot the tool actually returned, not a hardcoded top-5. The
+        // handler already bounds this list itself (pickSpreadSlots /
+        // pickSpreadMustBe, capped at `offeredSlotCount(profile)` — default 8,
+        // owner-configurable) — a SECOND, independent cap of 5 here silently
+        // dropped up to 3 real, Sonnet-visible candidates from the one place
+        // the slot-grounding check (claimChecker's 'slot_grounding' mode)
+        // reads its ground truth. A draft that correctly named the 6th/7th/8th
+        // offered slot would have read as "not in the list" and been corrected
+        // into a false refusal of a genuinely available time — G2 (this log
+        // must carry the truth, not a guess) and G5 (a guard must never
+        // corrupt a correct reply) both required removing the second cap.
+        // bounce-fix (2026-08-26) — carry `presentation_local`
+        // (src/skills/meetings/ops/handlers/findAvailableSlots.ts, e.g. "Thu
+        // 4 Sep 08:00 EDT") when the tool
+        // attached one. Without it, this line has ONLY the owner-local
+        // HH:MM with the UTC offset already sliced off — the slot-grounding
+        // and owner-fact prompts both ask the model to judge a
+        // "timezone-equivalent restatement" against ground truth that
+        // carries no timezone info at all, so a correct "08:00 ET" claim
+        // could not actually be verified, only guessed at (worst case,
+        // incorrectly rewritten into a wrong bare owner-clock number).
+        const fmt = (s: { start?: string; end?: string; presentation_local?: string }) => {
+          if (!s.start) return '?';
+          const t = String(s.start).slice(11, 16);  // 'HH:MM'
+          const d = String(s.start).slice(0, 10);   // 'YYYY-MM-DD'
+          const base = s.end ? `${d} ${t}-${String(s.end).slice(11, 16)}` : `${d} ${t}`;
+          return s.presentation_local ? `${base} [local: ${s.presentation_local}]` : base;
+        };
+        const verdictWord = (v: { available?: boolean; broken_rule_label?: string }) =>
+          v.available ? 'available' : `unavailable${v.broken_rule_label ? ` (${v.broken_rule_label})` : ''}`;
+
+        // bounce-fix finding 1 (2026-08-24) — candidate_validation is a
+        // SEPARATE shape with no `slots` key at all
+        // (findAvailableSlots.ts:1181-1190): `{ mode:'candidate_validation',
+        // duration_minutes, candidates_checked, results:[{start,end,
+        // available,...}] }`. Falling through to the slots-array path below
+        // always read length 0 and rendered "0 slots" even when every named
+        // candidate came back available=true — this is the tool's own
+        // documented preferred mode for "does 15:45 or 16:15 work?"
+        // (meetings.ts:230), so high-frequency, not an edge case. Render
+        // each candidate's own real verdict instead so the slot-grounding
+        // check (and the claim-checker generally) has real ground truth.
+        if (result && typeof result === 'object' && (result as any).mode === 'candidate_validation') {
+          const results: Array<{ start?: string; end?: string; available?: boolean; broken_rule_label?: string }> =
+            Array.isArray((result as any).results) ? (result as any).results : [];
+          const durCV = (result as any).duration_minutes ?? (input as any).duration_minutes;
+          const parts = results.map(r => `${fmt(r)} ${verdictWord(r)}`);
+          return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}]`;
+        }
+
         const slots: Array<{ start?: string; end?: string }> =
           Array.isArray(result) ? result :
           (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
           [];
-        const fmt = (s: { start?: string; end?: string }) => {
-          if (!s.start) return '?';
-          const t = String(s.start).slice(11, 16);  // 'HH:MM'
-          const d = String(s.start).slice(0, 10);   // 'YYYY-MM-DD'
-          return s.end ? `${d} ${t}-${String(s.end).slice(11, 16)}` : `${d} ${t}`;
-        };
-        const slotList = slots.slice(0, 5).map(fmt).join(', ');
+        const slotList = slots.map(fmt).join(', ');
         const dur = (input as any).duration_minutes;
         const from = (input as any).search_from;
         const to = (input as any).search_to;
         const window = from && to ? ` ${String(from).slice(0, 16)}→${String(to).slice(0, 16)}` : '';
+        // bounce-fix finding 2 (2026-08-24) — `preferred_slot_status` is a
+        // tool-confirmed available (or unavailable, with its real reason)
+        // instant that is DELIBERATELY excluded from `slots` itself
+        // (findAvailableSlots.ts:1744-1763, attached at :2062) — the handler
+        // tells Sonnet to "treat it as available and offer it alongside
+        // `slots`; never imply it's blocked, and never stay silent about
+        // it." Rendering only `slots` made this confirmed instant invisible
+        // to the slot-grounding ground truth — worst case, if it were the
+        // ONLY available time, a guaranteed false "nothing found".
+        const preferredStatus = (result && typeof result === 'object') ? (result as any).preferred_slot_status : undefined;
+        const preferredPart = (preferredStatus && typeof preferredStatus === 'object' && typeof preferredStatus.start === 'string')
+          ? `; preferred ${fmt(preferredStatus)} ${verdictWord(preferredStatus)}`
+          : '';
         if (slots.length === 0) {
           // gh#chris-kelley-oof-block-a — a zero-result day_summary (the
           // rejection reason for EVERY date, e.g. owner_out_of_office) used
@@ -276,10 +334,25 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
               reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
             }
           }
-          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}]`;
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${preferredPart}]`;
         }
-        const more = slots.length > 5 ? ` +${slots.length - 5} more` : '';
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${more}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${preferredPart}]`;
+      }
+      case 'check_join_availability': {
+        // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool
+        // had NO dedicated case; it fell through to the generic `default`
+        // below, which renders only the FIRST input key (`meeting_start`) and
+        // never the actual verdict. So the claim-checker's slot-grounding
+        // check had zero ground truth for this tool's outcome — a colleague
+        // could be told "he can join" with nothing in the tool log to confirm
+        // or refute it. Render the checked instant AND the real `can_join`
+        // verdict (meetings.ts's own field: true / 'partial' / false /
+        // 'needs_approval') so a "he's free then" claim can be verified the
+        // same way a find_available_slots claim can.
+        const meetingStart = typeof input.meeting_start === 'string' ? input.meeting_start : '';
+        const when = meetingStart ? `${meetingStart.slice(0, 10)} ${meetingStart.slice(11, 16)}` : '?';
+        const canJoin = (result && typeof result === 'object') ? (result as { can_join?: unknown }).can_join : undefined;
+        return `[check_join_availability ${when}: can_join=${String(canJoin ?? 'unknown')}]`;
       }
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;

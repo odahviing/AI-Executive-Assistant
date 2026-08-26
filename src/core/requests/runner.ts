@@ -22,7 +22,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, updateRequest } from '../../db/requests';
 import { getOutreachJobByRequestId } from '../../db/jobs';
 import { workTimeBaseFromNow } from '../../utils/workHours';
-import { colleagueWorkTimeBaseFromNow } from '../../utils/responseDeadline';
+import { isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface } from './types';
@@ -539,11 +539,11 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   // o#245/o#246) — defer this re-ask to the colleague's own next work-time
   // start rather than firing on the raw +24h timer regardless of their clock.
   const colleagueTz = job!.colleague_tz || profile.user.timezone;
-  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
-  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
-    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'reschedule_reask' });
+  const gate = isColleagueSendDeferred(colleagueTz);
+  if (gate.deferred) {
+    updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'reschedule_reask' });
     logger.info('runRescheduleReask — outside colleague work hours, deferring re-ask', {
-      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+      requestId: row.id, colleagueTz, deferredTo: gate.deferredTo,
     });
     return 'rearmed';
   }
@@ -647,11 +647,11 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
   // other colleague-facing send on this spine.
   const job = getOutreachJobByRequestId(row.id);
   const colleagueTz = job?.colleague_tz || profile.user.timezone;
-  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
-  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
-    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'send_scheduled_outreach' });
+  const gate = isColleagueSendDeferred(colleagueTz);
+  if (gate.deferred) {
+    updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'send_scheduled_outreach' });
     logger.info('runSendScheduledOutreach — outside colleague work hours, deferring send', {
-      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+      requestId: row.id, colleagueTz, deferredTo: gate.deferredTo,
     });
     return 'rearmed';
   }

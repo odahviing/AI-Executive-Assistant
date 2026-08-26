@@ -126,3 +126,36 @@ export function colleagueWorkTimeBaseFromNow(colleagueTz: string | null | undefi
   const window = defaultWorkingHoursForTz(tz);
   return nextWorkingHourStart(tz, window, fromMs).toUTC().toISO()!;
 }
+
+/** Slop against a timer tick firing a few ms early and deferring a whole
+ * extra day over it — shared by every `isColleagueSendDeferred` call site. */
+const COLLEAGUE_SEND_GATE_SLOP_MS = 60_000;
+
+/**
+ * single-implementation-of-a-shared-rule (2026-08-24,
+ * colleague-work-hours-gate-duplicated-across-five-call-sites) — every
+ * colleague-facing send TIMER (reschedule re-ask, OOF reengage send + its
+ * own re-ask, the first fire of a scheduled outreach) must defer to the
+ * colleague's own work hours (R4) before it actually sends. Until now each
+ * of those 4 call sites hand-copied the same
+ * `Date.parse(colleagueWorkTimeBaseFromNow(tz)) > Date.now() + 60_000`
+ * comparison with its own literal slop constant — one place a fixed slop
+ * value, or the comparison itself, could silently drift from the other
+ * three. Callers still own their own rearm handler name and log copy
+ * (those legitimately differ per timer); only the deferral verdict itself
+ * is unified here.
+ *
+ * NOT used by outreach.ts's schedule-time floor (a different question —
+ * "what instant should this scheduled send persist as", not "should this
+ * currently-firing timer defer itself") — that call site already rides the
+ * single `colleagueWorkTimeBaseFromNow` this wraps.
+ */
+export function isColleagueSendDeferred(
+  colleagueTz: string | null | undefined,
+): { deferred: false } | { deferred: true; deferredTo: string } {
+  const deferredTo = colleagueWorkTimeBaseFromNow(colleagueTz);
+  if (Date.parse(deferredTo) > Date.now() + COLLEAGUE_SEND_GATE_SLOP_MS) {
+    return { deferred: true, deferredTo };
+  }
+  return { deferred: false };
+}

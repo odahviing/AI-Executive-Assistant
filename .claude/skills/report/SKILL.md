@@ -79,11 +79,29 @@ His five verbs, and what this skill does with each:
 - **`convert`** — a design question, not a bug. The 6-step GitHub-issue
   process is the Manager skill's; don't attempt any part of it here.
 
+## 3. The row you just ruled on leaves `report.md`'s `pending owner` group — reflect that, don't invent the headline shape
+
+A decline / defer / queue-for-later ruling means that row no longer belongs
+in the `pending owner` group (Manager `SKILL.md`'s vocabulary table says
+where each verdict's row lands). Remove it there, then rewrite the
+headline's leading clause and total from `node scripts/ledger-stats.cjs
+--open`'s **RULABLE** figure — never a number you compute by hand. Reuse
+the rule already written for exactly this case, don't restate it your own
+way: **`WRAP_UP.md` step 9.2** — the leading bolded clause is always
+RULABLE, never a delta, and an all-clear phrasing (`0 rows await you`,
+`nothing awaiting you`) is correct **only** when RULABLE is genuinely 0.
+This is one row and one headline, not the full cross-check against
+`ledger-stats.cjs --open` that Manager's own `report` command does — that
+stays a full session. Run `node scripts/ledger-stats.cjs --report` before
+you reply: it enforces the same all-clear rule and the 5-line narration
+budget outside the table, so a wrong shape is caught here, not by him.
+
 ## Out of scope, always
 
 This skill never dispatches a lane, never edits anything under `src/`, and
 never wraps. Read `report.md`, read `ledger-stats.cjs --open` when a `build`
 verdict needs the RE-READ check above, write a `declined`/`deferred`/
 `queued-next-run` ledger row (the last paired with a `state.pendingOverflow`
-append, never one without the other) — nothing else. Anything bigger is the
-Manager skill's session.
+append, never one without the other), and update the one row and headline on
+`report.md` that ruling changed (step 3) — nothing else. Anything bigger is
+the Manager skill's session.

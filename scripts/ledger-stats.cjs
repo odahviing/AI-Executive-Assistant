@@ -537,6 +537,50 @@ if (argv.includes('--closed-refs')) {
   process.exit(0);
 }
 
+if (argv.includes('--open-known')) {
+  const ledgerPath = argOf('--ledger') || LEDGER;
+  if (!fs.existsSync(ledgerPath)) {
+    console.error(`No ledger at ${ledgerPath}`);
+    process.exit(1);
+  }
+  const all = fs
+    .readFileSync(ledgerPath, 'utf8')
+    .split(/\r?\n/)
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const latest = new Map();
+  for (const r of all) {
+    if (!r.ref) continue;
+    latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r });
+  }
+  const terse = argv.includes('--terse');
+  const rows = [...latest.values()]
+    .filter((r) => r.verdict === 'converted' || r.verdict === 'declined')
+    .map((r) => ({
+      ref: r.ref,
+      symptom: r.finding || '',
+      invariant: r.invariant,
+      state: r.verdict,
+      note: terse ? (r.note || '').slice(0, 160) : r.note || '',
+    }));
+  if (jsonOut) {
+    console.log(JSON.stringify(rows));
+  } else {
+    console.log(
+      `\nOPEN KNOWN — ${rows.length} row(s) that already left the bug track as a settled decision (${rows.filter((r) => r.state === 'converted').length} converted, ${rows.filter((r) => r.state === 'declined').length} declined).`,
+    );
+    console.log(`Pass --json for args.openKnown directly. A converted match overrides on any source but a bare 'logs' rediscovery; a declined match is a straight drop unless the new finding's source is not 'logs'.\n`);
+  }
+  process.exit(0);
+}
+
 // ── X67 · WHAT SHIPPED IN VERSION X ─────────────────────────────────────────
 // The wrap summary asserts a pair of numbers — *"7 shipped, 4 verified"* — and
 // nothing could check either. They are hand-typed, and on 2026-07-31 an architect
@@ -1236,7 +1280,7 @@ if (argv.includes('--report')) {
     );
     if (got.rulable === null && want['waiting on a verb'])
       console.log(
-        `      ${want['waiting on a verb']} open row(s) need his build-or-decline and carry no verb, so X77 keeps every one of them OFF the table. Silence on this line reads as nothing pending — write it, then give those rows their verb (M6b).`,
+        `      ${want['waiting on a verb']} open row(s) need his build-or-decline and carry no verb, so X77 keeps every one of them OFF the table. Silence on this line reads as nothing pending — write it, then give those rows their verb (the Manager's own recommend rule).`,
       );
     if (wrong.length) bad += 1;
     // X194 · THE "0 ROWS AWAIT YOU" ALL-CLEAR, CHECKED AGAINST THE STANDING
@@ -1839,7 +1883,7 @@ for (const [lane, s] of lanes) {
     noted += 1;
   }
   if (blocked >= 3) {
-    console.log(`  ! ${lane}: ${blocked} blocked-charter — a rule may be wrong. M6 signal; read the notes before assuming the lane is at fault.`);
+    console.log(`  ! ${lane}: ${blocked} blocked-charter — a rule may be wrong. An architectural signal per the Manager's own charter; read the notes before assuming the lane is at fault.`);
     noted += 1;
   }
   if (s.buildAsks >= 5 && pct > 60) {

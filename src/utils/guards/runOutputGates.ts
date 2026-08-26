@@ -27,7 +27,11 @@
  *     rule-aware check established as unavailable may not be sold as workable to
  *     anyone, so it is decided by the calendar and not by the reader, and running
  *     it first means its rewrite is scrubbed / voice-checked / date-verified by
- *     whichever leg follows.
+ *     whichever leg follows — THEN the slot-grounding check (claimChecker's
+ *     'slot_grounding' mode, gh proposed-slot-not-grounded-in-search-result):
+ *     the MIRROR case — a specific time never confirmed by this turn's own
+ *     find_available_slots / check_join_availability may not be sold as
+ *     available either. Same reader-independent placement, same reasoning.
  *   OWNER-PRIVATE (a 1:1 DM; only the owner ever reads it): claim-check +
  *     humanGate('owner') + date-verify, probed concurrently, exact serial chain
  *     on any flag.
@@ -248,6 +252,23 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // whichever leg the reply is on. On a clean turn it costs nothing: the pre-filter
   // is an empty in-memory ledger and no module is even loaded.
   cleanReply = await runAvailabilityFloorAndMaybeRewrite(ctx, cleanReply);
+
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — the MIRROR of
+  // the floor above, same placement and the same reasoning (reader-independent
+  // calendar fact, rewrite gets checked by every gate below): a slot the
+  // rule-aware check ESTABLISHED as blocked may not be sold as workable (the
+  // floor above); a slot NEVER established as available by this turn's own
+  // find_available_slots / check_join_availability may not be sold as
+  // available either. Confirmed incident: a real find_available_slots call
+  // returned an evening window, the drafted reply named a fabricated
+  // early-afternoon time and a fabricated colleague conflict, 8 seconds
+  // later, to a real colleague. RULE A (claimChecker's default mode) exempts
+  // proposals from its phantom-action check by design — an EA proposing a
+  // time is not claiming a completed action — which is correct for the
+  // general case but left this specific class (a fabricated SPECIFIC time)
+  // uncaught. On a turn that never calls either tool this costs nothing: the
+  // deterministic pre-filter inside the function below returns immediately.
+  cleanReply = await runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
 
   // (v3.6.x — the "booked-date honesty" backstop that used to run between the
   // two legs was RETIRED. It was a 4th output-path LLM call on every booking
@@ -1253,6 +1274,24 @@ async function runClaimCheckAndMaybeRewrite(
 }
 
 /**
+ * bounce-fix (2026-08-26) — the SAME thread-history snippet Maelle drafted
+ * from (`ctx.history`), capped (last 12 turns, 220 chars each) to bound
+ * prompt size on checks that run every colleague-readable turn (G10). One
+ * canonical builder (G9) shared by 'owner_fact' mode (an invented personal
+ * fact may be something the owner said himself earlier) and 'slot_grounding'
+ * mode (a time this thread already confirmed via a REAL search in an
+ * EARLIER turn stays grounded even when THIS turn's own search result
+ * doesn't repeat it) — was hand-copied per call site before this fix.
+ */
+function buildRecentHistorySnippet(ctx: OutputGateContext): string | undefined {
+  const { profile } = ctx;
+  return (ctx.history ?? [])
+    .slice(-12)
+    .map(h => `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${(h.content ?? '').slice(0, 220)}`)
+    .join('\n') || undefined;
+}
+
+/**
  * owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — colleague-
  * readable-only check: extends the invented-fact pattern (previously
  * coda-mode only, verified against a snapshot of what we know about the
@@ -1302,17 +1341,12 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
     // retry) — ground truth the check needs beyond "did a tool run": the SAME
     // history array the orchestrator handed Maelle when she drafted this
-    // reply (`ctx.history`, already loaded — no extra DB read, no extra
-    // call), so "he can take a car call" reads as grounded when the owner
+    // reply, so "he can take a car call" reads as grounded when the owner
     // said exactly that three turns earlier in this same thread, and only as
     // invented when it has no such origin anywhere. See claimChecker.ts's
-    // `recentHistorySnippet` doc comment. Capped (last 12 turns, 220 chars
-    // each) to bound prompt size on a check that runs every colleague-
-    // readable turn (G10) — this is the same history window, just formatted.
-    const recentHistorySnippet = (ctx.history ?? [])
-      .slice(-12)
-      .map(h => `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${(h.content ?? '').slice(0, 220)}`)
-      .join('\n') || undefined;
+    // `recentHistorySnippet` doc comment; builder shared with 'slot_grounding'
+    // mode below (G9).
+    const recentHistorySnippet = buildRecentHistorySnippet(ctx);
 
     const verdict = await checkReplyClaims({
       reply: cleanReply,
@@ -1519,6 +1553,141 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
     logger.warn('Availability floor threw — sending the original draft', { err: String(err).slice(0, 200) });
     return initialReply;
   }
+}
+
+/**
+ * proposed-slot-not-grounded-in-search-result (2026-08-24) — the grounding
+ * check for a SPECIFIC time offered as available. Confirmed incident: a real
+ * `find_available_slots` call (11:33:21Z) returned an evening window; the
+ * reply sent 8 seconds later told a colleague a fabricated early-afternoon
+ * time and a fabricated colleague conflict — none of it backed by the actual
+ * tool result. RULE A (claimChecker's default mode) correctly exempts a
+ * PROPOSED future time from its phantom-action check ("proposing a future
+ * action is not a completed action, no verification needed") — right for the
+ * general case, but it means nothing ever cross-referenced a SPECIFIC time
+ * against the search that supposedly produced it. This is that
+ * cross-reference, modeled on claimChecker's 'owner_fact' mode: its own mode
+ * ('slot_grounding'), its own always-on-once-invoked check, called on EVERY
+ * colleague-readable AND owner-private turn (an owner told a fabricated time
+ * can act on it just as wrongly as a colleague can).
+ *
+ * TWO deterministic, free pre-filters (G10) before any LLM call:
+ *   1. Did `find_available_slots` or `check_join_availability` actually run
+ *      THIS turn? Read off the carried compact tool-summary lines
+ *      (turnHelpers.ts's `renderToolSummary` — the exact lines Sonnet herself
+ *      saw, never re-derived or re-parsed here, per G2). Absent on the vast
+ *      majority of turns, which never search availability at all — nothing
+ *      loads, nothing costs anything.
+ *   2. Does the draft contain at least one digit? A specific clock time or
+ *      date cannot be named without one, in every language this system
+ *      supports — the same language-neutral structural floor claimChecker's
+ *      own `needsCheck` already uses for its length heuristic (G10 — gate the
+ *      LLM behind a structural signal wherever one exists).
+ *
+ * Detection is Haiku, read as STRUCTURED FIELDS ONLY (G4) — the model never
+ * supplies its own reasoning, only `claimed_action`/`action_summary`, so a
+ * hallucinated time or a leaked chain-of-thought can never reach a reader.
+ * The remedy is `rewriteOwningTheMiss`'s `ungrounded_slot_claim` branch: a
+ * tool-less Sonnet rewrite constrained to substitute ONLY the real confirmed
+ * time(s) we hand it (never inventing its own), with the same
+ * minimal-redaction fallback and fail-open contract every other branch in
+ * that function already has (G3/G5).
+ *
+ * Fails open at every step — same contract as every other gate in this file.
+ *
+ * bounce-fix (2026-08-26, adversarial re-verify) — this turn's search result
+ * is not the ONLY ground truth: a time a real search already confirmed in an
+ * EARLIER turn of the same thread (colleague asks about a second day while a
+ * first offer still stands) is passed too, via `recentHistorySnippet`
+ * (`buildRecentHistorySnippet` above) — same field/builder 'owner_fact' mode
+ * already uses (G9), so a genuinely-confirmed earlier offer restated
+ * alongside a new search no longer reads as fabricated.
+ */
+async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
+  const { profile, result } = ctx;
+  if (!initialReply || initialReply.trim().length === 0) return initialReply;
+  if (!/\d/.test(initialReply)) return initialReply;
+
+  // A calendar mutation that actually succeeded THIS turn (booking, move,
+  // etc.) is its own, stronger ground truth — the reply is very likely
+  // narrating the booked/moved instant itself ("Booked Tue 20:30"), not
+  // offering a candidate. That instant can legitimately differ in rendering
+  // from find_available_slots' own candidate strings (a different
+  // presentation timezone, a grid-snap) without being false — same G5
+  // reasoning the availability floor above already applies to a completed
+  // mutation (see its own "CLEAR, don't merely stand down" branch). Standing
+  // down here is a safe MISS (RULE A / the matchingToolAlreadyRan shield
+  // already cover a false completed-action claim); rewriting would risk
+  // contradicting a true booking.
+  const tape = (result.toolSummaries ?? []).join(' ');
+  if (result.bookingOccurred === true || tape.includes('mutated=book')) return initialReply;
+
+  // Deterministic pre-filter 1 — read the carried compact summary lines for
+  // the two availability tools verbatim (never re-derived). Absent on this
+  // turn ⇒ nothing to ground a claim against ⇒ nothing to check.
+  const groundedToolLines = (result.toolSummaries ?? []).filter(
+    line => line.startsWith('[find_available_slots') || line.startsWith('[check_join_availability'),
+  );
+  if (groundedToolLines.length === 0) return initialReply;
+
+  let cleanReply = initialReply;
+  try {
+    const { checkReplyClaims, rewriteOwningTheMiss } = await import('../claimChecker');
+
+    // bounce-fix (2026-08-26) — a time confirmed by a real search in an
+    // EARLIER turn of this thread (colleague asks about a second day while a
+    // first offer still stands) has no other ground truth: this mode's own
+    // `groundedToolLines` is THIS TURN's search only. See
+    // claimChecker.ts's `recentHistorySnippet` doc comment.
+    const recentHistorySnippet = buildRecentHistorySnippet(ctx);
+
+    const verdict = await checkReplyClaims({
+      reply: cleanReply,
+      toolSummaries: result.toolSummaries ?? [],
+      bookingOccurred: result.bookingOccurred ?? false,
+      ownerFirstName: profile.user.name.split(' ')[0],
+      mode: 'slot_grounding',
+      slotGroundingContext: { groundedToolLines },
+      recentHistorySnippet,
+    });
+
+    if (!verdict.claimed_action) return cleanReply;
+
+    logger.warn('Slot-grounding check: draft offers a specific time as available that this turn\'s real search does not confirm — rewriting (no tool re-fire)', {
+      senderId: ctx.senderId,
+      threadTs: ctx.threadTs,
+      action_summary: verdict.action_summary,
+      groundedToolLines,
+      draftPreview: cleanReply.slice(0, 300),
+    });
+
+    const rewritten = await rewriteOwningTheMiss({
+      draft: cleanReply,
+      actionSummary: verdict.action_summary,
+      // bounce-fix finding 4 (2026-08-24) — pin the literal, not
+      // `verdict.action_type`. `checkReplyClaims` does
+      // `action_type: (parsed.action_type ?? 'other')` with no per-mode
+      // validation (claimChecker.ts:730-731), and a JSON-truncation recovery
+      // path can yield an unexpected value. This call site already KNOWS it
+      // invoked `mode: 'slot_grounding'` (line 1621 above) — trusting an LLM
+      // round-trip for control flow it already has the answer to would let a
+      // malformed `action_type` silently fall through to the DEFAULT
+      // phantom-action rewrite prompt (nonsense like "I'm not sure that went
+      // through" on a slot offer) instead of the slot-claim branch.
+      actionType: 'ungrounded_slot_claim',
+      targetName: verdict.target_name,
+      ownerFirstName: profile.user.name.split(' ')[0],
+      toolSummaries: result.toolSummaries ?? [],
+      groundedToolLines,
+    });
+    if (rewritten && rewritten.trim().length > 0) {
+      cleanReply = normalizeForTransport(ctx, rewritten);
+    }
+  } catch (err) {
+    logger.warn('Slot-grounding check threw — leaving draft unchanged', { err: String(err).slice(0, 200) });
+  }
+
+  return cleanReply;
 }
 
 /**

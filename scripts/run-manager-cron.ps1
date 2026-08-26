@@ -33,7 +33,9 @@ if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
 # `claude -p` force-kills a background Workflow task after 600s by default --
 # a real bugger run takes 45-54 min, so without this every headless run was
 # always going to get auto-killed mid-dispatch, no matter what else was fixed.
-$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "0"
+# 3 hours, not 0 (unlimited) -- a real bound so a genuine hang still gets
+# killed eventually instead of running forever.
+$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "10800000"
 # The wall-clock window is the join key against run-history.jsonl below — cron
 # runs never overlap, so no run id needs pre-minting to find "this run's" rows.
 # ParseExact yields Kind=Unspecified, which .ToUniversalTime() treats as local —

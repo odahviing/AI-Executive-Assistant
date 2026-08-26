@@ -241,20 +241,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // (create_approval / message_colleague) deliberately do
   // NOT set this (they're the lull case the coda is allowed to ride).
   let turnLeftWorkPending = false;
-  // coda-repeats-and-merges-with-action-confirmations (bouncer overturn,
-  // 2026-08-10) — true once a calendar mutation SUCCEEDS this turn, meaning
-  // the reply is about to report an executed action's result ("Done,
-  // cancelled X and booked Y"). Distinct from turnLeftWorkPending (which
-  // flags a mutation that DIDN'T close): a booking that resolves cleanly
-  // used to sail straight through the task-turn coda piggyback below, which
-  // only checked turnLeftWorkPending — so a resolved booking still got a
-  // coda stacked on it (Bodyguard, 2026-08-09 — confirmed via vm-logs:
-  // "Social coda DUE on a task turn" fired the same beat this booking
-  // closed, no approval/request-spine row involved at all). Handoff tools
-  // (create_approval / message_colleague) are deliberately excluded from
-  // `mutators` below — a parking turn still earns its coda; only a genuine
-  // action-result confirmation is excluded.
-  let turnReportedActionResult = false;
   // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
   // (postReply.ts). Carries FULL event ids so a retry can build a hint that
   // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
@@ -1039,12 +1025,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         if (awaitingDecision || failedMutation || errored) {
           turnLeftWorkPending = true;
         }
-        // coda-repeats-and-merges-with-action-confirmations — the mirror of
-        // failedMutation above: this mutation actually succeeded, so the
-        // reply is reporting a real, executed action.
-        if (mutators.has(toolUse.name) && (r.success === true || r.deleted === true)) {
-          turnReportedActionResult = true;
-        }
       }
 
       // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated
@@ -1449,12 +1429,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // It is SUPPRESSED when the turn is still mid-exchange — Maelle returned a
     // question/decision to the current interlocutor (confirm-override,
     // pick-a-slot, rule exception) or a tool failed — which
-    // `turnLeftWorkPending` captures during the tool loop — OR when this turn
-    // is reporting an executed action's result (a booking/cancel/move that
-    // actually succeeded — `turnReportedActionResult`, coda-repeats-and-
-    // merges-with-action-confirmations): that confirmation is the thing the
-    // person is reading right now, and L7 puts a coda stacked on top of it in
-    // the "never in the way" bucket even though the work did resolve.
+    // `turnLeftWorkPending` captures during the tool loop.
     //
     // History: the original piggyback (v2.2.1) fired on parking turns but the
     // picker was context-blind → mid-booking non-sequitur ("btw that Samuel L.
@@ -1464,7 +1439,35 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // guard keeps the coda off genuinely mid-process turns. The cold-open
     // socialOutreachTick is gone (v3.2.5) — this in-conversation coda is now the
     // ONLY proactive-social surface.
-    const codaEligible = !turnLeftWorkPending && !turnReportedActionResult;
+    //
+    // coda-repeats-and-merges-with-action-confirmations (2026-08-10) had also
+    // added a `turnReportedActionResult` flag here, blanket-suppressing the
+    // coda for the REST of the turn whenever a mutation (create/move/delete
+    // meeting, floating block, lunch) succeeded — a booking confirmation could
+    // never get a coda at all, on any surface, for any recipient. Reverted
+    // 2026-08-24 (owner ruling, Mike Naumenko onsite-booking case): the actual
+    // defect that fix was chasing was a stale/ignored social TOPIC resurfacing
+    // (Bodyguard) on the very beat a booking closed — a real problem, but it
+    // has its own dedicated fix since — a subject dies permanently after 2
+    // ignored raises (`recordSubjectUnanswered` / `MAX_UNANSWERED_RAISES`,
+    // db/socialSubjects.ts:493,:149), fed by two independent triggers:
+    // end-of-chat pivot detection (core/social/logEngagement.ts:92, called
+    // from memory/capturePass.ts:1217) and 24h resolve-on-read
+    // (core/social/stateMachine.ts:300-311). This supersedes the older
+    // `applyIgnoredRaiseDecay` (shipped 4.5.3, removed 4.6.0 in 025f6b5) — if
+    // you find that name in ledger history, it's the predecessor to the
+    // mechanism above, not a live citation. And the literal same-completion
+    // merge case this comment worried about is a
+    // DIFFERENT mechanism entirely (the in-prompt SOCIAL DIRECTIVE, gated off
+    // task turns unconditionally by `chooseSocialDirective`'s own
+    // `kind === 'task'` check, and off approval-relay turns by
+    // `hasOperationalRelay` — stateMachine.ts, untouched by this revert). This
+    // piggyback coda is never spliced into the confirmation text (postReply.ts
+    // `scheduleSocialCoda` — its own message, 5-15s later, dropped if the
+    // person speaks again or another turn already answered) — a resolved
+    // booking is exactly the "natural lull" v2.2.1 was built for, same as a
+    // question answered or a note saved.
+    const codaEligible = !turnLeftWorkPending;
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports

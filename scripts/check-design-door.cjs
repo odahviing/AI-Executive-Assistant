@@ -280,12 +280,19 @@ const main = async () => {
     ok(`refuses ${name}`, !!g.err && re.test(g.err.message), g.err ? g.err.message : '(no throw)')
     ok(`  …and dispatched nothing`, g.calls.length === 0, g.calls.map((c) => c.label))
   }
+  // A design ref is a single-element array by construction (`REFS =
+  // DESIGN ? [gh#N] : …`), and the REFS branch builds `items` by mapping
+  // that array directly — no intake agent involved, so there is no code
+  // path left for a design run to see more than one item. Proven by
+  // mocking `framer:backlog` to return two items anyway: if the engine
+  // ever called it, this would be the two-item plan; it never does.
   const twoItems = await run(
     { mode: 'plan', design: 'gh#154' },
     { 'framer:backlog': { items: [INTAKE.items[0], { ref: '#155', title: 'other', priority: 'Low', asks: 'x' }] }, 'framer:#154': RECON, framer: GOOD_PLAN },
   )
-  ok('refuses a design run that intake fanned out to two items', !!twoItems.err && /one design item, and intake returned 2/.test(twoItems.err.message), twoItems.err && twoItems.err.message)
-  ok('  …before any recon', reconOnly(twoItems.calls).length === 0, twoItems.calls.map((c) => c.label))
+  ok('no throw — a design ref never reaches the old two-item guard', !twoItems.err, twoItems.err && twoItems.err.message)
+  ok('a design run never dispatches the intake agent at all', called(twoItems.calls, 'framer:backlog').length === 0, twoItems.calls.map((c) => c.label))
+  ok('  …so exactly one recon runs, by construction', reconOnly(twoItems.calls).length === 1, reconOnly(twoItems.calls).map((c) => c.label))
   const bare = await run({ mode: 'plan', design: 'gh#154' }, GOOD)
   ok('a design run with NO cluster is allowed (a first-time design item)', !bare.err && bare.out.design.absorbs.length === 0, bare.err ? bare.err.message : bare.out.design)
   ok('  …and says the cluster was not passed', bare.logs.some((l) => /No cluster passed/.test(l)), bare.logs)

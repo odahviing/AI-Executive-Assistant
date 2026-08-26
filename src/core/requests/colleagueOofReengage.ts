@@ -51,7 +51,7 @@ import { createOutreachJob, updateOutreachJob, getOutreachJobByRequestId, getLin
 import { getPersonMemory } from '../../db/people';
 import { getOwnerEventsForDecision } from '../../connectors/graph/calendarReads';
 import { isAllDayOutOfOffice, computeOofSpan, formatOofUntilDisplay } from '../../utils/scheduleRules';
-import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../../utils/responseDeadline';
+import { calcResponseDeadline, isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { getConnection } from '../../connections/registry';
 import { logActivity } from './logActivity';
 import { closeRequest } from './closeRequest';
@@ -381,11 +381,11 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
   // instead; re-arming back through `colleague_oof_recheck` re-verifies owner
   // coverage too, which is correct — an extended trip can still change the
   // answer by the time the colleague's window opens.
-  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
-  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
-    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'colleague_oof_recheck' });
+  const gate = isColleagueSendDeferred(colleagueTz);
+  if (gate.deferred) {
+    updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'colleague_oof_recheck' });
     logger.info('sendOofReengagement — outside colleague work hours, deferring reengagement', {
-      requestId: row.id, colleagueSlackId, colleagueTz, deferredTo: colleagueBase,
+      requestId: row.id, colleagueSlackId, colleagueTz, deferredTo: gate.deferredTo,
     });
     return 'rearmed';
   }
@@ -482,11 +482,11 @@ export async function runOofReengageReask(row: RequestRow, profile: UserProfile)
   // o#245/o#246) — defer this re-ask to the colleague's own next work-time
   // start rather than firing on the raw +24h timer regardless of their clock.
   const colleagueTz = job.colleague_tz || profile.user.timezone;
-  const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTz);
-  if (Date.parse(colleagueBase) > Date.now() + 60_000) {
-    updateRequest(row.id, { nextCheckAt: colleagueBase, nextCheckHandler: 'oof_reengage_reask' });
+  const gate = isColleagueSendDeferred(colleagueTz);
+  if (gate.deferred) {
+    updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'oof_reengage_reask' });
     logger.info('runOofReengageReask — outside colleague work hours, deferring re-ask', {
-      requestId: row.id, colleagueTz, deferredTo: colleagueBase,
+      requestId: row.id, colleagueTz, deferredTo: gate.deferredTo,
     });
     return 'rearmed';
   }

@@ -192,7 +192,9 @@ Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUEST
   • "In person or online?"
   • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
 
-SMART-SKIP THE ASK: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has TZ data on each colleague), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
+SMART-SKIP THE ASK — two cases where you skip the two-question ask entirely:
+  • Cross-timezone default: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has TZ data on each colleague), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
+  • Thread already established it: if an earlier message, or an earlier find_available_slots call in this same thread for this same meeting, already gave you the mode / venue / travel time, reuse it on a later search instead of repeating the two-question ask — reading the thread is your job, not the owner's to repeat.
 
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
@@ -204,7 +206,8 @@ ONLINE ≠ "AT HOME". meeting_mode='online' is a scheduling flag — it tells th
 
 EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array with one entry per workday touched: \`{ date, accepted, top_reasons, blocked_by? }\`. When the user pushes back ("what about Monday?" / "nothing on Tuesday?"), look up that date in \`day_summary\` and narrate the actual reason:
   • \`accepted: 0, top_reasons: ['owner_busy_collision', 'focus_time_office']\` → "Monday is fully booked — back-to-back meetings, and what's left would put you under your free-time floor."
-  • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day."
+  • \`accepted: 0, top_reasons: ['wrong_day_type']\` → "Monday is a home day, in-person needs an office day." (a mismatch, not a day off — he's working, just not from the office)
+  • \`accepted: 0, top_reasons: ['vacation_or_off_day']\` → this IS a real day off — say so plainly: "Monday is a day off for ${profile.user.name.split(' ')[0]}."
   • \`accepted: 0, top_reasons: ['owner_out_of_office']\` → "Monday is out — ${profile.user.name.split(' ')[0]} is out of office that day." If that entry also carries \`oof_until_display\`, the away stretch runs past this one day — name the real end instead: "Monday is out — ${profile.user.name.split(' ')[0]} is away through Friday 29 Aug."
   • \`accepted: 0, top_reasons: ['category_per_day']\` → "Already at the daily cap for that category."
   • \`attendee_busy_collision\` (also in \`blocked_by\`) → the attendee's OWN calendar is genuinely busy during your shared hours — real evidence. Scope it ("X is booked during your shared hours Thursday"), don't inflate to "unavailable all day."
@@ -212,7 +215,7 @@ EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array wit
   • \`accepted: >0\` → the day HAS options; if Sonnet's spread picker didn't surface one, say "there are slots that day, want me to pull them?"
   • Date not in \`day_summary\` at all → "I haven't checked that day yet — want me to look?"
 
-NEVER fabricate a reason. Don't say "day off" / "not a workday" unless \`top_reasons\` is \`['wrong_day_type']\`. The data has the truth — use it. And NEVER blame the colleague for the owner's full day: "X isn't available / can't make it" is honest ONLY with positive evidence from X's calendar (\`attendee_busy_collision\` / \`blocked_by\`). When the real block is the owner's own calendar, or you lack positive evidence he's free then, say it owner-first / no-overlap ("your Thursday is full", "no opening that works for both of you Thursday") — never a false absolute about the colleague.
+NEVER fabricate a reason. Say "day off" / "not a workday" only when \`top_reasons\` includes \`vacation_or_off_day\` — that's the actual day-off case. \`wrong_day_type\` is a different mismatch (in-person requested on a home day) — he's working, just not from the office, so don't call that one a day off. The data has the truth — use it. And NEVER blame the colleague for the owner's full day: "X isn't available / can't make it" is honest ONLY with positive evidence from X's calendar (\`attendee_busy_collision\` / \`blocked_by\`). When the real block is the owner's own calendar, or you lack positive evidence he's free then, say it owner-first / no-overlap ("your Thursday is full", "no opening that works for both of you Thursday") — never a false absolute about the colleague.
 
 A SPREAD IS A SAMPLE. The 2–5 options find_available_slots surfaces are a sample of the day, not the whole set — NEVER narrate the un-shown time as gone ("that's all", "the rest of the day is packed"). More may be free; offer to pull more, or to check a specific time.
 
@@ -266,7 +269,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             meeting_mode: {
               type: 'string',
               enum: ['in_person', 'online', 'either', 'custom'],
-              description: 'REQUIRED. Ask the owner if you do not know.',
+              description: 'REQUIRED. Reuse it if this thread already established it for this meeting (see SMART-SKIP above) — otherwise ask the owner.',
             },
             travel_buffer_minutes: {
               type: 'number',

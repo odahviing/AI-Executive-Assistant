@@ -566,7 +566,27 @@ export async function createApprovalRequest(
   const ownerUserId = profile.user.slack_user_id;
 
         const subkind = args.kind as ApprovalSubkind;
-        const payload = (args.payload as Record<string, unknown>) ?? {};
+        // The tool schema declares payload as an object, but a malformed tool
+        // call can still send it as a stringified JSON blob — a plain `as`
+        // assertion doesn't convert at runtime, so a later `payload.x = y`
+        // write throws (TypeError: Cannot create property on string) with no
+        // approval ever reaching the owner. Normalize defensively: parse a
+        // string payload back into an object, and fall back to {} (logging
+        // why) if it isn't valid JSON, so a bad tool call degrades instead of
+        // crashing create_approval outright.
+        let rawPayload = args.payload;
+        if (typeof rawPayload === 'string') {
+          const rawPayloadString = rawPayload;
+          try {
+            rawPayload = JSON.parse(rawPayloadString);
+          } catch {
+            logger.warn('create_approval — payload arrived as a non-JSON string; falling back to {}', {
+              preview: rawPayloadString.slice(0, 200),
+            });
+            rawPayload = {};
+          }
+        }
+        const payload = (rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {});
         const askText = args.ask_text as string;
 
         // #145 — a CALENDAR change must never ride a freeform approval. Freeform
@@ -1515,7 +1535,7 @@ Behavior:
           type: 'object',
           properties: {
             kind: { type: 'string', enum: [...APPROVAL_SUBKINDS] },
-            payload: { type: 'object', description: 'Kind-specific payload (see tool description).' },
+            payload: { type: 'object', description: 'Kind-specific payload (see tool description). Pass a real JSON object here, NOT a JSON-encoded string.' },
             ask_text: { type: 'string', description: 'The exact text to DM the owner as the approval ask.' },
             expires_in_workdays: { type: 'number', description: 'Owner-workdays until expiry. Default 2.' },
             expires_in_hours: { type: 'number', description: 'Sub-workday escape hatch.' },

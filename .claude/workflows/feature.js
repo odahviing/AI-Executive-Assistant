@@ -26,7 +26,7 @@ export const meta = {
 // Three more things bugger.js gets wrong for this shape, all load-bearing:
 //   • Its intake is `--label Bug`. An improvement is not there.
 //   • Its triage schema demands a root cause. An improvement has none.
-//   • Manager rule M2 ("one root = one issue") is bug logic. Improvements split
+//   • The Manager's one-root-one-issue rule is bug logic. Improvements split
 //     by CAPABILITY and SURFACE — the same idea can legitimately land in three
 //     lanes at once, and that is not a merge candidate.
 //
@@ -572,9 +572,7 @@ if (MODE === 'plan') {
   // what the owner naturally calls it) became invisible to this engine forever.
   // The priority word narrows to whichever track uses it, which is the intent:
   // `High` finds Improvements, `Roadmap` finds Features.
-  const query = REFS
-    ? `Run ONLY: \`gh issue view <n> --json number,title,body,labels\` for each of these issue numbers: ${REFS.join(', ')}`
-    : `Run ONLY this one command: \`gh issue list --search "is:open label:Improvement,Feature${PRIORITY ? ` label:${PRIORITY}` : ''}" --json number,title,body,labels\``
+  const query = `Run ONLY this one command: \`gh issue list --search "is:open label:Improvement,Feature${PRIORITY ? ` label:${PRIORITY}` : ''}" --json number,title,body,labels\``
 
   // A described item needs no intake at all — the owner already said what he
   // wants, and re-reading it through an agent would only risk paraphrasing it.
@@ -589,6 +587,17 @@ if (MODE === 'plan') {
       asks: it.asks || it.title || '',
     }))
     log(`Plan: ${items.length} described item(s), not on GitHub yet — intake skipped. A ticket is filed if you approve, not before.`)
+  } else if (REFS) {
+    // Named refs are already known — there is nothing to LIST, so the only
+    // thing the old backlog agent did here was run `gh issue view` on a ref
+    // the caller already named. That was a whole extra agent dispatch to run
+    // one shell command; each per-ref recon agent below now runs it itself
+    // as its own first step instead. The listing agent (below) stays,
+    // because THAT path genuinely cannot be skipped: nothing names which
+    // items exist until it runs, so there is nothing yet to fan a per-item
+    // recon out over.
+    items = REFS.map((r) => ({ ref: `#${normRef(r)}`, needsFetch: true }))
+    log(`Recon: ${items.length} named item(s) — each fetches its own issue directly, no separate listing pass.`)
   } else {
     const raw = await agent(
       `${query} (read-only). Do NOT orient, explore the codebase, or read other files — just the command. SKIP any issue already labelled \`Agent\`. ` +
@@ -600,24 +609,24 @@ if (MODE === 'plan') {
       // decision means do not dispatch" — and every one of those is wrong here.
       // Effort and model stay as tuned: one shell command does not need more.
       // X151 · the label names the agent first (framer, every dispatch in this
-      // file) and the task second. X177 · phase is `Recon` — the listing and
-      // the per-item understand pass below now share one box, not two.
+      // file) and the task second. This path runs only when no ref was named:
+      // a real listing, which no per-item agent can do for itself because
+      // none of them exist yet to be named.
       { label: 'framer:backlog', phase: 'Recon', agentType: 'framer', effort: 'low', model: 'haiku', schema: RAW },
     )
     items = (raw && raw.items) || []
     log(`Recon: ${items.length} open item(s) found${PRIORITY ? ` at ${PRIORITY}` : ''}.`)
   }
   if (!items.length) return { mode: 'plan', items: [], pieces: [], blockingQuestions: [], note: 'Nothing open.' }
-  items.forEach((i) => log(`  • ${i.ref} [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`))
+  items.forEach((i) => log(`  • ${i.ref}${i.needsFetch ? ' (fetching in recon)' : ` [${i.priority || '?'}] ${(i.title || '').slice(0, 80)}`}`))
 
-  // ONE DESIGN ITEM, and this is the line that enforces it. The whole point of
-  // clustering by destination is that nine symptoms become ONE recon and ONE plan;
-  // a design run that arrived with two items would spend two Opus recons deciding
-  // the same question twice and then hand him two half-designs to reconcile.
-  if (DESIGN && items.length !== 1)
-    throw new Error(
-      `args.design (${DESIGN_REF}) is one design item, and intake returned ${items.length}: ${items.map((i) => i.ref).join(', ')}. Nothing was planned. One design question = one destination = one recon.`,
-    )
+  // ONE DESIGN ITEM. Used to be a runtime check here (`items.length !== 1`),
+  // because `items` came back from an intake AGENT that could in principle
+  // hallucinate more than the one ref it was asked to fetch. Since the REFS
+  // branch above builds `items` by mapping DESIGN's own single-element ref
+  // array — no agent involved — `items.length` is now exactly 1 by
+  // construction, not by a check: there is no code path left for it to be
+  // anything else. Removed rather than kept as a check nothing can trip.
   if (DESIGN)
     log(
       `Design door: ${DESIGN_REF} — ${CLUSTER_REFS.length} converted symptom ref(s)` +
@@ -715,7 +724,10 @@ if (MODE === 'plan') {
               ? `**THE OWNER'S CONSTRAINTS — read these BEFORE deciding what the item means:**\n${CONSTRAINTS.map((c) => `• ${c}`).join('\n')}\n\n` +
                 `A constraint is not a hint. If one makes the item impossible, or forces a materially worse route than you would otherwise take, put that in \`openQuestions\` rather than quietly working round it — **a constraint he cannot have is the most valuable thing you can tell him**, and silently satisfying it hides the choice he needed to make.\n\n`
               : '') +
-            `IMPROVEMENT ${it.ref}: ${it.title}\n${it.asks}`,
+            (it.needsFetch
+              ? `**This ref was named directly, so nothing has fetched it yet — run \`gh issue view ${it.ref.replace(/^#/, '')} --json number,title,body,labels\` yourself first.** If it is already labelled \`Agent\`, say so in \`openQuestions\` rather than proceeding blind. Read its priority label (High|Medium|Low on an Improvement, Roadmap|Next|Idea on a Feature, else unlabelled) and use its body as the \`asks\` below, in the owner's own framing — do not reinterpret or improve it.\n\n`
+              : '') +
+            `IMPROVEMENT ${it.ref}: ${it.title || '(fetch it yourself — see above)'}\n${it.asks || ''}`,
           // X15 · OPUS, on the owner's call. This pass establishes the ground
           // truth every later piece stands on, and NOTHING backstops it: the
           // bouncer checks the diff, not whether the premise was right, and a
@@ -771,7 +783,7 @@ if (MODE === 'plan') {
     // (F5-F10), so the engine states the schema and the charter states the
     // standing duty. Effort stays xhigh; no model pin, so the tier comes from
     // the charter, which is where spend.cjs:293 says it belongs.
-    { label: 'framer', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
+    { label: 'framer:decompose', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
   )
 
   let pieces = (plan && plan.pieces) || []

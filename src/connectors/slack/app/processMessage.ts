@@ -50,13 +50,24 @@ async function reattachRecentThreadImage(
   for (let i = recent.length - 1; i >= 0; i--) {
     const m = recent[i];
     if (m.role !== 'user') continue;
-    const match = /\[Image[^\]]*\bfile_urls:\s*(\S+)/i.exec(m.content);
+    // Stops at the first whitespace OR `]` — the persisted format is
+    // `file_urls: URL1 URL2] rest-of-message` with no space before the
+    // closing bracket, so a bare `\S+` swallowed the trailing `]` into the
+    // URL itself, corrupting it and making every re-download fail.
+    // The prefix between `[Image` and `file_urls:` is the auto-generated
+    // vision description (`imageDescPart` in the writer below), which is
+    // free-form model text and can itself contain a `]` — a `[^\]]*` prefix
+    // can't cross that character, so the whole match silently failed
+    // whenever the description happened to include one. `[\s\S]*?` (lazy,
+    // dot-matches-newline) can cross any character and still stops at the
+    // first `file_urls:` label, which the description itself won't contain.
+    const match = /\[Image[\s\S]*?\bfile_urls:\s*([^\s\]]+)/i.exec(m.content);
     if (!match) continue;
     const url = match[1];
     try {
       const dl = await downloadSlackImage(url, botToken, mimeFromImageUrl(url));
       if ('error' in dl) {
-        logger.warn('image re-attach — re-download failed, proceeding without', { error: dl.error });
+        logger.warn('image re-attach — re-download failed, proceeding without', { error: dl.error, detail: dl.detail });
         return undefined;
       }
       logger.info('image re-attach — re-attached recent thread image for a follow-up turn', { urlPreview: url.slice(0, 80) });

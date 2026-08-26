@@ -535,7 +535,17 @@ function touchThreadStatusState(key: string, state: ThreadStatusState): void {
     const oldestKey = threadStatusState.keys().next().value;
     if (oldestKey !== undefined) {
       const oldest = threadStatusState.get(oldestKey);
-      if (oldest?.timer) clearTimeout(oldest.timer);
+      if (oldest?.pending) {
+        // A pending status is already scheduled to fire on its own timer
+        // (closed over `oldest`, not looked up from this map) — only drop
+        // the map's tracking entry, never cancel work already promised to
+        // the user. The timer's own callback re-inserts via
+        // touchThreadStatusState once it fires, so this is a bounded,
+        // logged overflow, not a silent drop.
+        logger.warn('assistant status LRU eviction — thread had a pending status still queued, letting it fire', { key: oldestKey });
+      } else if (oldest?.timer) {
+        clearTimeout(oldest.timer);
+      }
       threadStatusState.delete(oldestKey);
     }
   }

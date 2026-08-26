@@ -986,14 +986,34 @@ export async function findAvailableSlots(params: {
       // window that is ENTIRELY such days left both rejectedCounts and
       // dayReasons empty, so the gate below never ran and diagnosticsOut.
       // daySummary was never set — a colleague dead-end search returned a
-      // bare `[]` with zero explanation to relay. Same `wrong_day_type`
-      // bucket the in-person/home-day mismatch below already uses for the
-      // narrower case, and the same collapse mapVerdictToRejectLabel applies
-      // to checkSlot's own `vacation_or_off_day` verdict.
+      // bare `[]` with zero explanation to relay.
+      //
+      // findavailableslots-day-off-mislabeled-wrong-day-type (2026-08-24) —
+      // this gate's ONLY reachable failure, for a day inside allWorkweekDays,
+      // is an active per-date override with isWorkday:false (owner said
+      // "block Wed off" via set_work_schedule_override) — a plain
+      // office/home day-NAME match already makes getEffectiveWorkDay's
+      // baseIsWorkday true, so `!dayIsWorkday` here can only fire via
+      // row.isWorkday===false. That is exactly checkSlot's own rule 1
+      // predicate (scheduleRules.ts `!effectiveDay.isWorkday`), which already
+      // carries the override-aware, TRUE label — 'vacation_or_off_day',
+      // rendered "Idan has Wednesday 9 Sep off" (hasOverride) vs "Wednesday
+      // isn't one of Idan's working days" (no override). Tagging it
+      // 'wrong_day_type' here instead — the SEPARATE label the in-person/
+      // home-day mismatch below correctly uses — produced a FALSE reason
+      // ("not the right kind of day for that — Idan is not in the office
+      // then") for a day that IS his office day and was simply blocked
+      // (2026-08-24 KPMG/Mike incident: Idan set an off-day override on
+      // 9 Sep in an unrelated thread; the resulting empty-breakdown search
+      // for that day carried no true reason for Sonnet to relay). checkSlot
+      // can never actually see this day (this gate always runs first and
+      // `continue`s), so reusing its verdict NAME here — not re-deriving a
+      // second one — keeps search and book agreeing on what the day's real
+      // story is (M1).
       const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
       if (!dayIsWorkday) {
         if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
-          dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
+          dayReasons.set(dayKey, new Map([['vacation_or_off_day', 1]]));
         }
         cursor = new Date(cursor.getTime() + step);
         continue;

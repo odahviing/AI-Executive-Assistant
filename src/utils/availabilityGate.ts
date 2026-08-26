@@ -21,8 +21,9 @@
  * now logs them apart. So this guard would NOT have fired on the incident it was
  * built for, and it was not supposed to.
  *
- * ⚠ AND ITS PRODUCTION RECORD IS 0 CATCHES, 2 FALSE FIRES — both on its first day,
- * both from bad INPUT rather than bad judgement, and both now closed upstream:
+ * ⚠ AND ITS PRODUCTION RECORD IS 0 CATCHES, 4 FALSE FIRES — the first two on its
+ * first day, both from bad INPUT rather than bad judgement, and both now closed
+ * upstream:
  *   • :743 — rewrote an honest "ich halte mir 16:00 CET frei" into a false collision
  *     claim, off a ledger entry for 16:00 Israel when the colleague meant 16:00 CET
  *     (= 17:00, which was free). Closed: an undecided frame now arms nothing unless
@@ -35,11 +36,21 @@
  *     draft entirely about Monday 3 August; only the rewriter's keep-veto stopped it
  *     (:784). Closed: `in_the_past` no longer arms, and the ledger holds future
  *     instants only.
- * The two vetoes did their job, which is the G5 design working — but a destructive
- * rewriter with no proven catch has not yet earned its active form (G6). Whether it
- * keeps that form, or should only ever rewrite to "I can't confirm that time", is an
- * open owner decision; this file states its own record so that decision is made on
- * data instead of on the story above.
+ *   • 2026-08-24T12:07:06Z / T12:07:12Z — two more, same shape, NOT yet closed
+ *     upstream: an owner-facing thread offering Sun 6 Sep 12:00/13:00, Mon 7 Sep
+ *     11:15/12:30, Tue 8 Sep 9:15/11:30, Thu 10 Sep 10:30/14:00, and a Hebrew
+ *     colleague-facing thread offering Mon 7.9 13:00/13:55 and Thu 10.9 14:30/15:25 —
+ *     both flagged against the identical stale cross-thread hard block "Monday 7 Sep
+ *     at 11:30" from a DIFFERENT thread's ledger entry, even though neither draft's
+ *     own offered instants are that collision. `detectAffirmedBlockedSlots`
+ *     (runOutputGates.ts:1447) appears to over-match once the same calendar day is
+ *     mentioned rather than the specific instant offered. Both rewriter-vetoed
+ *     ("keep") before shipping — root cause not yet investigated or closed.
+ * All four vetoes did their job, which is the G5 design working — but a destructive
+ * rewriter with 0 catches and 4 false fires has not yet earned its active form (G6).
+ * Whether it keeps that form, or should only ever rewrite to "I can't confirm that
+ * time", is an open owner decision; this file states its own record so that decision
+ * is made on data instead of on the story above.
  *
  * WHY no existing gate covers the class. `claimChecker` ran (:190) and passed correctly:
  * its inputs are `reply + toolSummaries + bookingOccurred` (claimChecker.ts:39-66)

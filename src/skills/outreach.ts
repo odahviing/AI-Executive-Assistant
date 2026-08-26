@@ -135,7 +135,7 @@ Only send messages the user explicitly asks for — never reach out to people on
                 },
                 required: ['slack_file_url'],
               },
-              description: 'Optional. Attach Slack files (images, PDFs) to the outgoing DM. Pass file URLs from earlier in the conversation — e.g. an image the owner shared, or a chart a colleague suggested. DM only — channel posts ignore this. Each file is downloaded with the bot token and re-uploaded to the recipient\'s DM under the same thread.',
+              description: 'Optional. Attach Slack files (images, PDFs) to the outgoing message — DM or channel post, immediate or scheduled. Pass file URLs from earlier in the conversation — e.g. an image the owner shared, or a chart a colleague suggested. Each file is downloaded with the bot token and re-uploaded under the same thread.',
             },
           },
           required: ['colleague_slack_id', 'colleague_name', 'message', 'await_reply'],
@@ -276,11 +276,20 @@ Only send messages the user explicitly asks for — never reach out to people on
         // unchanged, so the "I've scheduled it for Saturday" told to the
         // owner would silently NOT be what actually fires (runner.ts
         // re-floors at send time and would push it again).
+        // registrar fix (colleague-work-hours-gate-duplicated-across-five-
+        // call-sites) — colleagueBase is always >= anchorMs >= sendAt
+        // (nextWorkingHourStart never returns earlier than the instant it
+        // was asked to start searching from), so it's also always the
+        // correct effectiveSendAt: the old `colleagueBase > sendAt ? … :
+        // sendAt` ternary below it could only ever take the colleagueBase
+        // branch or land on a value equal to it — a second, redundant copy
+        // of the same comparison this spine's other 4 colleague-hours gates
+        // hand-rolled (now unified in responseDeadline.ts's
+        // `isColleagueSendDeferred`).
         let effectiveSendAt = sendAt;
         if (sendAt) {
           const anchorMs = Math.max(Date.parse(sendAt), Date.now());
-          const colleagueBase = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs);
-          effectiveSendAt = Date.parse(colleagueBase) > Date.parse(sendAt) ? colleagueBase : sendAt;
+          effectiveSendAt = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs);
         }
         const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
         // channelIdArg is resolved here (before deadline) so awaitReplyEffective
@@ -453,7 +462,18 @@ Only send messages the user explicitly asks for — never reach out to people on
         if (args.channel_id) {
           const mention = `<@${colleagueSlackId}>`;
           const fullText = `${mention} ${args.message as string}`;
-          const outcome = await connection.postToChannel(args.channel_id as string, fullText);
+          // registrar fix (outreach-immediate-channel-post-also-drops-
+          // attachments) — attachmentsArg (computed above at :331 for the
+          // scheduled-send replay) was never passed on THIS, the immediate
+          // send path, so a channel post with a file silently dropped it
+          // while the sibling DM branch below (sendOpts) already carried it.
+          // Same defect the deferred-send fix (runner.ts:685-689) closed on
+          // the scheduled-channel-post path — mirrored here.
+          const outcome = await connection.postToChannel(
+            args.channel_id as string,
+            fullText,
+            attachmentsArg?.length ? { attachments: attachmentsArg } : undefined,
+          );
           if (!outcome.ok) {
             updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Channel post failed: ${outcome.reason}` });
             const hint = outcome.reason === 'not_in_channel_private'

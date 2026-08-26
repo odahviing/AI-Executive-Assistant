@@ -2,6 +2,20 @@
 
 ---
 
+## 4.7.4 — Maelle can no longer offer a time her own search never confirmed
+
+A colleague booking an onsite meeting was told a specific time was "clean for both of you" and a fabricated conflict for a third colleague — neither backed by the actual calendar search that ran that turn. A new output-time check now cross-references any specific time offered in a reply against that turn's real availability search, and rewrites it using the real confirmed time if it doesn't match. Two follow-up rounds (each caught by a second, differently-tuned adversarial pass) closed real gaps in the first version: a time confirmed earlier in the same thread could be wrongly flagged as fabricated, and a time the search explicitly marked *unavailable* could still be waved through as fine. Separately: a booking confirmation stopped getting Maelle's usual warm follow-up for the last two weeks (an overbroad fix for an unrelated bug); a malformed tool-call payload could crash the approval flow mid-request; and a real day off was being narrated as "your calendar is full" instead of the true reason.
+
+### Fixed
+- A specific time offered as available in a reply must now actually appear, confirmed, in that turn's own calendar search — otherwise the reply is corrected before it sends. Closes a real incident: a colleague was told a fabricated time and a fabricated third-party conflict. Two bounce rounds fixed real gaps found by an independent adversarial pass: a time confirmed in an *earlier* turn of the same thread was wrongly treated as fabricated (multi-turn negotiation, not an edge case), and a time the search itself marked unavailable could still be sold as fine because the correction step never checked which way the match went.
+- A successful booking confirmation stopped earning Maelle's normal social follow-up entirely, on every surface, for two weeks — an overbroad fix for a real but narrower bug (a stale conversation topic resurfacing) that has had its own separate, working fix since the same day. Reverted the overbroad part; the narrower fix stays.
+- `create_approval` crashed when a tool call's payload arrived as a raw JSON string instead of an object — including while Maelle was trying to raise the very approval to undo a mistaken booking. Now degrades safely instead of crashing the request mid-flight.
+- A day genuinely blocked by an owner-set schedule override was narrated with the wrong reason ("not the right kind of day, not in the office") instead of the true one ("he has that day off") — now corrected at the source and in how Maelle is told to talk about it.
+- Booking an onsite/offsite meeting no longer re-asks for the venue or travel details a second time if the same thread already gave them earlier in the conversation.
+
+### Framework (other chats, bundled)
+The overnight cron's background-task kill ceiling — removed entirely in 4.7.2's follow-up after it was found silently killing every real bug-loop run — now has a real 3-hour bound instead of none, closing the "is this now cost/time-unbounded" question that fix left open. Several small hygiene items landed alongside: a stale doc-comment citation in Librarian's own charter, a stale false-fire count in a guard's docstring, a stuck delete-meeting replay, an image re-attach regex gap, and a stale tool-description line.
+
 ## 4.7.3 — Slack status text now reads like a real assistant at work
 
 The per-tool "working…" indicator in Slack's assistant panel used to describe mechanisms ("Saving the preference") instead of what a person would actually see her doing ("Jotting that down"); every entry was revisited against that bar, and very quick tools can now hold their status for at least 250ms so it's actually seen before the next one replaces it. Separately, two gaps from 4.7.2's outreach fix were closed: a scheduled channel post could still lose its attachment or get falsely narrated as "never replied," and the mixed-meeting calendar-health dedup that release shipped was only half-deduplicated.

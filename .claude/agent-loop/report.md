@@ -1,8 +1,10 @@
-# Report — cumulative since the 4.7.3 wrap
+# Report — cumulative since the 4.7.4 wrap
 
 ```
-out: 0 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 0 queued
-Empty — v4.7.3 wrapped.
+out: 16 built · 0 already-fixed · 0 built-with-gap · 5 bounced · 0/0 joint-traced · 0 converted · 0 queued
+Empty — v4.7.4 wrapped.
 ```
 
-**3 rows await you** — v4.7.3 wrapped, 0 new from this wrap. Standing backlog: 3 open rows — 3 still-real · 0 need a re-read · 0 cite no file · 3 rulable · 0 waiting on a verb (node scripts/ledger-stats.cjs --open). 2 of the 3 are QUEUED discoveries that self-drain at the next build; 1 genuinely needs your ruling.
+**Built and uncommitted — this is what a wrap ships (16):** `news-dedup-no-deterministic-backstop` brief stops re-showing already-covered stories · `proposed-slot-not-grounded-in-search-result` new slot-grounding guard, 2 bounce rounds · `coda-suppressed-on-every-completed-action` booking confirmations get their coda back · `create-approval-string-payload-crash` malformed payload no longer crashes approvals · `findavailableslots-day-off-mislabeled-wrong-day-type` real day-off narrated correctly · `meetings-narration-rubric-forbids-correct-day-off-label` narration rubric matches the label fix · `find-available-slots-no-thread-reuse-for-travel-fields` stop re-asking travel info already given · `colleague-work-hours-gate-duplicated-across-five-call-sites` shared work-hours gate helper · `log-image-reattach-download-always-fails` image re-attach regex fixed · `image-reattach-regex-blind-to-bracket-in-description` re-attach regex widened further · `outreach-immediate-channel-post-also-drops-attachments` channel-post attachments included · `messaging-lru-eviction-silently-drops-pending-status` LRU eviction now logs a drop · `o#255-outreach-attachments-desc-stale` tool description corrected · `log-availabilitygate-false-fire-count-stale` guard docstring corrected · `librarian-charter-l7-stale-after-coda-revert` charter rule matches shipped behavior · `log-delete-meeting-replay-event-not-found-stuck` replay no longer auto-closes on an ambiguous 404
+
+**7 rows await you** — v4.7.4 wrapped, 0 new from this wrap. Standing backlog: 7 open rows — 0 still-real · 7 need a re-read · 0 cite no file · 7 rulable · 0 waiting on a verb (node scripts/ledger-stats.cjs --open). 5 of the 7 are QUEUED discoveries that self-drain at the next build; 2 genuinely need your ruling (the coda-on-unanswered-followup question, and whether the slot-grounding guard's conversation-history window should be widened).

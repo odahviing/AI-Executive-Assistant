@@ -167,7 +167,27 @@ export interface ClaimCheckInput {
   // invented PERSONAL/CAPABILITY claim about the owner himself (the mirror
   // image of 'coda' mode, which checks facts about the recipient). Same JSON
   // shape and `action_type: 'invented_fact'`, so callers don't branch.
-  mode?: 'action' | 'coda' | 'owner_fact';
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — FOURTH mode.
+  // 'slot_grounding' = check whether a SPECIFIC date/time the draft offers as
+  // available/clean/workable actually appears in THIS TURN's real
+  // find_available_slots / check_join_availability result. RULE A's own
+  // "proposing a future time is never a claimed action, however specific"
+  // exemption (see the NOT-a-false-claim list on the default prompt below) is
+  // correct for what it guards — an EA offering a time is not claiming a
+  // completed action — but it also means nothing ever checked that the
+  // specific instant offered was actually IN the search result rather than
+  // invented outright (the confirmed incident: a real find_available_slots
+  // call returned an evening window, the drafted reply named a fabricated
+  // early-afternoon time and a fabricated colleague conflict, 8 seconds
+  // later). Deliberately its own mode, not a clause added to RULE A's prompt:
+  // RULE A's scoping (ownerIsActing / approvalGrantContext, this file's
+  // top-of-file doc comment) is a considered choice for the PHANTOM-ACTION
+  // class; this is a different class (a false AVAILABILITY fact) that must run
+  // on every colleague-readable turn regardless of who is acting — the same
+  // reasoning 'owner_fact' mode already established for its own class. Same
+  // JSON shape and `action_type: 'ungrounded_slot_claim'`, so callers don't
+  // branch.
+  mode?: 'action' | 'coda' | 'owner_fact' | 'slot_grounding';
   coda?: {
     recipientName: string;
     /** Compact text snapshot of what we actually know about the recipient
@@ -210,11 +230,39 @@ export interface ClaimCheckInput {
    * Absent/undefined → the HISTORY block is simply omitted from the prompt;
    * the check still runs on tool activity alone, same as before this field
    * existed.
+   *
+   * bounce-fix (2026-08-26, adversarial re-verify of slot_grounding) —
+   * SECOND consumer, 'slot_grounding' mode. That mode's ground truth
+   * (`slotGroundingContext.groundedToolLines`) is THIS TURN's search result
+   * only, so a time confirmed by a real search in an EARLIER turn of the
+   * same thread (colleague asks about a second day while a first offer
+   * still stands) had nothing to ground it and was flagged/rewritten as
+   * fabricated — corrupting a genuinely-confirmed time (G5). Same field,
+   * same builder (runOutputGates.ts's `buildRecentHistorySnippet`), no new
+   * shape needed (G1/G9 — one canonical history snippet, not a
+   * mode-specific copy).
    */
   recentHistorySnippet?: string;
+  /**
+   * proposed-slot-not-grounded-in-search-result (2026-08-24) — ground truth
+   * for 'slot_grounding' mode. The caller (runOutputGates.ts) builds this ONLY
+   * when `find_available_slots` or `check_join_availability` actually ran
+   * THIS turn — the deterministic structural pre-filter (G10) that keeps this
+   * mode from costing anything on the vast majority of turns that never
+   * search availability at all. `groundedToolLines` is the EXACT compact
+   * tool-summary line(s) for those calls — read verbatim off
+   * `result.toolSummaries`, never re-derived or re-parsed here — so the model
+   * sees the SAME real dates/times Sonnet herself saw this turn (G2: carry
+   * the truth, don't guess it). Undefined/absent → 'slot_grounding' mode is
+   * never invoked at all (the caller skips the whole check), so every
+   * pre-existing call site to this file stays byte-identical.
+   */
+  slotGroundingContext?: {
+    groundedToolLines: string[];
+  };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | 'ungrounded_slot_claim' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -252,6 +300,12 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // "he's fine with weekends" is a full, confident, fabricated claim well
   // under any reasonable floor.
   if (input.mode === 'owner_fact') return true;
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — same reasoning:
+  // the caller only ever constructs `slotGroundingContext` when the
+  // structural pre-filter (an availability tool ran THIS turn) already held,
+  // so once this mode is invoked at all it always runs. No length floor here
+  // either — "15:45 or 16:15" is a short, specific, fully-formed false claim.
+  if (input.mode === 'slot_grounding') return true;
   // v4.4.x (#154) / o#227, tightened gh#154-R6, widened gh#154-R7 (2026-08-06), floor
   // hole closed gh#154-R8 (2026-08-06) — approvalGrantContext is only ever
   // CONSTRUCTED by the caller (runOutputGates.ts) when a request row has
@@ -428,7 +482,58 @@ If the draft is clean (no invented personal fact about ${input.ownerFirstName}),
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
-  const prompt = codaPrompt ?? ownerFactPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — FOURTH mode.
+  // `groundedToolLines` is ALWAYS present when this mode runs (the caller only
+  // invokes it after confirming an availability tool ran this turn) — the
+  // exact compact tool-summary line(s), carried verbatim, never re-derived.
+  // bounce-fix (2026-08-26) — an EARLIER turn's own real search can already
+  // have confirmed a time this turn's search never repeats (a colleague
+  // asking about a second day while a first offer still stands). See
+  // `recentHistorySnippet`'s doc comment above.
+  const slotGroundingHistoryBlock = input.recentHistorySnippet
+    ? `EARLIER TURNS IN THIS THREAD (this assistant may have already offered a specific time, backed by a REAL availability search, in an earlier turn of this same thread — that offer is STILL GROUNDED now even though THIS TURN'S result above does not repeat it; a new question about a different day/time does not retract an earlier confirmed offer still standing in the same reply):\n${input.recentHistorySnippet}\nWhen it is unclear whether this earlier-turns snippet actually confirms a time via a real search (the snippet is ambiguous or you cannot tell), do NOT flag on that basis alone — favor the safe miss.\n`
+    : '';
+
+  const slotGroundingPrompt = input.mode === 'slot_grounding' && input.slotGroundingContext
+    ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
+
+You audit a draft reply an executive assistant is about to send. Your one job: catch a SPECIFIC date/time offered as available/clean/workable that was NOT actually confirmed by a real availability search.
+
+THIS TURN'S REAL AVAILABILITY RESULT (find_available_slots / check_join_availability — times/verdicts confirmed THIS turn):
+${input.slotGroundingContext.groundedToolLines.map(l => `  ${l}`).join('\n')}
+${slotGroundingHistoryBlock}
+DRAFT REPLY:
+"""
+${input.reply}
+"""
+
+Flag when EITHER holds:
+(a) the draft states a SPECIFIC clock time on a SPECIFIC date as available, free, clean, open, workable, or bookable for the people involved, AND that exact date+time does not appear, marked available/confirmed, anywhere — not in THIS TURN'S REAL AVAILABILITY RESULT above, and not as an already-confirmed earlier offer in EARLIER TURNS IN THIS THREAD above when present (not the same instant, not a timezone-converted restatement of one of those confirmed instants); OR
+(b) the draft sells as available/workable an exact date+time that DOES appear in THIS TURN'S REAL AVAILABILITY RESULT above but ONLY with a NEGATIVE verdict attached to that same instant (marked unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or carrying a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and offering that instant anyway inverts the search's own verdict.
+
+Judge by MEANING, in any language — a CONFIRMED slot re-expressed in a different clock/timezone, or rounded/truncated the same way the draft rounds every other number, is still grounded.
+
+Do NOT flag:
+- A vague, non-specific offer with no clock time ("let me look for time next week", "I'll check some options") — nothing to verify.
+- A time correctly reported BY THE DRAFT as UNAVAILABLE, busy, blocked, or a conflict — that is the opposite of this rule's target.
+- A time that DOES match (or is a timezone-equivalent restatement of) one of the real times listed above WITH AN AVAILABLE/CONFIRMED verdict (a plain find_available_slots slot list with no verdict attached lists only confirmed-available slots by construction).
+- A time matching an offer this assistant already made and a real search already confirmed in an EARLIER TURN of this same thread (see EARLIER TURNS IN THIS THREAD above, when present).
+- A time describing an EXISTING meeting already on the calendar, not a newly offered slot.
+- Zero slots listed above ("0 slots") with the draft honestly saying nothing was found, or asking a clarifying question — only flag when it nonetheless states a SPECIFIC time as available despite the empty/negative result.
+
+Output schema (REUSE the action-checker shape so callers don't branch):
+{
+  "claimed_action": boolean,       // true = the draft offers a specific time as available that this turn's real result does not confirm
+  "action_type": "ungrounded_slot_claim" | null,
+  "target_name": null,
+  "action_summary": string | null  // the fabricated date/time, quoted/paraphrased from the draft, ≤120 chars
+}
+
+If every specific time the draft offers as available is backed by THIS TURN'S REAL AVAILABILITY RESULT (or the draft offers no specific time at all), set claimed_action=false and the other fields null.
+Reminder: JSON only. Start with { end with }. No prose.`
+    : null;
+
+  const prompt = codaPrompt ?? ownerFactPrompt ?? slotGroundingPrompt ?? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit draft replies from an executive assistant for honesty violations before they get sent. The assistant's principal is ${input.ownerFirstName}.
 
@@ -568,7 +673,10 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       messages: [{ role: 'user', content: prompt }],
     });
     logLlmUsage(
-      input.mode === 'coda' ? 'claim_checker_coda' : input.mode === 'owner_fact' ? 'claim_checker_owner_fact' : 'claim_checker',
+      input.mode === 'coda' ? 'claim_checker_coda'
+        : input.mode === 'owner_fact' ? 'claim_checker_owner_fact'
+        : input.mode === 'slot_grounding' ? 'claim_checker_slot_grounding'
+        : 'claim_checker',
       MODEL_HAIKU,
       response,
     );
@@ -740,6 +848,17 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * the owner, never a confession ("that didn't go through") that would make no
  * sense for a stated fact. Same tool-less, structured-verdict, fail-open
  * contract throughout.
+ *
+ * proposed-slot-not-grounded-in-search-result (2026-08-24) — reused again
+ * (G1) for a THIRD flag shape: `actionType === 'ungrounded_slot_claim'`, from
+ * claimChecker's 'slot_grounding' mode. Same family as `invented_fact` —
+ * a false FACT stated as settled, not an un-done action — so it shares that
+ * branch's shape: a fact-preserving rewrite, the `minimalRedaction` fallback,
+ * and `genericHonestHedge` as the last resort. What differs is the ground
+ * truth handed to the model: `groundedToolLines`, this turn's own real
+ * find_available_slots / check_join_availability result, so the rewrite is
+ * told the ACTUAL times rather than merely told to hedge — the model is
+ * substituting from facts we hand it, never inventing a replacement time.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -762,19 +881,61 @@ export async function rewriteOwningTheMiss(opts: {
   // here was EVER resolved), so a possibly-true grant about an older
   // resolved row never reaches this function at all — no approvalGrantContext
   // param is needed on this side of the call.
+  //
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — only for
+  // `actionType === 'ungrounded_slot_claim'`: the SAME compact tool-summary
+  // line(s) claimChecker's 'slot_grounding' mode already verified against
+  // (claimChecker.ts's `slotGroundingContext.groundedToolLines`), carried
+  // through verbatim so the rewrite corrects the draft using the real
+  // times/verdict rather than a generic hedge with no facts behind it.
+  groundedToolLines?: string[];
 }): Promise<string | null> {
   const isInventedOwnerFact = opts.actionType === 'invented_fact';
+  const isUngroundedSlotClaim = opts.actionType === 'ungrounded_slot_claim';
 
   const what = opts.actionSummary
     || (isInventedOwnerFact
       ? `an unverified personal fact about ${opts.ownerFirstName}`
-      : opts.actionType === 'message'
-        ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
-        : 'that action');
+      : isUngroundedSlotClaim
+        ? 'a specific time offered as available'
+        : opts.actionType === 'message'
+          ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
+          : 'that action');
 
   const toolBlock = (opts.toolSummaries && opts.toolSummaries.length)
     ? opts.toolSummaries.map(s => `  - ${s}`).join('\n')
     : '  (no tools ran this turn)';
+
+  // proposed-slot-not-grounded-in-search-result (2026-08-24) — same STEP
+  // 1/2/3 + minimalRedaction shape as the invented-owner-fact branch, but the
+  // ground truth handed to the model is THIS TURN'S REAL slot/verdict list,
+  // not "check with the owner" — the corrected time comes from facts we hand
+  // it, never from the model's own head.
+  const groundedSlotBlock = (opts.groundedToolLines && opts.groundedToolLines.length)
+    ? opts.groundedToolLines.map(l => `  ${l}`).join('\n')
+    : '  (the search ran and found nothing usable this turn)';
+
+  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that this turn's own availability search does not confirm — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+
+THIS TURN'S REAL AVAILABILITY RESULT (the ONLY times/verdicts actually confirmed — settled, do not re-judge):
+${groundedSlotBlock}
+FLAGGED CLAIM: ${what}
+
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually offer that flagged time as available, or if it does and the time genuinely matches (or is a timezone-equivalent restatement of) one of the real results above WITH A POSITIVE/AVAILABLE verdict attached. Do NOT call verdict="keep" when the matched result carries a NEGATIVE verdict (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and that is exactly the case STEP 2 must rewrite, not keep. Do not manufacture a problem that isn't one.
+
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states a specific time as available that the real result above does not back. Put the corrected reply in \`message\`. The rewrite must:
+- Replace the fabricated time with the REAL time(s) from the list above, if any exist — never invent a substitute time of your own.
+- If the list above found nothing usable, say plainly that no time was actually confirmed yet (never invent one) — an honest "let me get back to you with the real options" is fine.
+- Keep every OTHER fact in the message intact: names, other correctly-stated times, numbers, the rest of the answer.
+- Sound like a real person, never a disclaimer or a system message.
+- Match the language of the draft (Hebrew/English/etc).
+
+STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candidate: the draft with ONLY the flagged fabricated time deleted or blanked out and NOTHING else touched — no new sentences, no paraphrasing, no added hedge, every other word copied verbatim from the draft. This is the fallback used if \`message\` cannot be trusted; fill it even when you are confident in \`message\`.
+
+SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when the draft clearly offers a time the real result above does not confirm.
+
+Draft:
+${opts.draft}` : null;
 
   const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
@@ -796,7 +957,7 @@ STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candi
 SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a bare, confident, unsupported personal claim about ${opts.ownerFirstName}.
 
 Draft:
-${opts.draft}` : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
@@ -831,7 +992,9 @@ ${opts.draft}`;
         name: 'verdict',
         description: isInventedOwnerFact
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
-          : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
+          : isUngroundedSlotClaim
+            ? 'Report whether the draft offers a specific time as available that this turn\'s real availability search does not confirm, and if so the corrected reply.'
+            : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -840,13 +1003,17 @@ ${opts.draft}`;
               enum: ['keep', 'rewrite'],
               description: isInventedOwnerFact
                 ? '"keep" = the draft is fine (already hedged, or the claim is grounded by tool activity). "rewrite" = the draft states an unverified personal fact about the owner as settled fact.'
-                : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
+                : isUngroundedSlotClaim
+                  ? '"keep" = the draft is fine (the time genuinely matches the real result WITH A POSITIVE/AVAILABLE verdict, or nothing specific was offered). "rewrite" = the draft offers a specific time as available that the real result does not confirm — including when the matched result is itself marked unavailable/negative.'
+                  : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
             },
             message: {
               type: 'string',
               description: isInventedOwnerFact
                 ? 'Only when verdict="rewrite": the corrected reply text, with the flagged personal claim removed or hedged. Omit for "keep".'
-                : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
+                : isUngroundedSlotClaim
+                  ? 'Only when verdict="rewrite": the corrected reply text, using the REAL confirmed time(s) in place of the fabricated one (or honestly saying none was confirmed). Omit for "keep".'
+                  : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
             },
             noPendingActionClaim: {
               type: 'boolean',
@@ -856,9 +1023,13 @@ ${opts.draft}`;
               type: 'boolean',
               description: 'Only for an invented-owner-fact rewrite (verdict="rewrite", flagged claim was an unverified personal fact about the owner): self-check `message` before returning it. Set true ONLY if `message` no longer asserts, as settled fact, the flagged claim or any other unverified personal claim about the owner. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
             },
+            noUngroundedTimeClaim: {
+              type: 'boolean',
+              description: 'Only for an ungrounded-slot-claim rewrite (verdict="rewrite", flagged claim was a specific time offered as available with no backing in this turn\'s real search result): self-check `message` before returning it. Set true ONLY if `message` no longer states any specific time as available unless that time is one of the REAL confirmed times you were given. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
             minimalRedaction: {
               type: 'string',
-              description: 'Only for an invented-owner-fact rewrite (verdict="rewrite", flagged claim was an unverified personal fact about the owner): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
+              description: 'Only for an invented-owner-fact or ungrounded-slot-claim rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
             },
             minimalRedactionPreservesRest: {
               type: 'boolean',
@@ -882,6 +1053,7 @@ ${opts.draft}`;
       message?: string;
       noPendingActionClaim?: boolean;
       noUnfoundedOwnerClaim?: boolean;
+      noUngroundedTimeClaim?: boolean;
       minimalRedaction?: string;
       minimalRedactionPreservesRest?: boolean;
     };
@@ -890,7 +1062,8 @@ ${opts.draft}`;
       text.trim().length === 0 || /\b(the draft|the checker|claimed_action|UNCHANGED|the action was performed)\b/i.test(text);
 
     // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14, bouncer
-    // retry) — the scoped fallback for invented_fact mode (G1/G5): before
+    // retry) — the scoped fallback for invented_fact mode (G1/G5); reused
+    // unchanged (2026-08-24) for ungrounded_slot_claim, same shape: before
     // reaching for the full-reply-replacing genericHonestHedge, try the
     // model's own minimal-redaction candidate — the draft with ONLY the
     // flagged claim removed, everything else untouched, so a single false
@@ -898,7 +1071,7 @@ ${opts.draft}`;
     // trusted when the model's own self-attestation says it changed nothing
     // else AND the result isn't implausibly short (a cheap deterministic
     // guard against a "preserves rest" attestation that doesn't hold up).
-    const resolveInventedFactFallback = (): string => {
+    const resolveMinimalRedactionFallback = (): string => {
       const redaction = typeof input.minimalRedaction === 'string' ? input.minimalRedaction.trim() : '';
       const preservesRest = input.minimalRedactionPreservesRest === true;
       if (preservesRest && !isMetaOrEmpty(redaction) && redaction.length >= opts.draft.length * 0.4) {
@@ -932,7 +1105,7 @@ ${opts.draft}`;
         action_type: opts.actionType,
         messagePreview: message.slice(0, 160),
       });
-      return isInventedOwnerFact ? resolveInventedFactFallback() : GENERIC_HONEST_MISS;
+      return (isInventedOwnerFact || isUngroundedSlotClaim) ? resolveMinimalRedactionFallback() : GENERIC_HONEST_MISS;
     }
 
     if (isInventedOwnerFact) {
@@ -945,7 +1118,22 @@ ${opts.draft}`;
           action_type: opts.actionType,
           messagePreview: message.slice(0, 160),
         });
-        return resolveInventedFactFallback();
+        return resolveMinimalRedactionFallback();
+      }
+      return message;
+    }
+
+    if (isUngroundedSlotClaim) {
+      // proposed-slot-not-grounded-in-search-result (2026-08-24) — same
+      // self-attest pattern as the owner-fact branch above, checking that the
+      // rewrite drops the fabricated time rather than the phantom-action
+      // framing.
+      if (input.noUngroundedTimeClaim !== true) {
+        logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the ungrounded time claim; shipping a scoped fallback (never the known-false original)', {
+          action_type: opts.actionType,
+          messagePreview: message.slice(0, 160),
+        });
+        return resolveMinimalRedactionFallback();
       }
       return message;
     }

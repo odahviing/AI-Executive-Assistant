@@ -532,6 +532,47 @@ async function resolveRequestInner(
     logger.info('resolveRequest — possible_reschedule recovery: forcing a new meeting on retry', { id: requestId });
   }
 
+  // delete-meeting-event-not-found-stuck (2026-08-26) — the other half of the
+  // recovery path built in runApproveCallback's catch below: a prior replay
+  // hit event_not_found and asked the model to verify via get_calendar before
+  // declaring an outcome (never assumed here — see that catch's comment).
+  // `confirmed_gone` closes the request as cancelled ONLY once the model has
+  // actually re-checked and confirmed absence; `fresh_meeting_id` retries the
+  // delete with the corrected id when the meeting was still there under a
+  // different one. Neither branch runs the replay speculatively — confirmed_gone
+  // skips it entirely (a second delete_meeting call would just re-404) and
+  // fresh_meeting_id feeds straight back into the normal replay below.
+  if (effectiveApprove && effectiveApprove.tool === 'delete_meeting' && approveData.confirmed_gone === true) {
+    logger.info('resolveRequest — delete_meeting event_not_found confirmed by re-check, closing resolved', {
+      id: requestId,
+    });
+    closeRequest({
+      id: requestId,
+      state: 'resolved',
+      closureReason: `owner approved ${row.subkind ?? row.kind} (delete_meeting: id was stale, re-checked calendar and the event is genuinely gone)`,
+      closedBy: 'owner',
+      outcomeJson: { approved: true, replayed: 'delete_meeting', already_gone: true, verified: true },
+    });
+    await notifyRequesterOfDecision(row, 'approve', { replayed: 'delete_meeting' }, undefined, ctx, {
+      tool: 'delete_meeting', subject: row.subject ?? undefined,
+    });
+    return {
+      ok: true, request_id: requestId, state: 'resolved',
+      effect: 'approved — event confirmed already removed from the calendar',
+    };
+  }
+  if (effectiveApprove && effectiveApprove.tool === 'delete_meeting'
+      && typeof approveData.fresh_meeting_id === 'string'
+      && approveData.fresh_meeting_id.trim().length > 0) {
+    effectiveApprove = {
+      ...effectiveApprove,
+      args: { ...effectiveApprove.args, meeting_id: approveData.fresh_meeting_id.trim() },
+    };
+    logger.info('resolveRequest — delete_meeting event_not_found recovery: retrying with fresh meeting_id from get_calendar', {
+      id: requestId,
+    });
+  }
+
   if (effectiveApprove) {
     return runApproveCallback(row, effectiveApprove, ctx, {
       mergedFromAmend: !!hasCounter,
@@ -675,6 +716,38 @@ async function runApproveCallback(
         reason: existingId
           ? `There's already "${existingSubj}" on ${existingWhen} with the same person (meeting_id ${existingId}). To MOVE that meeting to the approved time instead of creating a new one, call resolve_approval again with verdict="approve", data={"move_existing_meeting_id":"${existingId}"}. To book a separate NEW meeting anyway, call resolve_approval again with verdict="approve", data={"force_new":true}.`
           : `A possible duplicate meeting was found, but no id came back with it — call resolve_approval again with verdict="approve", data={"force_new":true} to book anyway.`,
+      };
+    }
+    // delete-meeting-replay-event-not-found-stuck (2026-08-26, revised after
+    // bounce) — event_not_found is NOT the same fact as "the meeting is
+    // gone". The delete_meeting protocol itself (meetings.ts:1369 /
+    // calendarReads.ts's own error message) says the id being 404 covers TWO
+    // different cases: really cancelled already, OR a stale id while the
+    // meeting (recreated, recurring-instance id shifted, wrong id captured
+    // at raise time) may still be sitting on the calendar under a different
+    // id — "re-read the day with get_calendar if it should still exist" is
+    // the explicit instruction, not optional colour. Auto-closing this as
+    // "cancelled" without that check is the phantom-confirmed-booking class
+    // INVERTED (deferredActionReplay.ts:84-90): it tells the requester and
+    // owner a meeting is gone when it may still be live, and closes the
+    // request so nobody is left watching to catch the miss. So this no
+    // longer assumes either outcome — it hands the model the same kind of
+    // targeted recovery path as the possible_reschedule case just above:
+    // verify first, then say which of the two happened via a follow-up
+    // resolve_approval call (merged in, above, before this replay runs).
+    if (err instanceof ReplayToolError && err.sentinel.error === 'event_not_found' && tool === 'delete_meeting') {
+      const subj = typeof args.meeting_subject === 'string' && args.meeting_subject.trim()
+        ? args.meeting_subject
+        : (row.subject ?? 'the meeting');
+      logger.warn('on_approve replay hit event_not_found on delete_meeting — returning a verify-first recovery path instead of assuming cancelled', {
+        id: row.id, subject: subj,
+      });
+      return {
+        ok: false,
+        request_id: row.id,
+        state: row.state,
+        effect: 'approve_replay_event_not_found',
+        reason: `The event id on file for "${subj}" is not on the calendar under that id — it was either already cancelled elsewhere, or the id is stale (the meeting may still be there). Call get_calendar to check whether a meeting matching "${subj}" is still on the calendar. If it's genuinely gone, call resolve_approval again with verdict="approve", data={"confirmed_gone":true} to close this out as cancelled. If it's still there under a different id, call resolve_approval again with verdict="approve", data={"fresh_meeting_id":"<id from get_calendar>"} to retry the cancellation with the correct id.`,
       };
     }
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {

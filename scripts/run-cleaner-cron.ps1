@@ -30,7 +30,7 @@ if (-not $env:CLAUDE_CODE_OAUTH_TOKEN) {
 # Same fix as run-manager-cron.ps1 -- see that file's comment. Cleaner is a
 # single-agent dispatch (no Workflow), so this is cheap insurance, not the
 # primary fix, but there's no reason to leave it exposed to the same ceiling.
-$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "0"
+$env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "10800000"
 
 Set-Location $repoPath
 
