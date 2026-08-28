@@ -688,12 +688,26 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  * through `formatForSlack` — see `normalizeForTransport`'s doc comment for
  * why that would double-process the text.
  *
+ * DOES run the slot-grounding check (2026-08-28 fix — this leg used to skip
+ * it entirely, and that was never a decision, only an omission: the check
+ * was built 2026-08-24, after this leg already existed, and nothing here
+ * ever weighed it). Unlike the floor/security gate above, it is genuinely
+ * reader-independent by its own placement on the Slack side (both legs' own
+ * doc comment on it says so) — it reads this turn's own tool tape, not a
+ * Slack-only ledger or a Slack sender id, and its rewrite already runs
+ * through `normalizeForTransport`. A forwarded reply naming a specific time
+ * as available when this turn's own search never confirmed it is the same
+ * failure class the check exists for, on the one transport with no human
+ * re-read before send (the owner forwards the text verbatim) — so this leg
+ * needs it at least as much as Slack's does.
+ *
  * Fails open at every step — same contract as every other leg in this file.
  */
 async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): Promise<string> {
   let cleanReply = initialReply;
 
   cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
+  cleanReply = await runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
 
   try {
     const { runHumanGate } = await import('../humanGate');
@@ -1114,11 +1128,11 @@ async function runClaimCheckAndMaybeRewrite(
         //
         // gh#194-b-promised-resend-never-fired (2026-08-10, bouncer overturn) —
         // this function (runClaimCheckAndMaybeRewrite) has THREE call sites —
-        // the owner-private leg (:317), the colleague-readable leg gated by
-        // `ownerIsActing || approvalGrantContext` (:411), and the email leg,
-        // unconditional (:624, `runEmailLegGates`) — and the previous version of
+        // the owner-private leg (:346), the colleague-readable leg gated by
+        // `ownerIsActing || approvalGrantContext` (:440), and the email leg,
+        // unconditional (:709, `runEmailLegGates`) — and the previous version of
         // this comment asserted only the second was "colleague-reachable". That
-        // was the bug: the CALLER's gate at :411 restricts real colleague turns
+        // was the bug: the CALLER's gate at :440 restricts real colleague turns
         // correctly, but this check runs from ALL THREE sites and cannot rely on
         // caller-side scoping to know which one it's in — it must derive "real
         // colleague, real 1:1 DM" itself, from ctx, every time:
@@ -1136,7 +1150,7 @@ async function runClaimCheckAndMaybeRewrite(
         //     (postReply.ts) so this can check it directly.
         //   - Owner's own Slack turn still excluded by `senderId !==
         //     slack_user_id` (the owner-private leg, and the owner acting inside
-        //     a group DM/channel at :411, both fail this).
+        //     a group DM/channel at :440, both fail this).
         const isRealColleagueOneOnOneDm = ctx.transport !== 'email'
           && ctx.senderId !== profile.user.slack_user_id
           && !ctx.isMpim
@@ -1150,17 +1164,25 @@ async function runClaimCheckAndMaybeRewrite(
         // send claim opened a reminder that fabricates words the colleague
         // never said ("<X> asked me to pass this to you") AND never
         // surfaces the actual undelivered message. `verdict.target_name`
-        // (claimChecker.ts:136, already read above at :843-845 for the
+        // (claimChecker.ts:270, already read above at :953-954 for the
         // shield check) names whoever the draft claims it messaged —
         // comparing it against the owner's own name is the deterministic
         // gate. No match (name absent, or names someone else) is a safe MISS
         // — no reminder opens, same as before this backstop existed — never
         // a reminder that puts the wrong words in the wrong mouth.
-        const ownerFirstNameLower = profile.user.name.split(' ')[0].toLowerCase();
-        const ownerFullNameLower = profile.user.name.toLowerCase();
+        // v4.7.4 fix — this used to be `ownerFullNameLower.includes(target)`,
+        // a SUBSTRING test that false-matches any target string that happens
+        // to be a substring of either name part: owner "Idan Cohen", target
+        // "Dan" → "idan cohen".includes("dan") → true, and "Cohen" alone
+        // matches too. A colleague DM ("tell Dan the demo moved") about a
+        // THIRD PARTY who merely shares letters with the owner's name then
+        // false-fires this backstop: a spurious owner-flag DM putting words
+        // in the owner's mouth, over a message that was never about him.
+        // Exact token match against the owner's own name parts closes this —
+        // the owner's name is never legitimately a partial string of itself.
+        const ownerNameTokensLower = profile.user.name.toLowerCase().split(/\s+/).filter(Boolean);
         const targetIsOwner = !!verdict.target_name
-          && (verdict.target_name.toLowerCase() === ownerFirstNameLower
-            || ownerFullNameLower.includes(verdict.target_name.toLowerCase()));
+          && ownerNameTokensLower.includes(verdict.target_name.toLowerCase());
         if (verdict.action_type === 'message' && isRealColleagueOneOnOneDm && !targetIsOwner) {
           logger.info('claim_checker_rewrite — false relay claim named a target other than the owner, skipping the backstop reminder (safe miss)', {
             senderId: ctx.senderId, threadTs: ctx.threadTs, target_name: verdict.target_name,
@@ -1282,12 +1304,41 @@ async function runClaimCheckAndMaybeRewrite(
  * mode (a time this thread already confirmed via a REAL search in an
  * EARLIER turn stays grounded even when THIS turn's own search result
  * doesn't repeat it) — was hand-copied per call site before this fix.
+ *
+ * o#259 (2026-08-28) — an assistant row is stored as
+ * `toolSummaries.join(' ') + '\n' + replyText` ONLY when there were tool
+ * summaries that turn (postReply.ts:532-536) — a no-tool-call turn stores
+ * `cleanReply` alone, with NO tape and no synthetic `\n` prefix. Tool tape
+ * deliberately RAW and prepended (the claim-checker's `mutated=<domain>`
+ * shield reads it later — never touch that storage format). Slicing 220
+ * chars from the FRONT of that string can burn the whole budget on a verbose
+ * tool summary and leave none for the actual reply prose grounding needs to
+ * see. Skip past the tool-tape prefix before slicing an assistant row — but
+ * the first fix here (splitting on the first `\n` unconditionally) assumed
+ * every assistant row's first `\n` was that separator, when a tool-less row
+ * is just `cleanReply` and Slack replies are routinely multi-line: it
+ * silently dropped the real first line of every such row.
+ *
+ * Detect tape STRUCTURALLY instead: every tool-summary entry
+ * (`summarizeToolCall`/`summarizeInternalAction`, turnHelpers.ts:155,189)
+ * is bracket-wrapped (`[tool ...]` or `[tool FAILED: ...]`), optionally
+ * followed by ` mutated=<domain>`, and multiple entries are space-joined —
+ * so the pre-`\n` segment of a REAL tape always starts with `[` and contains
+ * a `]` before that newline. A row with no tool tape at all (no leading
+ * `[...]`) keeps its full content, first line included.
  */
 function buildRecentHistorySnippet(ctx: OutputGateContext): string | undefined {
   const { profile } = ctx;
   return (ctx.history ?? [])
     .slice(-12)
-    .map(h => `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${(h.content ?? '').slice(0, 220)}`)
+    .map(h => {
+      const raw = h.content ?? '';
+      const nl = raw.indexOf('\n');
+      const preNl = nl === -1 ? '' : raw.slice(0, nl);
+      const hasToolTape = h.role === 'assistant' && /^\[.*\]/.test(preNl);
+      const text = hasToolTape ? raw.slice(nl + 1) : raw;
+      return `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${text.slice(0, 220)}`;
+    })
     .join('\n') || undefined;
 }
 
@@ -1418,6 +1469,20 @@ async function runOwnerFactCheckAndMaybeRewrite(
  * time listed a Brussels clock to a colleague in New York — as a number the
  * rewriter is explicitly told to preserve.
  */
+/**
+ * Shared by the availability floor and the slot-grounding check (both below):
+ * "did a calendar mutation actually complete THIS turn" — a real booking/move
+ * is its own, stronger ground truth than either check's own subject (an
+ * established block, a grounded search result), so both stand down rather
+ * than risk contradicting a true completed action. Was two hand-typed
+ * copies of the identical one-liner (G9) — extracted so the two call sites
+ * can't silently drift about what "completed" means.
+ */
+function calendarMutationCompleted(result: OrchestratorOutput): boolean {
+  return result.bookingOccurred === true
+    || (result.toolSummaries ?? []).join(' ').includes('mutated=book');
+}
+
 async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
   const { profile, result } = ctx;
   if (!initialReply || initialReply.trim().length === 0) return initialReply;
@@ -1431,8 +1496,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
     const stored = freshHardBlockedSlots(profile.user.email);
     if (stored.length === 0) return initialReply;
 
-    const tape = (result.toolSummaries ?? []).join(' ');
-    if (result.bookingOccurred === true || tape.includes('mutated=book')) {
+    if (calendarMutationCompleted(result)) {
       // CLEAR, don't merely stand down. Standing down protected this turn and
       // left every entry armed for the next one, so "move that clash to 15:00" →
       // (next turn) "so 11:30 is open now?" came back as a confident false refusal.
@@ -1458,15 +1522,19 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
     }));
 
     const affirmed = await detectAffirmedBlockedSlots(
-      initialReply, blocks, profile.user.name.split(' ')[0],
+      initialReply, blocks, profile.user.name.split(' ')[0], profile.user.timezone,
     );
     if (affirmed.length === 0) return initialReply;
 
-    // Live re-verification — the rare path (per this file's own record: 0 catches,
-    // 2 false fires ever). The ledger entry can be up to TTL_MS (45min) old, and the
-    // proven false-fire class is exactly "the fact stopped being true between record
-    // and fire, with no Maelle mutation to trigger an invalidation rule" (an event
-    // someone else moved or cancelled directly in Outlook). Re-run the SAME
+    // Live re-verification — the rare path. Per availabilityGate.ts's own header
+    // (this guard's record of truth, not a copy kept here): 0 catches, 4 false
+    // fires as of 2026-08-24 — none of them yet the staleness class this rule
+    // exists for ("the fact stopped being true between record and fire, with no
+    // Maelle mutation to trigger an invalidation rule", e.g. someone else moved or
+    // cancelled directly in Outlook); all four so far were bad input or over-match
+    // at DETECTION time, closed or still open there, not here. The ledger entry can
+    // be up to TTL_MS (45min) old, so this rule stays as the last live check before
+    // the destructive rewrite regardless. Re-run the SAME
     // validator `checkSlot` that established the entry, on a FRESH live calendar
     // read, immediately before the destructive rewrite — the last possible moment
     // to catch a stale fact rather than ship a corrected reply that corrects nothing.
@@ -1577,7 +1645,15 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
  *      (turnHelpers.ts's `renderToolSummary` — the exact lines Sonnet herself
  *      saw, never re-derived or re-parsed here, per G2). Absent on the vast
  *      majority of turns, which never search availability at all — nothing
- *      loads, nothing costs anything.
+ *      loads, nothing costs anything. bug 1.1 (2026-08-27) exception: when
+ *      `result.availabilityQuestionDetected` is true (this turn's inbound
+ *      message was a detected colleague availability question —
+ *      `precheckAvailability`'s own `ran`, buildTurnContext.ts), the check
+ *      still runs with an empty grounded-lines list rather than skipping —
+ *      a zero-tool-call answer to "is he free at X" is exactly the shape
+ *      this filter used to let through unchecked (Mike Naumenko /
+ *      D0ARQRD5H28: a stale time recalled from three days earlier in the
+ *      same thread shipped as fact because no search ran that turn).
  *   2. Does the draft contain at least one digit? A specific clock time or
  *      date cannot be named without one, in every language this system
  *      supports — the same language-neutral structural floor claimChecker's
@@ -1619,8 +1695,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   // down here is a safe MISS (RULE A / the matchingToolAlreadyRan shield
   // already cover a false completed-action claim); rewriting would risk
   // contradicting a true booking.
-  const tape = (result.toolSummaries ?? []).join(' ');
-  if (result.bookingOccurred === true || tape.includes('mutated=book')) return initialReply;
+  if (calendarMutationCompleted(result)) return initialReply;
 
   // Deterministic pre-filter 1 — read the carried compact summary lines for
   // the two availability tools verbatim (never re-derived). Absent on this
@@ -1628,7 +1703,20 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   const groundedToolLines = (result.toolSummaries ?? []).filter(
     line => line.startsWith('[find_available_slots') || line.startsWith('[check_join_availability'),
   );
-  if (groundedToolLines.length === 0) return initialReply;
+  // bug 1.1 (2026-08-27, Mike Naumenko / D0ARQRD5H28) — a ZERO-tool-call turn
+  // used to bail out here unconditionally, which is exactly how a stale time
+  // recalled from three days earlier in the same thread shipped unchecked (no
+  // search ran, so this checker never even looked at the draft). When THIS
+  // turn was a detected colleague availability question
+  // (`availabilityQuestionDetected`, set by `precheckAvailability`'s own `ran`
+  // in buildTurnContext.ts), still call the checker with an empty
+  // `groundedToolLines` — `checkReplyClaims`'s `slotGroundingPrompt` already
+  // handles that case correctly by design: it flags any specific-time-as-
+  // available claim not backed by this turn's real result OR the
+  // EARLIER-TURNS history block. Scoped to availability-question turns only
+  // (not every digit-bearing reply) to avoid a new LLM call on ordinary turns
+  // that have nothing to do with availability (G10).
+  if (groundedToolLines.length === 0 && !result.availabilityQuestionDetected) return initialReply;
 
   let cleanReply = initialReply;
   try {
@@ -1667,9 +1755,9 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       // bounce-fix finding 4 (2026-08-24) — pin the literal, not
       // `verdict.action_type`. `checkReplyClaims` does
       // `action_type: (parsed.action_type ?? 'other')` with no per-mode
-      // validation (claimChecker.ts:730-731), and a JSON-truncation recovery
+      // validation (claimChecker.ts:760), and a JSON-truncation recovery
       // path can yield an unexpected value. This call site already KNOWS it
-      // invoked `mode: 'slot_grounding'` (line 1621 above) — trusting an LLM
+      // invoked `mode: 'slot_grounding'` (line 1737 above) — trusting an LLM
       // round-trip for control flow it already has the answer to would let a
       // malformed `action_type` silently fall through to the DEFAULT
       // phantom-action rewrite prompt (nonsense like "I'm not sure that went

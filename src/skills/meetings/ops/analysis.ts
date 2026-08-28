@@ -552,6 +552,17 @@ export function analyzeCalendar(
     // analyze_calendar and the booking floor agree on what a "real break" is.
     // required = 1h free per N hours worked, rounded UP to 15 min, off the
     // summed work-window length (workTotalMin).
+    // v4.7.x — this loop is the SAME per-window/chunked shape as
+    // scheduleRules.computeDayQualityFreeMinutes (fixed there to walk
+    // effectiveDay.windows instead of a bounding box, matching what this loop
+    // already did), just over ProcessedEvent's already-localized
+    // `_localStartTime`/`_localEndTime` minute-of-day strings rather than raw
+    // CalendarEvent Date objects — the two shapes don't share a busy-block
+    // type, so this stays its own pass rather than a mechanical call-through.
+    // Any future change to the free-time DEFINITION (which chunk size counts,
+    // whether a floating block is busy) must land in BOTH this loop and
+    // computeDayQualityFreeMinutes/buildDayQualityBusyBlocks (scheduleRules.ts)
+    // — they are required to agree, not merely coincide.
     const freeWindows = windows.length > 0 ? windows : [{ startMin: workStartMin, endMin: workEndMin }];
     const meetingIntervals = timedMeetings.map(ev => {
       const [sh, sm] = ev._localStartTime.split(':').map(Number);

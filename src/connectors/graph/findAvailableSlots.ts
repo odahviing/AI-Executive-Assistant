@@ -6,6 +6,8 @@ import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from 
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 import type { RuleCheckResult } from '../../utils/scheduleRules';
+import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
+import { attendeeTzForDay } from '../../utils/attendeeAvailability';
 
 /**
  * ONE offered-slot shape. Was written out inline three times (the return type,
@@ -33,6 +35,36 @@ type SlotCandidate = {
   // on 'off_hours' entries; a 'busy' entry is a real calendar read, not a guess.
   attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }>;
 };
+
+/**
+ * CursorOutcome — the ONE shape every branch of the per-cursor day/slot walk
+ * (`evaluateCursor`, below) must return. v4.7.x — four incidents (2026-08-14,
+ * -16, -24, plus the `in_the_past` fix) each patched ONE branch of that walk
+ * forgetting to record why a slot/day was skipped; nothing enforced the NEXT
+ * branch would remember either. A discriminated union + an exhaustive switch
+ * make it a compile error to add a new skip path without declaring which of
+ * these four it is:
+ *
+ *   - accept    — the slot survived every rule; push it into its day's bucket.
+ *   - reject    — a per-SLOT rejection: bumps the global rejectedCounts/
+ *                 rejectedExamples AND the per-day breakdown (via trackReject).
+ *   - day_skip  — a whole-DAY skip (workday gate, wrong day type): writes the
+ *                 per-day reason directly, WITHOUT touching per-slot counts —
+ *                 the day never had candidate slots to begin with.
+ *   - silent    — the one legitimate no-explanation case: a plain weekend day,
+ *                 never in `allWorkweekDays`, needs no reason recorded.
+ */
+type CursorOutcome =
+  | { kind: 'accept'; dayKey: string; candidate: SlotCandidate & { density?: number } }
+  | {
+      kind: 'reject';
+      reason: string;
+      iso: string;
+      outOfWorkHours?: boolean;
+      conflicting?: NonNullable<RuleCheckResult['overCommitment']>;
+    }
+  | { kind: 'day_skip'; dayKey: string; reason: string }
+  | { kind: 'silent' };
 
 /**
  * One workday's rejection summary — surfaced per touched day so a caller can
@@ -781,6 +813,13 @@ export async function findAvailableSlots(params: {
     // tiebreak), so pickSpreadSlots offers efficient options first. ownerBusyMs =
     // the owner's fixed commitments (floating blocks are already elastic-
     // subtracted from allBusy above, so we never pack against a lunch that slides).
+    // v4.7.x — this pool is built from `allBusy` (Graph free/busy status
+    // intervals, already floating-block-carved above), not a raw CalendarEvent[]
+    // list, so it can't mechanically call the shared `densityCommitments`
+    // (utils/floatingBlocks.ts) the other four density-pool call sites now do
+    // — but it IS that function's `floatingBlocksAsNeighbours: false` case by
+    // construction: floating blocks excluded, WE excluded. Keep this comment
+    // and that function's doc in sync if either changes.
     const packingDense = profile ? prefersDensePacking(profile.meetings) : false;
     const densityCfg = profile
       ? densityConfigFromProfile(profile.meetings)
@@ -804,32 +843,11 @@ export async function findAvailableSlots(params: {
     // instead of fabricating "Monday is a day off."
     const dayReasons = new Map<string, Map<string, number>>();
     // Map a checkSlot verdict to the search-path reject label so day_summary
-    // narration is unchanged after the validator unification.
-    const mapVerdictToRejectLabel = (kind: string | undefined, dayType: 'office' | 'home' | 'other'): string => {
-      switch (kind) {
-        // (v4.2.x) — NOT folded into `within_lead_time` any more. They are not
-        // the same fact: "too soon" is one of the owner's rules and he can waive
-        // it, "already happened" is not and nobody can. Folding them put elapsed
-        // times inside SOFT_REJECT_PREFIXES, and the colleague hint downstream
-        // then described a time that had simply passed as held by "day-load
-        // protections" and invited a policy_exception over it. The walker's own
-        // past-floor above means checkSlot should never reach here with this
-        // verdict (same predicate, same instant, one iteration earlier); the case
-        // stays so that if it ever does, the reason handed onward is the true one.
-        case 'in_the_past': return 'in_the_past';
-        case 'within_lead_time': return 'within_lead_time';
-        case 'outside_working_hours': return 'outside_owner_work_hours';
-        case 'floating_block_overlap': return 'floating_block_no_room';
-        case 'focus_time_floor': return dayType === 'home' ? 'focus_time_home' : 'focus_time_office';
-        case 'travel_buffer_collision': return 'travel_buffer_collision';
-        case 'category_day_type': return 'category_day_type';
-        case 'category_per_day': return 'category_per_day';
-        case 'category_per_week': return 'category_per_week';
-        case 'vacation_or_off_day': return 'wrong_day_type';
-        case 'owner_busy_collision':
-        default: return 'owner_busy_collision';
-      }
-    };
+    // narration is unchanged after the validator unification. Moved to
+    // scheduleRules.ts (`mapVerdictToRejectLabel`, imported above) so
+    // `ops/handlers/findAvailableSlots.ts`'s owner-overridable label
+    // derivation can reuse the exact same mapping instead of a second,
+    // driftable copy — see `OWNER_OVERRIDABLE_KINDS`'s doc there.
     // gh#165-d — the ONE writer for diagnosticsOut.conflictingEvent, called from
     // both the STRICT-reject branch and the relaxed-pass branch below so a
     // caller's single-slot check gets the fact regardless of which one fired
@@ -872,10 +890,13 @@ export async function findAvailableSlots(params: {
     // (a) a workday excluded specifically because of the requested mode
     // (e.g. Monday is a home day; meetingMode='in_person' excludes it), and
     // (b) a workday taken off entirely by a per-date override (vacation, sick
-    // day). Both surface as `wrong_day_type` in daySummary so Sonnet can
-    // narrate "Monday is a home day, in-person needs an office day" or
-    // "Tuesday, he's off" instead of fabricating a reason. A plain weekend
-    // (never in this list) stays silent — that needs no explanation.
+    // day). (a) surfaces as `wrong_day_type` in daySummary so Sonnet can
+    // narrate "Monday is a home day, in-person needs an office day"; (b)
+    // surfaces as `vacation_or_off_day` instead — split 2026-08-24
+    // (findavailableslots-day-off-mislabeled-wrong-day-type) so "Tuesday,
+    // he's off" reuses checkSlot's own verdict name rather than the
+    // in-person/home-day mismatch label. A plain weekend (never in this
+    // list) stays silent — that needs no explanation.
     const allWorkweekDays: string[] = profile
       ? [...officeDayNames, ...homeDayNames]
       : workDays;
@@ -931,7 +952,19 @@ export async function findAvailableSlots(params: {
       cursorDt0 = flooredQuarter < cursorDt0 ? flooredQuarter.plus({ minutes: 15 }) : flooredQuarter;
     }
     let cursor = cursorDt0.toJSDate();
-    while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
+
+    // v4.7.x — the per-cursor day/slot walk, extracted into one function
+    // returning a CursorOutcome (see its own doc, above). PURE classifier: it
+    // reads the same outer-scope state the old inline loop body did (closure,
+    // not a giant parameter list), but does NOT mutate rejectedCounts/
+    // rejectedExamples/dayReasons/dayBuckets/diagnosticsOut itself — every
+    // mutation now happens in exactly one place, the switch in the while loop
+    // below. Behavior-preserving: same accept/reject/day_skip/silent
+    // classification for every case that existed before this extraction, same
+    // labels, same conditions — only the SHAPE changed (early `return` where
+    // the old code did `cursor += step; continue`), so this is not a second
+    // copy of the walk's logic to keep in sync, it's the one copy relocated.
+    function evaluateCursor(cursor: Date): CursorOutcome {
       const cursorDt = DateTime.fromJSDate(cursor).setZone(params.timezone);
       const dayName = cursorDt.toFormat('EEEE');
       const dayKey = cursorDt.toFormat('yyyy-MM-dd');
@@ -962,9 +995,7 @@ export async function findAvailableSlots(params: {
       // named correctly. The propose-a-time path (checkSlot) never had this
       // gap; only "when is he free" (this walker) did.
       if (oofDayKeys.has(dayKey)) {
-        trackReject('owner_out_of_office', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+        return { kind: 'reject', reason: 'owner_out_of_office', iso: cursorDt.toISO()! };
       }
       // v3.7.x (#143) — the day's effective work context (yaml + per-date override).
       const effectiveDay = profile ? getEffectiveWorkDayForInstantCal(cursorDt.toISO()!, profile) : null;
@@ -1012,20 +1043,16 @@ export async function findAvailableSlots(params: {
       // story is (M1).
       const dayIsWorkday = effectiveDay ? effectiveDay.isWorkday : workDays.includes(dayName);
       if (!dayIsWorkday) {
-        if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
-          dayReasons.set(dayKey, new Map([['vacation_or_off_day', 1]]));
-        }
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+        return allWorkweekDays.includes(dayName)
+          ? { kind: 'day_skip', dayKey, reason: 'vacation_or_off_day' }
+          : { kind: 'silent' };
       }
       // meetingMode: in-person requires an office-type day; a home / away day in
       // in_person mode is a wrong-day-type exclusion (narrated in day_summary).
       if (effectiveDay && meetingMode === 'in_person' && dayType !== 'office') {
-        if (allWorkweekDays.includes(dayName) && !dayReasons.has(dayKey)) {
-          dayReasons.set(dayKey, new Map([['wrong_day_type', 1]]));
-        }
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+        return allWorkweekDays.includes(dayName)
+          ? { kind: 'day_skip', dayKey, reason: 'wrong_day_type' }
+          : { kind: 'silent' };
       }
       const dayHours = getWorkHoursForDay(effectiveDay);
       const slotEnd = new Date(cursor.getTime() + durationMs);
@@ -1045,9 +1072,7 @@ export async function findAvailableSlots(params: {
           ? (slotTotalMin < bandFromMin && slotEndMin > bandToMin)
           : (slotTotalMin < bandFromMin || slotEndMin > bandToMin);
         if (outOfBand) {
-          trackReject('outside_requested_window', cursorDt.toISO()!);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return { kind: 'reject', reason: 'outside_requested_window', iso: cursorDt.toISO()! };
         }
       }
       // ── (a) THE PAST — a universal floor on the OFFER, not a rule ──────────
@@ -1076,9 +1101,7 @@ export async function findAvailableSlots(params: {
       // `in_the_past` is not a soft prefix and already humanizes to "that time has
       // already passed" (ops/violationLabels).
       if (cursor.getTime() < Date.now()) {
-        trackReject('in_the_past', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+        return { kind: 'reject', reason: 'in_the_past', iso: cursorDt.toISO()! };
       }
       // ── (b) NO PROFILE — the lead-time floor with nowhere else to live ─────
       // #128 (owner 2026-07-26: "we need to have priority of reasons") — for
@@ -1101,9 +1124,7 @@ export async function findAvailableSlots(params: {
       // 8 slots on Monday") is built from those labels, and owner rules shadowing
       // them would silently empty it.
       if (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours)) {
-        trackReject('within_lead_time', cursorDt.toISO()!);
-        cursor = new Date(cursor.getTime() + step);
-        continue;
+        return { kind: 'reject', reason: 'within_lead_time', iso: cursorDt.toISO()! };
       }
       // v2.4.1 — slots overlapping the meeting being moved are forbidden as move
       // targets (don't offer 11:00 back when moving the 11:00 meeting).
@@ -1112,9 +1133,7 @@ export async function findAvailableSlots(params: {
           cursor.getTime() < zone.end && slotEnd.getTime() > zone.start
         );
         if (overlapsMovingEvent) {
-          trackReject('overlaps_meeting_being_moved', cursorDt.toISO()!);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return { kind: 'reject', reason: 'overlaps_meeting_being_moved', iso: cursorDt.toISO()! };
         }
       }
 
@@ -1152,9 +1171,7 @@ export async function findAvailableSlots(params: {
             slotEnd.getTime() > busy.start.getTime()
           );
           if (overlapsAttendee) {
-            trackReject(`attendee_busy_collision:${overlapsAttendee.email}`, cursorDt.toISO()!);
-            cursor = new Date(cursor.getTime() + step);
-            continue;
+            return { kind: 'reject', reason: `attendee_busy_collision:${overlapsAttendee.email}`, iso: cursorDt.toISO()! };
           }
         }
         // Travel buffer, ATTENDEE side only. v4.1.x (M1) — the OWNER side of
@@ -1170,9 +1187,7 @@ export async function findAvailableSlots(params: {
             slotEnd.getTime() > busy.start.getTime() - bufferMs
           );
           if (withinBuffer) {
-            trackReject('travel_buffer_collision', cursorDt.toISO()!);
-            cursor = new Date(cursor.getTime() + step);
-            continue;
+            return { kind: 'reject', reason: 'travel_buffer_collision', iso: cursorDt.toISO()! };
           }
         }
         // #43 / #124 / Daniel — per-attendee work-window clip, own TZ with
@@ -1181,10 +1196,7 @@ export async function findAvailableSlots(params: {
           const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
           const attendeeOutsideHours = (att: NonNullable<typeof params.attendeeAvailability>[number]): boolean => {
             try {
-              const tw = att.travelWindow;
-              const effTz = (tw && candidateDayIso >= tw.from && candidateDayIso <= tw.until)
-                ? tw.timezone
-                : (att.homeTimezone ?? att.timezone);
+              const effTz = attendeeTzForDay(att, candidateDayIso);
               const attStart = DateTime.fromJSDate(cursor).setZone(effTz);
               const attEnd = DateTime.fromJSDate(slotEnd).setZone(effTz);
               if (!attStart.isValid || !attEnd.isValid) return false;
@@ -1213,9 +1225,7 @@ export async function findAvailableSlots(params: {
           } else {
             const blockingAttendee = params.attendeeAvailability.find(attendeeOutsideHours);
             if (blockingAttendee) {
-              trackReject(`outside_attendee_work_hours:${blockingAttendee.email}`, cursorDt.toISO()!);
-              cursor = new Date(cursor.getTime() + step);
-              continue;
+              return { kind: 'reject', reason: `outside_attendee_work_hours:${blockingAttendee.email}`, iso: cursorDt.toISO()! };
             }
           }
         }
@@ -1258,13 +1268,6 @@ export async function findAvailableSlots(params: {
         const verdict = checkSlot({ ...slotCheckInput, allowRelaxed: params.relaxed });
         verdictOverOptional = verdict.overOptional;
         if (!verdict.passes) {
-          trackReject(
-            mapVerdictToRejectLabel(verdict.violation_kind, dayType),
-            cursorDt.toISO()!,
-            // The day narration counts in-hours slots only; which rule won on
-            // an out-of-hours slot is irrelevant to "why was this day empty".
-            verdict.outsideWorkHours === true,
-          );
           // gh#165-d — a colleague's STRICT check (allowRelaxed:false) rejects
           // here whenever overCommitment is set (scheduleRules.ts rule 8), so
           // this is the ONLY branch a colleague's single-slot narrow-window call
@@ -1273,11 +1276,17 @@ export async function findAvailableSlots(params: {
           // this the field could never be populated on a strict rejection —
           // gh#165-b's add-attendees steer and any all-day-collision handling
           // downstream were both unreachable dead code.
-          if (verdict.violation_kind === 'owner_busy_collision' && verdict.overCommitment) {
-            stampConflictingEvent(verdict.overCommitment);
-          }
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return {
+            kind: 'reject',
+            reason: mapVerdictToRejectLabel(verdict.violation_kind, dayType),
+            iso: cursorDt.toISO()!,
+            // The day narration counts in-hours slots only; which rule won on
+            // an out-of-hours slot is irrelevant to "why was this day empty".
+            outOfWorkHours: verdict.outsideWorkHours === true,
+            ...(verdict.violation_kind === 'owner_busy_collision' && verdict.overCommitment
+              ? { conflicting: verdict.overCommitment }
+              : {}),
+          };
         }
         // ── A PROPOSAL IS NEVER A TIME HE IS ALREADY COMMITTED ON (M2, #142d) ──
         // `allowRelaxed` waives checkSlot rule 8 for the WRITE path — that waiver
@@ -1301,18 +1310,19 @@ export async function findAvailableSlots(params: {
         // option. The DIRECT-book chain is untouched and still total: he names the
         // time, create_meeting books it, and says what it lands on.
         if (verdict.overCommitment) {
-          trackReject('owner_busy_collision', cursorDt.toISO()!, verdict.outsideWorkHours === true);
           // #165b — first hit wins; a single-candidate caller has exactly one to
           // report, and a spread search never reads this field.
-          stampConflictingEvent(verdict.overCommitment);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return {
+            kind: 'reject',
+            reason: 'owner_busy_collision',
+            iso: cursorDt.toISO()!,
+            outOfWorkHours: verdict.outsideWorkHours === true,
+            conflicting: verdict.overCommitment,
+          };
         }
         // Relaxing a soft block is not extending his day (see `keepWorkHours`).
         if (params.keepWorkHours && verdict.outsideWorkHours) {
-          trackReject('outside_owner_work_hours', cursorDt.toISO()!, true);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()!, outOfWorkHours: true };
         }
         // A relaxed pass is the only one that returns a rule-BREAKING slot, so it
         // is the only one that owes the owner which rule. Ask the SAME validator
@@ -1335,9 +1345,7 @@ export async function findAvailableSlots(params: {
         // applied by the pre-filter above, which is scoped to exactly this path.
         const inAnyWindow = dayHours.some(w => slotTotalMin >= w.startMin && slotEndMin <= w.endMin);
         if (!inAnyWindow) {
-          trackReject('outside_owner_work_hours', cursorDt.toISO()!);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return { kind: 'reject', reason: 'outside_owner_work_hours', iso: cursorDt.toISO()! };
         }
         const overlapsOwner = allBusy.find(busy =>
           busy.email === ownerEmailLower &&
@@ -1345,13 +1353,10 @@ export async function findAvailableSlots(params: {
           slotEnd.getTime() > busy.start.getTime()
         );
         if (overlapsOwner) {
-          trackReject('owner_busy_collision', cursorDt.toISO()!);
-          cursor = new Date(cursor.getTime() + step);
-          continue;
+          return { kind: 'reject', reason: 'owner_busy_collision', iso: cursorDt.toISO()! };
         }
       }
 
-      if (!dayBuckets.has(dayKey)) dayBuckets.set(dayKey, []);
       // v3.2.6 (RC1) — flag slots sitting on a floating block's CURRENT placement
       // (booking here forces it to shift; consumers prefer non-disturbing slots).
       const slotStartMs = cursor.getTime();
@@ -1364,16 +1369,51 @@ export async function findAvailableSlots(params: {
       // reaches here (dropped above) — real rule wins, so WE-soft is strictly
       // above the relaxed tier and strictly below clean. The subject comes from
       // the validator's M2 level (v4.1.x), already masked for this caller.
-      dayBuckets.get(dayKey)!.push({
-        start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
-        end: slotEndLocal.toISO()!,
-        day_type: dayType,
-        disturbs_floating_block: disturbsBlock,
-        ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
-        ...(verdictBrokenRuleLabel ? { broken_rule_label: verdictBrokenRuleLabel } : {}),
-        ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
-        ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
-      });
+      return {
+        kind: 'accept',
+        dayKey,
+        candidate: {
+          start: cursorLocal.toISO()!,   // local-zoned ISO with explicit offset (v2.4.2)
+          end: slotEndLocal.toISO()!,
+          day_type: dayType,
+          disturbs_floating_block: disturbsBlock,
+          ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
+          ...(verdictBrokenRuleLabel ? { broken_rule_label: verdictBrokenRuleLabel } : {}),
+          ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
+          ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
+        },
+      };
+    }
+
+    // The ONE place every CursorOutcome's side effects land — trackReject
+    // (global + per-day counts), dayReasons (whole-day skips), dayBuckets
+    // (accepted candidates), and the single cursor advance. The `never`
+    // assignment in `default` is what makes a new union member a compile
+    // error until it is handled here (see CursorOutcome's own doc).
+    while (cursor.getTime() + durationMs <= searchEnd.getTime()) {
+      const outcome = evaluateCursor(cursor);
+      switch (outcome.kind) {
+        case 'accept':
+          if (!dayBuckets.has(outcome.dayKey)) dayBuckets.set(outcome.dayKey, []);
+          dayBuckets.get(outcome.dayKey)!.push(outcome.candidate);
+          break;
+        case 'reject':
+          trackReject(outcome.reason, outcome.iso, outcome.outOfWorkHours);
+          if (outcome.conflicting) stampConflictingEvent(outcome.conflicting);
+          break;
+        case 'day_skip':
+          if (!dayReasons.has(outcome.dayKey)) {
+            dayReasons.set(outcome.dayKey, new Map([[outcome.reason, 1]]));
+          }
+          break;
+        case 'silent':
+          break;
+        default: {
+          // Exhaustiveness guard — never let a new skip path go unhandled.
+          const _exhaustive: never = outcome;
+          void _exhaustive;
+        }
+      }
       cursor = new Date(cursor.getTime() + step);
     }
 
@@ -1439,10 +1479,13 @@ export async function findAvailableSlots(params: {
     //
     // findavailableslots-drops-context-on-colleague-oof-deadend (2026-08-16)
     // — daySummary is built from `dayReasons`, not `rejectedCounts`, but the
-    // two day-type branches above (`wrong_day_type`) write straight into
-    // `dayReasons` without going through `trackReject` — deliberately: they
-    // are a whole-day skip, not a per-slot rejection, so they don't belong in
-    // the per-reason log/counts. A window whose ONLY story is a day-type skip
+    // two day-type branches above (`vacation_or_off_day` for a per-date
+    // off-day, `wrong_day_type` for an in-person/home-day mismatch — split
+    // 2026-08-24, findavailableslots-day-off-mislabeled-wrong-day-type)
+    // write straight into `dayReasons` without going through `trackReject`
+    // — deliberately: they are a whole-day skip, not a per-slot rejection,
+    // so they don't belong in the per-reason log/counts. A window whose
+    // ONLY story is a day-type skip
     // (e.g. a vacation-only week, nothing else ever rejected) left
     // `rejectedCounts` empty, so this gate never ran and `daySummary` was
     // never set at all — silently dropping the one fact a dead-end colleague

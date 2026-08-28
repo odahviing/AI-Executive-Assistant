@@ -22,6 +22,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
+import type { CalendarEvent } from '../connectors/graph/calendar';
 import logger from './logger';
 import { findDeadGaps, alignUpQuarter, alignDownQuarter, type DensityConfig } from './calendarDensity';
 
@@ -163,6 +164,151 @@ export function isFloatingBlockEvent(
   if (categories.includes(defaultCat)) return true;
 
   return false;
+}
+
+/**
+ * densityCommitments — THE busy pool for the day's dense-packing gap-scoring
+ * math (scoreSlotDensity / findDeadGaps / earlierConnectiveStart /
+ * findConsolidatingSlotForBlock). Four call sites each hand-rolled a
+ * near-identical pool that disagreed about whether a floating block counts
+ * as a neighbour — proven live: the search walker's own pool excludes a
+ * floating block (elastic, can slide out of the way) so a slot offered as
+ * clean carves lunch out, but createMeeting's counter-offer pool INCLUDED it
+ * as busy, so the slot Maelle just offered as clean immediately triggered
+ * her own counter-offer once booked.
+ *
+ * `floatingBlocksAsNeighbours` makes that call an explicit, named per-site
+ * flag instead of an accidental byproduct of which filter a call site
+ * happened to write:
+ *   - false — a floating block is elastic and can slide out of the way, so
+ *     it is never a fixed neighbour for "is this slot connective" (matches
+ *     the search walker's own pool; createMeeting's counter-offer pool).
+ *   - true — the call is literally about a meeting or another block
+ *     abutting THIS block (autoMove's abut-the-block guards; rebalance's
+ *     dense-consolidation `commitments`), so the block must score as a real
+ *     neighbour or the abut math has nothing to abut against.
+ *
+ * Always excludes: cancelled, all-day, showAs='free', showAs='workingElsewhere'
+ * (never a real occupant either way), and any id in `excludeEventIds`.
+ */
+export function densityCommitments(
+  events: CalendarEvent[],
+  profile: UserProfile,
+  opts: { floatingBlocksAsNeighbours: boolean; excludeEventIds?: string[] },
+): Array<{ start: number; end: number }> {
+  const exclude = new Set(opts.excludeEventIds ?? []);
+  const blocks = getFloatingBlocks(profile);
+  return events
+    .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere')
+    .filter(e => !exclude.has(e.id))
+    .filter(e => opts.floatingBlocksAsNeighbours
+      || !blocks.some(b => isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, b)))
+    .map(e => ({
+      start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toMillis(),
+      end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).toMillis(),
+    }));
+}
+
+/**
+ * busyForBlockWindow — THE busy pool for "what's occupying the space a
+ * floating block could otherwise use", inside one preferred window.
+ *
+ * Owner ruling (2026-08-28, matching checkSlot rule 6): for a single-slot
+ * CAPACITY check — "is there still room for this block somewhere in its
+ * window" — a Working-Elsewhere event is never busy; WE time is always
+ * reclaimable, same as it is for the booking check. That is this function's
+ * DEFAULT (`treatWorkingElsewhereAsBusy` omitted / false) and is what rule 6
+ * itself uses.
+ *
+ * Corrected same day: that default is wrong for a DESTINATION SEARCH — code
+ * that is ranking candidate landing spots for a block and picking one, not
+ * just answering yes/no about one already-chosen slot. There, WE is a
+ * second-tier fallback, never equal to genuinely free time (a slot whose
+ * only "conflict" is a real WE-tagged event is worse than a fully clear
+ * slot, only usable when no clear slot exists at all). Callers doing that
+ * kind of search pass `treatWorkingElsewhereAsBusy: true` for a first pass,
+ * then fall back to the default (false) for a second pass if the first
+ * finds nothing — see `findBlockDestination` below, the one place that
+ * two-pass logic lives.
+ *
+ * Also fixes rule 6's own self-identification bug: "is this event the
+ * block's own instance" is answered via `isFloatingBlockEvent` (regex +
+ * category aware, so a Hebrew-titled lunch matches its configured
+ * `match_subject_regex`), never a raw English subject substring — the old
+ * rule-6-only check silently failed to recognize a non-English block name
+ * and mis-flagged the block's own event as a competing busy interval.
+ *
+ * Excludes, uniformly for every caller: cancelled events, showAs='free',
+ * the block's own calendar instance, and any id in `excludeIds` (a move's
+ * own moving event, etc) — plus showAs='workingElsewhere' unless the caller
+ * opts into treating it as busy. Every surviving interval is clipped to
+ * [windowStart, windowEnd) in millis so callers can go straight into
+ * findAlignedSlotForBlock / findLatestAlignedSlotForBlock.
+ */
+export function busyForBlockWindow(
+  events: CalendarEvent[],
+  block: FloatingBlock,
+  windowStart: number,
+  windowEnd: number,
+  excludeIds?: Set<string>,
+  treatWorkingElsewhereAsBusy = false,
+): Array<{ start: number; end: number }> {
+  const busy: Array<{ start: number; end: number }> = [];
+  for (const ev of events) {
+    if (ev.isCancelled) continue;
+    if (excludeIds?.has(ev.id)) continue;
+    if (ev.showAs === 'free') continue;
+    if (ev.showAs === 'workingElsewhere' && !treatWorkingElsewhereAsBusy) continue;
+    if (isFloatingBlockEvent({ subject: ev.subject, categories: ev.categories }, block)) continue;
+    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
+    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis();
+    if (evEnd <= windowStart || evStart >= windowEnd) continue;
+    busy.push({ start: Math.max(evStart, windowStart), end: Math.min(evEnd, windowEnd) });
+  }
+  return busy;
+}
+
+/**
+ * findBlockDestination — THE two-pass destination search for every consumer
+ * that is picking a landing spot for a floating block inside its preferred
+ * window (as opposed to validating one already-chosen slot — that's
+ * checkSlot rule 6, which stays a single-pass capacity check and is
+ * unaffected by this; see busyForBlockWindow's own doc for why).
+ *
+ * Owner ruling (2026-08-28): a genuinely free slot must always be tried and
+ * preferred FIRST. Pass 1 treats a real WE-tagged event as busy and searches
+ * for a fully clear slot; only when pass 1 finds nothing does pass 2 fall
+ * back to the pre-existing behaviour (WE excluded from busy) and search
+ * again. `usedWorkingElsewhereFallback` tells the caller which tier the
+ * returned slot came from, so a reply can be honest about it
+ * ("moved to 13:00, though that does sit against a Working-Elsewhere
+ * block") instead of presenting a WE-fallback slot as a clean one.
+ */
+export function findBlockDestination(
+  events: CalendarEvent[],
+  block: FloatingBlock,
+  dateStr: string,
+  timezone: string,
+  excludeIds?: Set<string>,
+  extraBusy?: { start: number; end: number },
+): { aligned: number | null; usedWorkingElsewhereFallback: boolean } {
+  const windowStart = windowMsForDay(dateStr, block.preferred_start, timezone);
+  const windowEnd = windowMsForDay(dateStr, block.preferred_end, timezone);
+  const finder = block.prefer_position === 'latest_in_window' ? findLatestAlignedSlotForBlock : findAlignedSlotForBlock;
+
+  const buildBusy = (treatWorkingElsewhereAsBusy: boolean) => {
+    const pool = busyForBlockWindow(events, block, windowStart, windowEnd, excludeIds, treatWorkingElsewhereAsBusy);
+    if (extraBusy && extraBusy.start < windowEnd && extraBusy.end > windowStart) {
+      pool.push({ start: Math.max(extraBusy.start, windowStart), end: Math.min(extraBusy.end, windowEnd) });
+    }
+    return pool;
+  };
+
+  const freeSlot = finder(block, dateStr, timezone, buildBusy(true));
+  if (freeSlot !== null) return { aligned: freeSlot, usedWorkingElsewhereFallback: false };
+
+  const weFallbackSlot = finder(block, dateStr, timezone, buildBusy(false));
+  return { aligned: weFallbackSlot, usedWorkingElsewhereFallback: weFallbackSlot !== null };
 }
 
 /**

@@ -36,7 +36,6 @@ import {
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
-import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
 import { logActivity } from '../../../../core/requests/logActivity';
 import { ACTIVITY_REVERTIBILITY, isEventStillUpcoming } from '../../../../core/requests/activityRevertibility';

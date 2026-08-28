@@ -143,6 +143,18 @@ export interface OrchestratorOutput {
    *  post-hoc hallucination backstop in app.ts — when the LLM claims a booking
    *  but this is false, the reply is rewritten to a safe fallback. */
   bookingOccurred?: boolean;
+  /**
+   * bug 1.1 (2026-08-27) — true when `precheckAvailability` detected and
+   * tested at least one (date, time) availability question in THIS turn's
+   * inbound message (`buildTurnContext.ts`'s own `result.ran`, carried
+   * verbatim, never re-derived). Lets `runOutputGates`'s slot-grounding
+   * checker (`runSlotGroundingCheckAndMaybeRewrite`) still run on a turn
+   * that fired ZERO availability tools — otherwise its hard gate on
+   * `groundedToolLines` skips checking a specific-time claim entirely,
+   * which is how a stale time recalled from three days earlier in the
+   * thread shipped as fact with no tool call to catch it.
+   */
+  availabilityQuestionDetected?: boolean;
   toolSummaries?: string[];     // compact summaries of tool calls for conversation history
   /**
    * v2.8.3+ — rich per-mutation record for this turn. Populated whenever a
@@ -223,6 +235,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     socialActive,
     socialClassification,
     resolvedMeetingAttendees,
+    availabilityQuestionDetected,
   } = await buildTurnContext(input);
 
   let requiresApproval = false;
@@ -287,6 +300,16 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // This is the deterministic, clock-free backstop: a same-turn message_colleague
   // to a requester already relayed-to is suppressed on this fact alone.
   const relayedRequestersThisTurn = new Set<string>();
+  // closeloop-silent-close-no-requester-relay (bounce fix, point 3) — request
+  // ids a `resolve_approval` tool call touched THIS turn, success OR failure.
+  // The owner-said-done scanner (closeLoopOnOwnerHandled, below) matches on
+  // raw owner free text and can independently close the SAME row a
+  // structured resolve_approval call just handled this turn — including one
+  // resolver.ts deliberately leaves `awaiting_owner` (still "open" to the
+  // scanner's own query) after a failed on_approve replay, specifically so
+  // the owner can retry. A same-turn free-text match must never override
+  // that considered decision. Populated below regardless of ok/failure.
+  const resolveApprovalTouchedIdsThisTurn = new Set<string>();
   // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
   // colleagues already sent the private cap-notice DM this turn
   // (colleaguePendingCapRefusal, tasks/skill.ts). Kept SEPARATE from
@@ -899,6 +922,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             logger.warn('orchestrator — relayed-requester record threw, non-fatal', { err: String(err).slice(0, 200) });
           }
         }
+        // closeloop-silent-close-no-requester-relay (bounce fix, point 3) —
+        // UNCONDITIONAL touch record (success or failure; see the Set's own
+        // comment above). A failed replay still means the structured path
+        // already owns this row's outcome this turn.
+        if (toolUse.name === 'resolve_approval') {
+          const touchedId = (result && typeof result === 'object')
+            ? ((result as { request_id?: string }).request_id
+                ?? (result as { approval_id?: string }).approval_id)
+            : undefined;
+          if (typeof touchedId === 'string' && touchedId) {
+            resolveApprovalTouchedIdsThisTurn.add(touchedId);
+          }
+        }
       }
 
       toolResults.push({
@@ -1338,7 +1374,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     void (async () => {
       try {
         const { closeLoopOnOwnerHandled } = await import('../../utils/closeLoopOnOwnerHandled');
-        const r = await closeLoopOnOwnerHandled({ profile, ownerMessage: userMessage });
+        const r = await closeLoopOnOwnerHandled({
+          profile,
+          ownerMessage: userMessage,
+          // closeloop-silent-close-no-requester-relay (bounce fix) — reuse the
+          // SAME turn-scoped guards resolve_approval's own relay uses
+          // (tasks/skill.ts's alreadyMessagedRequesterIds), so this scanner's
+          // relay never double-notifies and never second-guesses a row a
+          // structured resolve_approval call already handled this turn.
+          alreadyMessagedRequesterIds: messagedColleaguesOkThisTurn,
+          touchedByResolveApprovalThisTurn: resolveApprovalTouchedIdsThisTurn,
+        });
         if (r.scanned && r.closedItems.length > 0) {
           logger.info('closeLoopOnOwnerHandled: cascade fired', {
             threadTs, count: r.closedItems.length, items: r.closedItems,
@@ -1474,6 +1520,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const { directiveForProactiveSlot } = require('../social/stateMachine') as typeof import('../social/stateMachine');
         const codaDirective = directiveForProactiveSlot({
           personSlackId: turnPersonSlackId,
+          ownerUserId: profile.user.slack_user_id,
           ownerTimezone: profile.user.timezone,
         });
         if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
@@ -1526,6 +1573,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     approvalId,
     slackActions,
     bookingOccurred,
+    availabilityQuestionDetected,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
     healthCheckVacuous: healthCheckVacuous ? true : undefined,

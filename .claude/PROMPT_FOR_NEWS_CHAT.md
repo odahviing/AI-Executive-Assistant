@@ -14,7 +14,7 @@ Shipped: `NEWS_MEETING_COMPANY_CAP = 3` in `src/tasks/briefs.ts:57`, enforced by
 ---
 
 ## M-5 — pruneSeenLog today-section merge — DONE
-Shipped v3.3.1: the merge now matches the header with an anchored regex, not a literal substring — `src/skills/news.ts:520-526` (comment tagged `v3.3.1 (M-5)`).
+Shipped v3.3.1: the merge now matches the header with an anchored regex, not a literal substring — `src/skills/news.ts:633-639` (comment tagged `v3.3.1 (M-5)`).
 
 ---
 
@@ -57,7 +57,7 @@ Shipped: a near-dup match returns `{ duplicate: true, matchedLine }` instead of 
 ---
 
 ## N-12 — news seen-log sits in the CACHED static prompt — DONE
-Shipped: `getSystemPromptSection` scope-gates the seen-log + prefs block behind `inPlay` (general/news scopes only); the always-on part is just the routing rule — `src/skills/news.ts:643-666`.
+Shipped: `getSystemPromptSection` scope-gates the seen-log + prefs block behind `inPlay` (general/news scopes only); the always-on part is just the routing rule — `src/skills/news.ts:756-780`.
 
 ---
 

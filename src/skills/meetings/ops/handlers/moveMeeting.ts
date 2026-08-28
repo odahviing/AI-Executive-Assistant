@@ -14,17 +14,10 @@ import { humanizeViolationLabel } from '../../ops/violationLabels';
 import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  findDuplicateEvent,
-  findReschedulableSibling,
   findSameSubjectSiblings,
-  type CalendarEvent,
   getFreeBusy,
   findAvailableSlots,
-  createMeeting,
-  deleteMeeting,
-  verifyEventDeleted,
   updateMeeting,
-  GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
@@ -1214,7 +1207,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // meeting being moved is a floating block (lunch, coffee, etc.), don't
         // trust args.new_start verbatim — Sonnet keeps doing time math in
         // chat and getting it wrong (window check, buffer, alignment). Run
-        // findAlignedSlotForBlock with args.new_start as a HINT to compute
+        // findBlockDestination with args.new_start as a HINT to compute
         // the correct slot; if no in-window slot fits, refuse with a clear
         // pointer to policy_exception (deferred_action move_meeting). Owner-
         // directed moves no longer ask permission for in-window adjustments
@@ -1244,9 +1237,17 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
 
         let effectiveStart = args.new_start as string;
         let effectiveEnd   = args.new_end   as string;
+        // WE-fallback-surfacing parity (2026-08-28 bouncer finding) — the
+        // colleague-path block-snap below is the third of three surfaces
+        // that thread `usedWorkingElsewhereFallback` (check_join_availability
+        // in meetings.ts and rebalanceFloatingBlocks' own shadowNotify are
+        // the other two); this used to only `logger.info` it, never telling
+        // a human. Set when the destination search below only found a slot
+        // against a WE block, read at the final success return.
+        let moveUsedWorkingElsewhereFallback = false;
         // v3.x — grid-align an off-grid move target to the :00/:15/:30/:45 grid
         // unless the owner named the exact time. Floating blocks are realigned
-        // by findAlignedSlotForBlock below, so this only affects the regular
+        // by findBlockDestination below, so this only affects the regular
         // (non-floating) move fall-through.
         if (!args.start_is_explicit && typeof effectiveStart === 'string') {
           const sDt = DateTime.fromISO(effectiveStart, { zone: timezone });
@@ -1280,7 +1281,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               // e.g. 25), so moving an owner-stretched 40-min lunch silently reset
               // it to 25. Read the event's actual span; fall back to config only
               // if the event's times don't parse. effectiveBlock carries it so the
-              // placement search (findAlignedSlotForBlock) also sizes for the real
+              // placement search (findBlockDestination) also sizes for the real
               // duration.
               const movingDurationMin = (() => {
                 try {
@@ -1295,18 +1296,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               const effectiveBlock = movingDurationMin !== matchedBlock.duration_minutes
                 ? { ...matchedBlock, duration_minutes: movingDurationMin }
                 : matchedBlock;
-              // Build the busy-window list for findAlignedSlotForBlock.
+              // Window bounds, needed by the owner-path in-window check below.
               // Exclude the floating block itself (it's about to move).
               const wStart = fb.windowMsForDay(dayStr, matchedBlock.preferred_start, timezone);
               const wEnd   = fb.windowMsForDay(dayStr, matchedBlock.preferred_end,   timezone);
-              const busy = dayEvents
-                .filter(e => e.id !== args.meeting_id && !e.isCancelled && e.showAs !== 'free')
-                .map(e => ({
-                  start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toMillis(),
-                  end:   DateTime.fromISO(e.end.dateTime,   { zone: e.end.timeZone   ?? 'utc' }).toMillis(),
-                }))
-                .filter(b => b.end > wStart && b.start < wEnd)
-                .map(b => ({ start: Math.max(b.start, wStart), end: Math.min(b.end, wEnd) }));
               // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
               // v2.3.2 (3A) — owner-explicit hint respects target as-is. Don't
@@ -1356,7 +1349,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 const windowNote = inWindow
                   ? ''
                   : ` (outside its usual ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window — moved as asked).`;
-                // Skip the colleague-path findAlignedSlotForBlock branch below.
+                // Skip the colleague-path findBlockDestination branch below.
                 return await updateMeeting({
                   userEmail, timezone,
                   meetingId: args.meeting_id as string,
@@ -1404,7 +1397,12 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               }
 
               // Colleague-path — keep existing alignment + conflict guard.
-              const alignedMs = fb.findAlignedSlotForBlock(effectiveBlock, dayStr, timezone, busy);
+              // Destination search (owner ruling 2026-08-28): this picks WHERE
+              // the block lands, not a single-slot capacity check — two-pass
+              // finder, a genuinely free slot preferred over a WE-tagged one.
+              const { aligned: alignedMs, usedWorkingElsewhereFallback } = fb.findBlockDestination(
+                dayEvents, effectiveBlock, dayStr, timezone, new Set([args.meeting_id as string]),
+              );
               if (alignedMs === null) {
                 logger.info('move_meeting refused — no in-window slot for floating block', {
                   meetingId: args.meeting_id, block: matchedBlock.name, hint: args.new_start,
@@ -1423,8 +1421,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 logger.info('move_meeting — floating block snapped to aligned slot', {
                   meetingId: args.meeting_id, block: matchedBlock.name,
                   hint: args.new_start, snapped: alignedStartIso,
+                  usedWorkingElsewhereFallback,
                 });
               }
+              if (usedWorkingElsewhereFallback) moveUsedWorkingElsewhereFallback = true;
               effectiveStart = alignedStartIso;
               effectiveEnd   = alignedEndIso;
             }
@@ -1676,15 +1676,25 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             }
           }
         } catch (err) {
-          // "proceed with a time-only move" is a fine degrade when
-          // planMeeting couldn't classify a CATEGORY or a location; it is not
-          // fine when the reason it failed is that his calendar is unreadable,
-          // because then the destination was never checked against anything.
-          // A move is a write: refuse it.
-          if (err instanceof CalendarOfflineError) throw err;
-          logger.warn('move_meeting — planMeeting threw, proceeding with time-only move', {
-            err: String(err).slice(0, 200), meetingId: args.meeting_id,
-          });
+          // A move is a write: whatever the reason planMeeting failed —
+          // CalendarOfflineError (his calendar is genuinely unreadable,
+          // handled by the offline refusal upstream) or anything else (a
+          // real validation exception) — the destination was never checked
+          // against his rules, so "proceed with a time-only move" is never a
+          // safe degrade. Rethrow unconditionally instead of swallowing:
+          // CalendarOfflineError is caught by withCalendarOfflineRefusal
+          // (meetings.ts) into the clean "calendar unreachable" answer; any
+          // other error surfaces as a genuine tool failure (registry.ts's
+          // generic catch) rather than a silent unvalidated write. Mirrors
+          // create_meeting's own planMeeting call (createMeeting.ts), which
+          // has no catch here at all and fails closed the same way — one
+          // spine, one behavior (M1).
+          if (!(err instanceof CalendarOfflineError)) {
+            logger.error('move_meeting — planMeeting threw, refusing the move (no unvalidated write)', {
+              err: String(err).slice(0, 200), meetingId: args.meeting_id,
+            });
+          }
+          throw err;
         }
 
         // #30 — hold-conflict gate on MOVE (mirror of the create gate). Never
@@ -2065,7 +2075,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
           // instead of acknowledging her own action.
-          action_summary: `Moved '${movedSubject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.`,
+          action_summary: `Moved '${movedSubject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.${moveUsedWorkingElsewhereFallback ? ' (No fully clear gap in the window — it now sits against a Working-Elsewhere block.)' : ''}`,
           ...(moveTripDisplay ? { _trip_note: 'Travel day — state the moved time from `action_summary` VERBATIM (both clocks, correctly labelled); do not recompute it.' } : {}),
         };
 }

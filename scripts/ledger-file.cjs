@@ -361,20 +361,23 @@ if ((verdictRaw === 'needs-owner-decision' || verdictRaw === 'blocked-charter' |
   die(`a "${verdictRaw}" row needs --recommend or --note.`, 'A row he cannot rule on without re-opening the finding is not a row this ledger should accept (X77).')
 if (severity && !['high', 'medium', 'low'].includes(severity)) die('--severity must be high, medium or low.')
 
-// ── `--bounces` — there was no writer for this field until now. `bugger.js` and
-// `feature.js` both cap the round at BOUNCE_LIMIT=1 ("we can bounce stuff once,
-// not twice", SKILL.md) and only ever emit the field when it is non-zero, so 1
-// is not a default, it is the only value the field ever legitimately holds —
-// same rule for a hand-run bouncer pass (SKILL.md: "write bounces: 1 on every
-// one"). The OUTCOME of the bounce (fixed and cleared, vs escalated after the
-// second attempt) is already carried by `--verdict` (`built` vs
-// `needs-owner-decision`) — a second field for that would be the same fact
-// twice, so this stays a single count, not a new verdict spelling.
+// ── `--bounces` — there was no writer for this field until now. Each engine
+// caps its own ladder at its own BOUNCE_LIMIT and only ever emits the field
+// when it is non-zero. X211 (2026-08-27) raised bugger.js's BOUNCE_LIMIT to 2
+// (bugs now escalate the build model — round 1 `opus`, round 2 `fable` —
+// instead of stopping at one same-tier retry); feature.js is UNCHANGED at 1.
+// The ceiling here is the HIGHER of the two, since this script has no
+// `--engine` flag to tell which produced the row — a hand-run bounce follows
+// the same ladder (SKILL.md: "write bounces: 1" / "bounces: 2"). The OUTCOME
+// of the bounce (fixed and cleared, vs escalated after the last attempt) is
+// already carried by `--verdict` (`built` vs `needs-owner-decision`) — a
+// second field for that would be the same fact twice, so this stays a single
+// count, not a new verdict spelling.
 let bounces = null
 if (bouncesRaw !== null) {
   const n = Number(bouncesRaw)
   if (!Number.isInteger(n) || n < 1) die('--bounces must be a positive integer.', 'Omit the flag entirely for a row that was never sent back — there is no reason to write `bounces: 0`.')
-  if (n > 1) die(`--bounces ${n} is above the engine's own limit.`, 'BOUNCE_LIMIT is 1 in both bugger.js and feature.js — a row overturned a second time goes to the owner with verdict `needs-owner-decision`, it does not get a bigger count. If this really happened outside the engine, that is a bug in the bounce mechanism, not a new value for this field.')
+  if (n > 2) die(`--bounces ${n} is above either engine's own limit.`, 'BOUNCE_LIMIT is 2 in bugger.js and 1 in feature.js — a row overturned past its own engine\'s limit goes to the owner with verdict `needs-owner-decision`, it does not get a bigger count. If this really happened outside either engine, that is a bug in the bounce mechanism, not a new value for this field.')
   bounces = n
 }
 

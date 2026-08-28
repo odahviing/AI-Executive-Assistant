@@ -36,16 +36,21 @@
  *     draft entirely about Monday 3 August; only the rewriter's keep-veto stopped it
  *     (:784). Closed: `in_the_past` no longer arms, and the ledger holds future
  *     instants only.
- *   • 2026-08-24T12:07:06Z / T12:07:12Z — two more, same shape, NOT yet closed
- *     upstream: an owner-facing thread offering Sun 6 Sep 12:00/13:00, Mon 7 Sep
- *     11:15/12:30, Tue 8 Sep 9:15/11:30, Thu 10 Sep 10:30/14:00, and a Hebrew
- *     colleague-facing thread offering Mon 7.9 13:00/13:55 and Thu 10.9 14:30/15:25 —
- *     both flagged against the identical stale cross-thread hard block "Monday 7 Sep
- *     at 11:30" from a DIFFERENT thread's ledger entry, even though neither draft's
- *     own offered instants are that collision. `detectAffirmedBlockedSlots`
- *     (runOutputGates.ts:1447) appears to over-match once the same calendar day is
- *     mentioned rather than the specific instant offered. Both rewriter-vetoed
- *     ("keep") before shipping — root cause not yet investigated or closed.
+ *   • 2026-08-24T12:07:06Z / T12:07:12Z — two more, same shape: an owner-facing
+ *     thread offering Sun 6 Sep 12:00/13:00, Mon 7 Sep 11:15/12:30, Tue 8 Sep
+ *     9:15/11:30, Thu 10 Sep 10:30/14:00, and a Hebrew colleague-facing thread
+ *     offering Mon 7.9 13:00/13:55 and Thu 10.9 14:30/15:25 — both flagged
+ *     against the identical stale cross-thread hard block "Monday 7 Sep at
+ *     11:30" from a DIFFERENT thread's ledger entry, even though neither
+ *     draft's own offered instants are that collision. `detectAffirmedBlockedSlots`
+ *     (this file, :561) over-matched once the same calendar day was mentioned
+ *     rather than the specific instant offered. Both rewriter-vetoed ("keep")
+ *     before shipping. Closed (o#260): a `presented_available` verdict is no
+ *     longer trusted on the model's word alone — the report tool also returns
+ *     the `quoted_span` it based the verdict on, and `quotedSpanNamesBlock`
+ *     deterministically confirms that span names both the block's date AND
+ *     its exact time (not just the shared day) before the verdict arms the
+ *     rewriter; an unconfirmed span downgrades to `not_mentioned` (safe miss).
  * All four vetoes did their job, which is the G5 design working — but a destructive
  * rewriter with 0 catches and 4 false fires has not yet earned its active form (G6).
  * Whether it keeps that form, or should only ever rewrite to "I can't confirm that
@@ -99,11 +104,13 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
+import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
 import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { renderClockInZone } from './timezoneConvert';
+import { extractTimes, extractDates } from './dateTimeExtract';
 
 // ── The class vocabulary ────────────────────────────────────────────────────
 
@@ -398,18 +405,18 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
 /**
  * Drop one instant. Call sites (verified by grep), all cases of "this entry
  * is no longer the best knowledge":
- *   - availabilityPreCheck.ts:954 — a fresh verdict for that exact instant is NOT
+ *   - availabilityPreCheck.ts:967 — a fresh verdict for that exact instant is NOT
  *     a hard block (invalidation rules 1 and 4 both resolve through this one line:
  *     "not every reading arms" is true whether there was one reading or two).
- *   - availabilityPreCheck.ts:1183 / :1189 — `forgetNamedInstantsFromHardBlockLedger`,
+ *   - availabilityPreCheck.ts:1155 / :1161 — `forgetNamedInstantsFromHardBlockLedger`,
  *     the named-attendee bail's text-matched forget (invalidation rule 5) — a
  *     DIFFERENT mechanism from the two lines above: no `checkSlot` call, a scope
  *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;
- *     it is not — rule 4 is the undecided-frame case at :954, and this is its own
+ *     it is not — rule 4 is the undecided-frame case at :967, and this is its own
  *     rule, corrected 2026-08 (o#190).
- *   - runOutputGates.ts:999 — the pre-rewrite live re-check found this instant no
+ *   - runOutputGates.ts:1592 — the pre-rewrite live re-check found this instant no
  *     longer hard-blocked (invalidation rule 6); dropped WITHOUT a rewrite.
- *   - runOutputGates.ts:1025 — a rewrite landed on it (invalidation rule 3).
+ *   - runOutputGates.ts:1618 — a rewrite landed on it (invalidation rule 3).
  * A caller adding another should update this list AND the ledger's own
  * INVALIDATION doc above in the same change — this file's own header undercounted
  * its callers once already.
@@ -465,6 +472,50 @@ export function displayForAsker(
 type SlotTreatment = 'presented_available' | 'presented_blocked' | 'not_mentioned';
 
 /**
+ * o#260 — deterministic confirmation that a detector-quoted span actually names
+ * THIS block's date and time, rather than trusting the model's own claim of a
+ * match. Reuses the SAME cost-free regex primitives availabilityPreCheck.ts
+ * extracts date/time candidates with (G9 — one canonical definition in
+ * dateTimeExtract.ts, imported here rather than hand-copied).
+ *
+ * TIME — exact HH:MM match against the block's owner-local hour/minute. This
+ * alone rules out the proven failure mode (same day, different hour): the
+ * two documented false fires each quoted a span naming the block's DAY but a
+ * different clock time.
+ *
+ * DATE — when the span carries an explicit numeric date (7.9, 9/7, ...),
+ * it must resolve to the block's exact calendar date. When it carries none
+ * (a word-form date — "Monday 7 Sep", another language's month name — which a
+ * numeric regex can't parse without becoming a language-specific rule, W4),
+ * fall back to the language-neutral minimum: the bare day-of-month digit,
+ * word-bounded. Combined with the exact time match above, day-of-month +
+ * exact time is enough to rule out a same-day/different-time mismatch even
+ * without resolving the month from a word.
+ */
+function quotedSpanNamesBlock(quotedSpan: string, block: HardBlockedSlot, ownerTz: string): boolean {
+  // instantIso already carries the owner-local offset (see HardBlockedSlot's own
+  // doc), but Luxon's default `fromISO` reads it into the PROCESS zone (UTC on the
+  // VM — no TZ env var, no Settings.defaultZone) rather than the owner's, so
+  // `.hour`/`.day` below silently read a different clock than the one the quoted
+  // span and `block.display` actually name. Force ownerTz explicitly rather than
+  // trusting the process default.
+  const dt = DateTime.fromISO(block.instantIso, { zone: ownerTz });
+  if (!dt.isValid) return false;
+
+  const timeHit = extractTimes(quotedSpan).some(t => t.hour === dt.hour && t.minute === dt.minute);
+  if (!timeHit) return false;
+
+  const monthFirst = /^America\//.test(ownerTz);
+  const dateMatches = extractDates(quotedSpan, ownerTz, monthFirst);
+  if (dateMatches.length > 0) {
+    return dateMatches.some(d => d.date === dt.toFormat('yyyy-MM-dd'));
+  }
+  // No numeric date in the span — language-neutral fallback: the bare
+  // day-of-month digit, word-bounded so "7" doesn't match inside "17:30".
+  return new RegExp(`(?<![\\d.])${dt.day}(?![\\d.])`).test(quotedSpan);
+}
+
+/**
  * Which of the established blocks does the draft present as available?
  *
  * Haiku + forced tool. The model NEVER supplies a time, a date or a reason — it
@@ -495,11 +546,23 @@ type SlotTreatment = 'presented_available' | 'presented_blocked' | 'not_mentione
  * stays `presented_available`.
  *
  * Fails open: any throw, any unusable output → empty list → the draft ships.
+ *
+ * o#260 — the model's own "MATCH THE DATE BEFORE THE TIME" instruction (below)
+ * proved insufficient alone: two live false fires (2026-08-24, this file's own
+ * header at :39-48) show it still flags a draft's offered time as matching a
+ * block just because they share the same calendar DAY, not the same instant.
+ * Rather than trust a "presented_available" verdict on the model's word alone,
+ * the report tool also asks for the exact `quoted_span` the verdict is based
+ * on, and `quotedSpanNamesBlock` deterministically confirms that span actually
+ * names both the block's date AND its time before the verdict is trusted — a
+ * verdict that can't be confirmed downgrades to `not_mentioned` (safe-miss,
+ * G5), which directly targets the proven failure mode.
  */
 export async function detectAffirmedBlockedSlots(
   draft: string,
   blocks: HardBlockedSlot[],
   ownerFirstName: string,
+  ownerTz: string,
 ): Promise<HardBlockedSlot[]> {
   const listed = blocks.map((b, i) => `  ${i + 1}. ${b.display}`).join('\n');
 
@@ -524,12 +587,14 @@ MATCH THE DATE BEFORE THE TIME. Every listed time carries its own weekday AND da
 
 Judge by MEANING, in whatever language the draft is written — Hebrew, Russian, Spanish, English. Tense and phrasing do not matter. A hedge is still "presented_available": "not clean but workable" tells the reader they can have it.
 
+Whenever your treatment for a time is "presented_available" or "presented_blocked", also give \`quoted_span\`: the exact substring of the draft you are basing THAT judgment on for THAT specific numbered time. Quote only the part naming/discussing that time — not the whole message.
+
 Report one entry per numbered time by calling the report tool.`;
 
   try {
     const resp = await getAnthropicClient().messages.create({
       model: MODEL_HAIKU,
-      max_tokens: 300,
+      max_tokens: 500,
       tools: [{
         name: 'report',
         description: 'Report, for each numbered time, how the draft treats it.',
@@ -546,6 +611,10 @@ Report one entry per numbered time by calling the report tool.`;
                     type: 'string',
                     enum: ['presented_available', 'presented_blocked', 'not_mentioned'],
                   },
+                  quoted_span: {
+                    type: 'string',
+                    description: 'Exact substring of the draft this judgment is based on. Required unless treatment is "not_mentioned".',
+                  },
                 },
                 required: ['index', 'treatment'],
               },
@@ -559,7 +628,7 @@ Report one entry per numbered time by calling the report tool.`;
     });
     logLlmUsage('availability_floor_detect', MODEL_HAIKU, resp);
     const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const reported = (toolUse?.input as { slots?: Array<{ index?: number; treatment?: string }> } | undefined)?.slots ?? [];
+    const reported = (toolUse?.input as { slots?: Array<{ index?: number; treatment?: string; quoted_span?: string }> } | undefined)?.slots ?? [];
     const out: HardBlockedSlot[] = [];
     for (const entry of reported) {
       // Index must land on a slot WE listed; treatment must be the one enum value
@@ -569,6 +638,17 @@ Report one entry per numbered time by calling the report tool.`;
       const treatment = entry?.treatment as SlotTreatment | undefined;
       if (i < 0 || i >= blocks.length) continue;
       if (treatment !== 'presented_available') continue;
+      // o#260 — don't trust the verdict on the model's word alone: confirm the
+      // quoted span it's based on actually names THIS block's date AND time,
+      // deterministically. Can't confirm → downgrade to not_mentioned (safe
+      // miss) instead of arming a destructive rewrite off a same-day match.
+      if (!entry.quoted_span || !quotedSpanNamesBlock(entry.quoted_span, blocks[i], ownerTz)) {
+        logger.info('Availability floor — presented_available verdict could not be confirmed against its quoted span; downgraded to not_mentioned (safe miss)', {
+          slotDisplay: blocks[i].display,
+          quotedSpan: (entry.quoted_span ?? '(none)').slice(0, 200),
+        });
+        continue;
+      }
       if (!out.includes(blocks[i])) out.push(blocks[i]);
     }
     return out;

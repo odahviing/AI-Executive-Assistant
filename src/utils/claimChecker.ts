@@ -483,9 +483,14 @@ Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
   // proposed-slot-not-grounded-in-search-result (2026-08-24) — FOURTH mode.
-  // `groundedToolLines` is ALWAYS present when this mode runs (the caller only
-  // invokes it after confirming an availability tool ran this turn) — the
-  // exact compact tool-summary line(s), carried verbatim, never re-derived.
+  // `groundedToolLines` carries this turn's exact compact tool-summary
+  // line(s), verbatim, never re-derived, whenever an availability tool ran
+  // this turn. bug 1.1 (2026-08-27) — the caller (runOutputGates.ts:1719)
+  // also invokes this mode with an EMPTY `groundedToolLines` on a detected
+  // zero-tool-call availability question, so a stale time recalled from
+  // earlier in the thread still gets checked; the prompt below is written to
+  // handle both cases (an empty list plus the EARLIER-TURNS history block is
+  // what it falls back to when THIS turn ran no search at all).
   // bounce-fix (2026-08-26) — an EARLIER turn's own real search can already
   // have confirmed a time this turn's search never repeats (a colleague
   // asking about a second day while a first offer still stands). See
@@ -812,7 +817,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * ship the lie this whole function exists to stop. Both now return
  * GENERIC_HONEST_MISS instead: a fixed, tool-less, deterministic line that
  * asserts nothing about any action. English-only is an accepted compromise
- * here, same as humanGate's own fallback-of-a-fallback (humanGate.ts:409-411)
+ * here, same as humanGate's own fallback-of-a-fallback (humanGate.ts:433-439)
  * — this only fires when the checker AND this rewriter's own veto have both
  * already agreed the draft is false and the model's proposed fix is itself
  * untrustworthy, rarer still than either alone.
@@ -946,7 +951,7 @@ FLAGGED CLAIM: ${what}
 STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read). Do not manufacture a problem that isn't one.
 
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged personal claim about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
-- Remove or soften the specific unfounded claim — either drop it, or turn it into an honest hedge / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you").
+- Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered.
 - NOT invent a DIFFERENT unfounded personal claim about ${opts.ownerFirstName} in its place.
 - Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.

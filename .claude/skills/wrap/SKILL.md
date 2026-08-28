@@ -15,14 +15,14 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 1. **PATCH.** Never minor unless he says the word. Never major, ever.
 2. **Bundle EVERY chat's work, not just this one's.** Read the FULL working tree — `git status --porcelain` with no path filter — and commit all of it, framework files included. He has said *"take from other chats as well"* / *"take other chat code"* on three separate wraps. A commit containing only your own files is the defect.
 3. **Nothing uncommitted when you are done.** Re-run `git status --porcelain` at the end; empty output is the acceptance test. That includes `.claude/agent-loop/**` bookkeeping.
-4. **Close the GitHub issues that are fully resolved — and COMMENT the ones that are not.** The second half is the part that used to get skipped: a partial ticket gets a comment naming what landed and what is still open, so it is not silently left to rot. The three closing conditions and the partial rule are WRAP_UP.md step 12.
-5. **Maelle running on the new sha.** The push *is* the restart — the VM auto-deploys. **Never build or restart locally: there is no local Maelle and starting one opens a second Slack socket.** The wrap is not finished until the VM's boot stamp confirms the new sha (step 13).
+4. **Close the GitHub issues that are fully resolved — and COMMENT the ones that are not.** The second half is the part that used to get skipped: a partial ticket gets a comment naming what landed and what is still open, so it is not silently left to rot. The three closing conditions and the partial rule are WRAP_UP.md step 13.
+5. **Maelle running on the new sha.** The push *is* the restart — the VM auto-deploys. **Never build or restart locally: there is no local Maelle and starting one opens a second Slack socket.** The wrap is not finished until the VM's boot stamp confirms the new sha (step 14).
 6. **Then one summary**, stating verified-against-shipped.
 
 ## Two gates that still belong to him — do not assume these
 
 - **The ship word itself.** Do not wrap because work has accumulated. Wait for "wrap" / "ship" / "commit" / "cut a version" / "bundle".
-- **A verify overturn blocks the wrap.** If the pre-wrap bouncer pass overturned a fix, do NOT wrap it in. Report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **A verify overturn blocks the wrap.** WRAP_UP.md step 9 is the ONE place this is spelled out — one adversarial pass, forced to Fable, over the full accumulated diff. Overturning a fix means do NOT wrap it in: report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
 ## Other standing rules
 
@@ -42,4 +42,6 @@ Four of them exist because they were once missed. Confirm each actually happened
 - **Bookkeeping: the ledger BEFORE the report, then the wrap stamp after the push.** Two markers, `"runId":"wrap-<version>"` on every appended row and `state.lastWrapIso`, and one acceptance test for both — `node scripts/ledger-stats.cjs --report` must be **green**. Do not finish a wrap on a red one.
 - **Verified against shipped** in the summary — *"7 shipped, 4 verified"*, plus the reason each gap carried.
 
-Issue closing, the boot stamp and the summary are steps 12-14 there, and the CHANGELOG's one-question test closes that file. All four stood in full in both files until 2026-08-01; **one copy, and it is that one.**
+Issue closing, the boot stamp and the summary are steps 13-15 there, and the CHANGELOG's one-question test closes that file. All four stood in full in both files until 2026-08-01; **one copy, and it is that one.**
+
+**A fifth, newer than the rest and never duplicated in the first place: pre-wrap adversarial verify — one pass, forced to Fable, over the full accumulated diff (step 9).** An overturn blocks the wrap; confirm it ran before you call the wrap done.

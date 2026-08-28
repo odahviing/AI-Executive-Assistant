@@ -10,8 +10,13 @@
  *   5. outreach reply handler — colleague replied to awaiting_colleague outreach
  *   (also: brief itself, when surfaced_count >= 3 → cancelled)
  *
- * No other code path may write `state` directly to a terminal value. Schema
- * doesn't enforce this (SQLite); convention does. Audit happens here.
+ * No other code path may write `state` directly to a terminal value — with ONE
+ * named exception: db/requests.ts's cancelColleagueBookingRecordsForEvent.
+ * A colleague_booking_record is BORN terminal ('resolved'), so retiring it to
+ * 'cancelled' on meeting delete can't route through here (the already-terminal
+ * guard below would no-op it); that function writes state directly and mirrors
+ * this file's audit_log row itself. Schema doesn't enforce any of this
+ * (SQLite); convention does. Audit happens here.
  *
  * Cascade semantics:
  *   - Closing a parent cascades to its children unless skipChildren=true.

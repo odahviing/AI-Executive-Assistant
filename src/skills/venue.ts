@@ -56,7 +56,8 @@ type FindVenueArgs = {
 
 type RankVenueArgs = {
   venue_id_or_name: string;
-  rank: 1 | 2 | 3;
+  rank?: 1 | 2 | 3;
+  travel_time_minutes?: number;
 };
 
 export class VenueSkill implements Skill {
@@ -133,9 +134,11 @@ Do NOT use when:
       },
       {
         name: 'rank_venue',
-        description: `Set the owner's rank on a venue in the catalog (see the \`rank\` param for the 1/2/3 legend).
+        description: `Set the owner's rank and/or one-way travel time on a venue in the catalog (see the \`rank\` param for the 1/2/3 legend).
 
-Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "make this my favorite", "never offer that one again", etc. The venue must already exist in the catalog — newly-found ones get saved on booking.`,
+Use \`rank\` when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "make this my favorite", "never offer that one again", etc.
+
+Use \`travel_time_minutes\` when the owner states how long it takes to get to a venue he visits repeatedly ("Coffee Landwer is about 15 minutes from the office", "budget 20 minutes each way for that place"). Stated once, it's saved on that venue's record and pads the travel buffer before every future booking there automatically — pass whichever one(s) apply; at least one of \`rank\` / \`travel_time_minutes\` is required. The venue must already exist in the catalog — newly-found ones get saved on booking.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -146,10 +149,15 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
             rank: {
               type: 'integer',
               enum: [1, 2, 3],
-              description: '1 = avoid (hide), 2 = good (default), 3 = favorite (top of list).',
+              description: '1 = avoid (hide), 2 = good (default), 3 = favorite (top of list). Omit if you\'re only setting travel_time_minutes.',
+            },
+            travel_time_minutes: {
+              type: 'integer',
+              minimum: 1,
+              description: 'One-way travel time in minutes the owner stated for this venue. Omit if you\'re only setting rank.',
             },
           },
-          required: ['venue_id_or_name', 'rank'],
+          required: ['venue_id_or_name'],
         },
       },
     ];
@@ -309,11 +317,13 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
 
   private async rankVenue(args: RankVenueArgs, context: SkillContext): Promise<unknown> {
     const ownerUserId = context.profile.user.slack_user_id;
-    if (!args.venue_id_or_name || ![1, 2, 3].includes(args.rank)) {
+    const hasRank = args.rank !== undefined && [1, 2, 3].includes(args.rank);
+    const hasTravelTime = typeof args.travel_time_minutes === 'number' && args.travel_time_minutes > 0;
+    if (!args.venue_id_or_name || (!hasRank && !hasTravelTime)) {
       return {
         success: false,
         error: 'bad_args',
-        message: 'venue_id_or_name + rank (1, 2, or 3) required.',
+        message: 'venue_id_or_name + at least one of rank (1, 2, or 3) / travel_time_minutes (positive integer) required.',
       };
     }
 
@@ -337,17 +347,27 @@ Use when the owner explicitly says "rank Coffee Landwer 3", "drop Aroma to 1", "
       };
     }
 
-    updateVenue(venue.id, { rank: args.rank });
-    logger.info('venue rank updated', {
-      id: venue.id, name: venue.name, oldRank: venue.rank, newRank: args.rank,
+    const patch: { rank?: 1 | 2 | 3; travelTimeMinutes?: number } = {};
+    if (hasRank) patch.rank = args.rank;
+    if (hasTravelTime) patch.travelTimeMinutes = args.travel_time_minutes;
+    updateVenue(venue.id, patch);
+    logger.info('venue updated via rank_venue', {
+      id: venue.id, name: venue.name,
+      oldRank: venue.rank, newRank: hasRank ? args.rank : undefined,
+      oldTravelTimeMinutes: venue.travel_time_minutes, newTravelTimeMinutes: hasTravelTime ? args.travel_time_minutes : undefined,
     });
+    const messageParts: string[] = [];
+    if (hasRank) messageParts.push(`rank ${args.rank}`);
+    if (hasTravelTime) messageParts.push(`travel time ${args.travel_time_minutes} min`);
     return {
       success: true,
       venue_id: venue.id,
       name: venue.name,
       previous_rank: venue.rank,
-      new_rank: args.rank,
-      message: `Set ${venue.name}${venue.branch_name ? ` (${venue.branch_name})` : ''} to rank ${args.rank}.`,
+      new_rank: hasRank ? args.rank : venue.rank,
+      previous_travel_time_minutes: venue.travel_time_minutes,
+      new_travel_time_minutes: hasTravelTime ? args.travel_time_minutes : venue.travel_time_minutes,
+      message: `Set ${venue.name}${venue.branch_name ? ` (${venue.branch_name})` : ''} to ${messageParts.join(' and ')}.`,
     };
   }
 
@@ -379,6 +399,8 @@ After he picks a venue from a Case-2 search, surface the \`reservation_url\` (if
 OPENING HOURS — pass \`meeting_time\` to \`find_venue\` whenever you know the time. The tool drops closed venues deterministically. Surviving candidates carry \`hours_status\`: when it's \`unknown\`, mention that openly ("opening hours not in my data — worth a quick check"). When it's \`open\`, you're cleared. Don't invent hours either way.
 
 Owner can re-rank venues in chat ("rank Coffee Landwer 3", "drop Aroma to 1", "make that my favorite") → call \`rank_venue\`. The catalog only carries places he's previously booked; tell him so if he tries to rank something brand-new.
+
+Owner can also state a venue's one-way travel time in chat ("Coffee Landwer is about 15 minutes from the office", "budget 20 minutes each way for that place") → call \`rank_venue\` with \`travel_time_minutes\` set (rank optional). Stated once, it's saved on that venue's record and used as the travel buffer on every future booking there — no need to ask him again.
 
 When the venue skill is the right tool: any meeting where ${firstName} or a colleague is asking for a non-company physical setting. NOT for online meetings, NOT for office meetings, NOT for home-day Huddles.`;
   }
@@ -442,6 +464,7 @@ function serializeVenue(v: VenueRow): Record<string, unknown> {
     maps_url: buildMapsSearchUrl(v.name, v.branch_name ?? undefined, v.address ?? undefined),
     notes: v.notes,
     rank: v.rank,
+    travel_time_minutes: v.travel_time_minutes,
     last_used_at: v.last_used_at,
   };
 }
@@ -497,6 +520,7 @@ export function saveOrBumpVenueOnBook(params: {
   areaTags?: string[];
   phone?: string;
   reservationUrl?: string;
+  travelTimeMinutes?: number;
 }): string | null {
   const existing = findVenueByNameAndOwner(params.ownerUserId, params.name);
   if (existing) {
@@ -507,6 +531,9 @@ export function saveOrBumpVenueOnBook(params: {
       ...(existing.address ? {} : params.address !== undefined ? { address: params.address } : {}),
       ...(existing.phone ? {} : params.phone !== undefined ? { phone: params.phone } : {}),
       ...(existing.reservation_url ? {} : params.reservationUrl !== undefined ? { reservationUrl: params.reservationUrl } : {}),
+      // #203-5 — an owner-stated travel time is curated data too; never
+      // silently overwritten by a later auto-save.
+      ...(existing.travel_time_minutes != null ? {} : params.travelTimeMinutes !== undefined ? { travelTimeMinutes: params.travelTimeMinutes } : {}),
     });
     return existing.id;
   }
@@ -519,6 +546,7 @@ export function saveOrBumpVenueOnBook(params: {
     phone: params.phone,
     reservationUrl: params.reservationUrl,
     rank: 2,
+    travelTimeMinutes: params.travelTimeMinutes,
   });
   // bump last_used_at right away
   updateVenue(fresh.id, { lastUsedAt: new Date().toISOString() });

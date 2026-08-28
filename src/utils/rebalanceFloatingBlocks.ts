@@ -20,6 +20,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import * as fb from './floatingBlocks';
+import { densityCommitments } from './floatingBlocks';
 import { getEffectiveWorkDay } from './workHours';
 import { prefersDensePacking, densityConfigFromProfile } from './calendarDensity';
 import type { CalendarEvent } from '../connectors/graph/calendar';
@@ -73,6 +74,184 @@ function logRebalanceMoveActivity(
   });
 }
 
+/**
+ * The reclaim-slot search, shared by the real mover (the overlap branch below)
+ * and the pre-booking dry-run (`dryRunFloatingBlockRelocation`) so there is
+ * ONE place that decides "can this block actually move inside its window" —
+ * never two implementations that can drift (M1-style: one search, one
+ * answer). Mirrors the real mover's own guards: a block outside its
+ * preferred window is never promised a move (`inWindow: false`); an aligned
+ * slot is searched honoring `prefer_position`.
+ *
+ * `extraBusy` lets a caller fold in a slot that doesn't exist on the
+ * calendar yet (the dry-run's not-yet-booked candidate meeting) without a
+ * second busy-window builder.
+ */
+function computeBlockRelocation(
+  block: fb.FloatingBlock,
+  dateStr: string,
+  tz: string,
+  blockEvent: CalendarEvent,
+  blockStartMs: number,
+  blockEndMs: number,
+  realEvents: CalendarEvent[],
+  extraBusy?: { start: number; end: number },
+): { inWindow: boolean; aligned: number | null; usedWorkingElsewhereFallback: boolean } {
+  const winStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
+  const winEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
+  if (
+    Number.isFinite(winStart) && Number.isFinite(winEnd)
+    && (blockStartMs < winStart || blockEndMs > winEnd)
+  ) {
+    return { inWindow: false, aligned: null, usedWorkingElsewhereFallback: false };
+  }
+  // Owner ruling (2026-08-28): this is a DESTINATION SEARCH (picking where the
+  // block lands among several candidate gaps), not a single-slot capacity
+  // check — so it goes through the two-pass finder: a genuinely free slot
+  // first, a WE-tagged slot only as a fallback when no clear slot exists.
+  const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
+    realEvents, block, dateStr, tz, new Set([blockEvent.id]), extraBusy,
+  );
+  return { inWindow: true, aligned, usedWorkingElsewhereFallback };
+}
+
+/**
+ * Read-only pre-booking check: for a candidate meeting slot that has NOT
+ * been written yet, does it overlap a floating block on that day, and if so
+ * can the REAL mover (`rebalanceFloatingBlocksAfterMutation`'s overlap
+ * branch) actually relocate that block afterward? No `updateMeeting` call —
+ * a dry run of the exact same search via `computeBlockRelocation`.
+ *
+ * Built so the pre-booking confirmation can state a REAL fact ("no room for
+ * lunch will remain" / "lunch would move to 13:00–13:25") instead of Sonnet's
+ * own arithmetic on the calendar — the live incident this exists to fix
+ * (2026-08-26, Slack thread D0ASFFYTCQ0): the confirmation said "20 min free
+ * will remain" while the real post-write rebalance found zero viable slots.
+ *
+ * Deliberately narrow: only reports on blocks the CANDIDATE slot overlaps.
+ * A block untouched by this booking is not this call's concern.
+ */
+export interface FloatingBlockImpact {
+  block: string;
+  relocatable: boolean;
+  newSlotIso?: string;
+  newSlotLabel?: string;
+  /** True when the only landing spot found sits against a Working-Elsewhere
+   * event rather than a fully clear gap (owner ruling 2026-08-28). */
+  usedWorkingElsewhereFallback?: boolean;
+}
+
+export async function dryRunFloatingBlockRelocation(params: {
+  profile: UserProfile;
+  candidateStartIso: string;
+  candidateEndIso: string;
+  /** Pre-fetched day events, when the caller already has them (skip the Graph read). */
+  preloadedDayEvents?: CalendarEvent[];
+}): Promise<FloatingBlockImpact[]> {
+  const results: FloatingBlockImpact[] = [];
+  try {
+    const { profile, candidateStartIso, candidateEndIso } = params;
+    const tz = profile.user.timezone;
+    const startDt = DateTime.fromISO(candidateStartIso, { zone: tz });
+    const endDt = DateTime.fromISO(candidateEndIso, { zone: tz });
+    if (!startDt.isValid || !endDt.isValid) return results;
+    const dateStr = startDt.toFormat('yyyy-MM-dd');
+    const dayName = startDt.toFormat('EEEE');
+
+    // Mirrors the real mover: no floating blocks on a per-date override day.
+    if (getEffectiveWorkDay(dateStr, profile).hasOverride) return results;
+
+    const blocks = fb.getFloatingBlocks(profile);
+    if (blocks.length === 0) return results;
+
+    const candidateStartMs = startDt.toMillis();
+    const candidateEndMs = endDt.toMillis();
+
+    // Cheap pre-check (2026-08-28, bouncer finding) — this used to fetch the
+    // day's full calendar unconditionally before checking whether the
+    // candidate could even plausibly touch a block. A block's actual placed
+    // event normally sits inside its own `preferred_start`/`preferred_end`
+    // window (that's the whole point of the window); test the candidate
+    // against those windows first — pure profile data, zero I/O — and only
+    // pay for the Graph read when at least one applicable block's window
+    // overlaps the candidate. A block currently sitting outside its window
+    // (owner-pinned) is out of scope for this pre-booking check either way —
+    // the real post-write mover already treats "outside window" as never
+    // relocatable, and the caller's day-events fetch below still runs
+    // whenever preloadedDayEvents wasn't already supplied and this pre-check
+    // can't rule the block out.
+    if (!params.preloadedDayEvents) {
+      const mightOverlap = blocks.some(block => {
+        if (!fb.blockAppliesOnDay(block, dayName, profile)) return false;
+        const winStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
+        const winEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
+        if (!Number.isFinite(winStart) || !Number.isFinite(winEnd)) return true; // can't rule out — fall through to the real check
+        return candidateStartMs < winEnd && candidateEndMs > winStart;
+      });
+      if (!mightOverlap) return results;
+    }
+
+    const { getCalendarEvents } = await import('../connectors/graph/calendar');
+    const dayStartIso = startDt.startOf('day').toUTC().toISO();
+    const dayEndIso = startDt.endOf('day').toUTC().toISO();
+    if (!dayStartIso || !dayEndIso) return results;
+    const events = params.preloadedDayEvents ?? await getCalendarEvents(profile.user.email, dayStartIso, dayEndIso, tz);
+    const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
+
+    const nowMs = DateTime.now().setZone(tz).toMillis();
+
+    for (const block of blocks) {
+      if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
+
+      const blockEvent = realEvents.find(e => {
+        if (!fb.isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, block)) return false;
+        const evDay = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' })
+          .setZone(tz).toFormat('yyyy-MM-dd');
+        return evDay === dateStr;
+      });
+      if (!blockEvent) continue; // nothing on the calendar this day to protect
+
+      const blockStartMs = DateTime.fromISO(blockEvent.start.dateTime, {
+        zone: blockEvent.start.timeZone ?? 'utc',
+      }).setZone(tz).toMillis();
+      const blockEndMs = DateTime.fromISO(blockEvent.end.dateTime, {
+        zone: blockEvent.end.timeZone ?? 'utc',
+      }).setZone(tz).toMillis();
+
+      // Mirrors #140 in the real mover: a slot already past today is spent —
+      // never promise a relocation for it.
+      if (blockEndMs <= nowMs) continue;
+
+      // Only report blocks the CANDIDATE slot actually overlaps.
+      if (!(candidateStartMs < blockEndMs && candidateEndMs > blockStartMs)) continue;
+
+      const relocation = computeBlockRelocation(
+        block, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents,
+        { start: candidateStartMs, end: candidateEndMs },
+      );
+      if (!relocation.inWindow || relocation.aligned === null) {
+        results.push({ block: block.name, relocatable: false });
+        continue;
+      }
+      const rs = DateTime.fromMillis(relocation.aligned, { zone: tz });
+      const re = rs.plus({ minutes: block.duration_minutes });
+      results.push({
+        block: block.name,
+        relocatable: true,
+        newSlotIso: rs.toISO()!,
+        newSlotLabel: `${rs.toFormat('HH:mm')}–${re.toFormat('HH:mm')}`,
+        ...(relocation.usedWorkingElsewhereFallback ? { usedWorkingElsewhereFallback: true } : {}),
+      });
+    }
+  } catch (err) {
+    logger.warn('dryRunFloatingBlockRelocation threw — swallowed', {
+      err: String(err).slice(0, 200),
+      candidateStartIso: params.candidateStartIso,
+    });
+  }
+  return results;
+}
+
 // Process-lifetime dedup cache for "floating block overlap" shadows.
 // Same (date, blockName, overlappingEventId) fingerprint within the TTL
 // is collapsed to one DM so the owner doesn't get pinged twice a day,
@@ -109,6 +288,13 @@ export interface ReclaimableBlock {
   label: string;
   /** Graph event id of the displaced block (so a follow-up move can target it). */
   blockEventId: string;
+  /**
+   * True when no genuinely free slot existed in the window and this
+   * candidate only clears the block against a Working-Elsewhere event
+   * (owner ruling 2026-08-28 — WE is a second-tier fallback, never a
+   * clean slot). Omitted when the slot is fully clear.
+   */
+  usedWorkingElsewhereFallback?: boolean;
 }
 
 export async function rebalanceFloatingBlocksAfterMutation(params: {
@@ -316,25 +502,12 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           });
           continue;
         }
-        // Build busy-in-window for THIS block (excluding the block itself —
-        // it's the one we'd be moving). Mirror the overlap-branch math below.
-        const reclaimBusy: Array<{ start: number; end: number }> = [];
-        for (const e of realEvents) {
-          if (e.id === blockEvent.id) continue;
-          const eStart = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' })
-            .setZone(tz).toMillis();
-          const eEnd = DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' })
-            .setZone(tz).toMillis();
-          if (eStart < ownerPinWinEnd && eEnd > ownerPinWinStart) {
-            reclaimBusy.push({
-              start: Math.max(eStart, ownerPinWinStart),
-              end: Math.min(eEnd, ownerPinWinEnd),
-            });
-          }
-        }
-        const reclaimSlot = block.prefer_position === 'latest_in_window'
-          ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, reclaimBusy)
-          : fb.findAlignedSlotForBlock(block, dateStr, tz, reclaimBusy);
+        // Destination search — same two-pass rule as the overlap-branch math
+        // via computeBlockRelocation (owner ruling 2026-08-28): a genuinely
+        // free slot first, a WE-tagged slot only as a fallback.
+        const { aligned: reclaimSlot, usedWorkingElsewhereFallback: reclaimUsedWE } = fb.findBlockDestination(
+          realEvents, block, dateStr, tz, new Set([blockEvent.id]),
+        );
         // Any in-window aligned slot is "more home" than the current
         // out-of-window placement, so its mere existence makes this a candidate.
         if (reclaimSlot !== null) {
@@ -345,6 +518,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             targetSlotIso: rs.toISO()!,
             label: `${rs.toFormat('EEE d MMM HH:mm')}–${re.toFormat('HH:mm')}`,
             blockEventId: blockEvent.id,
+            ...(reclaimUsedWE ? { usedWorkingElsewhereFallback: true } : {}),
           });
           logger.info('rebalanceFloatingBlocks: reclaim candidate found (propose-only)', {
             block: block.name, date: dateStr,
@@ -380,12 +554,15 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         // reduces the day's dead minutes (already-optimal / unfixable → no move
         // → idempotent across sweeps). Gated: opt-in flag + dense tenant only.
         if (params.consolidateDense && prefersDensePacking(profile.meetings)) {
-          const commitments = realEvents
-            .filter(e => e.id !== blockEvent.id)   // meetings + any OTHER floating block, never this one
-            .map(e => ({
-              start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).setZone(tz).toMillis(),
-              end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).setZone(tz).toMillis(),
-            }));
+          // floatingBlocksAsNeighbours: true — an OTHER floating block (gym,
+          // coffee) is a real neighbour to abut for consolidation purposes,
+          // same rationale as autoMove's abut-the-block guards. Was its own
+          // hand-rolled filter that (unlike this) never excluded WE — fixed
+          // here to match rule 6 / the other three density-pool call sites.
+          const commitments = densityCommitments(realEvents, profile, {
+            floatingBlocksAsNeighbours: true,
+            excludeEventIds: [blockEvent.id],
+          });
           const target = fb.findConsolidatingSlotForBlock(
             block, dateStr, tz, commitments, densityConfigFromProfile(profile.meetings), blockStartMs,
           );
@@ -431,33 +608,15 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         overlappingEvent: { subject: overlapping.subject, id: overlapping.id },
       });
 
-      // Build busyInWindow for the block's preferred window (excluding the
-      // block itself — Maelle is the one moving it).
-      const winStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
-      const winEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
-      const busyInWindow: Array<{ start: number; end: number }> = [];
-      for (const e of realEvents) {
-        if (e.id === blockEvent.id) continue;
-        const eStart = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' })
-          .setZone(tz).toMillis();
-        const eEnd = DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' })
-          .setZone(tz).toMillis();
-        if (eStart < winEnd && eEnd > winStart) {
-          busyInWindow.push({
-            start: Math.max(eStart, winStart),
-            end: Math.min(eEnd, winEnd),
-          });
-        }
-      }
-
-      // Honor block.prefer_position: 'latest_in_window' picks the latest
-      // aligned gap (via the existing findLatestAlignedSlotForBlock) so a
-      // "lunch at end-of-window" preference survives rebalance instead of
-      // silently resetting to earliest. Default (no prefer_position) →
-      // earliest aligned slot, existing behavior.
-      const aligned = block.prefer_position === 'latest_in_window'
-        ? fb.findLatestAlignedSlotForBlock(block, dateStr, tz, busyInWindow)
-        : fb.findAlignedSlotForBlock(block, dateStr, tz, busyInWindow);
+      // Search the block's preferred window for an aligned slot (excluding
+      // the block itself — Maelle is the one moving it), honoring
+      // block.prefer_position ('latest_in_window'
+      // picks the latest aligned gap so a "lunch at end-of-window"
+      // preference survives rebalance instead of silently resetting to
+      // earliest). Shared with the pre-booking dry run — see
+      // computeBlockRelocation's own doc comment.
+      const relocation = computeBlockRelocation(block, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents);
+      const aligned = relocation.aligned;
       if (aligned !== null) {
         const newStart = DateTime.fromMillis(aligned, { zone: tz });
         const newEnd = newStart.plus({ minutes: block.duration_minutes });
@@ -472,11 +631,14 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           result.moved++;
           result.movedBlockEventIds.push(blockEvent.id);
           logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
+          const weNote = relocation.usedWorkingElsewhereFallback
+            ? ' (no fully clear gap in the window — this one sits against a Working-Elsewhere block.)'
+            : '';
           await shadowNotify(profile, {
             channel: '',  // sendDirect path; cache handles the channel
             icon: '🔧',
             action: 'Floating block rebalanced',
-            detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.`,
+            detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.${weNote}`,
           });
         } catch (err) {
           logger.warn('rebalanceFloatingBlocks: updateMeeting failed', {

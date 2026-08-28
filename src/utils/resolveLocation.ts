@@ -109,6 +109,17 @@ export type LocationVerdict =
 
 const HUDDLE_LABEL = 'Huddle';
 
+const PHONE_LOCATION_RE = /^\+?\d[\d\s\-().]{5,}$/;
+
+/**
+ * Is this a bare phone-dial location string ("+972-54-123-4567") rather than
+ * a place name? Shared with planMeeting's venue-travel-time lookup (#203-5)
+ * so a dial-in number can never be treated as (or match) a catalog venue.
+ */
+export function isPhoneLocationString(location: string): boolean {
+  return PHONE_LOCATION_RE.test(location.trim());
+}
+
 export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const { profile } = input;
   const tz = profile.user.timezone;
@@ -149,7 +160,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   // ── (1) OWNER-EXPLICIT HINT ─────────────────────────────────────────────
   if (input.ownerLocationHint && input.ownerLocationHint.trim().length > 0) {
     const loc = input.ownerLocationHint.trim();
-    const isPhone = /^\+?\d[\d\s\-().]{5,}$/.test(loc);
+    const isPhone = isPhoneLocationString(loc);
     if (isPhone) {
       return { kind: 'resolved', isOnline: false, location: loc, reasoning: 'owner-explicit phone location' };
     }

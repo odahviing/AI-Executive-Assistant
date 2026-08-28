@@ -2,11 +2,32 @@
  * Owner-says-done scanner — LLM-only (v2.7.0 spine).
  *
  * Reads open `requests` (the spine). When the owner's free-text message says
- * "done / dropped / handled" about one of them, closes via `closeRequest`.
+ * "done / dropped / handled" about one of them, closes via `closeRequest`
+ * AND relays the closure to the requester (notifyRequesterOfDecision,
+ * verdict='closed_by_owner') when the row has one — R3, closeloop-silent-
+ * close-no-requester-relay. The owner never needs telling here (he's the one
+ * who said it's done); a colleague who raised the ask does.
  *
  * Per owner direction (v2.6.5): no keyword pre-filter. LLM-only is the gate.
  * Conservative SYSTEM_PROMPT keeps false positives near zero. Empty open-items
  * → no LLM call (cost bound).
+ *
+ * Two safety notes on the requester relay (bounce fix, closeloop-silent-
+ * close-no-requester-relay attempt 2):
+ *   1. `reason` (the scanner's own paraphrase, which quotes the owner's
+ *      private message verbatim — see the JSON schema below) is used ONLY
+ *      for `closeRequest`'s internal `closureReason` (owner's own audit
+ *      trail). It is deliberately NOT forwarded to `notifyRequesterOfDecision`
+ *      — that field is unfiltered free text and the requester relay must
+ *      never carry the owner's private wording (the class `usableRelaySubject`
+ *      exists to stop; see resolver.ts's subject-selection comment).
+ *   2. The caller passes two turn-scoped sets: `alreadyMessagedRequesterIds`
+ *      (so a same-turn `message_colleague` to the same person never doubles
+ *      up with this relay) and `touchedByResolveApprovalThisTurn` (so this
+ *      free-text scanner never second-guesses — closing OR relaying — a row
+ *      a structured `resolve_approval` call already touched this turn,
+ *      including one resolver.ts deliberately left open for retry after a
+ *      failed replay).
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -15,6 +36,7 @@ import { MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import { getOpenScannerItems } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
+import { notifyRequesterOfDecision } from '../core/requests/resolver';
 import { parseDetails, type RequestRow } from '../core/requests/types';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
@@ -196,6 +218,15 @@ export function messageReferencesRequest(message: string, row: RequestRow): bool
 export async function closeLoopOnOwnerHandled(params: {
   profile: UserProfile;
   ownerMessage: string;
+  /** v3.4.7-style reverse-order double-notify guard, forwarded to
+   * notifyRequesterOfDecision's ResolveContext — the orchestrator's
+   * turn-scoped `messagedColleaguesOkThisTurn`. */
+  alreadyMessagedRequesterIds?: Set<string>;
+  /** closeloop-silent-close-no-requester-relay (bounce fix) — request ids a
+   * `resolve_approval` tool call already touched THIS turn (success or
+   * failure). The scanner must not close or relay any row in this set — see
+   * the file header. */
+  touchedByResolveApprovalThisTurn?: Set<string>;
 }): Promise<ScannerResult> {
   const result: ScannerResult = { scanned: false, closedItems: [] };
   if (!params.ownerMessage || params.ownerMessage.length < 3) return result;
@@ -263,6 +294,19 @@ export async function closeLoopOnOwnerHandled(params: {
       logger.warn('closeLoopOnOwnerHandled: LLM returned unknown id — skipping', { id });
       continue;
     }
+    // closeloop-silent-close-no-requester-relay (bounce fix, point 3) — a
+    // structured resolve_approval call already touched this row THIS turn.
+    // That includes the case resolver.ts:753 deliberately leaves open
+    // (on_approve replay failed, e.g. delete_meeting event_not_found) so the
+    // owner can retry — the row is STILL "open" to this scanner's own query,
+    // but a same-turn free-text match here would silently override that
+    // considered decision, and — worse — tell the requester "nothing more
+    // needed from you" about an action that never actually happened. The
+    // structured tool call already owns this row's outcome this turn; skip.
+    if (params.touchedByResolveApprovalThisTurn?.has(id)) {
+      logger.info('closeLoopOnOwnerHandled: skipping — resolve_approval already touched this id this turn', { id });
+      continue;
+    }
     // Deterministic referent backstop (Eli false-close fix). Refuse to close a
     // request the owner's message doesn't actually reference by counterpart or
     // a distinctive subject token. Safe direction: leave it open for the brief.
@@ -271,6 +315,21 @@ export async function closeLoopOnOwnerHandled(params: {
         id, kind: row.kind, subject: row.subject,
         counterpart: row.target_name ?? row.requester_name ?? null,
         reason: reason.slice(0, 80),
+      });
+      continue;
+    }
+    // gh#169-a parity — resolve_approval's structured gate refuses a named
+    // match when a SECOND open approval matches the same words
+    // (ambiguousNamedMatch, tasks/skill.ts): the owner never said WHICH one.
+    // This scanner ran the exact same referent check but per-row only, so
+    // "the roadmap review is done" matching two open rows closed whichever
+    // one the model happened to guess. Same discipline, same outcome here:
+    // when another currently-open row also passes the check for this message,
+    // treat it as ambiguous and close neither — both stay for the brief / an
+    // explicit resolve in their own thread (the scanner's own safe direction).
+    if (open.some(r => r.id !== id && messageReferencesRequest(params.ownerMessage, r))) {
+      logger.info('closeLoopOnOwnerHandled: message matches 2+ open requests — ambiguous, refusing close (safe)', {
+        id, kind: row.kind, subject: row.subject,
       });
       continue;
     }
@@ -285,6 +344,25 @@ export async function closeLoopOnOwnerHandled(params: {
       logger.info('closeLoopOnOwnerHandled: closed request', {
         id, kind: row.kind, reason: reason.slice(0, 100),
       });
+      // closeloop-silent-close-no-requester-relay — closeRequest's informed=0
+      // only queues a narration for the OWNER's brief (he already knows, he's
+      // the one who said it's done); a colleague-raised request still has a
+      // requester on the other end who was never told anything (R3). Reuses
+      // the same relay resolveRequest uses for every other closure — no-ops
+      // cleanly when row.requester_slack_id is unset (owner-internal rows).
+      // Bounce fix — `reason` is deliberately NOT forwarded (leak) while
+      // alreadyMessagedRequesterIds IS (double-notify); both notes, with the
+      // incidents behind them, are stated in full in this file's header.
+      try {
+        await notifyRequesterOfDecision(row, 'closed_by_owner', null, undefined, {
+          profile: params.profile,
+          alreadyMessagedRequesterIds: params.alreadyMessagedRequesterIds,
+        });
+      } catch (relayErr) {
+        logger.warn('closeLoopOnOwnerHandled: requester relay threw — non-fatal', {
+          id, err: String(relayErr).slice(0, 200),
+        });
+      }
     } catch (err) {
       logger.warn('closeLoopOnOwnerHandled: closeRequest threw — skipping', {
         id, err: String(err).slice(0, 200),

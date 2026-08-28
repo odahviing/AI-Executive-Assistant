@@ -320,6 +320,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         socialDirective = chooseSocialDirective({
           personSlackId: turnPersonSlackId,
           classification: socialClassification,
+          ownerUserId: profile.user.slack_user_id,
           ownerTimezone: profile.user.timezone,
           hasOperationalRelay,
         });
@@ -714,6 +715,17 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // the booking flow will accept later. Fails open: regex doesn't match
   // → block empty → normal flow.
   let availabilityPrecheckBlock = '';
+  // bug 1.1 (2026-08-27, Mike Naumenko / D0ARQRD5H28) — did THIS turn's inbound
+  // message contain a detected (date, time) availability question at all? Set
+  // from `precheckAvailability`'s own `ran` (below) — true only when at least
+  // one slot was actually extracted and tested, never re-derived. Threaded all
+  // the way to `runOutputGates`'s `OrchestratorOutput.availabilityQuestionDetected`
+  // so the slot-grounding checker can still run when this turn fired ZERO
+  // availability tools (the checker's own hard gate on `groundedToolLines`
+  // otherwise skips it entirely) — a real Sonnet answer to "is he free at X"
+  // with no tool call is exactly the shape that let a stale time from three
+  // days earlier in the thread ship as fact.
+  let availabilityQuestionDetected = false;
   // v4.4.x (#154) — gated on `authority`, not the surface-clamped `senderRole`.
   // This precheck's own rendered text names the asker "this colleague's
   // question" (availabilityPreCheck.ts) — true for a genuine colleague, false
@@ -786,6 +798,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (result.ran && result.promptBlock) {
         availabilityPrecheckBlock = result.promptBlock;
       }
+      availabilityQuestionDetected = result.ran;
       // A slot the colleague ASKED about that we confirmed bookable IS a slot
       // we offered them — record it into the SAME stash find_available_slots
       // feeds, so the hold gate (which validates "was this offered?") passes on
@@ -1313,5 +1326,6 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialActive,
     socialClassification,
     resolvedMeetingAttendees,
+    availabilityQuestionDetected,
   };
 }

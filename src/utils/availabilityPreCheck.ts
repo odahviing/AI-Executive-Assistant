@@ -29,24 +29,19 @@ import { DateTime, IANAZone } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getOwnerEventsForDecision } from '../connectors/graph/calendar';
 import { renderClockInZone } from './timezoneConvert';
-import { bookingLeadTimeHours, checkSlot, type RuleViolationKind } from './scheduleRules';
+import { bookingLeadTimeHours, checkSlot, OWNER_OVERRIDABLE_KINDS, type RuleViolationKind } from './scheduleRules';
 import { armsHardFloor, forgetHardBlockedSlot, hardBlockClassPhrase, recordHardBlockedSlot } from './availabilityGate';
 import { blockedSlotAlternativesBlock } from '../skills/meetings/nearbyAlternatives';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
+import { extractTimes, extractDates, type DateMatch } from './dateTimeExtract';
 
 // ── Detection regex ────────────────────────────────────────────────────────
-
-// Time pattern — HH:MM (24-hour, with optional leading zero).
-const TIME_PATTERN = /\b(\d{1,2}):(\d{2})\b/g;
-
-// Date pattern — two 1-2 digit components + optional year. Day/month ORDER is
-// resolved in extractDates (value-based, then owner-locale tiebreaker) — the
-// regex itself is order-agnostic. The hours/minutes pattern collides with the
-// d/m pair if the year is missing — guarded by the month<=12 check downstream.
-const DATE_PATTERN = /\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/g;
+// Date/time extraction regex + helpers moved to dateTimeExtract.ts (o#260, G9)
+// so availabilityGate.ts's blocked-slot detector can share the ONE canonical
+// definition instead of hand-copying it.
 
 // Language-NEUTRAL question mark (Latin + Hebrew share "?"; Arabic "؟"; CJK
 // "？"). Structural signal only — NO language words (G8). It just decides
@@ -1058,55 +1053,6 @@ export async function precheckAvailability(params: {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function extractTimes(text: string): Array<{ hour: number; minute: number; index: number }> {
-  const out: Array<{ hour: number; minute: number; index: number }> = [];
-  for (const m of text.matchAll(TIME_PATTERN)) {
-    const h = parseInt(m[1], 10);
-    const min = parseInt(m[2], 10);
-    if (h < 0 || h > 23 || min < 0 || min > 59) continue;
-    out.push({ hour: h, minute: min, index: m.index ?? 0 });
-  }
-  return out;
-}
-
-interface DateMatch { date: string; index: number }
-
-function extractDates(text: string, tz: string, monthFirst: boolean): DateMatch[] {
-  const out: DateMatch[] = [];
-  for (const m of text.matchAll(DATE_PATTERN)) {
-    // v3.2.x de-tenant — don't hardcode DD/MM (Israeli/EU). Disambiguate by
-    // value first (a component >12 can't be a month), then fall back to the
-    // owner's locale order for the genuinely ambiguous case (e.g. "6/2" =
-    // June 2 for a month-first owner, 6 Feb for a day-first owner).
-    const a = parseInt(m[1], 10);
-    const b = parseInt(m[2], 10);
-    let d: number, mo: number;
-    if (a > 12 && b <= 12) { d = a; mo = b; }
-    else if (b > 12 && a <= 12) { d = b; mo = a; }
-    else if (monthFirst) { mo = a; d = b; }
-    else { d = a; mo = b; }
-    if (d < 1 || d > 31 || mo < 1 || mo > 12) continue;
-    let year: number;
-    if (m[3]) {
-      const y = parseInt(m[3], 10);
-      year = y < 100 ? 2000 + y : y;
-    } else {
-      // No year — assume current year, but if the date is more than ~2 weeks
-      // in the past relative to today, roll to next year (e.g. December
-      // referencing January).
-      const now = DateTime.now().setZone(tz);
-      const candidate = DateTime.fromObject({ year: now.year, month: mo, day: d }, { zone: tz });
-      year = candidate.isValid && candidate.diff(now.minus({ days: 14 })).milliseconds < 0
-        ? now.year + 1
-        : now.year;
-    }
-    const dt = DateTime.fromObject({ year, month: mo, day: d }, { zone: tz });
-    if (!dt.isValid) continue;
-    out.push({ date: dt.toFormat('yyyy-MM-dd'), index: m.index ?? 0 });
-  }
-  return out;
-}
-
 interface Pair {
   date: string;
   time: string;
@@ -1276,10 +1222,12 @@ function requesterClock(date: string, time: string, ownerTz: string, requesterTz
 // the tier split is now read in two places (the renderer and the injected-verdicts
 // log), so one definition is the only way they cannot disagree about which tier a
 // kind is — which is exactly the question a log review of this file needs answered.
-const ESCALATABLE = new Set<string>([
-  'focus_time_floor', 'floating_block_overlap', 'within_lead_time', 'travel_buffer_collision',
-  'outside_working_hours', 'category_per_day', 'category_per_week', 'category_day_type',
-]);
+// v4.7.x — now IS `OWNER_OVERRIDABLE_KINDS` (scheduleRules.ts), not a second
+// hand-rolled copy: this file's own list and ops/handlers/findAvailableSlots.ts's
+// SOFT_REJECT_PREFIXES had drifted apart (four kinds present here, silently
+// absent there), so the same rejection escalated to the owner on one
+// colleague-facing surface and was a flat refusal on the other.
+const ESCALATABLE: ReadonlySet<string> = OWNER_OVERRIDABLE_KINDS;
 
 function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, requesterTz: string): string {
   const tz = profile.user.timezone;

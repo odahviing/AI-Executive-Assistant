@@ -11,9 +11,9 @@ Stated 2026-07-30 and again 2026-07-31, with the explicit request that it be enc
 Four consequences the old checklist did not have:
 
 - **Step 2 means the WHOLE tree.** `git status --porcelain` with no path filter, every chat's files, framework included. A commit holding only your own files is the defect, not a tidy scope.
-- **Step 9 and the stamp at step 11 are the bookkeeping, and they are what gets skipped.** The ledger append is the only moment the day's history can be lost; the stamp is what stops the next run reporting a release nothing stands behind. `node scripts/ledger-stats.cjs --report` is green or the wrap is not finished.
-- **Steps 12-13 are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
-- **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **Step 10 and the stamp at step 12 are the bookkeeping, and they are what gets skipped.** The ledger append is the only moment the day's history can be lost; the stamp is what stops the next run reporting a release nothing stands behind. `node scripts/ledger-stats.cjs --report` is green or the wrap is not finished.
+- **Steps 13-14 are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
+- **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."* Step 9's Opus-then-Fable pass is this rule's own standing enforcement point, not a separate one.
 
 **Deploy is now AUTOMATIC and REMOTE — there is no local restart.** Maelle runs on the GCP VM; after the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. Do NOT `npm run deploy` / `pm2 restart maelle` (no local Maelle exists — starting one = a second Slack socket). Confirm the deploy from the VM's boot stamp: `powershell -File scripts/vm-logs.ps1 "starting up" 6`. The stamp's `gitSha` must equal **HEAD** (the *last* commit — a bookkeeping commit after the version commit shows that one).
 
@@ -156,14 +156,22 @@ Do NOT update for:
 - Internal refactors
 - Prompt tweaks
 
-### 9. Bookkeeping — the ledger BEFORE the report
+### 9. Pre-wrap adversarial verify — one pass, forced to Fable, over everything accumulated
+
+Every wave's own bouncer pass only ever saw that wave's own diff, on Opus. By wrap time the tree usually carries MORE than any one wave shipped — other chats' hand-dispatched fixes, framework edits, doc tweaks — and nothing has looked at all of it together yet. This was already happening ad hoc (SKILL.md's `verify` verb, "run before a wrap"); it is now a standing, numbered step: **one pass, over the full accumulated diff, forced to `model: 'fable'`** — not a second Opus pass on top of it. X211, 2026-08-27: during the 4.7.4 wrap this exact pass, run by hand, found 4 real issues an Opus bouncer had already cleared TWICE on the same diff — Fable is the stronger check here, so it replaces the Opus pass at this step rather than adding to it.
+
+1. **`Agent({subagent_type:'bouncer', …})` over the full accumulated diff** — `git status --porcelain` with no path filter, the same WHOLE-TREE scope as step 2 — forced to `model: 'fable'` (overriding `bouncer.md`'s own default `model: opus` for this one dispatch).
+
+**An overturn blocks the wrap** — same standing rule as any wave's own bouncer overturn (see "Four consequences" above): fix it and re-run this pass before moving on. A discovery does NOT block; it is next run's intake, same as always.
+
+### 10. Bookkeeping — the ledger BEFORE the report
 
 **This is the only moment the day's history can be lost, and it has been lost exactly this way.** The append once named only the *wrapped* rows while the reset took everything, so a row he had already RULED ON died with the file: `slot-hold-release-dm-role-gate` was recorded on `report.md` as *"deferred — owner: not important for now"*, the report was emptied at the 4.3.1 wrap, and `ledger.jsonl:253` still carries it as `needs-owner-decision` — so `--open` lists a decision he has already made as one he has never seen. Do these three in this order:
 
 1. **Append EVERY row on `.claude/agent-loop/report.md` to `.claude/agent-loop/ledger.jsonl`** — whatever its verdict, not only the built ones. Two fields on every row, and both exist because this step dropped them:
    - **`"runId":"wrap-<version>"`** — without it `node scripts/ledger-stats.cjs --wrap <version>` cannot name a release's own rows, and the built-list check reaches back past the release to count everything since the last stamp.
    - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built`. It is sitting in the **Your options** cell you are about to delete — *"Recommend: build — …"* becomes `"recommend":"build — <the clause>"`. Skip it and the row survives in a form he cannot rule on, which is how **54 of 56** standing open rows got there. A `deferred` or `declined` row also carries **his words** in `note`, or the counter he gave dies with the cell.
-   - **A `built` row this wrap ships also needs a `state:"wrapped"` companion row — NOT here.** This step runs *before* step 11's commit exists, and "shipped" means a real sha to point at; nothing at this point in the checklist can honestly claim it yet — an instruction here that cannot be performed here is worse than no instruction. That companion row is minted at **step 12**, together with the GitHub sync, once the commit is real. (X152's own note guessed the gap this closes also explains `alreadyBuilt` matching 0 of 94 refs one night — checked and **refuted**: `bugger.js`'s triage match is pure LLM judgment over the `ref`/`rootCause` text handed to it, with no code path that reads `state` at all. Keep the two as separate defects.)
+   - **A `built` row this wrap ships also needs a `state:"wrapped"` companion row — NOT here.** This step runs *before* step 12's commit exists, and "shipped" means a real sha to point at; nothing at this point in the checklist can honestly claim it yet — an instruction here that cannot be performed here is worse than no instruction. That companion row is minted at **step 13**, together with the GitHub sync, once the commit is real. (X152's own note guessed the gap this closes also explains `alreadyBuilt` matching 0 of 94 refs one night — checked and **refuted**: `bugger.js`'s triage match is pure LLM judgment over the `ref`/`rootCause` text handed to it, with no code path that reads `state` at all. Keep the two as separate defects.)
 
 2. **Then reset `report.md` — never before the append.** An emptied report **still carries its headline**: run `node scripts/ledger-stats.cjs --open` and write its open total and split into that line. Empty means no rows, not *"nothing is waiting on you"*. **And the leading, bolded clause is the RULABLE figure from that same command, never the wrap's own delta** — see SKILL.md's "NEVER PRINT A ZERO YOU DID NOT COMPUTE" (X194): `**<n> rows await you** — v<version> wrapped, 0 new from this wrap.` An all-clear phrasing is correct **only** when RULABLE is genuinely 0. `node scripts/ledger-stats.cjs --report` checks this against the standing backlog now, not only against the (trivially empty) table.
 
@@ -171,9 +179,9 @@ Do NOT update for:
 
 **Check the append in one command:** `node scripts/ledger-stats.cjs --open` must not name the rows you just wrote.
 
-The third marker this step is owed is **not on a row** — it is `state.lastWrapIso`, and it is set at **step 11**, because its value is the release commit's own timestamp and that commit does not exist yet here.
+The third marker this step is owed is **not on a row** — it is `state.lastWrapIso`, and it is set at **step 12**, because its value is the release commit's own timestamp and that commit does not exist yet here.
 
-### 10. Typecheck
+### 11. Typecheck
 
 ```bash
 npm run typecheck
@@ -181,7 +189,7 @@ npm run typecheck
 
 Must pass. If it doesn't, stop and fix — don't ship broken.
 
-### 11. Commit + push under owner author — then stamp the wrap
+### 12. Commit + push under owner author — then stamp the wrap
 
 ```bash
 git add -A
@@ -199,7 +207,7 @@ Use the owner's author (not `Maelle Auto-Triage`).
 
 **Then stamp the wrap, in the same turn as the push.** The wrap leaves **two** markers and they describe the same fact — *which release this wrap shipped*:
 
-- `"runId":"wrap-<version>"` on every row appended at step 9.
+- `"runId":"wrap-<version>"` on every row appended at step 10.
 - `state.lastWrapIso` — the release commit's own timestamp:
 
 ```bash
@@ -220,7 +228,7 @@ It exits 1 naming any release commit that neither marker stands behind, and it c
 
 **A third check, same moment: did tonight's own comment edits break a line-number citation?** `wave-comment-edits-broke-stale-line-citations` was the 2nd occurrence of the identity — a code comment cites `file.ts:NNN` for where a behaviour lives, an edit to that file shifts its lines, the citation goes stale — inside a 31x `stale-mechanism-comment` pattern, caught until now only by a bouncer noticing during an unrelated pass. `node scripts/check-stale-citations.cjs` scans every comment/doc in the repo for a `file.ts:NNN`-shaped citation and reports only the ones whose TARGET is a file this session touched (working tree vs HEAD, plus untracked adds) — cheap and precise, because the only way a citation goes stale here is a line shift in the file it's pointed at. It exits 1 naming each one: a symbol named nearby whose own declaration has drifted more than 25 lines from the cited anchor, or (weaker, stated as such) a citation reaching past the target's own EOF. **Run it before this step's commit**, same reasoning as gh#197 — `--all` runs the identical check with no target filter, for an occasional full sweep outside a wrap.
 
-### 12. GitHub issues — close the resolved, COMMENT the rest
+### 13. GitHub issues — close the resolved, COMMENT the rest
 
 Close only when all three hold: verdict is `built`, the commit exists (close *after* the push, so the sha is real), and he said wrap.
 
@@ -244,19 +252,19 @@ gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what cha
 
 2. **Whatever GitHub gets, the ledger gets the identical statement — never a second, independent copy of the prose.** For every issue touched above: `{"date":"<today>", "runId":"wrap-<version>", "ref":"gh#<n>", "state":"closed"|"partial", "note":"<the exact text gh issue close/comment sent, verbatim>"}`. `state` is the FACT GitHub shows; do not hardcode a verdict off it. **A closed ticket is `"verdict":"wrapped"`** — never `"built"`: that verdict means "a fresh atomic fix," and a bare ticket ref carrying it falsely demands a companion row nothing will ever mint. **A partial ticket is unfinished work more often than it is a question for him — pick the verb the comment's own "why" actually supports**: `"recommend":"build — <the remaining piece>"` when it just needs another round, `"recommend":"defer — <what it waits on>"`, or `"verdict":"needs-owner-decision"` only when the comment itself says he must choose something. Pairing every partial with `needs-owner-decision` regardless of why would put unfinished-but-routine work on his desk that a lane could simply pick back up — and a row still awaiting his decision is never closed on GitHub in the first place (rule above), so it correctly contributes nothing here to check against. A closed-or-commented ticket with no matching row is why *"a wave ships and the source GitHub issue is never closed or even updated, and nothing reports where a ticket stands"* took him a full day to notice himself.
 
-**COMMIT THESE ROWS before you check them — the check reads git history, not the working tree.** `git add -A && git commit -m "<version> bookkeeping: file <tickets> closes/comments" && git push`, riding alongside (or as) step 11's `lastWrapIso` bookkeeping commit. **The check, one command, run AFTER that commit — extends the same one already run at step 11:**
+**COMMIT THESE ROWS before you check them — the check reads git history, not the working tree.** `git add -A && git commit -m "<version> bookkeeping: file <tickets> closes/comments" && git push`, riding alongside (or as) step 12's `lastWrapIso` bookkeeping commit. **The check, one command, run AFTER that commit — extends the same one already run at step 12:**
 
 ```bash
 node scripts/ledger-stats.cjs --wrap <version>
 ```
 
-Two lines, `BUILT -> WRAPPED` and `GITHUB <-> LEDGER SYNC`, report against this wrap's own committed rows and name any ref or ticket the two appends above missed, plus a `MUTATION-SHAPED` line if a row carries both `verdict:"built"` and `state:"wrapped"` at once. **It exits 1 on any of the three — do not call the wrap finished on a red exit**, same acceptance-test convention as `--report` at step 11.
+Two lines, `BUILT -> WRAPPED` and `GITHUB <-> LEDGER SYNC`, report against this wrap's own committed rows and name any ref or ticket the two appends above missed, plus a `MUTATION-SHAPED` line if a row carries both `verdict:"built"` and `state:"wrapped"` at once. **It exits 1 on any of the three — do not call the wrap finished on a red exit**, same acceptance-test convention as `--report` at step 12.
 
 **A third check runs in the same command: `PHANTOM CANDIDATES`.** 16 of 23 build-ready backlog rows going into the 4.5.0 wrap were bugs that wave's own diff had already fixed under a *different* ref — found by hand, after the fact, because nothing here ever cross-referenced the shipped diff against the standing backlog. `--wrap <version>` now does: it cross-references every currently-open ledger row against the files this wrap's own commits touched (plus a shared `invariant` with a row this wrap closed, plus a ref appearing in this wrap's own commit subjects), and prints any hit as a candidate. **It never auto-closes.** Verify each against the CURRENT tree, cite the exact `file:line` that makes the original failure impossible, and close it with `node scripts/ledger-file.cjs --verdict already-fixed`. If a candidate is genuinely a distinct, still-open bug, append a `{"date":"…","ref":"…","recheck":"…"}` line dated today or later so it stops being reflagged — it stays open, it just stops being asked about at every future re-run of this wrap's own check. This is the OPPOSITE direction from `alreadyBuilt` (which guards intake against re-filing a shipped fix as new); this guards the standing backlog against staying open after a later wave silently closed it.
 
-### 13. Confirm the boot stamp — the push already restarted her
+### 14. Confirm the boot stamp — the push already restarted her
 
-**Build and restart nothing here.** The push at step 11 is the deploy: the VM's `maelle-deploy-watcher` pulls, builds and restarts her within ~2 min (header, and `SESSION_STARTER.md:149`). Read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
+**Build and restart nothing here.** The push at step 12 is the deploy: the VM's `maelle-deploy-watcher` pulls, builds and restarts her within ~2 min (header, and `SESSION_STARTER.md:149`). Read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
 
 ```bash
 powershell -File scripts/vm-logs.ps1 "starting up" 6
@@ -270,7 +278,7 @@ If the sha is still old after ~3 min, read the watcher rather than restarting an
 gcloud compute ssh maelle-agent-vm --zone=europe-west4-b --tunnel-through-iap --command "pm2 logs maelle-deploy-watcher --lines 20 --nostream"
 ```
 
-### 14. Summary back to the owner — verified against shipped
+### 15. Summary back to the owner — verified against shipped
 
 One short block: version and sha, the headline, **how many fixes shipped and how many were verified** with the reason each gap carried, which issues closed and which were commented, and the confirmed boot stamp. Not "deploy when ready" — it is already deployed by now.
 

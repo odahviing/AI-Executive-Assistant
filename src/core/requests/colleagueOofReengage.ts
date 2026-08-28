@@ -691,7 +691,7 @@ export async function handleOofReengageReply(
       // skipped every one of those checks (leak/identity-spoof scan,
       // owner-fact-check-and-rewrite, humanGate, dateVerifier, the
       // availability floor), the exact class runOutputGates' own header
-      // (:260-269) records as retired in v4.1.x for re-running the
+      // (:281-297) records as retired in v4.1.x for re-running the
       // orchestrator on the reply path (G3). Same minimal shape inbound.ts
       // uses: gate the draft, then send whatever it returns.
       const gatedReply = await runOutputGates(result.reply, {

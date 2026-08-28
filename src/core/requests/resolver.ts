@@ -26,6 +26,7 @@ import {
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
+import { usableRelaySubject, requesterRelayLanguage } from './requesterRelay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
@@ -842,44 +843,9 @@ async function runApproveCallback(
 }
 
 // ── Requester loop-close DM ─────────────────────────────────────────────────
-
-/**
- * v2.8.6 — filter out the auto-generated `<subkind> needs your input` phrase
- * that lands on row.subject when Sonnet didn't pass an explicit subject. That
- * phrase leaked into MPIM resolution messages as "Idan said yes on policy
- * exception needs your input" — internal jargon visible to colleagues. When
- * this returns true, the caller falls back to a generic phrase instead.
- */
-function looksLikeApprovalMeta(subject: string): boolean {
-  const lower = subject.trim().toLowerCase();
-  return lower.endsWith('needs your input')
-    || lower === 'unknown person'
-    || lower === 'policy exception'
-    || lower === 'duration override'
-    || lower === 'lunch bump'
-    || lower === 'calendar conflict';
-}
-
-// v3.3.x (Dina webinar, 2026-06-14) — a candidate subject that is phrased as a
-// QUESTION is the internal approval ASK ("Can Idan find 10 minutes with Dina
-// tomorrow for Zoom webinar setup?"), framed to the OWNER. Pasting it into the
-// requester-facing "{owner} said yes on {X}" relay leaked that internal framing
-// to Dina ("said yes on Can Idan find 10 minutes…?"). A real meeting subject is
-// a noun phrase, never a question — reject question-form candidates so the relay
-// falls back to a clean generic.
-function looksLikeApprovalQuestion(subject: string): boolean {
-  const t = subject.trim();
-  if (t.endsWith('?')) return true;
-  return /^(can|could|would|will|should|does|is|are|may|shall)\b/i.test(t);
-}
-
-function usableRelaySubject(candidate: unknown): string | undefined {
-  if (typeof candidate !== 'string') return undefined;
-  const s = candidate.trim();
-  if (!s) return undefined;
-  if (looksLikeApprovalMeta(s) || looksLikeApprovalQuestion(s)) return undefined;
-  return s;
-}
+// The subject leak filter (usableRelaySubject) and the relay-language
+// derivation now live in requesterRelay.ts, shared with every non-resolver
+// closure relay (runner.ts expiry / freeform give-up, closeMeetingArtifacts).
 
 /**
  * What the resolver ACTUALLY executed for this request, handed in by the only
@@ -901,9 +867,26 @@ interface ExecutedOutcome {
   subject?: string;
 }
 
-async function notifyRequesterOfDecision(
+// Exported (closeloop-silent-close-no-requester-relay) — closeLoopOnOwnerHandled
+// (the scanner that closes a request when the owner's free-text says "done" /
+// "dropped" / "handled" out of band) used to call closeRequest directly and
+// stop there: the request had a `requester_slack_id` waiting on it (a
+// colleague-raised approval), and closeRequest's own informed=0 only queues a
+// narration for the OWNER's brief — the owner already knows, he's the one who
+// said it's done. Nobody ever told the colleague who actually raised the ask
+// (R3 — "the people waiting on it are told what actually happened... Never
+// the wrong outcome, never twice, never silence"). Reusing this function
+// (rather than growing a second, thinner relay) keeps the idempotency guard,
+// MPIM/DM routing, thread-history-aware LLM composition and owner-shadow all
+// on the one path R1 requires. See the 'closed_by_owner' verdict below.
+export async function notifyRequesterOfDecision(
   row: RequestRow,
-  verdict: 'approve' | 'reject' | 'amend',
+  // 'closed_by_owner' — the scanner path (closeLoopOnOwnerHandled): distinct
+  // from 'approve'/'reject' because neither is true here — the owner didn't
+  // say yes or no to a specific ask, he said the whole thing is already
+  // handled/dropped. Templated + composed wording below reflects that
+  // honestly instead of misreporting a decision that was never made.
+  verdict: 'approve' | 'reject' | 'amend' | 'closed_by_owner',
   data: Record<string, unknown> | null,
   reason: string | undefined,
   ctx: ResolveContext,
@@ -935,7 +918,7 @@ async function notifyRequesterOfDecision(
     logger.info('notifyRequesterOfDecision — skip: requester already messaged this turn (reverse-order double-notify guard)', {
       id: row.id, requesterSlackId, verdict,
     });
-    if (verdict === 'approve' || verdict === 'reject') {
+    if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner') {
       try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
     }
     return;
@@ -951,8 +934,8 @@ async function notifyRequesterOfDecision(
   //   (2) details.subject — what Sonnet explicitly passed
   //   (3) details.question — the freeform question text
   //   (4) row.subject — the auto-generated fallback (e.g. "policy exception
-  //       needs your input"), filtered through looksLikeApprovalMeta to
-  //       avoid leaking internal jargon to colleagues
+  //       needs your input"), filtered through usableRelaySubject
+  //       (requesterRelay.ts) to avoid leaking internal jargon to colleagues
   //   (5) generic "that ask"
   // Pre-fix this fell straight to row.subject, leaking the auto-generated
   // "<subkind> needs your input" phrase into MPIM resolution messages.
@@ -977,21 +960,10 @@ async function notifyRequesterOfDecision(
     usableRelaySubject(row.subject) ||
     'that ask';
 
-  // v2.9.4 (#107d) — language-aware relay body. Renders Hebrew when the
-  // requester's profile_json.language_preference is set to Hebrew; falls back
-  // to English. Pre-fix the relay was always English even for Hebrew-speaking
-  // requesters (Yael), so the "Idan said yes" DM didn't read as a recognizable
-  // confirmation. profile_json is best-effort — null/undefined → English.
-  let requesterLang: 'he' | 'en' = 'en';
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getPersonMemory, resolveOutboundLanguageForPerson } = require('../../db/people') as typeof import('../../db/people');
-    const personRow = getPersonMemory(requesterSlackId);
-    // v3.5.x — DERIVE the relay language from their most recent inbound (default
-    // English), not a frozen one-off language_preference (the Ayala bug). The
-    // relay renders he/en only; any non-Hebrew code (en/ru/ar/…) → English.
-    requesterLang = resolveOutboundLanguageForPerson(personRow) === 'he' ? 'he' : 'en';
-  } catch { /* fail-open to English */ }
+  // v2.9.4 (#107d) — language-aware relay body, derived from the requester's
+  // most recent inbound (the Ayala fix). One derivation for every requester
+  // relay, not a per-site copy — see requesterRelay.ts.
+  const requesterLang: 'he' | 'en' = requesterRelayLanguage(requesterSlackId);
 
   // Format start time in the requester's timezone if known, else owner's.
   const formatStart = (iso: string): string => {
@@ -1075,6 +1047,13 @@ async function notifyRequesterOfDecision(
     body = requesterLang === 'he'
       ? `${hi} — ${ownerFirst} לא יכול לעשות את זה כרגע${reasonTail}. סליחה — אם תרצי שאחפש משהו אחר, רק תגידי.`
       : `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
+  } else if (verdict === 'closed_by_owner') {
+    // Scanner path — never "approved" (nothing was granted) and never "can't
+    // make it work" (nothing was declined): just that it's closed, and why.
+    const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
+    body = requesterLang === 'he'
+      ? `${hi} — ${ownerFirst} סגר את זה בעצמו${reasonTail}. שום דבר נוסף לא נדרש ממך כרגע.`
+      : `${hi} — ${ownerFirst} closed this out himself${reasonTail} — nothing more needed from you here.`;
   } else {
     // v2.9.2 — question-shape counter: when counter.text is a clarifying
     // question from the owner ("what time?", "where?", "who else?"), render
@@ -1160,7 +1139,7 @@ async function notifyRequesterOfDecision(
   // machine-labelled part (pure owner prose — already human words, nothing to
   // relabel) and a question-shaped counter (his question must travel verbatim).
   const composeAmend = verdict === 'amend' && amendPinned.length > 0;
-  if (verdict === 'approve' || verdict === 'reject' || composeAmend) {
+  if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend) {
     try {
       const rawAsk =
         (typeof details.question === 'string' && details.question.trim() ? details.question.trim() : '') ||
@@ -1220,11 +1199,13 @@ Write the message.`;
       } else {
         const outcome = verdict === 'approve'
           ? `${ownerFirst} said yes`
-          : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
+          : verdict === 'closed_by_owner'
+            ? `${ownerFirst} closed this out himself${reason && reason.trim() ? ` (${reason.trim()})` : ''} — not an approval or a decline, just handled/no longer needed`
+            : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
         sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short, warm Slack message to ${requesterFirst ?? 'a colleague'} to close the loop on something they asked you to arrange with ${ownerFirst}.
 RULES:
 - Language: ${langRule}.
-- Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself. If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.
+- Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself.${verdict === 'closed_by_owner' ? ` Never say anything was booked or executed — nothing ran here; ${ownerFirst} closed it out himself, out of band.` : ` If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.`}
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
 - ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.${historyRule ? `\n${historyRule}` : ''}`;
         usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
@@ -1275,9 +1256,10 @@ RULES:
     } catch (_) { /* shadow is best-effort */ }
   };
   const stampIfTerminal = (): void => {
-    // Stamp on approve/reject (terminal outcomes). NOT on amend — the request
-    // stays open and the eventual booking must still notify the requester.
-    if (verdict === 'approve' || verdict === 'reject') {
+    // Stamp on approve/reject/closed_by_owner (terminal outcomes). NOT on
+    // amend — the request stays open and the eventual booking must still
+    // notify the requester.
+    if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner') {
       try { stampReq(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) {}
     }
   };

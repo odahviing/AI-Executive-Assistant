@@ -6,17 +6,18 @@ export const meta = {
     { title: 'Intake' },
     { title: 'Build' },
     { title: 'Context' },
-    // X151 · the bounce round and its re-check live INSIDE Verify, not a fifth
-    // box of their own — they are the same stage (the gate reads, sends back,
-    // re-reads), and a separate 'Bounce' title read as an empty box on every
-    // clean run, which looks like a run that did not finish. What still needs
-    // to be readable once they share a box: `rebuild:<lane>(N)` names a lane's
-    // second attempt, `bouncer:wave(N)` the first pass, `bouncer:recheck(N)`
-    // the second — distinct from a first-time `Build`/`Context` dispatch,
-    // which (X168) carries its own item count and a `dep:` PREFIX on any
-    // round after the first: `matchmaker(5)` is fresh, `dep:matchmaker(2)` is
-    // the same lane answering a dependency round, never guessed at from the
-    // panel.
+    // X151/X211 · the bounce ladder and its re-checks live INSIDE Verify, not a
+    // fifth box of their own — they are the same stage (the gate reads, sends
+    // back, re-reads, and may do so again on a stronger model), and a separate
+    // 'Bounce' title read as an empty box on every clean run, which looks like
+    // a run that did not finish. What still needs to be readable once they
+    // share a box: `rebuild:<lane>(N)` names a lane's second attempt (round 1
+    // of the ladder), `rebuild2:<lane>(N)` its third (round 2), `bouncer:wave(N)`
+    // the first pass, `bouncer:recheck(N)`/`bouncer:recheck2(N)` each round's
+    // re-check — distinct from a first-time `Build`/`Context` dispatch, which
+    // (X168) carries its own item count and a `dep:` PREFIX on any round after
+    // the first: `matchmaker(5)` is fresh, `dep:matchmaker(2)` is the same lane
+    // answering a dependency round, never guessed at from the panel.
     { title: 'Verify' },
   ],
 }
@@ -1137,31 +1138,44 @@ const dispatchedLanesOnce = new Set()
 // apart from a first `Build`-phase attempt by the same lane. A bounce never
 // touches `dispatchedLanesOnce`: it already carries its own marker and must
 // never also read as a dependency round.
-const dispatch = (lane, issues, asBounce) => {
+const dispatch = (lane, issues, asBounce, bounceRound, bounceModel) => {
   const isDepRound = !asBounce && dispatchedLanesOnce.has(lane)
   if (!asBounce) dispatchedLanesOnce.add(lane)
   return agent(
     `You are dispatched a batch of atomic issues in your lane. For EACH: **name the root cause with a \`file:line\`** — the place the fix must GO, not where the symptom showed. That is a patch-vs-root judgement, not an evidence exercise: settle it from the code, and reach for the logs only when timing or frequency is genuinely in question. Then build the deep fix within your charter, run \`npm run typecheck\` **ONCE at the END** (not after each edit — every run is a whole turn that re-reads your entire accumulated context, which is what a dispatch actually costs; batch the edits, then check), paper-trace to 100%. If unsure, do NOT build — return the right escalation verdict. Return one verdict per issue per your return contract, and **list every file you edited in \`filesTouched\`** — the tree may hold work from other chats, and that list is how the verify tells your change apart from theirs.${issues.some((i) => i._where) ? WHERE_NOTE : ''}${INVARIANT_NOTE}${TIMEOUT_NOTE}${OBSERVABLE_NOTE}${issues.some((i) => i.source === 'regression') ? REGRESSION_NOTE : ''}\nISSUES:\n${JSON.stringify(issues, null, 2)}`,
-    // No `model` here: the tier lives on the lane's charter frontmatter, so a
-    // hand-dispatched lane gets it too. Setting it in the engine only made it
-    // true on the engine path, which is the shape of failure this framework
-    // keeps repeating. Three things to watch, all instrumented here: turns per
-    // dispatch (a lighter model may explore more), `overturned` at verify (did
-    // fix quality drop), and the pushback ratio in `ledger-stats` — a lane that
-    // stops returning `blocked-charter` and `needs-owner-decision` has stopped
-    // being governed and is just building, which would NOT announce itself.
+    // No `model` here ON A FIRST ATTEMPT: the tier lives on the lane's charter
+    // frontmatter, so a hand-dispatched lane gets it too. Setting it in the
+    // engine only made it true on the engine path, which is the shape of
+    // failure this framework keeps repeating. Three things to watch, all
+    // instrumented here: turns per dispatch (a lighter model may explore
+    // more), `overturned` at verify (did fix quality drop), and the pushback
+    // ratio in `ledger-stats` — a lane that stops returning `blocked-charter`
+    // and `needs-owner-decision` has stopped being governed and is just
+    // building, which would NOT announce itself.
+    //
+    // X211 · `bounceModel` IS the one deliberate exception, and it does not
+    // contradict the paragraph above — that doctrine is about a lane's
+    // ORDINARY work, where the frontmatter tier is the right default. A
+    // bounce is the opposite case on purpose: the lane's own tier already
+    // failed once, so retrying on the same tier tests nothing new. See the
+    // bounce ladder below for why the two tiers it forces are 'opus' then
+    // 'fable'.
     {
       // X151/X168 · the label's job is to name the agent AND how much work it
       // was handed. `Build`/`Context` already say what stage this is, so a
       // bare lane name would be enough there; the count is what the round
       // comment above explains, and `·dep` is the reason a repeat is never
       // fresh work. `Verify` does not say "this is a rebuild", so that prefix
-      // stays — see the comment above `dispatch`.
-      label: asBounce ? `rebuild:${lane}(${issues.length})` : `${isDepRound ? 'dep:' : ''}${lane}(${issues.length})`,
+      // stays — see the comment above `dispatch`. X211 · a SECOND bounce round
+      // is `rebuild2:`, a full prefix rather than a suffix — X168 already
+      // proved a suffix breaks the `<why>:<agent>(<count>)` shape the panel
+      // expects.
+      label: asBounce ? `rebuild${bounceRound > 1 ? bounceRound : ''}:${lane}(${issues.length})` : `${isDepRound ? 'dep:' : ''}${lane}(${issues.length})`,
       phase: asBounce ? 'Verify' : lane === 'instructor' ? 'Context' : 'Build',
       agentType: lane,
       effort: EFFORT[lane],
       schema: VERDICTS,
+      ...(bounceModel ? { model: bounceModel } : {}),
     },
   )
 }
@@ -1791,12 +1805,16 @@ let verifyDepAsks = []
 // the field it watches could not report it. Now it reports what happened.
 let verifyRan = false
 let verifyAttempted = 0
-// ── X137 · THE BOUNCE COUNTER ───────────────────────────────────────────────
+// ── X137/X211 · THE BOUNCE COUNTER, NOW A MODEL-ESCALATING LADDER ──────────
 // His ruling, 2026-08-03: *"we can bounce stuff once, not twice."* An OVERTURN
-// now goes back to the lane that built it instead of straight to his desk — but
-// exactly once, because a second failure on one item is a signal, not something
-// to retry. `bounces` rides on the item, so a row he re-sends next run carries
-// its history in and cannot be bounced a second time.
+// goes back to the lane that built it instead of straight to his desk. X211
+// (2026-08-27) REVERSES the "once" half of that: a same-tier retry tests
+// nothing new, and real evidence says so — the v4.7.4 wrap's manual Fable-5
+// pass over the accumulated diff caught 4 real issues an Opus bouncer had
+// already cleared TWICE. So a second failure now earns a STRONGER model
+// instead of an immediate trip to his desk — `bounces` still rides on the
+// item, so a row he re-sends next run carries its history in and cannot
+// restart the ladder from zero.
 //
 // WHAT BOUNCES AND WHAT DOES NOT, and getting this wrong is what makes a wave
 // never terminate: an **overturn** is *"the thing we said we fixed, we did not
@@ -1804,7 +1822,14 @@ let verifyAttempted = 0
 // **discovery** is *"here is something else worth doing"* — new work, and it
 // queues for the next run exactly as before. Bouncing discoveries would make
 // every pass generate its own next round forever.
-const BOUNCE_LIMIT = 1
+//
+// `BOUNCE_LIMIT` is now 2, which is what makes the ladder 3 build attempts in
+// total: the original build, then up to `BOUNCE_LIMIT` bounces
+// (`bounceOf(id) < BOUNCE_LIMIT` gates whether another one happens; hitting
+// the limit is what finally escalates to the owner). Bugs only — `feature.js`
+// keeps its own identical `BOUNCE_LIMIT = 1` untouched; whether to mirror this
+// ladder there is a separate call for him to make.
+const BOUNCE_LIMIT = 2
 let bouncedIds = []
 let bounceRecheckRan = false
 let bounceCleared = []
@@ -2110,44 +2135,68 @@ if (VERIFY) {
     )
     if (backlogClaims.length) log(`  backlog spot-check: ${backlogConfirmed.size} of ${backlogClaims.length} \`fixed\` claim(s) confirmed at HEAD — only these close.`)
 
-    // ── X137 · ONE BOUNCE, THEN HIS DESK ─────────────────────────────────────
-    // Until now an overturn went straight to `needs-owner-decision`: the bouncer
-    // proved the wave had not fixed what it claimed, and the answer was to wake
-    // him up about it. Measured on wf_e2b7aeeb-325's aftermath, that is also the
-    // EXPENSIVE answer — its overturns came back the next morning as two whole
-    // extra runs (wf_e2fd1caf-c84 $53, wf_94e9e397-06a $20, both measured by
-    // `scripts/spend.cjs --runs`), each paying a fresh intake and a fresh full
-    // bouncer pass to do what one round inside the wave does.
+    // ── X137/X211 · A MODEL-ESCALATING LADDER, THEN HIS DESK ─────────────────
+    // Until X137 an overturn went straight to `needs-owner-decision`: the
+    // bouncer proved the wave had not fixed what it claimed, and the answer
+    // was to wake him up about it. Measured on wf_e2b7aeeb-325's aftermath,
+    // that is also the EXPENSIVE answer — its overturns came back the next
+    // morning as two whole extra runs (wf_e2fd1caf-c84 $53, wf_94e9e397-06a
+    // $20, both measured by `scripts/spend.cjs --runs`), each paying a fresh
+    // intake and a fresh full bouncer pass to do what one round inside the
+    // wave does.
     //
-    // ONE round, and it is FLAT — deliberately not the `while` loop above. A
-    // dependency ask raised in here is REPORTED, never dispatched, so this can
-    // never re-enter the round machinery and multiply with `MAX_ROUNDS`. The
-    // whole ceiling is: ≤MAX_ROUNDS build rounds · 1 bouncer · 1 bounce round ·
-    // 1 scoped re-check. Nothing here can add a second bounce to anything.
+    // X211 · UP TO `BOUNCE_LIMIT` rounds, escalating the BUILD model each
+    // time — `BOUNCE_MODEL[round-1]` — because a same-tier retry (what a
+    // bounce was until now) tests nothing new about whether the row is
+    // fixable at all. A dependency ask raised inside a round is REPORTED,
+    // never dispatched, so this still cannot re-enter the round machinery and
+    // multiply with `MAX_ROUNDS`. The whole ceiling is: ≤MAX_ROUNDS build
+    // rounds · 1 bouncer · ≤BOUNCE_LIMIT bounce rounds · 1 scoped re-check
+    // per bounce round.
     //
-    // THE RE-CHECK IS MANDATORY AND IT FAILS CLOSED. A bounce nobody verifies is
-    // worse than no bounce, because the wave would then claim a fix that was
-    // never re-examined — which is precisely the `verify.ran` hardcoded-true
-    // failure this engine already paid for. If the re-check does not return,
-    // every bounced row goes to his desk saying so.
+    // EACH ROUND'S RE-CHECK IS MANDATORY AND FAILS CLOSED. A bounce nobody
+    // verifies is worse than no bounce, because the wave would then claim a
+    // fix that was never re-examined — which is precisely the `verify.ran`
+    // hardcoded-true failure this engine already paid for. If a round's
+    // re-check does not return, or returns no verdict for a row, that row
+    // stops the ladder right there and escalates as unverified/unchecked
+    // rather than risk a further rebuild against an unknown state — only a
+    // row the re-check ACTUALLY re-examined and still refused continues to
+    // the next round.
     const laneOf = (id) => (specById.get(id) || {}).lane || ''
     const bounceOf = (id) => Number((specById.get(id) || {}).bounces || 0)
+    // The bouncer itself stays pinned to Opus on every round (bouncer.md's
+    // own frontmatter) — only the BUILD/retry side escalates, round 1 forced
+    // to `opus`, round 2 forced to `fable`. See `dispatch`'s own comment for
+    // why overriding the tier here does not contradict the "no model on an
+    // ordinary dispatch" doctrine above.
+    const BOUNCE_MODEL = ['opus', 'fable']
     let finalOverturn = new Map(overturned)
     // X143 · the denominator, recorded whether or not anything bounces. These
     // three PARTITION the first pass's overturns, so `eligible` always equals
     // `bounced + atLimit + unroutable` and a silent drop is arithmetically
-    // impossible to hide.
+    // impossible to hide. Fixed once, before round 1 — a row that clears in
+    // round 1 does not shrink `bouncedIds`, so this partition still holds
+    // after the whole ladder runs.
     bounceEligible = overturned.size
     bounceAtLimit = [...overturned.keys()].filter((id) => bounceOf(id) >= BOUNCE_LIMIT)
     bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
     bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
     if (bounceAtLimit.length)
-      log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
+      log(`  NOT bounced — already made every attempt this ladder allows (bounces=${BOUNCE_LIMIT}), straight to the owner: ${bounceAtLimit.join(', ')}`)
     if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
-    if (bouncedIds.length) {
-      // X151 · no `phase('Bounce')` here anymore — the round runs inside the
-      // same `Verify` phase entered above; there is no box to transition into.
-      const bounceItems = bouncedIds.map((id) => ({
+    bounceRecheckRan = true // AND'ed with each round's own result below; stays true if no round ever had anything to re-check
+    let round = 0
+    let stillOverturned = [...bouncedIds]
+    while (stillOverturned.length && round < BOUNCE_LIMIT) {
+      round += 1
+      const model = BOUNCE_MODEL[round - 1] || BOUNCE_MODEL[BOUNCE_MODEL.length - 1]
+      const roundIds = stillOverturned.filter((id) => bounceOf(id) < BOUNCE_LIMIT)
+      if (!roundIds.length) break
+      const isLastRound = round >= BOUNCE_LIMIT
+      // X151 · no `phase('Bounce')` here — every round runs inside the same
+      // `Verify` phase entered above; there is no box to transition into.
+      const bounceItems = roundIds.map((id) => ({
         ...(specById.get(id) || {}),
         id,
         lane: laneOf(id),
@@ -2158,42 +2207,46 @@ if (VERIFY) {
         // fresh issue and rebuild what it already built.
         _bouncedBack: {
           youClaimed: claimed.get(id),
-          theBouncerRefused: overturned.get(id) || '(no note returned)',
+          theBouncerRefused: finalOverturn.get(id) || '(no note returned)',
           thisIsAttempt: bounceOf(id) + 2,
-          andItIsTheLast: `Your work is already in the tree — read your own diff first, then fix what the bouncer named. If you believe the bouncer is wrong, say so in \`notes\` and return your evidence: that is a legitimate answer and it goes to the owner. Do NOT rebuild from scratch, and do NOT widen the scope. This item cannot be sent back again — a second refusal goes to the owner, not to a third attempt.`,
+          andItIsTheLast: isLastRound
+            ? `Your work is already in the tree — read your own diff first, then fix what the bouncer named. If you believe the bouncer is wrong, say so in \`notes\` and return your evidence: that is a legitimate answer and it goes to the owner. Do NOT rebuild from scratch, and do NOT widen the scope. This item cannot be sent back again — a refusal this time goes to the owner, not to another attempt.`
+            : `Your work is already in the tree — read your own diff first, then fix what the bouncer named. If you believe the bouncer is wrong, say so in \`notes\` and return your evidence: that is a legitimate answer and it goes to the owner. Do NOT rebuild from scratch, and do NOT widen the scope. A further refusal earns exactly one more attempt on a different model before this goes to the owner — it is not unlimited.`,
         },
       }))
       bounceItems.forEach((i) => specById.set(i.id, i))
-      log(`Bounce: ${bounceItems.length} overturned row(s) go back ONCE — ${bounceItems.map((i) => `${i.id}→${i.lane}`).join(', ')}.`)
+      log(`Bounce round ${round}/${BOUNCE_LIMIT} (model: ${model}): ${bounceItems.length} overturned row(s) go back — ${bounceItems.map((i) => `${i.id}→${i.lane}`).join(', ')}.`)
       const bounceOut = await parallel(
-        [...new Set(bounceItems.map((i) => i.lane))].map((lane) => () => dispatch(lane, bounceItems.filter((i) => i.lane === lane), true).then((r) => (r && r.results) || [])),
+        [...new Set(bounceItems.map((i) => i.lane))].map((lane) => () => dispatch(lane, bounceItems.filter((i) => i.lane === lane), true, round, model).then((r) => (r && r.results) || [])),
       )
-      const rebuilt = bounceOut.filter(Boolean).flat().filter((r) => r && bouncedIds.includes(r.id))
-      // The second attempt REPLACES the first — one row per item, same id, so the
-      // manifest cannot count one bug as two fixes.
+      const rebuilt = bounceOut.filter(Boolean).flat().filter((r) => r && roundIds.includes(r.id))
+      // The new attempt REPLACES the last one — one row per item, same id, so
+      // the manifest cannot count one bug as two fixes.
       const rebuiltIds = new Set(rebuilt.map((r) => r.id))
       if (rebuiltIds.size) results = results.filter((r) => !rebuiltIds.has(r.id)).concat(rebuilt)
-      const silent = bouncedIds.filter((id) => !rebuiltIds.has(id))
-      if (silent.length) log(`! ${silent.length} bounced row(s) returned NOTHING from their lane: ${silent.join(', ')}. They keep the first overturn and go to the owner.`)
+      const silent = roundIds.filter((id) => !rebuiltIds.has(id))
+      if (silent.length) log(`! ${silent.length} bounced row(s) returned NOTHING from their lane on round ${round}: ${silent.join(', ')}. They keep their last overturn and go to the owner.`)
 
-      // Asks raised during the bounce. This round does not chain, so a
+      // Asks raised during the bounce. A round does not chain, so a
       // DISPATCHABLE ask here would fall into neither the loop nor
       // `deferredDepAsks` (which takes only NON-dispatchable verdicts) and
-      // vanish — the exact silent-drop class this file keeps paying for. The two
-      // filters are complements, so every ask lands in exactly one list.
-      bounceDepAsks = rebuilt
-        .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict))
-        .map((r) => ({
-          id: `${r.id}>dep`,
-          symptom: r.dependencyAsk,
-          lane: r.dependencyAgent,
-          severity: 'high',
-          clarity: 'clear',
-          from: r.id,
-          fromVerdict: r.verdict,
-          awaitingOwner: true,
-          fromBounce: true,
-        }))
+      // vanish — the exact silent-drop class this file keeps paying for. The
+      // two filters are complements, so every ask lands in exactly one list.
+      bounceDepAsks = bounceDepAsks.concat(
+        rebuilt
+          .filter((r) => hasAsk(r) && DISPATCHABLE_DEP.has(r.verdict))
+          .map((r) => ({
+            id: `${r.id}>dep`,
+            symptom: r.dependencyAsk,
+            lane: r.dependencyAgent,
+            severity: 'high',
+            clarity: 'clear',
+            from: r.id,
+            fromVerdict: r.verdict,
+            awaitingOwner: true,
+            fromBounce: true,
+          })),
+      )
 
       // ── X149 · A PENDING DEP-ASK ON A BOUNCED LANE GETS RE-ASKED HERE ────────
       // `verifyDepAsks` was frozen before this round ran, so it cannot know the
@@ -2207,27 +2260,30 @@ if (VERIFY) {
       const bouncedLanes = new Set(bounceItems.map((i) => i.lane))
       const askedDuringBounce = verifyDepAsks.filter((a) => bouncedLanes.has(a.lane))
 
-      // ── THE RE-CHECK — the bounced rows ONLY, never the whole diff again ────
+      // ── THE RE-CHECK — this round's bounced rows ONLY, never the whole diff again ──
       const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
       const recheck = rebuilt.length
         ? await agent(
-            `**RE-CHECK — second and FINAL pass over ${rebuilt.length} row(s) you already overturned once.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
+            `**RE-CHECK — pass ${round + 1} of up to ${BOUNCE_LIMIT + 1} over ${rebuilt.length} row(s) you already overturned before.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
               `**Scope is these rows and nothing else.** Do not re-read the rest of the wave — you passed it an hour ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
               `For each row: **what you refused is quoted on it.** Answer the one question — is the reported problem fixed now? Trace from the symptom, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
-              `**THERE IS NO THIRD ATTEMPT.** A row you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
+              (isLastRound
+                ? `**THERE IS NO FURTHER ATTEMPT.** A row you refuse here goes to the owner carrying every attempt and every note. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise before.\n\n`
+                : `**A row you refuse here gets exactly ONE further attempt, on a different model, before it reaches the owner.** So refuse it if it is wrong — that is the correct outcome — but do not refuse it for something you did not raise before.\n\n`) +
               (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
               (askedDuringBounce.length
                 ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by an earlier pass and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.symptom}`).join('\n')}\n\n`
                 : '') +
               `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
-                rebuilt.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
+                rebuilt.map((r) => ({ ...r, _youRefused: finalOverturn.get(r.id) || '(no note)' })),
                 null,
                 2,
               )}`,
-            { label: `bouncer:recheck(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+            { label: `bouncer:recheck${round > 1 ? round : ''}(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
           )
         : null
-      bounceRecheckRan = !!recheck
+      const thisRecheckRan = !!recheck
+      if (rebuilt.length) bounceRecheckRan = bounceRecheckRan && thisRecheckRan
       const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
       // A discovery raised by the re-check is next run's intake like any other.
       // It NEVER bounces — that is the loop with no exit.
@@ -2240,33 +2296,41 @@ if (VERIFY) {
             .map((x) => x.id),
         )
         if (resolvedIds.size) {
-          log(`Bounce re-check also closed ${resolvedIds.size} pending dependency ask(s), satisfied by this round's own rebuild: ${[...resolvedIds].join(', ')}.`)
+          log(`Bounce round ${round} re-check also closed ${resolvedIds.size} pending dependency ask(s), satisfied by this round's own rebuild: ${[...resolvedIds].join(', ')}.`)
           verifyDepAsks = verifyDepAsks.filter((a) => !resolvedIds.has(a.id))
         }
       }
       const answeredAgain = new Set(recheckResults.map((x) => x.id))
-      for (const id of bouncedIds) {
-        const first = overturned.get(id) || ''
-        if (!rebuiltIds.has(id)) continue // lane returned nothing — keeps its first overturn
-        if (!bounceRecheckRan)
-          finalOverturn.set(id, `${first} [BOUNCED ONCE; THE RE-CHECK DIED, so the second attempt is UNVERIFIED — do not read this as fixed]`)
-        else if (!answeredAgain.has(id))
-          finalOverturn.set(id, `${first} [BOUNCED ONCE; the re-check returned no verdict for this row, so the second attempt is UNCHECKED]`)
+      // Only a row the re-check ACTUALLY re-examined and still refused is
+      // eligible for a further round — silence, a dead re-check, or a missing
+      // verdict all escalate immediately instead of retrying blind.
+      const retryEligible = []
+      for (const id of roundIds) {
+        const prior = finalOverturn.get(id) || ''
+        if (!rebuiltIds.has(id)) continue // lane returned nothing — keeps its last overturn, no retry
+        if (!thisRecheckRan) finalOverturn.set(id, `${prior} [BOUNCED (round ${round}); THE RE-CHECK DIED, so this attempt is UNVERIFIED — do not read this as fixed]`)
+        else if (!answeredAgain.has(id)) finalOverturn.set(id, `${prior} [BOUNCED (round ${round}); the re-check returned no verdict for this row, so this attempt is UNCHECKED]`)
         else {
           const again = recheckResults.find((x) => x.id === id)
-          if (again.verdict !== rebuiltClaim.get(id)) finalOverturn.set(id, `${first} [ATTEMPT 2 ALSO REFUSED: ${again.notes || ''}] — two attempts, no third; this is yours to rule on.`)
-          else finalOverturn.delete(id)
+          if (again.verdict !== rebuiltClaim.get(id)) {
+            finalOverturn.set(id, `${prior} [ATTEMPT ${round + 1} ALSO REFUSED: ${again.notes || ''}]${isLastRound ? ' — no further attempt; this is yours to rule on.' : ''}`)
+            if (!isLastRound) retryEligible.push(id)
+          } else finalOverturn.delete(id)
         }
       }
-      bounceCleared = bouncedIds.filter((id) => !finalOverturn.has(id))
-      bounceStillWrong = bouncedIds.filter((id) => finalOverturn.has(id))
+      const clearedThisRound = roundIds.filter((id) => !finalOverturn.has(id))
       log(
-        `Bounce result: ${bounceCleared.length} cleared on the second attempt, ${bounceStillWrong.length} still wrong and going to the owner${
-          bounceRecheckRan ? '' : ' (THE RE-CHECK DID NOT RUN — every bounced row is unverified)'
+        `Bounce round ${round} result: ${clearedThisRound.length} of ${roundIds.length} cleared${
+          thisRecheckRan ? '' : ' (THE RE-CHECK DID NOT RUN — every row in this round is unverified)'
         }.`,
       )
+      stillOverturned = retryEligible
     }
-    // X143 · what actually reached his desk, after the bounce and the re-check.
+    bounceCleared = bouncedIds.filter((id) => !finalOverturn.has(id))
+    bounceStillWrong = bouncedIds.filter((id) => finalOverturn.has(id))
+    if (bouncedIds.length)
+      log(`Bounce ladder result: ${bounceCleared.length} of ${bouncedIds.length} cleared, ${bounceStillWrong.length} still wrong and going to the owner after ${round} round(s).`)
+    // X143 · what actually reached his desk, after the whole ladder.
     bounceEscalated = finalOverturn.size
     // `finalOverturn`, not `overturned`: a row the bounce round fixed and the
     // re-check confirmed is `built` and must not reach his desk. `bounces` rides
@@ -2526,15 +2590,16 @@ const manifest = {
     clearedRefs: bounceCleared,
     toOwner: bounceStillWrong.length,
     toOwnerRefs: bounceStillWrong,
-    // Already spent their one bounce on an earlier run, so they went straight to
-    // him carrying both attempts. Non-zero is the counter doing its job.
+    // Already made every attempt this ladder allows on an earlier run, so they
+    // went straight to him carrying every attempt. Non-zero is the counter
+    // doing its job.
     notBouncedAtLimit: bounceAtLimit.length,
     notBouncedAtLimitRefs: bounceAtLimit,
     // Overturned with no resolvable lane — nowhere to send it, so it escalates.
     unroutable: bounceUnroutable.length,
     unroutableRefs: bounceUnroutable,
-    // Every overturn still standing after the bounce and the re-check: what he
-    // actually has to rule on.
+    // Every overturn still standing after the whole ladder: what he actually
+    // has to rule on.
     escalated: bounceEscalated,
     depAsksRaised: bounceDepAsks.length, // reported, never dispatched — the round does not chain
   },
@@ -2674,18 +2739,19 @@ if (VERIFY && bounceEligible !== bouncedIds.length + bounceAtLimit.length + boun
       bouncedIds.length + bounceAtLimit.length + bounceUnroutable.length
     } are accounted for (${bouncedIds.length} bounced · ${bounceAtLimit.length} at the limit · ${bounceUnroutable.length} with no lane). An overturn has gone somewhere the manifest does not name.`,
   )
-// X137 · a bounce whose re-check died is the `verify.ran` failure one level in:
-// the lane re-attempted, nothing re-examined it, and without this the row would
-// read as an ordinary overturn on his desk instead of an UNVERIFIED second try.
+// X137/X211 · a bounce whose re-check died is the `verify.ran` failure one
+// level in: the lane re-attempted, nothing re-examined it, and without this
+// the row would read as an ordinary overturn on his desk instead of an
+// UNVERIFIED retry — on ANY round of the ladder, not only the first.
 if (VERIFY && bouncedIds.length && !bounceRecheckRan)
   warnings.push(
-    `THE BOUNCE RE-CHECK DID NOT RUN — ${bouncedIds.length} row(s) went back to their lane and NOTHING re-examined the second attempt: ${bouncedIds.join(', ')}. They are on your desk marked unverified. Do not wrap on this; run \`/manager verify\` by hand.`,
+    `THE BOUNCE RE-CHECK DID NOT RUN — ${bouncedIds.length} row(s) went back to their lane and NOTHING re-examined at least one attempt: ${bouncedIds.join(', ')}. They are on your desk marked unverified. Do not wrap on this; run \`/manager verify\` by hand.`,
   )
 if (VERIFY && bounceAtLimit.length)
   warnings.push(
-    `${bounceAtLimit.length} row(s) were overturned having ALREADY used their one bounce, so they went straight to you with both attempts on them: ${bounceAtLimit.join(
+    `${bounceAtLimit.length} row(s) were overturned having ALREADY made every attempt this ladder allows (bounces=${BOUNCE_LIMIT}), so they went straight to you with every attempt already on them: ${bounceAtLimit.join(
       ', ',
-    )}. Two failures on one item is a signal — read the item, not the diff.`,
+    )}. Repeated failure on one item across models is a signal — read the item, not the diff.`,
   )
 if (VERIFY && verifyAttempted > 0 && !verifyRan)
   warnings.push(`THE VERIFY DID NOT RUN — ${verifyAttempted} built fix(es) are unchecked. \`agent()\` returns null when a subagent dies after its retries, and every read downstream is null-guarded, so this was previously indistinguishable from a clean pass. Do NOT wrap this run without \`/manager verify\`.`)

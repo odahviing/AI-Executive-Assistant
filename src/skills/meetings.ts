@@ -190,16 +190,16 @@ Do NOT use for:
 
 Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
-  • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?" + "Roughly how long is the trip each way?"
+  • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?"
 
 SMART-SKIP THE ASK — two cases where you skip the two-question ask entirely:
   • Cross-timezone default: when at least one attendee is in a different timezone than ${profile.user.name.split(' ')[0]} (people_memory has TZ data on each colleague), the meeting is remote by default. The handler will infer this and treat missing meeting_mode as 'online' automatically. Don't ask "in person or online?" when the attendee is clearly remote — it reads obtuse. Only ask when all attendees are in the same TZ as ${profile.user.name.split(' ')[0]}.
-  • Thread already established it: if an earlier message, or an earlier find_available_slots call in this same thread for this same meeting, already gave you the mode / venue / travel time, reuse it on a later search instead of repeating the two-question ask — reading the thread is your job, not the owner's to repeat.
+  • Thread already established it: if an earlier message, or an earlier find_available_slots call in this same thread for this same meeting, already gave you the mode / venue, reuse it on a later search instead of repeating the two-question ask — reading the thread is your job, not the owner's to repeat.
 
 Then YOU pick the right meeting_mode based on what they said:
   • "online" / "Teams" / "Zoom" / "call" / "video" → meeting_mode='online'
   • "in person at the office" / "in person" with no other venue / "onsite" / "at our office" / "from the office" / "in the office" → meeting_mode='in_person'
-  • "in person at <somewhere else>" / "at the client" / "their place" / "offsite" / "I need to join their meeting" → meeting_mode='custom' AND pass travel_buffer_minutes from their answer (one-way minutes)
+  • "in person at <somewhere else>" / "at the client" / "their place" / "offsite" / "I need to join their meeting" → meeting_mode='custom'
   • "either" / "whatever works" / "doesn't matter" → meeting_mode='either'
 
 ONLINE ≠ "AT HOME". meeting_mode='online' is a scheduling flag — it tells the tool the meeting does NOT require physical presence at the office, so all day types are searched. It does NOT mean ${profile.user.name.split(' ')[0]} attends from home. An online meeting can land on an office day; he may be at the office while joining via Teams/Zoom. Never frame online and in-person as mutually exclusive places — they describe the meeting's connection method, not where he sits.
@@ -346,6 +346,8 @@ DON'T ASK WHEN A CLEAR SIGNAL ALREADY EXISTS (people_memory shows different TZ, 
 Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
 SUBJECT — with an EXTERNAL on the invite, secure a REAL one BEFORE booking. Externals see the invite, and a rename hits them as a SECOND notification — so never send an external a placeholder ("Meeting with X and Y") you'll rename right after. When the subject is missing and the invite includes an external (candidate / other company / personal domain), ASK for it BEFORE create_meeting, batched with any other missing field in ONE question ("what day, and what should I call it?") — never day-first, then subject after the fact. Internal-only bookings on ${profile.user.name.split(' ')[0]}'s OWN path may use a working title and be renamed later, for speed. On the COLLEAGUE path, when the colleague asking for the meeting hasn't stated a subject, ASK for one before booking — batch it with any other missing field, same as above — instead of inventing a placeholder like "Team Sync"; a colleague's meeting gets its real subject up front, not a rename after the fact.
+
+FLOATING-BLOCK IMPACT — quote it, never re-derive it. When the result includes \`floating_block_impact\` (this booking overlapped a floating block like lunch or focus time), state it VERBATIM in the confirmation instead of computing "X min free will remain" yourself from the raw calendar — it's the real relocation-search answer, not an estimate. \`relocatable: false\` → say plainly that the block (name it) has nowhere to go that day. \`relocatable: true\` with \`newSlotLabel\` → state that as the plan (e.g. "I'll move lunch to 13:00–13:25").
 
 LANGUAGE: calendar invites are shared artifacts others read, so keep subject + body in English (translate if the owner instructs in Hebrew). The subject/body params restate this.`,
         input_schema: {
@@ -744,6 +746,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           newEndIso: string;
           newStartHHMM: string;
           newEndHHMM: string;
+          usedWorkingElsewhereFallback?: boolean;
         }> = [];
         for (const block of floatingBlocks) {
           if (!fb.blockAppliesOnDay(block, joinDayName, profile)) continue;
@@ -751,29 +754,13 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const wEnd = DateTime.fromISO(`${dayStr}T${block.preferred_end}`, { zone: timezone }).toMillis();
           if (meetingStartMs >= wEnd || meetingEndMs <= wStart) continue;  // no overlap
 
-          const busyInWindow: Array<{ start: number; end: number }> = [];
-          for (const evt of events) {
-            if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
-            if (fb.isFloatingBlockEvent(
-              { subject: evt.subject, categories: evt.categories },
-              block,
-            )) continue;  // elastic
-            const eStart = evTime(evt.start).toMillis();
-            const eEnd = evTime(evt.end).toMillis();
-            if (eStart < wEnd && eEnd > wStart) {
-              busyInWindow.push({
-                start: Math.max(eStart, wStart),
-                end: Math.min(eEnd, wEnd),
-              });
-            }
-          }
-          busyInWindow.push({
-            start: Math.max(meetingStartMs, wStart),
-            end: Math.min(meetingEndMs, wEnd),
-          });
-
-          const aligned = fb.findAlignedSlotForBlock(
-            block, dayStr, timezone, busyInWindow,
+          // Destination search (owner ruling 2026-08-28): this is picking
+          // WHERE the block moves to, not just a capacity check (that's
+          // checkSlot rule 6) — so it goes through the two-pass finder: a
+          // genuinely free slot first, a WE-tagged slot only as a fallback.
+          const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
+            events.filter(e => !e.isAllDay), block, dayStr, timezone, undefined,
+            { start: meetingStartMs, end: meetingEndMs },
           );
           if (aligned !== null) {
             // Block fits — does its CURRENT event overlap the proposed
@@ -807,6 +794,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
                   newEndIso: newEnd.toISO()!,
                   newStartHHMM: newStart.toFormat('HH:mm'),
                   newEndHHMM: newEnd.toFormat('HH:mm'),
+                  ...(usedWorkingElsewhereFallback ? { usedWorkingElsewhereFallback: true } : {}),
                 });
               }
             }
@@ -830,6 +818,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           // to "yes free" without the move (safer than a false no).
           const activeMode = profile.behavior.calendar_health_mode === 'active';
           const movesDone: string[] = [];
+          let movedIntoWorkingElsewhereFallback = false;
           if (activeMode && pendingBlockMoves.length > 0) {
             for (const mv of pendingBlockMoves) {
               try {
@@ -841,6 +830,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
                   timezone,
                 });
                 movesDone.push(`moved ${mv.blockName} ${mv.currentStartHHMM}→${mv.newStartHHMM}`);
+                if (mv.usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
                 logger.info('check_join_availability active-mode: block moved in-turn', {
                   eventId: mv.eventId, blockName: mv.blockName,
                   from: mv.currentStartHHMM, to: mv.newStartHHMM,
@@ -853,7 +843,9 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             }
           }
           const movesLine = movesDone.length > 0
-            ? ` I ${movesDone.join(' and ')} to make room.`
+            ? ` I ${movesDone.join(' and ')} to make room.${movedIntoWorkingElsewhereFallback
+                ? ' (No fully clear gap in the window — it now sits against a Working-Elsewhere block.)'
+                : ''}`
             : '';
           // M2 — "free" can still mean "free over an optional-join event". Say so
           // rather than presenting it as a clean slot; the validator already
@@ -1384,7 +1376,7 @@ THREAD CONTEXT — who to invite when ${firstName} asks for a meeting FROM a cha
 - Office days (${officeDays}): ≤3 people → ${firstName}'s Office + Teams; >3 → Meeting Room + Teams.
 - Home days (${homeDays}): internal → Huddle; external → Teams.
 - Phone call: custom_location = the phone number itself (e.g. "+972-54-123-4567").
-- External venue (WeWork, client office): use custom_location. ASK ${firstName} the one-way travel time first — pad slots on both sides.
+- External venue (WeWork, client office): use custom_location — travel padding is applied automatically on both sides.
 
 ${ships('check_join_availability') ? `ROUTE — JOIN an existing meeting: "join / attend / sit in on / come to our meeting" → check_join_availability. Flow: check availability → reply (free → "forward the invite"; partial → offer partial; conflict → decline; rule violation → escalate). No booking — colleague owns the invite.
 
@@ -1414,7 +1406,7 @@ When you need multiple inputs from ${firstName} before booking (topic, mode, dur
 - ❌ Wrong: "Want to override?" → owner says yes → "What's the topic?" → owner answers → "Online or in-person?" → owner answers → "How long?" → owner answers → 4 separate turns
 - ✅ Right: "Got it, override approved. Just need the topic, mode (online or in-person), and duration." → owner answers all three in one reply → done in 2 turns total
 
-The exception: when one answer materially changes the next question (e.g., "in-person at <somewhere else>" requires asking for travel time), it's fine to fold the follow-up into the next turn. But don't sequence questions that are independent of each other. ${firstName} can read three short questions in one message faster than he can answer four sequential turns.
+Don't sequence questions that are independent of each other. ${firstName} can read three short questions in one message faster than he can answer four sequential turns.
 
 MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 

@@ -267,6 +267,12 @@ function initSchema(db: Database.Database): void {
     // get_calendar could narrate THIS owner's audit trail. Column added here
     // for upgrades; CREATE TABLE above covers fresh installs.
     `ALTER TABLE audit_log ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''`,
+    // v4.7.4 (#203-5) — per-venue owner-stated one-way travel time, an
+    // alternative to the flat 30-min default when a venue match exists.
+    // NULL = not yet stated; never derived from the calendar or a routing
+    // lookup, only ever written by the owner (or preserved, not overwritten,
+    // by save-on-book — see saveOrBumpVenueOnBook).
+    `ALTER TABLE venues ADD COLUMN travel_time_minutes INTEGER`,
   ];
   for (const sql of columnMigrations) {
     try { db.exec(sql); } catch (_) { /* column already exists — safe to ignore */ }
@@ -939,6 +945,7 @@ function initSchema(db: Database.Database): void {
       booking_links     TEXT,                          -- JSON array of { platform, url } (future)
       notes             TEXT,
       rank              INTEGER,                       -- 1 | 2 | 3 — owner-curated
+      travel_time_minutes INTEGER,                     -- one-way travel time, owner-stated (v4.7.4, #203); NULL = no override, caller falls back to its own default
       last_used_at      TEXT,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))

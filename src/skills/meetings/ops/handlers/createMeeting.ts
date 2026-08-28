@@ -1299,12 +1299,17 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   rs.endOf('day').toFormat("yyyy-MM-dd'T'23:59:59"),
                   tzc,
                 );
-                const ownerBusy = dayEvents
-                  .filter(e => !e.isCancelled && !e.isAllDay && (e as { showAs?: string }).showAs !== 'free' && (e as { showAs?: string }).showAs !== 'workingElsewhere')
-                  .map(e => ({
-                    start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? tzc }).toMillis(),
-                    end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? tzc }).toMillis(),
-                  }));
+                // v4.7.x — was its own hand-rolled filter that counted a
+                // floating block (lunch) as busy, disagreeing with the search
+                // walker's own pool (which excludes it — elastic, can slide).
+                // Proven live: search offers a slot as clean with lunch carved
+                // out, then this counter-offer pool counted lunch as busy and
+                // immediately countered the slot it had just offered as clean.
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fbMod = require('../../../../utils/floatingBlocks') as typeof import('../../../../utils/floatingBlocks');
+                const ownerBusy = fbMod.densityCommitments(dayEvents, context.profile, {
+                  floatingBlocksAsNeighbours: false,
+                });
                 const cfg = density.densityConfigFromProfile(context.profile.meetings);
                 const cand = density.earlierConnectiveStart(rs.toMillis(), re.toMillis(), ownerBusy, cfg, tzc);
                 if (cand !== null) {
@@ -1525,6 +1530,32 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           meetingMode: effectiveIsOnline ? 'online' : 'in_person',
           category: args.category,
         });
+
+        // floating-block-impact-preflight (2026-08-27) — real incident (Slack
+        // thread D0ASFFYTCQ0, 2026-08-26): the pre-booking confirmation said
+        // "only 20 min free will remain" for lunch, but that was Sonnet's own
+        // arithmetic on the calendar — the REAL relocation search
+        // (rebalanceFloatingBlocksAfterMutation, called post-write) found
+        // ZERO viable slots for lunch anywhere that day. Run the same search
+        // — via the shared `dryRunFloatingBlockRelocation`, no write — BEFORE
+        // the booking lands, whenever the candidate slot overlaps a floating
+        // block, so the confirmation quotes a real answer instead of a guess.
+        // Skipped for all-day events (args.start/end here are pre-clamp; an
+        // all-day candidate isn't the "does this slot overlap lunch" question
+        // this check answers).
+        let floatingBlockImpact: import('../../../../utils/rebalanceFloatingBlocks').FloatingBlockImpact[] = [];
+        if (args.is_all_day !== true && typeof args.start === 'string' && typeof args.end === 'string') {
+          try {
+            const { dryRunFloatingBlockRelocation } = await import('../../../../utils/rebalanceFloatingBlocks');
+            floatingBlockImpact = await dryRunFloatingBlockRelocation({
+              profile: context.profile,
+              candidateStartIso: args.start,
+              candidateEndIso: args.end,
+            });
+          } catch (err) {
+            logger.warn('create_meeting — floating-block impact dry run threw, continuing', { err: String(err).slice(0, 200) });
+          }
+        }
 
         return createMeeting({
           userEmail,
@@ -1981,6 +2012,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
             ...(planOverrideNotice ? { override_notice: planOverrideNotice } : {}),
+            // floating-block-impact-preflight (2026-08-27) — the REAL
+            // relocation-search answer for any floating block this booking
+            // overlaps, computed pre-write above. Quote verbatim (same
+            // contract as `action_summary` / `_trip_note`) instead of
+            // computing "X min free will remain" from the raw calendar.
+            ...(floatingBlockImpact.length > 0 ? { floating_block_impact: floatingBlockImpact } : {}),
           };
         });
 }

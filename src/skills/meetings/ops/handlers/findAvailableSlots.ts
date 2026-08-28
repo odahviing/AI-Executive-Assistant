@@ -38,8 +38,7 @@ import { grantRelaxed } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
-import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
-import { bookingLeadTimeHours, offeredSlotCount } from '../../../../utils/scheduleRules';
+import { bookingLeadTimeHours, offeredSlotCount, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
@@ -1284,9 +1283,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // in a mixed window — three soft-held slots among forty real meetings —
             // the model can only steer an override at a time that is on the list,
             // and is told plainly that everything else was a real commitment.
-            const SOFT_REJECT_PREFIXES = ['focus_time', 'travel_buffer_collision', 'floating_block_no_room', 'within_lead_time'];
+            // v4.7.x — was a hand-rolled prefix list that had silently drifted
+            // from availabilityPreCheck.ts's own ESCALATABLE set (missing
+            // outside_working_hours/category_per_day/category_per_week/
+            // category_day_type — the same rejection kind escalatable on one
+            // colleague-facing surface, a flat refusal on the other). Now
+            // derived from the ONE shared kind list — see
+            // OWNER_OVERRIDABLE_KINDS's doc in scheduleRules.ts.
             const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
-              .filter(l => SOFT_REJECT_PREFIXES.some(p => l.startsWith(p)));
+              .filter(l => OWNER_OVERRIDABLE_SEARCH_LABELS.has(l));
             const softBlockedStarts = [...new Set(
               softRejectLabels.flatMap(l => diagnosticsOut.rejectedExamples?.[l] ?? []),
             )]

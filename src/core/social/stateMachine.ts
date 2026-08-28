@@ -54,6 +54,7 @@
 
 import type { OwnerIntentClassification } from './classifyTurn';
 import {
+  adjustCategoryScore,
   countAssistantInitiationsTodayForPerson,
   getActiveCategoriesForPerson,
   getActiveSubjectsForPerson,
@@ -61,6 +62,7 @@ import {
   getCategoryScoresForPerson,
   lastAssistantInitiatedAt,
   recordSubjectUnanswered,
+  CATEGORY_SCORE_CAP,
   FIXED_CATEGORIES,
   MAX_ACTIVE_CATEGORIES_PER_PERSON,
   type SocialSubject,
@@ -207,6 +209,13 @@ function pickDormantCategory(
 export function directiveForProactiveSlot(params: {
   personSlackId: string;
   /**
+   * Owner's own user id — needed to zero out a dead category's score via
+   * `adjustCategoryScore` when `continueDirective` finds one with no live
+   * subjects left (bug 2.1). Threaded from callers that already have
+   * `profile.user.slack_user_id` in scope.
+   */
+  ownerUserId: string;
+  /**
    * Owner timezone for owner-local "today" computation. When omitted, the
    * count helper falls back to UTC midnight (legacy behavior). Threaded
    * from callers that have profile in scope so the per-day-per-person
@@ -220,7 +229,7 @@ export function directiveForProactiveSlot(params: {
    */
   allowRaiseNew?: boolean;
 }): SocialDirective {
-  const { personSlackId, ownerTimezone, allowRaiseNew = true } = params;
+  const { personSlackId, ownerUserId, ownerTimezone, allowRaiseNew = true } = params;
 
   // Rank-0 = "do not engage" opt-out. Maelle never INITIATES with rank-0
   // people. Inbound replies / response handling go through other paths
@@ -345,6 +354,28 @@ export function directiveForProactiveSlot(params: {
       b.score - a.score || a.category_label.localeCompare(b.category_label));
     for (const cat of ordered) {
       const allSubjects = getActiveSubjectsForPersonCategory(personSlackId, cat.category_id);
+      // Bug 2.1 — a category with real standing (score > 0) but ZERO live
+      // subjects left (every subject died / was rejected) is a true dead
+      // end, not a transient "all subjects have a raise pending an answer"
+      // state. Left alone, its score never comes back down on its own
+      // (adjustCategoryScore only ever moves on engagement), so it
+      // permanently occupies one of the MAX_ACTIVE_CATEGORIES_PER_PERSON (3)
+      // slots and starves the picker of real variety. Zero it out here so
+      // `getActiveCategoriesForPerson`'s `score > 0` filter naturally drops
+      // it and `pickDormantCategory` can offer a genuinely fresh category
+      // next time — "zero points category is out of the count" (owner).
+      if (allSubjects.length === 0) {
+        try {
+          adjustCategoryScore({
+            ownerUserId, personSlackId, categoryId: cat.category_id, delta: -CATEGORY_SCORE_CAP,
+          });
+        } catch (err) {
+          logger.warn('Dead-category score reset threw — leaving score as-is', {
+            categoryId: cat.category_id, personSlackId, err: String(err).slice(0, 200),
+          });
+        }
+        continue;
+      }
       // Eligible = no raise currently awaiting an answer. Once the person's
       // next chat reconciles (match or pivot), the marker clears either way
       // (logEngagement.ts) — so this is a plain filter, not a decay site.
@@ -402,6 +433,9 @@ export function noDirective(): SocialDirective {
 export function chooseSocialDirective(params: {
   personSlackId: string;
   classification: OwnerIntentClassification;
+  /** Owner's own user id — threaded through to `directiveForProactiveSlot`
+   *  (bug 2.1's dead-category score reset). */
+  ownerUserId: string;
   /** Owner timezone — threaded through to the proactive-slot daily gate. */
   ownerTimezone?: string;
   /**
@@ -419,7 +453,7 @@ export function chooseSocialDirective(params: {
    */
   hasOperationalRelay?: boolean;
 }): SocialDirective {
-  const { classification, personSlackId, ownerTimezone, hasOperationalRelay } = params;
+  const { classification, personSlackId, ownerUserId, ownerTimezone, hasOperationalRelay } = params;
 
   if (hasOperationalRelay) return noDirective();
   if (classification.kind === 'task') return noDirective();
@@ -427,7 +461,7 @@ export function chooseSocialDirective(params: {
   if (classification.conversation_state === 'closing') return noDirective();
   // In-prompt directive — never originates a brand-new subject (answer 2):
   // only the coda's own direct call to directiveForProactiveSlot may.
-  return directiveForProactiveSlot({ personSlackId, ownerTimezone, allowRaiseNew: false });
+  return directiveForProactiveSlot({ personSlackId, ownerUserId, ownerTimezone, allowRaiseNew: false });
 }
 
 export function formatDirectiveForPromptBlock(directive: SocialDirective): string {

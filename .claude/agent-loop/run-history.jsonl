@@ -17,3 +17,7 @@
 {"ts":"2026-08-25T23:13:27.242Z","runId":"wf_d649e3b2-1f0","stamp":"triggered","trigger":"cron"}
 {"ts":"2026-08-25T23:55:18.636Z","runId":"wf_d649e3b2-1f0","stamp":"results-in"}
 {"ts":"2026-08-26T00:01:37.521Z","runId":"wf_d649e3b2-1f0","stamp":"report-written","headline":"Run wf_d649e3b2-1f0 — in: 0 tickets · 3 day(s) of logs · 4 backlog re-reads\nout: 5 built · 0 already-fixed · 0 built-with-gap · 5 bounced · 0/0 joint-traced · 0 converted · 3 queued\nboard: net 0 → 4 open rows — 0 still-real · 4 need a re-read · 0 cite no file · 4 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)\nyour 1 rows await you: 0 from tonight · 1 re-surfaced · 0 found by the loop","pendingOwner":1}
+{"ts":"2026-08-26T23:05:39.924Z","runId":"wf_e3cb45de-439","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-26T23:46:49.540Z","runId":"wf_e3cb45de-439","stamp":"results-in"}
+{"ts":"2026-08-26T23:46:53.980Z","runId":"wf_e3cb45de-439","stamp":"report-written","headline":"Run wf_e3cb45de-439 — in: 0 tickets · 1 day(s) of logs · 1 backlog re-read | out: 4 built · 0 already-fixed · 0 built-with-gap · 1 bounced · 0/0 joint-traced · 0 converted · 3 queued | board: net -1 -> 6 open rows - 3 still-real · 3 need a re-read · 0 cite no file · 6 rulable · 0 waiting on a verb | 3 rows await you: 1 from tonight · 2 re-surfaced · 0 found by the loop","pendingOwner":3}
+{"ts":"2026-08-27T23:03:47.797Z","failed":true,"trigger":"cron","exitcode":0,"note":"died after: never triggered"}

@@ -48,7 +48,12 @@ import type { SocialDirective } from './stateMachine';
 import logger from '../../utils/logger';
 import { tavilySearch } from '../../skills/general';
 import { getPersonMemory, getRecentChannelMessages } from '../../db';
-import { getCategoryByLabel, recordCategoryRaiseAttempt, recordSubjectUnanswered } from '../../db/socialSubjects';
+import {
+  getActiveSubjectsForPersonCategory,
+  getCategoryByLabel,
+  recordCategoryRaiseAttempt,
+  recordSubjectUnanswered,
+} from '../../db/socialSubjects';
 
 /**
  * Everything the coda needs, decided during the turn but COMPOSED later.
@@ -146,7 +151,17 @@ async function groundCoda(params: {
 }): Promise<CodaGrounding | null> {
   const { directive, personSlackId, channelId } = params;
 
-  const topicHint = directive.categoryLabel ?? directive.subjectLabel ?? null;
+  // Bug 2.2 — in `continue` mode a real subject IS being followed up on, so
+  // the grounding search should target it specifically (e.g. the actual game
+  // title), not the whole category — otherwise every "continue" coda in a
+  // category re-runs the identical generic category search regardless of
+  // which subject is nominally being continued, and a title that genuinely
+  // holds the top spot for a while gets served back nearly verbatim each
+  // time. `raise_new` has no subject yet, so category-first stays correct
+  // and unchanged there.
+  const topicHint = directive.mode === 'continue'
+    ? (directive.subjectLabel ?? directive.categoryLabel ?? null)
+    : (directive.categoryLabel ?? directive.subjectLabel ?? null);
   const location = resolvePersonLocationForSearch(personSlackId);
   const query = topicHint
     ? `${topicHint} — what's new or trending right now${location ? `, ${location}` : ''}`
@@ -202,6 +217,14 @@ async function generateSocialCoda(params: {
    *  whenever mode is 'continue' or 'raise_new' — see `groundCoda`. */
   grounding: CodaGrounding;
   /**
+   * Bug 2.2 — this person's OTHER live subjects in the same category as the
+   * one being continued (real DB labels, excluding the subject itself), for
+   * `continue` mode only. Additional real grounding the model MAY draw on
+   * for personalization/variety — never a substitute for the subject-
+   * specific search grounding above, and never invented content.
+   */
+  otherCategorySubjectLabels?: string[];
+  /**
    * v2.2.4 — language hint for the coda. The orchestrator passes the
    * dominant language of the current conversation. Sonnet's prompt is
    * always English here; without an explicit instruction Sonnet will
@@ -211,7 +234,7 @@ async function generateSocialCoda(params: {
    */
   language?: 'he' | 'en';
 }): Promise<string | null> {
-  const { profile, directive, senderRole, senderFirstName, grounding, language } = params;
+  const { profile, directive, senderRole, senderFirstName, grounding, otherCategorySubjectLabels, language } = params;
   if (directive.mode === 'none') return null;
 
   const isOwner = senderRole === 'owner';
@@ -227,6 +250,16 @@ async function generateSocialCoda(params: {
       ? `Something real and current you found: ${grounding.searchSnippet}`
       : null,
   ].filter(Boolean).join(' ');
+
+  // Bug 2.2 — real, on-file context only: this person's other live subjects
+  // in the same category as the one being continued. The model MAY draw on
+  // these for personalization/variety (e.g. noticing a pattern across their
+  // interests in this category) but never MUST — never a substitute for the
+  // subject-specific grounding above, and these are stored labels, not
+  // invented content, so this doesn't touch the anti-fabrication guard.
+  const otherSubjectsLine = otherCategorySubjectLabels && otherCategorySubjectLabels.length > 0
+    ? `This person's other subjects in this same category, for context only, mention only if it fits naturally: ${otherCategorySubjectLabels.join(', ')}.`
+    : '';
 
   // gh#198 (answer 11) — the shape is the model's and the topic's call: a
   // question, an observation, or a plain share are all legal for `continue`
@@ -318,6 +351,7 @@ Compose one small human line to send into that quiet moment. It is NOT part of t
 ${langLine ? `- ${langLine}` : ''}
 
 ${directive.toneCue ? `Tone: ${directive.toneCue}` : ''}
+${otherSubjectsLine ? `\n${otherSubjectsLine}` : ''}
 
 Output the coda sentence only. No quotes, no label.`;
 
@@ -394,12 +428,32 @@ export async function composeSocialCoda(
       grounding = ground;
     }
 
+    // Bug 2.2 — for `continue`, hand the composer the person's OTHER live
+    // subjects in this same category (real DB labels, subject being
+    // continued excluded) so it can personalize/vary content by drawing on
+    // real history, not just the one subject in isolation. Additional real
+    // grounding on top of the subject-specific search above, never a
+    // substitute for it.
+    let otherCategorySubjectLabels: string[] | undefined;
+    if (pending.directive.mode === 'continue' && pending.directive.subject) {
+      try {
+        otherCategorySubjectLabels = getActiveSubjectsForPersonCategory(
+          pending.personSlackId, pending.directive.subject.category_id,
+        )
+          .filter(s => s.id !== pending.directive.subject!.id)
+          .map(s => s.label);
+      } catch (err) {
+        logger.warn('Coda other-subjects lookup threw — proceeding without it', { err: String(err).slice(0, 200) });
+      }
+    }
+
     const coda = await generateSocialCoda({
       profile,
       directive: pending.directive,
       senderRole: pending.senderRole,
       senderFirstName: pending.senderFirstName,
       grounding,
+      otherCategorySubjectLabels,
       language: pending.language,
     });
     if (!coda || coda.trim().length === 0) return null;

@@ -107,18 +107,24 @@ export class SchedulingSkill {
     // deleting a key that can never be present was dead code.)
     if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
       delete (result as Record<string, unknown>).override_notice;
+      // floating-block-impact-preflight (2026-08-27) — same class of leak as
+      // `override_notice` just above: second-person owner admin narration
+      // ("this leaves no room for your lunch") that has no owner-facing side
+      // channel on the email leg — the whole reply is the client-forwardable
+      // text. Strip here rather than gate the attach site in createMeeting.ts.
+      delete (result as Record<string, unknown>).floating_block_impact;
 
       // Same class of leak, find_available_slots' side: the owner-trade-off note
       // family (_over_optional_note / _attendee_conflicts_note /
       // _no_all_attendee_free_note / _recovery_note,
-      // findAvailableSlots.ts:1696-1744) is second-person prose for the owner
+      // findAvailableSlots.ts:2079-2133) is second-person prose for the owner
       // PLUS the raw per-slot data it narrates — a non-private meeting's
       // subject (`over_optional`) and a colleague's email + busy reason
       // (`attendee_conflicts`). Stripping only the notes would still leave that
       // data sitting in the model's context on a leg whose entire reply is
       // forwarded verbatim to an external party, so both the notes AND the
       // fields they describe are removed here — the same chokepoint, extended.
-      // (`_attendee_busy_colleague_note`, findAvailableSlots.ts:1708, is NOT
+      // (`_attendee_busy_colleague_note`, findAvailableSlots.ts:2090, is NOT
       // stripped here — it's gated on `mustBe`, which requires
       // `!isOwnerInitiatedSearch`; the email leg is always
       // `senderRole:'owner'` so `isOwnerInitiatedSearch` is always true and the

@@ -131,7 +131,7 @@ import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
 import { displaySubject, PRIVATE_MASK, type SubjectViewer } from './displaySubject';
-import { blockAppliesOnDay, getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
+import { blockAppliesOnDay, busyForBlockWindow, getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
 import { getEffectiveWorkDayForInstant, slotDayMinutes, type EffectiveWorkDay } from './workHours';
 
 export type RuleViolationKind =
@@ -151,6 +151,93 @@ export type RuleViolationKind =
 /** M2 booking level — what already holds the slot, independent of the rules. */
 export type BookingLevel = 'free' | 'optional' | 'unfiltered';
 
+/**
+ * OWNER_OVERRIDABLE_KINDS — THE single list of checkSlot violation kinds that
+ * are soft, owner-relaxable day-load protections rather than a real
+ * commitment / hard fact. A colleague hitting one of these is never a flat
+ * refusal: it escalates to the owner via policy_exception on insist (M9),
+ * same as planMeeting already treats them.
+ *
+ * Two consumers used to each hand-roll this list and had drifted apart —
+ * `availabilityPreCheck.ts`'s `ESCALATABLE` (checkSlot kinds directly, since
+ * it calls checkSlot itself) had four kinds (`outside_working_hours`,
+ * `category_per_day`, `category_per_week`, `category_day_type`) that
+ * `ops/handlers/findAvailableSlots.ts`'s `SOFT_REJECT_PREFIXES` (search-path
+ * labels, since it reads the walker's post-relabel `rejectedCounts`) did not
+ * — so the same rejection kind was escalatable-to-owner on one colleague-
+ * facing surface and silently a flat "not bookable" on the other. This is
+ * the exact shape (present in one list, absent from the other) that already
+ * caused the `in_the_past` incident once (see the note at that case in
+ * `mapVerdictToRejectLabel` below).
+ *
+ * Both consumers now derive their membership check from THIS set. The
+ * search-path surface additionally needs `mapVerdictToRejectLabel` (below) to
+ * translate a kind into the walker's own relabeled vocabulary before it can
+ * compare against `rejectedCounts` keys.
+ */
+export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<RuleViolationKind>([
+  'focus_time_floor',
+  'floating_block_overlap',
+  'within_lead_time',
+  'travel_buffer_collision',
+  'outside_working_hours',
+  'category_per_day',
+  'category_per_week',
+  'category_day_type',
+]);
+
+/**
+ * Map a checkSlot verdict kind to the search-path's own reject label. Single
+ * source (moved from `connectors/graph/findAvailableSlots.ts` v4.x, which
+ * hand-rolled this switch inline) so the walker's `trackReject` calls and
+ * `ops/handlers/findAvailableSlots.ts`'s owner-overridable label derivation
+ * (via `OWNER_OVERRIDABLE_KINDS` above) can never disagree about what a given
+ * kind is called downstream — day_summary narration is unchanged either way.
+ *
+ * `in_the_past` is deliberately its OWN label, never folded into
+ * `within_lead_time`: "too soon" is one of the owner's rules and he can waive
+ * it; "already happened" is not, and nobody can. Folding them once put
+ * elapsed times inside the soft/owner-overridable set, and the colleague hint
+ * downstream described a time that had simply passed as merely "protective"
+ * and invited a policy_exception over it.
+ */
+export function mapVerdictToRejectLabel(
+  kind: string | undefined,
+  dayType: 'office' | 'home' | 'other',
+): string {
+  switch (kind) {
+    case 'in_the_past': return 'in_the_past';
+    case 'within_lead_time': return 'within_lead_time';
+    case 'outside_working_hours': return 'outside_owner_work_hours';
+    case 'floating_block_overlap': return 'floating_block_no_room';
+    case 'focus_time_floor': return dayType === 'home' ? 'focus_time_home' : 'focus_time_office';
+    case 'travel_buffer_collision': return 'travel_buffer_collision';
+    case 'category_day_type': return 'category_day_type';
+    case 'category_per_day': return 'category_per_day';
+    case 'category_per_week': return 'category_per_week';
+    case 'vacation_or_off_day': return 'wrong_day_type';
+    case 'owner_busy_collision':
+    default: return 'owner_busy_collision';
+  }
+}
+
+/**
+ * Every search-path label `mapVerdictToRejectLabel` can produce for an
+ * owner-overridable kind — both `dayType` variants included (the label
+ * itself, e.g. `focus_time_home` vs `focus_time_office`, is a search-path
+ * concern; membership must catch either). Consumers that read
+ * `rejectedCounts`/`rejectedExamples` keys (search-path labels) test
+ * membership against this set; consumers that read checkSlot's own
+ * `violation_kind` (e.g. availabilityPreCheck, which calls checkSlot
+ * directly) test against `OWNER_OVERRIDABLE_KINDS` itself.
+ */
+export const OWNER_OVERRIDABLE_SEARCH_LABELS: ReadonlySet<string> = new Set<string>(
+  [...OWNER_OVERRIDABLE_KINDS].flatMap(k => [
+    mapVerdictToRejectLabel(k, 'office'),
+    mapVerdictToRejectLabel(k, 'home'),
+  ]),
+);
+
 // ── v3.1.2 (C) — Shared daily-focus-time helper ─────────────────────────────
 //
 // Single source of truth for "how much quality free time does this day have."
@@ -169,45 +256,63 @@ export type BookingLevel = 'free' | 'optional' | 'unfiltered';
 //     ONE check, both surfaces. Relaxed-mode bypass preserved — explicit
 //     owner override is the approval, same as every other soft rule.
 //
+// v4.7.x — PER-WINDOW, not a bounding box. Pre-fix this took one
+// workStart/workEnd pair spanning earliest-window-start to latest-window-end,
+// so a split-shift day (e.g. 09:00–15:30, 20:30–23:59) had its OFF-hours gap
+// (15:30–20:30 — no work happening) counted as "quality free time" against
+// the floor. On Idan's actual split-Tuesday that gap alone (~300 min) cleared
+// the floor by itself, so this rule could structurally never fire on that day
+// no matter how packed the real work windows were — while `analyzeCalendar`'s
+// own per-window free-time math (ops/analysis.ts) never had this bug and could
+// disagree with this rule about the same day. Now walks each window
+// separately (mirroring analyzeCalendar) and sums, so search/book/analyze all
+// answer from the same shape of math. `windows` are minute-of-day
+// {startMin,endMin} pairs (EffectiveWorkDay['windows'] / WorkHourRange) —
+// never a single earliest/latest pair.
+//
 // Pure function: no DB, no profile, easy to test.
 export function computeDayQualityFreeMinutes(params: {
   dayDate: string;           // YYYY-MM-DD
   timezone: string;          // IANA
-  workStart: string;         // 'HH:MM'
-  workEnd: string;           // 'HH:MM'
+  windows: Array<{ startMin: number; endMin: number }>;
   busyBlocks: Array<{ start: Date; end: Date }>;
   minChunkMinutes: number;
 }): number {
-  const { dayDate, timezone, workStart, workEnd, busyBlocks, minChunkMinutes } = params;
-  const dayStartMs = DateTime.fromISO(`${dayDate}T${workStart}`, { zone: timezone }).toMillis();
-  const dayEndMs   = DateTime.fromISO(`${dayDate}T${workEnd}`,   { zone: timezone }).toMillis();
-
-  const dayBusy = busyBlocks
-    .filter(b => b.start.getTime() < dayEndMs && b.end.getTime() > dayStartMs)
-    .map(b => ({
-      start: Math.max(b.start.getTime(), dayStartMs),
-      end:   Math.min(b.end.getTime(), dayEndMs),
-    }))
-    .sort((a, b) => a.start - b.start);
-
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const block of dayBusy) {
-    if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
-      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
-    } else {
-      merged.push({ ...block });
-    }
-  }
+  const { dayDate, timezone, windows, busyBlocks, minChunkMinutes } = params;
+  const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const busyMs = busyBlocks.map(b => ({ start: b.start.getTime(), end: b.end.getTime() }));
 
   let totalFreeMin = 0;
-  let prev = dayStartMs;
-  for (const block of merged) {
-    const gapMin = (block.start - prev) / 60_000;
-    if (gapMin >= minChunkMinutes) totalFreeMin += gapMin;
-    prev = block.end;
+  for (const w of windows) {
+    const windowStartMs = DateTime.fromISO(`${dayDate}T${hhmm(w.startMin)}`, { zone: timezone }).toMillis();
+    const windowEndMs = DateTime.fromISO(`${dayDate}T${hhmm(Math.min(w.endMin, 1439))}`, { zone: timezone }).toMillis();
+
+    const dayBusy = busyMs
+      .filter(b => b.start < windowEndMs && b.end > windowStartMs)
+      .map(b => ({
+        start: Math.max(b.start, windowStartMs),
+        end:   Math.min(b.end, windowEndMs),
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const block of dayBusy) {
+      if (merged.length > 0 && block.start <= merged[merged.length - 1].end) {
+        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, block.end);
+      } else {
+        merged.push({ ...block });
+      }
+    }
+
+    let prev = windowStartMs;
+    for (const block of merged) {
+      const gapMin = (block.start - prev) / 60_000;
+      if (gapMin >= minChunkMinutes) totalFreeMin += gapMin;
+      prev = block.end;
+    }
+    const finalGapMin = (windowEndMs - prev) / 60_000;
+    if (finalGapMin >= minChunkMinutes) totalFreeMin += finalGapMin;
   }
-  const finalGapMin = (dayEndMs - prev) / 60_000;
-  if (finalGapMin >= minChunkMinutes) totalFreeMin += finalGapMin;
 
   return totalFreeMin;
 }
@@ -267,10 +372,21 @@ export interface RuleCheckInput {
    */
   leadTimeHours?: number;
   /**
-   * v4.1.x (M1) — explicit travel padding in minutes for this call (the search's
-   * `travel_buffer_minutes` arg). Omitted → resolved from the category flag +
-   * profile.meetings.travel_buffer_minutes via travelBufferMinutesFor. Pre-fix
-   * checkSlot hardcoded 30 and ignored the caller's value entirely.
+   * v4.1.x (M1) — explicit travel padding in minutes for this call (the
+   * search's `travel_buffer_minutes` arg). Omitted → resolved from the
+   * category flag + profile.meetings.travel_buffer_minutes via
+   * travelBufferMinutesFor. Pre-fix checkSlot hardcoded 30 and ignored the
+   * caller's value entirely.
+   *
+   * gh#203-3/203-5 — the write path (create_meeting / move_meeting, via
+   * planMeeting.ts) now ALSO feeds this, resolved from the venue catalog
+   * right after `resolveLocation` runs — create_meeting and move_meeting
+   * expose no per-call travel-minutes arg (owner ruled out 2026-08-27: the
+   * venue catalog, set once via `rank_venue`, is the only override channel),
+   * so a number the owner stated once for a venue is honored on every future
+   * booking to it. Both callers resolve through the SAME
+   * travelBufferMinutesFor (with its 15-min floor) — never a second
+   * buffer-resolution function.
    */
   travelBufferMinutes?: number;
 }
@@ -384,16 +500,21 @@ export function isWithinBookingLeadTime(
 
 /**
  * travelBufferMinutesFor — THE single source for travel padding. An explicit
- * caller value wins; otherwise a category flagged `requires_travel_buffer` gets
- * the configured length; otherwise 0. Replaces the literal 30 in rule 7 AND the
- * duplicate category lookup + literal 30 in the slot walker.
+ * (or venue-sourced) caller value wins, floored at 15min (owner-ruled
+ * 2026-08-27: a number below 15 is raised to 15, 15-29 is honored as given —
+ * e.g. a nearby venue — never a flat "never below 30"); otherwise a category
+ * flagged `requires_travel_buffer` gets the configured length (default 30);
+ * otherwise 0. Replaces the literal 30 in rule 7 AND the duplicate category
+ * lookup + literal 30 in the slot walker.
  */
 export function travelBufferMinutesFor(
   profile: UserProfile,
   category: string | null | undefined,
   explicitMinutes?: number,
 ): number {
-  if (typeof explicitMinutes === 'number' && explicitMinutes > 0) return explicitMinutes;
+  if (typeof explicitMinutes === 'number' && explicitMinutes > 0) {
+    return Math.max(explicitMinutes, 15);
+  }
   const cat = getProfileCategoryByName(profile, category ?? null);
   return cat?.requires_travel_buffer === true
     ? (profile.meetings.travel_buffer_minutes ?? 30)
@@ -599,6 +720,47 @@ export function occupancyRoleOf(
   // `rebalanceFloatingBlocksAfterMutation` slides it after the write commits.
   if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) return 'ignore';
   return 'commitment';
+}
+
+/**
+ * buildDayQualityBusyBlocks — THE busy pool for "how much QUALITY free time
+ * does this day have" (computeDayQualityFreeMinutes' input), used by
+ * checkSlot rule 9. `analyzeCalendar` (ops/analysis.ts) does NOT call this —
+ * it keeps its own separate per-window pass over ProcessedEvent's localized
+ * fields (see that file's own comment, ~line 555), deliberately kept in sync
+ * by hand rather than sharing a call, since the two loops don't share a
+ * busy-block type.
+ *
+ * Deliberately NOT `occupancyRoleOf`: that predicate calls a floating block
+ * `ignore` (it can slide out of the way of a SPECIFIC candidate slot), but
+ * for "how much of the day is protected as free" a floating block (lunch)
+ * DOES occupy real clock time until it's actually moved — so it counts as
+ * busy here. The two functions answer different questions on purpose; this
+ * one is the one true source for the free-time-floor question specifically.
+ *
+ * Excludes: cancelled, showAs='free', a TIMED workingElsewhere event
+ * (reclaimable free time, matches the search + calendar-health pools), any
+ * all-day event (vacation markers etc. — an all-day OOF day never reaches
+ * this floor check at all, since checkSlot's earlier rules/effectiveDay
+ * already gate it), and any id in `excludeEventIds`.
+ */
+export function buildDayQualityBusyBlocks(
+  events: CalendarEvent[],
+  excludeEventIds?: Set<string>,
+): Array<{ start: Date; end: Date }> {
+  const busyBlocks: Array<{ start: Date; end: Date }> = [];
+  for (const ev of events) {
+    if (ev.isCancelled) continue;
+    if (excludeEventIds?.has(ev.id)) continue;
+    if (ev.showAs === 'free') continue;
+    if (!ev.isAllDay && ev.showAs === 'workingElsewhere') continue;
+    if (ev.isAllDay) continue;
+    busyBlocks.push({
+      start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),
+      end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toJSDate(),
+    });
+  }
+  return busyBlocks;
 }
 
 export function checkSlot(input: RuleCheckInput): RuleCheckResult {
@@ -917,35 +1079,23 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
 
       const blockDurationMin = block.duration_minutes ?? 25;
 
-      // Collect busy intervals inside the window (today only).
-      const busyInWindow: Array<{ start: number; end: number }> = [];
-      for (const ev of input.events) {
-        if (ev.isCancelled) continue;
-        if (excludeSet.has(ev.id)) continue;
-        if (ev.showAs === 'free') continue;
-        // v3.6.4 — a timed optional-join (WE-soft) yields to a floating block:
-        // the owner drops the optional to keep lunch, so it never occupies the
-        // window for feasibility. Keeps this rule consistent with the search /
-        // health pools that also treat timed-WE as reclaimable free time.
-        // The ALL-DAY marker yields too. It occupies no clock time at all, so
-        // leaving it in filled the whole lunch window and would have turned every
-        // slot on a WFH-marked day into `floating_block_overlap` the moment the
-        // occupancy scan stopped masking it with a collision.
-        if (ev.showAs === 'workingElsewhere') continue;
-        const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
-        const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
-        // Skip if event doesn't overlap the window.
-        if (evEnd <= windowStart || evStart >= windowEnd) continue;
-        // Skip if this IS the floating block itself (subject matches the
-        // block's name — lunch / coffee / etc). It will shift, not collide.
-        const subj = (ev.subject ?? '').toLowerCase();
-        const blockName = block.name.toLowerCase();
-        if (subj.includes(blockName)) continue;
-        busyInWindow.push({
-          start: Math.max(evStart.toMillis(), windowStart.toMillis()),
-          end: Math.min(evEnd.toMillis(), windowEnd.toMillis()),
-        });
-      }
+      // Collect busy intervals inside the window (today only). This is a
+      // single-slot CAPACITY check ("is there still room for the block
+      // somewhere in its window"), not a destination search, so it uses
+      // busyForBlockWindow's default (WE never busy) directly — unlike the
+      // rebalance mover, its dry-run, check_join_availability's pending-move
+      // pool and moveMeeting's floating-block guard, which are all picking a
+      // LANDING SPOT and go through the two-pass `findBlockDestination`
+      // instead (owner ruling 2026-08-28: WE is a fallback tier there, never
+      // equal to genuinely free time). See busyForBlockWindow's own doc for
+      // the full rationale.
+      const busyInWindow: Array<{ start: number; end: number }> = busyForBlockWindow(
+        input.events,
+        block,
+        windowStart.toMillis(),
+        windowEnd.toMillis(),
+        excludeSet,
+      );
       // Add the proposed slot, clipped to the window.
       busyInWindow.push({
         start: Math.max(slotStart.toMillis(), windowStart.toMillis()),
@@ -1061,41 +1211,19 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       const requiredMin = requiredFreeMinutesForWorkDay(workTotalMinForFloor, profile.meetings.work_hours_per_free_hour);
       if (requiredMin > 0 && effectiveDay.windows.length > 0) {
         const minChunk = profile.meetings.thinking_time_min_chunk_minutes ?? 30;
-        // Build busyBlocks from this day's events, minus excluded ids.
-        // showAs='free' events don't block focus time; isAllDay doesn't either
-        // (vacation markers etc.); a timed optional-join (WE-soft) is reclaimable
-        // free time and is skipped too (matches the search + calendar-health
-        // pools). Parse zone-aware (Graph dateTime is bare wall-clock + .timeZone)
-        // so an off-owner-TZ host doesn't skew the blocks.
-        const busyBlocks: Array<{ start: Date; end: Date }> = [];
-        for (const ev of input.events) {
-          if (ev.isCancelled) continue;
-          if (excludeSet.has(ev.id)) continue;
-          if (ev.showAs === 'free') continue;
-          if (!ev.isAllDay && ev.showAs === 'workingElsewhere') continue;
-          if (ev.isAllDay) continue;
-          busyBlocks.push({
-            start: DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toJSDate(),
-            end: DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toJSDate(),
-          });
-        }
+        // Shared busy pool with analyzeCalendar — see buildDayQualityBusyBlocks'
+        // own doc (near occupancyRoleOf) for what counts as busy here and why.
+        const busyBlocks = buildDayQualityBusyBlocks(input.events, excludeSet);
         // Add the proposed slot itself — checking what's left after booking.
         busyBlocks.push({ start: slotStart.toJSDate(), end: slotEnd.toJSDate() });
-        // Union window bounds (earliest start … latest end) across the day's
-        // effective windows, formatted for the free-time helper.
-        let earliestMin = 24 * 60;
-        let latestMin = 0;
-        for (const w of effectiveDay.windows) {
-          if (w.startMin < earliestMin) earliestMin = w.startMin;
-          if (w.endMin > latestMin) latestMin = w.endMin;
-        }
-        const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+        // PER-WINDOW, not a bounding box (v4.7.x fix — see
+        // computeDayQualityFreeMinutes' own doc): a split-shift day's
+        // between-window gap must never read as "quality free time".
         const dayDate = slotStart.setZone(effectiveDay.timezone).toFormat('yyyy-MM-dd');
         const dayFreeMin = computeDayQualityFreeMinutes({
           dayDate,
           timezone: effectiveDay.timezone,
-          workStart: hhmm(earliestMin),
-          workEnd: hhmm(Math.min(latestMin, 1439)),
+          windows: effectiveDay.windows,
           busyBlocks,
           minChunkMinutes: minChunk,
         });

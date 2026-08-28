@@ -38,7 +38,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import { getOwnerEventsForDecision, getFreeBusyForDecision, findAvailableSlots, type CalendarEvent } from '../../connectors/graph/calendar';
 import { loadAttendeeAvailabilityForEmails } from '../../utils/attendeeAvailability';
-import { resolveLocation, type LocationVerdict } from '../../utils/resolveLocation';
+import { resolveLocation, isPhoneLocationString, type LocationVerdict } from '../../utils/resolveLocation';
 import { bookingLeadTimeHours, checkSlot, type RuleCheckResult } from '../../utils/scheduleRules';
 import { subjectViewerFor, type SubjectViewer } from '../../utils/displaySubject';
 import { profileDualClock } from '../../utils/weTimeResolver';
@@ -46,6 +46,7 @@ import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternat
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner, type MeetingOwnerInfo } from './findMeetingOwner';
 import { getCurrentTravel, searchPeopleMemory } from '../../db/people';
+import { getVenueTravelTimeMinutes, isCompanyLocation } from '../../db/venues';
 import logger from '../../utils/logger';
 import type { BookingRequest } from './bookingRequest';
 
@@ -444,6 +445,22 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let unfilteredLevelNotice: string | undefined;
   let bookingLevel: 'free' | 'optional' | 'unfiltered' | undefined;
   let locationAskReasoning: string | undefined;
+  /**
+   * gh#203-3/203-5 — an owner-stated one-way travel number for the venue this
+   * booking resolves to, read ONCE here (the write path) straight from the
+   * venue catalog — never from a per-call arg. create_meeting / move_meeting
+   * expose no travel-minutes argument (owner ruled out 2026-08-27: the venue
+   * catalog is the only override channel), so the resolved LOCATION itself is
+   * the one signal available at write time. Feeds `travelBufferMinutesFor` via
+   * checkSlot's rule-7 below — the SAME resolution point find_available_slots
+   * uses — so a number the owner told Maelle once for a venue (via rank_venue)
+   * is honored on every future booking to that venue. Left undefined for
+   * anything that isn't a genuine outside venue (online, a company space/Teams
+   * string, a bare phone-dial location, or no venue on file / no travel time
+   * stated for it) — those fall through to the category default inside
+   * travelBufferMinutesFor exactly as before.
+   */
+  let venueTravelMinutes: number | undefined;
   // Colleague-path rule break: the label, and the nearby rule-compliant options
   // to offer before escalating (#8). Both feed the single combined return.
   let ruleViolationLabel: string | undefined;
@@ -511,6 +528,31 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       gates.push({ kind: 'location', ask: locationVerdict.suggestedAskText });
       locationAskReasoning = locationVerdict.reasoning;
     }
+    // gh#203-3/203-5 — venue-sourced travel minutes. The venue catalog only
+    // exists per-owner when the `venue` skill is on (same gate the
+    // save-on-book hook uses) — gated to a genuine outside venue: physical
+    // (not online), not a company space/Teams string (so a "Microsoft Teams
+    // Meeting" location can never match a catalog row), and not a bare
+    // phone-dial location. `preserve_existing` counts too — a move that
+    // keeps the same day-type keeps the same physical venue.
+    if (
+      (profile.skills as any)?.venue === true &&
+      (locationVerdict.kind === 'resolved' || locationVerdict.kind === 'preserve_existing') &&
+      !locationVerdict.isOnline &&
+      locationVerdict.location.trim().length > 0 &&
+      !isPhoneLocationString(locationVerdict.location) &&
+      !isCompanyLocation(locationVerdict.location, profile.meetings.office_location ?? {})
+    ) {
+      venueTravelMinutes = getVenueTravelTimeMinutes(profile.user.slack_user_id, locationVerdict.location) ?? undefined;
+    }
+    // Owner-ruled accepted gap (2026-08-28): `find_available_slots` (search)
+    // has no venue in hand yet — it pads with the category default travel
+    // time — while this write-path lookup resolves the REAL venue-specific
+    // number, which can be higher (e.g. 45 vs the 30-min default). A slot
+    // search offers as clean can then get rejected here for a venue with an
+    // above-default travel time. Ruled a known, accepted asymmetry, not a
+    // bug — do not add a venue-lookup argument/plumbing to the search tool
+    // schema to close it; that fix was explicitly declined.
   }
 
   // ── Check rules ─────────────────────────────────────────────────────────
@@ -537,6 +579,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       // search does. Pre-fix a colleague naming "3pm today" at 2pm was refused
       // by find_available_slots and accepted by create_meeting.
       leadTimeHours: bookingLeadTimeHours(profile, initiator),
+      // gh#203-3/203-5 — a venue-sourced travel number, resolved just above
+      // from the venue catalog (the only override channel at write time).
+      // travelBufferMinutesFor is still the one resolution point both this
+      // call and find_available_slots share. Omitted → category default.
+      travelBufferMinutes: venueTravelMinutes,
       // v4.1.x (M10) — the owner_busy label embeds the colliding subject.
       viewer: input.viewer,
       // v4.4.9 (#154) — the attendee-aware half of that same mask.

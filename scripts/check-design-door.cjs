@@ -1246,6 +1246,106 @@ const main = async () => {
     mixedBugger.out && mixedBugger.out.counts.fromEditor + mixedBugger.out.counts.fromQueue + mixedBugger.out.counts.fromBacklog === mixedBugger.out.counts.buildable,
     mixedBugger.out && mixedBugger.out.counts,
   )
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // X211 (2026-08-27) · THE BOUNCE LADDER NOW ESCALATES MODEL ACROSS UP TO
+  // BOUNCE_LIMIT (2) ROUNDS INSTEAD OF STOPPING AFTER ONE SAME-TIER RETRY.
+  // Before this change a row overturned once always escalated straight to the
+  // owner (BOUNCE_LIMIT was 1) — the THREE assertions below are the fixture:
+  // a row that needs the second bounce actually GETS it, on `model:'fable'`
+  // (fires on the bad input the old ladder could never reach); a row that
+  // clears on the FIRST bounce never pays for a second (silent on the good
+  // one — no wasted `rebuild2`/`recheck2` dispatch); and a row that fails
+  // BOTH bounces terminates and escalates rather than looping a third time.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('39 · THE BOUNCE LADDER — model escalates opus then fable, then terminates')
+  const LADDER_ISSUE = { id: 'b1', symptom: 'the reminder fires twice', lane: 'slackmaster', severity: 'high', clarity: 'clear', source: 'github' }
+  const clearsOnSecondBounce = await runBugger(
+    { issues: [LADDER_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'first refusal' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
+      'rebuild:slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:recheck(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'still wrong on opus' }], discoveries: [], verifiedClean: [] },
+      'rebuild2:slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:recheck2(1)': { results: [{ id: 'b1', verdict: 'built' }], discoveries: [], verifiedClean: [] },
+    },
+  )
+  ok('no throw', !clearsOnSecondBounce.err, clearsOnSecondBounce.err && clearsOnSecondBounce.err.message)
+  ok(
+    'round 1 rebuild dispatched forced to model:opus  (fires on the bad input — this override did not exist before X211)',
+    (calledPhase(clearsOnSecondBounce.calls, 'Verify').find((c) => c.label === 'rebuild:slackmaster(1)') || {}).opts.model === 'opus',
+    calledPhase(clearsOnSecondBounce.calls, 'Verify').map((c) => `${c.label}:${c.opts && c.opts.model}`),
+  )
+  ok(
+    'round 2 rebuild dispatched forced to model:fable, under the rebuild2: label',
+    (calledPhase(clearsOnSecondBounce.calls, 'Verify').find((c) => c.label === 'rebuild2:slackmaster(1)') || {}).opts.model === 'fable',
+    calledPhase(clearsOnSecondBounce.calls, 'Verify').map((c) => `${c.label}:${c.opts && c.opts.model}`),
+  )
+  ok(
+    'the bouncer itself is NEVER model-overridden on either recheck — only the build side escalates',
+    !('model' in (called(clearsOnSecondBounce.calls, 'bouncer:recheck(1)')[0] || {}).opts) && !('model' in (called(clearsOnSecondBounce.calls, 'bouncer:recheck2(1)')[0] || {}).opts),
+    calledPhase(clearsOnSecondBounce.calls, 'Verify').map((c) => `${c.label}:${JSON.stringify(c.opts && c.opts.model)}`),
+  )
+  ok(
+    'the row clears after 2 bounces — bounces:2, verdict built',
+    clearsOnSecondBounce.out && clearsOnSecondBounce.out.results.find((r) => r.id === 'b1').verdict === 'built' && clearsOnSecondBounce.out.results.find((r) => r.id === 'b1').bounces === 2,
+    clearsOnSecondBounce.out && clearsOnSecondBounce.out.results,
+  )
+  ok(
+    'manifest.bounce: 1 eligible, 1 bounced (one row, however many rounds), 1 cleared, 0 to owner',
+    clearsOnSecondBounce.out &&
+      clearsOnSecondBounce.out.manifest.bounce.eligible === 1 &&
+      clearsOnSecondBounce.out.manifest.bounce.bounced === 1 &&
+      clearsOnSecondBounce.out.manifest.bounce.cleared === 1 &&
+      clearsOnSecondBounce.out.manifest.bounce.toOwner === 0,
+    clearsOnSecondBounce.out && clearsOnSecondBounce.out.manifest.bounce,
+  )
+
+  const clearsOnFirstBounce = await runBugger(
+    { issues: [LADDER_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'first refusal' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
+      'rebuild:slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:recheck(1)': { results: [{ id: 'b1', verdict: 'built' }], discoveries: [], verifiedClean: [] },
+    },
+  )
+  ok('no throw', !clearsOnFirstBounce.err, clearsOnFirstBounce.err && clearsOnFirstBounce.err.message)
+  ok(
+    'clearing on round 1 dispatches NO round 2 at all  (silent on the good one — no wasted fable pass)',
+    !clearsOnFirstBounce.calls.some((c) => c.label.startsWith('rebuild2:') || c.label.startsWith('bouncer:recheck2')),
+    clearsOnFirstBounce.calls.map((c) => c.label),
+  )
+  ok('bounces:1, not 2', clearsOnFirstBounce.out && clearsOnFirstBounce.out.results.find((r) => r.id === 'b1').bounces === 1, clearsOnFirstBounce.out && clearsOnFirstBounce.out.results)
+
+  const failsBothBounces = await runBugger(
+    { issues: [LADDER_ISSUE] },
+    {
+      'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:wave(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'first refusal' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
+      'rebuild:slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:recheck(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'still wrong on opus' }], discoveries: [], verifiedClean: [] },
+      'rebuild2:slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', filesTouched: ['src/x.ts'] }] },
+      'bouncer:recheck2(1)': { results: [{ id: 'b1', verdict: 'needs-owner-decision', notes: 'still wrong even on fable' }], discoveries: [], verifiedClean: [] },
+    },
+  )
+  ok('no throw', !failsBothBounces.err, failsBothBounces.err && failsBothBounces.err.message)
+  ok(
+    'the ladder TERMINATES — no third rebuild is ever attempted',
+    !failsBothBounces.calls.some((c) => c.label.startsWith('rebuild3:')),
+    failsBothBounces.calls.map((c) => c.label),
+  )
+  ok(
+    'exhausting both bounces escalates to the owner carrying bounces:2, never a silent drop',
+    failsBothBounces.out && failsBothBounces.out.results.find((r) => r.id === 'b1').verdict === 'needs-owner-decision' && failsBothBounces.out.results.find((r) => r.id === 'b1').bounces === 2,
+    failsBothBounces.out && failsBothBounces.out.results,
+  )
+  ok(
+    'manifest.bounce: 0 cleared, 1 to owner, escalated:1',
+    failsBothBounces.out && failsBothBounces.out.manifest.bounce.cleared === 0 && failsBothBounces.out.manifest.bounce.toOwner === 1 && failsBothBounces.out.manifest.bounce.escalated === 1,
+    failsBothBounces.out && failsBothBounces.out.manifest.bounce,
+  )
 }
 
 main().then(

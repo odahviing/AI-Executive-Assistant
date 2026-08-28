@@ -463,7 +463,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           const mention = `<@${colleagueSlackId}>`;
           const fullText = `${mention} ${args.message as string}`;
           // registrar fix (outreach-immediate-channel-post-also-drops-
-          // attachments) — attachmentsArg (computed above at :331 for the
+          // attachments) — attachmentsArg (computed above at :340 for the
           // scheduled-send replay) was never passed on THIS, the immediate
           // send path, so a channel post with a file silently dropped it
           // while the sibling DM branch below (sendOpts) already carried it.

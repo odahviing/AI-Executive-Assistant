@@ -137,7 +137,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // the `slack_id_mention` retirement above. Its pattern REQUIRED the `<#` prefix, so
   // the only form it could ever match was a RENDERED channel link — which Slack draws
   // as "#general", and which humanGate's own prompt protects as correct output
-  // (humanGate.ts:258: "ALWAYS leave a <@…> or <#…> mention exactly as written"). Two
+  // (humanGate.ts:287: "ALWAYS leave a <@…> or <#…> mention exactly as written"). Two
   // gates in one stack disagreeing about one token is precisely what shipped the
   // 2026-07-21 de-tagging. It also broke its own class contract in the direction that
   // matters: an 'identifier' is a token that means nothing to the reader, but a
@@ -681,11 +681,30 @@ export async function filterColleagueReply(opts: {
   });
 
   if (rewritten) {
-    logger.info('Security rewriter produced clean reply', {
-      triggers,
-      colleagueSlackId: opts.colleagueSlackId,
-    });
-    return { reply: rewritten, filtered: true, triggers, aiIdentityCleared };
+    // v4.7.4 fix (G9) — the same deterministic fact-preservation veto humanGate,
+    // the deliberation guard, and the availability floor already run their own
+    // Sonnet rewrite through before shipping it. This rewriter shipped on prompt
+    // instructions alone, with nothing to catch it silently dropping a
+    // load-bearing token (a de-tagged @mention was exactly this shape,
+    // 2026-07-21, closed at the time by retiring one trigger rather than by
+    // adding the veto). On a detected drop, fall through to the existing
+    // class-appropriate fallback below (identifier strip / canned line) instead
+    // of shipping a rewrite that silently lost a fact.
+    const { rewriteDroppedAFact } = await import('./humanGate');
+    if (rewriteDroppedAFact(opts.reply, rewritten)) {
+      logger.warn('⚠ SECURITY — rewriter dropped a load-bearing fact; falling through to the class-appropriate fallback rather than shipping it', {
+        triggers,
+        colleagueSlackId: opts.colleagueSlackId,
+        originalPreview: opts.reply.slice(0, 120),
+        rewritePreview: rewritten.slice(0, 120),
+      });
+    } else {
+      logger.info('Security rewriter produced clean reply', {
+        triggers,
+        colleagueSlackId: opts.colleagueSlackId,
+      });
+      return { reply: rewritten, filtered: true, triggers, aiIdentityCleared };
+    }
   }
 
   // v4.2.x (G3/G5) — the rewriter failed. What ships now depends on the trigger

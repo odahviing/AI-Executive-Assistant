@@ -17,6 +17,7 @@ import logger from '../../utils/logger';
 import { displaySubject } from '../../utils/displaySubject';
 import type { UserProfile } from '../../config/userProfile';
 import { densityConfigFromProfile, scoreSlotDensity, alignDownQuarter } from '../../utils/calendarDensity';
+import { densityCommitments } from '../../utils/floatingBlocks';
 import { parseGraphDt } from './classify';
 import type { HealthIssue } from './types';
 
@@ -364,12 +365,14 @@ export async function pullInternalMeetingToAbut(params: {
   let cleanTarget = false;
   if (top) {
     const densCfg = densityConfigFromProfile(profile.meetings);
-    const dayBusy = dayEventsForBusy
-      .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
-      .map(e => ({
-        start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
-        end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
-      }));
+    // floatingBlocksAsNeighbours: true — this guard is specifically about
+    // pulling a meeting back to abut whatever's already there, including a
+    // floating block; the block must score as a real neighbour or the
+    // abut/dead-gap math has nothing to compare against.
+    const dayBusy = densityCommitments(dayEventsForBusy, profile, {
+      floatingBlocksAsNeighbours: true,
+      excludeEventIds: [movable.id],
+    });
     const tStartDt = DateTime.fromISO(top.start).setZone(timezone);
     const sameDay = tStartDt.hasSame(mStart, 'day');
     const tScore = scoreSlotDensity(tStartDt.toMillis(), tStartDt.toMillis() + durationMin * 60000, dayBusy, densCfg);
@@ -463,13 +466,14 @@ export async function pushInternalMeetingToAbutBefore(params: {
   const free = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - targetStartMs) <= 60000);
 
   // Net-improvement guard: the pushed slot must NOT open a new dead gap on the
-  // LEFT (the meeting before it) — never just shove the sliver onto the neighbour.
-  const dayBusy = dayEventsForBusy
-    .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere' && e.id !== movable.id)
-    .map(e => ({
-      start: parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(),
-      end: parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(),
-    }));
+  // LEFT (the meeting before it) — never just shove the sliver onto the
+  // neighbour. floatingBlocksAsNeighbours: true — this push target's whole
+  // point is abutting the floating block, so the block must score as a real
+  // neighbour (same rationale as pullInternalMeetingToAbut above).
+  const dayBusy = densityCommitments(dayEventsForBusy, profile, {
+    floatingBlocksAsNeighbours: true,
+    excludeEventIds: [movable.id],
+  });
   const tScore = scoreSlotDensity(targetStartMs, targetEndMs, dayBusy, densCfg);
 
   if (!free || tScore.createsDeadGap) {

@@ -2,6 +2,38 @@
 
 ---
 
+## 4.7.5 — Offsites stop asking for the drive time, and three lanes got a full correctness pass
+
+Booking an offsite meeting no longer asks anyone how long the commute is — a category default applies automatically, and a venue's own remembered travel time now overrides it when known. Alongside that feature, a full charter-compliance audit of the scheduling core, the output-safety gates, and the request/approval spine surfaced and fixed a real regression that had shipped invisibly within this same wrap, a false-attribution bug, a silently-failing scheduled message, and a wide batch of "the same fact computed two different ways" bugs.
+
+### Added
+- Booking an offsite/custom-location meeting no longer asks the owner or a colleague how long the trip takes — the category default (30 min) applies automatically, floored at 15 min for any explicit or venue-stated override.
+- A venue can now carry its own remembered travel time (stated once), which overrides the flat default at booking time. Search doesn't see this number yet — a known, accepted gap, not an oversight.
+
+### Fixed (high-impact)
+- A colleague's direct "is he free at X" question could get answered from days-old thread memory with zero fresh calendar check. The existing safety net caught the resulting false claim but produced a confusing hedge instead of a clean correction. Both closed: a detected zero-tool-call availability answer now gets the same real-time check a search-backed answer already gets, and the correction drops the irrelevant fabricated detail instead of repeating it.
+- A colleague message like "tell Dan the demo moved" could be misread as being about the owner (Idan) on a plain substring match, triggering a false correction and a spurious owner-facing DM putting words in the owner's mouth.
+- A scheduled reminder to a colleague that silently failed to send (e.g. a deactivated account) was still treated as delivered — the reply timer armed, and the owner would eventually be told the person "never replied" to a message that was never sent.
+- A safety check built earlier in this same wrap to stop a destructive rewrite from over-firing shipped with a timezone bug that instead disabled it completely — caught and fixed before it reached anyone, by a dedicated final adversarial pass over the whole session's changes.
+- Moving a meeting could silently skip the same validation a new booking always requires, if the underlying check failed for any reason other than the calendar being offline — now fails loudly, consistent with how booking already behaves.
+- A day split into two work blocks (e.g. a lunch-break schedule) could never trigger the "not enough free time" protection at all, no matter how packed it actually was — a bounding-box bug counted the gap between blocks as free time.
+- Relocating a floating block (like lunch) around a real meeting tagged "working elsewhere" could land on a spot that was actually occupied while a genuinely free slot sat unused nearby — relocation now always tries a fully clear slot first.
+- The requester-facing message sent when a request closes was composed correctly in one place and copied, worse, into three others — all English-only regardless of the requester's language, one with no filter against leaking an internal auto-generated phrase verbatim. Consolidated into one shared, language-aware, filtered composer.
+
+### Fixed (small)
+- Several "the same fact computed two different ways" bugs closed across the scheduling core: which rule violations a colleague may ask the owner to override, what counts as busy for dense-calendar gap-scoring, a duplicated timezone lookup, and the search's own bookkeeping of why a slot or day was rejected (now one exhaustive, compiler-checked path instead of a growing set of hand-copied branches).
+- The output-safety gate stack's "did this reply already say something without a fresh check backing it" grounding check now runs on the email leg too, not only Slack.
+- A rewrite step that redacts sensitive content now gets the same fact-preservation safety check every other rewrite step already has.
+- The background scanner that closes requests from the owner's plain-text replies can no longer guess between two open approvals that both plausibly match — it now leaves both for the daily brief, matching how the structured approval flow already behaves.
+- A coda (Maelle's small proactive social aside) could get permanently stuck repeating one topic once its other conversation categories ran dry — a category with nothing left to talk about now frees its slot for a fresh one, and the grounding search behind a continued topic now targets the specific thing being discussed instead of its whole category.
+- Assorted: dead imports removed in two places that asserted a validation guard the code doesn't actually run there; several stale internal code-comment citations corrected; an unnecessary extra calendar read on every booking removed.
+
+### Framework (other chats, bundled)
+- Three lane charters (Matchmaker, Gatekeeper, Registrar) corrected to match what their code actually does today, after a full compliance audit of each.
+- A periodic hygiene sweep ran across this wrap's full diff — ten comment-only corrections, no dead code found.
+
+---
+
 ## 4.7.4 — Maelle can no longer offer a time her own search never confirmed
 
 A colleague booking an onsite meeting was told a specific time was "clean for both of you" and a fabricated conflict for a third colleague — neither backed by the actual calendar search that ran that turn. A new output-time check now cross-references any specific time offered in a reply against that turn's real availability search, and rewrites it using the real confirmed time if it doesn't match. Two follow-up rounds (each caught by a second, differently-tuned adversarial pass) closed real gaps in the first version: a time confirmed earlier in the same thread could be wrongly flagged as fabricated, and a time the search explicitly marked *unavailable* could still be waved through as fine. Separately: a booking confirmation stopped getting Maelle's usual warm follow-up for the last two weeks (an overbroad fix for an unrelated bug); a malformed tool-call payload could crash the approval flow mid-request; and a real day off was being narrated as "your calendar is full" instead of the true reason.

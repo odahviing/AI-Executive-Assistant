@@ -420,60 +420,31 @@ export async function closeMeetingArtifacts(params: {
             r.requester_slack_id
             && r.requester_slack_id !== params.ownerUserId
             && positiveBooking
-            // v3.1 (115b) — single-notification idempotency. If the request was
-            // already stamped (the resolver's notifyRequesterOfDecision, or a
-            // prior cascade), don't double-DM the requester. The request owns
-            // the "told them" fact; both paths honor it. No new gate — one
-            // field on the spine.
-            && !r.requester_notified_at
           ) {
             try {
+              // Routed through the spine's ONE shared closure relay
+              // (core/requests/requesterRelay.ts) — this path only fires for
+              // NON-resolver bookings (tier-0 hands resolver-driven requests
+              // back to the resolver, whose notifyRequesterOfDecision owns
+              // those). The helper carries what the old inline copy here
+              // lacked: the requester's language (this was English-only), the
+              // leak filter (params.subject/r.subject could print an internal
+              // auto-generated "… needs your input" verbatim into a
+              // colleague's DM), origin-thread MPIM/DM routing, and the v3.1
+              // (115b) single-notification idempotency + stamp-ONLY-on-a-
+              // confirmed-ok-send retry behavior, both checked fresh inside.
               // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getConnection } = require('../connections/registry') as
-                typeof import('../connections/registry');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { updateRequest } = require('../db/requests') as typeof import('../db/requests');
-              const conn = getConnection(params.ownerUserId, 'slack');
-              if (conn) {
-                const requesterFirst = (r.requester_name ?? '').split(/\s+/)[0] || 'there';
-                const subjectText = params.subject || r.subject || 'the meeting';
-                // Voice mirrors notifyRequesterOfDecision but kept minimal —
-                // the full impl with time/lang/MPIM/origin-channel routing
-                // lives in core/requests/resolver.ts and runs from the
-                // resolver path. This is the fallback when booking landed
-                // outside the resolver.
-                const text = `Hey ${requesterFirst}, locked in "${subjectText}" — calendar invite is on its way.`;
-                // Stamp requester_notified_at ONLY after a confirmed ok send.
-                // On failure (throw OR {ok:false}) leave it UNSET so a later
-                // relay (or the next cascade) can retry — a silent send failure
-                // becomes a safe retry instead of a permanent invisible drop.
-                //
-                // v3.4.6 — consistent requester threading: relay into the
-                // requester's ORIGIN thread (MPIM channel or 1:1 DM), mirroring
-                // notifyRequesterOfDecision, so the close-loop never lands as a
-                // stray new top-level DM. This path only fires for NON-resolver
-                // bookings now (tier-0 hands resolver-driven requests back to
-                // the resolver); the resolver's own relay owns those.
-                try {
-                  const sent = (r.origin_is_mpim && r.origin_channel)
-                    ? await conn.postToChannel(r.origin_channel, text, { threadTs: r.origin_thread_ts ?? undefined })
-                    : await conn.sendDirect(r.requester_slack_id, text, { threadTs: r.origin_thread_ts ?? undefined });
-                  if (sent.ok) {
-                    updateRequest(r.id, { requesterNotifiedAt: new Date().toISOString() });
-                    logger.info('closeMeetingArtifacts — close-loop DM sent + stamped', {
-                      requestId: r.id, requesterSlackId: r.requester_slack_id, subject: subjectText,
-                    });
-                  } else {
-                    logger.warn('closeMeetingArtifacts — close-loop DM not ok, leaving requester_notified_at unset for retry', {
-                      requestId: r.id, requesterSlackId: r.requester_slack_id, reason: sent.reason,
-                    });
-                  }
-                } catch (err) {
-                  logger.warn('closeMeetingArtifacts — close-loop DM threw, leaving requester_notified_at unset for retry', {
-                    requestId: r.id, requesterSlackId: r.requester_slack_id, err: String(err).slice(0, 200),
-                  });
-                }
-              }
+              const { relayClosureToRequester } = require('../core/requests/requesterRelay') as
+                typeof import('../core/requests/requesterRelay');
+              await relayClosureToRequester({
+                row: r,
+                label: 'closeMeetingArtifacts close-loop',
+                subjectCandidates: [params.subject],
+                subjectFallback: { en: 'the meeting', he: 'הפגישה' },
+                compose: ({ lang, hi, subject }) => lang === 'he'
+                  ? `${hi}, סגרנו על "${subject}" — הזימון בדרך.`
+                  : `${hi}, locked in "${subject}" — calendar invite is on its way.`,
+              });
             } catch (err) {
               logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {
                 requestId: r.id, err: String(err).slice(0, 200),

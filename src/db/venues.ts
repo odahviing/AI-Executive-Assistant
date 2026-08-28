@@ -35,6 +35,7 @@ export interface VenueRow {
   booking_links: Array<{ platform: string; url: string }>;  // parsed JSON
   notes: string | null;
   rank: 1 | 2 | 3 | null;
+  travel_time_minutes: number | null;  // owner-stated one-way travel time (v4.7.4, #203); NULL = not stated
   last_used_at: string | null;
   created_at: string;
   updated_at: string;
@@ -54,6 +55,7 @@ interface VenueInsert {
   bookingLinks?: Array<{ platform: string; url: string }>;
   notes?: string;
   rank?: 1 | 2 | 3 | null;
+  travelTimeMinutes?: number | null;
 }
 
 interface VenueUpdate {
@@ -68,6 +70,7 @@ interface VenueUpdate {
   bookingLinks?: Array<{ platform: string; url: string }>;
   notes?: string;
   rank?: 1 | 2 | 3 | null;
+  travelTimeMinutes?: number | null;
   lastUsedAt?: string;
 }
 
@@ -87,6 +90,7 @@ function rowToVenue(r: any): VenueRow {
     booking_links: safeParseBookingLinks(r.booking_links),
     notes: r.notes ?? null,
     rank: (r.rank as 1 | 2 | 3 | null) ?? null,
+    travel_time_minutes: (typeof r.travel_time_minutes === 'number' ? r.travel_time_minutes : null),
     last_used_at: r.last_used_at ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -115,10 +119,10 @@ export function insertVenue(input: VenueInsert): VenueRow {
   db.prepare(`
     INSERT INTO venues (id, owner_user_id, name, branch_name, address, area_tags,
                         type, type_tags, phone, reservation_url, place_id,
-                        booking_links, notes, rank, created_at, updated_at)
+                        booking_links, notes, rank, travel_time_minutes, created_at, updated_at)
     VALUES (@id, @owner_user_id, @name, @branch_name, @address, @area_tags,
             @type, @type_tags, @phone, @reservation_url, @place_id,
-            @booking_links, @notes, @rank, datetime('now'), datetime('now'))
+            @booking_links, @notes, @rank, @travel_time_minutes, datetime('now'), datetime('now'))
   `).run({
     id,
     owner_user_id: input.ownerUserId,
@@ -134,6 +138,7 @@ export function insertVenue(input: VenueInsert): VenueRow {
     booking_links: JSON.stringify(input.bookingLinks ?? []),
     notes: input.notes ?? null,
     rank: input.rank ?? 2,  // default 2 — silent insert per owner direction
+    travel_time_minutes: input.travelTimeMinutes ?? null,
   });
   logger.info('venue created', { id, name: input.name, type: input.type, rank: input.rank ?? 2 });
   return getVenueById(id)!;
@@ -192,6 +197,23 @@ export function findVenueByNameAndOwner(ownerUserId: string, name: string): Venu
   return null;
 }
 
+/**
+ * Owner-stated one-way travel time (minutes) for a venue matching the given
+ * location string, drift-tolerant via `findVenueByNameAndOwner` (#203-5).
+ *
+ * Returns null when no venue matches OR the matched venue has never had a
+ * travel time stated — either way the caller falls back to its own flat
+ * default. NEVER derived here from the calendar or a routing lookup; the
+ * only writer is the owner (via `rank_venue`) or a preserved value carried
+ * through `saveOrBumpVenueOnBook`.
+ */
+export function getVenueTravelTimeMinutes(ownerUserId: string, location: string): number | null {
+  if (!location || location.trim().length === 0) return null;
+  const venue = findVenueByNameAndOwner(ownerUserId, location);
+  if (!venue) return null;
+  return venue.travel_time_minutes ?? null;
+}
+
 export function updateVenue(id: string, patch: VenueUpdate): void {
   const sets: string[] = [];
   const params: Record<string, unknown> = { id };
@@ -207,6 +229,7 @@ export function updateVenue(id: string, patch: VenueUpdate): void {
     ['bookingLinks',    'booking_links',   v => JSON.stringify(v ?? [])],
     ['notes',           'notes',           v => v],
     ['rank',            'rank',            v => v],
+    ['travelTimeMinutes', 'travel_time_minutes', v => v],
     ['lastUsedAt',      'last_used_at',    v => v],
   ];
   for (const [key, col, transform] of map) {

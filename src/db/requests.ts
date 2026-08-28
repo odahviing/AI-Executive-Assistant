@@ -670,6 +670,12 @@ export function getMeetingsRequestedBy(
  */
 export function cancelColleagueBookingRecordsForEvent(ownerUserId: string, eventId: string): void {
   if (!ownerUserId || !eventId) return;
+  const rows = getDb().prepare(`
+    SELECT id FROM requests
+    WHERE owner_user_id = ? AND subkind = 'colleague_booking_record'
+      AND outcome_external_event_id = ? AND state != 'cancelled'
+  `).all(ownerUserId, eventId) as Array<{ id: string }>;
+  if (rows.length === 0) return;
   getDb().prepare(`
     UPDATE requests
     SET state = 'cancelled', closure_reason = 'meeting_deleted', closed_by = 'meeting_cascade',
@@ -677,6 +683,24 @@ export function cancelColleagueBookingRecordsForEvent(ownerUserId: string, event
     WHERE owner_user_id = ? AND subkind = 'colleague_booking_record'
       AND outcome_external_event_id = ? AND state != 'cancelled'
   `).run(ownerUserId, eventId);
+  // This is closeRequest.ts's ONE named exception to "no direct terminal
+  // write" (these rows are born 'resolved', so its already-terminal guard
+  // would no-op them) — so it mirrors closeRequest's audit_log row itself:
+  // every terminal transition stays on the record. Audit failure never blocks
+  // the cascade, same as there.
+  try {
+    const audit = getDb().prepare(`
+      INSERT INTO audit_log (owner_user_id, action, source, actor, target, details, outcome)
+      VALUES (?, 'request_closed', 'requests.cancelColleagueBookingRecordsForEvent', 'meeting_cascade', ?, ?, 'success')
+    `);
+    for (const r of rows) {
+      audit.run(ownerUserId, r.id, JSON.stringify({
+        state: 'cancelled', closure_reason: 'meeting_deleted', event_id: eventId,
+      }));
+    }
+  } catch (err) {
+    logger.warn('cancelColleagueBookingRecordsForEvent — audit log insert threw', { err: String(err).slice(0, 200) });
+  }
 }
 
 /**

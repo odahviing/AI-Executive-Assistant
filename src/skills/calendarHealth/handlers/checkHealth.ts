@@ -615,6 +615,25 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             const { requiredFreeMinutesForWorkDay } = require('../../../utils/scheduleRules') as typeof import('../../../utils/scheduleRules');
             const freeTimeThresholdMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
 
+            // v4.7.x — DELIBERATELY a different, coarser number than
+            // analyzeCalendar's `freeMin` and checkSlot rule 9's
+            // computeDayQualityFreeMinutes, not a third accidental copy of the
+            // same one. Two intentional differences, both because "is today a
+            // busy day worth flagging" is a coarser question than "is there a
+            // real quality-focus chunk left":
+            //   (1) no min-chunk filter — every free minute counts here (raw
+            //       `workTotalMin - totalBusyInWork`), where the other two only
+            //       count CONTIGUOUS chunks ≥ thinking_time_min_chunk_minutes.
+            //   (2) busy pool is `nonAllDay` (built above, shared with the
+            //       overlap/category detectors on this same page) — floating
+            //       blocks, yaml issue_exclusions subjects, and no_issue_tracking
+            //       categories are already filtered OUT before this point, so
+            //       none of them count as busy here, unlike the other two
+            //       (which count a floating block as busy — see
+            //       buildDayQualityBusyBlocks' doc in scheduleRules.ts).
+            // If this ever needs to agree exactly with the other two, route it
+            // through computeDayQualityFreeMinutes instead of hand-rolling —
+            // don't let a third copy drift back in silently.
             // Parse busy events ONCE; per-window calc reuses these.
             const allBusy = nonAllDay
               .filter(e => e.showAs !== 'workingElsewhere')
