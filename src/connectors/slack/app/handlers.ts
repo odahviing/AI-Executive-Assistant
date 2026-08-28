@@ -574,19 +574,19 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     if (!('text' in event) || !event.text) return;
     if ('subtype' in event && event.subtype && event.subtype !== 'file_share') return;
 
-    // v2.6.2 — channel routing.
-    // Real channel (not MPIM) messages need to pass two gates before this handler
-    // continues:
-    //   (1) The message must be a thread reply — top-level channel chatter is
-    //       intentionally dropped (an EA doesn't read every word in #general).
-    //   (2) Maelle must have spoken in this thread before — i.e. someone already
-    //       @-mentioned her in this thread and she replied. Without that, even
-    //       thread replies are dropped (she's not a member of every thread).
-    // Both gates pass → fall through to the same MPIM relevance + addressee
-    // gates downstream so she only responds when actually addressed.
-    // MPIM messages (channel_type='mpim' OR 'channel'+is_mpim) skip both gates
-    // and use the existing relevance check below.
-    let isRealChannelContinuation = false;
+    // v4.7.6 (charter S3) — real channel (not MPIM) messages never reach
+    // Maelle through this handler, mentioned or not. S3 requires a fresh
+    // @-mention on EVERY turn in a channel — "a prior mention in a thread
+    // does not grant her standing for the next message" — with no
+    // continuation carve-out once she's already spoken there. That fresh
+    // mention is handled exclusively by the app_mention handler below,
+    // which matches the strict re-mention rule the catch-up path already
+    // enforces (`background.ts` findUnansweredMentionInThread). Removed the
+    // v2.6.2 "Maelle already spoke in this thread → keep answering
+    // un-mentioned replies" carve-out that used to live here — it
+    // contradicted S3 and disagreed with catch-up.
+    // MPIM messages (channel_type='mpim' OR 'channel'+is_mpim) are untouched
+    // by this — they fall through to the relevance check below unchanged.
     if (event.channel_type === 'channel') {
       let isMpimChannel = false;
       try {
@@ -600,30 +600,9 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
         return;
       }
       if (!isMpimChannel) {
-        // Real channel. Apply the two gates.
-        const isThreadReply = 'thread_ts' in event
-          && typeof event.thread_ts === 'string'
-          && event.thread_ts.length > 0
-          && event.thread_ts !== event.ts;
-        if (!isThreadReply) {
-          // Top-level channel message — drop. Maelle isn't passively reading channels.
-          return;
-        }
-        const priorThreadTs = (event as { thread_ts: string }).thread_ts;
-        const priorHistory = getConversationHistory(priorThreadTs);
-        const maelleSpokeHere = priorHistory.some(m => m.role === 'assistant');
-        if (!maelleSpokeHere) {
-          // Thread Maelle never engaged in. Drop — she joins threads only when
-          // someone @-mentions her (handled by app_mention). Once she's spoken,
-          // continuation flows through this branch.
-          return;
-        }
-        isRealChannelContinuation = true;
-        logger.info('Real-channel thread continuation eligible — running relevance + addressee gates', {
-          channelId: event.channel, threadTs: priorThreadTs,
-          historySize: priorHistory.length,
-          preview: (event.text as string).slice(0, 80),
-        });
+        // Real channel — never processed here, mentioned or not. She joins
+        // or continues a channel thread only via an explicit @-mention.
+        return;
       }
     }
 
@@ -676,16 +655,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       let groupContext = '';
       const mpimMemberNames: string[] = [];
       const mpimMemberIds: string[] = [];
-      // v2.6.2 — skip the full-channel members fetch for real-channel
-      // continuations. Real channels can have hundreds of members, the
-      // groupContext "all participants see everything" framing is wrong
-      // for a channel thread, and the coord-routing flows that use
-      // mpimMemberIds don't apply here. Thread participants are loaded
-      // separately via processMessage's conversations.replies merge.
       try {
-        if (isRealChannelContinuation) {
-          // No-op — leave groupContext empty + mpimMember* arrays empty.
-        } else {
         const membersRes = await client.conversations.members({
           token: assistant.slack.bot_token,
           channel: event.channel as string,
@@ -720,7 +690,6 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
           // with the colleague-DM prefix change, and keeps system-added context
           // out of the injection-scanner's owner_spoof regex range.
           groupContext = buildGroupDmPreamble(nameEntries, senderName);
-        }
         }
       } catch (err) {
         logger.warn('Could not fetch MPIM members — proceeding without group context', { err: String(err) });
@@ -793,14 +762,11 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
         threadTs,
         say,
         client,
-        // v2.6.2 — real-channel thread continuation flips these. The
-        // addressee gate in processMessage reads either flag (`isMpim ||
-        // isChannel`) to gate the relevance check, so behavior stays correct;
-        // mpimMemberIds is intentionally undefined for channels (no DM-each-
-        // member coord routing applies).
-        isChannel: isRealChannelContinuation,
-        isMpim: !isRealChannelContinuation,
-        mpimMemberIds: isRealChannelContinuation ? undefined : mpimMemberIds,
+        // v4.7.6 — this handler only ever reaches here for MPIMs now (real
+        // channels return early above), so isChannel is always false.
+        isChannel: false,
+        isMpim: true,
+        mpimMemberIds,
       }).catch(err => logger.error('processMessage error', { err }));
     });
   });

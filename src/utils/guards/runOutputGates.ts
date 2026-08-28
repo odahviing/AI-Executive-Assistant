@@ -654,8 +654,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  * transport that isn't `postReply` still gets gated at all — today this is
  * the only path `runOutputGates` is reachable from besides Slack.
  *
- * Three checks, same relative order the owner-private Slack leg already uses
- * (claim → humanGate → date-verify):
+ * Checks, same relative order the owner-private Slack leg already uses
+ * (claim → humanGate → date-verify), plus the two colleague-readable-shaped
+ * checks this leg's 'external' reader-frame also needs (slot-grounding,
+ * owner-fact):
  *
  *  - claimChecker always runs (no `ownerIsActing` gate needed): the inbound sender
  *    authorization already restricts this whole leg to the owner + his
@@ -663,6 +665,11 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  *    IS the owner's own turn. A phantom "I've booked it" reaching externals
  *    over his signature, with nothing between the LLM and Graph's send call,
  *    is exactly the honesty gap the checker exists to catch.
+ *  - the owner-fact-invention check (2026-08-14; wired into this leg
+ *    2026-08-28 — see the call site below) runs unconditionally, same as on
+ *    the colleague-readable Slack leg: an invented personal/capability claim
+ *    about the owner is exactly as wrong landing in an external inbox as it
+ *    is in a colleague's DM.
  *  - humanGate runs in the 'external' frame — a value the type has defined
  *    since v2.9 (humanGate.ts:83) and that no caller had ever passed until
  *    this one: no owner-name third-person reference, professional register,
@@ -673,9 +680,23 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  *    over the owner's own signature.
  *
  * Deliberately does NOT run the availability floor or the security gate.
- * The floor's ledger is armed only by the Slack-only `availabilityPreCheck`
- * (colleague path) and is empty here by construction — nothing to check. The
- * security gate's leak-scrub half assumes a Slack colleague (a
+ * Corrected 2026-08-28 (charter audit) — the floor's ledger is NOT empty
+ * here "by construction": it is keyed by owner EMAIL and read across
+ * threads/transports (`freshHardBlockedSlots(profile.user.email)`,
+ * ~availabilityGate.ts), armed by the Slack-only `availabilityPreCheck`
+ * whenever `input.authority === 'colleague'` (buildTurnContext.ts:751), and
+ * entries live for up to 45 minutes (`TTL_MS`, availabilityGate.ts). So an
+ * email reply drafted inside that window, while a Slack-colleague turn just
+ * armed the ledger, could affirm a real hard-blocked instant with nothing on
+ * this leg checking it — the exposure is narrow (Slack-colleague-armed +
+ * inside the 45-min TTL + an email reply naming that exact instant in the
+ * meantime) but real, and NOT covered today; this leg's own turn can never
+ * arm the ledger itself, since the pre-check is gated to colleague authority
+ * only. Wiring the floor onto this leg is accepted as a follow-up, not done
+ * here: `runAvailabilityFloorAndMaybeRewrite`'s rewrite path ends in an
+ * unconditional `formatForSlack` call (not `normalizeForTransport`), so it
+ * is not transport-safe for this leg as written — a real fix, not a
+ * one-line wire-in. The security gate's leak-scrub half assumes a Slack colleague (a
  * `people_memory` lookup keyed on a Slack sender id) that doesn't exist on
  * this leg, and its identity-spoof half exists to ask "is this SENDER
  * claiming to be someone else" — meaningless when the sender is already
@@ -708,6 +729,18 @@ async function runEmailLegGates(ctx: OutputGateContext, initialReply: string): P
 
   cleanReply = await runClaimCheckAndMaybeRewrite(ctx, cleanReply);
   cleanReply = await runSlotGroundingCheckAndMaybeRewrite(ctx, cleanReply);
+  // owner-personal-fact-fabricated-in-colleague-reply (2026-08-14) — wired in
+  // 2026-08-28. This leg's own reader-frame is 'external' by construction
+  // (this function's doc comment), the exact same risk the colleague-readable
+  // Slack leg runs this check for on EVERY turn regardless of who is acting
+  // (see runOutputGates' call site comment) — an invented personal/capability
+  // claim about the owner lands in front of an outside reader either way. It
+  // was simply never wired into this leg: the check was built 2026-08-14,
+  // after this leg already existed, and nothing here ever weighed it — the
+  // same shape of omission the slot-grounding fix above closed. Its own
+  // rewrite path already calls `normalizeForTransport` (not `formatForSlack`
+  // directly), so it needed no transport-awareness fix to be safe here.
+  cleanReply = await runOwnerFactCheckAndMaybeRewrite(ctx, cleanReply);
 
   try {
     const { runHumanGate } = await import('../humanGate');

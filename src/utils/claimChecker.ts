@@ -971,7 +971,7 @@ STEP 1 — Call verdict="keep" (leave message empty) if ANY of these hold:
 - it reports a completed action AND, in the same reply, OFFERS a follow-up as a QUESTION ("Moved it to 13:45 — Oran, Onn and Daniel are all busy then, want me to let them know?"). A trailing interrogative offer to notify ("want me to tell / notify / let them know?") is a PROPOSAL, never a completed send — EVEN when it names those people. (Only a declarative-past "I've let them know" with no message tool is a false send.), OR
 - it ASKS PERMISSION before acting, OR
 - it COMMITS to a FUTURE action conditional on ${opts.ownerFirstName}'s answer ("once you pick, I'll move it"), OR
-- the stated action IS backed by the TOOL ACTIVITY above — a matching tool ran with an OK outcome. Judge by MEANING, across forms: an attendee named by EMAIL in the draft ("added meeting@reflectiz.com") and by DISPLAY NAME in the summary ("added Meeting Room") are the SAME add; a room / resource mailbox counts as an added attendee. OR
+- the stated action IS backed by the TOOL ACTIVITY above — a matching tool ran with an OK outcome. Judge by MEANING, across forms: an attendee named by EMAIL in the draft ("added meeting@example.com") and by DISPLAY NAME in the summary ("added Meeting Room") are the SAME add; a room / resource mailbox counts as an added attendee. OR
 - the draft simply does NOT state that something is already done / sent / booked / moved / added / flagged.
 Do not turn a proposal into an apology, and do not "own a miss" that isn't one.
 

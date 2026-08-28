@@ -385,6 +385,13 @@ function initSchema(db: Database.Database): void {
   // and stops an auto guess from re-overwriting it. Cosmetic rename of the
   // column to `name_native` is deferred (45 call-sites) — behavior is generic.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN name_he_set_by TEXT`); } catch (_) {}
+  // v4.7.5 (charter audit) — provenance for the plain `name` field itself, same
+  // shape as name_he_set_by above. Before this, `upsertPersonMemory` wrote
+  // `name` unconditionally on every Slack sync, so a stated correction ("call
+  // me Yoni") had nowhere safe to land — the next sync would silently stomp it.
+  // Routed through setCoreFieldWithProvenanceById (people.ts) same as name_he;
+  // a Slack-derived write stamps 'auto' and defers to any existing stated value.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN name_set_by TEXT`); } catch (_) {}
   // v3.5.x (person-memory rebuild) — derived outbound-language signal. We stamp
   // the dominant SCRIPT of each inbound human message ('he'|'ru'|'ar'|'en')
   // plus when we saw it. Outbound composition TO a person (relay / outreach /

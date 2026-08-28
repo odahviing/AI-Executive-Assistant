@@ -114,6 +114,7 @@ export interface PersonMemory {
   is_vip?: number;
   slack_id: string | null;
   name: string;
+  name_set_by?: CoreFieldSetBy; // v4.7.5 — provenance for `name` itself (owner/person correction sticks; auto Slack sync can't clobber)
   name_he?: string;             // native-script spelling (Hebrew/Cyrillic/Arabic), used verbatim when writing in that script
   name_he_set_by?: CoreFieldSetBy; // v3.5.x — provenance for name_he (owner correction sticks; auto can't clobber)
   email?: string;
@@ -375,8 +376,10 @@ export function setPersonVipById(personId: string, vip: boolean): void {
  * v4.2.x — `name_he` joined them: it had its own setter running a byte-identical
  * copy of the rank chain, which is one authority rule in two places (and the copy
  * returned void, so its outcome could never be reported).
+ * v4.7.5 — `name` joined them: `upsertPersonMemory` wrote it unconditionally on
+ * every Slack sync, so a stated correction had no provenance to defend it.
  */
-export type CoreProvenanceField = 'gender' | 'timezone' | 'state' | 'name_he';
+export type CoreProvenanceField = 'gender' | 'timezone' | 'state' | 'name_he' | 'name';
 
 /**
  * v4.2.x — the outcome of a provenance-gated write.
@@ -550,7 +553,6 @@ export function upsertPersonMemory(params: {
   // confirmed update must go through confirmPersonGenderById().
   db.prepare(`
     UPDATE people_memory SET
-      name             = @name,
       gender           = CASE
                            WHEN gender_confirmed = 1 THEN gender
                            WHEN @gender != 'unknown' THEN @gender
@@ -561,9 +563,18 @@ export function upsertPersonMemory(params: {
     WHERE person_id = @person_id
   `).run({
     person_id: personId,
-    name:      params.name,
     gender:    params.gender   ?? 'unknown',
   });
+
+  // v4.7.5 — `name` rides the same provenance chokepoint as timezone/name_he
+  // (owner > person > auto), always stamped 'auto' here: this function is the
+  // Slack sync path (users.info / profile pull), never a stated correction.
+  // No tool currently writes `name` at 'person'/'owner' rank — a stated name
+  // correction still has nowhere to land (update_person_profile allowlists
+  // name_he, not name) — so this closes the SYNC half of the gap (a sync can
+  // no longer stomp a higher-authority value) ahead of the correction flow
+  // existing. The moment one is built, it is already protected.
+  if (params.name) setCoreFieldWithProvenanceById(personId, 'name', params.name, 'auto');
 
   // Timezone rides the provenance chokepoint (owner > person > auto). It used to
   // be a `COALESCE(@timezone, timezone)` in the statement above, which OVERWROTE
@@ -1091,6 +1102,10 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
   }
 
   const slackIdMerged = survivor.slack_id ?? loser.slack_id ?? null;
+  const name = pickByProvenance(
+    { value: survivor.name, setBy: survivor.name_set_by },
+    { value: loser.name, setBy: loser.name_set_by },
+  );
   const nameHe = pickByProvenance(
     { value: survivor.name_he, setBy: survivor.name_he_set_by },
     { value: loser.name_he, setBy: loser.name_he_set_by },
@@ -1147,7 +1162,8 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
                             : (survivor.kind === 'internal' || loser.kind === 'internal') ? 'internal' : 'external',
     org:                  survivor.org ?? loser.org ?? null,
     source:               slackIdMerged ? 'slack' : (survivor.source ?? loser.source ?? null),
-    name:                 (survivor.name ?? '').trim() || (loser.name ?? '').trim() || 'Unknown',
+    name:                 name.value || 'Unknown',
+    name_set_by:          name.setBy,
     name_he:              nameHe.value,
     name_he_set_by:       nameHe.setBy,
     timezone:             timezone.value,
@@ -1187,7 +1203,7 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     db.prepare(`
       UPDATE people_memory SET
         slack_id = @slack_id, email = @email, kind = @kind, org = @org, source = @source,
-        name = @name, name_he = @name_he, name_he_set_by = @name_he_set_by,
+        name = @name, name_set_by = @name_set_by, name_he = @name_he, name_he_set_by = @name_he_set_by,
         timezone = @timezone, timezone_set_by = @timezone_set_by,
         state = @state, state_set_by = @state_set_by,
         gender = @gender, gender_set_by = @gender_set_by, gender_confirmed = @gender_confirmed,
