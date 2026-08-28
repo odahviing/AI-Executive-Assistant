@@ -453,10 +453,13 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         // which meant runSubjectReconciliation never ran for the thread, so
         // a person who replied (without teaching Haiku a new profile fact)
         // still had the raise counted against them at the next coda
-        // trigger. Reconciliation is the ONLY writer of an answered raise
-        // (recordSubjectAnswered/recordSubjectTouch have no other caller),
-        // so it must run regardless of this branch's outcome — log and
-        // fall through instead of bailing.
+        // trigger. Reconciliation is the ONLY path that reaches an
+        // answered-raise write: `recordSubjectAnswered`/`recordSubjectTouch`
+        // are called only from core/social/logEngagement.ts, whose own two
+        // entry points (`applyRaiseFeedbackForMatches`,
+        // `applyOrganicMatchSignal`) have no caller outside this file's
+        // reconciliation pass. So it must run regardless of this branch's
+        // outcome — log and fall through instead of bailing.
         logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
       } else {
         // 5. Apply deltas to DB + md mirror.

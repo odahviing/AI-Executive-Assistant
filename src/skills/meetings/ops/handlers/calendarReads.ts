@@ -7,19 +7,12 @@
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
-import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
-import { humanizeViolationLabel } from '../../ops/violationLabels';
-import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
+import { buildOutOfHoursBusy, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
+import { processCalendarEvents, analyzeCalendar } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  findDuplicateEvent,
-  findReschedulableSibling,
-  type CalendarEvent,
   getFreeBusy,
-  findAvailableSlots,
-  createMeeting,
   deleteMeeting,
   declineMeeting,
   verifyEventDeleted,
@@ -27,22 +20,18 @@ import {
   GraphPermissionError,
 } from '../../../../connectors/graph/calendar';
 import {
-  getDb,
   auditLog,
   dismissFloatingBlockGap,
-  searchPeopleMemory,
   getPersonMemory,
 } from '../../../../db';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
-import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
-import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../../../../utils/displaySubject';
 import { logActivity } from '../../../../core/requests/logActivity';
 import { ACTIVITY_REVERTIBILITY, isEventStillUpcoming } from '../../../../core/requests/activityRevertibility';
 import type { OpCtx } from './context';
 
 export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
-  const { context, userEmail, timezone } = ctx;
+  const { context } = ctx;
         // Tentative slot reservation. Colleague-path: only a slot WE
         // offered them this conversation, max 3, re-pick replaces same-thread.
         // Owner-path: any slot, any holder. Auto-expires at min(2 workdays,
@@ -629,7 +618,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
 }
 
 export async function handleSetWorkScheduleOverride(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
-  const { context, userEmail, timezone } = ctx;
+  const { context, timezone } = ctx;
         // v3.7.x (#143) — owner-only per-date override WRITE. Dates are
         // Sonnet-parsed from the DATE LOOKUP table (no NL parsing here). A range
         // writes N single-date rows via the merge-upsert; clear:true removes them.
@@ -718,7 +707,7 @@ export async function handleSetWorkScheduleOverride(args: Record<string, unknown
 }
 
 export async function handleGetWorkScheduleOverrides(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
-  const { context, userEmail, timezone } = ctx;
+  const { context, timezone } = ctx;
         // v3.7.x (#143) — owner-only read of upcoming overrides (today forward).
         if (context.senderRole !== 'owner') {
           return { success: false, error: 'owner_only', message: 'Only the owner can view schedule overrides.' };

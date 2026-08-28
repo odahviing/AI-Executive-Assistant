@@ -65,7 +65,6 @@ import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
 import { getDb } from '../../db/client';
 import logger from '../../utils/logger';
-import { config } from '../../config';
 import type { OutreachJob } from '../../db/jobs';
 
 const anthropic = getAnthropicClient();

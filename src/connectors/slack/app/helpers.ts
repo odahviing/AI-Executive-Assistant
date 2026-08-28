@@ -99,6 +99,25 @@ export async function resolveSlackMentions(ctx: SlackAppContext, text: string): 
     return resolved;
 }
 
+/**
+ * The `<<GROUP DM — participants: …>>` model-facing preamble, built in ONE
+ * place for the three surfaces that declare it as framing (the live MPIM
+ * handler, an MPIM-shaped app_mention, and the reconnect catch-up replay).
+ * The wording is load-bearing model instruction, so three hand-copies were a
+ * drift risk (WORKSHOP.md's own origin story). `senderName` is optional only
+ * because the replay path doesn't fetch the sender's name — a parameter, not
+ * a fork of the text.
+ */
+export function buildGroupDmPreamble(nameEntries: string[], senderName?: string): string {
+  return (
+    `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
+    (senderName ? `Sender: ${senderName}. ` : '') +
+    `All participants can see everything you write. ` +
+    `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
+    `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`
+  );
+}
+
   // Helper: detect Anthropic API "overloaded" errors (529) so we can surface
   // a human "coffee break" message instead of generic "something broke".
 export function isOverloadError(err: unknown): boolean {

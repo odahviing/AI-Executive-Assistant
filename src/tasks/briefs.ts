@@ -4,7 +4,6 @@ import { SONNET } from '../llm/models';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { config } from '../config';
 import { markEventsSeen, getDb, getPreferences, appendToConversation } from '../db';
 import {
   getRequestsForBrief,

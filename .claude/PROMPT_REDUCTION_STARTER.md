@@ -71,7 +71,7 @@ projects (Person Store, search rebuild) — not ours.
    `buildSkillsPromptSection` helper was DELETED on 2026-07-28: once the assembly
    loop gained a reachability filter and a `news` exception, the exported copy was a
    second spelling of one job that no longer matched what production rendered — and
-   `scripts/measure-prompt.ts` was sizing the budget against that phantom.)
+   `scripts/measure-prompts.cjs` was sizing the budget against that phantom.)
    `coord`/`calendar` deterministically union `meetings`; `freeTimeInquiry` unions `calendar`.
 4. **Static dedup/trim.** Removed the duplicate EVENT CATEGORIES block (kept the
    richer MeetingsSkill copy), collapsed the dead location decision tree

@@ -9,13 +9,17 @@
  *     orchestrator instead of drafting a reply itself (see the generic-branch
  *     comment inside the function for why — gh#daniel-sharabi-decisive-reply-
  *     stuck-in-continue-loop)
- *   - findSlackUser / openDM: Slack utilities
+ *   - openDM: Slack utility
  *
  * `findSlackChannel` was here too and is GONE (v4.2.x): zero callers, and it was a
  * second copy of connections/slack/messaging.findChannelByName — same
  * conversations.list, same substring filter — which meant a second, separately
  * maintained path that listed private channels. One listing path is enough, and it
  * belongs behind the Connection (W11), not in the connector.
+ * `findSlackUser` followed (4.7.x): its only caller was processMessage's
+ * `slackActions` dispatch, dead since no tool has returned
+ * `_requires_slack_client` (message_colleague went synchronous in v1.8.11) —
+ * and it was the same second-copy pattern over messaging.findUserByName.
  *
  * What used to live here but is gone in 1.6:
  *   - sendCoordinationDM / handleCoordinationReply / confirmAndBook / handleDecline:
@@ -33,7 +37,6 @@ import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
 import { App } from '@slack/bolt';
 import { formatForSlack } from '../../connections/slack/formatting';
-import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
 import type { OrchestratorOutput } from '../../core/orchestrator';
 import { updateRequest, getOpenRequestsForThread, getRequest } from '../../db/requests';
@@ -454,39 +457,6 @@ export async function closeOutreachReplyIfResolvedThisTurn(params: {
     logger.warn('closeOutreachReplyIfResolvedThisTurn — owner relay failed', {
       jobId: params.jobId, err: String(err).slice(0, 200),
     });
-  }
-}
-
-// ── Slack utilities ──────────────────────────────────────────────────────────
-
-export async function findSlackUser(
-  app: App,
-  bot_token: string,
-  name: string
-): Promise<Array<{ id: string; name: string; real_name: string; tz: string }>> {
-  try {
-    const result = await app.client.users.list({ token: bot_token, limit: 200 });
-    const members = (result.members ?? []) as any[];
-    const query = name.toLowerCase();
-
-    return members
-      .filter(m =>
-        !m.deleted && !m.is_bot &&
-        (
-          m.real_name?.toLowerCase().includes(query) ||
-          m.name?.toLowerCase().includes(query) ||
-          m.profile?.display_name?.toLowerCase().includes(query)
-        )
-      )
-      .map(m => ({
-        id: m.id,
-        name: m.name,
-        real_name: m.real_name ?? m.name,
-        tz: m.tz ?? 'UTC',
-      }));
-  } catch (err) {
-    logger.error('Failed to search Slack users', { err, name });
-    return [];
   }
 }
 

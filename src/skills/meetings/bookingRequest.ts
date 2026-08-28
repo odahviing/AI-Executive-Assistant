@@ -43,10 +43,9 @@
  * doesn't touch rules — it only normalizes the input.
  */
 
-import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import type { SkillContext } from '../types';
-import { getPersonMemory, searchPeopleMemory } from '../../db/people';
+import { getPersonMemory } from '../../db/people';
 import { viewerEmailFor } from '../../utils/displaySubject';
 import logger from '../../utils/logger';
 

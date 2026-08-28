@@ -25,6 +25,7 @@ import {
   createOutreachJob,
   updateOutreachJob,
   upsertPersonMemory,
+  getPersonMemory,
 } from '../db';
 import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
@@ -415,10 +416,15 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
 
-        // Not scheduled — send path. Track the person.
+        // Not scheduled — send path. Track the person. `args.colleague_name`
+        // is a model-supplied tool arg, not a Slack signal — an existing row
+        // keeps its stored name (same stomp class fixed in
+        // resolvePersonTarget.ts: a partial/omitted arg must not overwrite a
+        // real name).
+        const existingColleague = getPersonMemory(colleagueSlackId);
         upsertPersonMemory({
           slackId:  colleagueSlackId,
-          name:     args.colleague_name as string,
+          name:     existingColleague?.name?.trim() || (args.colleague_name as string),
           timezone: args.colleague_tz as string | undefined,
         });
         // v1.6.8 — DON'T write to interaction_log here. The outreach_jobs row and

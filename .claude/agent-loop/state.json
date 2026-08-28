@@ -4,32 +4,14 @@
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
   "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
   "lastWrapIso": "2026-08-28T14:44:33+02:00",
-  "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-03 by direct-cleaner-full-sweep-2026-08-03: the FIRST unscoped run (prior run was scoped to src/utils and correctly left this null) — full src/ (199 files/73.5k LOC) + scripts/ + .claude/*.md, detect-only over all YAML + framework surfaces. Set to aeab9630b5e9874a425511e6e70dce98034f7f58 (HEAD at the time, unchanged throughout — the cleaner never commits). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C4.",
-  "lastCleanSha": "a631fcd4591e9a3872ce9b60318ad61de96038a3",
+  "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-28 by a second unscoped full sweep (Opus, owner-dispatched between wraps) — full src/ (205 files) + scripts/ (28) + .claude/*.md (52), detect-only over all YAML + framework surfaces; zero dead files/exports found, several dead-code/stale-citation fixes landed, uncommitted. Set to 45736ff7488aa14165ca30f83bffac6ed1c259ac (HEAD at the time — the wrap-4.7.5 bookkeeping commit; the cleaner never commits and deliberately never looked at the uncommitted tree on top of it, per C4). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C4.",
+  "lastCleanSha": "45736ff7488aa14165ca30f83bffac6ed1c259ac",
   "_nextReportIdNote": "ONE counter for report-row ids; assign then increment, NEVER renumber and NEVER reuse. The FORMAT is defined in exactly one place — the `#` bullet in .claude/skills/manager/SKILL.md — and is deliberately NOT restated here.",
   "nextReportId": 261,
   "_inFlightNote": "What is being worked RIGHT NOW — add on dispatch, remove on return, and check it before dispatching so one item is never sent twice. EMPTY THIS IN THE SAME TURN A RUN RETURNS: a stale entry is the STOP 1 lock and refuses the next run. It went stale for three consecutive rounds on 2026-08-06 because every return fed straight into the next dispatch instead of into this file, and the final bouncer pass is what caught it.",
   "inFlight": [],
-  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here.",
+  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. RECONCILED 2026-08-04: three later runs (wf_1faea3eb-c23, wf_24308d23-e36) each wrote queued-next-run ledger rows without also adding them here — ledger-stats --open showed them as QUEUED regardless (it reads the ledger directly), but nothing would have auto-drained them on the next build since only THIS array feeds args.issues. Caught and backfilled; all 7 current queued-next-run ledger rows now have a matching entry here. Going forward: a queued-next-run ledger row is not done until it is ALSO here. RECONCILED AGAIN 2026-08-28 (wrap-4.8.0): 2 of the 3 entries here (closeloop-cancels-deliberately-open-failed-approval, availabilitygate-header-crossref-wrong-file) were already shipped in e6dec9d (v4.7.5) and marked already-fixed in the ledger by that wrap's own PHANTOM CANDIDATES check — but this array was never drained to match, so it sat here as stale residue for one full wrap cycle. Removed both; only the one still-genuinely-open entry remains.",
   "pendingOverflow": [
-    {
-      "id": "closeloop-cancels-deliberately-open-failed-approval",
-      "lane": "registrar",
-      "severity": "medium",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "An approval the resolver deliberately kept OPEN because its action failed gets cancelled anyway seconds later by the same-turn scanner, so a failed booking/cancellation is recorded as handled and never retried.",
-      "evidence": "src/utils/closeLoopOnOwnerHandled.ts:283 -- verify discovery during the 2026-08-26 overnight run, unrelated to that run's own fixes."
-    },
-    {
-      "id": "availabilitygate-header-crossref-wrong-file",
-      "lane": "gatekeeper",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "A reader following the availability guard's own header to see why it over-matches lands on a blank line in the wrong file.",
-      "evidence": "src/utils/availabilityGate.ts:46 -- verify discovery during the 2026-08-26 overnight run, unrelated to that run's own fixes."
-    },
     {
       "id": "scanner-close-relay-targets-owner-self",
       "lane": "registrar",
@@ -253,10 +235,10 @@
     "observableClosed": 4
   },
   "lastRun": {
-    "id": "wrap-4.7.5",
+    "id": "wrap-4.8.0",
     "status": "complete",
     "startedAt": "2026-08-28T00:00:00.000Z",
-    "note": "2026-08-28 owner session: #203 travel-buffer feature (feature.js, 3 build waves) + Naumenko stale-memory bug fix (bugs skill) + 2 coda fixes + full charter-compliance audits/fix batches across Matchmaker/Gatekeeper/Registrar (hand-dispatched Agent calls, not bugger.js -- so most individual findings are NOT separate ledger rows, only o#258/o#259/o#260 were, being pre-existing report.md rows) + a pre-wrap Fable bouncer pass (1 real regression caught and fixed within the same wrap) + a scoped cleaner hygiene sweep (comment-only, lastCleanSha NOT advanced -- scoped, not unscoped). Wrapped as 4.7.5 (patch, owner's explicit call after floating minor and then reverting to patch).",
+    "note": "2026-08-28 owner session, continuation after 4.7.5: 5 remaining lane charter-compliance audits (Librarian, SlackMaster, Diplomat, Instructor, Handyman -- hand-dispatched Fable Agent calls, not bugger.js, completing the 8-lane sweep started with Matchmaker/Gatekeeper/Registrar in 4.7.5) + several small cross-lane follow-up fixes the owner made directly + a second unscoped, full-project Cleaner sweep on Opus (lastCleanSha advanced to 45736ff) + a pre-wrap Fable bouncer pass over the full accumulated diff (zero overturns, 2 discoveries fixed directly: dead requiresApproval/slackActions return-side plumbing, one stale librarian.md citation). Wrapped as 4.8.0 (minor, owner's explicit call: 'I will do minor when finish the other lanes').",
     "notBuilt": []
   }
 }

@@ -37,8 +37,6 @@ export async function classifyEventCategory(
   if (!profile.categories || profile.categories.length === 0) return null;
   const catalog = profile.categories.map(c => `- ${c.name}: ${c.description}`).join('\n');
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Anthropic = (require('@anthropic-ai/sdk') as typeof import('@anthropic-ai/sdk')).default;
     const client = getAnthropicClient();
     const resp = await client.messages.create({
       ...SONNET,

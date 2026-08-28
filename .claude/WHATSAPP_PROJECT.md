@@ -423,26 +423,32 @@ The placeholder is single-tenant. Fix all of it:
 
 - `src/connectors/whatsapp.ts` — REWRITE inbound (placeholder, owner-only, unwired).
 - `src/connections/whatsapp/index.ts` — NEW `WhatsAppConnection implements Connection`.
-- `src/connections/types.ts:92` — the interface to implement; `PersonRef.whatsapp`
-  (`:218`) + `RoutingPolicy` (`:234`) already exist.
-- `src/connections/router.ts:108,144` — already routes/refs `whatsapp`; verify the
-  whatsapp branch end-to-end once a real connection is registered.
+- `src/connections/types.ts:120` — the `Connection` interface to implement.
+  `ConnectionId` (`:24`) already includes `'whatsapp'`. **`PersonRef` and
+  `RoutingPolicy` no longer exist anywhere in `src/`** — they were named here
+  as already-present and are gone; whatever routing this needs has to be built,
+  not reused.
+- **There is no `src/connections/router.ts`** — the only routing surface is
+  `src/connections/registry.ts` (53 lines: `registerConnection` /
+  `getConnection` / `listConnections`), and it contains no `whatsapp` branch
+  at all. The earlier claim that a whatsapp branch was already wired and merely
+  needed verifying was wrong.
 - `src/connectors/slack/app.ts:77-78,111-112` — the `registerConnection` +
   `getSenderRole` patterns to mirror.
 - `src/db/people.ts:1288,1332` — add `phone` to `ResolvePersonInput` + a phone match
   step + `getPersonByPhone`. `people_memory.phone` column exists
-  (`src/db/client.ts:784`).
+  (`src/db/client.ts:938`).
 - `src/core/orchestrator/index.ts:217,219,376-385` — orchestrator already takes
   `channel: ChannelId`, `senderRole`, and flips role for MPIM; feed it
   `channel:'whatsapp'` + group inputs. Audit `channel === 'slack'` assumptions.
 - `src/skills/types.ts:179` — `ChannelId` already includes `'whatsapp'`.
 - `src/index.ts` — wire `startWhatsApp(profile)` into startup (gated on config);
   extend the transient-error survive list.
-- `src/config/index.ts:46` — `WHATSAPP_OWNER_PHONE` exists; add profile-YAML
+- `src/config/index.ts:60` — `WHATSAPP_OWNER_PHONE` exists; add profile-YAML
   `whatsapp_phone` (preferred) + `connections` policy block to
   `src/config/userProfile.ts`.
 - `src/connectors/slack/processedDedup.ts` — pattern for a WhatsApp dedup set.
-- `package.json:30-31` — `whatsapp-web.js` + `qrcode-terminal` already installed.
+- `package.json:31-32` — `qrcode-terminal` + `whatsapp-web.js` already installed.
 
 ---
 

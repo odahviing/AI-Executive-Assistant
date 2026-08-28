@@ -25,6 +25,7 @@ import type { UserProfile } from '../config/userProfile';
 import { promises as fs, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import logger from '../utils/logger';
+import { SLACK_ID_RE } from '../utils/resolveSlackId';
 
 const MAX_FILE_BYTES = 32 * 1024; // 32 KB per person — plenty, still bounded
 
@@ -300,7 +301,6 @@ export async function resolvePersonSlug(profile: UserProfile, query: string): Pr
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const db = require('../db') as typeof import('../db');
-    const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
     let row = SLACK_ID_RE.test(query) ? db.getPersonMemory(query) : null;
     if (!row) {
       const matches = db.searchPeopleMemory(query);

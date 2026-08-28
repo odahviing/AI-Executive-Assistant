@@ -1,14 +1,10 @@
-# Report — cumulative since the 4.7.5 wrap
+# Report — cumulative since the 4.8.0 wrap
 
-Run wrap-4.7.5 — in: 0 tickets · 1 day(s) of owner-session work (feature.js + hand-dispatched charter audits, not bugger.js) · 3 backlog re-read
-out: 4 built · 0 already-fixed · 0 built-with-gap · 5 bounced · 0/0 joint-traced · 0 converted · 3 queued
-board: net -13 → 5 open rows — 1 still-real · 3 need a re-read · 1 cite no file · 5 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
-5 rows await you: 0 from tonight · 0 re-surfaced · 0 found by the loop — all pre-existing, already ruled or self-draining (below)
+Run wrap-4.8.0 — in: 0 tickets · 1 day(s) of owner-session work (5 lane charter audits + an unscoped Cleaner sweep + a pre-wrap Fable bouncer pass, not bugger.js) · 0 backlog re-read
+out: 3 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 0 queued
+board: net 0 → 4 open rows — 4 still-real · 0 need a re-read · 0 cite no file · 4 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+4 rows await you: 0 from tonight · 0 re-surfaced · 0 found by the loop — all pre-existing, unchanged by this wrap (below)
 
-**Built and uncommitted — this is what a wrap ships (7):** `findavailableslots-stale-comment-wrong-day-type-count` · `outreach-attachmentsarg-comment-pointer-off` · `runoutputgates-stale-false-fire-count-inline` · `closeloop-silent-close-no-requester-relay` requester relay added · `floating-block-impact-preflight` real fact, not a guess · `detectAffirmedBlockedSlots-over-match-zero-catches` (o#260) deterministic quoted-span backstop · `slot-grounding-history-crowded-out-by-tool-tape` (o#259) snippet skips tool-tape prefix
+**Built and uncommitted — this is what a wrap ships (3):** `backfill-diplomat-2026-08-28` gh#197 lane-day backfill · `backfill-slackmaster-2026-08-28` gh#197 lane-day backfill · `backfill-handyman-2026-08-28` gh#197 lane-day backfill
 
-**5 bounced, all cleared on retry** — 2 caught by this wrap's own pre-wrap Fable bouncer pass: o#260 shipped comparing owner-local vs server-local time (silently disabled the detector, fixed); o#259 could drop a no-tool reply's first line (fixed).
-
-**3 new verify discoveries queued for the next build** (self-drain, never land on your desk): `closeloop-cancels-deliberately-open-failed-approval` · `availabilitygate-header-crossref-wrong-file` · `scanner-close-relay-targets-owner-self`. Also deferred today, ruled by you: `coda-no-suppression-on-unanswered-prose-followup` (o#258) — revisit only if it fires.
-
-**This wrap's bulk work (the #203 feature + most of today's lane fix batches) was hand-dispatched, not bugger.js, so it isn't ledger rows — see `CHANGELOG.md`'s 4.7.5 entry instead.**
+**This wrap's own work** (the 5 lane audits, the cleaner sweep, the bouncer pass and its 2 discoveries) **was hand-dispatched, not bugger.js — see `CHANGELOG.md`'s 4.8.0 entry, not this ledger, for what it actually did.** The 3 built rows above are gh#197 coverage backfills, not fresh findings. Of the 4 standing open rows: 1 QUEUED (self-drains next build), 2 DEFERRED (due next run, no live occurrence yet), 1 (`gh#204`) genuinely awaits an owner decision.

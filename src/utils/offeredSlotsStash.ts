@@ -67,7 +67,10 @@ const TTL_MS = 2 * 60 * 60 * 1000;
 /** The email leg's round trip is a human forwarding mail, not a chat reply —
  *  hours to overnight. ~48h per the owner's tempo-based call (#24). */
 const EMAIL_TTL_MS = 48 * 60 * 60 * 1000;
-const EMAIL_KEY_PREFIX = 'email:';
+/** Exported so the ONE minting site (connectors/email/inbound.ts's channelKey)
+ *  and this module's prefix detection are provably the same string — the
+ *  prefix used to be spelled independently in both files. */
+export const EMAIL_KEY_PREFIX = 'email:';
 
 /** Every email-transport key is `email:<conversationId>` composed through
  *  keyFor below — so a plain prefix test is a complete, caller-free signal. */

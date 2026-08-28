@@ -43,7 +43,6 @@
  *   - ask_owner         : caller refuses + relays the suggested ask.
  */
 
-import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getEffectiveWorkDayForInstant } from './workHours';
 
@@ -122,8 +121,6 @@ export function isPhoneLocationString(location: string): boolean {
 
 export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   const { profile } = input;
-  const tz = profile.user.timezone;
-  const dt = DateTime.fromISO(input.startIso).setZone(tz);
   // v3.7.x (#143) — day type from the effective work day (yaml base + per-date
   // override), so an "office Tuesday" / "home Friday" override drives the location
   // stamp. No override → identical to the office_days/home_days name check. An

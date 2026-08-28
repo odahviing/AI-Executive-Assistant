@@ -683,7 +683,7 @@ Always pass the owner's verbatim message in owner_message. Always handle ALL ret
         name: 'learn_summary_style',
         description: `Persist a SUMMARY style preference for all future summaries. Use whenever the owner says how summaries should look — "always shorter", "use first person", "lead with action items", "empty line between paragraphs", "bold external participants".
 
-CRITICAL: when in an active summary session, ALWAYS use this tool — NOT learn_preference. learn_preference saves to a different category that summaries don't read. They look similar but only learn_summary_style affects future summaries.
+CRITICAL: when in an active summary session, ALWAYS use this tool — NOT manage_preference. manage_preference saves to a catalog that summaries don't read; only learn_summary_style affects future summaries.
 
 Do NOT use for per-meeting corrections like "Speaker 1 is Brett" or "remove Yael from attendees" — those are DRAFT_EDIT, use update_summary_draft.`,
         input_schema: {
@@ -868,7 +868,7 @@ ${ownerMessage}
             intents,
             _action_plan: planSteps,
             _must_reply_with: mustReplyWith,
-            _critical: 'You MUST execute every action in _action_plan and write the confirmation in _must_reply_with. Do NOT end this turn without text. Do NOT use learn_preference for any of the STYLE_RULE intents — use learn_summary_style.',
+            _critical: 'You MUST execute every action in _action_plan and write the confirmation in _must_reply_with. Do NOT end this turn without text. Do NOT use manage_preference for any of the STYLE_RULE intents — use learn_summary_style.',
           };
         } catch (err) {
           logger.warn('summary.stage2 — classification failed, defaulting to single DRAFT_EDIT', { err: String(err) });

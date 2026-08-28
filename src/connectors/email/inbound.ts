@@ -21,8 +21,9 @@
  * marks a message read ONLY after this handler returns without throwing, and
  * leaves it unread on a throw — but that is NOT a retry. Graph's
  * /messages/delta is consume-once: mailPoll's watermark has already advanced
- * past this message before the handler even runs (connectors/graph/
- * mailPoll.ts:112-118), so an unread message is only a "look at this" marker
+ * past this message before the handler even runs (the delta link persists
+ * inside listNewMessages, before it returns — connectors/graph/
+ * mail.ts:423-424), so an unread message is only a "look at this" marker
  * in a mailbox the owner does not check — there is no next tick that comes
  * back to it. Because there is no retry, a throw here used to be silent to
  * the owner: he forwards something, something breaks, he gets nothing back,
@@ -44,7 +45,8 @@ import type { UserProfile } from '../../config/userProfile';
 import type { MailMessage } from '../graph/mail';
 import { registerMailInbound } from '../graph/mailInboundRegistry';
 import { createEmailConnection } from '../../connections/email';
-import { ownerEmailAddresses } from '../../connections/email/ownerAddresses';
+import { mailboxAddress, ownerEmailAddresses } from '../../connections/email/ownerAddresses';
+import { EMAIL_KEY_PREFIX } from '../../utils/offeredSlotsStash';
 import { getConnection, registerConnection } from '../../connections/registry';
 import type { Connection } from '../../connections/types';
 import { runOrchestrator } from '../../core/orchestrator';
@@ -180,7 +182,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // Stable per-chain key. A forward is addressed to Maelle, so toRecipients
   // carries only her; conversationId is the one durable coordinate for "this
   // email chain" that survives across forwards and replies.
-  const channelKey = `email:${message.conversationId || message.id}`;
+  const channelKey = `${EMAIL_KEY_PREFIX}${message.conversationId || message.id}`;
 
   const plainBody = message.bodyContentType === 'html'
     ? htmlToPlainText(message.body)
@@ -204,7 +206,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // One filter, computed once, reused below by both the person-store loop
   // and the deterministic attendee hand-off.
   const ownerAddresses = ownerEmailAddresses(profile);
-  const mailboxEmail = (profile.channels.email?.mailbox ?? '').trim().toLowerCase();
+  const mailboxEmail = mailboxAddress(profile) ?? '';
   const assistantEmail = (profile.assistant.email ?? '').trim().toLowerCase();
   const ownerDomain = profile.user.email.trim().toLowerCase().split('@')[1] ?? '';
   const isMeaningfulParticipant = (email: string): boolean =>
@@ -219,7 +221,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // (now-filtered) set. Fires here — independent of whether a booking ever
   // happens — because being addressed on the chain she was asked to act on
   // IS the engagement (L1), the same "found → upserted" shape the Slack
-  // directory search uses (connections/slack/index.ts:308).
+  // directory search uses (connections/slack/index.ts:311).
   for (const email of externalParticipants) {
     try {
       resolvePerson({ email, ownerDomain });
@@ -336,6 +338,11 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // not the addressee. See runEmailLegGates in runOutputGates.ts for what
   // runs (claim-check, humanGate('external'), date-verify) and why the
   // Slack-only availability floor and security gate are skipped on this leg.
+  //
+  // D8 — `result.socialCoda` is deliberately never read on this leg:
+  // postReply (Slack's delivery pipeline) is its ONLY consumer and never runs
+  // here, so no rapport line can ride a forwardable external artifact. A
+  // future outward channel must keep suppressing it the same way.
   const gatedReply = await runOutputGates(result.reply, {
     profile, result,
     history, userMessage: turnText,

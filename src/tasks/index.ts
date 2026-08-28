@@ -3,7 +3,7 @@ import { getActiveOutreachForThread } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
 import { DISPATCHERS } from './dispatchers';
 import logger from '../utils/logger';
-import type { Task, TaskType, TaskStatus } from './types';
+import type { Task } from './types';
 
 export type { Task, TaskType, TaskStatus } from './types';
 

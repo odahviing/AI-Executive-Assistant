@@ -1,18 +1,16 @@
 /**
  * Slack messaging primitives (v1.7.2).
  *
- * This is the foundation of the planned Connection-interface migration tracked
- * in issue #1. It exposes a small surface that domain skills can use to send
- * messages WITHOUT importing from connectors/slack/coordinator.ts (which is
- * still domain-muddled).
+ * The Slack half of the Connection-interface migration (issue #1), which has
+ * since SHIPPED: `connections/slack/index.ts` builds `SlackConnection` on top of
+ * these primitives and `connections/email/index.ts` implements the same
+ * `Connection` shape, so a domain skill sends without importing
+ * connectors/slack/coordinator.ts. Whatsapp is the one transport still unbuilt.
  *
- * Today: only Slack. Tomorrow: each Connection (slack, email, whatsapp)
- * implements the same shape so domain skills don't change when transports
- * are added or swapped.
- *
- * SummarySkill is the first consumer. As coord.ts and outreach.ts get ported
- * (issue #1), they'll route through here too — at which point coordinator.ts
- * shrinks to a Slack-specific Connection implementation.
+ * Live callers today are `connections/slack/index.ts` plus three direct
+ * `setAssistantStatus` users (postReply.ts, orchestrator/index.ts,
+ * buildTurnContext.ts) — NOT SummarySkill, which this header named as the first
+ * consumer back in v1.7.2.
  *
  * Important: this module is fire-and-forget. It does NOT create outreach_jobs
  * rows or track replies — that's an outreach concern. Use this for "send and

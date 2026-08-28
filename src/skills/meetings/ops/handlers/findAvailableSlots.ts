@@ -7,37 +7,19 @@
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
-import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
-import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
+import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
-  findDuplicateEvent,
-  findReschedulableSibling,
-  type CalendarEvent,
   type DaySummaryEntry,
-  getFreeBusy,
   findAvailableSlots,
-  createMeeting,
-  deleteMeeting,
-  verifyEventDeleted,
-  updateMeeting,
   GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
-import {
-  getDb,
-  auditLog,
-  dismissFloatingBlockGap,
-  searchPeopleMemory,
-  getPersonMemory,
-} from '../../../../db';
+import { getPersonMemory } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
-import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
-import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { bookingLeadTimeHours, offeredSlotCount, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';

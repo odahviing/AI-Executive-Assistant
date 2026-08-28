@@ -17,8 +17,7 @@
  *      POST-gate text, so the record and the wire can never disagree.
  *   4  Ack-class emoji replacement, then the colleague shadow-notify.
  *   5  Audio vs text branch based on the input modality + TTS availability.
- *   6  Optional approval footer when the orchestrator flagged a pending ask.
- *   7  Social coda, if the turn produced one — its OWN in-thread message a beat
+ *   6  Social coda, if the turn produced one — its OWN in-thread message a beat
  *      after the reply lands, never a last line glued onto it. On a confirmed
  *      post it closes the social cadence gate and mirrors to the owner's shadow.
  */
@@ -97,8 +96,8 @@ export interface PostReplyInput {
    * Nothing else counts: not a tool that DM'd a third party, not a history row.
    *
    * Its one consumer is the caller's failure handler. A throw AFTER delivery is
-   * reachable (the approval footer's own `say`, the threadActivity import at the
-   * tail of sendReply), and an "I'm having trouble" posted on top of an answer
+   * reachable (the threadActivity import at the tail of sendReply), and an
+   * "I'm having trouble" posted on top of an answer
    * the person is already reading is a worse bug than the one it apologises for.
    * A callback rather than a return value because a return value cannot survive
    * the throw it is needed for — same shape, same reason, as the queue's
@@ -615,7 +614,6 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     // colleague — don't shadow him about his own conversation. (!isOwnerInGroup
     // already handles the MPIM clamp; this closes the channel case.)
     senderId !== profile.user.slack_user_id &&
-    !result.requiresApproval &&
     cleanReply &&
     cleanReply.trim().length > 0
   ) {
@@ -683,15 +681,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     onDelivered,
   });
 
-  // Step 6 — approval footer, if any.
-  if (result.requiresApproval && result.approvalId) {
-    const approvalMsg =
-      `To approve: \`approve ${result.approvalId}\`\n` +
-      `To reject: \`reject ${result.approvalId}\``;
-    await say({ text: approvalMsg, thread_ts: threadTs });
-  }
-
-  // Step 7 — the social coda, as its own message. LAST on purpose: everything
+  // Step 6 — the social coda, as its own message. LAST on purpose: everything
   // this turn owes the person is already in Slack, so the coda can only ever
   // follow the answer, never precede or replace it. If Step 5 threw, we never
   // get here — a failed reply is not followed by small talk.

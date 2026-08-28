@@ -7,29 +7,21 @@
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
-import type { SkillContext } from '../../../types';
 
-import { formatIsoTime, computeVacatedSlot, buildOutOfHoursBusy, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
 import { humanizeViolationLabel } from '../../ops/violationLabels';
-import { processCalendarEvents, analyzeCalendar, enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
-  getFreeBusy,
-  findAvailableSlots,
   updateMeeting,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
-  getDb,
   auditLog,
-  dismissFloatingBlockGap,
-  searchPeopleMemory,
   getPersonMemory,
 } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
-import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { alignNearestQuarter } from '../../../../utils/calendarDensity';

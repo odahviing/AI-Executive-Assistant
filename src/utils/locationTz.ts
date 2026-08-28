@@ -10,7 +10,6 @@
  * tell us Boston vs NYC vs Atlanta).
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { SONNET } from '../llm/models';
 import { config } from '../config';

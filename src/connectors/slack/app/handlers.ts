@@ -15,7 +15,7 @@ import { type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import { registerInboundReplay } from '../inboundReplayRegistry';
 import { markProcessed, markContentProcessed } from '../processedDedup';
-import { is1on1DM, OVERLOAD_REPLY } from './helpers';
+import { is1on1DM, OVERLOAD_REPLY, buildGroupDmPreamble } from './helpers';
 import { isSlackDocFile, isSlackImageFile, extractSlackDocText, downloadAndScanImageBatch } from './fileIngestion';
 import type { SlackAppContext } from './context';
 
@@ -133,11 +133,7 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
           } catch { nameEntries.push(id); }
         }
         if (nameEntries.length > 0) {
-          groupContext =
-            `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
-            `All participants can see everything you write. ` +
-            `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
-            `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`;
+          groupContext = buildGroupDmPreamble(nameEntries);
         }
       } catch (err) {
         logger.warn('inboundReplay — MPIM group context build failed, replying without it', { err: String(err).slice(0, 200) });
@@ -334,11 +330,18 @@ export function registerDmHandler(ctx: SlackAppContext): void {
         return;
       }
 
-      // Audio branch (multi-file in v2.0.7). Every audio file in the upload
-      // gets transcribed sequentially; each transcription turns into its own
-      // processMessage call so the orchestrator answers each one in order.
+      // Audio/video branch (multi-file in v2.0.7). Every audio/video file in
+      // the upload gets transcribed sequentially; each transcription turns into
+      // its own processMessage call so the orchestrator answers each one in
+      // order. `video/*` is matched by MIMETYPE, same as the catch-up replay
+      // path (registerInboundReplayHandler above) — pre-fix the live filter
+      // only knew the mp4/webm FILETYPES, so a .mov (video/quicktime) was
+      // silently dropped live yet transcribed fine when caught up after
+      // downtime: the same message got two different answers depending on
+      // whether the socket happened to be up.
       const audioFiles = (files ?? []).filter((f: any) =>
-        f.mimetype?.startsWith('audio/') || f.filetype === 'mp4' || f.filetype === 'webm'
+        f.mimetype?.startsWith('audio/') || f.mimetype?.startsWith('video/')
+        || f.filetype === 'mp4' || f.filetype === 'webm'
       );
       if (audioFiles.length === 0) {
         logger.warn('file_share but no audio/image/doc file found', { files: files?.map((f:any) => f.filetype) });
@@ -716,12 +719,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
           // Using `<<GROUP DM ...>>` instead of `[GROUP DM ...]` — consistent
           // with the colleague-DM prefix change, and keeps system-added context
           // out of the injection-scanner's owner_spoof regex range.
-          groupContext =
-            `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
-            `Sender: ${senderName}. ` +
-            `All participants can see everything you write. ` +
-            `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
-            `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`;
+          groupContext = buildGroupDmPreamble(nameEntries, senderName);
         }
         }
       } catch (err) {
@@ -746,7 +744,6 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       // Default: RESPOND. The classifier only suppresses on clear IGNORE conditions.
       // Pass member names so the classifier can correctly evaluate introductions, etc.
       const history         = getConversationHistory(threadTs);
-      const assistantActive = history.some(m => m.role === 'assistant');
       // v1.7.5 — when Maelle was the most-recent or second-most-recent speaker,
       // skip the relevance gate entirely. The next message in the thread is
       // almost certainly a continuation of the exchange she's actively in.
@@ -1057,12 +1054,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
             }
             const senderInfo = await client.users.info({ token: assistant.slack.bot_token, user: event.user as string }).catch(() => null);
             const senderName = (senderInfo?.user as any)?.real_name || (senderInfo?.user as any)?.name || 'the sender';
-            mpimContext =
-              `<<GROUP DM — participants: ${nameEntries.join(', ')}. ` +
-              `Sender: ${senderName}. ` +
-              `All participants can see everything you write. ` +
-              `Respond to ALL relevant people in the DM — when addressing a specific person, START your reply with <@their_slack_id> so they get a push notification. ` +
-              `Do NOT say "tell her" or "let him know" when they are right here in this conversation.>>\n\n`;
+            mpimContext = buildGroupDmPreamble(nameEntries, senderName);
           }
           logger.info('app_mention — detected MPIM channel', { channelId: event.channel, memberCount: allMemberIds.length });
         }

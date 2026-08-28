@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# tail-logs.sh — fetch recent Maelle logs. Runs ON the VM (invoked over SSH by
-# scripts/vm-logs.ps1 from the laptop, or directly if you're SSH'd in).
+# tail-logs.sh — fetch recent Maelle logs. Runs ON the VM; run it directly once
+# you're SSH'd in. NOTE: `scripts/vm-logs.ps1` no longer invokes this — it reads
+# Cloud Logging as the `maelle-logs-reader` service account, with no SSH at all.
+# This file is the on-box fallback for the raw winston file + pm2 stderr, which
+# Cloud Logging does not carry.
 #
 # Usage:  bash scripts/tail-logs.sh [grep-term] [lines]
 #   grep-term : optional case-insensitive filter (name, request id, error text)

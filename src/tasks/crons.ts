@@ -22,7 +22,7 @@ export interface Routine {
   schedule_type: 'daily' | 'weekdays' | 'weekly' | 'monthly';
   schedule_time: string;    // 'HH:MM' in user's timezone — or comma-separated "HH:MM,HH:MM" for twice-daily (v2.9.3)
   schedule_day: string | null; // day name for weekly; day-of-month string for monthly
-  status: 'active' | 'paused';
+  status: 'active' | 'paused' | 'deleted';  // 'deleted' = soft-delete (delete_routine) — kept as a row so ensureBriefingCron won't recreate a system routine the owner removed
   next_run_at: string | null;
   last_run_at: string | null;
   last_result: string | null;
@@ -212,7 +212,7 @@ export function ensureBriefingCron(profile: UserProfile): void {
   const existing = db.prepare('SELECT * FROM routines WHERE id = ?').get(cronId) as Routine | null;
 
   // Get briefing time from preferences or profile
-  const { getBriefingHourMin, getBriefingWorkDays } = require('./briefs') as typeof import('./briefs');
+  const { getBriefingHourMin } = require('./briefs') as typeof import('./briefs');
   const [h, m] = getBriefingHourMin(profile);
   const scheduleTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   const workDays = getProfileWorkDays(profile);

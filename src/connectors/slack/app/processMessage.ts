@@ -18,7 +18,7 @@ import {
   getSummarySessionByThread,
 } from '../../../db';
 import { detectAndSaveGender } from '../../../utils/genderDetect';
-import { handleOutreachReply, findSlackUser, closeOutreachReplyIfResolvedThisTurn } from '../coordinator';
+import { handleOutreachReply, closeOutreachReplyIfResolvedThisTurn } from '../coordinator';
 import { describeImage, downloadSlackImage, buildImageBlock, type AnthropicImageBlock } from '../../../vision';
 import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
@@ -768,7 +768,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               onWriteExecuted: () => markWrite(),
               priorOutboundContext,
             });
-            logger.info('Orchestrator completed', { senderId, threadTs, hasApproval: result.requiresApproval, actionCount: result.slackActions?.length ?? 0 });
+            logger.info('Orchestrator completed', { senderId, threadTs });
 
             // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop (round 2,
             // 2026-08-18) — this turn was routed through handleOutreachReply's
@@ -834,44 +834,6 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               onDelivered: () => { delivered = true; },
             });
 
-            // ── Dispatch background Slack actions AFTER reply is delivered ───────────
-            // These are fire-and-forget — owner already got their reply above.
-            // find_slack_user is the only exception: its result feeds back into context.
-            if (result.slackActions && result.slackActions.length > 0) {
-              for (const action of result.slackActions) {
-                // find_slack_user must stay synchronous — result feeds into conversation context
-                if (action.action === 'find_slack_user') {
-                  try {
-                    const users = await findSlackUser(app, assistant.slack.bot_token, action.name as string);
-                    appendToConversation(threadTs, channelId, {
-                      role: 'assistant',
-                      content: users.length > 0
-                        ? `Found: ${users.map((u: any) => `${u.real_name} (ID: ${u.id}, tz: ${u.tz})`).join(', ')}`
-                        : `No Slack user found matching "${action.name}". Ask the user to @mention them.`,
-                      // v4.4.10 — same class of fix as postReply.ts Step 3b: this
-                      // breadcrumb has no real Slack ts (it's a synthetic history
-                      // row, not a posted message), so without a stamp it parses to
-                      // 0 in the catch-up merge's `parseFloat(m.ts || '0')` sort
-                      // above (line 370) and jumps to the front of every merged
-                      // history — ahead of every real message, and the first row
-                      // the `.slice(-20)` trim drops. Wall-clock at write time, in
-                      // Slack ts format, sorts it correctly relative to the
-                      // messages around it instead.
-                      ts: (Date.now() / 1000).toFixed(6),
-                    });
-                  } catch (err) {
-                    logger.error('Slack action failed', { err, action: action.action });
-                  }
-                  continue;
-                }
-
-                // v1.8.11 — `send_outreach_dm` and `post_to_channel` actions
-                // removed: message_colleague now sends synchronously inside its tool
-                // handler via Connection. v3.4.x — coordinate_meeting /
-                // finalize_coord_meeting actions removed with the coord subsystem.
-                // find_slack_user (handled above) is the only Slack action left.
-              }
-            }
           } catch (err) {
             // THE failure handler for the reply path, and it has to live in here.
             // This closure runs from scheduleRun's timer, long after
@@ -891,7 +853,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               err, senderId, channelId, threadTs, role, delivered,
             });
             // Already answered, and then something in the tail threw (the
-            // approval footer's own send, the threadActivity import). Do NOT
+            // threadActivity import in sendReply's tail). Do NOT
             // stack "something's off" on top of an answer the person is reading
             // — a broken trailer's audience is the log, not them.
             if (delivered) return;

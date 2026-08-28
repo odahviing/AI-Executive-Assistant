@@ -8,7 +8,7 @@ Maelle is an AI executive assistant platform built in Node.js/TypeScript. She li
 
 **Mission / filter for every decision:** "would a real human EA do this?" — outranks speed, completeness, elegance.
 
-**Current shipped version: 4.7.5.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
+**Current shipped version: 4.8.0.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
 
 ## Where she runs
 

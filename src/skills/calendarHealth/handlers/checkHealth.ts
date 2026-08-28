@@ -692,7 +692,6 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             // Sonnet can narrate honest detail without recomputing.
             if (freeTimeThresholdMin > 0 && freeMin < freeTimeThresholdMin) {
               const dayLabel = cursor.toFormat('EEEE d MMMM');
-              const freeHrs = (freeMin / 60).toFixed(1);
               const targetHrs = (freeTimeThresholdMin / 60).toFixed(1);
               issues.push({
                 type: 'busy_day',

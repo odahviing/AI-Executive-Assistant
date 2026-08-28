@@ -581,7 +581,6 @@ action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`o
           if (!extracted.content || extracted.content.trim().length < 50) {
             return { ok: false, error: 'page_unreadable', url, detail: extracted.error || 'no content returned' };
           }
-          const Anthropic = (await import('@anthropic-ai/sdk')).default;
           const anthropic = getAnthropicClient();
           const result = await ingestKnowledgeDoc({
             profile: context.profile,

@@ -34,6 +34,7 @@ import {
 } from './mail';
 import { getMailInbound } from './mailInboundRegistry';
 import { getConnection } from '../../connections/registry';
+import { mailboxAddress } from '../../connections/email/ownerAddresses';
 import logger from '../../utils/logger';
 
 const MAIL_POLL_INTERVAL_MS = 30 * 1000;
@@ -156,7 +157,7 @@ async function pollProfile(profileName: string, profile: UserProfile): Promise<v
   // just finished, forever. This is the "second dedup" the owner asked for:
   // isRead itself is the durable per-message marker, independent of the
   // deltaLink watermark.
-  const ownMailbox = profile.channels?.email?.mailbox?.toLowerCase();
+  const ownMailbox = mailboxAddress(profile);
   const toProcess = messages.filter(m => {
     if (m.isRead) return false;
     // Drop mail sent by the mailbox itself (owner decision #24) — a

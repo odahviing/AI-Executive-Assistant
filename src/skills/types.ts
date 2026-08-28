@@ -50,7 +50,7 @@ export interface Skill {
    *
    * `channel` (v4.3.0, gh#24 row 121) — the turn's inbound transport.
    * Only relevant to a skill that internally re-derives a shipped-tool check
-   * (search.ts: whether web_research ships, to decide if its prose paragraph
+   * (general.ts: whether web_research ships, to decide if its prose paragraph
    * should render) — pass it through so that check agrees with the actual
    * CHANNEL_TOOL_CLAMP-clamped tool set instead of silently assuming 'slack'.
    * Optional trailing param — every other skill ignores it, no changes needed.

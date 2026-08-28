@@ -61,7 +61,7 @@ export function assessLateness(opts: {
   const latenessMinutes = Math.max(0, Math.round((now.getTime() - scheduled) / 60000));
 
   // Override flag — always run
-  if ((opts.routine as any).never_stale === 1) {
+  if (opts.routine.never_stale === 1) {
     return { run: true, latenessMinutes };
   }
 

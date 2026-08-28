@@ -2276,7 +2276,7 @@ TASK RULES:
 - edit_task to modify; don't cancel + recreate.
 
 MORNING BRIEFING:
-When the user changes their briefing time, call learn_preference with category="scheduling", key="briefing_time", value="HH:MM". Owner-initiated brief requests are routed deterministically to send_briefing_now BEFORE the orchestrator runs.
+When the user changes their briefing time, update the system briefing routine via manage_routine(action='update', schedule_time=…) — it reschedules and persists the time. Owner-initiated brief requests are routed deterministically to send_briefing_now BEFORE the orchestrator runs.
 
 ## APPROVALS — structured decisions from the owner
 

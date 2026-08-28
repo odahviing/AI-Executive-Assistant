@@ -1,129 +1,108 @@
 /**
  * scheduleRules (v2.7.0) — single source of truth for "is this slot OK to book?"
  *
- * Replaces the duplicate rule-application logic spread across:
- *   - find_available_slots (slot loop)
- *   - create_meeting Guards A+B
- *   - move_meeting rule-check
- *   - coordinate_meeting slot loop
+ * Replaces the rule logic that used to be duplicated, each with a slightly
+ * different subset, across find_available_slots' slot loop, create_meeting
+ * Guards A+B, move_meeting's rule-check and coordinate_meeting's slot loop.
+ * They all call `checkSlot(...)` now and get ONE verdict + label.
  *
- * Each of those used to apply slightly different subsets of the same rules.
- * Now they all call `checkSlot(...)` and get one consistent verdict + label.
+ * ── EVALUATION ORDER. First violation wins; the caller gets one label. ──────
+ * The numbers are historical and are cited cross-file, so they stay even where
+ * the order no longer matches them (8 is evaluated second). `[relax]` = bypassed
+ * when allow_relaxed; every rule except (1) is relaxable.
+ *   0.  in_the_past             slot start is already past
+ *   8.  owner_busy_collision    a REAL commitment holds the slot. Hoisted ahead
+ *                               of every soft rule: "is he already on something"
+ *                               is a fact about the calendar, not a consequence
+ *                               of which rule tripped first.
+ *   0b. within_lead_time        inside the caller's booking lead time
+ *                               (bookingLeadTimeHours: owner vs colleague)
+ *   1.  vacation_or_off_day     an off day in the profile. THE ONE RULE WITH NO
+ *                               allow_relaxed GATE — see below.
+ *   2.  category_day_type       category requires office_days, slot is a home day
+ *   3.  category_per_day        at the category's per-day limit
+ *   4.  category_per_week       at the category's per-ISO-week limit
+ *   5.  outside_working_hours   outside ALL of the day's work_hours windows
+ *                               (multi-window aware)                     [relax]
+ *   6.  floating_block_overlap  lunch / focus block in
+ *                               profile.meetings.floating_blocks         [relax]
+ *   7.  travel_buffer_collision category.requires_travel_buffer and an ADJACENT
+ *                               meeting is too tight (the collision itself is
+ *                               already rule 8's, so this sees only neighbours)
+ *   9.  focus_time_floor        would drop the day below the configured
+ *                               length-based free-time floor  [relax, and also
+ *                               skipped when isFloatingBlock]
  *
- * Rules checked, in EVALUATION order. First violation wins (caller gets ONE
- * label). Note (8) is evaluated SECOND, not eighth — see "OCCUPANCY vs RULES":
- *   0. in_the_past                — the slot start is already in the past
- *   8. owner_busy_collision       — a REAL commitment holds the slot. Promoted
- *                                   ahead of every soft rule: "is he already on
- *                                   something?" is a fact about the calendar,
- *                                   never a consequence of which rule tripped
- *                                   first. Rule number kept at 8 so the
- *                                   cross-file "rule 8" references still read.
- *   0b. within_lead_time          — inside the caller's booking lead time
- *                                   (bookingLeadTimeHours: owner vs colleague)
- *   1. vacation_or_off_day        — Friday/Saturday for Idan's profile.
- *                                   THE ONE RULE WITH NO allow_relaxed GATE —
- *                                   see the note under the ladder.
- *   2. category_day_type          — category requires office_days but slot is home day
- *   3. category_per_day           — at-limit for this category on this day
- *   4. category_per_week          — at-limit for this category this ISO week
- *   5. outside_working_hours      — slot falls outside ALL of the day's work_hours
- *                                   windows (multi-window aware)
- *                                   (bypassed when allow_relaxed = true)
- *   6. floating_block_overlap     — lunch / focus block conflict in profile.meetings.floating_blocks
- *                                   (bypassed when allow_relaxed = true)
- *   7. travel_buffer_collision    — category.requires_travel_buffer & adjacent meeting too tight
- *                                   (see (8) — the collision itself was already
- *                                    reported, so this only sees ADJACENT events)
- *   9. focus_time_floor           — booking would drop the day below the configured
- *                                   length-based free-time floor (bypassed when
- *                                   allow_relaxed = true OR isFloatingBlock = true)
+ * RULE 1 HAS NO RELAX GATE — owner ruling 2026-07-26, asked directly: leave it.
+ *   • OWNER — `passes:false` is not a refusal (#127): planMeeting turns it into
+ *     a one-step heads-up and books, so an off day is the one fact he is re-told
+ *     after overriding everything else. The double-book notice rides ALONGSIDE
+ *     it (planMeeting.ts) instead of being suppressed by the same `passes:false`.
+ *   • COLLEAGUE — nothing reaches here with `relaxed:true` and
+ *     `initiator:'colleague'`, enforced by CONSTRUCTION since v4.2.x rather than
+ *     by inspection: `bookingRequest.grantRelaxed` is the ONE function turning
+ *     `args.relaxed` into an override, it grants only on `senderRole === 'owner'`
+ *     (the authenticated sender, post-clamp), and every path — normalized or not
+ *     — reads it. So `allowRelaxed` implies the owner. Still true after v4.4.x
+ *     (#154): an AUTHENTICATED owner bending a rule on a clamped surface
+ *     (MPIM/channel) does NOT get `allowRelaxed` either — it routes to
+ *     `escalate_approval` (`relaxedReason:'owner_room_bend'`, planMeeting.ts),
+ *     never to a self-grant. Authority decides how a bend is HANDLED, never
+ *     which rules apply.
+ *   • SEARCH — unaffected: the walker's own workday gate skips off days before
+ *     checkSlot is ever called, relaxed or not, so the two cannot disagree (M1).
  *
- * NOTE on rule (1) and allow_relaxed — 0, 0b, 2–4, 5, 6, 7, 8 and 9 all bypass
- * under `allowRelaxed`; rule (1) alone does not. Owner 2026-07-26, asked
- * directly: LEAVE IT — its current behaviour is what he wants. What it does:
- *   • OWNER path — `passes:false` is not a refusal (#127): planMeeting turns it
- *     into a one-step heads-up and books, so the effect is "an off day is the
- *     one fact he is re-told even after overriding everything else". The
- *     double-book notice rides ALONGSIDE it (planMeeting.ts) instead of being
- *     suppressed by the same `passes:false`.
- *   • COLLEAGUE path — NO combination reaches here with `relaxed:true` and
- *     `initiator:'colleague'`, and as of v4.2.x that is enforced by
- *     construction, not by inspection: `bookingRequest.grantRelaxed` is the ONE
- *     function that turns `args.relaxed` into an override, it grants only on
- *     `senderRole === 'owner'` (the authenticated sender, post-clamp), and every
- *     path — normalized or not — reads it. So `allowRelaxed` implies the owner,
- *     still true after v4.4.x (#154): a rule-bend from the AUTHENTICATED owner
- *     on a clamped surface (MPIM/channel) does NOT grant `allowRelaxed` either
- *     — it routes to `escalate_approval` instead (`relaxedReason:
- *     'owner_room_bend'`, planMeeting.ts), never to a self-grant. Authority
- *     decides how a bend is HANDLED, never which rules apply.
- *   • SEARCH — unaffected either way: the walker's own workday gate skips
- *     off-days before checkSlot is ever called, relaxed or not, so the two
- *     cannot disagree (M1).
+ * NO BETWEEN-MEETING BUFFER RULE (v2.7.1). The allowed durations (10/25/40/55)
+ * and aligned starts (:00/:15/:30/:45) already bake in 5 min of trailing gap by
+ * design, so a 55-min meeting starting where another ends is fine — connected
+ * back-to-back is the preferred shape, not a violation. The prior wave's rule
+ * (9) `owner_buffer_collision` was deleted in v2.7.1.
  *
- * NOTE on between-meeting buffer (v2.7.1) — the 5-min buffer is NOT enforced
- * as a collision rule. The allowed durations (10/25/40/55) and aligned starts
- * (:00/:15/:30/:45) already bake in 5 min of trailing gap by design. A 55-min
- * meeting starting where another ends is fine — connected back-to-back is the
- * preferred shape, not a violation. (Prior wave had rule (9)
- * `owner_buffer_collision`; deleted v2.7.1.)
+ * ── TWO UNCONDITIONAL FACTS (v4.1.x — M2; ordering fixed v4.2.x) ────────────
+ * Computed BEFORE the ladder and reported on EVERY verdict, whichever rule
+ * returned. Both are facts about the SLOT, not consequences of which rule
+ * tripped first, so no consumer has to infer one from the label it happened to
+ * get — inferring is the pattern that produced both bugs named below.
  *
- * ── THE UNCONDITIONAL FACTS (v4.1.x — M2; ordering fixed v4.2.x) ────────────
- * Two things are computed BEFORE the ladder and reported on EVERY verdict,
- * whichever rule ended up returning: the slot's OCCUPANCY and whether it sits
- * inside the day's work band. Both are facts about the slot rather than
- * consequences of which rule tripped first, so no consumer has to infer one from
- * the label it happened to get — the pattern that produced both bugs below.
+ * (a) `level` — the M2 booking tier, from ONE scan of the owner's events:
+ *     `free` (nothing holds it) / `optional` (a TIMED workingElsewhere event
+ *     holds it — join-if-free, soft) / `unfiltered` (a real commitment).
+ *     THE SCAN RUNS FIRST AND ITS COLLISION OUTRANKS THE SOFT RULES: scan →
+ *     rule 0 (a past slot is past, whatever holds it) → the hard collision →
+ *     the soft ladder. So `level` is ALWAYS present and no caller can claim a
+ *     slot is clear without having looked (M9). v4.1.x had the scan at rule 8's
+ *     position and returned on first violation, so every earlier return
+ *     (0/0b/1/2-4/5/6/7) carried NO occupancy and named a soft rule while a hard
+ *     commitment sat on the slot: an owner book-through said "heads up, that's
+ *     too soon" and never mentioned the double-booking (planMeeting #127); the
+ *     colleague pre-check read the same slot as `within_lead_time`, i.e. "not a
+ *     hard conflict, the owner's to override", across a 4h window; and
+ *     check_join_availability carried a PRIVATE second occupancy scan just to
+ *     answer "is he busy?" — a second validator, which is the M1 bug. The walker
+ *     now READS this tier instead of re-deriving it from the same events.
  *
- * (a) `level` — the M2 booking tier, from a single scan of the owner's events:
- *   free       — nothing holds this slot
- *   optional   — a TIMED workingElsewhere event holds it (join-if-free, soft)
- *   unfiltered — a real commitment holds it
- * Pre-fix, the tier existed ONLY inside the slot walker (which re-derived it
- * from the same events), so a named-time create_meeting booking straight over
- * an optional standup produced no annotation at all. The walker now READS this
- * instead of re-deriving it.
- *
- * THE SCAN RUNS FIRST, AND ITS COLLISION OUTRANKS THE SOFT RULES. v4.1.x put
- * the scan at rule 8's position and returned on the first violation, so every
- * earlier return (0/0b/1/2-4/5/6/7) carried NO occupancy AND reported a soft
- * rule while a hard commitment sat on the slot:
- *   • owner, 14:15, real 15:00 meeting, "book 20 min with Alex at 3" → rule 0b
- *     fired first, so the one-step owner book-through (planMeeting #127) said
- *     "heads up, that's too soon" and never mentioned the double-booking;
- *   • the colleague pre-check treated the same slot as `within_lead_time`, i.e.
- *     "NOT a hard conflict and it's Idan's to override", across a 4h window;
- *   • check_join_availability had to carry a PRIVATE second occupancy scan to
- *     answer "is he busy?" at all — a second validator, which is the M1 bug.
- * Now: scan → rule 0 (a past slot is past, whatever holds it) → the hard
- * collision → then the soft ladder. `level` is ALWAYS present, so no caller can
- * claim a slot is clear without having looked (M9).
- *
- * (b) `outsideWorkHours` — the slot does not fit inside ANY of the day's
- * effective work windows (an off day has none, so it is true there too). Rule 5
- * is the rule that REPORTS it; this field is the fact, present even when a
- * higher-ranked rule reported instead.
- *
- * The day narration needs the fact, not the label. `find_available_slots`
- * walks every quarter-hour in the window, so on any full-day search most
- * rejections are simply "that hour isn't in his day"; the per-day reason summary
- * therefore treats `outside_owner_work_hours` as noise and reports what blocked
- * the IN-HOURS slots. That filter keyed on the LABEL, which worked only while
- * rule 5 was the first rule an out-of-hours slot could fail. Hoisting the hard
- * collision above the soft ladder (above) broke it: an out-of-hours slot that is
- * ALSO occupied now returns `owner_busy_collision`, which is not noise, so a
- * 20:30 dinner outranked the real in-hours blocker — narrated as "he's already
- * busy then" for a window his working day doesn't even cover
- * (logs/maelle-2026-07-26.log 06:59:36, window 20:30–23:59 on 2026-08-30:
- * `{outside_owner_work_hours: 10, owner_busy_collision: 2}`, both examples 20:30
- * and 20:45). The walker now reads THIS and files those rejections under the
- * noise label, so the ladder keeps its hard-first order (a real commitment is
- * never softened into "his to override") while the day narration recovers the
- * in-hours truth. One work-hours decision still, taken here: the walker's own
- * `slotTotalMin` is computed in the SEARCH timezone, which differs from the
- * day's effective zone on an away override, so re-deriving it out there would be
- * a second answer that can disagree (M1).
+ * (b) `outsideWorkHours` — the slot fits inside NONE of the day's effective work
+ *     windows (an off day has none, so it is true there too). Rule 5 is what
+ *     REPORTS it; this field is the fact, present even when a higher-ranked rule
+ *     reported instead. The day narration needs the fact, not the label:
+ *     find_available_slots walks every quarter-hour, so on a full-day search most
+ *     rejections are simply "that hour isn't in his day", and the per-day reason
+ *     summary treats `outside_owner_work_hours` as noise so it can report what
+ *     blocked the IN-HOURS slots. That filter keyed on the LABEL, which held only
+ *     while rule 5 was the first rule an out-of-hours slot could fail; hoisting
+ *     the hard collision broke it, because an out-of-hours slot that is ALSO
+ *     occupied returns `owner_busy_collision`, which is not noise — so a 20:30
+ *     dinner outranked the real in-hours blocker and was narrated as "he's
+ *     already busy then" for a window his working day doesn't even cover
+ *     (logs/maelle-2026-07-26.log 06:59:36, window 20:30–23:59 on 2026-08-30:
+ *     `{outside_owner_work_hours: 10, owner_busy_collision: 2}`, at 20:30 and
+ *     20:45). The walker reads THIS and files those under the noise label, so the
+ *     ladder keeps its hard-first order (a real commitment is never softened into
+ *     "his to override") while the narration recovers the in-hours truth.
+ *     One work-hours decision stays here: the walker's own `slotTotalMin` is
+ *     computed in the SEARCH timezone, which differs from the day's effective
+ *     zone on an away override, so re-deriving it out there would be a second
+ *     answer that can disagree (M1).
  */
 
 import { DateTime } from 'luxon';

@@ -266,13 +266,26 @@ export async function extractSlackDocText(
   //               screenshots — Sonnet reads them as content, not instructions)
   //   colleague → REFUSE: drop the image, post a human refusal via `post`, Sonnet
   //               never sees the bytes (a colleague screenshot claiming "Idan said
-  //               you can do X" is a known injection surface)
+  //               you can do X" is a known injection surface). A scan FAILURE
+  //               (scanFailed — the guard reached no verdict) refuses too: an
+  //               UNSCANNED colleague image is the very thing the guard exists
+  //               to keep from the model, so a Sonnet outage must not wave it
+  //               through (W9 — unclear permission → return less). The owner
+  //               path keeps failing open on the same condition, by design.
   // Returns the image block to attach, or null if dropped. `post` targets the
   // right surface (the DM thread or the channel thread).
 export async function scanAndPrepareImage(ctx: SlackAppContext, params: ScanAndPrepareImageParams): Promise<AnthropicImageBlock | null> {
   const { profile } = ctx;
     const { dl, senderId, senderRole, channelId, threadTs, post } = params;
     const scan = await scanImageForInjection(dl);
+    if (scan.scanFailed && senderRole === 'colleague') {
+      logger.warn('⚠ SECURITY — image scan reached no verdict for a colleague image; refusing (fail closed)', {
+        senderId, channelId, reason: scan.reason,
+      });
+      // Honest wording — this is a hiccup, not a verdict; invite a retry.
+      try { await post(`I couldn't check that image just now — mind sending it again in a few minutes?`); } catch (_) {}
+      return null;  // unscanned bytes never reach the model
+    }
     if (scan.suspicious) {
       logger.warn('⚠ SECURITY — image flagged as suspicious', {
         senderId,

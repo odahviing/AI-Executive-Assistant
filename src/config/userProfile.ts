@@ -410,28 +410,17 @@ const UserProfileSchema = z.object({
     // (amend counter shape is approval-kind-specific; Haiku can't build it
     // reliably). Fails open: any classifier error → pass to Sonnet.
     deterministic_approval_resolve: z.boolean().default(false),
-    // v2.2 — proactive colleague social knobs. Master on/off has moved to
-    // `skills.social` (v2.6.2 rename + consolidation); this block keeps the
-    // fine-tuning sub-config (window hours, cooldown, weekend skip).
-    // The `enabled` field was retired — `skills.social: true` turns the
-    // hourly tick on; `false` no-ops every dispatcher. Old yamls with
-    // `enabled` still parse (kept optional below) but the value is ignored.
-    proactive_colleague_social: z.object({
-      enabled: z.boolean().optional(),  // legacy — value ignored, master is skills.social
-      daily_window_hours: z.tuple([z.number(), z.number()]).default([13, 15]),
-      cooldown_days: z.number().default(5),
-      skip_weekends: z.boolean().default(true),
-    }).default({
-      daily_window_hours: [13, 15],
-      cooldown_days: 5,
-      skip_weekends: true,
-    }),
+    // v2.2's `proactive_colleague_social` block (enabled / daily_window_hours /
+    // cooldown_days / skip_weekends) was DELETED here 2026-08-28. Its master
+    // switch moved to `skills.social` in v2.6.2 and nothing in the repo ever
+    // read the three fine-tuning fields it was kept for. This schema is
+    // non-strict, so a yaml still carrying the key parses exactly as before —
+    // stripped instead of parsed-and-ignored. `skills.social` is the only gate.
   }).default({
     v1_shadow_mode: false,
     calendar_health_mode: 'passive',
     intent_aware_tools: false,
     deterministic_approval_resolve: false,
-    proactive_colleague_social: { daily_window_hours: [13, 15], cooldown_days: 5, skip_weekends: true },
   })),
 
   // v3.0.4 — same null→undefined preprocess as behavior above.

@@ -228,9 +228,6 @@ function initSchema(db: Database.Database): void {
     `ALTER TABLE outreach_jobs ADD COLUMN scheduled_at TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN conversation_json TEXT`,
     `ALTER TABLE outreach_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
-    `ALTER TABLE tasks ADD COLUMN user_requested INTEGER NOT NULL DEFAULT 1`,
-    `ALTER TABLE tasks ADD COLUMN briefed INTEGER NOT NULL DEFAULT 0`,
-    `ALTER TABLE outreach_jobs ADD COLUMN briefed_at TEXT`,
     // v1.8.4 — intent routing on outreach replies. Skills tag an outreach
     // with an intent (e.g. 'meeting_reschedule') and a context_json payload;
     // the reply dispatcher routes incoming replies to the right skill handler.
@@ -684,15 +681,14 @@ function initSchema(db: Database.Database): void {
   for (const sql of taskMigrations) {
     try { db.exec(sql); } catch (_) { /* column already exists */ }
   }
-  // Migrate old user_requested integer to who_requested text
-  try {
-    const hasOldCol = db.prepare(`SELECT user_requested FROM tasks LIMIT 1`).get();
-    if (hasOldCol !== undefined) {
-      // Copy old values: 1 → owner_user_id (we don't know it, so use 'unknown'), 0 → 'system'
-      // Then drop is not possible in SQLite, so we just leave the old column harmlessly
-      db.prepare(`UPDATE tasks SET who_requested = 'system' WHERE who_requested = 'system' AND user_requested = 0`).run();
-    }
-  } catch (_) { /* old column doesn't exist — fresh DB */ }
+  // Legacy dead columns left in place on upgraded DBs (same call as
+  // people_memory.proactive_pending above — a column drop is a risky table
+  // rebuild, and nothing reads them): tasks.user_requested, tasks.briefed,
+  // outreach_jobs.briefed_at. Their ALTER TABLE adds and the old
+  // user_requested→who_requested migration block were removed 2026-08-28 —
+  // that block's UPDATE was a provable no-op (it SET who_requested='system'
+  // WHERE who_requested='system') and had never changed a row. Fresh installs
+  // never get these columns. Safe to drop all three in a future migration.
   // Migrate old statuses to new ones
   try {
     db.prepare(`UPDATE tasks SET status = 'new' WHERE status = 'pending'`).run();

@@ -1,16 +1,15 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, getPreferences, deletePreference, upsertPersonMemory, appendPersonInteraction, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, searchPeopleMemoryEitherDirection, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, getPersonSocialSummary, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
+import { savePreference, deletePreference, upsertPersonMemory, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, searchPeopleMemoryEitherDirection, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, getPersonSocialSummary, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
   writePersonSection,
   resolvePersonSlug,
-  slugifyName,
-  listPersonFiles,
 } from '../memory/peopleMemory';
 import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
+import { SLACK_ID_RE } from '../utils/resolveSlackId';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -571,7 +570,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const recentExchange = await (async () => {
           try {
             const hits = searchPeopleMemory(name)
-              .filter(p => p.slack_id && /^[UW][A-Z0-9]{6,}$/.test(p.slack_id));
+              .filter(p => p.slack_id && SLACK_ID_RE.test(p.slack_id));
             const person = hits[0];
             if (!person?.slack_id) return undefined;
             if (context.senderRole !== 'owner' && person.slack_id !== context.userId) {
@@ -795,7 +794,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // at — must ALSO return that people_memory data, or the relational
         // context (comms style, social-engineering flags, past asks) would be
         // unreachable. Resolve the row by slack_id, else by name/email.
-        const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
         // 2026-08-16 (gh#idan-cohen-memory) — asking about the OWNER is the
         // worst case for a string-search miss: the caller here is ALWAYS the
         // owner (get_person_memory is on ownerOnlyTools above), and his slack
@@ -913,7 +911,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // v3.2.0 — resolve-or-create the person (internal by slack_id, else by
         // name), then key the md file by person_id. This is also what lets an
         // email-only / name-only person get a memory file at all.
-        const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
         const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
         const resolved = resolvePerson(
           SLACK_ID_RE.test(query) ? { slackId: query, ownerDomain } : { name: query, ownerDomain },
@@ -1135,7 +1132,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // and what a higher authority refused. Ensure the row exists first — the
         // upsert only writes the name here, because a STATED timezone belongs to
         // the provenance write below (passing it both ways wrote the field twice).
-        upsertPersonMemory({ slackId, name });
+        // `target.name` (the stored row's own name, via resolvePersonTarget), NOT
+        // the model-supplied `name` arg — the arg is whatever the chat called them
+        // ("Luke") and upsertPersonMemory writes name verbatim, so passing it
+        // stomped the Slack-derived full name on file.
+        upsertPersonMemory({ slackId, name: target.name });
         const coreWrites: Array<[string, CoreFieldWrite]> = [];
 
         if (nameHe && nameHe.trim()) {

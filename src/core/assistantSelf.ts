@@ -19,7 +19,7 @@
  * both owner and colleagues — Maelle's identity is not private.
  */
 
-import { getDb, getPersonMemory, upsertPersonMemory, type PersonMemory, type PersonNote, type PersonProfile, type PersonInteraction } from '../db';
+import { getPersonMemory, upsertPersonMemory, type PersonNote, type PersonProfile, type PersonInteraction } from '../db';
 import type { UserProfile } from '../config/userProfile';
 import logger from '../utils/logger';
 

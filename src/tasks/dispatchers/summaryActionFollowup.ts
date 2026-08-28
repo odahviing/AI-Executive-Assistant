@@ -20,8 +20,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
-import { config } from '../../config';
-import { completeTask, createTask, updateTask } from '../index';
+import { completeTask, updateTask } from '../index';
 import {
   createOutreachJob,
   getPersonMemory,

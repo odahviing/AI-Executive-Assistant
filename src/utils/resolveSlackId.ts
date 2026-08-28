@@ -21,9 +21,11 @@
  *
  * Behaviour:
  *   - Real Slack ID format → return as-is, was_hallucinated=false
- *   - Non-matching format AND name supplied → people_memory lookup by name,
+ *   - Non-matching format AND name supplied → people_memory lookup by name
+ *     (whole-name match, never a substring; see the gate inline below),
  *     return resolved real ID, was_hallucinated=true
- *   - No people_memory hit → return null, caller decides (fail clean, or
+ *   - No genuine hit, or >1 distinct person genuinely matching (ambiguous) →
+ *     return null, caller decides (fail clean, or
  *     skip silently depending on call site). The tool can then surface a
  *     human error message ("I don't have a Slack ID for X — call
  *     find_slack_user first") instead of a confusing "user_not_found".
@@ -33,13 +35,18 @@
  */
 
 import { searchPeopleMemory } from '../db/people';
+import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
 
 /**
  * Slack user IDs match `/^[UW][A-Z0-9]{6,}$/` — `U` for users, `W` for
  * Enterprise Grid users, then 6+ uppercase alphanumeric characters. Anything
  * else (a slug like `oran_frenkel`, an email, a free-form name) is invalid.
+ *
+ * Exported as THE definition of the slack-id shape — callers that need the
+ * test (assistant.ts, memory/peopleMemory.ts, …) import it rather than
+ * re-declaring the literal, so the shape can't drift per call site.
  */
-const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
+export const SLACK_ID_RE = /^[UW][A-Z0-9]{6,}$/;
 
 export interface ResolveSlackIdResult {
   /** Real Slack ID, or null when neither rawId is valid nor name resolves. */
@@ -84,11 +91,27 @@ export function resolveSlackId(
     : (rawId && rawId.trim().length > 0 ? rawId.trim() : null);
   if (lookupName) {
     try {
-      const matches = searchPeopleMemory(lookupName);
-      const hit = matches.find(p => p.slack_id && SLACK_ID_RE.test(p.slack_id));
-      if (hit) {
+      // Whole-name gate: searchPeopleMemory is a bare SQL LIKE '%q%' ordered
+      // by last_seen, so "Dan" substring-matches "Idan" and "Simon" matches
+      // "Simone" — and this resolver BINDS an identity for person-writes
+      // (resolvePersonTarget) and colleague DMs (outreach, tasks/skill), where
+      // the first plausible row used to win. Same rule the deterministic
+      // attendee resolvers already enforce (`nameGenuinelyMatches`,
+      // memory/resolveAttendeeEmails.ts) — one matching rule for identity.
+      const genuine = searchPeopleMemory(lookupName).filter(p =>
+        p.slack_id && SLACK_ID_RE.test(p.slack_id)
+        && nameGenuinelyMatches(p.name, p.email, lookupName),
+      );
+      // >1 DISTINCT slack identity genuinely matching = ambiguous — never
+      // guess which human. Returning null lets the tool surface "I don't have
+      // a Slack ID for X — call find_slack_user first" instead of silently
+      // picking whoever was seen most recently. (slack_id is UNIQUE, so
+      // duplicate rows for ONE human can't both carry an id — distinct ids
+      // here are genuinely distinct people.)
+      const distinct = new Set(genuine.map(p => p.slack_id as string));
+      if (distinct.size === 1) {
         return {
-          slack_id: hit.slack_id,
+          slack_id: [...distinct][0],
           was_hallucinated: rawId !== undefined && rawId !== null,
           rejected_input: rawId ?? undefined,
         };

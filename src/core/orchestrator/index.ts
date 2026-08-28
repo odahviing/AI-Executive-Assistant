@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { config } from '../../config';
 import type { PendingSocialCoda } from '../social/generateCoda';
 import { executeSkillTool, WRITE_TOOLS } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
@@ -7,6 +6,7 @@ import type { SkillContext, ChannelId } from '../../skills/types';
 import { auditLog } from '../../db';
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
+import { detectMessageLanguage } from '../../utils/detectMessageLanguage';
 import { callClaude, mutationOutcome, summarizeToolCall, summarizeInternalAction } from './turnHelpers';
 import { buildTurnContext } from './buildTurnContext';
 
@@ -129,16 +129,8 @@ export interface OrchestratorInput {
   onWriteExecuted?: (toolName: string) => void;
 }
 
-export interface SlackAction {
-  action: string;
-  [key: string]: unknown;
-}
-
 export interface OrchestratorOutput {
   reply: string;
-  requiresApproval: boolean;
-  approvalId?: string;
-  slackActions?: SlackAction[];  // actions that need the Slack client to execute
   /** True if a real calendar booking succeeded in this turn. Consumed by the
    *  post-hoc hallucination backstop in app.ts — when the LLM claims a booking
    *  but this is false, the reply is rewritten to a safe fallback. */
@@ -238,8 +230,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     availabilityQuestionDetected,
   } = await buildTurnContext(input);
 
-  let requiresApproval = false;
-  let approvalId: string | undefined;
   // Track tools called so we can save a summary in conversation history.
   // This prevents Claude from forgetting what it just did on the next turn.
   const toolCallSummaries: string[] = [];
@@ -260,7 +250,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // re-call create_meeting".
   const mutationActions: NonNullable<OrchestratorOutput['mutationActions']> = [];
   let finalReply = '';
-  const slackActions: SlackAction[] = [];
   // True if any tool in this turn actually performed a real calendar booking.
   // Consumed by the post-hoc hallucination backstop in app.ts — if the reply
   // claims a booking happened but this is false, the claim is rewritten.
@@ -439,12 +428,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       break;
     }
 
-    // end_turn WITH tool calls means Claude finished tools but forgot to write a reply
-    // Push tool results and loop once more to get the final text
-    if (response.stop_reason === 'end_turn' && toolBlocks.length > 0) {
-      // Still need to process the tools and get a confirmation reply
-    }
-
+    // end_turn WITH tool calls means Claude finished tools but forgot to write a
+    // reply — fall through: process the tools and loop once more for the final text.
     messages.push({ role: 'assistant', content: response.content });
 
     const skillContext: SkillContext = {
@@ -734,17 +719,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
-      // Check if any skill signalled approval required
-      if (
-        result &&
-        typeof result === 'object' &&
-        'requiresApproval' in result &&
-        (result as Record<string, unknown>).requiresApproval === true
-      ) {
-        requiresApproval = true;
-        approvalId = (result as Record<string, unknown>).approvalId as string;
-      }
-
       // v3.1.2 (#118) — pick up the vacuous flag on check_calendar_health so
       // the routine dispatcher can suppress posting on auto-fired runs that
       // found nothing.
@@ -755,16 +729,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         (result as Record<string, unknown>).vacuous === true
       ) {
         healthCheckVacuous = true;
-      }
-
-      // Check if any skill needs Slack client execution
-      if (
-        result &&
-        typeof result === 'object' &&
-        '_requires_slack_client' in result &&
-        (result as Record<string, unknown>)._requires_slack_client === true
-      ) {
-        slackActions.push(result as unknown as SlackAction);
       }
 
       // Track whether a real booking occurred this turn — used by the
@@ -1145,21 +1109,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     messages.push({ role: 'user', content: toolResults });
   }
 
-  // If sender is a colleague, scrub any sensitive calendar data from tool results
-  // that may have leaked into the conversation history before generating final reply
-  if (input.senderRole === 'colleague') {
-    for (const msg of messages) {
-      if (msg.role === 'user' && typeof msg.content === 'string') {
-        // Already safe — user messages don't contain calendar data
-      } else if (msg.role === 'assistant' && typeof msg.content === 'string') {
-        // Scrub body/description fields from any calendar event data
-        msg.content = msg.content
-          .replace(/"body":\s*"[^"]*"/g, '"body": "[redacted]"')
-          .replace(/"bodyPreview":\s*"[^"]*"/g, '"bodyPreview": "[redacted]"')
-          .replace(/"description":\s*"[^"]*"/g, '"description": "[redacted]"');
-      }
-    }
-  }
+  // (2026-08-28 audit) — a "scrub calendar body/description from history before
+  // generating the final reply" block that used to sit here was DELETED: it ran
+  // AFTER the tool loop ended, mutating the local `messages` array that nothing
+  // reads again (no further Claude call this turn), and its string-typed match
+  // never touched tool_result blocks (arrays) anyway — provably inert since the
+  // loop restructure. The real controls are payload scoping in the calendar
+  // tools (W9 — colleague-path returns free/busy only) and the output gates
+  // (utils/guards/runOutputGates.ts) on the reply text itself.
 
   // v2.8.1 (#41) — recovery pass DELETED. Pre-fix, when Sonnet ran tools but
   // produced no text, the orchestrator made a second Sonnet call to generate
@@ -1206,9 +1163,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const SILENCE_ELIGIBLE = new Set([
           'note_about_person',
           'log_interaction',
-          'learn_preference',
-          'forget_preference',
-          'recall_preferences',
+          'manage_preference', // v2.9 — merged learn_preference/forget_preference/recall_preferences
           'recall_interactions',
           'update_person_profile',
           'update_person_memory',
@@ -1236,9 +1191,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           classify_summary_feedback: 'noted your feedback',
           // Memory
           update_my_preferences: 'saved that as a standing preference',
-          learn_preference: 'saved that as a preference',
-          forget_preference: 'cleared that preference',
-          recall_preferences: 'looked up your preferences',
+          manage_preference: 'updated a preference', // v2.9 — merged learn/forget/recall_preferences; not in VERB_PRIORITY so never actually surfaces (same as the tools it replaced)
           recall_interactions: 'checked past interactions',
           note_about_person: 'made a note',
           note_about_self: 'got it, saved that for next time',
@@ -1345,8 +1298,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     action: 'orchestrator_run',
     source: input.channel,
     actor: input.userId,
-    details: { threadTs, iterations: iteration, requiresApproval, skills: tools.map(t => t.name) },
-    outcome: requiresApproval ? 'pending_approval' : 'success',
+    details: { threadTs, iterations: iteration, skills: tools.map(t => t.name) },
+    outcome: 'success',
   });
 
   // v2.0.7 — shadow-DM the owner whenever Maelle replies to a colleague.
@@ -1355,12 +1308,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // for a slot bump) happened completely invisibly until the next morning
   // brief. This closes the silence gap: one line per inbound so the owner can
   // follow along in ~real time. Gated on v1_shadow_mode like every other
-  // shadow path. Skipped when requiresApproval=true because the approval
-  // helper already DMs the owner with the full ask.
+  // shadow path.
   // v3.0.8 — shadow-notify moved to postReply.ts so it mirrors the
   // POST-GATE text (what the colleague actually receives), not the raw
   // draft. See postReply.ts Step 4.6.
-  void requiresApproval;  // suppress unused-var lint if it was only read here
 
   // v2.4.2 — owner-said-done scanner (deterministic version of RULE 2d).
   // Fire-and-forget after every owner turn — keyword pre-filter is cheap,
@@ -1525,10 +1476,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         });
         if (codaDirective.mode === 'continue' || codaDirective.mode === 'raise_new') {
           // v2.2.4 (bug 1A) — pass conversation language so the coda matches.
-          // Detect from the inbound user message — Hebrew chars present → 'he',
-          // else 'en'. Cheap, deterministic; the coda generator falls back to
-          // English when omitted, so failure mode is graceful.
-          const codaLang: 'he' | 'en' = /[֐-׿]/.test(input.userMessage ?? '') ? 'he' : 'en';
+          // (2026-08-28 audit) — derived through the ONE shared script detector
+          // (utils/detectMessageLanguage, dominant-script ≥30%) instead of a
+          // second inline Hebrew-range regex, so a mostly-English message that
+          // merely names one Hebrew word gets an English coda — the same signal
+          // the per-turn reply-language re-stamp reads (buildTurnContext.ts).
+          // Anything other than Hebrew falls back to English, so the failure
+          // mode stays graceful.
+          const codaLang: 'he' | 'en' =
+            detectMessageLanguage(input.userMessage) === 'Hebrew' ? 'he' : 'en';
           // Eligibility is settled HERE — it is a property of this turn and
           // nothing downstream can re-derive it. The SENTENCE is not written
           // here: `composeSocialCoda` runs in the transport's existing
@@ -1569,9 +1525,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
 
   return {
     reply: finalReply,
-    requiresApproval,
-    approvalId,
-    slackActions,
     bookingOccurred,
     availabilityQuestionDetected,
     toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,

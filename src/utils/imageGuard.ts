@@ -1,21 +1,23 @@
 /**
  * Image content guard (v1.7.1) — extract any visible text and flag injection attempts.
  *
- * Owner-only path today: always proceeds (owner is trusted) but logs +
- * shadow-notifies any suspicious-looking text in the image so we have an
- * audit trail. When the colleague path opens (per issue #1 Connection-interface
- * work), the policy here flips from "log and proceed" to "refuse and notify"
- * — single switch, no re-architecture.
+ * This module only SCANS. The role-keyed POLICY lives with its one caller,
+ * `scanAndPrepareImage` (connectors/slack/app/fileIngestion.ts): owner images
+ * proceed even when flagged (trusted; logged + shadow-notified), colleague
+ * images are refused when flagged — and refused when the scan itself FAILED
+ * (`scanFailed` below), because an unscanned colleague image is exactly what
+ * this guard exists to keep away from the model. The colleague path has been
+ * live since v1.7.1 (DM) / #144.
  *
  * Same shape as the other Sonnet guards: narrow classifier, strict JSON
- * output, fails open on parse / API errors so an LLM hiccup doesn't drop a
- * legitimate owner image.
+ * output. On parse / API errors it returns `suspicious: false` PLUS
+ * `scanFailed: true` — "no verdict", not "clean" — so the caller can fail
+ * open for the owner (an LLM hiccup must not drop a legitimate owner image)
+ * and closed for a colleague.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
 import { SONNET } from '../llm/models';
-import { config } from '../config';
 import logger from './logger';
 import type { DownloadedImage } from '../vision';
 
@@ -26,6 +28,13 @@ export interface ImageScanResult {
   extractedText: string | null;
   reason?: string;
   elapsedMs: number;
+  /**
+   * True when NO verdict was reached (non-JSON reply or API error) — the
+   * image is UNSCANNED, not clean. `suspicious` stays false so the owner
+   * path proceeds unchanged; the colleague path must treat this as a
+   * refusal (fileIngestion.ts's scanAndPrepareImage — W9: unclear → less).
+   */
+  scanFailed?: boolean;
 }
 
 /**
@@ -90,11 +99,11 @@ Output STRICT JSON only — no prose, no markdown, no code fences:
     try {
       parsed = JSON.parse(cleaned);
     } catch (_) {
-      logger.warn('Image guard returned non-JSON — failing open', {
+      logger.warn('Image guard returned non-JSON — no verdict (owner proceeds, colleague refused)', {
         preview: text.slice(0, 200),
         elapsedMs,
       });
-      return { suspicious: false, extractedText: null, reason: 'parse_error', elapsedMs };
+      return { suspicious: false, extractedText: null, reason: 'parse_error', elapsedMs, scanFailed: true };
     }
 
     const suspicious = parsed.suspicious === true;
@@ -114,7 +123,7 @@ Output STRICT JSON only — no prose, no markdown, no code fences:
     return { suspicious, extractedText, reason, elapsedMs };
   } catch (err) {
     const elapsedMs = Date.now() - start;
-    logger.warn('Image guard errored — failing open', { err: String(err), elapsedMs });
-    return { suspicious: false, extractedText: null, reason: 'api_error', elapsedMs };
+    logger.warn('Image guard errored — no verdict (owner proceeds, colleague refused)', { err: String(err), elapsedMs });
+    return { suspicious: false, extractedText: null, reason: 'api_error', elapsedMs, scanFailed: true };
   }
 }

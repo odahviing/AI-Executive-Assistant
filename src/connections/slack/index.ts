@@ -10,7 +10,7 @@
  */
 
 import type { App } from '@slack/bolt';
-import type { Connection, ConnectionChannel, ConnectionUser, SendOptions, SendResult } from '../types';
+import type { Connection, ConnectionChannel, ConnectionUser, SendResult } from '../types';
 import type { UserProfile } from '../../config/userProfile';
 import {
   sendDM,

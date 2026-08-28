@@ -29,3 +29,15 @@ export function ownerEmailAddresses(profile: UserProfile): string[] {
   const aliases = (profile.channels.email?.owner_aliases ?? []).map(a => a.trim().toLowerCase());
   return [owner, ...aliases];
 }
+
+/**
+ * Maelle's OWN mailbox address, normalized once — the one derivation for the
+ * two places that compare against it: mailPoll.ts's own-mailbox loop guard
+ * (drop her own outgoing mail landing back in the inbox) and inbound.ts's
+ * meaningful-participant filter. The two used to normalize independently
+ * (one trimmed, one didn't) — the exact silent-drift shape this file exists
+ * to prevent. Null when channels.email or the mailbox is unset.
+ */
+export function mailboxAddress(profile: UserProfile): string | null {
+  return profile.channels.email?.mailbox?.trim().toLowerCase() || null;
+}

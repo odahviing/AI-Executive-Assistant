@@ -31,7 +31,6 @@ import { updateRequest } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
-import { config } from '../config';
 import { getConnection } from '../connections/registry';
 import { shadowNotify } from '../utils/shadowNotify';
 import logger from '../utils/logger';

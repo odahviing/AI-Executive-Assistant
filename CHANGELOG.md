@@ -2,6 +2,27 @@
 
 ---
 
+## 4.8.0 — Every remaining lane got a full correctness pass, and a substring bug in identity resolution is closed
+
+The charter-compliance sweep that covered Matchmaker, Gatekeeper and Registrar in 4.7.5 now covers the rest of the roster — Librarian, SlackMaster, Diplomat, Instructor and Handyman — closing out a full audit of all eight lanes in one stretch. The headline fix is an identity-resolution bug: a bare substring match could bind a Slack name reference to the wrong person ("Dan" resolving to "Idan"), reachable from every person-write tool and colleague messaging. Alongside it, a security fail-open on a Sonnet outage during colleague image scanning is closed, several silent name-overwrite bugs are fixed, and a full-project, unscoped hygiene sweep (comment ratio, dead imports, one dead config key, stale citations) ran across the whole codebase for only the second time ever.
+
+### Fixed (high-impact)
+- **Identity substring-match bug.** `resolveSlackId`'s name-fallback lookup had no whole-name gate — a query for "Dan" or "Simon" could silently bind to "Idan" or "Simone", first-seen-wins. This resolver backs every person-write tool and colleague DM addressing. Now filtered through the same whole-token match every other identity resolver already enforces, and refuses (rather than guesses) when more than one distinct person genuinely matches.
+- **Colleague image-scan security fail-open closed.** A Sonnet outage or malformed response during the injection scan on a colleague-sent image used to wave the (unscanned) image straight through. It now refuses with a retry message on that condition; the owner path is untouched and still fails open by design.
+- **Two silent name-overwrite bugs.** A tool call with an omitted or partial name argument (`update_person_profile`, `message_colleague`) could stomp a real stored name with a raw Slack ID or a truncated version of it. An existing row now always keeps its stored name; a tool-supplied name only seeds a brand-new row.
+- **Mailbox-address and email-thread-key drift.** Two independent normalizations of Maelle's own mailbox address (one trimmed, one didn't) could desync her own-mail loop guard from the inbound participant filter on a mailbox address with stray whitespace. Consolidated to one shared derivation.
+
+### Fixed (small)
+- A `.mov` voice-video sent live was silently dropped by a file-type filter that only matched two extensions; the replay/catch-up path already matched by mimetype and would pick it up after downtime. Both paths now agree.
+- A stale tool-name list (`learn_preference`/`forget_preference`/`recall_preferences`, merged into `manage_preference` at v2.9) meant a preference-only turn no longer stayed silent as designed, and a briefing-time change pointed the model at a tool that no longer exists.
+- A dead approval/Slack-action dispatch path — never fired by any tool in the current codebase — removed end to end (an unused footer, a dead coordinator helper, an unused collection loop and its interface fields).
+- A handful of stale `file:line` citations across code comments and lane charter docs, corrected on sight.
+
+### Framework
+- The remaining five lanes (Librarian, SlackMaster, Diplomat, Instructor, Handyman) each ran a full charter-compliance audit against current code — all eight lanes have now been audited. Several small provable fixes landed inline per lane; product/design-shaped findings were left for the owner (channel-mention posture vs. continuation behavior, a missing name-provenance column, an email-leg gate coverage gap).
+- A second unscoped, full-project Cleaner sweep (the first was 2026-08-03) covered all of `src/`, `scripts/`, and every `.claude/*.md` doc: 101 unused imports removed, one dead config key deleted, a 127-line comment header trimmed, roughly a dozen stale citations fixed across code and docs. Zero dead files or dead exports found.
+- A pre-wrap adversarial verify pass (forced to Fable) ran over the full accumulated diff before this wrap — zero overturns; two small discoveries (dead return-side plumbing left over from the approval-dispatch removal, one more stale citation) fixed directly.
+
 ## 4.7.5 — Offsites stop asking for the drive time, and three lanes got a full correctness pass
 
 Booking an offsite meeting no longer asks anyone how long the commute is — a category default applies automatically, and a venue's own remembered travel time now overrides it when known. Alongside that feature, a full charter-compliance audit of the scheduling core, the output-safety gates, and the request/approval spine surfaced and fixed a real regression that had shipped invisibly within this same wrap, a false-attribution bug, a silently-failing scheduled message, and a wide batch of "the same fact computed two different ways" bugs.

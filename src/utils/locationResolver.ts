@@ -15,7 +15,6 @@
 
 import { getAnthropicClient } from '../llm/client';
 import { SONNET } from '../llm/models';
-import { config } from '../config';
 import { tavilySearch, TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS } from '../skills/general';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';

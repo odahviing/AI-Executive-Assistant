@@ -34,7 +34,6 @@ export class MeetingsSkill implements Skill {
   private readonly ops = new _LegacyOpsSkill();
 
   getTools(profile: UserProfile): Anthropic.Tool[] {
-    const allowedDurations = profile.meetings.allowed_durations.join('/');
     // Read category enum from yaml instead of hardcoding owner-specific
     // names. Empty enum is invalid in Anthropic schemas, so a profile
     // without categories defined gets the field omitted entirely (matches
@@ -273,7 +272,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             },
             travel_buffer_minutes: {
               type: 'number',
-              description: 'Only for meeting_mode=custom. One-way travel time in minutes; the tool pads slots on BOTH sides so the meeting does not crash into adjacent events.',
+              description: 'Only for meeting_mode=custom, and only when a one-way travel time was stated in this conversation — the tool pads slots on BOTH sides. Omitted → the category\'s default travel padding applies automatically; never ask for a trip time.',
             },
             must_be_after_event_id: {
               type: 'string',
@@ -586,7 +585,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
-    const { profile, channelId, threadTs } = context;
+    const { profile } = context;
 
     switch (toolName) {
 
@@ -1263,7 +1262,7 @@ VALIDATE A MOVE BEFORE PROPOSING IT — the slot you propose must come FROM \`fi
 - A colleague ORGANIZING a meeting they're NOT in → \`requester_is_attending: false\`, so their own calendar doesn't filter the search or come back as "you're busy in all the options".
 NARRATE every time in the LISTENER's zone (${firstName} → his; a colleague → theirs) from the tool's returned strings (\`per_attendee_local[].local_display\` / the fields above) — never your own arithmetic. Append the other party's zone once as a parenthetical only if relevant ("Wed 12:45 — 15:15 her time"); skip it when both share a zone. Mention \`travelers\` once ("Anna's in Boston this week"). An attending colleague needs no tag — their stored timezone already drives the labels.
 
-BOOKING / MOVING a time GIVEN in another zone — same tag-don't-convert contract, on the booking tools. When the time was stated in a non-owner zone ("book it 9:30 EST", "2pm ET", or a destination-zone clock while ${firstName} is travelling), \`create_meeting\` / \`move_meeting\` take \`start_timezone\`: pass the clock EXACTLY as stated (start/new_start = "...T09:30:00") + \`start_timezone\` = that IANA zone, and the tool converts to his local time deterministically. SAME TRAP as the search field above: do NOT also hand-convert the time — passing a converted clock AND start_timezone double-converts it. Omit start_timezone only when the time is already his local zone.
+BOOKING / MOVING a time GIVEN in another zone — same tag-don't-convert contract, on the booking tools. When the time was stated in a non-owner zone ("book it 9:30 EST", "2pm ET", or a destination-zone clock while ${firstName} is travelling), \`create_meeting\` / \`move_meeting\` take \`stated_zone\`: pass the clock EXACTLY as stated (start/new_start = "...T09:30:00") + \`stated_zone\` = the zone he named (see the field's own values), and the tool converts deterministically. SAME TRAP as the search field above: do NOT also hand-convert the time — passing a converted clock AND stated_zone double-converts it. Omit stated_zone only when he named no zone.
 
 AVAILABILITY VS BOOKING — answer the question, then OFFER to book.
 When a colleague asks "is ${firstName} free at X?" / "is X open Sunday at 14:00?" — that's an AVAILABILITY check, not a booking request. Answer the availability question first ("yes, he's free Sunday 10.5 at 14:00 for 55 min"), THEN offer the next step in the same reply: "want me to send the invite, or are you just checking?" Give them the choice. Don't assume they want it booked, don't assume they don't. The colleague might be lining up multiple options before committing, OR they might be ready to lock it in — let them tell you. ONLY call \`create_meeting\` after they say go.
@@ -1439,7 +1438,7 @@ Subject: USE WHAT THE OWNER STATED. If his message names the meeting in any form
 
 Work week: ${firstName}'s work days are ${profile.schedule.office_days.days.join(', ')} + ${profile.schedule.home_days.days.join(', ')}. "Next week" means HIS work week. Don't pass search_from/search_to that exclude valid work days; if in doubt, omit search_to and let the search expand.
 
-TIMEZONES: each person in WORKSPACE CONTACTS may have a "tz:" field — use it. Propose slots in THEIR timezone terms ("12-3p ET = 19-22 my side"), not yours. If they give a time window in their zone (ET/PT/GMT/etc.), respect it — never volunteer slots outside it. If you don't know their tz yet, assume ${profile.user.timezone}; if the conversation reveals a new tz, save it via update_personprofile (don't overwrite confirmed ones without strong signal).
+TIMEZONES: each person in WORKSPACE CONTACTS may have a "tz:" field — use it. Propose slots in THEIR timezone terms ("12-3p ET = 19-22 my side"), not yours. If they give a time window in their zone (ET/PT/GMT/etc.), respect it — never volunteer slots outside it. If you don't know their tz yet, assume ${profile.user.timezone}; if the conversation reveals a new tz, save it via update_person_profile (don't overwrite confirmed ones without strong signal).
 
 ${isSlackNative ? `CALENDAR SCOPE with colleagues (${firstName}'s calendar is already visible via Outlook — the issue is scope, not leaking):
 - OK to share ONE specific event tied to the slot being scheduled ("he has Simon at 10 Monday, want me to see if that can move?").

@@ -1136,7 +1136,7 @@ async function runClaimCheckAndMaybeRewrite(
         // correctly, but this check runs from ALL THREE sites and cannot rely on
         // caller-side scoping to know which one it's in — it must derive "real
         // colleague, real 1:1 DM" itself, from ctx, every time:
-        //   - EMAIL LEG excluded by transport: `inbound.ts:342` passes
+        //   - EMAIL LEG excluded by transport: `inbound.ts:349` passes
         //     `senderId: from`, an email address, which is trivially never equal
         //     to a Slack id — so `senderId !== slack_user_id` was ALWAYS true on
         //     that leg regardless of who actually sent it, and runEmailLegGates'
