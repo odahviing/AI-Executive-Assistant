@@ -1076,6 +1076,7 @@ async function runClaimCheckAndMaybeRewrite(
           targetName: verdict.target_name,
           ownerFirstName: profile.user.name.split(' ')[0],
           toolSummaries: result.toolSummaries ?? [],
+          isOwnerAudience: ctx.transport === 'email',
         });
         if (rewritten && rewritten.trim().length > 0) {
           return formatForSlack(rewritten);
@@ -1117,6 +1118,7 @@ async function runClaimCheckAndMaybeRewrite(
         // o#224 — no approvalGrantContext here: permission_granted claims
         // return above and never reach this call (see the block above).
         toolSummaries: result.toolSummaries ?? [],
+        isOwnerAudience: ctx.transport === 'email',
       });
       // v4.2.x — no history write here any more. This used to append the honest
       // version so the next turn wouldn't act on the dishonest draft, because the
@@ -1456,6 +1458,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
       targetName: verdict.target_name,
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: result.toolSummaries ?? [],
+      isOwnerAudience: ctx.transport === 'email',
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, rewritten);
@@ -1800,6 +1803,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: result.toolSummaries ?? [],
       groundedToolLines,
+      isOwnerAudience: ctx.transport === 'email',
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, rewritten);

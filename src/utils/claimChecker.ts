@@ -101,8 +101,23 @@ const GENERIC_HONEST_MISS = "Actually, hold on — I'm not sure that went throug
  *     detection, not a language guess) so a Hebrew/Russian/Arabic thread
  *     doesn't get an English line in its otherwise-native-language reply.
  */
-function genericHonestHedge(draft: string): string {
+// email-leg-hedge-shipped-colleague-third-person-wording (2026-08-28) — this
+// line was written for the colleague-facing case (talking ABOUT the owner to
+// someone else, hence "confirm it with him directly"), then reused unchanged
+// on 2026-08-24 for the ungrounded-slot-claim case, which — unlike the
+// original invented-owner-fact case — also fires on the email leg, where the
+// reply goes DIRECTLY to the owner. "him" has no antecedent there and reads
+// as broken. `isOwnerAudience` (true when `ctx.transport === 'email'`, set by
+// every call site in runOutputGates.ts) picks the second-person wording
+// instead of silently shipping a third-person line to its own subject.
+function genericHonestHedge(draft: string, isOwnerAudience?: boolean): string {
   const lang = detectMessageLanguage(draft);
+  if (isOwnerAudience) {
+    if (lang === 'Hebrew') return 'רגע — לגבי הפרט הספציפי הזה אני לא לגמרי בטוחה, כדאי שתוודא בעצמך.';
+    if (lang === 'Russian') return 'Секунду — в этом конкретном моменте я не совсем уверена, лучше уточнить это самостоятельно.';
+    if (lang === 'Arabic') return 'لحظة — لست متأكدة تمامًا من هذه النقطة بالذات، من الأفضل التأكد من ذلك بنفسك.';
+    return "Actually, I'm not totally sure about that specific point — best to double check it yourself.";
+  }
   if (lang === 'Hebrew') return 'רגע — לגבי הפרט הספציפי הזה אני לא לגמרי בטוחה, כדאי לוודא ישירות מולו.';
   if (lang === 'Russian') return 'Секунду — в этом конкретном моменте я не совсем уверена, лучше уточнить напрямую у него.';
   if (lang === 'Arabic') return 'لحظة — لست متأكدة تمامًا من هذه النقطة بالذات، من الأفضل التأكد منه مباشرة.';
@@ -894,6 +909,11 @@ export async function rewriteOwningTheMiss(opts: {
   // through verbatim so the rewrite corrects the draft using the real
   // times/verdict rather than a generic hedge with no facts behind it.
   groundedToolLines?: string[];
+  // email-leg-hedge-shipped-colleague-third-person-wording (2026-08-28) — true
+  // when this reply goes directly to the owner (the email leg), so the
+  // scoped fallback's wording can address them in second person instead of
+  // the colleague-facing "confirm it with him directly" default.
+  isOwnerAudience?: boolean;
 }): Promise<string | null> {
   const isInventedOwnerFact = opts.actionType === 'invented_fact';
   const isUngroundedSlotClaim = opts.actionType === 'ungrounded_slot_claim';
@@ -1082,7 +1102,7 @@ ${opts.draft}`;
       if (preservesRest && !isMetaOrEmpty(redaction) && redaction.length >= opts.draft.length * 0.4) {
         return redaction;
       }
-      return genericHonestHedge(opts.draft);
+      return genericHonestHedge(opts.draft, opts.isOwnerAudience);
     };
 
     // verdict=keep (or missing/garbled) → classifier misfired → keep original.

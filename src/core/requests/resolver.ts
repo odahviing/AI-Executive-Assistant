@@ -903,8 +903,19 @@ export async function notifyRequesterOfDecision(
     verdict, state: row.state, hasRequester: !!row.requester_slack_id,
   });
   const requesterSlackId = row.requester_slack_id;
-  if (!requesterSlackId) {
-    logger.info('notifyRequesterOfDecision — skip: no requester_slack_id (owner-internal)', { id: row.id });
+  // requester-relay-never-targets-owner — requester_slack_id can end up
+  // self-referential (the owner's own id): the same authority-vs-senderRole
+  // misclassification class already documented at tasks/skill.ts's
+  // flagUnresolvedFreeformForOwner, and already guarded against by every OTHER
+  // requester-relay call site (orchestrator/index.ts's relayedRequestersThisTurn
+  // build, closeMeetingArtifacts.ts's thread-match filter + relay gate) — this
+  // one wasn't. Without this, the scanner's 'closed_by_owner' path DMed the
+  // owner a third-person narration of his own message ("Idan said yes..."),
+  // plus a shadow copy and an outreach_jobs row, both keyed on himself.
+  if (!requesterSlackId || requesterSlackId === row.owner_user_id) {
+    logger.info('notifyRequesterOfDecision — skip: no requester_slack_id, or requester is the owner himself (owner-internal)', {
+      id: row.id, requesterSlackId: requesterSlackId ?? null,
+    });
     return;  // owner-internal request, nothing to close back
   }
   // v3.4.7 — reverse-order double-notify guard. Sonnet already messaged this

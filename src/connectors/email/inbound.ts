@@ -50,7 +50,8 @@ import { EMAIL_KEY_PREFIX } from '../../utils/offeredSlotsStash';
 import { getConnection, registerConnection } from '../../connections/registry';
 import type { Connection } from '../../connections/types';
 import { runOrchestrator } from '../../core/orchestrator';
-import { getConversationHistory, appendToConversation, resolvePerson, setPersonTimezoneByEmail, type CoreFieldSetBy } from '../../db';
+import { getConversationHistory, appendToConversation, resolvePerson, setPersonTimezoneByEmail, getPersonByEmail, setCurrentTravelById } from '../../db';
+import { DateTime } from 'luxon';
 import { isNonHumanAttendee } from '../../memory/recordBooking';
 import { extractForwardedParticipants } from './extractParticipants';
 import { htmlToPlainText } from './htmlToText';
@@ -275,10 +276,45 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
       continue;
     }
     const provablyOwnersOwnText = statedZoneAppearsInUniqueBody(hint.statedTimezone, uniqueBodyPlain);
-    const setBy: CoreFieldSetBy = provablyOwnersOwnText ? 'owner' : 'auto';
-    const { outcome } = setPersonTimezoneByEmail(hint.email, iana, setBy, { ownerDomain });
-    logger.info('Email inbound — stated timezone resolved and applied', {
-      email: hint.email, stated: hint.statedTimezone, iana, setBy, outcome, provablyOwnersOwnText,
+    if (provablyOwnersOwnText) {
+      // The owner's own explicit words — his standing ruling: "if I tell you
+      // in email the timezone, you know it." A stated correction from the
+      // person who owns the fact is durable, same as owner-tier anywhere else
+      // in people_memory — write it to the permanent base field.
+      const { outcome } = setPersonTimezoneByEmail(hint.email, iana, 'owner', { ownerDomain });
+      logger.info('Email inbound — stated timezone resolved and applied (owner-tier, permanent)', {
+        email: hint.email, stated: hint.statedTimezone, iana, outcome,
+      });
+      continue;
+    }
+    // person-permanent-timezone-corrupted-by-transient-email-signal — the
+    // email ITSELF states a zone for someone else (a signature block, a
+    // third party's own words), which is exactly the low-confidence, possibly
+    // misattributed signal the existing travel-override system exists to
+    // absorb safely: `people_memory.timezone` is the permanent base (Slack's
+    // own `users.info.tz` sync writes there too, at the same 'auto' rank),
+    // and until now this loop wrote straight into that base field with no
+    // date and no expiry — able to silently and permanently stomp a correct,
+    // Slack-verified zone with a same-day guess that never self-corrects.
+    // Route it instead through the SAME dated, self-expiring mechanism
+    // `update_person_profile`'s `currently_traveling` argument already uses
+    // (`setCurrentTravelById`/`getCurrentTravelById`, people.ts) — a bounded
+    // window rather than a permanent, unprotected overwrite. `location`
+    // carries the raw stated text (not the resolved IANA string) so it
+    // re-resolves through the identical `inferTimezoneFromStateStatic` path
+    // attendeeTzForDay already uses for every other travel record.
+    const person = getPersonByEmail(hint.email);
+    if (!person) {
+      logger.warn('Email inbound — stated timezone hint has no resolved person row; skipping', {
+        email: hint.email, stated: hint.statedTimezone,
+      });
+      continue;
+    }
+    const from = DateTime.now().toFormat('yyyy-MM-dd');
+    const until = DateTime.now().plus({ days: 14 }).toFormat('yyyy-MM-dd');
+    setCurrentTravelById(person.person_id, { location: hint.statedTimezone, from, until });
+    logger.info('Email inbound — stated timezone resolved as a bounded travel override (auto-tier, expires)', {
+      email: hint.email, stated: hint.statedTimezone, iana, from, until,
     });
   }
 

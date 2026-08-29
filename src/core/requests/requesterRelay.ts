@@ -111,7 +111,15 @@ export async function relayClosureToRequester(opts: {
 }): Promise<boolean> {
   const { row, label } = opts;
   const requesterSlackId = row.requester_slack_id;
-  if (!requesterSlackId) return false;
+  // requester-relay-never-targets-owner — requester_slack_id can end up
+  // self-referential (the owner's own id) when an upstream creation path
+  // misreads his authority as 'colleague' (the same clamp class documented at
+  // tasks/skill.ts's flagUnresolvedFreeformForOwner; confirmed in production
+  // data as colleague_booking_record rows keyed on the owner himself).
+  // Enforced once here rather than at each caller: closeMeetingArtifacts.ts
+  // already filtered this before calling in; runExpiry/runFreeformFlagRetry
+  // (runner.ts) hadn't.
+  if (!requesterSlackId || requesterSlackId === row.owner_user_id) return false;
   // Once-only idempotency — the same field notifyRequesterOfDecision stamps and
   // reads. Fresh read: the row in hand may predate a stamp another path (the
   // resolver's relay, a prior cascade) just wrote.
