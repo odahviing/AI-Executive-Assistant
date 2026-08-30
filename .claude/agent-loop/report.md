@@ -3,7 +3,7 @@
 ```
 Run wf_00ed9907-676 — in: 0 tickets · 4 day(s) of logs · 2 backlog re-reads
 out: 0 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 3 queued
-board: net +1 → 6 open rows — 3 still-real · 3 need a re-read (0 moved · 3 never examined) · 0 cite no file · 6 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+board: net +1 → 6 open rows — 2 still-real · 4 need a re-read (3 moved · 1 never examined) · 0 cite no file · 6 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 2 rows await you: 0 from tonight · 2 re-surfaced · 0 found by the loop
 ```
 
