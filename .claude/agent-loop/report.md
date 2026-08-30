@@ -4,7 +4,7 @@
 Session work (owner-driven, hand-dispatched — no editor run) — in: 0 tickets · 0 days of logs · 0 backlog re-reads
 out: 2 built · 0 already-fixed · 0 built-with-gap · 0 bounced since last wrap · 0/0 joint-traced · 0 converted · 4 queued
 ```
-**7 open rows** (6 still-real, 1 need a re-read, 0 cite no file) — 7 rulable, 0 waiting on a verb.
+**7 open rows** (5 still-real, 2 need a re-read, 0 cite no file) — 7 rulable, 0 waiting on a verb.
 
 3 rows await you: 0 from tonight · 3 re-surfaced · 0 found by the loop
 
