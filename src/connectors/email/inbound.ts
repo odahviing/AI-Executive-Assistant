@@ -296,17 +296,35 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     // and until now this loop wrote straight into that base field with no
     // date and no expiry — able to silently and permanently stomp a correct,
     // Slack-verified zone with a same-day guess that never self-corrects.
-    // Route it instead through the SAME dated, self-expiring mechanism
-    // `update_person_profile`'s `currently_traveling` argument already uses
-    // (`setCurrentTravelById`/`getCurrentTravelById`, people.ts) — a bounded
-    // window rather than a permanent, unprotected overwrite. `location`
-    // carries the raw stated text (not the resolved IANA string) so it
-    // re-resolves through the identical `inferTimezoneFromStateStatic` path
-    // attendeeTzForDay already uses for every other travel record.
+    // The route depends on whether there is anything to protect (owner ruling,
+    // 2026-08-30 "refined"):
+    //   base timezone EMPTY → nothing a stray hint could corrupt, and a
+    //     14-day expiry would just decay a useful fact back to guessing off
+    //     the owner's zone — write it durably at the 'auto' tier via
+    //     setPersonTimezoneByEmail, which routes through the provenance
+    //     chokepoint (setCoreFieldWithProvenanceById, people.ts): a later
+    //     person-stated or owner-stated value still outranks and replaces it,
+    //     and 'auto' can never displace a higher-tier value already there.
+    //   base timezone SET → the original incident's shape (a real, correct
+    //     zone on file) — route through the SAME dated, self-expiring
+    //     mechanism `update_person_profile`'s `currently_traveling` argument
+    //     already uses (`setCurrentTravelById`/`getCurrentTravelById`,
+    //     people.ts) — a bounded window rather than a permanent, unprotected
+    //     overwrite. `location` carries the raw stated text (not the resolved
+    //     IANA string) so it re-resolves through the identical
+    //     `inferTimezoneFromStateStatic` path attendeeTzForDay already uses
+    //     for every other travel record.
     const person = getPersonByEmail(hint.email);
     if (!person) {
       logger.warn('Email inbound — stated timezone hint has no resolved person row; skipping', {
         email: hint.email, stated: hint.statedTimezone,
+      });
+      continue;
+    }
+    if (!person.timezone) {
+      const { outcome } = setPersonTimezoneByEmail(hint.email, iana, 'auto', { ownerDomain });
+      logger.info('Email inbound — stated timezone written durably (auto-tier, base was empty — nothing to protect)', {
+        email: hint.email, stated: hint.statedTimezone, iana, outcome,
       });
       continue;
     }

@@ -236,10 +236,43 @@ function inferIntentFromTool(toolName: string): BookingIntent {
   }
 }
 
+/**
+ * jim-douglass follow-up (2026-08-30, adversarial review of the same-day fix) —
+ * was this exact address actually TYPED BY A HUMAN in this conversation?
+ *
+ * The directory-overrides-model-email rule (buildParticipants below, and the
+ * same rule in createMeeting.ts / moveMeeting.ts) is the right default for a
+ * model-AUTHORED address — but with no escape hatch it also silently overrode
+ * an owner-STATED correction ("Jim's email changed — use jim@newco.com" kept
+ * inviting the stale stored address; at the time update_person_profile had no
+ * email field — it does now, so a stated correction also lands DURABLY in the
+ * directory via setPersonEmail's provenance tier, and this history check is the
+ * in-conversation half of the same rule), and re-routed a NEW same-named
+ * external's correct invite to a DIFFERENT stored person's real inbox. Same authority tiering db/people.ts
+ * uses for provenance-gated core fields (stated > stored > auto), decided
+ * deterministically: an address counts as "stated" only when it appears
+ * verbatim (case-insensitive) in the CURRENT human message or a prior
+ * role:'user' turn of the recent history. Assistant turns are deliberately
+ * excluded — an address the model fabricated and narrated in an earlier reply
+ * must never launder itself into "stated". A fabricated email never appears in
+ * human-authored text, so the original fix (fabrications lose to the
+ * directory) is fully preserved. Substring match is safe here: an email
+ * address is a language-independent structured string, and Slack's
+ * `<mailto:a@b|a@b>` rendering still contains it verbatim.
+ */
+export function emailStatedByHuman(email: string, context: SkillContext): boolean {
+  const needle = (email ?? '').trim().toLowerCase();
+  if (!needle.includes('@')) return false;
+  if ((context.currentUserMessage ?? '').toLowerCase().includes(needle)) return true;
+  return (context.conversationHistory ?? []).some(
+    m => m.role === 'user' && (m.content ?? '').toLowerCase().includes(needle),
+  );
+}
+
 async function buildParticipants(
   raw: Array<{ name?: string; email?: string; slack_id?: string; just_invite?: boolean }>,
   ownerEmail: string,
-  _context: SkillContext,
+  context: SkillContext,
 ): Promise<BookingParticipant[]> {
   const out: BookingParticipant[] = [];
   const seen = new Set<string>();
@@ -269,6 +302,13 @@ async function buildParticipants(
     // directory match wins over whatever the model typed; only when nothing
     // matches does the model-supplied (or now-resolved) email stand. A
     // genuinely new/unknown external is unaffected: no match, no override.
+    //
+    // Adversarial-review follow-up (same day): ONE escape hatch, decided by
+    // emailStatedByHuman above — an address a human actually typed in this
+    // conversation outranks the stored row (stale-email correction; new
+    // same-named external). A model-fabricated address never appears in
+    // human text, so it still loses to the directory. Same tie-break as the
+    // write path (createMeeting.ts) so plan and write can't disagree (M1).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
       typeof import('../../memory/resolveAttendeeEmails');
@@ -276,14 +316,23 @@ async function buildParticipants(
       const resolved = resolveAttendeeEmail({ name, email: '', slack_id: slackId });
       if (resolved.email) {
         if (email && email.includes('@') && resolved.email !== email) {
-          // Queryable trail (M18): every directory override of a model-typed
-          // email is visible in the logs — this is exactly the signal that
-          // would have surfaced the incident on booking #2 instead of #3.
-          logger.info('buildParticipants — directory match overrode the model-supplied email', {
-            name, supplied: email, resolved: resolved.email,
-          });
+          if (emailStatedByHuman(email, context)) {
+            // Human-stated address wins over the differing stored row.
+            logger.info('buildParticipants — human-stated email kept over a differing directory row', {
+              name, stated: email, directory: resolved.email,
+            });
+          } else {
+            // Queryable trail (M18): every directory override of a model-typed
+            // email is visible in the logs — this is exactly the signal that
+            // would have surfaced the incident on booking #2 instead of #3.
+            logger.info('buildParticipants — directory match overrode the model-supplied email', {
+              name, supplied: email, resolved: resolved.email,
+            });
+            email = resolved.email;
+          }
+        } else {
+          email = resolved.email;
         }
-        email = resolved.email;
       }
     } else if (!email || !email.includes('@')) {
       // No name at all to look up by — fall back to the slack_id-only path

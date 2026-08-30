@@ -59,15 +59,19 @@ export function extractCallbacks(details: Record<string, unknown> | null | undef
   // Legacy alias: deferred_action == on_approve when on_approve isn't set.
   // EXPLICIT PRECEDENCE (extractCallbacks-precedence-silent-trap, 2026-08-14):
   // `callbacks.on_approve` always wins over `deferred_action` when BOTH are
-  // present on the same row. Harmless today — nothing writes `details.callbacks`
-  // on a row that also carries `deferred_action` (only `deferred_action` itself,
-  // e.g. skill.ts's refreshIfOpen) — but it is a silent trap for the day
-  // something does: refreshing `deferred_action` alone (as refreshIfOpen does)
-  // would stop having any effect here, and the whole "replay the correction"
-  // fix would go silently inert. Guarded, not just documented: a row that ever
-  // DOES carry both is logged loudly so the collision is never invisible. Don't
-  // add a `callbacks` writer on a `deferred_action`-carrying row shape without
-  // also teaching refreshIfOpen (or this function) to keep them in sync.
+  // present on the same row. ONE writer does put `callbacks` on a
+  // `deferred_action`-carrying row today — skill.ts's open calendar-conflict
+  // stamp (2026-08-30) — and it deliberately writes `on_amend` ONLY, never
+  // `on_approve`, precisely so this bridge keeps reading `deferred_action`
+  // (and refreshIfOpen's deferred_action refresh keeps taking effect). The
+  // trap below is about `on_approve` specifically: refreshing
+  // `deferred_action` alone (as refreshIfOpen does) would stop having any
+  // effect here, and the whole "replay the correction" fix would go silently
+  // inert. Guarded, not just documented: a row that ever DOES carry both is
+  // logged loudly so the collision is never invisible. Don't add a
+  // `callbacks.on_approve` writer on a `deferred_action`-carrying row shape
+  // without also teaching refreshIfOpen (or this function) to keep them in
+  // sync.
   if (callbacks.on_approve && details.deferred_action) {
     logger.warn('extractCallbacks — row carries BOTH callbacks.on_approve and deferred_action; on_approve wins by precedence, deferred_action is ignored', {
       onApproveTool: callbacks.on_approve.tool,
@@ -137,7 +141,14 @@ export function buildConsequenceText(
     case 'move_meeting': {
       const subj = (args.meeting_subject as string) ?? 'the meeting';
       const newStart = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
-      return newStart ? `If yes → I'll move "${subj}" to ${newStart}.` : `If yes → I'll move "${subj}".`;
+      // A TIME-LESS move is the open calendar-conflict anchor (skill.ts's
+      // create_approval stamp — options offered, no single time chosen): a bare
+      // ✅ has nothing to execute there (the resolver refuses it with a
+      // pick-a-time recovery), so the consequence line must ask for the pick,
+      // not promise a move a yes can't perform.
+      return newStart
+        ? `If yes → I'll move "${subj}" to ${newStart}.`
+        : `Reply with the time you pick → I'll move "${subj}" to it (or say no to leave it as is).`;
     }
     case 'delete_meeting': {
       const subj = (args.meeting_subject as string) ?? 'the meeting';

@@ -20,7 +20,7 @@ import {
   auditLog,
   getPersonMemory,
 } from '../../../../db';
-import { grantRelaxed } from '../../bookingRequest';
+import { grantRelaxed, emailStatedByHuman } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
@@ -402,6 +402,14 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         let newCategoryFromShape: string | undefined;
         let newLocationFromShape: string | undefined;
         let newIsOnlineFromShape: boolean | undefined;
+        // jim-douglass follow-up (2026-08-30) — divergences between a supplied
+        // address and the one actually invited (directory override, or a
+        // human-stated address kept over a stale row), narrated on the success
+        // return so a redirected invite is never silent. `resolvedAddedEmails`
+        // carries the RESOLVED add-list for `added_attendees` — the raw
+        // model-supplied addresses would misreport what was actually invited.
+        const attendeeEmailNotes: string[] = [];
+        let resolvedAddedEmails: string[] | undefined;
 
         if (hasAttendeeChange || venueChangeRequested) {
           // v3.1.4 — resolve name-only adds to emails from the directory
@@ -422,18 +430,39 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               // match / ambiguous → the supplied email stands. Pre-fix this add
               // path trusted any syntactically-valid model email outright — the
               // exact fabrication hole the incident hit on create.
+              //
+              // Adversarial-review follow-up (same day): ONE escape hatch, the
+              // same tie-break as create's — an address a human actually typed
+              // in this conversation (emailStatedByHuman) outranks a differing
+              // stored row; a fabricated address never appears in human text,
+              // so it still loses. Either divergence is narrated via
+              // attendeeEmailNotes on the success return.
               const supplied = (a.email ?? '').trim().toLowerCase();
               const hasName = !!a.name?.trim();
               const resolved = resolveAttendeeEmail({ name: a.name, email: hasName ? '' : supplied });
-              const email = resolved.email || (supplied.includes('@') ? supplied : '');
+              let email = resolved.email || (supplied.includes('@') ? supplied : '');
               if (hasName && resolved.email && supplied.includes('@') && resolved.email !== supplied) {
-                logger.info('update_meeting add_attendees — directory match overrode the model-supplied email', {
-                  name: a.name, supplied, resolved: resolved.email,
-                });
+                if (emailStatedByHuman(supplied, context)) {
+                  email = supplied;
+                  logger.info('update_meeting add_attendees — human-stated email kept over a differing directory row', {
+                    name: a.name, stated: supplied, directory: resolved.email,
+                  });
+                  attendeeEmailNotes.push(
+                    `${a.name ?? supplied} is invited at ${supplied} (the address stated in this conversation). The directory has a different address on file (${resolved.email}) — if that stored address is stale, say so and it should be corrected.`,
+                  );
+                } else {
+                  logger.info('update_meeting add_attendees — directory match overrode the model-supplied email', {
+                    name: a.name, supplied, resolved: resolved.email,
+                  });
+                  attendeeEmailNotes.push(
+                    `${a.name ?? resolved.email} is invited at ${resolved.email} (the address on file), NOT at ${supplied}. If ${supplied} is actually the right address, the requester must state it explicitly and the invite will be corrected.`,
+                  );
+                }
               }
               return { name: resolved.name, email, optional: a.optional === true };
             })
             .filter(a => a.email.includes('@'));
+          resolvedAddedEmails = addList.map(a => a.email);
           const removeList = rawRemove
             .map(e => (e ?? '').trim().toLowerCase())
             .filter(e => e.includes('@'));
@@ -694,10 +723,16 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           updated: updatedSubject,
           category: args.category ?? newCategoryFromShape ?? null,
           new_subject: args.new_subject ?? null,
-          added_attendees: rawAdd.map(a => a.email).filter(Boolean),
+          // jim-douglass follow-up (2026-08-30) — the RESOLVED addresses
+          // actually invited, not the raw model-supplied ones (which the
+          // directory may have overridden above).
+          added_attendees: resolvedAddedEmails ?? rawAdd.map(a => a.email).filter(Boolean),
           removed_attendees: rawRemove,
           // v1.8.3 — past-tense summary for owner-visible reply. Issue #26 bug 1.
           action_summary: `Updated '${updatedSubject}'${updateChanges.length > 0 ? ': ' + updateChanges.join(', ') : ''}.`,
+          ...(attendeeEmailNotes.length > 0
+            ? { _attendee_email_note: `Attendee address resolution differed from the tool input — state the actual invited address(es) in the reply, never silently: ${attendeeEmailNotes.join(' ')}` }
+            : {}),
         };
 }
 

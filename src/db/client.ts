@@ -392,6 +392,13 @@ function initSchema(db: Database.Database): void {
   // Routed through setCoreFieldWithProvenanceById (people.ts) same as name_he;
   // a Slack-derived write stamps 'auto' and defers to any existing stated value.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN name_set_by TEXT`); } catch (_) {}
+  // v4.8.x — provenance for `email`, same authority chain as the other core
+  // fields (owner > person > auto). `email` is the logical identity key, so its
+  // writes stay inside setPersonEmail (people.ts) — the tag lets an owner-stated
+  // address correction ("Jim's email changed to jim@newco.com", via
+  // update_person_profile's email field) survive the Slack users.info sync,
+  // which writes at 'auto' and now defers to any stated value.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN email_set_by TEXT`); } catch (_) {}
   // v3.5.x (person-memory rebuild) — derived outbound-language signal. We stamp
   // the dominant SCRIPT of each inbound human message ('he'|'ru'|'ar'|'en')
   // plus when we saw it. Outbound composition TO a person (relay / outreach /

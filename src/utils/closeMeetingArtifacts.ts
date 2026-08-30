@@ -32,6 +32,12 @@
  *      side, it does not un-say what Maelle told a human. Capped at once per event
  *      per day; absent `newStartIso` ⇒ no relay. See the step for the 07-13 case.
  *
+ *      2b. (2026-08-30) On a DELETE there is no new instant, so 2a is structurally
+ *      silent — yet the colleague still holds an open question about a meeting
+ *      that no longer exists. He is told it's off, once, in the same DM thread
+ *      (relayCancellationToOutreachColleague). Suppressed for `inferredFromAbsence`
+ *      callers, which cannot vouch that the delete was real.
+ *
  *   3. Cancel open follow_up / reminder tasks whose payload_json references
  *      this meeting_id. These are Sonnet-created "remind me to update Yael"
  *      style tasks; the cascade fires when meeting_id is in the payload.
@@ -131,6 +137,24 @@ export async function closeMeetingArtifacts(params: {
    * separation. FAIL-SAFE: absent, step 5's orphan tier is a no-op.
    */
   bookingStartIso?: string;
+  /**
+   * requester-close-loop-never-notifies-cancelled-hold (2026-08-30) — TRUE when
+   * the caller did not perform or observe this mutation but INFERRED it from the
+   * event no longer being readable. Exactly one caller sets it:
+   * `cleanupVanishedMeetingArtifacts` (the daily-brief pre-pass), whose whole
+   * trigger is `verifyEventDeleted` returning true — and that returns true on ANY
+   * 404 (connectors/graph/calendarReads.ts:1313-1329), so a rotated or stale event
+   * id that no longer resolves in the owner's mailbox is indistinguishable from a
+   * real cancellation.
+   *
+   * Its ONE consumer is step 5's close-loop relay: an inferred call still closes
+   * artifacts (that is the sweep's job) but never tells a colleague an outcome,
+   * because it does not know one. R3 bars the wrong outcome exactly as hard as it
+   * bars silence, and "your meeting was cancelled" sent off a 404 is a claim this
+   * path cannot make honestly. Every other caller performs the mutation and
+   * verifies it landed, so all of them relay.
+   */
+  inferredFromAbsence?: boolean;
 }): Promise<CloseMeetingArtifactsResult> {
   const result: CloseMeetingArtifactsResult = {
     tasksCancelled: 0,
@@ -213,9 +237,40 @@ export async function closeMeetingArtifacts(params: {
         const closureState = params.reason === 'deleted' ? 'cancelled' : 'resolved';
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+        // requester-never-told-move-request-cancelled-instead (2026-08-30) — one
+        // notice per COLLEAGUE, not per row: a colleague holding two open
+        // reschedule asks on this same event must still hear it exactly once (R3).
+        const toldCancelled = new Set<string>();
         for (const row of matchingOutreach) {
           if (!row.request_id) continue;
-          closeRequest({ id: row.request_id, state: closureState, closureReason: `meeting_${params.reason}`, closedBy: 'meeting_cascade' });
+          let closureReason = `meeting_${params.reason}`;
+          // requester-never-told-move-request-cancelled-instead (2026-08-30) —
+          // a cancellation is a fact this colleague was never given. The
+          // correction relay above (relayVoidedNotices) only speaks up when a
+          // write states a DIFFERENT time — it requires newStartIso/newEndIso,
+          // which a delete never carries (see that param's own doc), so it
+          // silently no-ops here. Without this, a colleague who was just told
+          // "I moved our meeting to X" could have that same meeting deleted
+          // outright and never be told anything at all — his ask closed
+          // 'cancelled' with nobody informed, and he keeps waiting on an
+          // answer to a question about a time that no longer exists. Same
+          // inferredFromAbsence gate as step 5: the vanished-meeting sweep
+          // infers a delete from a bare 404 and cannot vouch for the outcome,
+          // so it stays silent same as everywhere else.
+          if (closureState === 'cancelled' && !params.inferredFromAbsence
+              && row.colleague_slack_id && !toldCancelled.has(row.colleague_slack_id)) {
+            const delivered = await relayCancellationToOutreachColleague(params, row);
+            if (delivered) {
+              toldCancelled.add(row.colleague_slack_id);
+              // Deliberately NOT the `_and_notified_requester` suffix step 5
+              // uses: the human told here is the ask's TARGET (someone Maelle
+              // asked), not its requester (someone who asked her), and the
+              // brief narrates a colleague DM off this value (tasks/briefs.ts's
+              // CLOSURE NARRATION block). Only stamped on a confirmed send.
+              closureReason = `meeting_${params.reason}_and_notified_colleague`;
+            }
+          }
+          closeRequest({ id: row.request_id, state: closureState, closureReason, closedBy: 'meeting_cascade' });
           result.outreachClosed++;
         }
       }
@@ -291,20 +346,34 @@ export async function closeMeetingArtifacts(params: {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getRequestsByExternalEventId, getOpenRequestsForOwner } = require('../db/requests') as
         typeof import('../db/requests');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { closeRequest } = require('../core/requests/closeRequest') as
-        typeof import('../core/requests/closeRequest');
 
       const directMatches = getRequestsByExternalEventId(params.ownerUserId, params.meetingId);
       for (const r of directMatches) {
         // tier-0 skip — the resolver owns this request's close + relay.
         if (params.fulfillingRequestId && r.id === params.fulfillingRequestId) continue;
-        closeRequest({
-          id: r.id,
-          state: 'cancelled',
-          closureReason: `meeting_${params.reason}`,
-          closedBy: 'meeting_cascade',
-        });
+        // event-id-linked-request-never-notified-on-delete (2026-08-30) — this
+        // tier used to hardcode `state: 'cancelled'` regardless of `reason`, so
+        // a tracker a SUCCESSFUL move/create fulfilled was recorded as
+        // cancelled. Measured on the live VM DB 2026-08-30: 8 rows sitting at
+        // `follow_up / in_flight_action / cancelled / meeting_moved` — every one
+        // a move that actually landed, filed as if it had been called off, and
+        // narrated to the owner from that value.
+        //
+        // The relay half of the shared helper cannot fire from THIS tier, and
+        // that is structural, not an oversight: `getRequestsByExternalEventId`
+        // is filtered to open states (db/requests.ts:512), and every writer that
+        // stamps `outcome_external_event_id` on a still-OPEN row is owner- or
+        // system-initiated with no requester at all —
+        // maybeOpenInFlightMeetingRequest (owner-only by its first guard),
+        // calendarHealth/autoMove.ts:166 (system), calendarHealth/handlers/
+        // categoryOps.ts:205 (owner). The two writers that DO carry a colleague
+        // requester stamp it on an already-terminal row (createMeeting.ts:2042
+        // writes state:'resolved'; resolver.ts:858 stamps it while closing), so
+        // this query can never return one. Confirmed on the live DB: all 15
+        // meeting_cascade closures with a requester came through the tier below.
+        // The helper is shared anyway so the two tiers cannot drift on outcome
+        // state again — not because a requester is expected here.
+        await closeMatchedRequestWithRelay(r, params);
       }
 
       // Fallback — sweep open top-level requests: match by meeting_id in
@@ -400,70 +469,15 @@ export async function closeMeetingArtifacts(params: {
         }
         if (matched) {
           // v3.0.7 — close-loop DM to colleague-requester BEFORE closing the
-          // request. Owner direction: requests are the canonical route; the
-          // lifecycle is "owner approve → notify requester → close request".
-          // Pre-fix: a colleague-initiated approval got the booking via
-          // create_meeting on owner-path (not via the resolver's deferred-
-          // action replay), so notifyRequesterOfDecision never fired and the
-          // colleague never heard back. Maelle had promised "I'll let you
-          // know once Idan responds" — broken. Fire a simple Connection DM
-          // here so the loop closes regardless of which booking path ran.
-          //
-          // Constraints:
-          //   - Only colleague-initiated requests (requester_slack_id is set
-          //     and != owner).
-          //   - Only positive booking reasons (created / moved / updated) —
-          //     deletes have their own decline-and-relay path.
-          //   - Fire-and-forget; never block the cascade or the booking.
-          const positiveBooking = params.reason === 'created' || params.reason === 'moved' || params.reason === 'updated';
-          if (
-            r.requester_slack_id
-            && r.requester_slack_id !== params.ownerUserId
-            && positiveBooking
-          ) {
-            try {
-              // Routed through the spine's ONE shared closure relay
-              // (core/requests/requesterRelay.ts) — this path only fires for
-              // NON-resolver bookings (tier-0 hands resolver-driven requests
-              // back to the resolver, whose notifyRequesterOfDecision owns
-              // those). The helper carries what the old inline copy here
-              // lacked: the requester's language (this was English-only), the
-              // leak filter (params.subject/r.subject could print an internal
-              // auto-generated "… needs your input" verbatim into a
-              // colleague's DM), origin-thread MPIM/DM routing, and the v3.1
-              // (115b) single-notification idempotency + stamp-ONLY-on-a-
-              // confirmed-ok-send retry behavior, both checked fresh inside.
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { relayClosureToRequester } = require('../core/requests/requesterRelay') as
-                typeof import('../core/requests/requesterRelay');
-              await relayClosureToRequester({
-                row: r,
-                label: 'closeMeetingArtifacts close-loop',
-                subjectCandidates: [params.subject],
-                subjectFallback: { en: 'the meeting', he: 'הפגישה' },
-                compose: ({ lang, hi, subject }) => lang === 'he'
-                  ? `${hi}, סגרנו על "${subject}" — הזימון בדרך.`
-                  : `${hi}, locked in "${subject}" — calendar invite is on its way.`,
-              });
-            } catch (err) {
-              logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {
-                requestId: r.id, err: String(err).slice(0, 200),
-              });
-            }
-          }
-          // v3.0.7 — close state matches reality: positive booking = resolved
-          // (not cancelled). Old `cancelled` reason was wrong for create/move/
-          // update success cases; the linked work DID happen. Delete keeps
-          // 'cancelled' since the meeting itself is gone.
-          const closureState = positiveBooking ? 'resolved' : 'cancelled';
-          closeRequest({
-            id: r.id,
-            state: closureState,
-            closureReason: positiveBooking
-              ? `meeting_${params.reason}_and_notified_requester`
-              : `meeting_${params.reason}`,
-            closedBy: 'meeting_cascade',
-          });
+          // request, and record the real outcome (resolved for a positive
+          // booking, cancelled for a delete) rather than a hardcoded state.
+          // event-id-linked-request-never-notified-on-delete (2026-08-30) —
+          // this is now `closeMatchedRequestWithRelay`, shared with the
+          // event-id tier above, so both tiers relay + record outcome the
+          // same way. See that helper's own doc for the full history
+          // (Mike Naumenko / req_1787571380436_otils trace, the
+          // inferredFromAbsence constraint, the wording split).
+          await closeMatchedRequestWithRelay(r, params);
         }
       }
     } catch (err) {
@@ -631,6 +645,93 @@ async function relayVoidedNotices(
   return relayed;
 }
 
+/**
+ * requester-never-told-move-request-cancelled-instead (2026-08-30) — tell the
+ * colleague holding an open reschedule ask that the meeting is GONE, so he is
+ * not left owing an answer about a time that no longer exists.
+ *
+ * WHY NOT the spine's shared closure relay. A reschedule outreach's request row
+ * carries the colleague as `target_slack_id` and NEVER as `requester_slack_id`
+ * — `createOutreachJob` (db/jobs.ts) passes only `targetSlackId`. Verified on
+ * the live VM DB 2026-08-30: all 9 `kind='outreach' subkind='meeting_reschedule'`
+ * rows have `requester_slack_id` NULL, `target_slack_id` set, and
+ * `requester_notified_at` NULL. `relayClosureToRequester` hard-refuses a row
+ * with no requester (requesterRelay.ts:122), so routing this through it would
+ * be silently inert — and widening it to targets would change what that relay
+ * is FOR: a target is someone Maelle ASKED, not someone who asked her. So the
+ * recipient is read off the outreach row, exactly as step 2a's
+ * `relayVoidedNotices` already does for this same population.
+ *
+ * This is not a second close-loop (R1). It borrows the spine's own language
+ * resolution and leak filter (`requesterRelayLanguage` / `usableRelaySubject`,
+ * both exported from requesterRelay.ts) instead of hand-rolling an English-only
+ * copy, and lands in the SAME DM thread `handleRescheduleReply` confirms into,
+ * so the retraction sits under the notice it retracts. "Exactly once" needs no
+ * stamp here: the caller closes the request immediately after, which drops the
+ * row out of `getOpenRescheduleOutreach` (it JOINs on open request state) for
+ * good, and the caller de-dupes per colleague within the pass.
+ *
+ * Never throws. Returns whether the DM confirmably landed.
+ */
+async function relayCancellationToOutreachColleague(
+  params: { ownerUserId: string; subject?: string },
+  row: OutreachJob,
+): Promise<boolean> {
+  try {
+    // Self-target guard, same class as the requester relay's own
+    // (requesterRelay.ts:122): an outreach row keyed on the owner himself must
+    // never produce a DM telling him his own meeting was cancelled.
+    if (!row.colleague_slack_id || row.colleague_slack_id === params.ownerUserId) return false;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
+    const conn = getConnection(params.ownerUserId, 'slack');
+    if (!conn) {
+      logger.warn('closeMeetingArtifacts — no Slack connection, cancelled reschedule ask NOT relayed', {
+        outreachId: row.id, colleague: row.colleague_name,
+      });
+      return false;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { requesterRelayLanguage, usableRelaySubject } = require('../core/requests/requesterRelay') as
+      typeof import('../core/requests/requesterRelay');
+    const lang = requesterRelayLanguage(row.colleague_slack_id);
+    const first = row.colleague_name?.split(/\s+/)[0] ?? '';
+    const hi = first
+      ? (lang === 'he' ? `היי ${first}` : `Hi ${first}`)
+      : (lang === 'he' ? 'היי' : 'Hi there');
+    // The name he actually SAW, read off the notice's own stored payload —
+    // never re-derived (R2). Quoted only when a real title survived the leak
+    // filter; the generic fallback must not read as a quoted title.
+    const real = [readToldNotice(row.context_json).subject, params.subject]
+      .map(usableRelaySubject).find(Boolean);
+    const subject = real ? `"${real}"` : (lang === 'he' ? 'הפגישה' : 'that meeting');
+    const body = lang === 'he'
+      ? `${hi}, עדכון על ${subject} — היא בוטלה, אז אין צורך לחזור אליי לגבי המועד. סליחה על הבלגן.`
+      : `${hi}, update on ${subject} — it's been cancelled, so no need to come back to me about the time. Sorry for the noise.`;
+    // Threads into the original outreach DM when we recorded it, same routing
+    // handleRescheduleReply uses for its own colleague confirmations; legacy
+    // rows with no captured ts fall back to a fresh DM.
+    const res = row.dm_channel_id
+      ? await conn.postToChannel(row.dm_channel_id, body, { threadTs: row.dm_message_ts })
+      : await conn.sendDirect(row.colleague_slack_id, body);
+    if (res.ok) {
+      logger.info('closeMeetingArtifacts — told colleague his open reschedule ask is off, the meeting was cancelled', {
+        outreachId: row.id, requestId: row.request_id ?? null, colleague: row.colleague_name, lang,
+      });
+      return true;
+    }
+    logger.warn('closeMeetingArtifacts — cancelled-meeting notice to colleague not delivered', {
+      outreachId: row.id, colleague: row.colleague_name, reason: res.reason,
+    });
+    return false;
+  } catch (err) {
+    logger.warn('closeMeetingArtifacts — cancelled-meeting notice threw, continuing to close', {
+      outreachId: row.id, err: String(err).slice(0, 200),
+    });
+    return false;
+  }
+}
+
 function payloadReferencesMeeting(payloadJson: string | null | undefined, meetingId: string): boolean {
   if (!payloadJson) return false;
   try {
@@ -639,10 +740,146 @@ function payloadReferencesMeeting(payloadJson: string | null | undefined, meetin
     for (const key of candidateKeys) {
       if (payload[key] === meetingId) return true;
     }
+    // requester-close-loop-never-notifies-cancelled-hold (2026-08-30) — an
+    // approval's own meeting reference lives under deferred_action.args (the
+    // tool + args the resolver replays on approve; createApprovalRequest /
+    // resolver.ts), never duplicated at the payload's top level. A colleague-
+    // linked approval whose deferred_action targets THIS meeting (e.g. "cancel
+    // my duplicate booking") was invisible to every tier of this scan — the
+    // top-level keys above never fire for it — so a direct delete_meeting on
+    // that same event (bypassing resolve_approval entirely) could never find,
+    // close, or notify that approval's requester. Confirmed live:
+    // req_1787571380436_otils's details_json carries `deferred_action.args.
+    // meeting_id` only, no top-level meeting_id.
+    const deferredArgs = (payload.deferred_action as { args?: Record<string, unknown> } | undefined)?.args;
+    if (deferredArgs) {
+      for (const key of candidateKeys) {
+        if (deferredArgs[key] === meetingId) return true;
+      }
+    }
     return false;
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * event-id-linked-request-never-notified-on-delete (2026-08-30) — the ONE
+ * close+relay+outcome-state routine for a matched request in step 5, shared
+ * by BOTH the outcome_external_event_id tier and the details/thread/orphaned-
+ * approval tier below it. Before this, only the second tier ran it — the
+ * event-id tier hardcoded `state: 'cancelled'` regardless of `reason`, so a
+ * request a create/move actually FULFILLED was recorded as cancelled (8 such
+ * rows measured on the live DB; see that tier's own comment, which also proves
+ * why its rows never carry a requester and the relay below is dead weight
+ * there rather than a gap being closed).
+ *
+ * The `_and_notified_requester` suffix keys on the relay's own CONFIRMED-SEND
+ * return value, not on the reason being a positive booking as the pre-2026-08-30
+ * inline copy did. That copy stamped "and notified requester" on every
+ * create/move/update close, including rows with no requester to notify and rows
+ * whose DM failed — and tasks/briefs.ts's CLOSURE NARRATION block reads
+ * closure_reason to decide whether Maelle may claim she told someone. No live
+ * row was affected (all 3 suffixed rows on the VM carry both a requester and a
+ * requester_notified_at stamp), because a requester-less positive booking
+ * always matched the event-id tier first and never reached the old copy.
+ *
+ * v3.0.7 — close-loop DM to colleague-requester BEFORE closing the request.
+ * Owner direction: requests are the canonical route; the lifecycle is "owner
+ * approve → notify requester → close request". Pre-fix: a colleague-initiated
+ * approval got the booking via create_meeting on owner-path (not via the
+ * resolver's deferred-action replay), so notifyRequesterOfDecision never
+ * fired and the colleague never heard back.
+ *
+ * requester-close-loop-never-notifies-cancelled-hold (2026-08-30) —
+ * `reason==='deleted'` used to be EXCLUDED here on the theory that "deletes
+ * have their own decline-and-relay path" (Outlook's own /decline or /cancel
+ * notice, sent by calendarReads.ts's handleDeleteMeeting). That notice is an
+ * EMAIL to whoever is on the calendar invite — never a reply in the Slack
+ * thread this request's own requester actually asked in, and a colleague
+ * waiting on a pending approval/hold may not even be on the invite yet.
+ * Traced live: Mike Naumenko asked Maelle to check a KPMG slot, she
+ * mistakenly booked it and raised create_approval(kind=policy_exception,
+ * deferred_action=delete_meeting) telling him she'd check with Idan — the
+ * eventual cancellation carried no Slack relay to Mike at all
+ * (req_1787571380436_otils, requester_notified_at NULL), and five days later
+ * Maelle was still telling him — from stale thread memory, zero tool calls —
+ * that it was "still pending Idan's decision." The relay now fires for every
+ * reason a caller PERFORMED (constraints below); only the wording differs.
+ *
+ * Constraints:
+ *   - Only colleague-initiated requests (requester_slack_id is set and !=
+ *     owner).
+ *   - Only callers that PERFORMED and verified the mutation
+ *     (`inferredFromAbsence` unset — see that param's doc). The brief's
+ *     vanished-meeting sweep infers a delete from a bare 404 and cannot state
+ *     an outcome, so it closes silently as before.
+ *   - Fire-and-forget; never block the cascade or the booking.
+ */
+async function closeMatchedRequestWithRelay(
+  r: RequestRow,
+  params: { ownerUserId: string; reason: MeetingArtifactReason; subject?: string; inferredFromAbsence?: boolean },
+): Promise<void> {
+  const positiveBooking = params.reason === 'created' || params.reason === 'moved' || params.reason === 'updated';
+  const notifyRequester = Boolean(r.requester_slack_id)
+    && r.requester_slack_id !== params.ownerUserId
+    && !params.inferredFromAbsence;
+  let relayed = false;
+  if (notifyRequester) {
+    try {
+      // Routed through the spine's ONE shared closure relay
+      // (core/requests/requesterRelay.ts) — this path only fires for
+      // NON-resolver bookings (tier-0 hands resolver-driven requests back to
+      // the resolver, whose notifyRequesterOfDecision owns those). The helper
+      // carries the requester's language, the leak filter (params.subject/
+      // r.subject could print an internal auto-generated "… needs your
+      // input" verbatim into a colleague's DM), origin-thread MPIM/DM
+      // routing, and the v3.1 (115b) single-notification idempotency +
+      // stamp-ONLY-on-a-confirmed-ok-send retry behavior, all checked fresh
+      // inside.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { relayClosureToRequester } = require('../core/requests/requesterRelay') as
+        typeof import('../core/requests/requesterRelay');
+      relayed = await relayClosureToRequester({
+        row: r,
+        label: 'closeMeetingArtifacts close-loop',
+        subjectCandidates: [params.subject],
+        subjectFallback: { en: positiveBooking ? 'the meeting' : 'that meeting', he: 'הפגישה' },
+        compose: ({ lang, hi, subject }) => positiveBooking
+          ? (lang === 'he'
+              ? `${hi}, סגרנו על "${subject}" — הזימון בדרך.`
+              : `${hi}, locked in "${subject}" — calendar invite is on its way.`)
+          // Unquoted on the cancelled branch on purpose: this wording is the
+          // one that most often runs on the generic fallback (a colleague-
+          // raised approval's row.subject is usually the internal "<subkind>
+          // needs your input", which usableRelaySubject strips), and
+          // `"that meeting" has been cancelled` reads as a quoted title that
+          // does not exist.
+          : (lang === 'he'
+              ? `${hi}, ${subject} בוטלה — אין צורך בפעולה נוספת מצידך.`
+              : `${hi}, ${subject} has been cancelled — nothing further needed from you.`),
+      });
+    } catch (err) {
+      logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {
+        requestId: r.id, err: String(err).slice(0, 200),
+      });
+    }
+  }
+  // v3.0.7 — close state matches reality: positive booking = resolved (not
+  // cancelled). Old `cancelled` reason was wrong for create/move/update
+  // success cases; the linked work DID happen. Delete keeps 'cancelled' since
+  // the meeting itself is gone.
+  const closureState = positiveBooking ? 'resolved' : 'cancelled';
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { closeRequest } = require('../core/requests/closeRequest') as typeof import('../core/requests/closeRequest');
+  closeRequest({
+    id: r.id,
+    state: closureState,
+    closureReason: relayed
+      ? `meeting_${params.reason}_and_notified_requester`
+      : `meeting_${params.reason}`,
+    closedBy: 'meeting_cascade',
+  });
 }
 
 /**

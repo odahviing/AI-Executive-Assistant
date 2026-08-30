@@ -23,6 +23,7 @@ import {
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import { getPersonMemory } from '../../../../db';
+import { resolveSlackId } from '../../../../utils/resolveSlackId';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
@@ -225,12 +226,62 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // they can no longer disagree about who "the colleague" is.
         const ownerSlackId = context.profile.user.slack_user_id;
         const isGenuineColleague = context.senderRole === 'colleague' && context.userId !== ownerSlackId;
-        let requesterId: string | undefined = (typeof args.requester_slack_id === 'string' && args.requester_slack_id.trim())
-          ? args.requester_slack_id.trim()
-          : (isGenuineColleague ? context.userId : undefined);
+        // createmeeting-requesterid-wrong-colleague-gets-event-rights (2026-08-30)
+        // — on the genuine-colleague path, context.userId is Slack's OWN
+        // authenticated sender id: ground truth for "who is asking". The old
+        // ternary let a model-supplied `args.requester_slack_id` win even here,
+        // so if Sonnet named a DIFFERENT colleague — one merely mentioned in the
+        // conversation, possibly the wrong one — that third party got recorded
+        // as "the requester" instead of the person actually talking. The tool
+        // description already says this field should be omitted on the
+        // colleague path ("it defaults to the colleague who is talking"); this
+        // now enforces it instead of trusting the model to comply. requesterId
+        // isn't cosmetic — the `colleague_booking_record` write below (:1987)
+        // hands whoever it names control (add/rename/location via the
+        // update_meeting + move_meeting gates) over a meeting the owner's
+        // calendar now carries, so naming the wrong person there is a real
+        // authority leak, not just a mislabeled log line.
+        // The owner-path override (a relayed request — "tell him Dana wants to
+        // meet Tal" — or a deferred-action replay stamping the ORIGINAL
+        // requester across senderRole:'owner') is untouched: isGenuineColleague
+        // is false in both those cases, so args.requester_slack_id still wins.
+        //
+        // owner-path-requester-slack-id-unvalidated (2026-08-30) — that owner-path
+        // trust was UNCHECKED: a Sonnet-invented or misremembered slack id landed
+        // as the meeting's controlling requester with no boundary check, unlike
+        // create_approval's own requester_slack_id (tasks/skill.ts:638-653), which
+        // runs the exact same field through resolveSlackId first. Same helper,
+        // same shape here — a real slack-id format passes through unchanged; a
+        // hallucinated one (a name slug, a stale id) resolves via people_memory
+        // or gets dropped, never trusted verbatim.
+        if (!isGenuineColleague && typeof args.requester_slack_id === 'string') {
+          const rawId = args.requester_slack_id;
+          const resolution = resolveSlackId(rawId, undefined);
+          if (resolution.was_hallucinated) {
+            logger.warn('create_meeting — requester_slack_id failed boundary check on owner path, resolved/dropped', {
+              rejected: resolution.rejected_input, resolved: resolution.slack_id,
+            });
+            if (resolution.slack_id) {
+              args.requester_slack_id = resolution.slack_id;
+            } else {
+              delete args.requester_slack_id;
+            }
+          }
+        }
+        let requesterId: string | undefined = isGenuineColleague
+          ? context.userId
+          : ((typeof args.requester_slack_id === 'string' && args.requester_slack_id.trim())
+            ? args.requester_slack_id.trim()
+            : undefined);
         if (requesterId === ownerSlackId) requesterId = undefined;  // the owner himself is never "the requester"
-        if (requesterId && (typeof args.requester_slack_id !== 'string' || !args.requester_slack_id.trim())) {
+        // Canonicalize args.requester_slack_id to the resolved value (never a
+        // rejected model override) so a later deferred-action replay — which
+        // reads args.requester_slack_id verbatim, see the doc comment above —
+        // can't resurrect a value this turn already overrode.
+        if (requesterId) {
           args.requester_slack_id = requesterId;
+        } else if (typeof args.requester_slack_id === 'string') {
+          delete args.requester_slack_id;
         }
         let requesterEmail: string | undefined;      // lowercased — comparisons only
         let requesterEmailRaw: string | undefined;   // original case — used when adding to attendees
@@ -409,14 +460,29 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         //      HIT — the loose LIKE-substring bind (Lori→Gloria) the shared
         //      resolver's `nameGenuinelyMatches` + distinct-person gate exists
         //      to prevent. Replaced with the one resolver.
+        //
+        // Adversarial-review follow-up (same day): ONE escape hatch, decided by
+        // emailStatedByHuman (bookingRequest.ts) — an address a human actually
+        // typed in this conversation outranks a differing stored row (stale-
+        // email correction: "use jim@newco.com"; new same-named external whose
+        // correct invite must not re-route to a DIFFERENT stored person's real
+        // inbox). A fabricated address never appears in human text, so it still
+        // loses to the directory. Either divergence — stated-wins or
+        // directory-wins — is collected into `attendeeEmailNotes` and surfaced
+        // on the booked return, so a redirected invite is narrated to the
+        // requester immediately, never discoverable only from the logs.
         // Still-missing emails fall through to the refusal below
         // ('attendee_missing_email') so Sonnet asks instead of papering over.
+        const attendeeEmailNotes: string[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { resolveAttendeeEmail } = require('../../../../memory/resolveAttendeeEmails') as
             typeof import('../../../../memory/resolveAttendeeEmails');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { emailStatedByHuman } = require('../../bookingRequest') as
+            typeof import('../../bookingRequest');
           for (const a of attendees) {
-            const supplied = typeof a.email === 'string' ? a.email.trim() : '';
+            const supplied = typeof a.email === 'string' ? a.email.trim().toLowerCase() : '';
             const hasName = typeof a.name === 'string' && !!a.name.trim();
             if (!hasName && supplied.includes('@')) continue;  // nothing to look up by — trust as-is
             const resolved = resolveAttendeeEmail({
@@ -425,14 +491,29 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               email: hasName ? '' : supplied,
             });
             if (resolved.email) {
-              if (supplied.includes('@') && resolved.email !== supplied.toLowerCase()) {
-                // Queryable trail (M18) — every directory override of a
-                // model-typed email is visible in the logs.
-                logger.info('create_meeting — directory match overrode the model-supplied email', {
-                  name: a.name, supplied, resolved: resolved.email,
-                });
+              if (supplied.includes('@') && resolved.email !== supplied) {
+                if (emailStatedByHuman(supplied, context)) {
+                  logger.info('create_meeting — human-stated email kept over a differing directory row', {
+                    name: a.name, stated: supplied, directory: resolved.email,
+                  });
+                  attendeeEmailNotes.push(
+                    `${a.name ?? supplied} is invited at ${supplied} (the address stated in this conversation). The directory has a different address on file (${resolved.email}) — if that stored address is stale, say so and it should be corrected.`,
+                  );
+                  a.email = supplied;
+                } else {
+                  // Queryable trail (M18) — every directory override of a
+                  // model-typed email is visible in the logs.
+                  logger.info('create_meeting — directory match overrode the model-supplied email', {
+                    name: a.name, supplied, resolved: resolved.email,
+                  });
+                  attendeeEmailNotes.push(
+                    `${a.name ?? resolved.email} is invited at ${resolved.email} (the address on file), NOT at ${supplied}. If ${supplied} is actually the right address, the requester must state it explicitly and the invite will be corrected.`,
+                  );
+                  a.email = resolved.email;
+                }
+              } else {
+                a.email = resolved.email;
               }
-              a.email = resolved.email;
             }
             if (!a.name && resolved.name) a.name = resolved.name;
           }
@@ -1522,7 +1603,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         }
 
         // create-meeting-final-duration-not-logged (2026-08-19) — mirrors
-        // find_available_slots' entry log (findAvailableSlots.ts:226) but placed
+        // find_available_slots' entry log (near the top of that handler) but placed
         // HERE, not at the top of this handler: args.start/end/attendees are
         // rewritten multiple times above (anchor-to-event-end snap, WE
         // resolveStatedInstant, quarter-grid align, requester add/scrub, room
@@ -2031,6 +2112,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // discovery instead of the result of her own action (issue #26 bug 1).
             action_summary: `Booked '${args.subject}' for ${bookedWhen}.`,
             ...(bookedTripNote ? { _trip_note: bookedTripNote } : {}),
+            // jim-douglass follow-up (2026-08-30) — an attendee's invited
+            // address diverged from what was passed (directory override, or a
+            // human-stated address kept over a stale row). State the actual
+            // invited address in the reply — a redirected invite must be
+            // visible to the requester immediately, never silent.
+            ...(attendeeEmailNotes.length > 0
+              ? { _attendee_email_note: `Attendee address resolution differed from the tool input — state the actual invited address(es) in the reply, never silently: ${attendeeEmailNotes.join(' ')}` }
+              : {}),
             // #127 — owner booked through a soft own-day rule: surface the
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.

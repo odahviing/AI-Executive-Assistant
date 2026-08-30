@@ -1,11 +1,15 @@
 /**
- * Meetings-skill direct-ops helper (internal; not a loadable skill).
+ * Meetings-skill direct-ops dispatcher (internal; not a loadable skill).
  *
- * This file holds the direct calendar operations (`get_calendar`, `create_meeting`,
+ * The direct calendar operations (`get_calendar`, `create_meeting`,
  * `move_meeting`, `delete_meeting`, `update_meeting`, `get_free_busy`,
- * `find_available_slots`, `analyze_calendar`) and the pure helpers
- * `processCalendarEvents` and `analyzeCalendar` used by the task runner's
- * `calendar_fix` dispatcher.
+ * `find_available_slots`, `analyze_calendar`, ...) live in ./ops/handlers/*
+ * (extracted v3.7.x); `executeToolCall` below is a thin dispatcher plus the
+ * email-leg result scrub. The pure helpers `processCalendarEvents` /
+ * `analyzeCalendar` live in ./ops/analysis and are re-exported below for
+ * their consumers (tasks/briefs.ts, core/orchestrator/buildTurnContext.ts);
+ * the task runner's `calendar_fix` dispatcher is a retired no-op
+ * (tasks/dispatchers/calendarFix.ts) and consumes neither.
  *
  * It exposes a class (`SchedulingSkill`) that conforms to the Skill interface
  * ONLY because `MeetingsSkill` instantiates it and delegates `executeToolCall`
@@ -13,8 +17,8 @@
  * never consulted — `MeetingsSkill` owns both — so keeping them would be dead
  * code. They are intentionally absent.
  *
- * NOT registered in `skills/registry.ts`. The leading underscore in the
- * filename signals "internal helper, not a togglable skill."
+ * NOT registered in `skills/registry.ts` — internal helper, not a togglable
+ * skill.
  */
 import type { SkillContext } from '../types';
 
@@ -61,7 +65,7 @@ export class SchedulingSkill {
     // gh#154-R3 (2026-08-06) — computed ONCE here, for find_available_slots only,
     // and threaded into the handler via OpCtx.relaxedGrant (context.ts) so
     // `handleFindAvailableSlots`'s own internal `grantRelaxed(args, context)`
-    // call (findAvailableSlots.ts:183 — needed mid-search for the real
+    // call (resolved near the top of that handler — needed mid-search for the real
     // rule-bypass decision, not just this disclosure) reads the SAME result
     // instead of calling it a second time and logging its decision twice.
     const relaxedGrant = toolName === 'find_available_slots' ? grantRelaxed(args, context) : undefined;
@@ -117,14 +121,14 @@ export class SchedulingSkill {
       // Same class of leak, find_available_slots' side: the owner-trade-off note
       // family (_over_optional_note / _attendee_conflicts_note /
       // _no_all_attendee_free_note / _recovery_note,
-      // findAvailableSlots.ts:2079-2133) is second-person prose for the owner
+      // findAvailableSlots.ts's result-wrapper block) is second-person prose for the owner
       // PLUS the raw per-slot data it narrates — a non-private meeting's
       // subject (`over_optional`) and a colleague's email + busy reason
       // (`attendee_conflicts`). Stripping only the notes would still leave that
       // data sitting in the model's context on a leg whose entire reply is
       // forwarded verbatim to an external party, so both the notes AND the
       // fields they describe are removed here — the same chokepoint, extended.
-      // (`_attendee_busy_colleague_note`, findAvailableSlots.ts:2090, is NOT
+      // (`_attendee_busy_colleague_note`, same block, is NOT
       // stripped here — it's gated on `mustBe`, which requires
       // `!isOwnerInitiatedSearch`; the email leg is always
       // `senderRole:'owner'` so `isOwnerInitiatedSearch` is always true and the
@@ -134,8 +138,25 @@ export class SchedulingSkill {
       delete r._attendee_conflicts_note;
       delete r._no_all_attendee_free_note;
       delete r._recovery_note;
+      // pre-wrap-4.8.2-bouncer — `_attendee_email_note` (createMeeting.ts) names
+      // a colleague's resolved directory address plus the model-supplied one it
+      // overrode, and instructs stating the real address in the reply — the
+      // same shape of leak as `_attendee_conflicts_note` above, on the one leg
+      // whose whole reply is forwarded verbatim to an external.
+      delete r._attendee_email_note;
+      // pre-wrap-4.8.2-bouncer — `_travel_buffer_note` (findAvailableSlots.ts)
+      // is owner-scheduling-mechanics prose ("screened with an N-minute travel
+      // buffer against Idan's real commitments") with no owner-facing side
+      // channel on this leg, same class as `_over_optional_note` above.
+      delete r._travel_buffer_note;
+      // scanner-relay-first-person-attendee-status — `_attendee_status_note`
+      // teaches quoting the per-entry `line` of a field this same scrub
+      // deletes just below; a note pointing at a stripped field would only
+      // mislead, so it goes with it.
+      delete r._attendee_status_note;
       // `attendee_status` (findAvailableSlots.ts's colleague-path / flexible-
-      // requester annotation, ~line 1496) is the same shape of fact — an
+      // requester annotation — the block that builds the per-slot
+      // `attendee_status` entries) is the same shape of fact — an
       // internal colleague's email + free/busy status per slot — and reaches
       // an owner-initiated email turn whenever ignore_attendee_availability or
       // a granted relaxed override is set, same as the fields above.
@@ -152,16 +173,16 @@ export class SchedulingSkill {
         }
       }
       // email-siblings-not-stripped-results-branch — the SAME leak, the
-      // candidate_validation branch's shape (findAvailableSlots.ts:835-885, taken
+      // candidate_validation branch's shape (findAvailableSlots.ts, taken
       // when the caller checks specific proposed times rather than searching):
       // no top-level `slots`, so the walk above never reaches it. Each
       // `results[]` item's `broken_rule` is the RAW per-attendee reason string
-      // (`outside_attendee_work_hours:<email>` / `attendee_busy_collision:<email>`,
-      // findAvailableSlots.ts:824-825) and `attendee_hours_note` spells out that
-      // same colleague's stated working hours verbatim (findAvailableSlots.ts:826-834,
-      // 140-142) — both left in place for the owner's own view; `broken_rule_label`
+      // (`outside_attendee_work_hours:<email>` / `attendee_busy_collision:<email>`)
+      // and `attendee_hours_note` spells out that same colleague's stated
+      // working hours verbatim (attendeeHoursGroundingNotes) — both left in
+      // place for the owner's own view; `broken_rule_label`
       // is the clean, human, name-free equivalent and stays. `travelers`
-      // (findAvailableSlots.ts:1513-1519, top-level — not nested in `slots`, so the
+      // (top-level — not nested in `slots`, so the
       // per-slot walk above never reached it either) is a colleague's email + travel
       // location, same shape of fact as `attendee_status`.
       if (Array.isArray(r.results)) {
@@ -171,12 +192,12 @@ export class SchedulingSkill {
         }
       }
       delete r.travelers;
-      // Same family, main-branch sibling (findAvailableSlots.ts:1745-1747): a
+      // Same family, main-branch sibling (`_attendee_unverified_note`): a
       // second-person aside attached when no slot survived attendee filtering
       // ("these are his OWN open times — I could not confirm the other
       // attendee(s) yet"). NOT stripped here — it's gated on
       // `usedColleagueOwnerOnly`, itself only ever set from
-      // `colleagueOwnerOnlySlots` (findAvailableSlots.ts:1086), which requires
+      // `colleagueOwnerOnlySlots`, which requires
       // `!isOwnerInitiatedSearch` — always false on the email leg
       // (senderRole:'owner' → isOwnerInitiatedSearch true) — so the key can
       // never be present here; deleting it was dead code.
@@ -186,8 +207,8 @@ export class SchedulingSkill {
       // attendees_not_checked / _attendee_not_checked_warning) is the same
       // class of leak: an internal colleague's raw email address, or a notice
       // naming them. It rides BOTH attendeeCheckWarnings call sites
-      // (findAvailableSlots.ts:868 the candidate_validation branch, :950 the
-      // main slots pass) — both spread it at the TOP LEVEL of the result, so
+      // (the candidate_validation branch and the main slots pass)
+      // — both spread it at the TOP LEVEL of the result, so
       // one delete here closes both branches at once.
       //
       // email-colleague-freebusy-failure-has-no-signal — `attendees_not_checked`
@@ -202,7 +223,7 @@ export class SchedulingSkill {
       // v4.4.x — `unresolved_attendee_emails` carries the SAME honesty gap as
       // `attendees_not_checked`: its own warning text says outright "their
       // availability was NOT checked (a nonexistent mailbox reads as fully
-      // free)" (findAvailableSlots.ts:83), yet this flag used to key off
+      // free)" (attendeeCheckWarnings), yet this flag used to key off
       // `attendees_not_checked` alone — a search whose ONLY trigger was an
       // unresolved address (attendees_not_checked empty) silently fell through
       // with no notice, reading as fully verified on the one leg forwarded
@@ -220,11 +241,11 @@ export class SchedulingSkill {
       }
 
       // email-leg-payload-strips-attendee-identifying-fields — day_summary
-      // (attached whole at findAvailableSlots.ts:1692) carries the same two
+      // (attached whole in the result-wrapper block) carries the same two
       // facts per DAY that are already stripped per-slot/per-result above:
-      // `blocked_by[].email` is a raw internal colleague address
-      // (findAvailableSlots.ts:661) and `attendee_hours_note` is that
-      // colleague's verbatim stated working hours (findAvailableSlots.ts:927).
+      // `blocked_by[].email` is a raw internal colleague address and
+      // `attendee_hours_note` is that colleague's verbatim stated working
+      // hours (attendeeHoursGroundingNotes).
       // Neither is caught by the walks above — they live one level further
       // out, on r.day_summary[] rather than r.results[] / r.slots[].
       if (Array.isArray(r.day_summary)) {

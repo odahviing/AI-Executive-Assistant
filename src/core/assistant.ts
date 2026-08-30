@@ -134,6 +134,7 @@ You don't need explicit statements. Infer from behavior:
 - communication_style: describe their message pattern. "Brief, direct, never asks questions back" or "Detailed, conversational, often elaborates".
 - language_preference: if they consistently reply in a different language from the one you used — save it here.
 - timezone: save as soon as you have a signal. If the person mentions a meeting in ET/PST/GMT/etc., or their email/calendar shows a US/EU/Asia location, save the IANA zone here (e.g. "America/New_York", "America/Los_Angeles", "Europe/London", "Australia/Sydney"). Don't overwrite a known timezone unless the new signal is clearly stronger.
+- email: ONLY when an address is explicitly stated in conversation — the owner ("Jim's email changed to jim@newco.com", "use dana@corp.io for Dana") or the person themselves. Saving it durably fixes the directory address calendar invites go to, so the correction keeps working in future conversations without being restated. Unlike timezone, NEVER infer or guess an address — a stated one only.
 - working_hours: infer from their timezone and when they actually respond. "Israel 9am–6pm" or "Responds in US Eastern mornings".
 - role_summary: piece together from calendar meetings you've seen, topics they mention, side context. "EMEA sales lead, focused on Q3 targets."
 - reports_to: if you learn who their manager is — save it.
@@ -168,6 +169,10 @@ Call this after interactions — not during them. It's a background update.`,
             state: {
               type: 'string',
               description: 'Free-text location for the person — city, region, or country ("Boston", "New York", "Israel", "London"). Save when the owner volunteers it ("[Person] lives in Israel") or the person tells you. State is more useful than timezone alone (Boston ≠ NYC even though both are ET). When state lands, the system automatically derives + saves a matching IANA timezone.',
+            },
+            email: {
+              type: 'string',
+              description: 'Email address for the person — pass ONLY an address explicitly stated in the conversation (owner: "Jim\'s email changed to jim@newco.com"; the person: "my address is dana@corp.io"). Durably updates the directory address used for calendar invites, so the correction holds in every future conversation. An owner-stated address outranks the auto-synced one and cannot be silently reverted by a later sync. NEVER pass an address you inferred, guessed, or composed yourself.',
             },
             working_hours: {
               type: 'string',
@@ -535,6 +540,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           'colleague_slack_id', 'colleague_name',
           'timezone', 'state', 'working_hours', 'working_hours_structured',
           'language_preference', 'name_he', 'currently_traveling',
+          // email: a person's own stated contact address (L2's own example, at
+          // 'person' tier — corrects an auto-synced value, never an owner entry).
+          'email',
         ]);
         const droppedFields: string[] = [];
         for (const k of Object.keys(args)) {
@@ -1007,6 +1015,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const timezone = args.timezone as string | undefined;
         const state   = args.state as string | undefined;
         const nameHe  = args.name_he as string | undefined;
+        const emailArg = ((args.email as string | undefined) ?? '').trim().toLowerCase() || undefined;
         // v4.4.x (#170) — travel is a person_id-keyed write (setCurrentTravelById /
         // clearCurrentTravelById), so — unlike the auto-working-hours refresh and
         // engagement_rank below, which really are Slack-only — it applies to
@@ -1076,6 +1085,20 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           }
         }
 
+        // v4.8.x — same pre-flight shape gate as timezone: a malformed address
+        // errors back to Sonnet instead of landing in the directory calendar
+        // invites are built from. Structured-string check (an email is
+        // language-independent), same shape as connectors/email/extractParticipants.ts.
+        if (emailArg && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailArg)) {
+          logger.warn('update_person_profile — rejected malformed email', {
+            colleague_name: name, attempted: emailArg,
+          });
+          return {
+            error: 'invalid_email',
+            message: `'${emailArg}' is not a valid email address. Pass the address exactly as it was stated in the conversation (e.g. 'jim@newco.com').`,
+          };
+        }
+
         // v3.2.0 — EXTERNAL (owner-path, no slack_id): write the core profile
         // fields by person_id, then return. Auto-working-hours-refresh and
         // engagement_rank below really are Slack/internal-only; travel is NOT
@@ -1084,10 +1107,25 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // Slack account / calendar.
         if (!slackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { setCoreFieldWithProvenanceById, updatePersonProfileById } = require('../db') as typeof import('../db');
+          const { setCoreFieldWithProvenanceById, updatePersonProfileById, setPersonEmail } = require('../db') as typeof import('../db');
           const coreWrites: Array<[string, CoreFieldWrite]> = [];
+          const extraNotes: string[] = [];
+          // v4.8.x — email FIRST: it is the identity-keyed write (setPersonEmail,
+          // db/people.ts — provenance-gated, merge-safe). A stated address another
+          // row already holds MERGES the two rows, so every write below must
+          // target the SURVIVOR, not a row the merge may have deleted.
+          let personId = target.personId;
+          if (emailArg) {
+            const w = setPersonEmail(personId, emailArg, { overwrite: true, by: setBy });
+            if (w.personId) personId = w.personId;
+            if (w.outcome === 'identity_conflict') {
+              extraNotes.push(`email NOT saved — ${emailArg} is already on file for a DIFFERENT person (a distinct identity, not a duplicate row). Tell ${context.profile.user.name.split(' ')[0]} about the clash instead of reporting a save.`);
+            } else if (w.outcome !== 'kept_existing') {
+              coreWrites.push(['email', w.outcome]);
+            }
+          }
           if (timezone && timezone.trim()) {
-            coreWrites.push(['timezone', setCoreFieldWithProvenanceById(target.personId, 'timezone', timezone.trim(), setBy)]);
+            coreWrites.push(['timezone', setCoreFieldWithProvenanceById(personId, 'timezone', timezone.trim(), setBy)]);
             // v4.2.x — externals never got this refresh (only the slack_id branch
             // below did), so a known timezone with no working_hours_auto read as
             // "unknown" to getEffectiveWorkingHours and attendeeAvailability
@@ -1096,11 +1134,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { refreshAutoWorkingHoursById } = require('../utils/workingHoursDefault') as
               typeof import('../utils/workingHoursDefault');
-            refreshAutoWorkingHoursById(target.personId);
+            refreshAutoWorkingHoursById(personId);
           }
-          if (state && state.trim()) coreWrites.push(['state', setCoreFieldWithProvenanceById(target.personId, 'state', state.trim(), setBy)]);
-          if (nameHe && nameHe.trim()) coreWrites.push(['name_he', setCoreFieldWithProvenanceById(target.personId, 'name_he', nameHe.trim(), setBy)]);
-          updatePersonProfileById(target.personId, {
+          if (state && state.trim()) coreWrites.push(['state', setCoreFieldWithProvenanceById(personId, 'state', state.trim(), setBy)]);
+          if (nameHe && nameHe.trim()) coreWrites.push(['name_he', setCoreFieldWithProvenanceById(personId, 'name_he', nameHe.trim(), setBy)]);
+          updatePersonProfileById(personId, {
             communication_style: args.communication_style as string | undefined,
             language_preference: args.language_preference as string | undefined,
             working_hours:       args.working_hours       as string | undefined,
@@ -1113,17 +1151,18 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           // v3.2.6 — owner-curated VIP flag (externals can be VIPs too).
           if (typeof args.vip === 'boolean') {
             const { setPersonVipById } = require('../db') as typeof import('../db');
-            setPersonVipById(target.personId, args.vip);
+            setPersonVipById(personId, args.vip);
           }
           // v4.4.x (#170) — travel (externals travel too; L2's own example).
-          applyTravel(target.personId);
-          logger.info('Person profile updated (external)', { personId: target.personId, name: target.name });
+          applyTravel(personId);
+          logger.info('Person profile updated (external)', { personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
+          const allNotes = [...described.notes, ...extraNotes];
           return {
             updated: true, name: target.name, external: true,
             ...(described.not_saved ? { not_saved: described.not_saved } : {}),
             ...(described.already_set ? { already_set: described.already_set } : {}),
-            ...(described.notes.length > 0 ? { _note: described.notes.join(' ') } : {}),
+            ...(allNotes.length > 0 ? { _note: allNotes.join(' ') } : {}),
           };
         }
 
@@ -1138,6 +1177,23 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // stomped the Slack-derived full name on file.
         upsertPersonMemory({ slackId, name: target.name });
         const coreWrites: Array<[string, CoreFieldWrite]> = [];
+
+        // v4.8.x — a stated address correction ("Jim's email changed to
+        // jim@newco.com") lands DURABLY through THE email writer (setPersonEmail,
+        // db/people.ts): identity-safe (merges a duplicate row already holding
+        // the address; flags a genuine two-people clash instead of silently
+        // stealing it) and provenance-gated, so the next Slack users.info sync
+        // (auto tier) can no longer stomp the correction. This row is
+        // slack-bearing, so a merge always survives on THIS row — the
+        // slackId-keyed writes below stay valid.
+        let emailConflict = false;
+        if (emailArg) {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { setPersonEmail } = require('../db') as typeof import('../db');
+          const w = setPersonEmail(target.personId, emailArg, { overwrite: true, by: setBy });
+          if (w.outcome === 'identity_conflict') emailConflict = true;
+          else if (w.outcome !== 'kept_existing') coreWrites.push(['email', w.outcome]);
+        }
 
         if (nameHe && nameHe.trim()) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1251,6 +1307,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const SLOT_RELEVANT_FIELDS = new Set([
           'timezone', 'working_hours', 'working_hours_structured',
           'workdays', 'work_hours', 'currently_traveling',
+          // v4.8.x — a corrected address changes whose calendar free/busy is
+          // queried and where the invite goes; prior slot results used the old one.
+          'email',
         ]);
         const slotRelevant = fieldsWritten.some(f => SLOT_RELEVANT_FIELDS.has(f));
 
@@ -1260,6 +1319,12 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         if (slotRelevant) {
           base._slot_results_now_stale = true;
           notes.push(`You updated slot-relevant fields for ${name}. Any prior find_available_slots results involving ${name} are now stale — the candidate set changes with the new constraint. Re-run find_available_slots before proposing options to the owner. Do not mentally filter old slot candidates; the tool's diagnostics (day_summary, attendee work-hours filter, etc.) need to re-evaluate.`);
+        }
+
+        // v4.8.x — a genuine two-identities clash on the stated address (L11:
+        // flag, never silently merge). The store refused the write.
+        if (emailConflict) {
+          notes.push(`email NOT saved — ${emailArg} is already on file for a DIFFERENT person (a distinct Slack identity, not a duplicate row). Tell ${context.profile.user.name.split(' ')[0]} about the clash instead of reporting a save.`);
         }
 
         // What each core-field write actually did. A field the OWNER already set

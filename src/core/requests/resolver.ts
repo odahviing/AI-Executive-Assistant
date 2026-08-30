@@ -498,6 +498,32 @@ async function resolveRequestInner(
     });
   }
 
+  // open-calendar-conflict (2026-08-30, Dina) — an OPEN ask's stored move
+  // anchor is TIME-LESS by design (skill.ts's create_approval stamp: the
+  // colleague offered options and left the pick to the owner, so no time
+  // existed at raise). The owner's pick arrives either as an amend counter
+  // (merged above via details.counter / run_with_amend) or as plain approve
+  // data — same shape as the location-mode merge just above: resolution DATA
+  // for the same decided ask, not a new offer, so R7's counter cap doesn't
+  // apply. Only fills a MISSING new_start — a concrete stored time is the
+  // approved decision and approve data never overwrites it (R2; time changes
+  // on a concrete ask stay verdict='amend').
+  if (effectiveApprove && effectiveApprove.tool === 'move_meeting'
+      && !(typeof effectiveApprove.args.new_start === 'string' && effectiveApprove.args.new_start.trim())
+      && typeof approveData.new_start === 'string' && approveData.new_start.trim().length > 0) {
+    const mergedArgs: Record<string, unknown> = {
+      ...effectiveApprove.args,
+      new_start: approveData.new_start.trim(),
+    };
+    if (typeof approveData.new_end === 'string' && approveData.new_end.trim().length > 0) {
+      mergedArgs.new_end = approveData.new_end.trim();
+    }
+    effectiveApprove = { ...effectiveApprove, args: mergedArgs };
+    logger.info('resolveRequest — open-ask move: merged owner-picked time from approve data into replay args', {
+      id: requestId, new_start: mergedArgs.new_start, new_end: mergedArgs.new_end,
+    });
+  }
+
   // possible-reschedule-replay-failure-has-no-recovery-path (2026-08-14) —
   // same shape as the location-mode merge above: resolution DATA for the
   // SAME approved decision, arriving on a plain re-`approve` (not an
@@ -638,6 +664,30 @@ async function runApproveCallback(
     });
     await notifyRequesterOfDecision(row, 'approve', {}, undefined, ctx);
     return { ok: true, request_id: row.id, state: 'resolved', effect: 'approved (no replay)' };
+  }
+
+  // open-calendar-conflict (2026-08-30, Dina) — a move with NO new_start is the
+  // OPEN ask's time-less anchor (skill.ts's create_approval stamp) and nothing
+  // has chosen the time yet: a bare approve (typed "yes", emoji ✅) has nothing
+  // to execute, and letting the replay hit move_meeting's own validation would
+  // land in the generic approve_replay_failed branch with an unactionable
+  // error. Refuse it here with the recovery path instead — the request stays
+  // open (awaiting_owner timers untouched), exactly like the two targeted
+  // recovery returns in the catch below. On the Sonnet paths the reason is
+  // surfaced and re-asked; on the emoji path it is logged and the row's own
+  // reminder/expiry timers keep it from dying silently (R3).
+  if (tool === 'move_meeting'
+      && !(typeof args.new_start === 'string' && args.new_start.trim().length > 0)) {
+    logger.warn('resolveRequest — bare approve on an open time-less move; a time must be chosen first', {
+      id: row.id, subject: row.subject,
+    });
+    return {
+      ok: false,
+      request_id: row.id,
+      state: row.state,
+      effect: 'approve_needs_time',
+      reason: `This ask is open-ended — the requester offered options and left the pick to the owner, so no single new time is stored and a bare approve has nothing to execute. Ask the owner which time he picks if he hasn't said, then resolve again carrying it: verdict="amend" with counter={"new_start":"<ISO>"} (add new_end only to change the duration — omitted, the meeting keeps its length). If the owner wants to leave the meeting unchanged, use verdict="reject" with his words as reason — the requester is told the meeting stays as is.`,
+    };
   }
 
   // Inject the override flag matching the tool. Same semantics as the

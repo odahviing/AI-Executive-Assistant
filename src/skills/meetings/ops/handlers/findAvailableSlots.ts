@@ -17,10 +17,10 @@ import {
   GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
-import { getPersonMemory } from '../../../../db';
+import { getPersonByEmail, getPersonMemory } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
-import { bookingLeadTimeHours, offeredSlotCount, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
+import { bookingLeadTimeHours, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
@@ -138,6 +138,73 @@ function attendeeHoursGroundingNotes(
   return notes.length > 0 ? notes : undefined;
 }
 
+/**
+ * scanner-relay-first-person-attendee-status (2026-08-30) — viewer-bound,
+ * pre-rendered prose for the two per-slot attendee facts (`attendee_status`,
+ * `attendee_conflicts`). Both used to ship bare ({email, kind, status} /
+ * {email, reason, assumed?}) and Sonnet free-wrote the sentence, perspective
+ * included — which is how a colleague reading about her OWN calendar got
+ * "I show tentative then" (first person, as if it were Maelle's calendar).
+ * The perspective is deterministic — does the entry's email match the
+ * authenticated person Maelle is replying to (`viewerEmailFor`)? — so it is
+ * bound HERE in code, the same pattern as `presentation_local` /
+ * `broken_rule_label` / the M13 dual-clock strings: second person for the
+ * recipient's own calendar, third person BY NAME for anyone else's, never
+ * "I". The result notes tell Sonnet to quote `line` verbatim.
+ *
+ * `viewerEmail` is null/undefined off the 1:1 colleague-DM surface (owner DM,
+ * room, email leg), so those always render third person — correct for the
+ * owner and for a room (multiple readers); the email leg strips both fields
+ * entirely before the model sees them (ops.ts's email scrub).
+ */
+function attendeeFirstName(email: string): string {
+  const stored = getPersonByEmail(email)?.name?.trim();
+  return stored ? stored.split(/\s+/)[0] : email;
+}
+
+function renderAttendeeStatusLine(
+  email: string,
+  status: string,
+  kind: 'internal' | 'external',
+  viewerEmail: string | null | undefined,
+): string {
+  const you = !!viewerEmail && email.toLowerCase() === viewerEmail;
+  if (kind === 'external') {
+    return you
+      ? 'your calendar can\'t be checked from here'
+      : `${attendeeFirstName(email)} is external — their calendar can't be checked from here`;
+  }
+  const name = attendeeFirstName(email);
+  switch (status) {
+    case 'free': return you ? 'you\'re free then' : `${name}'s free then`;
+    case 'busy': return you ? 'you show busy then' : `${name} shows busy then`;
+    case 'tentative': return you ? 'you show tentative then' : `${name} shows tentative then`;
+    case 'oof': return you ? 'you\'re marked out of office then' : `${name}'s marked out of office then`;
+    default: return you
+      ? 'your calendar couldn\'t be checked for this time'
+      : `${name}'s calendar couldn't be checked for this time`;
+  }
+}
+
+function renderAttendeeConflictLine(
+  conflict: { email: string; reason: string; assumed?: boolean },
+  viewerEmail: string | null | undefined,
+): string {
+  const you = !!viewerEmail && conflict.email.toLowerCase() === viewerEmail;
+  const name = attendeeFirstName(conflict.email);
+  if (conflict.reason === 'off_hours') {
+    // The assumed-hours hedge (o#213 / #M3): a guessed default is never
+    // narrated as fact — the hedge ships inside the line itself.
+    if (conflict.assumed === true) {
+      return you
+        ? 'probably outside your working hours then — though I\'m not certain of your actual schedule'
+        : `probably outside ${name}'s working hours then — though I'm not certain of their actual schedule`;
+    }
+    return you ? 'that\'s outside your working hours' : `that's outside ${name}'s working hours`;
+  }
+  return you ? 'you\'re busy then' : `${name}'s busy then`;
+}
+
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
   // v4.1.x — resolved ONCE per call from the authenticated sender.
@@ -213,6 +280,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             search_from_has_time: typeof args.search_from === 'string' && args.search_from.includes('T'),
             search_to_has_time: typeof args.search_to === 'string' && args.search_to.includes('T'),
             duration_minutes: args.duration_minutes,
+            travel_buffer_minutes: args.travel_buffer_minutes,
             attendee_emails: args.attendee_emails,
             meeting_mode: args.meeting_mode,
             relaxed: args.relaxed === true,
@@ -229,6 +297,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               message: `meeting_mode must be one of: in_person, online, either, custom. Got "${mode}". Ask the owner which one applies before calling again.`,
             };
           }
+          // (2026-08-30, Mike/KPMG onsite incident) — the travel padding this
+          // search will ENFORCE, resolved via the SAME helper the walker +
+          // checkSlot use (M1: one source, connectors/graph/findAvailableSlots.ts
+          // resolves the identical triple), so the RESULT can state the buffer it
+          // actually screened with (`_travel_buffer_note` below). Before this the
+          // payload carried no buffer fact at all: the model free-handed
+          // "20-minute travel buffer each way" into a reply, and the claim-checker
+          // — correctly finding no tool computation to match it — stripped a TRUE
+          // statement the search had in fact enforced (three
+          // travel_buffer_collision rejections in the very same call). Grounded-
+          // string pattern, same as `_requested_time_local`: quote, never re-derive.
+          const effectiveTravelBufferMinutes = travelBufferMinutesFor(
+            context.profile,
+            typeof args.category === 'string' ? args.category : null,
+            args.travel_buffer_minutes as number | undefined,
+          );
           // v2.2.5 (C) — must_be_after_event_id: clip searchFrom to AFTER the
           // predecessor's end. Optional; when omitted, behavior is unchanged.
           // Predecessor lookup via getCalendarEvents window around the
@@ -1804,15 +1888,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   }),
                 );
                 annotatedSlots = slots.map((s: any) => {
+                  // Each entry carries `line` — the pre-rendered, viewer-bound
+                  // sentence (renderAttendeeStatusLine above) Sonnet quotes
+                  // verbatim; the raw `status` stays for logs/inspection.
                   const attendee_status = perAttendeeAnnotations.map(p => {
                     const match = p.ann.find(a => a.slot.start === s.start);
-                    return { email: p.email, kind: 'internal', status: match?.attendeeStatus ?? 'unknown' };
+                    const status: string = match?.attendeeStatus ?? 'unknown';
+                    return { email: p.email, kind: 'internal', status, line: renderAttendeeStatusLine(p.email, status, 'internal', viewerEmail) };
                   });
                   // External attendees → always 'unknown'
                   const externals = attendeeEmails.filter(e => {
                     const lower = e.toLowerCase();
                     return !ownerDomain || !lower.endsWith('@' + ownerDomain);
-                  }).map(email => ({ email, kind: 'external', status: 'unknown' as const }));
+                  }).map(email => ({ email, kind: 'external', status: 'unknown' as const, line: renderAttendeeStatusLine(email, 'unknown', 'external', viewerEmail) }));
                   return { ...s, attendee_status: [...attendee_status, ...externals] };
                 });
               } catch (err) {
@@ -1974,6 +2062,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // instead of dropping them, tagged with `attendee_conflicts`. Tell
             // the owner WHO's busy / off-hours per slot (rules 6 + 7) — never
             // present a conflicted slot as clean.
+            // scanner-relay-first-person-attendee-status — each conflict entry
+            // (built bare in connectors/graph/findAvailableSlots.ts as
+            // {email, reason, assumed?}) gains `line` here: the pre-rendered,
+            // viewer-bound sentence (assumed-hours hedge included), so the
+            // notes below say "quote it" instead of teaching per-value
+            // phrasing the model then re-derives in the wrong person.
+            annotatedSlots = annotatedSlots.map((s: any) => {
+              if (!Array.isArray(s.attendee_conflicts) || s.attendee_conflicts.length === 0) return s;
+              return {
+                ...s,
+                attendee_conflicts: s.attendee_conflicts.map((c: any) => ({ ...c, line: renderAttendeeConflictLine(c, viewerEmail) })),
+              };
+            });
             const hasAttendeeConflicts = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_conflicts) && s.attendee_conflicts.length > 0,
             );
@@ -1988,8 +2089,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // traced end to end above), yet the reply presented the WE-tagged
             // slot as clean while narrating a DIFFERENT attendee's real conflict
             // in the same message — a colleague-path search always carries a
-            // SECOND per-slot signal (`attendee_status`) explained only in the
-            // system prompt, and asking the model to also cross-reference a
+            // SECOND per-slot signal (`attendee_status`; at the time explained
+            // only in the system prompt — it now carries a pre-rendered
+            // per-entry `line` plus `_attendee_status_note` below), and asking
+            // the model to also cross-reference a
             // free-text top-level note against "which slot" for a second,
             // unrelated fact is exactly the class of gap M13 exists to close for
             // timezone strings: don't narrate from data, quote a rendered string
@@ -2020,19 +2123,34 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // the model to quote a field that isn't there — and a model told to name
             // a reason it cannot read is a model that invents one (M9).
             const hasBrokenRuleLabel = annotatedSlots.some((s: any) => typeof s.broken_rule_label === 'string' && s.broken_rule_label.length > 0);
-            // `attendee_status` (per-slot, from the annotation above) ships bare on
-            // a plain colleague-initiated search. Its per-slot semantics are
-            // explained unconditionally by the system prompt (meetings.ts's
-            // "OWNER FREE, REQUESTER BUSY" paragraph) — o#186 removed the
-            // duplicate per-call `_attendee_status_note` that repeated the same
-            // instruction here. This flag's only remaining job is to force the
+            // `attendee_status` (per-slot, from the annotation above) carries a
+            // pre-rendered, viewer-bound `line` per entry
+            // (scanner-relay-first-person-attendee-status, 2026-08-30). Its
+            // VALUE semantics are still explained by the system prompt
+            // (meetings.ts's "OWNER FREE, REQUESTER BUSY" paragraph) — o#186
+            // removed a per-call duplicate of THAT, and the
+            // `_attendee_status_note` attached below is not it back: it teaches
+            // only the new quote-the-line rule, which nothing else carries on
+            // the plain colleague-path search. The flag also still forces the
             // `{slots, ...}` wrapper (below) even when no OTHER condition would,
             // so a search whose sole distinguishing fact is attendee_status still
             // returns the same shape as every other annotated result.
             const hasAttendeeStatus = annotatedSlots.some(
               (s: any) => Array.isArray(s.attendee_status) && s.attendee_status.length > 0,
             );
-            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning) {
+            // (2026-08-30, Mike/KPMG onsite incident) — state the travel padding
+            // these slots were ALREADY screened with, so a "with a 20-min travel
+            // window each way" claim is a quote of a tool fact instead of an
+            // invented one the claim-checker then strips. Only on passes that
+            // actually enforced it: the relaxed recovery (`isRecoveryResult`) and
+            // an owner relaxed search (`relaxedGranted`) both bypass the travel
+            // rule (checkSlot rule 7 / the walker's attendee-side pad), so the
+            // note would be false there. The two rule-6 backstop pools run
+            // relaxed:false and keep the padding — the note is true for them.
+            const travelBufferNote = (effectiveTravelBufferMinutes > 0 && annotatedSlots.length > 0 && !isRecoveryResult && !relaxedGranted)
+              ? `Every slot in \`slots\` was already screened with a ${effectiveTravelBufferMinutes}-minute travel buffer on BOTH sides against ${context.profile.user.name.split(' ')[0]}'s real commitments — candidates too close to an existing meeting were rejected before you saw them. If asked about travel margins, quote "${effectiveTravelBufferMinutes} minutes" verbatim; never recompute the gaps yourself. Two limits: optional/skippable events are NOT padded (only real commitments are), and if the requester asked for a LARGER margin than ${effectiveTravelBufferMinutes} minutes, re-call with travel_buffer_minutes set to their number instead of asserting it.`
+              : undefined;
+            if (travelers.length > 0 || hasDaySummary || isRecoveryResult || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || hasAttendeeConflicts || usedColleagueOwnerOnly || usedOwnerAttendeeTagged || hasOverOptional || requestedTimeLocal || timezoneHint || preferredSlotStatus || hasAttendeeStatus || movingEventIdMismatchWarning || travelBufferNote) {
               const result: Record<string, unknown> = { slots: annotatedSlots };
               // #148 — grounded timezone strings so Sonnet quotes the conversion, never recomputes it.
               Object.assign(result, tzGroundingFields);
@@ -2047,6 +2165,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // its real reason. Present only when a preferred_slot was asked for
               // and could not be offered.
               if (preferredSlotStatus) result.preferred_slot_status = preferredSlotStatus;
+              if (travelBufferNote) result._travel_buffer_note = travelBufferNote;
               if (travelers.length > 0) result.travelers = travelers;
               if (hasDaySummary) result.day_summary = daySummary;
               if (attendeeEmailWarning) Object.assign(result, attendeeEmailWarning);
@@ -2059,7 +2178,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // than real stored hours, tagged `assumed: true` on the
                 // conflict entry in connectors/graph/findAvailableSlots.ts.
                 result._attendee_conflicts_note =
-                  `You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has \`attendee_conflicts: [{email, reason, assumed?}]\`. Present them, but say plainly who is busy / off-hours on those (e.g. "Tue 10:00 — Anna is busy then"). For an \`off_hours\` entry, when \`assumed\` is missing or false that's real stored working-hours data — say it plainly; when it carries \`assumed: true\` those hours are a GUESSED default (no profile on file for that attendee, never confirmed), so hedge instead (e.g. "Tue 10:00 — probably outside Anna's hours, though I'm not certain of her actual schedule"). Never present a conflicted slot as clean. The owner can still book any of them.`;
+                  `You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Present them, and next to each conflicted slot quote that entry's \`line\` VERBATIM (e.g. "Tue 10:00 — <line>") — it is already in the right grammatical person for whoever you're replying to, and already hedged when the hours were a guessed default (\`assumed: true\`, no profile on file) rather than real stored data. Don't re-derive the sentence, and never restate someone's status in first person. Never present a conflicted slot as clean. The owner can still book any of them.`;
+              }
+              if (hasAttendeeStatus) {
+                // scanner-relay-first-person-attendee-status (2026-08-30) — NOT
+                // the o#186-removed duplicate back (that one repeated the system
+                // prompt's value semantics); this teaches only the
+                // quote-the-line rule, which nothing else carries on the plain
+                // colleague-path search — the live failure surface, where a
+                // colleague was told "I show tentative then" about her own
+                // calendar. Stripped on the email leg alongside the field
+                // itself (ops.ts email scrub).
+                result._attendee_status_note =
+                  `Each slot's \`attendee_status\` entries carry \`line\` — a pre-rendered status sentence, already in the right grammatical person for whoever you're replying to ("you show tentative then" when it's their own calendar; the attendee's name otherwise). Quote it verbatim next to the slot (translate faithfully if the conversation isn't in English — keep the same grammatical person). NEVER re-derive it, and NEVER state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it is never your calendar.`;
               }
               if (usedOwnerAttendeeTagged) {
                 const ownerFirst = context.profile.user.name.split(' ')[0];
@@ -2070,7 +2201,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // attendee. Name who's busy, and if they still want it, book it directly.
                   // Never escalate to the owner: his own busy/rules never reach this set.
                   result._attendee_busy_colleague_note =
-                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason}]\` names who; say ONLY that they're busy — you have no further detail, don't invent one). Tell the requester plainly ("${ownerFirst}'s free at 4pm, but <attendee>'s busy then"). This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. If they still want it (they've usually synced with the attendee already, or they'll own the clash), BOOK IT directly with create_meeting at that slot — the attendee just gets the invite and can decline.`;
+                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason, line}]\` names who; say ONLY that they're busy — you have no further detail, don't invent one). Tell the requester plainly by quoting each entry's \`line\` verbatim ("${ownerFirst}'s free at 4pm, but <line>") — it is already in the right person, including "you're busy then" when the busy attendee IS the requester; never restate it in first person ("I'm busy") — "I" is you, Maelle, and it's never your calendar. This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. If they still want it (they've usually synced with the attendee already, or they'll own the clash), BOOK IT directly with create_meeting at that slot — the attendee just gets the invite and can decline.`;
                 } else {
                   // Owner-tagged backstop: no slot was clean for everyone, so these are his
                   // genuinely open times with each attendee conflict tagged. Honest framing:
@@ -2081,7 +2212,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // than real stored hours, tagged `assumed: true` on the
                   // conflict entry in connectors/graph/findAvailableSlots.ts.
                   result._no_all_attendee_free_note =
-                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason, assumed?}]\`. Present them and say plainly, per slot, who can't make it (e.g. "Tue 16:15 — Maayan's busy then", "Tue 16:30 — both are busy"). For an \`off_hours\` entry, when \`assumed\` is missing or false that's real stored working-hours data — say it plainly; when it carries \`assumed: true\` those hours are a GUESSED default (no profile on file, never confirmed), so hedge instead (e.g. "Tue 16:15 — probably outside Maayan's hours, though I'm not certain of her actual schedule"). #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Present them and say plainly, per slot, who can't make it by quoting each conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both) — it is already in the right grammatical person, and already hedged when an \`off_hours\` entry's hours were a guessed default (\`assumed: true\`, no profile on file, never confirmed) rather than real stored data. #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
                 }
               }
               if (hasOverOptional) {
@@ -2117,7 +2248,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   + (hasBrokenRuleLabel
                     ? 'Each slot carries `broken_rule_label`: the exact rule it breaks, in his own words. QUOTE that per slot and present the trade-off explicitly ("17:30 works, heads up it dips under your free-time floor — book anyway?"); never present one as clean, and never guess a reason that isn\'t in the label. '
                     : 'Which specific rule each one bends is NOT in this payload, so do not name one — say only that his day is loaded around then and these are the times that could still work. ')
-                  + 'A slot may ALSO carry `attendee_conflicts` — say who is busy on top of the rule. He gets the final say.';
+                  + 'A slot may ALSO carry `attendee_conflicts` — quote each entry\'s `line` verbatim on top of the rule. He gets the final say.';
               }
               if (usedColleagueOwnerOnly) {
                 const ownerFirstUnverified = context.profile.user.name.split(' ')[0];
@@ -2127,8 +2258,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // — see recoverAttendeeBlockedSlots above), so a returned slot
                 // normally carries `attendee_conflicts: [{email, reason:'off_hours'}]`
                 // naming exactly who. That part is no longer a guess.
-                // v4.4.8 (bouncer overturn) — the colleague-path annotation at
-                // :1506 runs on every search that reaches this branch (it fires
+                // v4.4.8 (bouncer overturn) — the colleague-path annotation
+                // above runs on every search that reaches this branch (it fires
                 // whenever !isOwnerInitiatedSearch, which usedColleagueOwnerOnly
                 // implies), and ships a REAL per-slot Graph free/busy read for
                 // every INTERNAL attendee as `attendee_status`. "No calendar
@@ -2148,15 +2279,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // isn't there on a search whose slots carry no
                 // `attendee_status` at all (all-external attendees). Gated
                 // on `hasAttendeeStatus` now, matching the sibling flag
-                // above. Kept the concrete per-value mapping rather than
-                // pointing at the system prompt's "OWNER FREE, REQUESTER
-                // BUSY" paragraph (meetings.ts:1138) — that paragraph covers
-                // a different scenario (owner free, REQUESTER busy) and
-                // nowhere states what 'busy'/'tentative'/'oof' vs 'free'
-                // actually mean; claiming it "already covers" this would
-                // strip the only guidance Sonnet has for narrating these
-                // values, on the one path (the attendee-conflict fallback)
-                // where getting that narration right matters most.
+                // above. The concrete per-value mapping that used to live in
+                // this clause ('busy'/'tentative'/'oof' means..., e.g.
+                // "Lori's busy then") is now pre-rendered in code as each
+                // entry's `line` (renderAttendeeStatusLine —
+                // scanner-relay-first-person-attendee-status, 2026-08-30),
+                // so the clause only teaches quote-the-line: free-writing
+                // the sentence from raw values is how a colleague got her
+                // own status back as "I show tentative then".
                 // o#213 — the "external/unknown attendee can't be checked
                 // here" sentence used to live INSIDE the `hasAttendeeStatus`
                 // ternary, so it vanished whenever no slot carried a
@@ -2178,11 +2308,12 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // in connectors/graph/findAvailableSlots.ts. That's the other
                 // still-open half of `assumed-attendee-hours-narrated-as-fact`
                 // (the day_summary grounding note already hedged; this one
-                // didn't). Hedges per-entry now when `assumed` is true.
+                // didn't). Hedges per-entry now when `assumed` is true — the
+                // hedge is pre-rendered inside each entry's `line`.
                 result._attendee_unverified_note =
-                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours', assumed?}]\` — when an entry has no \`assumed\` flag (or it's false) that's real stored working-hours data, so say plainly who's outside their hours (e.g. "Tue 10:00 — Elinor's outside her hours then"); when an entry carries \`assumed: true\` those hours are a GUESSED default (no profile on file for that attendee, never confirmed), so hedge instead (e.g. "Tue 10:00 — probably outside Elinor's hours, though I'm not certain of her actual schedule"). Never present a tagged slot as clean for everyone.`
+                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours', assumed?, line}]\` — quote each entry's \`line\` verbatim next to that slot (e.g. "Tue 10:00 — <line>"); it is already in the right grammatical person for whoever you're replying to, and already hedged when the hours were a guessed default (\`assumed: true\`, no profile on file, never confirmed) rather than real stored data. Never present a tagged slot as clean for everyone.`
                   + (hasAttendeeStatus
-                    ? ` Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: 'busy' / 'tentative' / 'oof' means they already have something then (e.g. "Lori's busy then"); 'free' means they're clear.`
+                    ? ` Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: quote each entry's \`line\` verbatim; never re-derive it, and never state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it's never your calendar.`
                     : '')
                   + ` Only an EXTERNAL attendee (or one still 'unknown') can't be checked here — say you could not confirm THAT one yet.`
                   + ` Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;

@@ -1447,7 +1447,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // (Bodyguard) on the very beat a booking closed — a real problem, but it
     // has its own dedicated fix since — a subject dies after 2 ignored raises
     // (`recordSubjectUnanswered` / `MAX_UNANSWERED_RAISES`,
-    // db/socialSubjects.ts:636,:183) — not permanently: a person-initiated
+    // db/socialSubjects.ts:665,:183) — not permanently: a person-initiated
     // revival is designed behavior (`reviveSubject`, same file) — fed by two
     // independent triggers:
     // end-of-chat pivot detection (core/social/logEngagement.ts:92, called

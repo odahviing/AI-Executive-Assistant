@@ -9,9 +9,13 @@
  * footprint as today (we used to fold attendees into the busy filter; now we
  * just use the same data for annotation instead of filtering).
  *
- * Used in coord DM rendering: "1. Wednesday 14:00 (you look free)" lets the
- * recipient decide whether the slot works without Maelle assuming any of their
- * meetings are movable.
+ * The prose the recipient reads is NOT written here: the find_available_slots
+ * handler (skills/meetings/ops/handlers/findAvailableSlots.ts,
+ * renderAttendeeStatusLine) turns each status into a pre-rendered,
+ * viewer-bound `line` ("you show tentative then" to the person themself,
+ * "<name> shows tentative then" to anyone else) that the model quotes
+ * verbatim. The point stands either way: the recipient decides whether the
+ * slot works — Maelle never assumes any of their meetings are movable.
  *
  * Falls back to status='unknown' on Graph error — never blocks coord.
  */

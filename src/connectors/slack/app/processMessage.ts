@@ -639,19 +639,31 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // those have their own continuity surfaces.
             if (!priorOutboundContext && role === 'colleague' && !isMpim && !isChannel && !isOwnerInGroup) {
               try {
-                const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock } =
+                const { getRecentOutboundContext, closeFollowupForMessageTs, buildThreadReplyContextBlock, AUTO_EXPIRE_HOURS } =
                   await import('../recentOutboundContext');
                 // Path A — thread reply on a Maelle-sent DM. threadTs !== ts means
                 // this is a reply inside a thread, parent ts === threadTs. If
                 // that parent matches an outreach_jobs.dm_message_ts, it's an
-                // explicit reply (no LLM needed).
+                // explicit reply (no LLM needed). Always close the follow-up on
+                // a match regardless of age (a late reply still ends the wait) —
+                // but only ATTACH its content as context within the same
+                // AUTO_EXPIRE_HOURS window Path B enforces below. Past that, the
+                // thread link still proves what she's replying to, but the
+                // content itself is too stale to hand the model as if fresh.
                 if (threadTs && threadTs !== ts) {
                   const job = closeFollowupForMessageTs({ messageTs: threadTs, reason: 'thread_reply' });
                   if (job) {
-                    priorOutboundContext = buildThreadReplyContextBlock(job);
-                    logger.info('priorOutboundContext set via thread_reply', {
-                      jobId: job.id, colleague: colleagueName, threadTs,
-                    });
+                    const deltaHours = job.sent_at ? (Date.now() - Date.parse(job.sent_at)) / 3_600_000 : Infinity;
+                    if (Number.isFinite(deltaHours) && deltaHours <= AUTO_EXPIRE_HOURS) {
+                      priorOutboundContext = buildThreadReplyContextBlock(job);
+                      logger.info('priorOutboundContext set via thread_reply', {
+                        jobId: job.id, colleague: colleagueName, threadTs,
+                      });
+                    } else {
+                      logger.info('priorOutboundContext skipped via thread_reply — outbound too stale', {
+                        jobId: job.id, colleague: colleagueName, threadTs, deltaHours: Math.round(deltaHours),
+                      });
+                    }
                   }
                 }
                 // Path B — top-level DM reply. Run the time-window logic

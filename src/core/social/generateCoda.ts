@@ -51,7 +51,7 @@ import { getPersonMemory, getRecentChannelMessages } from '../../db';
 import {
   getActiveSubjectsForPersonCategory,
   getCategoryByLabel,
-  recordCategoryRaiseAttempt,
+  recordCategoryRaiseTried,
   recordSubjectUnanswered,
 } from '../../db/socialSubjects';
 
@@ -486,17 +486,21 @@ export async function composeSocialCoda(
     // untouched category tomorrow. Deliberately BEFORE the validator below:
     // even a candidate the validator later drops used up this category's one
     // free rotation slot, which is a harmless trade against the alternative
-    // (re-asking the same thing on a loop). Owner design 2026-08-30 — for a
-    // raise_new into an ACTIVE category (an in-place raise) the same call's
-    // `last_raise_attempt_at` stamp is the marker the picker's lazy resolve
-    // pass judges the raise's silence by (recordCategoryRaiseUnanswered —
-    // two ignored in-place raises kill the category). Never fires for
-    // `continue` — that mode's silence is judged on its subject row.
+    // (re-composing for the same category on a loop) — because the rotation
+    // slot is ALL a failed candidate consumes. The silence-judgment stamp
+    // (`last_raise_attempt_at`, which the picker's resolve pass counts toward
+    // category death via recordCategoryRaiseUnanswered — two ignored in-place
+    // raises kill the category) is deliberately NOT written here: it is
+    // charged at confirmed delivery only (recordCodaDelivered →
+    // markCategoryRaised, logEngagement.ts), so a raise the validator dropped
+    // or the transport never posted — one the person never saw — can never
+    // move a category toward death. Never fires for `continue` — that mode's
+    // silence is judged on its subject row.
     if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
       try {
         const category = getCategoryByLabel(pending.directive.categoryLabel);
         if (category) {
-          recordCategoryRaiseAttempt({
+          recordCategoryRaiseTried({
             ownerUserId: profile.user.slack_user_id,
             personSlackId: pending.personSlackId,
             categoryId: category.id,
@@ -574,7 +578,8 @@ export async function composeSocialCoda(
         // mode with a real subjectId and an actual invented-fact verdict
         // (not `gossipy`, which isn't about this subject's own staleness) —
         // `raise_new` has no subject row yet; its own pre-send cooldown is
-        // `recordCategoryRaiseAttempt` above.
+        // `recordCategoryRaiseTried` above (rotation slot only — never the
+        // death counter, which is delivery-charged).
         if (pending.directive.mode === 'continue' && pending.subjectId && verdict.action_type === 'invented_fact') {
           try {
             recordSubjectUnanswered(pending.subjectId);

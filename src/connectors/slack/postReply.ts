@@ -339,8 +339,9 @@ function scheduleSocialCoda(opts: {
           });
           return;
         }
-        // Social bookkeeping — the once-per-day cadence gate + the subject
-        // raise-marker — goes in on the line BEFORE the post, not after.
+        // Social bookkeeping — the once-per-day cadence gate + the raise
+        // marker (subject for `continue`, category for `raise_new`) — goes in
+        // on the line BEFORE the post, not after.
         //
         // A DB write either side of a network call leaves residue; the choice is
         // which side carries it. AFTER: posted, gate still open → the same person
@@ -355,7 +356,14 @@ function scheduleSocialCoda(opts: {
         // runCodaGates — already sits above this line, so the original bug
         // (charging a ping for a coda nobody saw) stays fixed either way. Never
         // throws by contract.
-        recordCodaDelivered({ personSlackId: coda.personSlackId, subjectId: coda.subjectId });
+        recordCodaDelivered({
+          personSlackId: coda.personSlackId,
+          subjectId: coda.subjectId,
+          ownerUserId: profile.user.slack_user_id,
+          raisedCategoryLabel: coda.directive.mode === 'raise_new'
+            ? coda.directive.categoryLabel ?? undefined
+            : undefined,
+        });
         await say({ text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
         // History, so the NEXT turn knows she asked — otherwise she re-asks, or
         // misreads the answer ("yeah, Berlin", with no memory of the question).

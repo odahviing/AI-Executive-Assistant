@@ -1098,7 +1098,7 @@ async function runClaimCheckAndMaybeRewrite(
           isOwnerAudience: isOwnerDirectAudience(ctx),
         });
         if (rewritten && rewritten.trim().length > 0) {
-          return formatForSlack(rewritten);
+          return normalizeForTransport(ctx, rewritten);
         }
       } catch (err) {
         logger.warn('rewriteOwningTheMiss threw for a permission_granted claim — keeping original draft', {
@@ -1361,7 +1361,7 @@ async function runClaimCheckAndMaybeRewrite(
  *
  * o#259 (2026-08-28) — an assistant row is stored as
  * `toolSummaries.join(' ') + '\n' + replyText` ONLY when there were tool
- * summaries that turn (postReply.ts:532-536) — a no-tool-call turn stores
+ * summaries that turn (postReply.ts:541-543) — a no-tool-call turn stores
  * `cleanReply` alone, with NO tape and no synthetic `\n` prefix. Tool tape
  * deliberately RAW and prepended (the claim-checker's `mutated=<domain>`
  * shield reads it later — never touch that storage format). Slicing 220

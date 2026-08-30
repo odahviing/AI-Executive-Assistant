@@ -313,7 +313,7 @@ export function directiveForProactiveSlot(params: {
   // A `raise_new` (category, no subject row) offer has its own matching step
   // since 2026-08-30 — the in-place category-raise resolve pass right below;
   // for a DORMANT-category offer that pass is inert (score 0 → not active)
-  // and `recordCategoryRaiseAttempt`'s tried-marker is what keeps the picker
+  // and `recordCategoryRaiseTried`'s tried-marker is what keeps the picker
   // from re-offering it.
   for (const s of getActiveSubjectsForPerson(personSlackId)) {
     if (!s.last_assistant_initiated_at) continue;
@@ -333,7 +333,9 @@ export function directiveForProactiveSlot(params: {
   // category that already had standing (score > 0) leaves no subject row
   // behind, so the subject loop above can never judge its silence; the
   // category row carries the marker instead (`last_raise_attempt_at`,
-  // stamped at compose time — generateCoda.ts). Judged per category:
+  // stamped only on CONFIRMED delivery — recordCodaDelivered →
+  // markCategoryRaised, so a validator- or gate-dropped raise the person
+  // never saw can never be judged here). Judged per category:
   //   - a live subject exists now → the raise was answered or mooted
   //     (reconciliation created/revived one, or subjects were there all
   //     along) → marker/counter cleared;

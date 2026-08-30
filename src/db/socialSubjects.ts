@@ -116,7 +116,7 @@ export interface PersonCategoryScore {
   score: number;                 // 0..3
   // Owner design 2026-08-30 — in-place raise tracking (see file header).
   unanswered_raises: number;     // in-place raises with no reply; score zeroed at MAX_UNANSWERED_RAISES
-  last_raise_attempt_at: string | null;  // when a raise_new coda last targeted this category (compose-time stamp)
+  last_raise_attempt_at: string | null;  // when a raise_new coda targeting this category was last DELIVERED (markCategoryRaised, via recordCodaDelivered)
   created_at: string;
   updated_at: string;
 }
@@ -313,7 +313,7 @@ export function adjustCategoryScore(params: {
 
 /**
  * gh#198 (answer 3/10 follow-up, bounce fix) — mark that a category was just
- * SUGGESTED via a `raise_new` coda, even though nothing has engaged with it
+ * OFFERED a `raise_new` candidate, even though nothing has engaged with it
  * yet (no subject exists to carry that memory). Without this, a dormant
  * category with no active subject was indistinguishable from one Maelle has
  * never mentioned, so `pickDormantCategory` (stateMachine.ts) — deterministic
@@ -321,18 +321,47 @@ export function adjustCategoryScore(params: {
  * a subject happened to land in it: re-asking the same thing forever, the
  * opposite of "she never re-asks what she already asked."
  *
- * The score is never touched on an existing row — this only ever plants a
- * fresh score-0 row so the category reads as "already tried" to the picker.
- * Never itself a form of engagement (answer 14 — score moves on engagement
- * alone), so it never bumps the score.
- *
- * Owner design 2026-08-30 — also stamps `last_raise_attempt_at` (both on
- * insert and on an existing row). For a dormant category the stamp is inert;
- * for an ACTIVE one (an in-place raise, stage 2 of the picker) it is the
- * marker the picker's lazy resolve pass reads to judge the raise's silence —
- * see recordCategoryRaiseUnanswered below.
+ * Called at COMPOSE time (generateCoda.ts), before the validator — a
+ * candidate the validator later drops still consumed this category's one
+ * free rotation slot. That slot is ALL a failed candidate consumes: this
+ * only plants a fresh score-0 row (an existing row is left untouched) and
+ * NEVER writes `last_raise_attempt_at` — the silence-judgment stamp that
+ * recordCategoryRaiseUnanswered counts toward category death is charged at
+ * confirmed delivery only (markCategoryRaised below), so a dropped or
+ * never-sent candidate can never read as "raised and ignored". Never itself
+ * a form of engagement (answer 14 — score moves on engagement alone), so it
+ * never bumps the score.
  */
-export function recordCategoryRaiseAttempt(params: {
+export function recordCategoryRaiseTried(params: {
+  ownerUserId: string;
+  personSlackId: string;
+  categoryId: string;
+}): void {
+  const db = getDb();
+  const { ownerUserId, personSlackId, categoryId } = params;
+  const id = `pcs_${personSlackId}_${categoryId}`;
+  db.prepare(`
+    INSERT INTO social_person_category_scores
+      (id, owner_user_id, person_slack_id, category_id, score)
+    VALUES (@id, @owner_user_id, @person_slack_id, @category_id, 0)
+    ON CONFLICT(owner_user_id, person_slack_id, category_id) DO NOTHING
+  `).run({
+    id, owner_user_id: ownerUserId, person_slack_id: personSlackId, category_id: categoryId,
+  });
+}
+
+/**
+ * Stamp that a `raise_new` coda targeting this category was actually
+ * DELIVERED — the category analog of markSubjectRaised, called only from
+ * recordCodaDelivered (logEngagement.ts) at the transport's confirmed-post
+ * point. For a dormant category the stamp is inert (the picker's resolve
+ * pass only judges rows with score > 0); for an ACTIVE one (an in-place
+ * raise, stage 2 of the picker) it is the marker that pass reads to judge
+ * the raise's silence — see recordCategoryRaiseUnanswered below. Upserts
+ * defensively, though in practice recordCategoryRaiseTried already planted
+ * the row at compose time.
+ */
+export function markCategoryRaised(params: {
   ownerUserId: string;
   personSlackId: string;
   categoryId: string;

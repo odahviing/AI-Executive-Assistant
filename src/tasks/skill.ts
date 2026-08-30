@@ -482,6 +482,16 @@ const REASON_FIELDS: Record<ApprovalSubkind, string> = {
  * refused this action this turn (index.ts:563-587). So its presence is the code's
  * proof that something really blocked the work, and its absence proves nothing
  * did — the model went straight to the owner without ever attempting the action.
+ * ONE code-authored exception: the OPEN calendar-conflict stamp in
+ * createApprovalRequest below (Dina, 2026-08-30 — owner ruling "any calendar
+ * change is approval for calendar"). A colleague raising a conflict on an
+ * existing meeting with OPTIONS but no single chosen time has no attemptable
+ * action, so a tool refusal is structurally impossible there; the handler
+ * itself stamps a TIME-LESS move_meeting anchor (meeting_id only, never a
+ * model-fabricated time), and the replay stays inert until the owner supplies
+ * the time at resolve. The v2.9.4 auto-stamp this gate deleted is different in
+ * kind: it fabricated an action for an ask that HAD a concrete time and had
+ * simply skipped the tool — that stays refused.
  * Pre-fix that case was not refused, it was PAPERED OVER: the handler fabricated
  * a `deferred_action` from the payload (v2.9.4 auto-stamp) and DM'd the owner an
  * override for work nothing had objected to. That auto-stamp is deleted with this
@@ -519,7 +529,7 @@ function gateApprovalAsk(
   if (subkind === 'policy_exception' && !approvalDeferredAction(payload)) {
     return {
       error: 'no_verified_deviation',
-      reason: `Nothing refused this action, so there is nothing to override and nothing to replay if he says yes. A policy_exception is only real once a tool has actually blocked the work. Do the action instead: call create_meeting / move_meeting / update_meeting / delete_meeting with the exact time, subject and attendees. Either it is permitted and it just happens — which is the right outcome and does not cost him a decision — or the tool refuses and hands back the precise reason (broken_rule / violation_label / suggested_ask_text) plus the action itself, which rides onto your next create_approval automatically. Do not re-raise this approval before running that tool.`,
+      reason: `Nothing refused this action, so there is nothing to override and nothing to replay if he says yes. A policy_exception is only real once a tool has actually blocked the work. Do the action instead: call create_meeting / move_meeting / update_meeting / delete_meeting with the exact time, subject and attendees. Either it is permitted and it just happens — which is the right outcome and does not cost him a decision — or the tool refuses and hands back the precise reason (broken_rule / violation_label / suggested_ask_text) plus the action itself, which rides onto your next create_approval automatically. Do not re-raise this approval before running that tool. ONE exception — an OPEN conflict on an EXISTING meeting where the person is offering options and leaving the choice to the owner (no single time chosen yet, so there is no tool call to run): retry this same create_approval(kind=policy_exception) with payload.meeting_id (resolve it via get_calendar first if needed), payload.subject (the meeting's name), payload.open_options (an array of the options in their words, e.g. ["move to another slot that day, any hour", "keep it and finish at 11:40"]), payload.context (the conflict itself), and NO start/end — the handler tracks it and the owner's eventual pick executes and is relayed back automatically.`,
     };
   }
   if (!statedApprovalReason(subkind, payload)) {
@@ -606,7 +616,7 @@ export async function createApprovalRequest(
             });
             return {
               error: 'freeform_calendar_change',
-              reason: `That's a calendar change, not a plain yes/no — a freeform approval carries no action, so on approve NOTHING would actually happen (the meeting wouldn't move/book/change). Do it through the tool: create_meeting to book, move_meeting to reschedule, update_meeting to add/remove attendees, delete_meeting to cancel. If it needs the owner's sign-off it becomes a policy_exception carrying the concrete action (real time + attendees), which replays on approve. If it's a move/book to a DAY with no time yet, run find_available_slots first (pass moving_event_ids for a move) to find when the attendees are free, THEN move/create.`,
+              reason: `That's a calendar change, not a plain yes/no — a freeform approval carries no action, so on approve NOTHING would actually happen (the meeting wouldn't move/book/change). Do it through the tool: create_meeting to book, move_meeting to reschedule, update_meeting to add/remove attendees, delete_meeting to cancel. If it needs the owner's sign-off it becomes a policy_exception carrying the concrete action (real time + attendees), which replays on approve. If it's a move/book to a DAY with no time yet, run find_available_slots first (pass moving_event_ids for a move) to find when the attendees are free, THEN move/create. If it's an OPEN conflict on an existing meeting where the asker is offering options and leaving the choice to the owner (no single time chosen), raise create_approval(kind=policy_exception) directly with payload.meeting_id + payload.subject (the meeting's name) + payload.open_options (their options, in their words) + payload.context and NO start/end — the handler tracks it so the owner's pick executes and the asker hears the outcome automatically.`,
             };
           }
           if (calVerdict === 'unsure') {
@@ -661,6 +671,56 @@ export async function createApprovalRequest(
         // put there, e.g. req_1784117442212_mo7hh's model-written
         // `rule: owner_busy_collision`.)
         delete payload.honest_hard_reason;
+
+        // ── The OPEN calendar-conflict door (Dina, 2026-08-30) ───────────
+        // Owner ruling: "any calendar changes is approval for calendar, if the
+        // user suggests stuff it's just helping!" — a colleague raising a
+        // conflict on an EXISTING meeting with options but NO single chosen
+        // time must still become a real request row, not an unstructured relay
+        // that leaves the requester never hearing the outcome. There is no
+        // attemptable tool call for it (move_meeting needs a concrete
+        // new_start), so the tool-refusal proof gateApprovalAsk requires is
+        // structurally impossible — this is the ONE code-authored stamp (see
+        // gateApprovalAsk's doc): a TIME-LESS move_meeting anchor. The replay
+        // is inert until the owner supplies the time (runApproveCallback
+        // refuses a time-less move with a recovery path); his pick arrives via
+        // the existing amend-counter / approve-data merges and executes
+        // immediately (`run_with_amend` — the colleague explicitly delegated
+        // the choice, so relaying his pick back for their sign-off would be
+        // R7 pestering, not consent). Keyed on STRUCTURED fields only (W4):
+        // meeting_id + non-empty open_options + no concrete start — an ask
+        // that HAS a chosen time still falls through to no_verified_deviation
+        // and must run the tool.
+        if (subkind === 'policy_exception' && !approvalDeferredAction(payload)) {
+          const openOptions = Array.isArray(payload.open_options)
+            ? (payload.open_options as unknown[]).filter(
+                (o): o is string => typeof o === 'string' && o.trim().length > 0,
+              )
+            : [];
+          const meetingId = typeof payload.meeting_id === 'string' ? payload.meeting_id.trim() : '';
+          if (openOptions.length > 0 && meetingId && typeof payload.start !== 'string') {
+            payload.open_options = openOptions;
+            payload.deferred_action = {
+              tool: 'move_meeting',
+              args: {
+                meeting_id: meetingId,
+                ...(typeof payload.subject === 'string' && payload.subject.trim()
+                  ? { meeting_subject: payload.subject.trim() }
+                  : {}),
+              },
+            };
+            // on_amend ONLY — never callbacks.on_approve, so extractCallbacks'
+            // legacy bridge keeps reading deferred_action (and refreshIfOpen's
+            // deferred_action refresh keeps working). See extractCallbacks'
+            // precedence note.
+            payload.callbacks = { on_amend: { mode: 'run_with_amend' } };
+            logger.info('create_approval — open calendar-conflict ask; stamped time-less move anchor', {
+              meetingId, optionCount: openOptions.length,
+              subject: typeof payload.subject === 'string' ? payload.subject : undefined,
+              requesterSlackId: payload.requester_slack_id,
+            });
+          }
+        }
 
         // ── The gate (R5) ────────────────────────────────────────────────
         // Nothing below this line runs for an ask that shouldn't reach him: no
@@ -1535,6 +1595,8 @@ The handler skips the booking-field check for a delete deferred_action; the reso
 
 For policy_exception approvals raised after a rule_violation on create_meeting / move_meeting / book_floating_block, the orchestrator auto-stamps deferred_action from the prior rule_violation's hint — you don't need to set it yourself. Only a cancellation (policy_exception + a delete_meeting deferred_action, which doesn't go through rule_violation) needs you to pass deferred_action explicitly.
 
+Open calendar conflict (no time chosen yet): when a colleague raises a conflict on an EXISTING meeting and offers OPTIONS but leaves the pick to the owner (no single new time named), raise create_approval(kind=policy_exception) with payload.meeting_id + payload.subject (the meeting's name) + payload.open_options (their options, in their own words) + payload.context (the conflict itself) and NO start/end — the handler stamps a time-less move anchor and tracks the ask as open; the owner's eventual pick executes and the requester hears the outcome automatically (see resolve_approval). If the colleague DID name a concrete new time, skip this shape — that's an ordinary policy_exception with a real move_meeting deferred_action.
+
 EVERY kind must say WHY it needs him, in its own payload field (policy_exception: rule + context · duration_override: reason · unknown_person: missing_fields · freeform: question + context). No reason → refused with \`missing_reason\`, and rightly: if you can't state why this needs HIM, either the action is already allowed (do it) or you don't yet know what's blocking it (find out first).
 
 Behavior:
@@ -1566,6 +1628,7 @@ Verdicts:
 - approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
 - reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
 - amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
+  - OPEN calendar-conflict ask (create_approval's open_options shape — no time was chosen when raised): once the owner picks one, resolve with verdict='amend' and \`counter={"new_start":"<ISO>"}\` (add \`new_end\` only to change the duration). A bare approve has nothing to execute and is refused — the time must ride in the counter. If the owner wants the meeting left as-is, use reject instead.
 
 Binding — take the explicit id token from the owner's reply; otherwise the line marked "← THIS THREAD" in PENDING APPROVALS, which renders whenever anything is pending and carries the full disambiguation rules. No anchor and several open → call list_pending_approvals and ask which one by subject. Outside the anchor thread, a bare yes/no is refused UNLESS the owner's own message names this approval by subject or counterpart ("ANF already done", "reject the Erez sync") — that's detected automatically from what he actually typed, not from anything you pass in \`reason\`. If it's refused, tell him which open approvals exist and ask him to confirm in the approval's own thread, the daily thread, or by naming which one he means.`,
         input_schema: {

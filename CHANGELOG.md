@@ -2,7 +2,37 @@
 
 ---
 
-## 4.8.1 — A fabricated meeting invite, a stuck timezone, and a coda that couldn't stop talking about one game
+## 4.8.2 — A colleague answered from six-day-old memory, and a second look at what shipped yesterday
+
+Two build waves plus a standalone retrospective adversarial pass over everything 4.8.1 shipped — because a morning of live incident response deserved a second, unhurried look before the next release. The headline bug: Maelle answered a colleague's calendar question with zero tool calls, repeating a six-day-old resolved conversation as if it were current — the false calendar-state claim it produced is what actually steered him to double-book onto a meeting added later that same morning. Chasing that down also surfaced a real gap in yesterday's attendee-email fix (no way to correct a stale directory entry) and a mechanism bug in yesterday's coda redesign (a category could be killed by raises nobody ever saw).
+
+### Fixed (high-impact)
+- **Maelle could assert a specific calendar fact with zero tool calls behind it.** A colleague's plain "hi" got a reply built from a resolved, six-day-old conversation — the claim-checker's grounding rule treated any "this is already on the calendar" statement as exempt from verification, with no requirement that a tool call or genuine history actually back it up. Root cause of a real incident: the stale claim told a colleague a since-cancelled hold was "still pending," which is what led him to place his own meeting invite directly on top of a slot the owner filled hours later. The checker now grounds calendar-state claims the same way it already grounds personal-capability claims — backed by tool activity or real history, or flagged.
+- **The attendee-email directory override had no escape hatch.** Yesterday's fix (a confident name match overrides a model-typed email) closed a real incident but created two new ones: a stale directory entry could never be corrected once written, and a name collision could silently route a real invite to the wrong person. An email a human actually typed in the conversation now outranks the stored directory row, and either direction of override is now stated in the reply instead of shipping silently.
+- **A stated email correction had no durable home.** `update_person_profile` had no `email` field at all, so even catching the override above only held for the current conversation. It now carries the same owner/person/auto provenance tiering as name and timezone corrections, so "Jim's email changed" permanently updates the directory instead of being re-litigated every conversation.
+- **A coda category could be killed by raises the person never saw.** The redesign's category-raise stamp fired before the validator ran, and that same stamp fed the unanswered-raise counter — so a dropped or failed raise could count the same as one that actually reached the person. Split into a compose-time stamp (rotation bookkeeping only) and a delivery-time stamp (the only thing that can now count toward a category's death).
+- **A colleague's open, undecided calendar conflict had no representable approval path.** "Move it, or should we just end early?" with no chosen time fell between the freeform-refusal gate (calendar changes correctly can't use it) and the policy-exception gate (which needs one concrete time to trigger). It relayed as a disconnected message, and the owner's eventual decision never looped back to the colleague who asked. A new open-conflict shape on the existing approval kind closes both gaps — the colleague is notified automatically once the owner decides, via the same mechanism every other colleague-raised approval already uses.
+- **A colleague who asked to move a meeting was never told when it was cancelled instead**, and a colleague's pending hold was never detected as vanished when the organizer cancelled the meeting directly in Outlook (the sweep read only top-level keys and missed the reference nested under the approval's own deferred action). Both now relay correctly — the second discovered by, and fixed alongside, the first.
+- **A colleague the model names as "the requester" could be handed real control over a meeting**, on both the colleague path (now always the authenticated speaker, never a model-supplied override) and the owner path (now boundary-checked the same way `create_approval` already checks it).
+
+### Fixed (small)
+- Two colleague/instructor-facing prompt gaps closed as direct dependencies of fixes above: the attendee-availability prompt now tells the model to quote a pre-rendered, perspective-correct sentence instead of composing its own (closing the door on the exact "I show tentative" bug fixed a day earlier); the approval tool descriptions now document the new open-conflict shape proactively instead of only reactively.
+- A day-off explanation could still be hedged as invented on a date-range ask ("am I off next week?") — yesterday's single-date fix targeted a code path that turned out to be unreachable from the check that needed it; the actual reachable gap (a range search silently drops its day-off reason once any day in the range has a free slot) is now closed.
+- An honest "I've sent it to Idan to decide" reply paid an unneeded rewrite call — the classifier now recognizes an in-progress relay instead of treating it as a completed decision.
+- A latent transport bug: one rewrite path formatted for Slack unconditionally instead of adapting to the reply's actual transport, inconsistent with every sibling path in the same file.
+- A handful of stale/incorrect code comments corrected on sight (one described a mechanism backwards, several cited line numbers that had drifted).
+
+### Changed
+- **Email-stated timezones now write durably when there's nothing to protect.** Yesterday's fix (route a non-owner timezone hint through a 14-day auto-expiring override instead of the permanent field) applied even to a person with no timezone on file at all — nothing to corrupt, but the useful fact still decayed after two weeks. It now writes durably (at the lowest provenance tier, still overridable) only when the base field was genuinely empty; an existing value is still protected exactly as shipped yesterday.
+
+### Migration
+- `people_memory` gained an `email_set_by` provenance column, mirroring the existing name/timezone columns, so a routine directory sync can no longer silently overwrite a stated email correction once one exists.
+
+### Framework
+- A standalone Fable-forced bouncer pass reviewed the entirety of yesterday's shipped v4.8.1 diff independently of either wave that built it — found the attendee-email escape-hatch gap and the coda stamp-ordering bug above, both live in production at the time, plus a latent transport formatter mismatch. All three fixed same-day.
+- Two verify-discovery build waves ran back to back this session, each ending in one combined bouncer pass over its own diff; four items were bounced back to their lane for a real second attempt (a wrong target, a new unprompted colleague-DM path, and two under-verified traces) and all four came back correct on retry.
+
+
 
 Five real, live-caught bugs from a single morning of actual use, each traced to production logs and the database rather than guessed at, and each fix independently re-verified by the lane that owns the code (three of the five first-pass fixes were themselves wrong or incomplete — caught before shipping, not after). Then a full redesign of how a proactive social aside picks what to talk about, replacing a deterministic "always the top-scoring thing" picker that this same wrap proved could get stuck, with a probabilistic one plus a genuinely new way for a topic to go stale.
 

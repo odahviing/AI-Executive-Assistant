@@ -53,6 +53,22 @@
  * EVERY colleague-readable turn, independent of RULE A's own
  * ownerIsActing/approvalGrantContext scoping above — a colleague reading a
  * fabricated fact about the owner is the risk regardless of who is typing.
+ *
+ * claimchecker-zero-tool-call-calendar-state-claim-ships (2026-08-30) — this
+ * mode's own carve-out ("merely describing what's already scheduled on the
+ * calendar is not a personal-capability claim") had no grounding requirement
+ * attached to it, so it silently exempted a FABRICATED calendar-state claim
+ * too, not just a true one. Proven incident (D0ARQRD5H28, 2026-08-30T07:47Z):
+ * a zero-tool-call reply told a colleague "11:30–12:25 already exists on the
+ * calendar (the meeting I booked by mistake, still awaiting Idan's decision
+ * on cancelling it)" — the checker flagged the decision-status half
+ * (matching this mode's PERSONAL-claim framing) and the rewrite dutifully
+ * fixed exactly that clause, but the load-bearing half — that a meeting
+ * exists there AT ALL — was never in scope for any checker (RULE A only
+ * covers completed EXTERNAL actions and doesn't run on a colleague's own
+ * turn anyway; slot_grounding only grounds AVAILABLE-claims). The prompt
+ * below now names a second flaggable class, CLASS 2, for exactly this shape
+ * — reusing this same always-on-once-invoked call (G1/G10), not a new mode.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -470,7 +486,7 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
   const ownerFactPrompt = input.mode === 'owner_fact'
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
-You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your one job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself before it ships.
+You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself, OR an INVENTED CALENDAR-STATE claim, before it ships.
 
 TOOL ACTIVITY THIS TURN (anything read or confirmed — a matching read here means the claim is GROUNDED, not invented):
 ${toolBlock}
@@ -480,22 +496,27 @@ DRAFT REPLY (to the colleague):
 ${input.reply}
 """
 
-Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule") that ALL of the following hold:
-(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`: that structured reason code is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
-(b) is not merely describing what's already scheduled on the calendar (a meeting's time, place or attendees is not a personal-capability claim), AND
-(c) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
+Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — EITHER of these, with nothing behind it:
 
-A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
+CLASS 1 — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule").
+
+CLASS 2 — a specific CALENDAR-STATE claim: that a particular meeting/event already EXISTS, is booked, or is pending some outcome (a cancellation, a decision) AT A SPECIFIC DATE+TIME ("that slot already has a meeting there", "it's already on the calendar, still waiting on his decision to cancel it"). Restating a meeting's time/place/attendees that TOOL ACTIVITY THIS TURN or CONVERSATION HISTORY above actually shows is NOT this class — only a claimed calendar item/state with NOTHING above backing its existence counts.
+
+For either class, BOTH of the following must hold:
+(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference read, or a get_calendar / analyze_calendar / find_available_slots read that actually shows it — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`, a find_available_slots result listing that same date under \`off_days=<date>(vacation_or_off_day)\` / \`off_days=<date>(owner_out_of_office …)\` — which appears even when the SAME search returned slots on OTHER dates in the range, so a search that found times later in the week still grounds "he's off Monday through Wednesday" for the dates it lists — or an analyze_calendar result whose per-day summary marks that same date \`day_off=<date>\` or \`owner_out_of_office=<date>\`: any of these structured markers is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
+(b) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
+
+A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a CLASS 1 or CLASS 2 claim, stated as certain with nothing behind it.
 
 Output schema (REUSE the action-checker shape so callers don't branch):
 {
-  "claimed_action": boolean,      // true = an invented personal fact about ${input.ownerFirstName} is present
+  "claimed_action": boolean,      // true = an invented personal fact or calendar-state claim about ${input.ownerFirstName} is present
   "action_type": "invented_fact" | null,
   "target_name": string | null,   // "${input.ownerFirstName}" when claimed_action is true, else null
-  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars
+  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars — name the SPECIFIC unfounded detail (the calendar item/state, or the personal fact), not just an adjacent framing clause
 }
 
-If the draft is clean (no invented personal fact about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
+If the draft is clean (no invented personal fact or calendar-state claim about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
@@ -586,6 +607,7 @@ The draft can assert that ${input.ownerFirstName} granted a permission, approved
 - If APPROVAL STATUS FOR THIS THREAD above says NOT RESOLVED, a declarative claim that the grant already came back is FALSE — flag claimed_action=true, action_type="permission_granted".
 - When the APPROVAL STATUS block is absent entirely, this rule does not apply — judge the draft under the other rules only.
 - An in-progress line ("still checking with him", "let me get back to you on that", "waiting to hear back") is NEVER a false claim under this rule — only a DECLARATIVE assertion that the decision already came back counts.
+- permission-granted-reply-pays-unneeded-rewrite-call (2026-08-30) — a statement that the request/question was SENT or ESCALATED to ${input.ownerFirstName} and his answer is awaited ("I've sent it to him to decide", "sent it to ${input.ownerFirstName}, I'll let you know once he answers", "passed it along to him") is an in-progress RELAY claim, not a grant claim — do NOT flag it merely because it names ${input.ownerFirstName} and a pending decision together. Only flag when the draft goes further and states the ANSWER itself already came back ("he said yes/no", "approved", "rejected", "cleared").
 
 CRITICAL — resolve_approval relays to the requester ITSELF:
 When the owner resolves a colleague-initiated approval (verdict approve / amend / reject), \`resolve_approval\` ALSO DMs the original requester the decision — an internal relay sent by the system, NOT a \`message_colleague\` call. So a draft saying "the requester will get the details" / "I'll let <name> know" / "they can confirm from there" / "<name> will get the adjusted details" is HONEST when \`[resolve_approval: ...]\` appears in TOOL ACTIVITY this turn. The matching mechanism for "told the requester" after an approval decision is \`resolve_approval\`, not \`message_colleague\`. Do NOT flag these as a phantom message — forcing a message_colleague would DOUBLE-DM the requester (one from the resolver, one from the send).
@@ -1008,17 +1030,17 @@ SAFE-MISS — the hard rule. If you cannot tell whether the draft truly claims t
 Draft:
 ${opts.draft}` : null;
 
-  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself, OR an unverified CALENDAR-STATE claim (a meeting/slot claimed to already exist, be booked, or be pending an outcome) — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
 ${toolBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read). Do not manufacture a problem that isn't one.
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference read, or a get_calendar / analyze_calendar / find_available_slots read that actually shows it). Do not manufacture a problem that isn't one.
 
-STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged personal claim about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
-- Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered.
-- NOT invent a DIFFERENT unfounded personal claim about ${opts.ownerFirstName} in its place.
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged claim (personal fact or calendar-state claim) about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
+- Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered. A calendar-existence claim ("that slot already has a meeting there") that is itself the thing the colleague needs an answer to is NEVER a stray/bonus detail — it must be dropped or clearly hedged, never left standing unchanged.
+- NOT invent a DIFFERENT unfounded personal or calendar-state claim about ${opts.ownerFirstName} in its place.
 - Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
 - Match the language of the draft (Hebrew/English/etc).

@@ -17,6 +17,12 @@
  *
  * Never throws — DB cleanup is best-effort. Calendar fetch failures degrade
  * to "leave artifacts as-is" (no false-positive deletes).
+ *
+ * SILENT BY CONSTRUCTION (2026-08-30): this sweep never messages a colleague.
+ * Its evidence is a 404, which cannot tell a rotated/stale id from a real
+ * cancellation, so it passes `inferredFromAbsence: true` to suppress the
+ * cascade's requester close-loop. Only callers that performed and verified the
+ * mutation relay an outcome to a human.
  */
 
 import { getDb } from '../db';
@@ -89,7 +95,19 @@ function collectReferencedMeetingIds(ownerUserId: string): ArtifactRef[] {
 
 const MEETING_ID_KEYS = ['meeting_id', 'existing_event_id', 'event_id', 'external_event_id'];
 
-/** Pull any meeting-id-shaped values from a JSON string under known keys. */
+/**
+ * Pull any meeting-id-shaped values from a JSON string under known keys —
+ * top-level, or (vanished-meeting-sweep-blind-to-deferred-action-ref,
+ * 2026-08-30) nested under `deferred_action.args`, the same shape
+ * closeMeetingArtifacts.ts's `payloadReferencesMeeting` already reads. An
+ * approval's own meeting reference lives there (the tool + args the resolver
+ * replays on approve), never duplicated at the payload's top level — this
+ * matcher was written before that storage shape existed and never looked
+ * there, so a pending hold whose only meeting reference was nested was
+ * invisible to this sweep: a meeting the organizer cancelled directly in
+ * Outlook (no Maelle mutation to fire closeMeetingArtifacts itself) never
+ * closed or relayed to the colleague waiting on it.
+ */
 function extractMeetingIds(json: string): string[] {
   if (!json) return [];
   try {
@@ -98,6 +116,13 @@ function extractMeetingIds(json: string): string[] {
     for (const key of MEETING_ID_KEYS) {
       const v = obj[key];
       if (typeof v === 'string' && v.length > 0) out.push(v);
+    }
+    const deferredArgs = (obj.deferred_action as { args?: Record<string, unknown> } | undefined)?.args;
+    if (deferredArgs) {
+      for (const key of MEETING_ID_KEYS) {
+        const v = deferredArgs[key];
+        if (typeof v === 'string' && v.length > 0) out.push(v);
+      }
     }
     return out;
   } catch {
@@ -137,6 +162,13 @@ export async function cleanupVanishedMeetingArtifacts(params: {
         ownerUserId: params.ownerUserId,
         meetingId: ref.meetingId,
         reason: 'deleted',
+        // requester-close-loop-never-notifies-cancelled-hold (2026-08-30) — this
+        // sweep INFERS the delete from `verifyEventDeleted`, which is true on any
+        // 404 (calendarReads.ts:1313-1329): a rotated or stale id reads exactly
+        // like a real cancellation. The cascade's colleague close-loop is
+        // therefore suppressed for this caller — artifacts still close (that is
+        // this sweep's job), but no human is told an outcome we cannot vouch for.
+        inferredFromAbsence: true,
       });
       const total = cleaned.tasksCancelled + cleaned.outreachClosed + cleaned.calendarIssuesResolved;
       if (total > 0) {

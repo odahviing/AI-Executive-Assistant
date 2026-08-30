@@ -160,16 +160,24 @@ export function applyOrganicMatchSignal(params: {
  * subject marked as raised for a line nobody ever saw. Delivery is the only
  * event that should move either field.
  *
- * Two writes, guarded SEPARATELY and in this order on purpose:
+ * Three writes, guarded SEPARATELY and in this order on purpose:
  *   1. `recordSocialMoment` → `people_memory.last_initiated_at`. This is the
  *      once-per-day cadence gate AND the window anchor
  *      `adjustRankFromColleagueResponse` (below) scores replies against. For a
  *      `raise_new` coda it is the ONLY gate — there is no subject row yet — so it
- *      goes first and a failure in the second write cannot cost us the gate.
+ *      goes first and a failure in a later write cannot cost us the gate.
  *   2. `markSubjectRaised` → `social_subjects.last_assistant_initiated_at`, which
  *      drives the raise→ignored/answered signal on the person's next chat and
  *      (for `continue` codas) a second independent read of the daily gate.
  *      Absent on `raise_new`.
+ *   3. `markCategoryRaised` → `social_person_category_scores.last_raise_attempt_at`,
+ *      the marker the picker's in-place category-raise resolve pass judges a
+ *      `raise_new` raise's silence by (recordCategoryRaiseUnanswered — two
+ *      unanswered raises zero the category, L12). Stamped HERE and only here,
+ *      not at compose time: a raise the validator or the coda gates dropped
+ *      was never seen, so it must never count as "invited back and ignored" —
+ *      compose time keeps only the rotation-slot tried-marker
+ *      (recordCategoryRaiseTried, generateCoda.ts). Absent on `continue`.
  *
  * NEVER throws. The caller is a `setTimeout` in the transport where an escaped
  * rejection is an unhandled one, and a social aside is optional by definition —
@@ -179,8 +187,11 @@ export function applyOrganicMatchSignal(params: {
 export function recordCodaDelivered(params: {
   personSlackId: string;
   subjectId?: string;
+  /** Category a `raise_new` coda targeted — with `ownerUserId`, drives write 3. */
+  raisedCategoryLabel?: string;
+  ownerUserId?: string;
 }): void {
-  const { personSlackId, subjectId } = params;
+  const { personSlackId, subjectId, raisedCategoryLabel, ownerUserId } = params;
 
   let gateStamped = false;
   try {
@@ -216,8 +227,25 @@ export function recordCodaDelivered(params: {
     }
   }
 
+  if (raisedCategoryLabel && ownerUserId) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getCategoryByLabel, markCategoryRaised } = require('../../db/socialSubjects') as
+        typeof import('../../db/socialSubjects');
+      const category = getCategoryByLabel(raisedCategoryLabel);
+      if (category) {
+        markCategoryRaised({ ownerUserId, personSlackId, categoryId: category.id });
+      }
+    } catch (err) {
+      logger.warn('Coda category raise-marker write threw — silence signal lost for this category', {
+        personSlackId, raisedCategoryLabel, err: String(err).slice(0, 200),
+      });
+    }
+  }
+
   logger.info('Social coda delivery recorded', {
-    personSlackId, subjectId: subjectId ?? null, gateStamped,
+    personSlackId, subjectId: subjectId ?? null,
+    raisedCategoryLabel: raisedCategoryLabel ?? null, gateStamped,
   });
 }
 

@@ -212,9 +212,33 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
     }
     switch (toolName) {
       case 'analyze_calendar': {
-        const days = Array.isArray(result) ? result : [];
+        // gatekeeper-offday-hedge-recurs-on-date-range (2026-08-30) — the
+        // handler (calendarReads.ts's handleAnalyzeCalendar) returns the bare
+        // `DayAnalysis[]` array ONLY when there's nothing else to attach; the
+        // moment a Working Elsewhere note applies to the range, it wraps the
+        // SAME array in `{ day_analysis: [...], ...weNote }` — the exact
+        // bare-vs-wrapped split `get_calendar` below already had to handle
+        // (v4.4.x). Reading only the bare-array case silently zeroed both
+        // `totalIssues` AND (new below) every day-off/OOF date whenever the
+        // range also carried a WE note.
+        const days: any[] = Array.isArray(result) ? result
+          : (result && typeof result === 'object' && Array.isArray((result as any).day_analysis)) ? (result as any).day_analysis
+          : [];
         const totalIssues = days.reduce((n: number, d: any) => n + (d.issues?.length ?? 0), 0);
-        return `[analyze_calendar ${input.start_date}→${input.end_date}: ${days.length} days, ${totalIssues} issues]`;
+        // a RANGE ask ("am I off next week?") can land on THIS tool rather
+        // than find_available_slots, and this line carried only a day COUNT —
+        // so a true "you're off Mon–Wed" statement had nothing in TOOL
+        // ACTIVITY to match and got hedged as invented. Surface each day's
+        // real day-off/OOF status here too, from the per-day DayAnalysis
+        // fields (`dayType`, `outOfOfficeAllDay` —
+        // skills/meetings/ops/analysis.ts:284,303) claimChecker's owner_fact
+        // mode is written to treat as ground truth. Sibling of the
+        // `off_days=` marker find_available_slots emits below; same bug.
+        const dayOffDates = days.filter((d: any) => d.dayType === 'day_off').map((d: any) => d.date);
+        const oofDates = days.filter((d: any) => d.outOfOfficeAllDay === true).map((d: any) => d.date);
+        const dayOffPart = dayOffDates.length ? ` day_off=${dayOffDates.join(',')}` : '';
+        const oofPart = oofDates.length ? ` owner_out_of_office=${oofDates.join(',')}` : '';
+        return `[analyze_calendar ${input.start_date}→${input.end_date}: ${days.length} days, ${totalIssues} issues${dayOffPart}${oofPart}]`;
       }
       case 'get_calendar': {
         // v4.4.x — get_calendar returns a bare array only when it has nothing else
@@ -309,6 +333,43 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const preferredPart = (preferredStatus && typeof preferredStatus === 'object' && typeof preferredStatus.start === 'string')
           ? `; preferred ${fmt(preferredStatus)} ${verdictWord(preferredStatus)}`
           : '';
+        // gatekeeper-offday-hedge-recurs-on-date-range (2026-08-30) —
+        // day_summary used to be read ONLY inside the `slots.length === 0`
+        // branch below. A RANGE ask ("any time next week?") where the owner is
+        // off Mon–Wed but free Thu–Fri comes back WITH slots, so that branch
+        // never ran and the line carried nothing at all about the three off
+        // days — a true "he's off Monday through Wednesday" sentence then had
+        // no ground truth in TOOL ACTIVITY and claimChecker's owner_fact mode
+        // hedged it into a false "you're inventing that". The handler attaches
+        // day_summary on the WITH-slots return too
+        // (skills/meetings/ops/handlers/findAvailableSlots.ts:2170, alongside
+        // the zero-slot returns at :1514/:1581/:1615), so read it once here for
+        // both branches.
+        const daySummary: Array<{ date?: string; accepted?: number; top_reasons?: string[]; oof_until_display?: string }> =
+          (result && typeof result === 'object' && Array.isArray((result as any).day_summary))
+            ? (result as any).day_summary
+            : [];
+        // WHOLE-day off only. `vacation_or_off_day` is a genuine day-level
+        // skip, written straight into `dayReasons` once per day
+        // (connectors/graph/findAvailableSlots.ts:844, `kind: 'day_skip'`).
+        // `owner_out_of_office` is NOT that shape — it is a per-slot
+        // `reject` outcome (:998) routed through `trackReject` (:878), which
+        // still lands in `dayReasons` (same reason recorded for every slot
+        // in the day, since `oofDayKeys.has(dayKey)` holds for the whole
+        // day), just via the per-slot path rather than a single day-level
+        // write. Either way `top_reasons` only fills when the day accepted
+        // zero slots (:1534). A merely BUSY day must never render here —
+        // that would ground a false "he's off that day", the exact
+        // corruption this line exists to prevent (G2/G5).
+        const WHOLE_DAY_OFF_REASONS = new Set(['vacation_or_off_day', 'owner_out_of_office']);
+        const offDayParts = daySummary
+          .filter(d => typeof d.date === 'string' && d.accepted === 0
+            && (d.top_reasons ?? []).some(r => WHOLE_DAY_OFF_REASONS.has(r)))
+          .map(d => {
+            const reason = (d.top_reasons ?? []).find(r => WHOLE_DAY_OFF_REASONS.has(r));
+            return `${d.date}(${reason}${d.oof_until_display ? ` until ${d.oof_until_display}` : ''})`;
+          });
+        const offDaysPart = offDayParts.length ? ` off_days=${offDayParts.join(',')}` : '';
         if (slots.length === 0) {
           // gh#chris-kelley-oof-block-a — a zero-result day_summary (the
           // rejection reason for EVERY date, e.g. owner_out_of_office) used
@@ -316,11 +377,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           // claimChecker's owner_fact mode had nothing in TOOL ACTIVITY to
           // ground a true "he's away" statement against and hedged it into
           // a false-sounding non-answer. Surface the top reason (+ the OOF
-          // span end, already formatted by the walker) when present.
-          const daySummary: Array<{ top_reasons?: string[]; oof_until_display?: string }> =
-            (result && typeof result === 'object' && Array.isArray((result as any).day_summary))
-              ? (result as any).day_summary
-              : [];
+          // span end, already formatted by the walker) when present. Kept
+          // alongside `off_days` above: this aggregate also covers reasons
+          // that are NOT a whole-day off (attendee_busy_collision, …).
           let reasonPart = '';
           if (daySummary.length > 0) {
             const reasonCounts = new Map<string, number>();
@@ -334,9 +393,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
               reasonPart = ` reason=${topReason}${oofUntil ? ` (until ${oofUntil})` : ''}`;
             }
           }
-          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${preferredPart}]`;
+          return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${offDaysPart}${preferredPart}]`;
         }
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${preferredPart}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool

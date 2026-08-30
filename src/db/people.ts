@@ -118,6 +118,7 @@ export interface PersonMemory {
   name_he?: string;             // native-script spelling (Hebrew/Cyrillic/Arabic), used verbatim when writing in that script
   name_he_set_by?: CoreFieldSetBy; // v3.5.x — provenance for name_he (owner correction sticks; auto can't clobber)
   email?: string;
+  email_set_by?: CoreFieldSetBy; // v4.8.x — provenance for `email` (owner/person-stated correction sticks; auto Slack sync can't clobber). Written ONLY by setPersonEmail.
   timezone?: string;
   timezone_set_by?: CoreFieldSetBy;
   state?: string;               // v2.2.2 — free-text location ("Israel", "Boston", "Tel Aviv")
@@ -590,10 +591,12 @@ export function upsertPersonMemory(params: {
     } catch { /* never block memory writes */ }
   }
 
-  // The Slack profile is authoritative for a Slack person's address, so an
-  // email CHANGE propagates here (resolvePerson's attach is fill-only). Routed
-  // through the single email writer so it can never mint / strand a second row
-  // for an address another person already owns.
+  // The Slack profile is authoritative for a Slack person's address AT THE
+  // AUTO TIER, so an email CHANGE propagates here (resolvePerson's attach is
+  // fill-only) — but a stated correction (owner/person, via
+  // update_person_profile's email field) outranks it, and this sync defers to
+  // one instead of stomping it. Routed through the single email writer so it
+  // can never mint / strand a second row for an address another person owns.
   if (params.email) setPersonEmail(personId, params.email, { overwrite: true });
 }
 
@@ -1147,10 +1150,19 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     ? survivor.last_inbound_lang
     : (loser.last_inbound_lang ?? survivor.last_inbound_lang ?? null);
 
+  // v4.8.x — email carries its provenance tag through the merge like every
+  // other core field (owner-stated beats auto/untagged; ties → survivor, which
+  // preserves the legacy survivor-first pick for untagged rows).
+  const emailPick = pickByProvenance(
+    { value: survivor.email, setBy: survivor.email_set_by },
+    { value: loser.email, setBy: loser.email_set_by },
+  );
+
   const merged = {
     person_id:            survivorId,
     slack_id:             slackIdMerged,
-    email:                survivor.email ?? loser.email ?? null,
+    email:                emailPick.value,
+    email_set_by:         emailPick.setBy,
     // A slack_id present ⇒ internal by construction; otherwise the stronger of
     // the two claims wins ('internal' means company-domain / known colleague).
     kind:                 slackIdMerged ? 'internal'
@@ -1197,7 +1209,7 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     db.prepare(`DELETE FROM people_memory WHERE person_id = ?`).run(loserId);
     db.prepare(`
       UPDATE people_memory SET
-        slack_id = @slack_id, email = @email, kind = @kind, org = @org, source = @source,
+        slack_id = @slack_id, email = @email, email_set_by = @email_set_by, kind = @kind, org = @org, source = @source,
         name = @name, name_set_by = @name_set_by, name_he = @name_he, name_he_set_by = @name_he_set_by,
         timezone = @timezone, timezone_set_by = @timezone_set_by,
         state = @state, state_set_by = @state_set_by,
@@ -1253,31 +1265,74 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
   return true;
 }
 
+/** v4.8.x — the outcome of an email write, alongside who owns the address now.
+ *  `CoreFieldWrite` covers the provenance outcomes; the two extras are email's
+ *  identity-key nature: `kept_existing` = fill-only call left a different
+ *  address in place (not a rank refusal), `identity_conflict` = two distinct
+ *  Slack identities claim one address — flagged, never silently merged (L11). */
+export interface PersonEmailWrite {
+  personId: string | null;
+  outcome: CoreFieldWrite | 'kept_existing' | 'identity_conflict';
+}
+
 /**
  * v4.0.4 — THE writer for `people_memory.email`. Never `UPDATE … SET email`
  * anywhere else: the address is the logical identity key, so if ANOTHER row
  * already holds it the two rows are the same human and must be MERGED, not left
- * as a duplicate pair.
+ * as a duplicate pair — while two distinct Slack identities claiming one
+ * address is a genuine clash that is refused and flagged, never merged.
  *
- * Fill-only by default (an existing address stays). `overwrite: true` is for the
- * Slack path, where users.info is authoritative and an address CHANGE should
- * propagate.
+ * Fill-only by default (an existing address stays). `overwrite: true` is for a
+ * caller asserting an address CHANGE: the Slack sync (users.info, authoritative
+ * at its tier) and a stated correction via update_person_profile's email field.
+ *
+ * v4.8.x — the address rides the same authority chain as the other core fields
+ * (owner > person > auto, `email_set_by`): an owner-stated correction ("Jim's
+ * email changed to jim@newco.com") permanently outranks the auto tier, so a
+ * later Slack/calendar sync can no longer stomp it. Untagged legacy rows rank
+ * 0, so every pre-provenance behavior is preserved. Re-stating the same value
+ * at a higher tier RAISES the tag (mirrors setCoreFieldWithProvenanceById);
+ * and a requested address that triggers a merge now LANDS on the survivor
+ * (rank-gated) instead of being silently lost when the survivor kept its own
+ * older address.
  *
  * Returns the person_id that owns the address afterwards (may differ from the
- * argument when a merge picked the other row as survivor), or null when the
- * write was refused — two distinct Slack identities claiming one address, where
- * the existing holder keeps it.
+ * argument when a merge picked the other row as survivor; null when nothing
+ * usable was written) plus the write outcome, so a tool surface can report
+ * honestly what landed, what already held, and what was refused.
  */
-export function setPersonEmail(personId: string, email: string, opts?: { overwrite?: boolean }): string | null {
+export function setPersonEmail(
+  personId: string,
+  email: string,
+  opts?: { overwrite?: boolean; by?: CoreFieldSetBy },
+): PersonEmailWrite {
+  const by = opts?.by ?? 'auto';
   const e = (email ?? '').trim().toLowerCase();
-  if (!personId || !e) return null;
+  if (!personId || !e) return { personId: null, outcome: 'no_value' };
   const db = getDb();
   const row = getPersonById(personId);
-  if (!row) return null;
+  if (!row) return { personId: null, outcome: 'no_person' };
 
   const current = (row.email ?? '').trim().toLowerCase();
-  if (current === e) return personId;
-  if (current && !opts?.overwrite) return personId;
+  const newRank = SET_BY_RANK[by];
+  const currentRank = row.email_set_by ? SET_BY_RANK[row.email_set_by] : 0;
+
+  if (current === e) {
+    // Already what was asked — the only work left is raising the authority
+    // behind it (an owner re-statement locks the address against auto syncs).
+    if (newRank > currentRank) {
+      db.prepare(`UPDATE people_memory SET email_set_by = ?, updated_at = datetime('now') WHERE person_id = ?`).run(by, personId);
+      return { personId, outcome: 'applied' };
+    }
+    return { personId, outcome: 'already_set' };
+  }
+  if (current && !opts?.overwrite) return { personId, outcome: 'kept_existing' };
+  if (current && newRank < currentRank) {
+    // A different address, and a higher authority owns the field — the auto
+    // Slack sync cannot stomp a stated correction (untagged rows rank 0, so
+    // this never fires for legacy data).
+    return { personId, outcome: 'refused_lower_authority' };
+  }
 
   const holder = getPersonByEmail(e);
   if (holder && holder.person_id !== personId) {
@@ -1285,15 +1340,25 @@ export function setPersonEmail(personId: string, email: string, opts?: { overwri
     // (getPersonByEmail's canonical "Slack wins" order).
     const survivorId = row.slack_id ? personId : (holder.slack_id ? holder.person_id : personId);
     const loserId = survivorId === personId ? holder.person_id : personId;
-    if (mergePersonRows(survivorId, loserId)) return survivorId;
+    if (mergePersonRows(survivorId, loserId)) {
+      // The merge picks the surviving row's email by provenance — which may be
+      // the survivor's OLD address, silently dropping the very address this
+      // call asserted. Land it explicitly (rank-gated against the merged tag).
+      const merged = getPersonById(survivorId);
+      if ((merged?.email ?? '').trim().toLowerCase() === e) return { personId: survivorId, outcome: 'applied' };
+      const mergedRank = merged?.email_set_by ? SET_BY_RANK[merged.email_set_by] : 0;
+      if (newRank < mergedRank) return { personId: survivorId, outcome: 'refused_lower_authority' };
+      db.prepare(`UPDATE people_memory SET email = ?, email_set_by = ?, updated_at = datetime('now') WHERE person_id = ?`).run(e, by, survivorId);
+      return { personId: survivorId, outcome: 'applied' };
+    }
     logger.warn('person store — email write refused, address held by another identity', {
       email: e, personId, holder: holder.person_id,
     });
-    return null;
+    return { personId: null, outcome: 'identity_conflict' };
   }
 
-  db.prepare(`UPDATE people_memory SET email = ?, updated_at = datetime('now') WHERE person_id = ?`).run(e, personId);
-  return personId;
+  db.prepare(`UPDATE people_memory SET email = ?, email_set_by = ?, updated_at = datetime('now') WHERE person_id = ?`).run(e, by, personId);
+  return { personId, outcome: 'applied' };
 }
 
 export interface ResolvePersonInput {
@@ -1388,7 +1453,7 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
          WHERE person_id = ?
       `).run(slackId, targetId);
     }
-    if (usableEmail) targetId = setPersonEmail(targetId, usableEmail) ?? targetId;
+    if (usableEmail) targetId = setPersonEmail(targetId, usableEmail).personId ?? targetId;
     const row = getPersonById(targetId);
     return row ? { person_id: row.person_id, created: false, row } : null;
   }

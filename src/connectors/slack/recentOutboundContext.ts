@@ -70,7 +70,7 @@ import type { OutreachJob } from '../../db/jobs';
 const anthropic = getAnthropicClient();
 
 /** Hours after which an outbound auto-expires from follow-up tracking. */
-const AUTO_EXPIRE_HOURS = 24;
+export const AUTO_EXPIRE_HOURS = 24;
 
 /**
  * Helper return shape. The caller (Slack inbound DM handler) uses
