@@ -1,13 +1,13 @@
-# Report — cumulative since the 4.8.0 wrap
+# Report — cumulative since the 4.8.1 wrap
 
 ```
 Run wf_00ed9907-676 — in: 0 tickets · 4 day(s) of logs · 2 backlog re-reads
-out: 4 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 3 queued
+out: 0 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0 converted · 3 queued
 board: net +1 → 6 open rows — 3 still-real · 3 need a re-read (0 moved · 3 never examined) · 0 cite no file · 6 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 2 rows await you: 0 from tonight · 2 re-surfaced · 0 found by the loop
 ```
 
-**Prior run's log-review warning is resolved.** wf_580bb8d0-6c7 (2026-08-27) saw the editor return `filesRead:[], findingsSeen:0` despite real activity — this run's editor read all 4 files in the window (26/27/28/29) and found 2 real, log-confirmed bugs (below). No framework fix needed to be filed; whatever caused the prior gap did not recur.
+**Prior run's log-review warning is resolved.** wf_580bb8d0-6c7 (2026-08-27) saw the editor return `filesRead:[], findingsSeen:0` despite real activity — this run's editor read all 4 files in the window (26/27/28/29) and found 2 real, log-confirmed bugs. No framework fix needed to be filed; whatever caused the prior gap did not recur.
 
 | Lane · ref | What happened | Your options | Risk |
 |---|---|---|---|
@@ -21,6 +21,4 @@ board: net +1 → 6 open rows — 3 still-real · 3 need a re-read (0 moved · 3
 
 3 verify discoveries queued for the next build (not owed to you now): `gatekeeper-offday-hedge-recurs-on-date-range` (gatekeeper, medium — this run's day-off fix only covers a single date, not a range), `permission-granted-reply-pays-unneeded-rewrite-call` (gatekeeper, low — a latency/cost tax, upstream classifier over-fires), `createmeeting-requesterid-wrong-colleague-gets-event-rights` (matchmaker, medium — adjacent to but distinct from this run's own createMeeting fix).
 
-**Built and uncommitted — this is what a wrap ships (4):** `log-permgranted-rewrite-inverts-sent-state` honest "sent to Idan" reply no longer denied · `log-ownerfact-offday-reason-ignored` real day-off claim no longer hedged · `requester-id-mint-tests-senderrole-not-authenticated-identity` approval self-mint fixed · `createmeeting-owner-room-booking-self-requester-link` room-booking self-requester fixed
-
-Bouncer verify: 0 overturned, 4/4 outcome-traced, 4/4 observable-checked, 0/0 joint-fix candidates. `npx tsc --noEmit` clean. Nothing committed — everything above is uncommitted, waiting for wrap.
+This run's own 4 built refs, plus the owner's own live-debugging session (5 real production bugs, each independently lane-verified — 3 of the 5 first-pass fixes caught wrong/incomplete in review), all shipped together in v4.8.1. See `CHANGELOG.md` for the full account.
