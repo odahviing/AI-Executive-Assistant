@@ -405,18 +405,18 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
 /**
  * Drop one instant. Call sites (verified by grep), all cases of "this entry
  * is no longer the best knowledge":
- *   - availabilityPreCheck.ts:967 — a fresh verdict for that exact instant is NOT
+ *   - availabilityPreCheck.ts:983 — a fresh verdict for that exact instant is NOT
  *     a hard block (invalidation rules 1 and 4 both resolve through this one line:
  *     "not every reading arms" is true whether there was one reading or two).
- *   - availabilityPreCheck.ts:1155 / :1161 — `forgetNamedInstantsFromHardBlockLedger`,
+ *   - availabilityPreCheck.ts:1215 / :1221 — `forgetNamedInstantsFromHardBlockLedger`,
  *     the named-attendee bail's text-matched forget (invalidation rule 5) — a
  *     DIFFERENT mechanism from the two lines above: no `checkSlot` call, a scope
  *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;
  *     it is not — rule 4 is the undecided-frame case at :967, and this is its own
  *     rule, corrected 2026-08 (o#190).
- *   - runOutputGates.ts:1592 — the pre-rewrite live re-check found this instant no
+ *   - runOutputGates.ts:1647 — the pre-rewrite live re-check found this instant no
  *     longer hard-blocked (invalidation rule 6); dropped WITHOUT a rewrite.
- *   - runOutputGates.ts:1618 — a rewrite landed on it (invalidation rule 3).
+ *   - runOutputGates.ts:1673 — a rewrite landed on it (invalidation rule 3).
  * A caller adding another should update this list AND the ledger's own
  * INVALIDATION doc above in the same change — this file's own header undercounted
  * its callers once already.

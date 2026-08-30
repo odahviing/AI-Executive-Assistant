@@ -31,7 +31,7 @@ import { getOwnerEventsForDecision } from '../connectors/graph/calendar';
 import { renderClockInZone } from './timezoneConvert';
 import { bookingLeadTimeHours, checkSlot, OWNER_OVERRIDABLE_KINDS, type RuleViolationKind } from './scheduleRules';
 import { armsHardFloor, forgetHardBlockedSlot, hardBlockClassPhrase, recordHardBlockedSlot } from './availabilityGate';
-import { blockedSlotAlternativesBlock } from '../skills/meetings/nearbyAlternatives';
+import { blockedSlotAlternativesBlock, type NearbyAlternative } from '../skills/meetings/nearbyAlternatives';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
@@ -473,6 +473,22 @@ export interface AvailabilityPreCheckResult {
    * answering.
    */
   promptBlock: string;
+  /**
+   * 2026-08-30 — the SAME verdicts (and the all-blocked alternatives, when that
+   * search ran) as compact synthetic tool-summary lines, one fact per line,
+   * every line starting with the stable prefix token `[availability_precheck`.
+   * Threaded into `OrchestratorOutput.toolSummaries` (orchestrator/index.ts)
+   * alongside real `[tool_name …]` summaries, because the output-time checkers
+   * (claimChecker `owner_fact` / `slot_grounding`, runOutputGates'
+   * `groundedToolLines`) recognize grounding ONLY through toolSummaries or
+   * conversation history — this precheck was invisible to both, so a correct
+   * precheck-backed "is he free at X" answer was rewritten into "let me check
+   * and get back to you" (Mike Naumenko, 2026-08-30T13:35Z). The prefix is a
+   * contract with those consumers: change it and their filters go blind.
+   * Rendered here, by the one producer of the verdicts — never re-derived
+   * downstream. All instants owner-local. Empty when ran=false.
+   */
+  toolSummaryLines: string[];
 }
 
 /**
@@ -528,7 +544,7 @@ export async function precheckAvailability(params: {
    */
   namedAttendeeEmails?: string[];
 }): Promise<AvailabilityPreCheckResult> {
-  const empty: AvailabilityPreCheckResult = { ran: false, verdicts: [], promptBlock: '' };
+  const empty: AvailabilityPreCheckResult = { ran: false, verdicts: [], promptBlock: '', toolSummaryLines: [] };
 
   if (!params.message || params.message.trim().length === 0) return empty;
   if (params.namedAttendeeEmails && params.namedAttendeeEmails.length > 0) {
@@ -1009,7 +1025,7 @@ export async function precheckAvailability(params: {
   // Appended AFTER the verdict lines because the block's own text refers to them.
   // That is the only ordering constraint here — the alternatives block never reads
   // the floor's ledger, so its position relative to the loop above is free.
-  const alternativesBlock = await blockedSlotAlternativesBlock({
+  const alternativesResult = await blockedSlotAlternativesBlock({
     profile: params.profile,
     // v4.2.2 — an undecided frame contributes BOTH of its readings, because both of
     // that block's questions are per-instant: its trigger is "did anything come back
@@ -1028,7 +1044,11 @@ export async function precheckAvailability(params: {
     threadTs: params.threadTs,
   });
   const promptBlock = renderPromptBlock(verdicts, params.profile, requesterTz)
-    + (alternativesBlock ? `\n\n${alternativesBlock}` : '');
+    + (alternativesResult.block ? `\n\n${alternativesResult.block}` : '');
+  // Same facts, second surface: the synthetic tool-summary lines (see the
+  // AvailabilityPreCheckResult field doc). Rendered here so the prompt block and
+  // the checker-visible lines come from the same verdicts and can never disagree.
+  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, durationMinutes);
   // v4.2.2 — log the TIER split, not just the count. `notBookable` sums the HARD
   // tier and the owner-overridable NOT CLEAN tier, and that ambiguity cost a day of
   // diagnosis: `bookable:0, notBookable:3` on 2026-07-27 (:187) was read as three
@@ -1048,10 +1068,50 @@ export async function precheckAvailability(params: {
     notClean: notBookable.length - hardBlocked,
     undecidedFrame: verdicts.filter(v => !!v.other).length,
   });
-  return { ran: true, verdicts, promptBlock };
+  return { ran: true, verdicts, promptBlock, toolSummaryLines };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * 2026-08-30 — one compact `[availability_precheck …]` line per verdict, plus one
+ * for the all-blocked alternatives when that search ran (see the
+ * `AvailabilityPreCheckResult.toolSummaryLines` doc for why these exist and who
+ * consumes them). Both branches emit — a bookable verdict and a not-bookable one
+ * are equally real, checker-relevant facts. All instants owner-local; the
+ * undecided frame (`other`) renders BOTH readings so no consumer can treat the
+ * primary one as the answer.
+ */
+function renderToolSummaryLines(
+  verdicts: SlotVerdict[],
+  alternatives: NearbyAlternative[],
+  tz: string,
+  fallbackDurationMin: number,
+): string[] {
+  const clause = (o: SlotOutcome): string => {
+    const head = `${o.date}T${o.time} dur=${o.durationMin ?? fallbackDurationMin}m`;
+    if (o.bookable) {
+      return typeof o.maxFreeMinutes === 'number'
+        ? `${head}: bookable maxFree=${o.maxFreeMinutes}m`
+        : `${head}: bookable`;
+    }
+    const reason = o.rejection_reason ?? 'not_bookable';
+    return `${head}: not bookable (${reason}${o.outOfOfficeAllDay ? ', all-day out-of-office' : ''})`;
+  };
+  const lines = verdicts.map(v => (v.other
+    ? `[availability_precheck ${clause(v)} | same clock read in ${v.other.zone}: ${clause(v.other)}]`
+    : `[availability_precheck ${clause(v)}]`));
+  if (alternatives.length > 0) {
+    const starts = alternatives
+      .map(a => DateTime.fromISO(a.start, { zone: tz }))
+      .filter(dt => dt.isValid)
+      .map(dt => dt.toFormat("yyyy-MM-dd'T'HH:mm"));
+    if (starts.length > 0) {
+      lines.push(`[availability_precheck alternatives (bookable): ${starts.join(', ')}]`);
+    }
+  }
+  return lines;
+}
 
 interface Pair {
   date: string;

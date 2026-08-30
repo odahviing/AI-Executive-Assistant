@@ -259,8 +259,13 @@ interface TestedSlot {
 }
 
 /**
- * The point-check's alternatives block: "" unless EVERY slot the point-check
- * tested this turn came back not-bookable and the search found something.
+ * The point-check's alternatives: an empty block unless EVERY slot the
+ * point-check tested this turn came back not-bookable and the search found
+ * something. Returns BOTH renderings of the same computation — `block`, the
+ * prose for the system prompt, and `alternatives`, the structured instants, so
+ * the caller (availabilityPreCheck) can also emit them as a compact
+ * `[availability_precheck …]` tool-summary line for the output-time checkers.
+ * One search, two surfaces — they can never disagree.
  *
  * The predicate lives here, not at the call site, so the trigger and the
  * computation cannot drift apart — and note what it deliberately is NOT: it is
@@ -287,10 +292,11 @@ export async function blockedSlotAlternativesBlock(params: {
   /** For binding a pick back to its exact instant — omit and nothing is stashed. */
   channelId?: string;
   threadTs?: string;
-}): Promise<string> {
+}): Promise<{ block: string; alternatives: NearbyAlternative[] }> {
   const { profile, verdicts } = params;
-  if (verdicts.length === 0) return '';
-  if (verdicts.some(v => v.bookable)) return '';
+  const none = { block: '', alternatives: [] as NearbyAlternative[] };
+  if (verdicts.length === 0) return none;
+  if (verdicts.some(v => v.bookable)) return none;
 
   const result = await findNearbyAlternatives({
     profile,
@@ -307,7 +313,7 @@ export async function blockedSlotAlternativesBlock(params: {
     logger.info('blockedSlotAlternativesBlock — every tested slot blocked, but the search found no alternative either', {
       tested: verdicts.length, anchorDays: result.anchorDays,
     });
-    return '';
+    return none;
   }
 
   // These times are about to be said aloud, so a pick from either list has to
@@ -346,7 +352,7 @@ export async function blockedSlotAlternativesBlock(params: {
       : '',
   ].filter(Boolean);
 
-  return `## TIMES THAT DO WORK (deterministic — the same search the booking flow runs)
+  const block = `## TIMES THAT DO WORK (deterministic — the same search the booking flow runs)
 
 Not one of the times I checked above came back bookable, so I ran the real search rather than leave you with nothing to offer. Every time below is genuinely bookable for ${ownerFirst} right now — same rules, same validator, and none of them sits on anything he is committed to:
 
@@ -355,4 +361,5 @@ ${sections.join('\n')}
 OFFER THESE TIMES IN THIS REPLY. Do NOT ask whether to go and look for other options — the looking is already done, and asking spends a round on an answer that is always yes. Quote each time exactly as written above; do not re-derive, re-word or convert it.
 What to do about the times that did NOT work is decided by their OWN lines above, one by one — follow each line, including where it tells you the time is ${ownerFirst}'s to override and to raise it for his decision if they want that exact slot. This list changes none of that; it only means you are never left with nothing to offer.
 Never state or imply a COUNT of what did not work ("none of your three", "all of them are booked", "your whole week"): the lines above cover the times I TESTED, which is not necessarily every time mentioned in this thread.`;
+  return { block, alternatives: [...result.onAnchorDays, ...result.beyond] };
 }

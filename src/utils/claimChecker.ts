@@ -54,21 +54,28 @@
  * ownerIsActing/approvalGrantContext scoping above — a colleague reading a
  * fabricated fact about the owner is the risk regardless of who is typing.
  *
- * claimchecker-zero-tool-call-calendar-state-claim-ships (2026-08-30) — this
- * mode's own carve-out ("merely describing what's already scheduled on the
- * calendar is not a personal-capability claim") had no grounding requirement
- * attached to it, so it silently exempted a FABRICATED calendar-state claim
- * too, not just a true one. Proven incident (D0ARQRD5H28, 2026-08-30T07:47Z):
- * a zero-tool-call reply told a colleague "11:30–12:25 already exists on the
- * calendar (the meeting I booked by mistake, still awaiting Idan's decision
- * on cancelling it)" — the checker flagged the decision-status half
- * (matching this mode's PERSONAL-claim framing) and the rewrite dutifully
- * fixed exactly that clause, but the load-bearing half — that a meeting
- * exists there AT ALL — was never in scope for any checker (RULE A only
- * covers completed EXTERNAL actions and doesn't run on a colleague's own
- * turn anyway; slot_grounding only grounds AVAILABLE-claims). The prompt
- * below now names a second flaggable class, CLASS 2, for exactly this shape
- * — reusing this same always-on-once-invoked call (G1/G10), not a new mode.
+ * REVERTED 2026-08-30 (claimchecker-zero-tool-call-calendar-state-claim-ships,
+ * shipped in 9680d9c as CLASS 2, reverted same day) — CLASS 2 flagged ANY
+ * zero-tool-call calendar-state claim as invented, including the one
+ * DESIGNED zero-tool-call ground truth in the system: `availabilityPreCheck`'s
+ * injected verdicts + alternatives (at the time not threaded into
+ * `toolSummaries`, so invisible to this checker). Result: every fresh-date
+ * colleague availability question ("is he free at X?") got its correct,
+ * precheck-computed answer deterministically rewritten into a useless "let me
+ * check and get back to you" hedge — confirmed via a live A/B same day. The
+ * regression this introduced was broader and more damaging than the narrow
+ * fabrication incident it fixed. Owner's ruling: revert CLASS 2 outright.
+ *
+ * CLASS 2 STAYS REVERTED — 'owner_fact' deliberately no longer flags
+ * calendar-EXISTENCE claims at all (accepted tradeoff; do not reintroduce
+ * it). The underlying blind spot was fixed separately later the same day, at
+ * the root instead: the precheck's deterministic verdicts + alternatives ARE
+ * now threaded into `toolSummaries` as synthetic lines with the stable prefix
+ * `[availability_precheck` (availabilityPreCheck.ts's
+ * `renderToolSummaryLines`, threaded by the orchestrator), and
+ * 'slot_grounding' mode recognizes them as real ground truth for
+ * offered/rejected times — see the slotGroundingPrompt below and
+ * runOutputGates.ts's `groundedToolLines` filter.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -334,9 +341,11 @@ function needsCheck(input: ClaimCheckInput): boolean {
   // under any reasonable floor.
   if (input.mode === 'owner_fact') return true;
   // proposed-slot-not-grounded-in-search-result (2026-08-24) — same reasoning:
-  // the caller only ever constructs `slotGroundingContext` when the
-  // structural pre-filter (an availability tool ran THIS turn) already held,
-  // so once this mode is invoked at all it always runs. No length floor here
+  // the caller only ever constructs `slotGroundingContext` when its
+  // structural pre-filter already held (an availability tool or the
+  // precheck produced a summary line THIS turn, or the turn was a detected
+  // availability question — bug 1.1), so once this mode is invoked at all it
+  // always runs. No length floor here
   // either — "15:45 or 16:15" is a short, specific, fully-formed false claim.
   if (input.mode === 'slot_grounding') return true;
   // v4.4.x (#154) / o#227, tightened gh#154-R6, widened gh#154-R7 (2026-08-06), floor
@@ -486,7 +495,7 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
   const ownerFactPrompt = input.mode === 'owner_fact'
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
-You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself, OR an INVENTED CALENDAR-STATE claim, before it ships.
+You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your one job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself before it ships.
 
 TOOL ACTIVITY THIS TURN (anything read or confirmed — a matching read here means the claim is GROUNDED, not invented):
 ${toolBlock}
@@ -496,39 +505,38 @@ DRAFT REPLY (to the colleague):
 ${input.reply}
 """
 
-Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — EITHER of these, with nothing behind it:
+Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule") that ALL of the following hold:
+(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`, a find_available_slots result listing that same date under \`off_days=<date>(vacation_or_off_day)\` / \`off_days=<date>(owner_out_of_office …)\` — which appears even when the SAME search returned slots on OTHER dates in the range, so a search that found times later in the week still grounds "he's off Monday through Wednesday" for the dates it lists — or an analyze_calendar result whose per-day summary marks that same date \`day_off=<date>\` or \`owner_out_of_office=<date>\`: any of these structured markers is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
+(b) is not merely describing what's already scheduled on the calendar (a meeting's time, place or attendees is not a personal-capability claim), AND
+(c) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
 
-CLASS 1 — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule").
-
-CLASS 2 — a specific CALENDAR-STATE claim: that a particular meeting/event already EXISTS, is booked, or is pending some outcome (a cancellation, a decision) AT A SPECIFIC DATE+TIME ("that slot already has a meeting there", "it's already on the calendar, still waiting on his decision to cancel it"). Restating a meeting's time/place/attendees that TOOL ACTIVITY THIS TURN or CONVERSATION HISTORY above actually shows is NOT this class — only a claimed calendar item/state with NOTHING above backing its existence counts.
-
-For either class, BOTH of the following must hold:
-(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference read, or a get_calendar / analyze_calendar / find_available_slots read that actually shows it — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`, a find_available_slots result listing that same date under \`off_days=<date>(vacation_or_off_day)\` / \`off_days=<date>(owner_out_of_office …)\` — which appears even when the SAME search returned slots on OTHER dates in the range, so a search that found times later in the week still grounds "he's off Monday through Wednesday" for the dates it lists — or an analyze_calendar result whose per-day summary marks that same date \`day_off=<date>\` or \`owner_out_of_office=<date>\`: any of these structured markers is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
-(b) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
-
-A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a CLASS 1 or CLASS 2 claim, stated as certain with nothing behind it.
+A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
 
 Output schema (REUSE the action-checker shape so callers don't branch):
 {
-  "claimed_action": boolean,      // true = an invented personal fact or calendar-state claim about ${input.ownerFirstName} is present
+  "claimed_action": boolean,      // true = an invented personal fact about ${input.ownerFirstName} is present
   "action_type": "invented_fact" | null,
   "target_name": string | null,   // "${input.ownerFirstName}" when claimed_action is true, else null
-  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars — name the SPECIFIC unfounded detail (the calendar item/state, or the personal fact), not just an adjacent framing clause
+  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars
 }
 
-If the draft is clean (no invented personal fact or calendar-state claim about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
+If the draft is clean (no invented personal fact about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
   // proposed-slot-not-grounded-in-search-result (2026-08-24) — FOURTH mode.
   // `groundedToolLines` carries this turn's exact compact tool-summary
   // line(s), verbatim, never re-derived, whenever an availability tool ran
-  // this turn. bug 1.1 (2026-08-27) — the caller (runOutputGates.ts:1719)
-  // also invokes this mode with an EMPTY `groundedToolLines` on a detected
-  // zero-tool-call availability question, so a stale time recalled from
-  // earlier in the thread still gets checked; the prompt below is written to
-  // handle both cases (an empty list plus the EARLIER-TURNS history block is
-  // what it falls back to when THIS turn ran no search at all).
+  // this turn — and, since 2026-08-30, the availability precheck's synthetic
+  // `[availability_precheck …]` verdict/alternatives lines too (same
+  // standing: a deterministic rule-aware check, not a guess; see the
+  // top-of-file REVERTED note). bug 1.1 (2026-08-27) — the caller
+  // (runOutputGates.ts) also invokes this mode with an EMPTY
+  // `groundedToolLines` on a detected zero-tool-call availability question,
+  // so a stale time recalled from earlier in the thread still gets checked;
+  // the prompt below is written to handle both cases (an empty list plus the
+  // EARLIER-TURNS history block is what it falls back to when THIS turn
+  // produced no availability result at all).
   // bounce-fix (2026-08-26) — an EARLIER turn's own real search can already
   // have confirmed a time this turn's search never repeats (a colleague
   // asking about a second day while a first offer still stands). See
@@ -542,7 +550,7 @@ Reminder: JSON only. Start with { end with }. No prose.`
 
 You audit a draft reply an executive assistant is about to send. Your one job: catch a SPECIFIC date/time offered as available/clean/workable that was NOT actually confirmed by a real availability search.
 
-THIS TURN'S REAL AVAILABILITY RESULT (find_available_slots / check_join_availability — times/verdicts confirmed THIS turn):
+THIS TURN'S REAL AVAILABILITY RESULT (find_available_slots / check_join_availability / availability_precheck — times/verdicts confirmed THIS turn):
 ${input.slotGroundingContext.groundedToolLines.map(l => `  ${l}`).join('\n')}
 ${slotGroundingHistoryBlock}
 DRAFT REPLY:
@@ -555,6 +563,12 @@ Flag when EITHER holds:
 (b) the draft sells as available/workable an exact date+time that DOES appear in THIS TURN'S REAL AVAILABILITY RESULT above but ONLY with a NEGATIVE verdict attached to that same instant (marked unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or carrying a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and offering that instant anyway inverts the search's own verdict.
 
 Judge by MEANING, in any language — a CONFIRMED slot re-expressed in a different clock/timezone, or rounded/truncated the same way the draft rounds every other number, is still grounded.
+
+\`[availability_precheck …]\` lines are REAL ground truth with the SAME standing as a find_available_slots result — a deterministic, rule-aware calendar check that ran before drafting, not a guess. Read them by meaning:
+- \`… <instant> dur=<n>m: bookable\` (with or without \`maxFree=…\`) — confirms THAT instant as available: a draft offering it is GROUNDED.
+- \`… <instant> dur=<n>m: not bookable (<reason>)\` — confirms that instant is NOT free: a draft correctly reporting it as unavailable/busy is GROUNDED, and a draft offering that same instant as available inverts the verdict — flag under (b).
+- \`[availability_precheck alternatives (bookable): <instant>, <instant>, …]\` — confirms EACH listed instant as available: a draft offering any of them is GROUNDED.
+- A dual-reading line (\`… bookable | same clock read in <zone>: … not bookable …\`) carries a SEPARATE verdict per timezone reading — judge each reading's instant by its own verdict only.
 
 Do NOT flag:
 - A vague, non-specific offer with no clock time ("let me look for time next week", "I'll check some options") — nothing to verify.
@@ -1030,17 +1044,17 @@ SAFE-MISS — the hard rule. If you cannot tell whether the draft truly claims t
 Draft:
 ${opts.draft}` : null;
 
-  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself, OR an unverified CALENDAR-STATE claim (a meeting/slot claimed to already exist, be booked, or be pending an outcome) — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
 ${toolBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference read, or a get_calendar / analyze_calendar / find_available_slots read that actually shows it). Do not manufacture a problem that isn't one.
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read). Do not manufacture a problem that isn't one.
 
-STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged claim (personal fact or calendar-state claim) about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
-- Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered. A calendar-existence claim ("that slot already has a meeting there") that is itself the thing the colleague needs an answer to is NEVER a stray/bonus detail — it must be dropped or clearly hedged, never left standing unchanged.
-- NOT invent a DIFFERENT unfounded personal or calendar-state claim about ${opts.ownerFirstName} in its place.
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged personal claim about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
+- Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered.
+- NOT invent a DIFFERENT unfounded personal claim about ${opts.ownerFirstName} in its place.
 - Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
 - Match the language of the draft (Hebrew/English/etc).

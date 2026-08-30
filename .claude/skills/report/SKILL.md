@@ -87,7 +87,8 @@ where each verdict's row lands). Remove it there, then rewrite the
 headline's leading clause and total from `node scripts/ledger-stats.cjs
 --open`'s **RULABLE** figure — never a number you compute by hand. Reuse
 the rule already written for exactly this case, don't restate it your own
-way: **`WRAP_UP.md` step 9.2** — the leading bolded clause is always
+way: **`WRAP_UP.md`'s bookkeeping step, the report-reset item** — the
+leading bolded clause is always
 RULABLE, never a delta, and an all-clear phrasing (`0 rows await you`,
 `nothing awaiting you`) is correct **only** when RULABLE is genuinely 0.
 This is one row and one headline, not the full cross-check against

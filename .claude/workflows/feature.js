@@ -1473,7 +1473,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
       // list, so an empty `outcomeTraces` against a non-empty list is visibly
       // a refusal, not an oversight.
       (outcomeCandidates.length
-        ? `**QUESTION 1 — ${outcomeCandidates.length} PIECE(S) THIS WAVE CLAIMS BUILT.** Trace each from its own \`requirement\` above (the product outcome it buys) to the line where that outcome now holds — your charter's B2, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per piece below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare piece with no behavioural outcome of its own (pure scaffolding another piece depends on). A piece you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
+        ? `**QUESTION 1 — ${outcomeCandidates.length} PIECE(S) THIS WAVE CLAIMS BUILT.** Trace each from its own \`requirement\` above (the product outcome it buys) to the line where that outcome now holds — your charter's B1, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per piece below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare piece with no behavioural outcome of its own (pure scaffolding another piece depends on). A piece you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
             .map((c) => `  • ${c.id} — ${c.requirement || '(no requirement text)'}`)
             .join('\n')}\n\n`
         : '') +

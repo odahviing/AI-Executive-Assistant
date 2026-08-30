@@ -147,7 +147,16 @@ export interface OrchestratorOutput {
    * thread shipped as fact with no tool call to catch it.
    */
   availabilityQuestionDetected?: boolean;
-  toolSummaries?: string[];     // compact summaries of tool calls for conversation history
+  /**
+   * Compact summaries of tool calls, for conversation history and the
+   * output-time checkers. 2026-08-30 — also carries the availability
+   * precheck's synthetic lines (stable prefix `[availability_precheck`,
+   * rendered in availabilityPreCheck.ts): the precheck is a real, deterministic
+   * `checkSlot` verdict computed before the model loop, and until it appeared
+   * here the checkers (claimChecker, runOutputGates' groundedToolLines) treated
+   * a correct precheck-backed answer as ungrounded and rewrote it.
+   */
+  toolSummaries?: string[];
   /**
    * v2.8.3+ — rich per-mutation record for this turn. Populated whenever a
    * write tool fires (create_meeting / move_meeting / update_meeting /
@@ -228,6 +237,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     socialClassification,
     resolvedMeetingAttendees,
     availabilityQuestionDetected,
+    availabilityPrecheckToolSummaries,
   } = await buildTurnContext(input);
 
   // Track tools called so we can save a summary in conversation history.
@@ -1525,11 +1535,22 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
   }
 
+  // 2026-08-30 — prepend the availability precheck's synthetic
+  // `[availability_precheck …]` lines (buildTurnContext → availabilityPreCheck's
+  // renderToolSummaryLines) to the outgoing summaries. Prepended, not seeded into
+  // `toolCallSummaries` above: the mid-turn gates keyed on that array (the
+  // v1.7.3 empty-reply fallback, the social coda's "did real work happen") must
+  // keep meaning "a real tool fired this turn". Out here the lines reach exactly
+  // the consumers that need them — the output-time checkers (claimChecker,
+  // runOutputGates) and conversation-history persistence (postReply), which is
+  // what stops a correct precheck-backed "is he free at X" answer from being
+  // rewritten as ungrounded. Precheck first: it ran before the model loop.
+  const outgoingToolSummaries = [...availabilityPrecheckToolSummaries, ...toolCallSummaries];
   return {
     reply: finalReply,
     bookingOccurred,
     availabilityQuestionDetected,
-    toolSummaries: toolCallSummaries.length > 0 ? toolCallSummaries : undefined,
+    toolSummaries: outgoingToolSummaries.length > 0 ? outgoingToolSummaries : undefined,
     mutationActions: mutationActions.length > 0 ? mutationActions : undefined,
     healthCheckVacuous: healthCheckVacuous ? true : undefined,
     socialCoda: socialCoda ?? undefined,

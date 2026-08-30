@@ -726,6 +726,15 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // with no tool call is exactly the shape that let a stale time from three
   // days earlier in the thread ship as fact.
   let availabilityQuestionDetected = false;
+  // 2026-08-30 — the precheck's synthetic tool-summary lines (stable prefix
+  // `[availability_precheck`, rendered by the one producer —
+  // availabilityPreCheck.ts's renderToolSummaryLines). Carried verbatim to the
+  // orchestrator, which prepends them to `OrchestratorOutput.toolSummaries`, so
+  // the output-time checkers (claimChecker owner_fact / slot_grounding,
+  // runOutputGates' groundedToolLines) see this deterministic zero-tool check as
+  // legitimate grounding instead of rewriting a correct precheck-backed answer
+  // into "let me check and get back to you".
+  let availabilityPrecheckToolSummaries: string[] = [];
   // v4.4.x (#154) — gated on `authority`, not the surface-clamped `senderRole`.
   // This precheck's own rendered text names the asker "this colleague's
   // question" (availabilityPreCheck.ts) — true for a genuine colleague, false
@@ -799,6 +808,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         availabilityPrecheckBlock = result.promptBlock;
       }
       availabilityQuestionDetected = result.ran;
+      availabilityPrecheckToolSummaries = result.toolSummaryLines;
       // A slot the colleague ASKED about that we confirmed bookable IS a slot
       // we offered them — record it into the SAME stash find_available_slots
       // feeds, so the hold gate (which validates "was this offered?") passes on
@@ -1327,5 +1337,6 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     socialClassification,
     resolvedMeetingAttendees,
     availabilityQuestionDetected,
+    availabilityPrecheckToolSummaries,
   };
 }

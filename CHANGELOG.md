@@ -2,6 +2,18 @@
 
 ---
 
+## 4.8.3 — A safety rule broke the question it was supposed to protect
+
+A same-day regression, caught and fixed within hours: a claim-checker rule shipped this morning (v4.8.2, to stop a real fabricated-calendar-fact incident) turned out to also fire on the single most common colleague question — "is he free at X?" — because it couldn't tell a genuine, correctly-computed fast-path answer from a fabrication. Reverted the rule outright rather than patch around it, then fixed the actual root cause so the fast path is recognized as real evidence going forward. Verified by a new 30-item regression battery built the same day specifically because of this incident.
+
+### Fixed (high-impact)
+- **The most common availability question stopped getting a straight answer.** Maelle has a fast, deterministic way to check "is he free at X on DATE?" without calling the search tool — a real check, not a guess. This morning's new claim-checker rule (CLASS 2, meant to catch a genuine fabrication where a meeting's existence was invented from nothing) couldn't distinguish that legitimate fast path from a fabrication, so it rewrote every correct fast-path answer into a useless "let me check and get back to you." Reverted the rule outright — breaking the ordinary flow was judged worse than leaving the narrower fabrication case unguarded for now.
+- **The actual root cause, fixed properly.** The fast-path check's verdicts now flow into the same evidence trail every other tool result already uses, so both output-time checks recognize a fast-path answer as real grounding instead of treating it as unverified. This also quietly fixes a smaller, older version of the same problem that predates today (since the 4.7.5 release) — a separate checker had the identical blind spot, just less destructively.
+
+### Framework
+- **A new 30-item regression battery** (`.claude/GOLDEN_PATHS.md`) now runs before every wrap and every verify pass — built the same day as this incident, because two independent adversarial reviews had already cleared this morning's rule and neither one asked "does this also break the ordinary case sitting next to it." The battery is exactly that second question, made standing and cheap. This wrap: 30/30 pass; one framework-internal reference bug the battery's own setup had left behind (a naming rename that missed 4 spots) was found and fixed pre-wrap.
+- Two stale-vs-code documentation contradictions in the architecture reference corrected during a routine hygiene sweep (a dispatcher list that still named two deleted routines; a database table listed as live that is in fact dropped on every boot).
+
 ## 4.8.2 — A colleague answered from six-day-old memory, and a second look at what shipped yesterday
 
 Two build waves plus a standalone retrospective adversarial pass over everything 4.8.1 shipped — because a morning of live incident response deserved a second, unhurried look before the next release. The headline bug: Maelle answered a colleague's calendar question with zero tool calls, repeating a six-day-old resolved conversation as if it were current — the false calendar-state claim it produced is what actually steered him to double-book onto a meeting added later that same morning. Chasing that down also surfaced a real gap in yesterday's attendee-email fix (no way to correct a stale directory entry) and a mechanism bug in yesterday's coda redesign (a category could be killed by raises nobody ever saw).

@@ -510,7 +510,7 @@ const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'slack
 // The non-lane agents live here too, so every dispatch in this engine reads its
 // effort from ONE table — a hardcoded effort at the call site is invisible to
 // anyone tuning the run, which is how the editor sat at `medium` unnoticed.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh', golden: 'medium' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -1056,6 +1056,39 @@ const VERIFY_OUT = {
     },
   },
   required: ['results'],
+}
+
+// ── 2026-08-30 · THE GOLDEN-PATH BATTERY'S RETURN SHAPE ──────────────────────
+// Born from CLASS 2: a guard change passed two adversarial passes and still
+// deterministically broke the most common colleague flow, because every check
+// in this engine traces symptom-forward and nothing ever re-walks the ordinary
+// paths. `.claude/GOLDEN_PATHS.md` is the fixed 30-item floor; this engine
+// cannot read files, so the checker reads the battery file itself and
+// `itemsInFile` is its own count — a self-reported denominator, weaker than
+// X182's engine-derived one, cross-checked against `goldenTraces.length` below
+// so a shortfall is still arithmetic. `lane` rides each entry (copied from the
+// item's own `lane:` field) because a `fail` is routed into the bounce ladder
+// and the engine has no file→lane map of its own.
+const GOLDEN_OUT = {
+  type: 'object',
+  properties: {
+    itemsInFile: { type: 'number', description: 'your own count of `Z<n>` items found in .claude/GOLDEN_PATHS.md — the denominator the engine checks `goldenTraces` against. 0 means you could not find/read the file: say so.' },
+    goldenTraces: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'the item id exactly as the file names it, e.g. `Z6`' },
+          verdict: { type: 'string', enum: ['pass', 'fail', 'stale-anchor'] },
+          lane: { type: 'string', description: 'the item\'s own `lane:` field, copied verbatim — REQUIRED on `fail` (it is how the engine routes the repair)' },
+          evidence: { type: 'string', description: '`fail`: the `file:line` where the behavior breaks at HEAD. `stale-anchor`: where the cited code actually lives now. `pass` on an item whose anchor file this wave touched: quote the anchor\'s current load-bearing line.' },
+        },
+        required: ['id', 'verdict'],
+      },
+      description: 'ONE entry per item in the battery file, every run, no sampling — an item you leave out is reported as unchecked and named. The battery file\'s own header is the law for how each verdict is earned.',
+    },
+  },
+  required: ['itemsInFile', 'goldenTraces'],
 }
 
 // ---- helpers ----
@@ -1859,6 +1892,16 @@ let outcomeUntraced = []
 let jointCandidates = []
 let jointTraces = []
 let jointUntraced = []
+// 2026-08-30 · the golden battery's own observables, recorded even at zero for
+// the reason X143 gives — and `manifest.golden` absent means a stale engine,
+// same capability-marker doctrine as `bounce`. `goldenItemsInFile` is the
+// checker's self-count of the battery file (this engine cannot read files);
+// `goldenTraces.length` against it is the coverage arithmetic.
+let goldenRan = false
+let goldenItemsInFile = 0
+let goldenTraces = []
+let goldenFails = []
+let goldenStale = []
 let waveFiles = []
 let priorCleanDropped = []
 let discoveries = []
@@ -1992,6 +2035,45 @@ if (VERIFY) {
       else log(`Joint-fix candidates: 0 — no \`>dep\` chain, no \`confirmed-other-lane\`, and no file cited by two lanes. Question 1b has nothing to trace this wave.`)
     }
 
+    // ── 2026-08-30 · THE GOLDEN BATTERY — launched BEFORE the bouncer, awaited
+    // after, so the two read-only passes run in parallel (same concurrency the
+    // bounce rounds already use via `parallel`). Deliberately a SEPARATE cheap
+    // dispatch rather than +25-40% reading folded into the Fable-tier bouncer:
+    // measured 2026-08-30 (spend.cjs), a Sonnet read-only pass runs $1.50-3
+    // against the bouncer's $12+ average, and the battery deliberately reads
+    // FIXED anchors independent of this wave's diff, so it loses nothing by
+    // not sharing the bouncer's context. The rules live in the battery file's
+    // own header — this brief carries only the pointer and the return shape.
+    // `agentType: 'general-purpose'` is the built-in read-only type (no
+    // charter of its own — the battery file IS its whole law). If this
+    // runtime ever refuses a built-in type, `agent()` returns null after its
+    // retries and the GOLDEN warning below names it loudly (X124's class:
+    // never let a bad type read as a quiet clean run); the fallback then is
+    // `agentType: 'bouncer', model: 'sonnet'`, which is verified to work.
+    //
+    // 2026-08-31 · PARALLEL IS THE DECISION, not an accident of insertion.
+    // The owner asked whether this should gate cheap-first — battery, then
+    // the bouncer only on a clean battery. HERE it should not: a golden
+    // `fail` enters the bounce ladder below as one more overturn, and each
+    // round's re-check is scoped to the bounced rows only ("never the whole
+    // diff again"), so the bouncer's full pass is never re-run and nothing
+    // it spent is wasted by a battery fail. Gating would serialize two
+    // independent read-only passes on every wave to save a dispatch no path
+    // ever re-spends — and would need a second, pre-bouncer repair loop for
+    // golden fails that the shared ladder already provides. The WRAP is the
+    // opposite case and DOES gate (WRAP_UP.md's pre-wrap verify step):
+    // no ladder there, a fail means fix-and-re-run the whole pass, so the
+    // battery runs first and the Fable pass waits for it.
+    const goldenPromise = agent(
+      `GOLDEN-PATH BATTERY — the fixed unit-test floor, run in FULL on every verify pass.\n\n` +
+        `Read \`.claude/GOLDEN_PATHS.md\` and run EVERY item in it exactly per that file's own "How to run" header — verdict vocabulary, evidence bar, paper-only rule all live THERE, nowhere else. No sampling, no skipping items whose files look untouched.\n\n` +
+        `Return \`itemsInFile\` (your own count of Z items in the file) and ONE \`goldenTraces\` entry per item. On a \`fail\`, copy the item's own \`lane:\` field into \`lane\` — the engine routes the repair with it.\n\n` +
+        (waveFiles.length
+          ? `THIS WAVE TOUCHED THESE FILES — any battery item whose anchors hit one of them needs its anchor's current load-bearing line quoted in \`evidence\`, per the battery header's pass rule:\n${waveFiles.map((f) => `  • ${f}`).join('\n')}`
+          : `No wave file list was available — apply the battery header's lighter one-line pass rule to every item.`),
+      { label: 'golden:battery', phase: 'Verify', agentType: 'general-purpose', model: 'sonnet', effort: EFFORT.golden, schema: GOLDEN_OUT },
+    )
+
     const check = await agent(
       // The bar, the standard, the seams-first scope, the trace sampling, the
       // budget, overturn-vs-discovery and the return contract all live in
@@ -2026,7 +2108,7 @@ if (VERIFY) {
         // the wave's own claim is the candidate list, so an empty `outcomeTraces`
         // against a non-empty list here is visibly a refusal, not an oversight.
         (outcomeCandidates.length
-          ? `**QUESTION 1 — ${outcomeCandidates.length} ROW(S) THIS WAVE CLAIMS FIXED.** Trace each from its reported symptom (or the report's \`Seen:\` line for a loop-born row) to the line where behaviour now diverges — your charter's B2, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per row below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare row with no behavioural outcome (a comment-only fix). A row you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
+          ? `**QUESTION 1 — ${outcomeCandidates.length} ROW(S) THIS WAVE CLAIMS FIXED.** Trace each from its reported symptom (or the report's \`Seen:\` line for a loop-born row) to the line where behaviour now diverges — your charter's B1, 100% bar, no sampling. **Return one \`outcomeTraces\` entry per row below**: \`traced\` with the \`file:line\` that proves it, or \`no-symptom\` with why for the rare row with no behavioural outcome (a comment-only fix). A row you leave out is reported as UNTRACED and named to the owner:\n${outcomeCandidates
               .map((c) => `  • ${c.id} — ${c.symptom || '(no symptom text)'}`)
               .join('\n')}\n\n`
           : '') +
@@ -2047,6 +2129,22 @@ if (VERIFY) {
       { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
     )
     verifyRan = !!check
+
+    // ── 2026-08-30 · collect the golden battery's return, launched above ─────
+    const golden = await goldenPromise
+    goldenRan = !!golden
+    goldenItemsInFile = Number((golden && golden.itemsInFile) || 0)
+    goldenTraces = ((golden && golden.goldenTraces) || []).filter((t) => t && t.id)
+    goldenFails = goldenTraces.filter((t) => t.verdict === 'fail')
+    goldenStale = goldenTraces.filter((t) => t.verdict === 'stale-anchor')
+    if (goldenRan) {
+      log(
+        `Golden battery: ${goldenTraces.length} of ${goldenItemsInFile} item(s) answered · ${goldenTraces.filter((t) => t.verdict === 'pass').length} pass · ${goldenFails.length} fail · ${goldenStale.length} stale-anchor`,
+      )
+      goldenFails.forEach((f) => log(`  ! GOLDEN PATH BROKEN — ${f.id} (${f.lane || 'no lane returned'}): ${String(f.evidence || '(no evidence)').slice(0, 140)}`))
+      goldenStale.forEach((s) => log(`  golden stale-anchor (re-pin, non-blocking) — ${s.id}: ${String(s.evidence || '').slice(0, 120)}`))
+    } else log('! THE GOLDEN BATTERY DID NOT RUN — its dispatch returned nothing. See the warning below; do not read this wave as battery-clean.')
+
     verifiedClean = (check && check.verifiedClean) || []
     discoveries = (check && check.discoveries) || []
     ticketCoverage = (check && check.ticketCoverage) || []
@@ -2134,6 +2232,31 @@ if (VERIFY) {
         .map((c) => c.ref),
     )
     if (backlogClaims.length) log(`  backlog spot-check: ${backlogConfirmed.size} of ${backlogClaims.length} \`fixed\` claim(s) confirmed at HEAD — only these close.`)
+
+    // ── 2026-08-30 · A GOLDEN `fail` ENTERS THE LADDER AS AN OVERTURN ────────
+    // The approved design's words: "a fail routes into the existing bounce
+    // path the same as an overturn." Each fail becomes a synthetic row seeded
+    // into `specById` (the ladder reads lane/severity/bounces from there) and
+    // into `overturned` BEFORE the X143 partition below, so the partition
+    // arithmetic still holds: a fail with a routable lane bounces to that
+    // lane, one with a missing/unknown lane lands in `bounceUnroutable` and
+    // escalates loudly — never a silent drop. `claimed` gets an honest entry
+    // so the `_bouncedBack.youClaimed` field the lane reads does not print
+    // `undefined`: the lane never claimed anything here; the WAVE broke a
+    // standing behavior.
+    for (const f of goldenFails) {
+      const gid = `golden:${f.id}`
+      specById.set(gid, {
+        id: gid,
+        lane: String(f.lane || ''),
+        severity: 'high',
+        clarity: 'clear',
+        bounces: 0,
+        symptom: `Golden path ${f.id} (.claude/GOLDEN_PATHS.md) FAILS at HEAD — a standing behavior this wave is expected to leave intact. Checker evidence: ${String(f.evidence || '(none returned)')}`,
+      })
+      claimed.set(gid, 'a passing golden path (standing behavior, broken by this wave)')
+      overturned.set(gid, `GOLDEN PATH ${f.id} FAILS at HEAD: ${String(f.evidence || '(no evidence returned)')}`)
+    }
 
     // ── X137/X211 · A MODEL-ESCALATING LADDER, THEN HIS DESK ─────────────────
     // Until X137 an overturn went straight to `needs-owner-decision`: the
@@ -2617,6 +2740,21 @@ const manifest = {
     untracedIds: outcomeUntraced.map((c) => c.id),
     noSymptom: outcomeTraces.filter((t) => t.verdict === 'no-symptom').length,
   },
+  // ── 2026-08-30 · THE GOLDEN BATTERY, MADE OBSERVABLE ───────────────────────
+  // Always an object with explicit zeros, ABSENT means a stale engine — the
+  // same capability-marker doctrine as `bounce`. `itemsInFile` is the
+  // checker's own count of the battery file (this engine cannot read files);
+  // `answered` against it is the coverage arithmetic, and the warning below
+  // fires on any shortfall. `fails` are also visible as `golden:Z<n>` refs
+  // inside `bounce` above — they ride the same ladder as any overturn.
+  golden: {
+    ran: goldenRan,
+    itemsInFile: goldenItemsInFile,
+    answered: goldenTraces.length,
+    passed: goldenTraces.filter((t) => t.verdict === 'pass').length,
+    fails: goldenFails.map((f) => f.id),
+    staleAnchors: goldenStale.map((s) => `${s.id}: ${String(s.evidence || '').slice(0, 100)}`),
+  },
   // ── 2026-08-06 · THE MEASURED OBSERVABLE, MADE OBSERVABLE ──────────────────
   // `closed` is every row THIS run marked `built` or `already-fixed`; `checked`
   // is how many actually name a real-data check rather than a re-read of the
@@ -2755,6 +2893,29 @@ if (VERIFY && bounceAtLimit.length)
   )
 if (VERIFY && verifyAttempted > 0 && !verifyRan)
   warnings.push(`THE VERIFY DID NOT RUN — ${verifyAttempted} built fix(es) are unchecked. \`agent()\` returns null when a subagent dies after its retries, and every read downstream is null-guarded, so this was previously indistinguishable from a clean pass. Do NOT wrap this run without \`/manager verify\`.`)
+// ── 2026-08-30 · THE GOLDEN BATTERY'S OWN GATES — same class as the verify's ──
+// A battery that silently did not run is the exact CLASS 2 blindness this
+// mechanism was built to close, so its absence is as loud as its findings.
+if (VERIFY && (verifyRan || verifyAttempted > 0) && !goldenRan)
+  warnings.push(
+    `THE GOLDEN BATTERY DID NOT RUN — its dispatch returned nothing (a dead subagent, or this runtime refusing agentType 'general-purpose'; if the latter, switch the call to agentType 'bouncer' + model 'sonnet'). The wave's golden paths are UNCHECKED. Run \`/golden\` by hand before wrapping.`,
+  )
+if (goldenRan && goldenItemsInFile === 0)
+  warnings.push(`THE GOLDEN BATTERY FOUND NO ITEMS — the checker reported itemsInFile: 0, meaning .claude/GOLDEN_PATHS.md is missing, moved, or unreadable. That file is the unit-test floor; nothing checked it this run.`)
+if (goldenRan && goldenItemsInFile > 0 && goldenTraces.length < goldenItemsInFile)
+  warnings.push(
+    `GOLDEN COVERAGE SHORT — ${goldenTraces.length} of ${goldenItemsInFile} battery item(s) answered. The unanswered remainder is UNCHECKED, not passing; re-run \`/golden\` for the full battery before wrapping.`,
+  )
+{
+  // Unresolved after the whole ladder = a standing behavior is broken at HEAD.
+  // Computed from the same escalation lists every other overturn rides, so a
+  // golden fail can never be "cleared" anywhere the manifest does not show.
+  const goldenBroken = [...new Set([...bounceStillWrong, ...bounceUnroutable, ...bounceAtLimit])].filter((id) => String(id).startsWith('golden:'))
+  if (goldenBroken.length)
+    warnings.push(
+      `GOLDEN PATH(S) STILL BROKEN AFTER THE LADDER — ${goldenBroken.join(', ')}. A golden fail is an overturn: do NOT wrap while one stands. Stale-anchors report only; THIS blocks.`,
+    )
+}
 if (ALREADY_BUILT.length > 0 && triageDropped.length === 0)
   warnings.push(`alreadyBuilt passed ${ALREADY_BUILT.length} entries and triage dropped NONE — either genuinely all-new, or ref matching failed again (gh#147 vs #147).`)
 // X176 · never fires on `matched: 0` — a normal night confirms nothing, same

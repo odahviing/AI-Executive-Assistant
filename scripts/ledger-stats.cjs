@@ -193,7 +193,7 @@ const citesReleaseFile = (cited, releaseFiles) => {
 // only durable once it is a row, never prose in report.md. `confirmed-other-lane`
 // closes a ref when another lane's fix landed it, deliberately uncounted as
 // shipped below so one change stays one fix in the count. `wrapped` closes a
-// WRAP_UP.md step-12 bookkeeping row (built -> shipped companion, or a
+// bookkeeping row from WRAP_UP.md's GitHub-issues step (built -> shipped companion, or a
 // GitHub-sync-closed ticket) so it never misreads as a fresh open decision.
 const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
 
@@ -659,7 +659,7 @@ if (argOf('--wrap')) {
     console.log(`\n  "${wrapRows.length} shipped, ${verified} verified" — check the wrap summary against that pair.`);
     console.log(`\nRows:`);
     for (const r of wrapRows) console.log(`  [${String(r.verdict || '?').padEnd(20)}] ${String(r.ref || '(no ref)').padEnd(46)} ${String(r.finding || '').slice(0, 70)}`);
-    // X158 · WRAP_UP.md step 12's two new appends (a `built` ref's `state:"wrapped"`
+    // X158 · the two appends in WRAP_UP.md's GitHub-issues step (a `built` ref's `state:"wrapped"`
     // companion, and a touched ticket's GitHub<->ledger sync row) had no observable
     // — the exact silent-skip class this whole file exists to catch, on the fix for
     // the LAST silent skip (X152). Both are derivable from `wrapRows`, already
@@ -669,7 +669,7 @@ if (argOf('--wrap')) {
     // here rather than only in WRAP_UP.md's prose, because a prose-only fix cannot
     // stop a future template drifting back to the same shape:
     //   (a) this block only sees COMMITTED rows (`added` above is a git diff), but
-    //       step 12 told you to append-then-check inside the same step, before any
+    //       the GitHub step's old text told you to append-then-check inside the same step, before any
     //       further commit — a flawless wrap and a skipped one printed identical
     //       text. Fixed in WRAP_UP.md: the check now runs after the appends are
     //       committed, not immediately after they are written.
@@ -679,7 +679,7 @@ if (argOf('--wrap')) {
     //       Fixed in WRAP_UP.md: that row now carries `verdict:"wrapped"`, matching
     //       what real wraps already did in practice (ledger.jsonl:876-877) — a
     //       GitHub-sync-closed row IS its own confirmation, not a fresh built claim.
-    //   (c) a row he has not ruled on (`needs-owner-decision`, which WRAP_UP.md:224
+    //   (c) a row he has not ruled on (`needs-owner-decision`, which WRAP_UP.md's GitHub step
     //       forbids closing) still fed `ticketNums` by ref-pattern alone. Fixed
     //       below: only rows whose verdict says something actually shipped this
     //       wrap (`built`, `confirmed-other-lane`, `already-fixed`) contribute a
@@ -1494,7 +1494,7 @@ const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter
 // X66 · `confirmed-other-lane` closes a ref as firmly as `built` — the work
 // landed, another lane did it. It is deliberately NOT counted as shipped below,
 // which is the whole reason the verdict exists: one change, one fix in the count.
-// X158 · `wrapped` joins the set: WRAP_UP.md step 12 now mints a `verdict:"wrapped"`
+// X158 · `wrapped` joins the set: WRAP_UP.md's GitHub-issues step now mints a `verdict:"wrapped"`
 // row for both a built ref's shipped-companion and a GitHub-sync-closed ticket —
 // without this, every one of those bookkeeping rows would misread as a fresh
 // open decision the moment a wrap starts writing them.

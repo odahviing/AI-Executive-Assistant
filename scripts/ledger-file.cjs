@@ -44,10 +44,10 @@
  *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
  *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --bounces 1
  *
- *   # WRAP_UP.md step 12, the built -> wrapped companion (no writer existed for this either):
+ *   # WRAP_UP.md's GitHub-issues step, the built -> wrapped companion (no writer existed for this either):
  *   node scripts/ledger-file.cjs --wrap-companion --ref "some-slug" --version 4.4.8 --sha abc1234
  *
- *   # WRAP_UP.md step 12, the GitHub <-> ledger sync row:
+ *   # WRAP_UP.md's GitHub-issues step, the GitHub <-> ledger sync row:
  *   node scripts/ledger-file.cjs --gh-sync --ref gh#200 --version 4.4.8 --ghstate closed \
  *     --note "Fixed in abc1234 (v4.4.8). One line on what changed."
  *   node scripts/ledger-file.cjs --gh-sync --ref gh#201 --version 4.4.8 --ghstate partial \
@@ -61,7 +61,7 @@
  *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
  *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --date 2026-08-11
  *
- *   # WRAP_UP.md step 12's PHANTOM CANDIDATES check: a candidate that is a genuinely
+ *   # WRAP_UP.md's GitHub-issues step, the PHANTOM CANDIDATES check: a candidate that is a genuinely
  *   # distinct, still-open bug (not something this wrap's own diff already fixed
  *   # under a different ref) gets a bare recheck row so it stops being reflagged —
  *   # it stays open, it never gets a verdict, invariant or finding of its own:
@@ -115,7 +115,7 @@ const stampDate = () => dateArg || new Date().toISOString().slice(0, 10)
 // look for a name they already know how to read, so an unmatched `--whatever`
 // used to sit in argv untouched and the run proceeded as if it had never been
 // passed — no error, no warning. That is exactly how a documented `--recheck`
-// mechanism (WRAP_UP.md step 12) went unimplemented for as long as it did:
+// mechanism (WRAP_UP.md's GitHub-issues step) went unimplemented for as long as it did:
 // passing `--recheck` produced no complaint at all. This is the general fix,
 // not just the one flag — every flag this script reads, anywhere, in one set,
 // checked once, before any mode-specific logic runs.
@@ -230,7 +230,7 @@ if (argv.includes('--targets') || argv.length === 0) {
   process.exit(0)
 }
 
-// ── WRAP_UP.md step 12, act 1: the built -> wrapped companion ────────────────
+// ── WRAP_UP.md's GitHub-issues step, act 1: the built -> wrapped companion ───
 // X158 fixed the CHECK for this; nothing made the ACT of writing it easy, so it
 // kept getting done by hand, inconsistently — the exact shape that produced the
 // verdict:"built" + state:"wrapped" mutation on one line that X158 had to learn
@@ -248,7 +248,7 @@ if (flag('--wrap-companion')) {
   process.exit(0)
 }
 
-// ── WRAP_UP.md step 12, act 2: the GitHub <-> ledger sync row ────────────────
+// ── WRAP_UP.md's GitHub-issues step, act 2: the GitHub <-> ledger sync row ───
 if (flag('--gh-sync')) {
   const ref = argOf('--ref')
   const version = argOf('--version')
@@ -259,7 +259,7 @@ if (flag('--gh-sync')) {
   if (!ref || !/^gh#\d+$/.test(ref)) die('--ref must be a bare ticket, `gh#<n>`.', 'A sub-ref like gh#200-a is a FINDING, not the ticket-level sync row this command writes.')
   if (!version) die('no --version.')
   if (!ghstate || !['closed', 'partial'].includes(ghstate)) die('--ghstate must be `closed` or `partial`.', 'This is the FACT GitHub shows — not a judgement.')
-  if (!note || note.length < 10) die('no --note, or too short.', 'The exact text `gh issue close/comment` sent, verbatim — WRAP_UP.md:230: never a second, independent copy of the prose.')
+  if (!note || note.length < 10) die('no --note, or too short.', 'The exact text `gh issue close/comment` sent, verbatim — WRAP_UP.md\'s GitHub-issues step: never a second, independent copy of the prose.')
   // X158's own rule: state is the fact, verdict/recommend is the judgement, and a
   // closed ticket is `wrapped`, never `built` — `built` means a fresh atomic fix and
   // a bare ticket ref carrying it wrongly demands a companion row nothing will mint.
@@ -267,7 +267,7 @@ if (flag('--gh-sync')) {
     verdict = 'wrapped'
     if (recommend) die('a CLOSED ticket takes no --recommend.', 'It is done; nothing is left to route back to a lane.')
   } else {
-    if (!verdict && !recommend) die('a PARTIAL ticket needs --recommend or --verdict needs-owner-decision.', 'WRAP_UP.md:230 — pick the verb the comment\'s own "why" supports. Do not leave it silent.')
+    if (!verdict && !recommend) die('a PARTIAL ticket needs --recommend or --verdict needs-owner-decision.', 'WRAP_UP.md\'s GitHub-issues step — pick the verb the comment\'s own "why" supports. Do not leave it silent.')
     if (verdict && verdict !== 'needs-owner-decision') die(`--verdict "${verdict}" is not valid for a partial sync row.`, 'Only `needs-owner-decision` is — for everything else, state it as --recommend instead.')
   }
   const row = { date: stampDate(), runId: `wrap-${version}`, ref, state: ghstate, note }
@@ -278,7 +278,7 @@ if (flag('--gh-sync')) {
   process.exit(0)
 }
 
-// ── WRAP_UP.md step 12, act 3: the PHANTOM-CANDIDATES recheck row ───────────
+// ── WRAP_UP.md's GitHub-issues step, act 3: the PHANTOM-CANDIDATES recheck row ──
 // The check (`ledger-stats.cjs --wrap`) tells the reader, on a candidate that
 // is genuinely a distinct, still-open bug, to "append a `{date, ref, recheck}`
 // line dated today or later so it stops being reflagged." Nothing ever wrote

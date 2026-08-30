@@ -1695,12 +1695,19 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
  * can act on it just as wrongly as a colleague can).
  *
  * TWO deterministic, free pre-filters (G10) before any LLM call:
- *   1. Did `find_available_slots` or `check_join_availability` actually run
- *      THIS turn? Read off the carried compact tool-summary lines
+ *   1. Is there a real availability verdict THIS turn? Three producers count:
+ *      `find_available_slots` / `check_join_availability` tool-summary lines
  *      (turnHelpers.ts's `renderToolSummary` — the exact lines Sonnet herself
- *      saw, never re-derived or re-parsed here, per G2). Absent on the vast
- *      majority of turns, which never search availability at all — nothing
- *      loads, nothing costs anything. bug 1.1 (2026-08-27) exception: when
+ *      saw, never re-derived or re-parsed here, per G2), and — since
+ *      2026-08-30 — the availability precheck's synthetic
+ *      `[availability_precheck …]` lines (availabilityPreCheck.ts's
+ *      `renderToolSummaryLines`, threaded into toolSummaries by the
+ *      orchestrator): the precheck is the DESIGNED zero-tool-call ground
+ *      truth for "is he free at X", and before it was threaded in, this mode
+ *      rewrote its correct answers as ungrounded (Mike Naumenko,
+ *      2026-08-30T13:35Z). Absent on the vast majority of turns, which never
+ *      touch availability at all — nothing loads, nothing costs anything.
+ *      bug 1.1 (2026-08-27) exception: when
  *      `result.availabilityQuestionDetected` is true (this turn's inbound
  *      message was a detected colleague availability question —
  *      `precheckAvailability`'s own `ran`, buildTurnContext.ts), the check
@@ -1753,10 +1760,14 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   if (calendarMutationCompleted(result)) return initialReply;
 
   // Deterministic pre-filter 1 — read the carried compact summary lines for
-  // the two availability tools verbatim (never re-derived). Absent on this
-  // turn ⇒ nothing to ground a claim against ⇒ nothing to check.
+  // the two availability tools, plus the availability precheck's synthetic
+  // `[availability_precheck …]` verdict lines (2026-08-30), verbatim (never
+  // re-derived). Absent on this turn ⇒ nothing to ground a claim against ⇒
+  // nothing to check.
   const groundedToolLines = (result.toolSummaries ?? []).filter(
-    line => line.startsWith('[find_available_slots') || line.startsWith('[check_join_availability'),
+    line => line.startsWith('[find_available_slots')
+      || line.startsWith('[check_join_availability')
+      || line.startsWith('[availability_precheck'),
   );
   // bug 1.1 (2026-08-27, Mike Naumenko / D0ARQRD5H28) — a ZERO-tool-call turn
   // used to bail out here unconditionally, which is exactly how a stale time
@@ -1770,7 +1781,11 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   // available claim not backed by this turn's real result OR the
   // EARLIER-TURNS history block. Scoped to availability-question turns only
   // (not every digit-bearing reply) to avoid a new LLM call on ordinary turns
-  // that have nothing to do with availability (G10).
+  // that have nothing to do with availability (G10). Since 2026-08-30 the
+  // precheck's own `[availability_precheck …]` lines normally populate
+  // `groundedToolLines` on exactly these turns (`ran` ⇒ ≥1 verdict line), so
+  // this empty-list branch is now the backstop for a threading failure, not
+  // the common path.
   if (groundedToolLines.length === 0 && !result.availabilityQuestionDetected) return initialReply;
 
   let cleanReply = initialReply;
