@@ -346,11 +346,6 @@ export function getTravelRecordById(personId: string): CurrentTravel | null {
   }
 }
 
-export function getTravelRecord(slackId: string): CurrentTravel | null {
-  const pid = personIdForSlackId(slackId);
-  return pid ? getTravelRecordById(pid) : null;
-}
-
 // ── v3.2.6 — VIP flag ────────────────────────────────────────────────────────
 // Owner-curated, like engagement_rank. VIP calendars are ALWAYS pulled into a
 // thread-booking free/busy search; non-VIPs are invite-only (annotated, never

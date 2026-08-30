@@ -414,8 +414,24 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             typeof import('../../../../memory/resolveAttendeeEmails');
           const addList = rawAdd
             .map(a => {
-              const resolved = resolveAttendeeEmail({ name: a.name, email: a.email });
-              return { name: resolved.name, email: resolved.email, optional: a.optional === true };
+              // jim-douglass-fabricated-email-across-repeat-bookings (2026-08-30) —
+              // same rule as create's buildParticipants (bookingRequest.ts): when a
+              // name is present the directory lookup ALWAYS runs (email:'' forces
+              // it past the valid-email early return) and a confident, unambiguous
+              // whole-name match overrides whatever email the model typed; no
+              // match / ambiguous → the supplied email stands. Pre-fix this add
+              // path trusted any syntactically-valid model email outright — the
+              // exact fabrication hole the incident hit on create.
+              const supplied = (a.email ?? '').trim().toLowerCase();
+              const hasName = !!a.name?.trim();
+              const resolved = resolveAttendeeEmail({ name: a.name, email: hasName ? '' : supplied });
+              const email = resolved.email || (supplied.includes('@') ? supplied : '');
+              if (hasName && resolved.email && supplied.includes('@') && resolved.email !== supplied) {
+                logger.info('update_meeting add_attendees — directory match overrode the model-supplied email', {
+                  name: a.name, supplied, resolved: resolved.email,
+                });
+              }
+              return { name: resolved.name, email, optional: a.optional === true };
             })
             .filter(a => a.email.includes('@'));
           const removeList = rawRemove

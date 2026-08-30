@@ -387,26 +387,54 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           }
         }
 
-        // Coord email auto-fill on create_meeting. Sonnet sometimes drops
-        // the email field even though we have it in people_memory (it was
-        // populated by an earlier find_slack_user upsert in the same flow).
-        // Primary lookup: by slack_id; fallback: by fuzzy name. Only fills
-        // missing entries; pre-existing emails pass through untouched. If
-        // still missing after lookup, downstream Guard A returns error:
-        // 'attendee_missing_email' so Sonnet asks instead of papering over.
+        // Email auto-fill + directory verification on create_meeting — IN PLACE,
+        // because this raw `attendees` array is what the Graph write at the
+        // bottom of this handler actually sends (normalizeBookingRequest's
+        // `participants` feeds planMeeting/checkSlot, never the invite payload).
+        //
+        // jim-douglass-fabricated-email-across-repeat-bookings (2026-08-30) —
+        // two defects fixed here at the write's chokepoint:
+        //   1. This ran ONLY on missing/malformed emails, so any syntactically
+        //      valid model-typed email — right or fabricated — shipped to Graph
+        //      unchecked (the incident: a known external's correct stored email
+        //      on booking #1, then a guessed domain and an example.com
+        //      placeholder on #2/#3 in the same conversation). Now, when a name
+        //      is present, the shared resolver ALWAYS runs (email:'' forces it
+        //      past its valid-email early return) and a confident, unambiguous
+        //      whole-name directory match overrides what the model typed; no
+        //      match / ambiguous → the supplied email stands (new externals
+        //      unaffected). Same rule as buildParticipants (bookingRequest.ts)
+        //      so plan and write can't disagree.
+        //   2. The name fallback was a hand-rolled `searchPeopleMemory` FIRST
+        //      HIT — the loose LIKE-substring bind (Lori→Gloria) the shared
+        //      resolver's `nameGenuinelyMatches` + distinct-person gate exists
+        //      to prevent. Replaced with the one resolver.
+        // Still-missing emails fall through to the refusal below
+        // ('attendee_missing_email') so Sonnet asks instead of papering over.
         try {
-          const { getPersonMemory, searchPeopleMemory } = await import('../../../../db');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { resolveAttendeeEmail } = require('../../../../memory/resolveAttendeeEmails') as
+            typeof import('../../../../memory/resolveAttendeeEmails');
           for (const a of attendees) {
-            if (a.email && typeof a.email === 'string' && a.email.includes('@')) continue;
-            if (a.slack_id) {
-              const mem = getPersonMemory(a.slack_id);
-              if (mem?.email) { a.email = mem.email; continue; }
+            const supplied = typeof a.email === 'string' ? a.email.trim() : '';
+            const hasName = typeof a.name === 'string' && !!a.name.trim();
+            if (!hasName && supplied.includes('@')) continue;  // nothing to look up by — trust as-is
+            const resolved = resolveAttendeeEmail({
+              name: a.name,
+              slack_id: a.slack_id,
+              email: hasName ? '' : supplied,
+            });
+            if (resolved.email) {
+              if (supplied.includes('@') && resolved.email !== supplied.toLowerCase()) {
+                // Queryable trail (M18) — every directory override of a
+                // model-typed email is visible in the logs.
+                logger.info('create_meeting — directory match overrode the model-supplied email', {
+                  name: a.name, supplied, resolved: resolved.email,
+                });
+              }
+              a.email = resolved.email;
             }
-            if (a.name) {
-              const matches = searchPeopleMemory(a.name);
-              const hit = matches.find(m => m.email && m.email.includes('@'));
-              if (hit) { a.email = hit.email; continue; }
-            }
+            if (!a.name && resolved.name) a.name = resolved.name;
           }
         } catch (err) {
           logger.warn('create_meeting email auto-fill threw — proceeding with raw attendees', {
@@ -1944,23 +1972,32 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // meeting they just requested isn't recognized as its requester. One
           // terminal row keyed on the event lets the requester control
           // add/rename/location via the update_meeting + move_meeting gates.
-          if (context.senderRole === 'colleague' && meetingId) {
+          //
+          // owner-clamp-fixed-per-surface (2026-08-30) — this used to gate on
+          // `context.senderRole === 'colleague'` alone, which is also true for
+          // the MPIM-clamped OWNER (room surface forces senderRole:'colleague'
+          // even when context.userId IS the owner — see `isGenuineColleague`
+          // a few hundred lines up). That wrote a row with the owner as his
+          // own "colleague requester" (subject: "Booking requested by <owner>:
+          // X"), so findMeetingOwner/activity reads mistook the owner for a
+          // third party on his own booking. `requesterId` (resolved once, top
+          // of this handler) already excludes the owner and already carries
+          // an explicit `requester_slack_id` override (e.g. an approval
+          // replay) — reuse it instead of re-deriving from senderRole/userId.
+          if (requesterId && meetingId) {
             try {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { createRequest } = require('../../../../db/requests') as typeof import('../../../../db/requests');
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getPersonMemory } = require('../../../../db/people') as typeof import('../../../../db/people');
-              const requesterName = getPersonMemory(context.userId)?.name ?? undefined;
               createRequest({
                 ownerUserId: context.profile.user.slack_user_id,
-                initiatedBy: context.userId,
+                initiatedBy: requesterId,
                 initiatedByRole: 'colleague',
                 kind: 'follow_up',
                 subkind: 'colleague_booking_record',
-                subject: `Booking requested by ${requesterName ?? context.userId}: ${args.subject ?? 'meeting'}`,
+                subject: `Booking requested by ${requesterName ?? requesterId}: ${args.subject ?? 'meeting'}`,
                 state: 'resolved',
                 informed: 1,
-                requesterSlackId: context.userId,
+                requesterSlackId: requesterId,
                 requesterName,
                 outcomeExternalEventId: meetingId,
               });

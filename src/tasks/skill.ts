@@ -690,8 +690,17 @@ export async function createApprovalRequest(
           expiresAt = addWorkdays(base, n, profile);
         }
 
+        // gh#requester-id-mint-tests-senderrole-not-authenticated-identity —
+        // this derivation used to gate on `senderRole`, which reads
+        // 'colleague' both for a real colleague AND for the owner clamped
+        // into a room/MPIM (see the two siblings' own comments at :90 and
+        // :340, and processMessage.ts's `role` vs `authority`). That minted
+        // requester_slack_id = the OWNER'S OWN id whenever he raised an
+        // approval himself from a channel/MPIM, recording his own ask as if
+        // a colleague had raised it. Compare the authenticated identity
+        // directly, matching the two siblings exactly.
         const requesterSlackId = (typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined)
-          ?? (context.senderRole === 'colleague' ? context.userId : undefined);
+          ?? (context.authority === 'colleague' && context.userId !== ownerUserId ? context.userId : undefined);
         // v2.9.4 (#107d) — when Sonnet doesn't pass requester_name, auto-populate
         // it from people_memory using requester_slack_id. Pre-fix the row stored
         // requester_name=null, and `notifyRequesterOfDecision` rendered "Hey"

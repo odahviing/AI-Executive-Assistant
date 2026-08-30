@@ -158,6 +158,25 @@ function normalizeForTransport(ctx: OutputGateContext, text: string): string {
   return ctx.transport === 'email' ? text : formatForSlack(text);
 }
 
+/**
+ * email-leg-hedge-shipped-colleague-third-person-wording (2026-08-28; Slack
+ * arm added 2026-08-30) — is the reply's DIRECT recipient the owner himself?
+ * Decides only the WORDING of claimChecker's `genericHonestHedge` fallback
+ * (second person vs the colleague-facing third-person "confirm it with him"),
+ * never which gates run. The email arm: the one-address cap restricts that
+ * leg's recipient to the owner's own mailbox (connectors/email/inbound.ts).
+ * The Slack arm is the exact negation of the `colleagueReadable` axis derived
+ * in runOutputGates below — the owner-private 1:1 DM. It matters because the
+ * slot-grounding check runs on BOTH Slack legs (its call site sits above the
+ * leg split), so the same antecedent-less "him" the 2026-08-28 email incident
+ * shipped was equally reachable in the owner's own DM. A wrong value here is
+ * a wrong pronoun in an already-hedged fallback line, never a dropped gate
+ * (G5-safe on both misses).
+ */
+function isOwnerDirectAudience(ctx: OutputGateContext): boolean {
+  return ctx.transport === 'email' || (ctx.role === 'owner' && ctx.isOwnerInGroup !== true);
+}
+
 export async function runOutputGates(draft: string, ctx: OutputGateContext): Promise<string> {
   const {
     profile, result,
@@ -1076,7 +1095,7 @@ async function runClaimCheckAndMaybeRewrite(
           targetName: verdict.target_name,
           ownerFirstName: profile.user.name.split(' ')[0],
           toolSummaries: result.toolSummaries ?? [],
-          isOwnerAudience: ctx.transport === 'email',
+          isOwnerAudience: isOwnerDirectAudience(ctx),
         });
         if (rewritten && rewritten.trim().length > 0) {
           return formatForSlack(rewritten);
@@ -1118,7 +1137,7 @@ async function runClaimCheckAndMaybeRewrite(
         // o#224 — no approvalGrantContext here: permission_granted claims
         // return above and never reach this call (see the block above).
         toolSummaries: result.toolSummaries ?? [],
-        isOwnerAudience: ctx.transport === 'email',
+        isOwnerAudience: isOwnerDirectAudience(ctx),
       });
       // v4.2.x — no history write here any more. This used to append the honest
       // version so the next turn wouldn't act on the dishonest draft, because the
@@ -1458,7 +1477,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
       targetName: verdict.target_name,
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: result.toolSummaries ?? [],
-      isOwnerAudience: ctx.transport === 'email',
+      isOwnerAudience: isOwnerDirectAudience(ctx),
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, rewritten);
@@ -1803,7 +1822,7 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       ownerFirstName: profile.user.name.split(' ')[0],
       toolSummaries: result.toolSummaries ?? [],
       groundedToolLines,
-      isOwnerAudience: ctx.transport === 'email',
+      isOwnerAudience: isOwnerDirectAudience(ctx),
     });
     if (rewritten && rewritten.trim().length > 0) {
       cleanReply = normalizeForTransport(ctx, rewritten);

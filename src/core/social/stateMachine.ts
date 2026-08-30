@@ -210,8 +210,8 @@ export function directiveForProactiveSlot(params: {
   personSlackId: string;
   /**
    * Owner's own user id — needed to zero out a dead category's score via
-   * `adjustCategoryScore` when `continueDirective` finds one with no live
-   * subjects left (bug 2.1). Threaded from callers that already have
+   * `adjustCategoryScore` in the dead-category sweep (bug 2.1) that runs
+   * before selection. Threaded from callers that already have
    * `profile.user.slack_user_id` in scope.
    */
   ownerUserId: string;
@@ -319,12 +319,46 @@ export function directiveForProactiveSlot(params: {
     }
   }
 
+  // Bug 2.1 — dead-category sweep, run over EVERY active category BEFORE any
+  // pick is made. A category with real standing (score > 0) but ZERO live
+  // subjects left (every subject died / was rejected) is a true dead end:
+  // its score never comes back down on its own (adjustCategoryScore only
+  // ever moves on engagement), so it permanently occupies one of the
+  // MAX_ACTIVE_CATEGORIES_PER_PERSON (3) slots and starves the picker of
+  // real variety. Zeroing drops it from `getActiveCategoriesForPerson`'s
+  // `score > 0` filter so `pickDormantCategory` can offer a genuinely fresh
+  // category — "zero points category is out of the count" (owner). This
+  // used to live INSIDE the pick loop below, which returned on the first
+  // category with an eligible subject — so any dry category sorting AFTER
+  // the winner was never checked, and one perpetually-live subject in the
+  // top category blocked the cleanup forever (movies/podcasts sat dry at
+  // score 3 for two weeks, 2026-08-16 → 08-30). The sweep is standalone now:
+  // it runs regardless of what the pick decides, and the active set is
+  // re-read after it so counts, labels and picks all see the cleaned state.
+  const subjectsByCategory = new Map<string, SocialSubject[]>();
+  for (const cat of getActiveCategoriesForPerson(personSlackId)) {
+    const subs = getActiveSubjectsForPersonCategory(personSlackId, cat.category_id);
+    if (subs.length === 0) {
+      try {
+        adjustCategoryScore({
+          ownerUserId, personSlackId, categoryId: cat.category_id, delta: -CATEGORY_SCORE_CAP,
+        });
+      } catch (err) {
+        logger.warn('Dead-category score reset threw — leaving score as-is', {
+          categoryId: cat.category_id, personSlackId, err: String(err).slice(0, 200),
+        });
+      }
+      continue;
+    }
+    subjectsByCategory.set(cat.category_id, subs);
+  }
+
   // Deterministic selection — no time-based decay pass runs here (answer 14):
   // a subject whose raise is still pending an answer is filtered out below by
   // its marker alone (now genuinely resolved by the pass above, not merely
   // deferred); the person's next real chat clears a marker on the spot too
   // (logEngagement.ts).
-  const activeCategories = getActiveCategoriesForPerson(personSlackId); // score DESC
+  const activeCategories = getActiveCategoriesForPerson(personSlackId); // score DESC, post-sweep
   const activeCount = activeCategories.length;
   const activeLabels = new Set(activeCategories.map(c => c.category_label));
   // Bounce fix — categories already suggested (score still 0, no engagement
@@ -353,29 +387,9 @@ export function directiveForProactiveSlot(params: {
     const ordered = activeCategories.slice().sort((a, b) =>
       b.score - a.score || a.category_label.localeCompare(b.category_label));
     for (const cat of ordered) {
-      const allSubjects = getActiveSubjectsForPersonCategory(personSlackId, cat.category_id);
-      // Bug 2.1 — a category with real standing (score > 0) but ZERO live
-      // subjects left (every subject died / was rejected) is a true dead
-      // end, not a transient "all subjects have a raise pending an answer"
-      // state. Left alone, its score never comes back down on its own
-      // (adjustCategoryScore only ever moves on engagement), so it
-      // permanently occupies one of the MAX_ACTIVE_CATEGORIES_PER_PERSON (3)
-      // slots and starves the picker of real variety. Zero it out here so
-      // `getActiveCategoriesForPerson`'s `score > 0` filter naturally drops
-      // it and `pickDormantCategory` can offer a genuinely fresh category
-      // next time — "zero points category is out of the count" (owner).
-      if (allSubjects.length === 0) {
-        try {
-          adjustCategoryScore({
-            ownerUserId, personSlackId, categoryId: cat.category_id, delta: -CATEGORY_SCORE_CAP,
-          });
-        } catch (err) {
-          logger.warn('Dead-category score reset threw — leaving score as-is', {
-            categoryId: cat.category_id, personSlackId, err: String(err).slice(0, 200),
-          });
-        }
-        continue;
-      }
+      // The dead-category sweep above already zeroed and dropped any category
+      // with no live subjects; a category still active here has ≥1, cached.
+      const allSubjects = subjectsByCategory.get(cat.category_id) ?? [];
       // Eligible = no raise currently awaiting an answer. Once the person's
       // next chat reconciles (match or pivot), the marker clears either way
       // (logEngagement.ts) — so this is a plain filter, not a decay site.

@@ -251,15 +251,46 @@ async function buildParticipants(
     const slackId = a.slack_id?.trim();
 
     // v3.1.4 — email auto-fill via the shared resolver (one function all
-    // booking paths use: create / move / update). Only when raw email is
-    // missing or malformed.
-    if (!email || !email.includes('@')) {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
-        typeof import('../../memory/resolveAttendeeEmails');
+    // booking paths use: create / move / update).
+    //
+    // jim-douglass-fabricated-email-across-repeat-bookings (2026-08-30) — this
+    // used to run ONLY when the raw email was missing or malformed, which
+    // meant a model-SUPPLIED email — right or wrong — always won outright,
+    // never checked against the directory. create_meeting's own compact
+    // history summary never carries attendee emails forward (turnHelpers.ts),
+    // so a KNOWN external person resolved correctly once has nothing anchoring
+    // that fact for a later booking in the same conversation: the next call
+    // re-derives him from scratch, and with no internal-domain match possible
+    // for an external, the model just typed a fresh guess each time (a
+    // plausible-looking wrong domain, then an outright example.com
+    // placeholder — a real, live incident, not a hypothetical). Now the name
+    // lookup always runs when a name is present, the same whole-name-matched,
+    // ambiguity-refusing check internal colleagues already get — a confident
+    // directory match wins over whatever the model typed; only when nothing
+    // matches does the model-supplied (or now-resolved) email stand. A
+    // genuinely new/unknown external is unaffected: no match, no override.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resolveAttendeeEmail } = require('../../memory/resolveAttendeeEmails') as
+      typeof import('../../memory/resolveAttendeeEmails');
+    if (name) {
+      const resolved = resolveAttendeeEmail({ name, email: '', slack_id: slackId });
+      if (resolved.email) {
+        if (email && email.includes('@') && resolved.email !== email) {
+          // Queryable trail (M18): every directory override of a model-typed
+          // email is visible in the logs — this is exactly the signal that
+          // would have surfaced the incident on booking #2 instead of #3.
+          logger.info('buildParticipants — directory match overrode the model-supplied email', {
+            name, supplied: email, resolved: resolved.email,
+          });
+        }
+        email = resolved.email;
+      }
+    } else if (!email || !email.includes('@')) {
+      // No name at all to look up by — fall back to the slack_id-only path
+      // (resolveAttendeeEmail also tries that) for the missing/malformed case.
       const resolved = resolveAttendeeEmail({ name, email, slack_id: slackId });
       if (resolved.email) email = resolved.email;
-      if (!name && resolved.name) name = resolved.name;
+      if (resolved.name) name = resolved.name;  // display-name backfill from the slack_id row
     }
 
     if (email && seen.has(email)) continue;

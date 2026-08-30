@@ -107,9 +107,11 @@ const GENERIC_HONEST_MISS = "Actually, hold on — I'm not sure that went throug
 // on 2026-08-24 for the ungrounded-slot-claim case, which — unlike the
 // original invented-owner-fact case — also fires on the email leg, where the
 // reply goes DIRECTLY to the owner. "him" has no antecedent there and reads
-// as broken. `isOwnerAudience` (true when `ctx.transport === 'email'`, set by
-// every call site in runOutputGates.ts) picks the second-person wording
-// instead of silently shipping a third-person line to its own subject.
+// as broken. The same gap existed on the Slack owner-private 1:1 DM (the
+// slot-grounding check runs on both Slack legs), closed 2026-08-30.
+// `isOwnerAudience` (runOutputGates' `isOwnerDirectAudience`: email leg, or
+// the owner-private Slack DM) picks the second-person wording instead of
+// silently shipping a third-person line to its own subject.
 function genericHonestHedge(draft: string, isOwnerAudience?: boolean): string {
   const lang = detectMessageLanguage(draft);
   if (isOwnerAudience) {
@@ -479,7 +481,7 @@ ${input.reply}
 """
 
 Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule") that ALL of the following hold:
-(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this), AND
+(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`: that structured reason code is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
 (b) is not merely describing what's already scheduled on the calendar (a meeting's time, place or attendees is not a personal-capability claim), AND
 (c) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
 
@@ -910,22 +912,36 @@ export async function rewriteOwningTheMiss(opts: {
   // times/verdict rather than a generic hedge with no facts behind it.
   groundedToolLines?: string[];
   // email-leg-hedge-shipped-colleague-third-person-wording (2026-08-28) — true
-  // when this reply goes directly to the owner (the email leg), so the
-  // scoped fallback's wording can address them in second person instead of
-  // the colleague-facing "confirm it with him directly" default.
+  // when this reply's direct recipient is the owner himself (the email leg,
+  // or the owner-private Slack DM — see runOutputGates' isOwnerDirectAudience),
+  // so the scoped fallback's wording can address him in second person instead
+  // of the colleague-facing "confirm it with him directly" default.
   isOwnerAudience?: boolean;
 }): Promise<string | null> {
   const isInventedOwnerFact = opts.actionType === 'invented_fact';
   const isUngroundedSlotClaim = opts.actionType === 'ungrounded_slot_claim';
+  // log-permgranted-rewrite-inverts-sent-state (2026-08-30) — permission_granted
+  // is its OWN claim shape: the false part (when it genuinely is false) is that
+  // ${opts.ownerFirstName}'s DECISION already came back, never that the request
+  // was sent to him at all — runOutputGates.ts only ever routes this actionType
+  // here when a request row EXISTS for the thread (that is what grounds the flag
+  // in the first place). Falling through to the generic completed-action branch
+  // below told the model to deny the wrong action ("that didn't go out yet"),
+  // inverting a true "I've sent it to him to decide" into a false "I haven't
+  // sent it over yet" — needs its own STEP1/2/3 prompt, same family as the two
+  // fact-shaped flags above.
+  const isPermissionGranted = opts.actionType === 'permission_granted';
 
   const what = opts.actionSummary
     || (isInventedOwnerFact
       ? `an unverified personal fact about ${opts.ownerFirstName}`
       : isUngroundedSlotClaim
         ? 'a specific time offered as available'
-        : opts.actionType === 'message'
-          ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
-          : 'that action');
+        : isPermissionGranted
+          ? `${opts.ownerFirstName}'s decision on a pending request, stated as already back`
+          : opts.actionType === 'message'
+            ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
+            : 'that action');
 
   const toolBlock = (opts.toolSummaries && opts.toolSummaries.length)
     ? opts.toolSummaries.map(s => `  - ${s}`).join('\n')
@@ -962,6 +978,36 @@ SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungro
 Draft:
 ${opts.draft}` : null;
 
+  // log-permgranted-rewrite-inverts-sent-state (2026-08-30) — same STEP
+  // 1/2/3 + minimalRedaction shape as the two prompts above, but the fact to
+  // preserve is different: the request WAS sent/escalated to
+  // ${opts.ownerFirstName} this turn (that's why runOutputGates.ts routed
+  // this claim here at all — a request row exists for the thread); the only
+  // thing that can be false is whether HIS ANSWER already came back. The
+  // rewrite must never deny the send/escalation itself.
+  const permissionGrantedPrompt = isPermissionGranted ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as declaring, as already settled, a permission/decision from ${opts.ownerFirstName} that has not actually come back yet — this thread's request to him is still pending. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+
+TOOL ACTIVITY THIS TURN (the ground truth — a \`create_approval\` / escalation tool succeeding here means the request truly WAS sent/escalated to ${opts.ownerFirstName} this turn, even though his answer is still pending):
+${toolBlock}
+FLAGGED CLAIM: ${what}
+
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert that ${opts.ownerFirstName}'s decision already came back — e.g. it only says the request was sent/escalated to him and is still awaiting his answer ("I've sent it to him to decide, I'll let you know as soon as he does"), or it is already hedged/in-progress ("still waiting to hear back", "checking with him"). A true statement that the request WAS sent/escalated this turn (backed by a matching tool above) is honest and must be left exactly as written — do not manufacture a problem that isn't one.
+
+STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states, as settled fact, that ${opts.ownerFirstName}'s decision has already come back, with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
+- Make clear his decision is STILL PENDING — he has not answered yet.
+- KEEP intact any true statement that the request was already sent/escalated to him this turn (if a create_approval / escalation tool ran, do NOT deny or walk back that it went out — the false part is only the decision outcome, never the fact that it was raised).
+- NOT invent a different unfounded claim about what ${opts.ownerFirstName} decided.
+- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Sound like a real person, never a disclaimer or a system message.
+- Match the language of the draft (Hebrew/English/etc).
+
+STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candidate: the draft with ONLY the flagged "decision already back" claim deleted or blanked out and NOTHING else touched — no new sentences, no paraphrasing, no added hedge, every other word (including any true "I've sent it to him" statement) copied verbatim from the draft. This is the fallback used if \`message\` cannot be trusted; fill it even when you are confident in \`message\`.
+
+SAFE-MISS — the hard rule. If you cannot tell whether the draft truly claims the decision already came back, do NOT rewrite — verdict="keep". NEVER invert a true "sent it to him to decide" statement into a false "haven't sent it yet" — that is worse than leaving a possible overclaim in place.
+
+Draft:
+${opts.draft}` : null;
+
   const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
@@ -982,7 +1028,7 @@ STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candi
 SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a bare, confident, unsupported personal claim about ${opts.ownerFirstName}.
 
 Draft:
-${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : isPermissionGranted ? permissionGrantedPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
@@ -1019,7 +1065,9 @@ ${opts.draft}`;
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
           : isUngroundedSlotClaim
             ? 'Report whether the draft offers a specific time as available that this turn\'s real availability search does not confirm, and if so the corrected reply.'
-            : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
+            : isPermissionGranted
+              ? 'Report whether the draft falsely states the owner\'s decision on a pending request already came back, and if so the corrected reply.'
+              : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -1030,7 +1078,9 @@ ${opts.draft}`;
                 ? '"keep" = the draft is fine (already hedged, or the claim is grounded by tool activity). "rewrite" = the draft states an unverified personal fact about the owner as settled fact.'
                 : isUngroundedSlotClaim
                   ? '"keep" = the draft is fine (the time genuinely matches the real result WITH A POSITIVE/AVAILABLE verdict, or nothing specific was offered). "rewrite" = the draft offers a specific time as available that the real result does not confirm — including when the matched result is itself marked unavailable/negative.'
-                  : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
+                  : isPermissionGranted
+                    ? '"keep" = the draft is fine (it only says the request was sent/escalated and is still pending, or is already hedged/in-progress). "rewrite" = the draft states, as settled fact, that the owner\'s decision on this pending request already came back.'
+                    : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
             },
             message: {
               type: 'string',
@@ -1038,7 +1088,9 @@ ${opts.draft}`;
                 ? 'Only when verdict="rewrite": the corrected reply text, with the flagged personal claim removed or hedged. Omit for "keep".'
                 : isUngroundedSlotClaim
                   ? 'Only when verdict="rewrite": the corrected reply text, using the REAL confirmed time(s) in place of the fabricated one (or honestly saying none was confirmed). Omit for "keep".'
-                  : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
+                  : isPermissionGranted
+                    ? 'Only when verdict="rewrite": the corrected reply text, making clear the decision is still pending WHILE keeping intact any true statement that the request was already sent/escalated. Omit for "keep".'
+                    : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
             },
             noPendingActionClaim: {
               type: 'boolean',
@@ -1052,9 +1104,13 @@ ${opts.draft}`;
               type: 'boolean',
               description: 'Only for an ungrounded-slot-claim rewrite (verdict="rewrite", flagged claim was a specific time offered as available with no backing in this turn\'s real search result): self-check `message` before returning it. Set true ONLY if `message` no longer states any specific time as available unless that time is one of the REAL confirmed times you were given. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
             },
+            noResolvedDecisionClaim: {
+              type: 'boolean',
+              description: 'Only for a permission_granted rewrite (verdict="rewrite", flagged claim was the owner\'s decision on a pending request stated as already back): self-check `message` before returning it. Set true ONLY if `message` no longer asserts, as settled fact, that the owner\'s decision already came back, AND still preserves any true statement that the request was already sent/escalated to him. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
             minimalRedaction: {
               type: 'string',
-              description: 'Only for an invented-owner-fact or ungrounded-slot-claim rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
+              description: 'Only for an invented-owner-fact, ungrounded-slot-claim, or permission_granted rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
             },
             minimalRedactionPreservesRest: {
               type: 'boolean',
@@ -1079,6 +1135,7 @@ ${opts.draft}`;
       noPendingActionClaim?: boolean;
       noUnfoundedOwnerClaim?: boolean;
       noUngroundedTimeClaim?: boolean;
+      noResolvedDecisionClaim?: boolean;
       minimalRedaction?: string;
       minimalRedactionPreservesRest?: boolean;
     };
@@ -1130,7 +1187,7 @@ ${opts.draft}`;
         action_type: opts.actionType,
         messagePreview: message.slice(0, 160),
       });
-      return (isInventedOwnerFact || isUngroundedSlotClaim) ? resolveMinimalRedactionFallback() : GENERIC_HONEST_MISS;
+      return (isInventedOwnerFact || isUngroundedSlotClaim || isPermissionGranted) ? resolveMinimalRedactionFallback() : GENERIC_HONEST_MISS;
     }
 
     if (isInventedOwnerFact) {
@@ -1155,6 +1212,22 @@ ${opts.draft}`;
       // framing.
       if (input.noUngroundedTimeClaim !== true) {
         logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the ungrounded time claim; shipping a scoped fallback (never the known-false original)', {
+          action_type: opts.actionType,
+          messagePreview: message.slice(0, 160),
+        });
+        return resolveMinimalRedactionFallback();
+      }
+      return message;
+    }
+
+    if (isPermissionGranted) {
+      // log-permgranted-rewrite-inverts-sent-state (2026-08-30) — same
+      // self-attest pattern as the two branches above: check that the rewrite
+      // drops the false "decision already back" claim WITHOUT denying a true
+      // "sent it to him" statement, rather than falling into the generic
+      // phantom-action framing below (which would deny the send itself).
+      if (input.noResolvedDecisionClaim !== true) {
+        logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the resolved-decision claim while preserving a true send; shipping a scoped fallback (never the known-false original)', {
           action_type: opts.actionType,
           messagePreview: message.slice(0, 160),
         });

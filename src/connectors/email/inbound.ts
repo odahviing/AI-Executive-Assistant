@@ -50,7 +50,7 @@ import { EMAIL_KEY_PREFIX } from '../../utils/offeredSlotsStash';
 import { getConnection, registerConnection } from '../../connections/registry';
 import type { Connection } from '../../connections/types';
 import { runOrchestrator } from '../../core/orchestrator';
-import { getConversationHistory, appendToConversation, resolvePerson, setPersonTimezoneByEmail, getPersonByEmail, setCurrentTravelById } from '../../db';
+import { getConversationHistory, appendToConversation, resolvePerson, setPersonTimezoneByEmail, getPersonByEmail, setCurrentTravelById, getTravelRecordById } from '../../db';
 import { DateTime } from 'luxon';
 import { isNonHumanAttendee } from '../../memory/recordBooking';
 import { extractForwardedParticipants } from './extractParticipants';
@@ -307,6 +307,20 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     if (!person) {
       logger.warn('Email inbound — stated timezone hint has no resolved person row; skipping', {
         email: hint.email, stated: hint.statedTimezone,
+      });
+      continue;
+    }
+    // Never stomp an existing travel record: `currently_traveling` has no
+    // provenance ranks (unlike core fields), and the record already there may
+    // be owner-stated via update_person_profile — an outside-claimed signature
+    // guess must not silently replace it (same overwrite class this branch
+    // exists to kill). `getTravelRecordById` covers active AND future trips;
+    // an email-derived record self-heals anyway — it expires within 14 days,
+    // after which the next hint applies.
+    const existingTravel = getTravelRecordById(person.person_id);
+    if (existingTravel) {
+      logger.info('Email inbound — stated timezone hint skipped, an active/future travel record already exists', {
+        email: hint.email, stated: hint.statedTimezone, existingLocation: existingTravel.location, existingUntil: existingTravel.until,
       });
       continue;
     }

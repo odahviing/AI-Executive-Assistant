@@ -24,3 +24,6 @@
 {"ts":"2026-08-29T00:03:45.976Z","runId":"wf_580bb8d0-6c7","stamp":"triggered","trigger":"user"}
 {"ts":"2026-08-29T00:22:51.754Z","runId":"wf_580bb8d0-6c7","stamp":"results-in"}
 {"ts":"2026-08-29T00:25:07.521Z","runId":"wf_580bb8d0-6c7","stamp":"report-written","headline":"Run wf_580bb8d0-6c7 -- in: 0 tickets, 0 day(s) of logs actually reviewed (defect flagged), 0 backlog re-reads; out: 1 built, 0 already-fixed, 0 bounced, 2 queued; board: net +1 -> 5 open rows; 2 rows await you","pendingOwner":2}
+{"ts":"2026-08-29T23:06:21.617Z","runId":"wf_00ed9907-676","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-29T23:39:22.243Z","runId":"wf_00ed9907-676","stamp":"results-in"}
+{"ts":"2026-08-29T23:42:44.610Z","runId":"wf_00ed9907-676","stamp":"report-written","headline":"Run wf_00ed9907-676 - in: 0 tickets, 4 days of logs, 2 backlog re-reads / out: 4 built, 0 already-fixed, 0 bounced, 0 converted, 3 queued / board: net +1 -> 6 open rows / 2 rows await you","pendingOwner":2}

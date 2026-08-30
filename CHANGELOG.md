@@ -2,7 +2,26 @@
 
 ---
 
-## 4.8.0 — Every remaining lane got a full correctness pass, and a substring bug in identity resolution is closed
+## 4.8.1 — A fabricated meeting invite, a stuck timezone, and a coda that couldn't stop talking about one game
+
+Five real, live-caught bugs from a single morning of actual use, each traced to production logs and the database rather than guessed at, and each fix independently re-verified by the lane that owns the code (three of the five first-pass fixes were themselves wrong or incomplete — caught before shipping, not after).
+
+### Fixed (high-impact)
+- **A booked meeting could go out with a fabricated attendee email — twice, worse each time.** The same external contact, already correctly resolved earlier in the same conversation, got re-guessed on every subsequent booking: `create_meeting`'s conversation history never carries attendee emails forward, so a person outside the owner's own company domain has zero memory anchoring their identity across a conversation, and nothing forced a directory check before a freely-typed email reached Graph. One booking used a plausible-looking wrong domain; the next used a literal placeholder (`@example.com`). Fixed at the actual write point in all three real booking-mutation paths (create, delete's normalizer, and update's add-attendee, which had the identical unguarded hole independently) — a confident, whole-name-matched directory record now overrides whatever the model typed; a genuinely new, unknown external is unaffected.
+- **A colleague's timezone could get permanently and silently corrupted by an email, with nothing to self-correct it.** An email-stated zone for someone other than the owner was written straight into that person's permanent record, no expiry — able to overwrite a correct, Slack-verified zone forever the moment one email misattributed a stated zone to the wrong participant (confirmed: this is exactly what happened to two Reflectiz colleagues, corrupting real scheduling for over a week). Now routed through the same dated, auto-expiring override the codebase already uses for "temporarily elsewhere" facts; the owner's own stated correction still writes permanently, as before.
+- **A safety-net reply could address the owner about himself, in the third person.** A fallback line built for a colleague-facing case ("confirm it with him directly") got reused for a case that also fires when the reply goes straight to the owner — on the email leg, and, caught during review, on his own Slack DM too. Both now address him directly.
+- **A proactive social aside could get stuck on one topic indefinitely.** The prior fix (4.7.5) only freed a topic category when it had zero live subjects left — but the pick loop returned as soon as it found any category with something to continue, so a category that was ALSO fully exhausted, sorting later, never actually got evaluated or freed as long another category kept winning. Confirmed: one topic recurred for over a week, spanning before and after the original fix shipped. The dead-category cleanup now runs across every active category up front, not gated behind finding a pick first.
+- **The owner-said-done scanner could DM the owner about his own message, in the third person.** A request's requester field could end up pointing at the owner himself; guarded at the one remaining call site.
+
+### Fixed (small)
+- An approval raised by the owner from a channel or group DM could record his own ask as if a colleague had raised it — the derivation compared the wrong role (senderRole, which reads 'colleague' for a clamped owner too) instead of the authenticated identity.
+- A genuinely completed send ("sent to Idan") could be denied by an unnecessary rewrite pass reacting to a stale classifier signal.
+- A real, calendar-confirmed day-off reason could get hedged into a vague "let me check" instead of being stated plainly.
+- A meeting booked from a room/group surface could link back to the owner as his own requester.
+- Several colleagues' timezone and identity records corrected directly (a name mixup between two people sharing initials, two display-name fixes, timezones for two Israel-based colleagues that had drifted to US Eastern, one stale test fixture removed).
+
+### Framework
+- Every fix above was built once, then handed to the lane that actually owns the code for independent re-verification — not a formality: Diplomat's own timezone fix introduced a smaller instance of the exact bug class it was fixing (caught and closed); Gatekeeper's fix missed an entire reachable surface (the owner's own Slack DM); Matchmaker's fix touched a data structure that wasn't even part of the real write path, meaning the original incident would have reproduced unchanged. All caught before wrap, not after.
 
 The charter-compliance sweep that covered Matchmaker, Gatekeeper and Registrar in 4.7.5 now covers the rest of the roster — Librarian, SlackMaster, Diplomat, Instructor and Handyman — closing out a full audit of all eight lanes in one stretch. The headline fix is an identity-resolution bug: a bare substring match could bind a Slack name reference to the wrong person ("Dan" resolving to "Idan"), reachable from every person-write tool and colleague messaging. Alongside it, a security fail-open on a Sonnet outage during colleague image scanning is closed, several silent name-overwrite bugs are fixed, and a full-project, unscoped hygiene sweep (comment ratio, dead imports, one dead config key, stale citations) ran across the whole codebase for only the second time ever.
 

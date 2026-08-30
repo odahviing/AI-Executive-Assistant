@@ -83,8 +83,8 @@ export function attendeeTzForDay(
 /**
  * Build an AttendeeAvailability list from people_memory for the given emails.
  *
- * v2.5.2 — when an attendee has an active travel record (`getCurrentTravel`
- * returns non-null), the entry's `timezone` becomes the travel location's
+ * v2.5.2 — when an attendee has an active travel record (person_id-keyed
+ * `getTravelRecordById`), the entry's `timezone` becomes the travel location's
  * timezone (resolved via `inferTimezoneFromStateStatic`) instead of the
  * stored profile timezone. The original stored timezone is preserved on
  * `entry.travel.homeTimezone` so callers can render dual-TZ slot lines.
@@ -109,7 +109,7 @@ export function loadAttendeeAvailabilityForEmails(
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory, getTravelRecord } = require('../db') as typeof import('../db');
+    const { searchPeopleMemory, getTravelRecordById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('./workingHoursDefault') as
       typeof import('./workingHoursDefault');
@@ -138,14 +138,22 @@ export function loadAttendeeAvailabilityForEmails(
       let timezone = resolvedTz;
       let travelMeta: AttendeeAvailabilityEntry['travel'];
       let travelWindow: AttendeeAvailabilityEntry['travelWindow'];
-      // v3.3.8 — travel applies only to a KNOWN person with a stored TZ (an
-      // assumed-frame attendee has no travel record). Raw record includes FUTURE
-      // trips; the dated window drives per-day resolution.
-      if (person?.timezone) {
-        const travel = person.slack_id ? getTravelRecord(person.slack_id) : null;
+      // v3.3.8 — raw record includes FUTURE trips; the dated window drives
+      // per-day resolution. v4.8.x — keyed by person_id, not slack_id: an
+      // email-only external (no slack_id) can carry a travel record too (the
+      // email-inbound stated-zone path writes one), and the slack_id-keyed
+      // lookup silently returned null for every such row — write succeeded,
+      // read never happened (same class as getCurrentTravelById's doc,
+      // db/people.ts). Also no longer gated on a stored base timezone: a
+      // fallback-assumed attendee (#M3) with a travel record has a STATED
+      // zone for the trip's days — inside the window that record outranks the
+      // owner-frame guess (M12: stated-in-chain > assume-owner-zone); outside
+      // it they fall back to homeTimezone = resolvedTz, unchanged.
+      if (person) {
+        const travel = getTravelRecordById(person.person_id);
         if (travel) {
           const travelTz = inferTimezoneFromStateStatic(travel.location);
-          if (travelTz && travelTz !== person.timezone) {
+          if (travelTz && travelTz !== resolvedTz) {
             travelWindow = {
               from: travel.from,
               until: travel.until,
@@ -153,11 +161,11 @@ export function loadAttendeeAvailabilityForEmails(
               location: travel.location,
             };
             const today = new Date().toISOString().slice(0, 10);
-            const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecord
+            const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecordById
             if (activeToday) {
               travelMeta = {
                 location: travel.location,
-                homeTimezone: person.timezone,
+                homeTimezone: resolvedTz,  // = person.timezone when stored; the #M3 fallback frame otherwise
                 until: travel.until,
               };
               timezone = travelTz;
