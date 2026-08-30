@@ -1445,9 +1445,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // 2026-08-24 (owner ruling, Mike Naumenko onsite-booking case): the actual
     // defect that fix was chasing was a stale/ignored social TOPIC resurfacing
     // (Bodyguard) on the very beat a booking closed — a real problem, but it
-    // has its own dedicated fix since — a subject dies permanently after 2
-    // ignored raises (`recordSubjectUnanswered` / `MAX_UNANSWERED_RAISES`,
-    // db/socialSubjects.ts:493,:149), fed by two independent triggers:
+    // has its own dedicated fix since — a subject dies after 2 ignored raises
+    // (`recordSubjectUnanswered` / `MAX_UNANSWERED_RAISES`,
+    // db/socialSubjects.ts:636,:183) — not permanently: a person-initiated
+    // revival is designed behavior (`reviveSubject`, same file) — fed by two
+    // independent triggers:
     // end-of-chat pivot detection (core/social/logEngagement.ts:92, called
     // from memory/capturePass.ts:1217) and 24h resolve-on-read
     // (core/social/stateMachine.ts:300-311). This supersedes the older

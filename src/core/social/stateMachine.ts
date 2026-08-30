@@ -1,9 +1,11 @@
 /**
  * Social state machine.
  *
- * Pure TypeScript. No LLM, no DB writes. Takes the classifier output +
- * per-person picker state (active categories/subjects, rate limits) and
- * decides ONE directive for the current turn. The directive is what the
+ * No LLM. Takes the classifier output + per-person picker state (active
+ * categories/subjects, rate limits) and decides ONE directive for the
+ * current turn; its only DB writes are the lazy resolve-on-read passes
+ * documented inside `directiveForProactiveSlot` (unanswered subject raises,
+ * unanswered in-place category raises). The directive is what the
  * orchestrator injects into the system prompt for Sonnet to phrase, or hands
  * to the coda composer.
  *
@@ -12,57 +14,64 @@
  * DB picker (getActiveCategoriesForPerson / getActiveSubjectsForPersonCategory)
  * and never receives a `reconciled` param.
  *
- * v4.5.9 (#198) — no more time-based anything here. A subject with a raise
+ * v4.5.9 (#198) — no time-based ENGAGEMENT decay here. A subject with a raise
  * still pending an answer (`last_assistant_initiated_at` not null) is simply
  * skipped; the person's next chat clears that marker one way or the other
  * (core/social/logEngagement.ts — match resets it, pivot records an
- * unanswered raise), so there is no window to track. Also dropped per answer
+ * unanswered raise). The only clocks in this file are the lazy 24h
+ * resolve-on-read checks ("has this raise been standing a full day with
+ * nobody clearing it?"), never a decay schedule. Also dropped per answer
  * 0: the legacy `topicId`/`topicLabel`/`topic` field mirror + `withLegacyShape`
  * wrapper (nothing consumes them any more), the unused `firstMention` flag
  * (set false everywhere, read nowhere), and the `revive_ack` mode (declared,
  * never produced).
  *
- * v4.5.9 (#198-LIB-1) — the picker used to be three independent Math.random()
- * rolls (whether to grow at all, which of a hardcoded 14-name subset to grow
- * into, which active category to continue). All three are gone: selection is
- * now deterministic and driven only by what's stored (category score, subject
- * recency, per-person id) — never a coin flip. `CONVERSATIONAL_CATEGORIES`
- * and `raiseNewProbabilityForCount` are deleted outright, not left unused —
- * the pool is the full 30 `FIXED_CATEGORIES`, no exclusion subset (answers
- * 4, 15).
+ * Picker (proactive slot) — owner redesign 2026-08-30, superseding the
+ * v4.5.9 (#198-LIB-1) fully-deterministic highest-score-first selection
+ * (probability is back BY DESIGN — the deterministic sort was itself a
+ * repetition engine: the top-scored category won every single day). The
+ * pool stays the full 30 `FIXED_CATEGORIES`, no exclusion subset (answers
+ * 4, 15). Two stages:
  *
- * Picker (proactive slot, EC6):
- *   - Below the 3-active-category cap (`MAX_ACTIVE_CATEGORIES_PER_PERSON`,
- *     socialSubjects.ts): always grow — `raise_new` into a dormant category,
- *     picked deterministically (`pickDormantCategory`, a stable per-person
- *     rotation over the 30, so different people aren't all offered "family"
- *     first). The picker only ever SUGGESTS the category; the 3-cap itself is
- *     enforced at the reconciler's create site (capturePass.ts), not here.
- *   - At the cap: continue the highest-scoring active category that has an
- *     eligible subject (no raise currently pending an answer), least-
- *     recently-touched subject inside it wins. No eligible subject anywhere →
- *     fall back to `raise_new` (suggesting a dormant category) rather than
- *     going silent — the cap is a target for the coda to grow toward, not a
- *     hard ceiling on what it may suggest.
- *   - Only the CODA (its own direct call, `allowRaiseNew` default true) may
- *     produce `raise_new`. The in-prompt directive (`chooseSocialDirective`,
- *     feeds buildTurnContext.ts) calls with `allowRaiseNew: false` — it is a
- *     rendered suggestion Sonnet may silently ignore, so it must never be
- *     what opens a brand-new subject (answer 2). It continues an eligible
- *     existing subject if one exists, else says nothing.
+ *   Stage 1 — CATEGORY: three equal-probability slots (one per
+ *   MAX_ACTIVE_CATEGORIES_PER_PERSON), filled by the active categories
+ *   (score > 0; if data ever holds more than 3 — reachable via organic
+ *   revival of a 4th, which the create-site cap doesn't gate — the top 3 by
+ *   score fill the slots). A roll landing on a filled slot picks that
+ *   category; an EMPTY slot means "try a brand-new (dormant) category" — so
+ *   2 active leave a 1/3 discovery chance, 1 active leaves 2/3, 0 active
+ *   always discovers. WHICH dormant category is still deterministic
+ *   (`pickDormantCategory` — stable per-person rotation, skips tried ones).
+ *
+ *   Stage 2 — inside the picked category: 50/50 between CONTINUING the
+ *   least-recently-touched eligible subject and RAISING A NEW SUBJECT
+ *   in-place, in that same category. A category with standing but zero live
+ *   subjects always raises in-place (owner ruling 2026-08-30 — never vacated
+ *   just for running dry; that replaced the 4.8.1 instant dry-category
+ *   zero-sweep). It dies only after two in-place raises go unanswered
+ *   (social_person_category_scores.unanswered_raises, resolved lazily below
+ *   — the one case where zeroing the score is still correct).
+ *
+ *   Only the CODA (its own direct call, `allowRaiseNew` default true) may
+ *   produce `raise_new`. The in-prompt directive (`chooseSocialDirective`,
+ *   feeds buildTurnContext.ts) calls with `allowRaiseNew: false` — it is a
+ *   rendered suggestion Sonnet may silently ignore, so it must never be
+ *   what opens a brand-new subject (answer 2). Any raise_new outcome
+ *   (either stage) becomes silence for it; only a stage-1 hit on a filled
+ *   slot whose stage-2 roll lands on "continue" renders anything.
  */
 
 import type { OwnerIntentClassification } from './classifyTurn';
 import {
-  adjustCategoryScore,
   countAssistantInitiationsTodayForPerson,
   getActiveCategoriesForPerson,
   getActiveSubjectsForPerson,
   getActiveSubjectsForPersonCategory,
   getCategoryScoresForPerson,
   lastAssistantInitiatedAt,
+  recordCategoryRaiseUnanswered,
   recordSubjectUnanswered,
-  CATEGORY_SCORE_CAP,
+  resetCategoryRaiseState,
   FIXED_CATEGORIES,
   MAX_ACTIVE_CATEGORIES_PER_PERSON,
   type SocialSubject,
@@ -209,10 +218,10 @@ function pickDormantCategory(
 export function directiveForProactiveSlot(params: {
   personSlackId: string;
   /**
-   * Owner's own user id — needed to zero out a dead category's score via
-   * `adjustCategoryScore` in the dead-category sweep (bug 2.1) that runs
-   * before selection. Threaded from callers that already have
-   * `profile.user.slack_user_id` in scope.
+   * Owner's own user id — multi-tenant scoping for the in-place category-
+   * raise resolve pass (`recordCategoryRaiseUnanswered` /
+   * `resetCategoryRaiseState`) that runs before selection. Threaded from
+   * callers that already have `profile.user.slack_user_id` in scope.
    */
   ownerUserId: string;
   /**
@@ -301,11 +310,11 @@ export function directiveForProactiveSlot(params: {
   //
   // Applied per-subject (not against the shared daily-gate anchor above) so
   // it holds regardless of which subject's raise happened to reopen the gate.
-  // No matching step for a `raise_new` (category, no subject) offer: it can
-  // only ever have targeted a category already at CATEGORY_SCORE_FLOOR (0) —
-  // `pickDormantCategory` only offers categories with no active standing —
-  // so a further −1 is a clamped no-op; `recordCategoryRaiseAttempt` (already
-  // called at compose time) is what keeps the picker from re-offering it.
+  // A `raise_new` (category, no subject row) offer has its own matching step
+  // since 2026-08-30 — the in-place category-raise resolve pass right below;
+  // for a DORMANT-category offer that pass is inert (score 0 → not active)
+  // and `recordCategoryRaiseAttempt`'s tried-marker is what keeps the picker
+  // from re-offering it.
   for (const s of getActiveSubjectsForPerson(personSlackId)) {
     if (!s.last_assistant_initiated_at) continue;
     const raisedAgoMs = Date.now() - new Date(s.last_assistant_initiated_at).getTime();
@@ -319,47 +328,53 @@ export function directiveForProactiveSlot(params: {
     }
   }
 
-  // Bug 2.1 — dead-category sweep, run over EVERY active category BEFORE any
-  // pick is made. A category with real standing (score > 0) but ZERO live
-  // subjects left (every subject died / was rejected) is a true dead end:
-  // its score never comes back down on its own (adjustCategoryScore only
-  // ever moves on engagement), so it permanently occupies one of the
-  // MAX_ACTIVE_CATEGORIES_PER_PERSON (3) slots and starves the picker of
-  // real variety. Zeroing drops it from `getActiveCategoriesForPerson`'s
-  // `score > 0` filter so `pickDormantCategory` can offer a genuinely fresh
-  // category — "zero points category is out of the count" (owner). This
-  // used to live INSIDE the pick loop below, which returned on the first
-  // category with an eligible subject — so any dry category sorting AFTER
-  // the winner was never checked, and one perpetually-live subject in the
-  // top category blocked the cleanup forever (movies/podcasts sat dry at
-  // score 3 for two weeks, 2026-08-16 → 08-30). The sweep is standalone now:
-  // it runs regardless of what the pick decides, and the active set is
-  // re-read after it so counts, labels and picks all see the cleaned state.
+  // Owner design 2026-08-30 — in-place category-raise resolve-on-read, the
+  // same lazy moment as the subject pass above. A raise_new aimed at a
+  // category that already had standing (score > 0) leaves no subject row
+  // behind, so the subject loop above can never judge its silence; the
+  // category row carries the marker instead (`last_raise_attempt_at`,
+  // stamped at compose time — generateCoda.ts). Judged per category:
+  //   - a live subject exists now → the raise was answered or mooted
+  //     (reconciliation created/revived one, or subjects were there all
+  //     along) → marker/counter cleared;
+  //   - still no live subject and the marker is 24h+ old → unanswered;
+  //     at MAX_UNANSWERED_RAISES the category's score is zeroed — the one
+  //     case the owner ruled zeroing is still correct (invited back in
+  //     twice, ignored both times = genuinely abandoned; L12's
+  //     silence-twice natural death), freeing the slot for
+  //     `pickDormantCategory`. Replaces the 4.8.1 instant dry-category
+  //     sweep, which vacated a category the moment it ran dry — the owner's
+  //     ruling is the opposite: standing earns an in-place re-raise first.
+  // Also caches each category's live subjects for the selection below (the
+  // getters themselves run the relevant_until expiry sweep, so dryness here
+  // is judged post-expiry).
   const subjectsByCategory = new Map<string, SocialSubject[]>();
   for (const cat of getActiveCategoriesForPerson(personSlackId)) {
     const subs = getActiveSubjectsForPersonCategory(personSlackId, cat.category_id);
-    if (subs.length === 0) {
-      try {
-        adjustCategoryScore({
-          ownerUserId, personSlackId, categoryId: cat.category_id, delta: -CATEGORY_SCORE_CAP,
-        });
-      } catch (err) {
-        logger.warn('Dead-category score reset threw — leaving score as-is', {
-          categoryId: cat.category_id, personSlackId, err: String(err).slice(0, 200),
-        });
-      }
-      continue;
-    }
     subjectsByCategory.set(cat.category_id, subs);
+    try {
+      if (subs.length > 0) {
+        if (cat.last_raise_attempt_at || cat.unanswered_raises > 0) {
+          resetCategoryRaiseState(ownerUserId, personSlackId, cat.category_id);
+        }
+        continue;
+      }
+      if (!cat.last_raise_attempt_at) continue;
+      const raisedAgoMs = Date.now() - new Date(cat.last_raise_attempt_at).getTime();
+      if (raisedAgoMs < ONE_DAY_MS) continue;
+      recordCategoryRaiseUnanswered({ ownerUserId, personSlackId, categoryId: cat.category_id });
+    } catch (err) {
+      logger.warn('In-place category-raise resolve threw — leaving category as-is', {
+        categoryId: cat.category_id, personSlackId, err: String(err).slice(0, 200),
+      });
+    }
   }
 
-  // Deterministic selection — no time-based decay pass runs here (answer 14):
-  // a subject whose raise is still pending an answer is filtered out below by
-  // its marker alone (now genuinely resolved by the pass above, not merely
-  // deferred); the person's next real chat clears a marker on the spot too
-  // (logEngagement.ts).
-  const activeCategories = getActiveCategoriesForPerson(personSlackId); // score DESC, post-sweep
-  const activeCount = activeCategories.length;
+  // Selection state, re-read AFTER both resolve passes so scores, labels and
+  // subject sets all reflect the cleaned state. A subject whose raise is
+  // still pending an answer is filtered out below by its marker alone; the
+  // person's next real chat clears a marker on the spot too (logEngagement.ts).
+  const activeCategories = getActiveCategoriesForPerson(personSlackId); // score DESC
   const activeLabels = new Set(activeCategories.map(c => c.category_label));
   // Bounce fix — categories already suggested (score still 0, no engagement
   // yet) so the rotation below skips them too, not just the active ones.
@@ -369,67 +384,68 @@ export function directiveForProactiveSlot(params: {
       .map(c => c.category_label),
   );
 
-  const raiseNewDirective = (): SocialDirective => ({
+  const raiseNewDirective = (categoryLabel: string): SocialDirective => ({
     mode: 'raise_new',
     subjectId: null,
     subjectLabel: null,
-    categoryLabel: pickDormantCategory(personSlackId, activeLabels, triedLabels),
+    categoryLabel,
     toneCue: 'one plain, natural question about this category — invite a real fact about the person; no preamble',
     subject: null,
     closingAck: false,
   });
 
-  // Highest-scoring active category with an eligible subject wins (ties
-  // broken alphabetically for a stable, reproducible order); least-recently-
-  // touched subject inside it is the pick. Returns null when no active
-  // category currently has anything eligible to continue.
-  const continueDirective = (): SocialDirective | null => {
-    const ordered = activeCategories.slice().sort((a, b) =>
-      b.score - a.score || a.category_label.localeCompare(b.category_label));
-    for (const cat of ordered) {
-      // The dead-category sweep above already zeroed and dropped any category
-      // with no live subjects; a category still active here has ≥1, cached.
-      const allSubjects = subjectsByCategory.get(cat.category_id) ?? [];
-      // Eligible = no raise currently awaiting an answer. Once the person's
-      // next chat reconciles (match or pivot), the marker clears either way
-      // (logEngagement.ts) — so this is a plain filter, not a decay site.
-      const subjects = allSubjects.filter(s => !s.last_assistant_initiated_at);
-      if (subjects.length === 0) continue;
-      // Least-recently-touched first — rotates variety among eligible
-      // subjects (subjects no longer carry a score to sort on).
-      const choice = subjects.slice().sort((a, b) => {
-        const aTs = a.last_touched_at ? new Date(a.last_touched_at).getTime() : 0;
-        const bTs = b.last_touched_at ? new Date(b.last_touched_at).getTime() : 0;
-        return aTs - bTs;
-      })[0];
-      return {
-        mode: 'continue',
-        subjectId: choice.id,
-        subjectLabel: choice.label,
-        categoryLabel: cat.category_label,
-        toneCue: 'one short, natural follow-up on this subject; lean on the recent topic-beats Maelle has logged',
-        subject: choice,
-        closingAck: false,
-      };
-    }
-    return null;
+  // Stage 1 — category: three equal-probability slots (owner design
+  // 2026-08-30). Filled slots hold the active categories, top-3 by score
+  // (ties broken alphabetically for a stable fill order — >3 active is
+  // reachable via organic revival, which the create-site cap doesn't gate);
+  // an empty slot is an independent shot at "try a brand-new category", so
+  // the empty-slot odds stack: 2 active → 1/3 discovery, 1 active → 2/3,
+  // 0 active → always.
+  const slotCategories = activeCategories.slice()
+    .sort((a, b) => b.score - a.score || a.category_label.localeCompare(b.category_label))
+    .slice(0, MAX_ACTIVE_CATEGORIES_PER_PERSON);
+  const slot = Math.floor(Math.random() * MAX_ACTIVE_CATEGORIES_PER_PERSON);
+  const picked = slotCategories[slot];
+
+  if (!picked) {
+    // Empty slot — discovery. Only the coda may originate (answer 2); the
+    // in-prompt directive goes quiet instead of substituting a continue,
+    // keeping the slot odds exactly as designed.
+    if (!allowRaiseNew) return noDirective();
+    return raiseNewDirective(pickDormantCategory(personSlackId, activeLabels, triedLabels));
+  }
+
+  // Stage 2 — inside the picked category: 50/50 continue-vs-raise-new,
+  // applied EVERY time, not only when the category is dry. A dry category
+  // (standing but zero eligible subjects) always raises in-place — a new
+  // subject in the same category, never a vacated slot (owner ruling
+  // 2026-08-30). Eligible = no raise currently awaiting an answer; once the
+  // person's next chat reconciles (match or pivot), the marker clears either
+  // way (logEngagement.ts) — a plain filter, not a decay site.
+  const eligible = (subjectsByCategory.get(picked.category_id) ?? [])
+    .filter(s => !s.last_assistant_initiated_at);
+  const raiseInPlace = eligible.length === 0 || Math.random() < 0.5;
+  if (raiseInPlace) {
+    if (!allowRaiseNew) return noDirective();
+    return raiseNewDirective(picked.category_label);
+  }
+
+  // Continue — least-recently-touched eligible subject in the picked
+  // category (rotates variety; subjects no longer carry a score to sort on).
+  const choice = eligible.slice().sort((a, b) => {
+    const aTs = a.last_touched_at ? new Date(a.last_touched_at).getTime() : 0;
+    const bTs = b.last_touched_at ? new Date(b.last_touched_at).getTime() : 0;
+    return aTs - bTs;
+  })[0];
+  return {
+    mode: 'continue',
+    subjectId: choice.id,
+    subjectLabel: choice.label,
+    categoryLabel: picked.category_label,
+    toneCue: 'one short, natural follow-up on this subject; lean on the recent topic-beats Maelle has logged',
+    subject: choice,
+    closingAck: false,
   };
-
-  if (!allowRaiseNew) {
-    // In-prompt directive: never originate a brand-new subject (answer 2).
-    // Continue something eligible if there is one; otherwise say nothing.
-    return continueDirective() ?? noDirective();
-  }
-
-  // Coda path: below the cap, always grow into a dormant category
-  // deterministically (the cap itself is enforced at the reconciler's create
-  // site — capturePass.ts — not here). At the cap, continue; if nothing is
-  // currently eligible to continue, fall back to suggesting a dormant
-  // category rather than going silent.
-  if (activeCount < MAX_ACTIVE_CATEGORIES_PER_PERSON) {
-    return raiseNewDirective();
-  }
-  return continueDirective() ?? raiseNewDirective();
 }
 
 export function noDirective(): SocialDirective {
@@ -448,7 +464,7 @@ export function chooseSocialDirective(params: {
   personSlackId: string;
   classification: OwnerIntentClassification;
   /** Owner's own user id — threaded through to `directiveForProactiveSlot`
-   *  (bug 2.1's dead-category score reset). */
+   *  (in-place category-raise resolve pass). */
   ownerUserId: string;
   /** Owner timezone — threaded through to the proactive-slot daily gate. */
   ownerTimezone?: string;

@@ -533,6 +533,8 @@ function initSchema(db: Database.Database): void {
       person_slack_id   TEXT NOT NULL,
       category_id       TEXT NOT NULL,
       score             INTEGER NOT NULL DEFAULT 0,   -- 0..3
+      unanswered_raises INTEGER NOT NULL DEFAULT 0,   -- in-place raise_new attempts (score>0, no live subject) with no reply; score zeroed at 2 (owner design 2026-08-30)
+      last_raise_attempt_at TEXT,                     -- when a raise_new coda last targeted this category (compose-time stamp, generateCoda.ts); resolved lazily by the picker
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(owner_user_id, person_slack_id, category_id)
@@ -543,8 +545,12 @@ function initSchema(db: Database.Database): void {
     -- Subjects: meaningful unit, live|dead (no score). Per-(owner, person, category).
     -- Created on first mention by either side; LLM classifier merges sub-beats
     -- of the same subject (no Jaccard hack). Cap 5 active per (person, category)
-    -- with lowest-priority eviction. Dies on the reject action or after 2
-    -- unanswered raises (unanswered_raises) — no time-based decay.
+    -- with lowest-priority eviction. Dies on the reject action, after 2
+    -- unanswered raises (unanswered_raises), or — for inherently time-bound
+    -- subjects — when relevant_until passes (owner design 2026-08-30). No
+    -- engagement decay on a clock; relevant_until is a stored calendar fact,
+    -- not a decay. A dead subject the person re-raises is revived, never
+    -- duplicated (reviveSubject, socialSubjects.ts).
     CREATE TABLE IF NOT EXISTS social_subjects (
       id                TEXT PRIMARY KEY,
       owner_user_id     TEXT NOT NULL,
@@ -559,7 +565,8 @@ function initSchema(db: Database.Database): void {
       created_by        TEXT NOT NULL DEFAULT 'owner',
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
-      summary           TEXT                                     -- accumulating merged summary (~1800-char cap enforced in code); NULL = no summary yet
+      summary           TEXT,                                    -- accumulating merged summary (~1800-char cap enforced in code); NULL = no summary yet
+      relevant_until    TEXT                                     -- YYYY-MM-DD calendar expiry for inherently time-bound subjects; NULL = no natural expiry (the normal case)
     );
     CREATE INDEX IF NOT EXISTS idx_social_subjects_person ON social_subjects(person_slack_id, status);
     CREATE INDEX IF NOT EXISTS idx_social_subjects_owner_person ON social_subjects(owner_user_id, person_slack_id);
@@ -614,6 +621,14 @@ function initSchema(db: Database.Database): void {
   // everywhere by design. Additive column is a no-op once present, including
   // every fresh install (which gets it straight from the CREATE TABLE above).
   try { db.exec(`ALTER TABLE social_subjects ADD COLUMN summary TEXT`); } catch (_) {}
+
+  // Owner design 2026-08-30 — time-based subject death (relevant_until) and
+  // in-place category-raise tracking (see socialSubjects.ts header). All
+  // additive + idempotent; fresh installs get them straight from the CREATE
+  // TABLEs above.
+  try { db.exec(`ALTER TABLE social_subjects ADD COLUMN relevant_until TEXT`); } catch (_) {}
+  try { db.exec(`ALTER TABLE social_person_category_scores ADD COLUMN unanswered_raises INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE social_person_category_scores ADD COLUMN last_raise_attempt_at TEXT`); } catch (_) {}
 
   // Slot holds (#30) — a tentative reservation on a slot someone picked but
   // hasn't confirmed (or the owner explicitly parked). Internal state ONLY,

@@ -60,6 +60,7 @@ import {
   FIXED_CATEGORIES,
   MAX_ACTIVE_CATEGORIES_PER_PERSON,
   getActiveSubjectsForPerson,
+  getAllSubjectsForPerson,
   getCategoryByLabel,
   getRecentTopicBeats,
   createSubject,
@@ -67,7 +68,9 @@ import {
   countActiveCategoriesForPerson,
   isCategoryActiveForPerson,
   markSubjectDead,
+  reviveSubject,
   threadHadSocialTurn,
+  updateSubjectRelevantUntil,
   updateSubjectSummary,
   type SubjectToucher,
 } from '../db/socialSubjects';
@@ -777,6 +780,14 @@ Three ways a topic can show up that are NOT the colleague's social subject:
 
 Read the direction of the conversation: who introduced it, whose life/hobby/work it describes, and whether the colleague showed they actually care about it. When the topic is genuinely theirs AND personal (not work) → capture it. When it's Maelle's lore or a passing mention they didn't own → output nothing. When it's work → reject it explicitly (below).
 
+## Retired subjects — revival, never duplication
+
+Below the active list you may also see RETIRED subjects — they died earlier (ignored raises, waved off, or their date passed). If the person GENUINELY brought one of those same things up again in this chat, "match" its id — matching revives it; NEVER "create" a near-duplicate of a retired subject. But if what they raised is a genuinely NEW instance of a similar thing (a new vacation, this year's edition of the conference), "create" a new subject. A passing mention of a retired subject is not a revival — output nothing for it.
+
+## Time-bound subjects — "relevant_until"
+
+Some subjects are inherently CALENDAR-BOUND: a trip, a visit, an event, a conference, a deadline-bound plan. Those stop being live topics once their date passes, no matter how warm the conversation was. When a subject you "match" or "create" is inherently time-bound and the chat reveals (even roughly) until when it's relevant, emit "relevant_until": "YYYY-MM-DD" — your best estimate of when it expires (end of the trip, day after the event). Most subjects — a game, a show, a hobby, family, an ongoing life thread — have NO natural expiry: omit the field entirely for those. Emitting it on an open-ended subject is worse than omitting it on a time-bound one.
+
 ## Explicit rejection — "reject"
 
 Two, and only two, situations use action: "reject":
@@ -845,6 +856,7 @@ For each subject this chat touched:
   - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat (irrelevant for "reject"; default "neutral")
   - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat — always empty for "reject"
   - summary: the merged running summary described above — required for "match"/"create", omitted for "reject"
+  - relevant_until: OPTIONAL "YYYY-MM-DD" — only for inherently time-bound subjects (see above); omit otherwise, and always omit for "reject"
 
 You may output zero decisions (if the chat had no social content and no work to reject), one decision (typical), or several (if the chat spanned multiple subjects across one or more categories).
 
@@ -866,6 +878,7 @@ interface SubjectDecision {
   sentiment: 'positive' | 'negative' | 'neutral';
   topic_beats: string[];
   summary?: string;           // merged running summary — match/create only (item 3)
+  relevant_until?: string;    // optional YYYY-MM-DD calendar expiry — time-bound subjects only (owner design 2026-08-30)
 }
 
 interface ReconcileOutput {
@@ -894,6 +907,10 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
       const topic_beats = Array.isArray(r.topic_beats)
         ? r.topic_beats.filter((b: unknown): b is string => typeof b === 'string' && b.trim().length > 0)
         : [];
+      // relevant_until — strict YYYY-MM-DD only (a structured string, W4-legal
+      // regex); anything else Haiku emits is dropped rather than stored.
+      const relevantUntilRaw = typeof r.relevant_until === 'string' ? r.relevant_until.trim() : '';
+      const relevant_until = /^\d{4}-\d{2}-\d{2}$/.test(relevantUntilRaw) ? relevantUntilRaw : undefined;
       decisions.push({
         category,
         action,
@@ -902,6 +919,7 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
         sentiment,
         topic_beats,
         summary: typeof r.summary === 'string' && r.summary.trim() ? r.summary.trim() : undefined,
+        relevant_until,
       });
     }
     return { decisions };
@@ -935,8 +953,20 @@ async function runSubjectReconciliation(
   priorCapturedAt: string | null,
 ): Promise<void> {
   try {
-    // 1. Active subjects with rich context (recent topic beats per subject)
+    // 1. Active subjects with rich context (recent topic beats per subject),
+    //    plus a bounded set of RETIRED (dead) subjects — owner design
+    //    2026-08-30. Without the dead list, a subject the person genuinely
+    //    re-raised themselves could only ever be re-CREATED as a duplicate
+    //    row (the reconciler never saw the original), breaking L11's one-
+    //    record law and L12's revival rule — and time-based death
+    //    (relevant_until) makes re-mentions of dead subjects routine ("how
+    //    was the trip?" → "the trip was great"). Most-recently-touched dead
+    //    first, capped so the prompt stays small.
     const subjects = getActiveSubjectsForPerson(personSlackId);
+    const MAX_DEAD_SUBJECTS_SHOWN = 8;
+    const deadSubjects = getAllSubjectsForPerson(personSlackId)
+      .filter(s => s.status === 'dead')
+      .slice(0, MAX_DEAD_SUBJECTS_SHOWN);
 
     // 2. Chat transcript
     const messages = getConversationHistory(threadTs);
@@ -953,16 +983,24 @@ async function runSubjectReconciliation(
           ? `\n      recent topics: ${beats.map(b => `"${b.label}"`).join(', ')}`
           : '';
         // item 3 (2026-08-16) — the existing merged summary, shown so Haiku
-        // MERGES into it rather than starting from the beats alone. Absent
-        // until the social_subjects.summary column lands (needs-dependency,
-        // Handyman) — s.summary reads undefined until then and this line
-        // simply doesn't render, no different from a subject with no summary yet.
+        // MERGES into it rather than starting from the beats alone. Nullable:
+        // a subject with no summary yet simply doesn't render this line (the
+        // column itself is guaranteed by the idempotent ALTER in db/client.ts).
         const summaryStr = s.summary ? `\n      current summary: "${s.summary}"` : '';
         const cat = s.category_id.replace(/^cat_global_/, '');
         lines.push(`    [${s.id}] "${s.label}" — category=${cat}, last touched ${s.last_touched_at}${summaryStr}${beatsStr}`);
       }
       return lines.join('\n');
     })();
+
+    const retiredSubjectsBlock = deadSubjects.length === 0 ? '' : [
+      '',
+      'RETIRED SUBJECTS for this person (match ONLY if genuinely re-raised — matching revives; never create a duplicate of these):',
+      ...deadSubjects.map(s => {
+        const cat = s.category_id.replace(/^cat_global_/, '');
+        return `    [${s.id}] "${s.label}" — category=${cat}, last touched ${s.last_touched_at}`;
+      }),
+    ].join('\n');
 
     const ownerUserId = profile.user.slack_user_id;
     // Who actually said this, in this leg: the owner-DM leg reconciles the
@@ -976,9 +1014,13 @@ async function runSubjectReconciliation(
     const systemPrompt = SUBJECT_RECONCILE_PROMPT_TEMPLATE(FIXED_CATEGORIES.join(', '));
     const userMsg = [
       `Person being reconciled: ${personName}`,
+      // Owner design 2026-08-30 — anchor for relevant_until: "next week" /
+      // "in August" in the transcript can only resolve to a date against today.
+      `Today's date: ${new Date().toISOString().split('T')[0]}`,
       '',
       'ACTIVE SUBJECTS for this person:',
       activeSubjectsBlock,
+      retiredSubjectsBlock,
       '',
       'CHAT TRANSCRIPT (just ended):',
       '```',
@@ -1023,9 +1065,12 @@ async function runSubjectReconciliation(
     }
 
     // 4. Apply decisions
-    // Build id → category map for the category-pairing integrity check.
+    // Build id → category map for the category-pairing integrity check —
+    // over BOTH lists (a match to a shown retired subject is legal; it
+    // revives). Also remember which shown ids are dead, for the revival step.
     const subjectCategoryById = new Map<string, string>();
-    for (const s of subjects) {
+    const deadShownIds = new Set<string>(deadSubjects.map(s => s.id));
+    for (const s of [...subjects, ...deadSubjects]) {
       subjectCategoryById.set(s.id, s.category_id.replace(/^cat_global_/, ''));
     }
     let matchedCount = 0;
@@ -1085,6 +1130,22 @@ async function runSubjectReconciliation(
             threadTs, claimedCategory: d.category, actualCategory, subject_id: d.subject_id,
           });
           continue;
+        }
+        // Owner design 2026-08-30 — a match to a shown RETIRED subject is a
+        // revival (L12: the person re-raised it themselves; L11: never a
+        // duplicate row). reviveSubject resets its raise counter, respects
+        // the per-category live cap, and clears the category's in-place
+        // raise state. relevant_until is NOT cleared — a still-past date
+        // re-retires it at the next sweep unless this decision also carries
+        // a fresh one (applied below).
+        if (deadShownIds.has(d.subject_id)) {
+          try {
+            reviveSubject(d.subject_id, toucher);
+          } catch (err) {
+            logger.warn('runSubjectReconciliation: reviveSubject threw — treating as plain match', {
+              threadTs, subjectId: d.subject_id, err: String(err).slice(0, 200),
+            });
+          }
         }
         subjectId = d.subject_id;
         matchedCount++;
@@ -1159,6 +1220,21 @@ async function runSubjectReconciliation(
           updateSubjectSummary(subjectId, d.summary);
         } catch (err) {
           logger.warn('runSubjectReconciliation: updateSubjectSummary threw', {
+            subjectId, err: String(err).slice(0, 200),
+          });
+        }
+      }
+
+      // Owner design 2026-08-30 — calendar expiry for inherently time-bound
+      // subjects, from the SAME Haiku call (no second round-trip). Set on
+      // create and refreshed on match (a moved trip gets its new date); an
+      // omitted field leaves any stored date standing. Validated upstream to
+      // strict YYYY-MM-DD (parseReconcileOutput).
+      if (subjectId && d.relevant_until) {
+        try {
+          updateSubjectRelevantUntil(subjectId, d.relevant_until);
+        } catch (err) {
+          logger.warn('runSubjectReconciliation: updateSubjectRelevantUntil threw', {
             subjectId, err: String(err).slice(0, 200),
           });
         }

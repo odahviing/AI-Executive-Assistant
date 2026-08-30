@@ -23,11 +23,13 @@
  *                                     conversation ("Clair Obscur Expedition
  *                                     33"). Carries `status` (live|dead) and
  *                                     `unanswered_raises` — a subject dies on
- *                                     TWO unanswered raises or an explicit
- *                                     reject (capturePass.ts), never on a
- *                                     time-based decay. Subjects themselves no
- *                                     longer carry a score (v4.5.9) — standing
- *                                     lives on the category above.
+ *                                     TWO unanswered raises, an explicit
+ *                                     reject (capturePass.ts), or — when it is
+ *                                     inherently time-bound — its
+ *                                     `relevant_until` date passing. Subjects
+ *                                     themselves no longer carry a score
+ *                                     (v4.5.9) — standing lives on the
+ *                                     category above.
  *
  *   social_topics                   — per-subject. Lightweight beats with no
  *                                     rank — concrete things to talk about
@@ -44,6 +46,28 @@
  *     "unanswered" is now detected once, at end-of-chat reconciliation
  *     (core/social/logEngagement.ts), not re-derived from a clock on every
  *     picker sweep.
+ *
+ * Owner design 2026-08-30 — three additions on top of that:
+ *   - `relevant_until` (nullable date) on subjects: an inherently time-bound
+ *     subject ("vacation in August", "the conference next week") is
+ *     calendar-dead once its date passes, regardless of engagement — a
+ *     second, independent path into the same `dead` status, swept lazily at
+ *     the live-only read sites (sweepExpiredSubjectsForPerson). This is NOT
+ *     the removed engagement decay coming back: it is a stored fact about
+ *     the subject, set by the reconciler (capturePass.ts, same Haiku call)
+ *     only when the content is genuinely date-bound. Most subjects never
+ *     carry one.
+ *   - In-place category-raise tracking on social_person_category_scores
+ *     (`last_raise_attempt_at` + `unanswered_raises`): a raise_new aimed at
+ *     a category that already has standing (score > 0) leaves no subject row
+ *     behind, so its silence is judged on the category row itself — two
+ *     unanswered in-place raises zero the score (the category dies, same
+ *     MAX_UNANSWERED_RAISES threshold), mirroring the subject rule (L12's
+ *     silence-twice natural death). Any subject landing in the category
+ *     resets it (resetCategoryRaiseState).
+ *   - A dead subject the person genuinely re-raises themselves is REVIVED by
+ *     the reconciler (reviveSubject), never duplicated into a second row
+ *     (L11 / L12).
  *
  * Caps:
  *   - 5 live subjects per (person, category) — new beyond cap evicts the
@@ -90,6 +114,9 @@ export interface PersonCategoryScore {
   person_slack_id: string;
   category_id: string;
   score: number;                 // 0..3
+  // Owner design 2026-08-30 — in-place raise tracking (see file header).
+  unanswered_raises: number;     // in-place raises with no reply; score zeroed at MAX_UNANSWERED_RAISES
+  last_raise_attempt_at: string | null;  // when a raise_new coda last targeted this category (compose-time stamp)
   created_at: string;
   updated_at: string;
 }
@@ -114,11 +141,15 @@ export interface SocialSubject {
   updated_at: string;
   // gh#(item-3, 2026-08-16) — running per-subject summary, MERGED across every
   // reconciliation that touches this subject (never overwritten wholesale).
-  // NEEDS `ALTER TABLE social_subjects ADD COLUMN summary TEXT` — see the
-  // migration note above `updateSubjectSummary` below. Optional/nullable:
-  // `SELECT *` on a DB that hasn't run that migration yet simply omits the
-  // key, so every reader here treats it as "no summary yet", not an error.
+  // Column added by the idempotent ALTER in db/client.ts (initSchema).
+  // Optional/nullable: absent reads as "no summary yet", not an error.
   summary?: string | null;
+  // Owner design 2026-08-30 — optional calendar expiry, "YYYY-MM-DD". Only
+  // inherently time-bound subjects carry one (set by the reconciler's
+  // existing Haiku call, capturePass.ts); once the date passes the subject
+  // is swept to `dead` (sweepExpiredSubjectsForPerson) regardless of
+  // engagement. NULL/absent = no natural expiry (the normal case).
+  relevant_until?: string | null;
 }
 
 export interface SocialTopicBeat {
@@ -146,6 +177,9 @@ export const MAX_SUBJECT_SUMMARY_CHARS = 1800;
 // the existing last_assistant_initiated_at stamp: every raise clears to NULL
 // once the person's next chat reconciles it (matched → answered, resets to 0;
 // pivot → unanswered, +1 here) so no time window is ever consulted.
+// Owner design 2026-08-30 — also the death threshold for in-place CATEGORY
+// raises (recordCategoryRaiseUnanswered below): same L12 silence-twice rule,
+// one constant, never a bespoke scale per surface.
 export const MAX_UNANSWERED_RAISES = 2;
 
 // Per-person category standing, 0..3.
@@ -287,11 +321,16 @@ export function adjustCategoryScore(params: {
  * a subject happened to land in it: re-asking the same thing forever, the
  * opposite of "she never re-asks what she already asked."
  *
- * A no-op INSERT OR IGNORE: if a row already exists (active, or previously
- * tried), its score is left untouched — this only ever plants a fresh
- * score-0 row so the category reads as "already tried" to the picker. Never
- * itself a form of engagement (answer 14 — score moves on engagement alone),
- * so it never bumps the score.
+ * The score is never touched on an existing row — this only ever plants a
+ * fresh score-0 row so the category reads as "already tried" to the picker.
+ * Never itself a form of engagement (answer 14 — score moves on engagement
+ * alone), so it never bumps the score.
+ *
+ * Owner design 2026-08-30 — also stamps `last_raise_attempt_at` (both on
+ * insert and on an existing row). For a dormant category the stamp is inert;
+ * for an ACTIVE one (an in-place raise, stage 2 of the picker) it is the
+ * marker the picker's lazy resolve pass reads to judge the raise's silence —
+ * see recordCategoryRaiseUnanswered below.
  */
 export function recordCategoryRaiseAttempt(params: {
   ownerUserId: string;
@@ -302,15 +341,136 @@ export function recordCategoryRaiseAttempt(params: {
   const { ownerUserId, personSlackId, categoryId } = params;
   const id = `pcs_${personSlackId}_${categoryId}`;
   db.prepare(`
-    INSERT OR IGNORE INTO social_person_category_scores
-      (id, owner_user_id, person_slack_id, category_id, score)
-    VALUES (@id, @owner_user_id, @person_slack_id, @category_id, 0)
+    INSERT INTO social_person_category_scores
+      (id, owner_user_id, person_slack_id, category_id, score, last_raise_attempt_at)
+    VALUES (@id, @owner_user_id, @person_slack_id, @category_id, 0, datetime('now'))
+    ON CONFLICT(owner_user_id, person_slack_id, category_id)
+    DO UPDATE SET last_raise_attempt_at = datetime('now'), updated_at = datetime('now')
   `).run({
     id, owner_user_id: ownerUserId, person_slack_id: personSlackId, category_id: categoryId,
   });
 }
 
+/**
+ * Owner design 2026-08-30 — an in-place raise (raise_new into a category with
+ * standing but no live subject) got no reply: +1 unanswered, marker cleared;
+ * at MAX_UNANSWERED_RAISES the category's score is zeroed — it dies and its
+ * picker slot frees. The counter also resets on death so a later organic
+ * revival of the category starts clean. The score-0 row left behind reads as
+ * "tried" to pickDormantCategory, so the just-killed category is not
+ * immediately re-offered as a discovery.
+ *
+ * Called ONLY from the picker's resolve-on-read pass (stateMachine.ts), the
+ * same lazy moment subject raises are judged — never on a background timer.
+ */
+export function recordCategoryRaiseUnanswered(params: {
+  ownerUserId: string;
+  personSlackId: string;
+  categoryId: string;
+}): { died: boolean } {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT * FROM social_person_category_scores
+    WHERE owner_user_id = ? AND person_slack_id = ? AND category_id = ?
+  `).get(params.ownerUserId, params.personSlackId, params.categoryId) as PersonCategoryScore | undefined;
+  if (!row) return { died: false };
+
+  const nextCount = row.unanswered_raises + 1;
+  const dies = nextCount >= MAX_UNANSWERED_RAISES;
+  db.prepare(`
+    UPDATE social_person_category_scores
+    SET unanswered_raises = @count,
+        score = @score,
+        last_raise_attempt_at = NULL,
+        updated_at = datetime('now')
+    WHERE id = @id
+  `).run({
+    id: row.id,
+    count: dies ? 0 : nextCount,
+    score: dies ? CATEGORY_SCORE_FLOOR : row.score,
+  });
+  if (dies) {
+    logger.info('Social category died — 2 unanswered in-place raises, score zeroed', {
+      personSlackId: params.personSlackId, categoryId: params.categoryId,
+    });
+  }
+  return { died: dies };
+}
+
+/**
+ * Owner design 2026-08-30 — clear a category's in-place raise state: a live
+ * subject landed in it (created or revived), which is engagement, so any
+ * standing raise marker/counter is moot. Also consulted lazily by the picker
+ * when it finds live subjects under a marked category.
+ */
+export function resetCategoryRaiseState(ownerUserId: string, personSlackId: string, categoryId: string): void {
+  const db = getDb();
+  db.prepare(`
+    UPDATE social_person_category_scores
+    SET unanswered_raises = 0, last_raise_attempt_at = NULL, updated_at = datetime('now')
+    WHERE owner_user_id = ? AND person_slack_id = ? AND category_id = ?
+      AND (unanswered_raises != 0 OR last_raise_attempt_at IS NOT NULL)
+  `).run(ownerUserId, personSlackId, categoryId);
+}
+
 // ── Subject helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Cap enforcement: at most MAX_ACTIVE_SUBJECTS_PER_CATEGORY live rows per
+ * (person, category). At cap, evict the least-recently-touched live subject
+ * (subjects no longer carry a score to break ties on). Shared by
+ * createSubject and reviveSubject — both add a live row.
+ */
+function evictLruLiveSubjectIfAtCap(ownerUserId: string, personSlackId: string, categoryId: string): void {
+  const db = getDb();
+  const activeCount = db.prepare(`
+    SELECT COUNT(*) as n FROM social_subjects
+    WHERE owner_user_id = ? AND person_slack_id = ?
+      AND category_id = ? AND status = 'live'
+  `).get(ownerUserId, personSlackId, categoryId) as { n: number };
+  if (activeCount.n < MAX_ACTIVE_SUBJECTS_PER_CATEGORY) return;
+  const evictRow = db.prepare(`
+    SELECT id FROM social_subjects
+    WHERE owner_user_id = ? AND person_slack_id = ?
+      AND category_id = ? AND status = 'live'
+    ORDER BY last_touched_at ASC
+    LIMIT 1
+  `).get(ownerUserId, personSlackId, categoryId) as { id: string } | undefined;
+  if (evictRow) {
+    db.prepare(`
+      UPDATE social_subjects SET status = 'dead', updated_at = datetime('now')
+      WHERE id = ?
+    `).run(evictRow.id);
+    logger.info('Social subject evicted (cap reached)', {
+      evictedId: evictRow.id, personSlackId, categoryId,
+    });
+  }
+}
+
+/**
+ * Owner design 2026-08-30 — lazy calendar-death sweep. Flips to `dead` every
+ * live subject whose `relevant_until` date has passed; called at the
+ * live-only read chokepoints below so every consumer (picker, reconciler,
+ * coda composer, caps) sees post-expiry truth without a background timer.
+ * Independent of the unanswered-raise path — two ways into the same status.
+ * Date-granular on purpose ("until roughly when" is inherently rough): the
+ * subject stays raisable through its relevant_until day, UTC.
+ */
+export function sweepExpiredSubjectsForPerson(personSlackId: string): void {
+  const db = getDb();
+  const info = db.prepare(`
+    UPDATE social_subjects
+    SET status = 'dead', last_assistant_initiated_at = NULL, updated_at = datetime('now')
+    WHERE person_slack_id = ? AND status = 'live'
+      AND relevant_until IS NOT NULL
+      AND date(relevant_until) < date('now')
+  `).run(personSlackId);
+  if (info.changes > 0) {
+    logger.info('Social subject(s) expired — relevant_until passed', {
+      personSlackId, count: info.changes,
+    });
+  }
+}
 
 export function createSubject(params: {
   ownerUserId: string;
@@ -322,32 +482,7 @@ export function createSubject(params: {
   const db = getDb();
   const id = `subj_${params.personSlackId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-  // Cap enforcement: at most MAX_ACTIVE_SUBJECTS_PER_CATEGORY live rows per
-  // (person, category). At cap, evict the least-recently-touched live
-  // subject (subjects no longer carry a score to break ties on).
-  const activeCount = db.prepare(`
-    SELECT COUNT(*) as n FROM social_subjects
-    WHERE owner_user_id = ? AND person_slack_id = ?
-      AND category_id = ? AND status = 'live'
-  `).get(params.ownerUserId, params.personSlackId, params.categoryId) as { n: number };
-  if (activeCount.n >= MAX_ACTIVE_SUBJECTS_PER_CATEGORY) {
-    const evictRow = db.prepare(`
-      SELECT id FROM social_subjects
-      WHERE owner_user_id = ? AND person_slack_id = ?
-        AND category_id = ? AND status = 'live'
-      ORDER BY last_touched_at ASC
-      LIMIT 1
-    `).get(params.ownerUserId, params.personSlackId, params.categoryId) as { id: string } | undefined;
-    if (evictRow) {
-      db.prepare(`
-        UPDATE social_subjects SET status = 'dead', updated_at = datetime('now')
-        WHERE id = ?
-      `).run(evictRow.id);
-      logger.info('Social subject evicted (cap reached)', {
-        evictedId: evictRow.id, personSlackId: params.personSlackId, categoryId: params.categoryId,
-      });
-    }
-  }
+  evictLruLiveSubjectIfAtCap(params.ownerUserId, params.personSlackId, params.categoryId);
 
   db.prepare(`
     INSERT INTO social_subjects (
@@ -379,6 +514,10 @@ export function createSubject(params: {
     delta: 1,
   });
 
+  // Owner design 2026-08-30 — a subject landing in this category answers (or
+  // moots) any standing in-place raise on it: clear the marker/counter.
+  resetCategoryRaiseState(params.ownerUserId, params.personSlackId, params.categoryId);
+
   const row = db.prepare(`SELECT * FROM social_subjects WHERE id = ?`).get(id) as SocialSubject;
   logger.info('Social subject created', {
     id, label: params.label, categoryId: params.categoryId,
@@ -394,6 +533,7 @@ export function getSubjectById(subjectId: string): SocialSubject | null {
 }
 
 export function getActiveSubjectsForPersonCategory(personSlackId: string, categoryId: string): SocialSubject[] {
+  sweepExpiredSubjectsForPerson(personSlackId);
   const db = getDb();
   return db.prepare(`
     SELECT * FROM social_subjects
@@ -403,6 +543,7 @@ export function getActiveSubjectsForPersonCategory(personSlackId: string, catego
 }
 
 export function getActiveSubjectsForPerson(personSlackId: string): SocialSubject[] {
+  sweepExpiredSubjectsForPerson(personSlackId);
   const db = getDb();
   return db.prepare(`
     SELECT * FROM social_subjects
@@ -420,6 +561,7 @@ export function getActiveSubjectsForPerson(personSlackId: string): SocialSubject
  * proactive-social caller that must never raise a dead topic.
  */
 export function getAllSubjectsForPerson(personSlackId: string): SocialSubject[] {
+  sweepExpiredSubjectsForPerson(personSlackId);  // live/dead split shown must be post-expiry truth
   const db = getDb();
   return db.prepare(`
     SELECT * FROM social_subjects
@@ -485,10 +627,11 @@ export function recordSubjectAnswered(subjectId: string, touchedBy: SubjectTouch
 /**
  * The assistant raised this subject and the person's next chat did NOT touch
  * it (pivot) — an unanswered raise. +1 to unanswered_raises; at
- * MAX_UNANSWERED_RAISES (2) the subject dies. No time-based decay anywhere
- * (answer 14) — this is the ONLY way a subject dies short of an explicit
- * reject (capturePass.ts). Replaces both the old 72h-window
- * applyIgnoredRaiseDecay and the weekly runWeeklyDecay sweep.
+ * MAX_UNANSWERED_RAISES (2) the subject dies. Replaces both the old
+ * 72h-window applyIgnoredRaiseDecay and the weekly runWeeklyDecay sweep.
+ * The other paths into `dead`: an explicit reject (capturePass.ts), the
+ * per-category cap eviction, and — since 2026-08-30 — a time-bound subject's
+ * `relevant_until` passing (sweepExpiredSubjectsForPerson above).
  */
 export function recordSubjectUnanswered(subjectId: string): SocialSubject | null {
   const db = getDb();
@@ -496,7 +639,14 @@ export function recordSubjectUnanswered(subjectId: string): SocialSubject | null
   if (!current) return null;
 
   const nextCount = current.unanswered_raises + 1;
-  const nextStatus: SubjectStatus = nextCount >= MAX_UNANSWERED_RAISES ? 'dead' : 'live';
+  // Never resurrect: a subject already dead (explicit reject, cap eviction,
+  // relevant_until expiry) stays dead — this call may still land on one via
+  // getMostRecentRaisedSubject's status-blind read (logEngagement.ts pivot)
+  // when the subject died between the raise and its resolution. Before this
+  // guard, a rejected subject with its raise marker still standing was
+  // flipped BACK to live by the very next pivot (count 0→1 < 2 → 'live').
+  const nextStatus: SubjectStatus = current.status === 'dead' || nextCount >= MAX_UNANSWERED_RAISES
+    ? 'dead' : 'live';
 
   db.prepare(`
     UPDATE social_subjects
@@ -517,15 +667,72 @@ export function recordSubjectUnanswered(subjectId: string): SocialSubject | null
  * Kill a subject outright — the person explicitly waved it off ("not
  * relevant" / "stop"), or the reconciler classified the content as work and
  * is rejecting an existing row that was wrongly capturing it. Distinct from
- * the raise-counter path above: this is immediate, not a count.
+ * the raise-counter path above: this is immediate, not a count. Also clears
+ * any standing raise marker — the reject IS the raise's resolution, so it
+ * must not linger for a later pivot pass to "resolve" again (see the
+ * never-resurrect guard in recordSubjectUnanswered).
  */
 export function markSubjectDead(subjectId: string): SocialSubject | null {
   const db = getDb();
   db.prepare(`
-    UPDATE social_subjects SET status = 'dead', updated_at = datetime('now')
+    UPDATE social_subjects
+    SET status = 'dead', last_assistant_initiated_at = NULL, updated_at = datetime('now')
     WHERE id = ?
   `).run(subjectId);
   return getSubjectById(subjectId);
+}
+
+/**
+ * Owner design 2026-08-30 — REVIVE a dead subject the person genuinely
+ * re-raised themselves (L12: self-raised again = positive, revives above
+ * where it died; L11: never a duplicate row for the same subject). Called by
+ * the reconciler (capturePass.ts) when Haiku matches a dead row shown in its
+ * inactive list. Resets the raise counter, clears any stale raise marker,
+ * records the touch, and clears the category's in-place raise state — the
+ * person re-engaging with the subject IS engagement with its category.
+ *
+ * `relevant_until` is deliberately NOT cleared: a time-bound subject revived
+ * by a retrospective mention ("the trip was great") re-retires at the next
+ * sweep unless the reconciler also emitted a fresh date — the row still got
+ * the summary/beat writes, which is the point of matching over duplicating.
+ *
+ * Respects the 5-live-per-category cap via the same LRU eviction as create.
+ */
+export function reviveSubject(subjectId: string, touchedBy: SubjectToucher): SocialSubject | null {
+  const db = getDb();
+  const current = getSubjectById(subjectId);
+  if (!current) return null;
+  if (current.status === 'live') return current;
+
+  evictLruLiveSubjectIfAtCap(current.owner_user_id, current.person_slack_id, current.category_id);
+  db.prepare(`
+    UPDATE social_subjects
+    SET status = 'live', unanswered_raises = 0,
+        last_touched_at = datetime('now'), last_touched_by = @touched_by,
+        last_assistant_initiated_at = NULL,
+        updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ id: subjectId, touched_by: touchedBy });
+  resetCategoryRaiseState(current.owner_user_id, current.person_slack_id, current.category_id);
+  logger.info('Social subject revived — person re-raised it themselves', {
+    subjectId, label: current.label,
+  });
+  return getSubjectById(subjectId);
+}
+
+/**
+ * Owner design 2026-08-30 — set/refresh a subject's calendar expiry. Written
+ * by the reconciler (capturePass.ts) from the same Haiku call that decides
+ * match/create; `relevantUntil` is already validated upstream to a strict
+ * YYYY-MM-DD (a structured string, W4-legal regex). Never clears — an
+ * omitted date leaves the stored fact standing.
+ */
+export function updateSubjectRelevantUntil(subjectId: string, relevantUntil: string): void {
+  const db = getDb();
+  db.prepare(`
+    UPDATE social_subjects SET relevant_until = @ru, updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ id: subjectId, ru: relevantUntil });
 }
 
 /**

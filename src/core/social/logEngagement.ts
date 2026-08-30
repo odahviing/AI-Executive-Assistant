@@ -16,8 +16,11 @@
  *       · doesn't match (pivot)  → no category movement; the SUBJECT's
  *         unanswered_raises +1, dies at 2 (recordSubjectUnanswered)
  *
- * No time-based movement anywhere (answer 14) — a score or a death only ever
- * happens in response to something that actually occurred in a chat.
+ * No time-based ENGAGEMENT movement anywhere (answer 14) — a score only ever
+ * moves in response to something that actually occurred in a chat. (The one
+ * calendar-driven death, `social_subjects.relevant_until` — owner design
+ * 2026-08-30 — is a stored date fact about the subject itself, swept in
+ * db/socialSubjects.ts; it is not an engagement signal and not this file's.)
  */
 
 import {

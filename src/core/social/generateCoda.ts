@@ -217,11 +217,14 @@ async function generateSocialCoda(params: {
    *  whenever mode is 'continue' or 'raise_new' — see `groundCoda`. */
   grounding: CodaGrounding;
   /**
-   * Bug 2.2 — this person's OTHER live subjects in the same category as the
-   * one being continued (real DB labels, excluding the subject itself), for
-   * `continue` mode only. Additional real grounding the model MAY draw on
-   * for personalization/variety — never a substitute for the subject-
-   * specific search grounding above, and never invented content.
+   * Bug 2.2 — this person's OTHER live subjects in the same category (real
+   * DB labels). For `continue` mode: excludes the subject being continued;
+   * context the model MAY draw on for personalization/variety. For
+   * `raise_new` into an ACTIVE category (owner design 2026-08-30, stage 2's
+   * new-subject branch): everything already on file there, handed over so
+   * "something new in this category" doesn't re-ask about a subject Maelle
+   * already tracks. Never a substitute for the search grounding above, and
+   * never invented content.
    */
   otherCategorySubjectLabels?: string[];
   /**
@@ -258,7 +261,9 @@ async function generateSocialCoda(params: {
   // subject-specific grounding above, and these are stored labels, not
   // invented content, so this doesn't touch the anti-fabrication guard.
   const otherSubjectsLine = otherCategorySubjectLabels && otherCategorySubjectLabels.length > 0
-    ? `This person's other subjects in this same category, for context only, mention only if it fits naturally: ${otherCategorySubjectLabels.join(', ')}.`
+    ? (directive.mode === 'raise_new'
+      ? `Already on file in this category, tracked separately — bring up something NEW in the category, not these: ${otherCategorySubjectLabels.join(', ')}.`
+      : `This person's other subjects in this same category, for context only, mention only if it fits naturally: ${otherCategorySubjectLabels.join(', ')}.`)
     : '';
 
   // gh#198 (answer 11) — the shape is the model's and the topic's call: a
@@ -445,6 +450,23 @@ export async function composeSocialCoda(
       } catch (err) {
         logger.warn('Coda other-subjects lookup threw — proceeding without it', { err: String(err).slice(0, 200) });
       }
+    } else if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
+      // Owner design 2026-08-30 — a raise_new can now target an ACTIVE
+      // category (stage 2's 50% new-subject branch, or a dry category with
+      // standing). Hand the composer whatever live subjects already exist
+      // there so "something new" doesn't re-ask about a subject already on
+      // file. Empty for a dormant category — nothing on file is the normal
+      // case there, and the line simply doesn't render.
+      try {
+        const category = getCategoryByLabel(pending.directive.categoryLabel);
+        if (category) {
+          const labels = getActiveSubjectsForPersonCategory(pending.personSlackId, category.id)
+            .map(s => s.label);
+          if (labels.length > 0) otherCategorySubjectLabels = labels;
+        }
+      } catch (err) {
+        logger.warn('Coda category-subjects lookup threw — proceeding without it', { err: String(err).slice(0, 200) });
+      }
     }
 
     const coda = await generateSocialCoda({
@@ -464,8 +486,12 @@ export async function composeSocialCoda(
     // untouched category tomorrow. Deliberately BEFORE the validator below:
     // even a candidate the validator later drops used up this category's one
     // free rotation slot, which is a harmless trade against the alternative
-    // (re-asking the same thing on a loop). No-op for `continue` — only
-    // `raise_new` ever names a category with nothing behind it yet.
+    // (re-asking the same thing on a loop). Owner design 2026-08-30 — for a
+    // raise_new into an ACTIVE category (an in-place raise) the same call's
+    // `last_raise_attempt_at` stamp is the marker the picker's lazy resolve
+    // pass judges the raise's silence by (recordCategoryRaiseUnanswered —
+    // two ignored in-place raises kill the category). Never fires for
+    // `continue` — that mode's silence is judged on its subject row.
     if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
       try {
         const category = getCategoryByLabel(pending.directive.categoryLabel);
