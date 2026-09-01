@@ -2,7 +2,7 @@
 
 ```
 Since 4.8.4 — 4 dispatches: 3 owner-triggered builds, 1 hand-run nightly pass replacing the disabled cron
-out: 11 built · 0 confirmed-other-lane · 1 needs-owner-decision · 1 bounced · 5/5 joint-traced · 9 discoveries queued
+out: 11 built · 0 confirmed-other-lane · 1 needs-owner-decision · 0 bounced · 5/5 joint-traced · 9 discoveries queued
 board: 7 open rows — 0 still-real · 7 need a re-read · 0 cite no file · 7 rulable · 6 queued and self-draining   (node scripts/ledger-stats.cjs --open)
 ```
 **1 row awaits you** — a documentation-convention question, not a defect; everything else on the board drains itself into the next build.
