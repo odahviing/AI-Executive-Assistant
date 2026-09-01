@@ -8,10 +8,13 @@
  * (relaxed=true for create/move_meeting, confirm_outside_window=true for
  * book_floating_block) so the action actually executes.
  *
- * This module is the replay engine. It re-creates the SkillContext that the
- * original tool handler expects, then calls executeToolCall on the registered
- * SchedulingSkill (the direct-ops home for create_meeting / move_meeting) or
- * CalendarHealthSkill (book_floating_block).
+ * This module is the replay engine. For the meeting tools it re-creates the
+ * SkillContext the original tool handler expects, then calls executeToolCall
+ * on the registered SchedulingSkill (the direct-ops home for create_meeting /
+ * move_meeting) or CalendarHealthSkill (book_floating_block). One tool,
+ * `promote_timezone_temp`, is not a skill call at all — it is a direct
+ * db/people.ts write (see the branch below), handled before any SkillContext
+ * is built.
  *
  * Errors PROPAGATE — they don't silently log+swallow. The resolver wraps each
  * call in try/catch and keeps the request in `awaiting_owner` on failure so
@@ -98,6 +101,36 @@ export interface RunDeferredActionInput {
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
   const { ownerUserId, profile, tool, args, requestId, originChannel, originThreadTs, surface } = input;
+
+  // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — NOT a
+  // meeting-skill tool call: a direct write through the ONE door out of the
+  // always-temp divert (db/people.ts's promoteTimezoneTempById), fired only
+  // on the owner's explicit yes to raiseTimezonePersistenceAsks
+  // (core/requests/runner.ts). No Slack connection or SkillContext needed, so
+  // this is handled before any of that machinery below. THROWS (never
+  // swallows) on a refusal — same contract as the meeting-tool path: the
+  // resolver keeps the request awaiting_owner rather than telling the owner
+  // "done" for a write that didn't happen.
+  if (tool === 'promote_timezone_temp') {
+    const personId = typeof args.person_id === 'string' ? args.person_id : '';
+    const expectedValue = typeof args.expected_value === 'string' ? args.expected_value : '';
+    if (!personId || !expectedValue) {
+      throw new ReplayToolError('promote_timezone_temp: missing person_id/expected_value', { error: 'bad_args' });
+    }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { promoteTimezoneTempById } = require('../../db/people') as typeof import('../../db/people');
+    const outcome = promoteTimezoneTempById(personId, expectedValue);
+    // 'applied' / 'already_set' are the only non-refusals. 'stale_streak' (the
+    // streak moved on between ask and answer), 'refused_lower_authority',
+    // 'no_value', 'no_person' are all refusals to surface, not swallow.
+    if (outcome !== 'applied' && outcome !== 'already_set') {
+      throw new ReplayToolError(`promote_timezone_temp refused: ${outcome}`, { error: outcome });
+    }
+    logger.info('runDeferredAction — promote_timezone_temp replay completed', {
+      requestId, personId, expectedValue, outcome,
+    });
+    return { promoted: true, outcome };
+  }
 
   // Resolve the Slack connection so meeting handlers can shadow-DM the owner.
   const slackConn = getConnection(ownerUserId, 'slack');

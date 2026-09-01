@@ -27,3 +27,15 @@
 {"ts":"2026-08-29T23:06:21.617Z","runId":"wf_00ed9907-676","stamp":"triggered","trigger":"user"}
 {"ts":"2026-08-29T23:39:22.243Z","runId":"wf_00ed9907-676","stamp":"results-in"}
 {"ts":"2026-08-29T23:42:44.610Z","runId":"wf_00ed9907-676","stamp":"report-written","headline":"Run wf_00ed9907-676 - in: 0 tickets, 4 days of logs, 2 backlog re-reads / out: 4 built, 0 already-fixed, 0 bounced, 0 converted, 3 queued / board: net +1 -> 6 open rows / 2 rows await you","pendingOwner":2}
+{"ts":"2026-08-30T23:04:24.391Z","runId":"wf_fcb5c775-389","stamp":"triggered","trigger":"cron"}
+{"ts":"2026-08-30T23:58:17.310Z","runId":"wf_fcb5c775-389","stamp":"results-in"}
+{"ts":"2026-08-30T23:59:44.509Z","runId":"wf_fcb5c775-389","stamp":"report-written","headline":"Run wf_fcb5c775-389 — in: 0 tickets · 1 day of logs · 1 backlog re-read\nout: 4 built · 1 already-fixed · 0 built-with-gap · 1 bounced · 5/5 joint-traced · 0 converted · 1 queued\nboard: net -2 -> 5 open rows -- 3 still-real, 2 need a re-read, 0 cite no file, 5 rulable, 0 waiting on a verb\n4 rows await you: 1 from tonight, 3 re-surfaced, 0 found by the loop","pendingOwner":4}
+{"ts":"2026-08-31T19:56:05.007Z","runId":"wf_c86ac645-5f6","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-31T21:23:13.002Z","runId":"wf_c86ac645-5f6","stamp":"results-in"}
+{"ts":"2026-08-31T21:39:16.784Z","runId":"wf_9c4b7ab0-142","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-31T22:14:09.550Z","runId":"wf_9c4b7ab0-142","stamp":"results-in"}
+{"ts":"2026-08-31T22:19:57.272Z","runId":"wf_1b1cfede-7d2","stamp":"triggered","trigger":"user"}
+{"ts":"2026-08-31T22:57:56.059Z","runId":"wf_1b1cfede-7d2","stamp":"results-in"}
+{"ts":"2026-08-31T23:09:49.070Z","runId":"wf_f81323f1-791","stamp":"triggered","trigger":"cron"}
+{"ts":"2026-09-01T00:08:20.569Z","runId":"wf_f81323f1-791","stamp":"results-in"}
+{"ts":"2026-09-01T00:11:59.960Z","runId":"wf_f81323f1-791","stamp":"report-written","headline":"Run wf_f81323f1-791 -- in: 0 tickets, 1 day of logs, 9 backlog re-reads / out: 10 built, 0 already-fixed, 0 built-with-gap, 7 bounced since wrap (1 this run), 1/1 joint-traced, 0 converted, 1 queued / board: net -8 to 1 open row / 1 rows await you (self-draining queue)","pendingOwner":1}

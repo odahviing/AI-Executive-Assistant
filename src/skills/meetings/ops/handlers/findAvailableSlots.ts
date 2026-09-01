@@ -108,7 +108,7 @@ function attendeeHoursGroundingNotes(
 ): string[] | undefined {
   if (!blockedBy || blockedBy.length === 0 || !attendeeAvailability || attendeeAvailability.length === 0) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { attendeeTzForDay } = require('../../../../utils/attendeeAvailability') as
+  const { attendeeTzForDay, tzTempDifferingForDay } = require('../../../../utils/attendeeAvailability') as
     typeof import('../../../../utils/attendeeAvailability');
   const notes: string[] = [];
   for (const b of blockedBy) {
@@ -128,8 +128,31 @@ function attendeeHoursGroundingNotes(
       const hoursLabel = entry.assumed
         ? 'assumed hours (no profile on file for this attendee — a default, not confirmed)'
         : 'stated hours';
+      // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a real stored profile
+      // exists, but a later, differing auto-tier reading (TTL'd) currently
+      // exists for the permanent one these hours are computed from. Surface
+      // it rather than asserting the day's exclusion as unqualified fact.
+      // Attribute by `source` (2026-09-01, capturepass-haiku-zone dep) — the
+      // reading can now come from a chat mention, not only the Slack profile
+      // sync, so the hedge must not hard-code "Slack".
+      // Resolved PER DAY (`tzTempDifferingForDay`, 2026-09-01): on a travel day
+      // `attendeeTz` above IS the trip zone, so hedging it as "their timezone
+      // on file" against a reading measured on the PERMANENT zone describes a
+      // conversion this note did not do — and reads as a flat self-
+      // contradiction ("on file is America/New_York, but we currently read
+      // America/New_York") whenever the passive reading came from a client in
+      // the destination.
+      let tzTempHedge = '';
+      const tzTempForDate = tzTempDifferingForDay(entry, date);
+      if (tzTempForDate) {
+        const t = tzTempForDate;
+        const readingClause = t.source === 'chat'
+          ? `they mentioned ${t.tempZone} in a recent chat`
+          : `Slack currently shows them as ${t.tempZone}`;
+        tzTempHedge = ` Heads up: their timezone on file is ${attendeeTz}, but ${readingClause} (through ${t.expiresAt}) — say this is an assumption and ask if that's changed, don't assert the exclusion as settled fact.`;
+      }
       notes.push(
-        `${b.email}'s ${hoursLabel} ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded${entry.assumed ? ', but say plainly these are ASSUMED, not confirmed, if asked' : ''}; do NOT recompute the conversion yourself.`,
+        `${b.email}'s ${hoursLabel} ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded${entry.assumed ? ', but say plainly these are ASSUMED, not confirmed, if asked' : ''}; do NOT recompute the conversion yourself.${tzTempHedge}`,
       );
     } catch {
       // best-effort grounding note — day_summary still has top_reasons/blocked_by without it
@@ -187,7 +210,7 @@ function renderAttendeeStatusLine(
 }
 
 function renderAttendeeConflictLine(
-  conflict: { email: string; reason: string; assumed?: boolean },
+  conflict: { email: string; reason: string; assumed?: boolean; tzTempDiffering?: { tempZone: string; expiresAt: string; source: 'slack' | 'chat' } },
   viewerEmail: string | null | undefined,
 ): string {
   const you = !!viewerEmail && conflict.email.toLowerCase() === viewerEmail;
@@ -199,6 +222,20 @@ function renderAttendeeConflictLine(
       return you
         ? 'probably outside your working hours then — though I\'m not certain of your actual schedule'
         : `probably outside ${name}'s working hours then — though I'm not certain of their actual schedule`;
+    }
+    // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a real stored profile
+    // exists but a differing, TTL'd auto-tier reading currently exists —
+    // surface the assumption rather than asserting the exclusion as settled
+    // fact. Attribute by `source` (2026-09-01, capturepass-haiku-zone dep) —
+    // the reading can now come from a chat mention, never hard-code "Slack".
+    if (conflict.tzTempDiffering) {
+      const t = conflict.tzTempDiffering;
+      const readingClause = t.source === 'chat'
+        ? (you ? `you mentioned ${t.tempZone} in a recent chat` : `they mentioned ${t.tempZone} in a recent chat`)
+        : (you ? `Slack currently shows you on ${t.tempZone}` : `Slack currently shows them on ${t.tempZone}`);
+      return you
+        ? `probably outside your working hours then, assuming your usual zone — ${readingClause} (through ${t.expiresAt}), flag me if that's changed`
+        : `probably outside ${name}'s working hours then, assuming their usual zone — ${readingClause} (through ${t.expiresAt}), flag me if that's changed`;
     }
     return you ? 'that\'s outside your working hours' : `that's outside ${name}'s working hours`;
   }
@@ -922,6 +959,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 entry.timezone = ov.tz.trim();
                 entry.homeTimezone = ov.tz.trim();
                 entry.travelWindow = undefined;
+                // Same rule as `tzTempDifferingForDay`, third path: the hedge
+                // is a discrepancy against the PERMANENT stored zone, and this
+                // override just replaced the zone every clip below now runs
+                // in. Keeping it would hedge the owner's own stated zone back
+                // at him ("flag me if that's changed" — he just said what it
+                // is), and reads as a contradiction whenever the reading and
+                // the zone he stated are the same one. Owner tier outranks the
+                // auto-tier reading (M12), so there is nothing left to hedge.
+                entry.tzTempDiffering = undefined;
               }
               // A conversational override IS a real statement (the owner said
               // it) — clear the #M3 assumed-default flag so downstream

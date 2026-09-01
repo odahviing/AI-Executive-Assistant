@@ -45,8 +45,9 @@ import { profileDualClock } from '../../utils/weTimeResolver';
 import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner } from './findMeetingOwner';
-import { getCurrentTravel, searchPeopleMemory } from '../../db/people';
+import { getCurrentTravel, getCurrentTravelById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory } from '../../db/people';
 import { getVenueTravelTimeMinutes, isCompanyLocation } from '../../db/venues';
+import { inferTimezoneFromStateStatic } from '../../utils/locationTz';
 import logger from '../../utils/logger';
 import type { BookingRequest } from './bookingRequest';
 
@@ -320,25 +321,129 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // Travel state lookup
   const ownerTravel = getCurrentTravel(profile.user.slack_user_id);
   let anyParticipantRemote = !!ownerTravel;
+  const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
+  // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a participant currently on
+  // a TEMP timezone reading (a later auto-tier value — Slack sync or chat
+  // capture — differing from their established PERMANENT zone, TTL'd — see
+  // getEffectiveTimezoneById) with a booking inside the TTL window is
+  // surfaced, never silently trusted. Filled by both loops below, folded
+  // into the `book` action's overrideNotice.
+  const tzAssumptionNotes: string[] = [];
+  // Identity-keyed, not string-keyed: the participant loop below and the
+  // external-tz loop further down can both see the SAME person (an external
+  // attendee is in `nonOwnerParticipants` AND in `externalEmails`), and they
+  // build the note text from different name sources (`p.name` vs
+  // `exact.name`) — an exact-string dedupe check between them silently missed
+  // the case where those two renderings differ, speaking one person's tz
+  // assumption twice in the same confirmation. `person_id` is the same value
+  // in both loops for the same person, so it's the one key that's actually
+  // reliable to dedupe on.
+  const tzAssumptionNotedIds = new Set<string>();
+  // v4.8.x — mirrors attendeeAvailability.ts's own gate for whether a travel
+  // record actually swapped the attendee's effective zone for the search's
+  // clip: resolvable via the static map AND different from home. A raw
+  // `getCurrentTravelById` hit is NOT enough to suppress the tempDiffering
+  // hedge below — an unresolvable destination (map miss) or a same-zone trip
+  // both leave the clip on the home zone (attendeeTzForDay falls through to
+  // homeTimezone in both cases), so treating "traveling" alone as "the search
+  // already swapped zones" silently dropped the ONLY hedge for exactly those
+  // two cases — the owner got no signal at all that a guess was in play.
+  const travelActuallySwappedZone = (travel: { location: string } | null, homeTz: string | undefined): boolean => {
+    if (!travel) return false;
+    const travelTz = inferTimezoneFromStateStatic(travel.location);
+    return !!travelTz && travelTz !== homeTz;
+  };
+  // v4.8.x (2026-09-01, gh full-maayan-symptom) — this loop used to `break` the
+  // instant `anyParticipantRemote` went true (whether that arrived pre-set from
+  // the owner's OWN travel above, or from an earlier participant in this same
+  // loop), which skipped every tempDiffering check after that point — on an
+  // owner-travel booking it skipped ALL of them, since the flag is already true
+  // before the first iteration. `anyParticipantRemote` only needs to be
+  // DETERMINED once; it must never gate whether a participant's tzAssumptionNotes
+  // are collected. Every non-owner participant is now checked, always.
   for (const p of nonOwnerParticipants) {
-    if (anyParticipantRemote) break;
-    if (p.slack_id) {
-      const travel = getCurrentTravel(p.slack_id);
-      if (travel) { anyParticipantRemote = true; break; }
+    const pEmail = (p.email ?? '').trim().toLowerCase();
+    // v4.8.x (o#262) — resolve person_id from slack_id OR email so a
+    // pure-email external (no slack_id) is travel-checked too. The old
+    // `p.slack_id`-only gate silently skipped every such external —
+    // `getCurrentTravelById` is person_id-keyed and works for both.
+    let personId: string | null = p.slack_id ? personIdForSlackId(p.slack_id) : null;
+    if (!personId && pEmail) {
+      const match = searchPeopleMemory(pEmail).find(x => (x.email ?? '').toLowerCase() === pEmail);
+      if (match) personId = match.person_id;
+    }
+    if (!personId) continue;
+    const eff = getEffectiveTimezoneById(personId);
+    // ONE travel read, TWO consumers: the remote flag just below, and the
+    // tz-assumption guard at the bottom of the loop. Skipped entirely when
+    // neither needs it (flag already true AND no temp reading to hedge) — a
+    // per-participant row read is not free.
+    const travel = (!anyParticipantRemote || eff.tempDiffering)
+      ? getCurrentTravelById(personId)
+      : null;
+    // v4.8.x — a travel record alone doesn't make this attendee "remote" for
+    // THIS meeting: a guest traveling TO the owner's own city/zone is heading
+    // toward the room, not away from it — the opposite of what this flag
+    // exists to catch (same class as the stored-tz-is-not-live-location bug:
+    // a stored signal read without checking what it actually resolves to
+    // right now). Only flip remote when the destination is unresolvable (safe
+    // default — we can't prove they're nearby) or resolves somewhere other
+    // than the owner's own zone.
+    if (travel) {
+      const travelTz = inferTimezoneFromStateStatic(travel.location);
+      if (!travelTz || travelTz !== profile.user.timezone) anyParticipantRemote = true;
     }
     // #M5 (2026-07-23) — a cross-TZ INTERNAL attendee (a colleague whose home zone
     // differs from the owner's, not just travelers) makes this a de-facto remote
-    // meeting → online, not the office-day default. Mirrors the external-different-TZ
-    // path. Only fires on a KNOWN different TZ; a no-TZ attendee (assumed owner-frame
-    // per #M3) correctly stays local. Fail-open.
-    const pEmail = (p.email ?? '').trim().toLowerCase();
-    if (pEmail) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { searchPeopleMemory } = require('../../db/people') as typeof import('../../db/people');
-        const m = searchPeopleMemory(pEmail).find(x => (x.email ?? '').toLowerCase() === pEmail);
-        if (m?.timezone && m.timezone !== profile.user.timezone) anyParticipantRemote = true;
-      } catch { /* fail-open — no cross-TZ signal */ }
+    // meeting → online, not the office-day default. v4.8.x (o#262) — scoped to
+    // INTERNAL (same email domain as owner) now: this used to run on EXTERNAL
+    // attendees too, so a visiting external whose stored home TZ merely differs
+    // from the owner's got silently forced online — a different HOME timezone is
+    // not evidence they're not physically in the room. External TZ handling has
+    // its own dedicated, nuanced path below (externalAttendeeInDifferentTz,
+    // feeding resolveLocation's office-day branch); this shortcut must not
+    // preempt it. Reads the PERMANENT stored zone (getEffectiveTimezoneById),
+    // never a raw column read, so a transient auto-tier reading (Slack or
+    // chat) can't trigger this by itself — only surfaced via tzAssumptionNotes
+    // below.
+    if (!anyParticipantRemote) {
+      const isInternal = !!pEmail && pEmail.endsWith('@' + ownerDomain);
+      if (isInternal && eff.timezone && eff.timezone !== profile.user.timezone) anyParticipantRemote = true;
+    }
+    // v4.8.x (2026-09-01) — NOT for a person on an active trip. The hedge
+    // claims she assumed their ESTABLISHED permanent zone; for a traveller
+    // that is a false account of her own reasoning, because the search already
+    // swapped the trip location's zone into their working-hours clip
+    // (`attendeeAvailability.ts` travel branch → `attendeeTzForDay`). Saying it
+    // anyway invites the owner to "correct" a zone that is already handled, and
+    // his reply would then pin the trip zone permanently at OWNER rank — the
+    // exact invariant `db/people.ts` states above `TimezoneTemp` ("folding them
+    // into one reader would make 'assuming they're on their permanent zone' a
+    // false claim about a person whose zone the search already swapped"). The
+    // two signals CAN co-exist on one row: Slack's users.info sync writes the
+    // temp reading from a destination-zone client while the dated travel record
+    // stands. The travel record is the stated, dated signal and outranks the
+    // passive reading (M12), so it needs no hedge — but ONLY when the trip
+    // record actually changed the effective zone the search used
+    // (`travelActuallySwappedZone`, mirroring attendeeAvailability.ts's own
+    // `travelTz && travelTz !== resolvedTz` gate). An active-trip record whose
+    // location the static map can't resolve, or whose zone happens to equal
+    // home, leaves the clip on the home/permanent zone exactly like a
+    // non-traveler — suppressing the hedge in those two cases on `travel`
+    // alone left the owner with NO signal at all that a guess was in play.
+    if (eff.tempDiffering && !travelActuallySwappedZone(travel, eff.timezone) && !tzAssumptionNotedIds.has(personId)) {
+      // Attribute by `source` (2026-09-01, capturepass-haiku-zone dep): the
+      // Haiku chat-capture pass now also writes this reading, so it must
+      // never be hard-coded as "Slack" — that would be a false claim about
+      // where the reading came from in exactly the sentence that exists to
+      // be honest about it.
+      const readingClause = eff.tempDiffering.source === 'chat'
+        ? `they mentioned ${eff.tempDiffering.value} in a recent chat`
+        : `Slack currently reads ${eff.tempDiffering.value}`;
+      tzAssumptionNotes.push(
+        `assuming ${p.name || pEmail || 'this attendee'} is on their established ${eff.timezone ?? 'unknown'} zone — ${readingClause} (through ${eff.tempDiffering.expiresAt}), flag me if that's changed`,
+      );
+      tzAssumptionNotedIds.add(personId);
     }
   }
 
@@ -473,7 +578,6 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let alternativesRequestedDay = '';
   let roomAskText: string | undefined;
   if (input.slotStartIso) {
-    const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
     const externalEmails: string[] = [];
     for (const p of nonOwnerParticipants) {
       const e = (p.email ?? '').toLowerCase();
@@ -481,10 +585,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
     const hasExternal = externalEmails.length > 0;
     // Decide if ANY external attendee is in a known-different TZ. Lookup is
-    // best-effort: people_memory exact-email match → row.timezone (IANA). If
-    // any external is known-different from owner's TZ, fire the auto-online
-    // path (3a). If all externals are same-TZ → ask. If any external TZ is
-    // unknown AND no external is known-different → ask.
+    // best-effort: people_memory exact-email match → the PERMANENT stored zone
+    // (getEffectiveTimezoneById — never a raw column read, so a transient
+    // auto-tier reading, Slack or chat, can't flip this). If any external is
+    // known-different from owner's TZ, fire the auto-online path (3a). If all externals are
+    // same-TZ → ask. If any external TZ is unknown AND no external is
+    // known-different → ask. v4.8.x (o#262) — no early `break` on the first
+    // different match now: every external still gets checked for an active
+    // tempDiffering reading, so one sitting behind the first different match is
+    // never missed (travellers excepted — see the guard on the push).
     let externalAttendeeInDifferentTz: boolean | undefined = undefined;
     if (hasExternal) {
       const ownerTz = profile.user.timezone;
@@ -493,9 +602,26 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       for (const email of externalEmails) {
         const matches = searchPeopleMemory(email);
         const exact = matches.find(m => (m.email ?? '').toLowerCase() === email);
-        const tz = exact?.timezone;
+        const eff = exact ? getEffectiveTimezoneById(exact.person_id) : undefined;
+        const tz = eff?.timezone;
         if (!tz) { anyUnknown = true; continue; }
-        if (tz !== ownerTz) { anyDifferent = true; break; }
+        // Same traveller guard as the participant loop above, for the same
+        // reason: no "assuming their permanent zone" hedge for someone whose
+        // zone the search actually swapped for a trip — but only when the
+        // trip record really did (resolvable AND different from home; see
+        // `travelActuallySwappedZone`), not merely because a trip is on file.
+        if (eff?.tempDiffering && exact && !travelActuallySwappedZone(getCurrentTravelById(exact.person_id), tz) && !tzAssumptionNotedIds.has(exact.person_id)) {
+          // Attribute by `source` — same honesty fix as the participant loop
+          // above (2026-09-01, capturepass-haiku-zone dep): the chat-capture
+          // pass is now a second writer of this reading, not only Slack.
+          const readingClause = eff.tempDiffering.source === 'chat'
+            ? `they mentioned ${eff.tempDiffering.value} in a recent chat`
+            : `Slack currently reads ${eff.tempDiffering.value}`;
+          const note = `assuming ${exact.name || email} is on their established ${tz} zone — ${readingClause} (through ${eff.tempDiffering.expiresAt}), flag me if that's changed`;
+          tzAssumptionNotes.push(note);
+          tzAssumptionNotedIds.add(exact.person_id);
+        }
+        if (tz !== ownerTz) anyDifferent = true;
       }
       if (anyDifferent) externalAttendeeInDifferentTz = true;
       else if (anyUnknown) externalAttendeeInDifferentTz = undefined; // unknown → ask
@@ -1098,7 +1224,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // notice, so "booked over your optional standup" and "this double-books you
     // over X with 2 people on it" reach the owner instead of a confirmation
     // that reads identical to booking a genuinely free slot.
-    overrideNotice: [ownerOverrideNotice, unfilteredLevelNotice, optionalLevelNotice, attendeeBusyNotice, roomBusyNotice]
+    overrideNotice: [ownerOverrideNotice, unfilteredLevelNotice, optionalLevelNotice, attendeeBusyNotice, roomBusyNotice, tzAssumptionNotes.join('; ') || undefined]
       .filter(Boolean).join('; ') || undefined,
   };
 }

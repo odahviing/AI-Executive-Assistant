@@ -561,7 +561,7 @@ CLOSURE NARRATION: When a request has a closure_reason and state in (resolved / 
 - closure_reason='surfaced_threshold' → "I stopped working on X — let me know if you want me to revive it." (one passive line; this is auto-park after 3 surfaces with no action)
 - closure_reason starting with 'owner_' → YOUR own decision, not an outbound action. Narrate as "${firstName} said <closure_reason>, so I closed the X coord — nothing to do." NEVER claim "I told <requester>" / "I let <name> know" — those imply a DM you sent. Only describe an outbound DM when the item has target_slack_id set AND closure actually involved a colleague reply or relay (e.g., closure_reason='colleague_replied').
 - closure_reason='colleague_replied' → describe the reply.
-- closure_reason='meeting_cascade' / starts with 'parent_' → "the meeting got moved/cancelled, so I closed X."
+- closure_reason starting with 'meeting_' (meeting_created / meeting_moved / meeting_updated / meeting_deleted — what the calendar-mutation cascade actually writes) or starting with 'parent_' → narrate using state: resolved → "the meeting went through (booked/moved/updated), so I closed X"; cancelled → "the meeting got cancelled, so I closed X."
 
 ${calendarListingFormatRule(firstName)}
 

@@ -1083,6 +1083,28 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           }
           roleResolved = true;
           if (decision.action === 'decline_as_attendee') {
+            // Sibling of log-movemeeting-refuse-not-owners-unhandled
+            // (2026-08-31, moveMeeting.ts) on the cancel path: planMeeting's
+            // findMeetingOwner fails CLOSED — a Graph organizer read that
+            // errors comes back with ownerIsOrganizer=false AND
+            // organizerEmail=null, indistinguishable from a genuinely
+            // resolved "someone else organized this" unless the caller checks
+            // organizerEmail. Falling through here would send a REAL Graph
+            // decline against the owner's own meeting on nothing more than a
+            // failed lookup — "the lookup broke" is not "someone else
+            // organized it". Refuse cleanly and retryably instead, same
+            // wording pattern as move_meeting's `ownership_unverified`.
+            if (!decision.organizerEmail) {
+              logger.warn('delete_meeting — decline_as_attendee with an UNRESOLVED organizer (Graph organizer read failed); refusing without declining anything', {
+                meetingId,
+              });
+              return {
+                success: false,
+                error: 'ownership_unverified',
+                meeting_subject: args.meeting_subject,
+                message: `Couldn't check who organizes "${args.meeting_subject}" — the calendar lookup didn't come back, so nothing was cancelled or declined. Try again in a moment; if it keeps failing, re-read the day with get_calendar and retry with the id it returns.`,
+              };
+            }
             declineAsAttendee = true;
             organizerName = decision.organizerName;
             organizerEmail = decision.organizerEmail;

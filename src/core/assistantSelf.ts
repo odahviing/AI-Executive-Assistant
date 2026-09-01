@@ -66,6 +66,12 @@ export function seedAssistantSelf(profile: UserProfile): void {
     // upsertPersonMemory never overwrites a confirmed gender
     // (gender_confirmed=1), so re-asserting this on every reconcile is safe.
     gender: 'female',
+    // name/timezone here are OWNER-AUTHORED CONFIG (profile.assistant.name /
+    // profile.user.timezone), never a live Slack read — 'owner' rank so a
+    // later config correction always lands on the permanent column instead of
+    // being treated as a differing auto-tier sync reading and silently
+    // diverted (see upsertPersonMemory's `by` doc in db/people.ts).
+    by: 'owner',
   });
   logger.info(existing ? 'Reconciled assistant self-memory identity from profile' : 'Seeded assistant self-memory row', {
     ownerId: profile.user.slack_user_id,

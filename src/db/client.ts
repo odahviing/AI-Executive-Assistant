@@ -461,6 +461,14 @@ function initSchema(db: Database.Database): void {
   // sense. Cleared automatically once `until` is in the past.
   try { db.exec(`ALTER TABLE people_memory ADD COLUMN currently_traveling TEXT`); } catch (_) {}
 
+  // v4.8.x — timezone permanent/temp split (owner ruling 2026-08-31). Sibling
+  // to currently_traveling above: a LATER auto-tier timezone reading (Slack
+  // profile sync or the Haiku capture pass's chat extraction) that DIFFERS
+  // from the already-established (permanent) auto value is never allowed to
+  // clobber it — it lands here instead, TTL'd, self-clearing on read. See
+  // applyAutoTimezoneById / getEffectiveTimezoneById in people.ts.
+  try { db.exec(`ALTER TABLE people_memory ADD COLUMN timezone_temp TEXT`); } catch (_) {}
+
   // v2.2 — audit trail for engagement_rank changes. Small table so we can
   // answer "why is Ysrael at rank 0?". Reasons: no_reply / reply_engaged /
   // reply_brief / colleague_initiated / colleague_deflected / owner_directive.

@@ -1063,9 +1063,19 @@ const main = async () => {
   // 2026-08-10): the row correctly got swept as "a wrap landed after it", and
   // that correct behaviour read as a test failure because the fixture's own
   // premise had gone stale, not because the mechanism under test broke.
+  // X213 · UTC, same as the production call this mirrors — `--date=short` alone
+  // renders in the commit's OWN offset (this repo's is +03:00), not the UTC
+  // `stampDate()` (ledger-file.cjs) actually stamps. Deriving this fixture's
+  // date with the old, un-forced call would silently stop testing the "same
+  // day" case the moment the ACTUAL latest wrap happened to be one of the
+  // boundary commits — see the permanent regression anchor below, section 35b.
   const latestWrapDate = (() => {
     try {
-      const log = execFileSync('git', ['-C', ROOT, 'log', '--format=%ad|%s', '--date=short'], { encoding: 'utf8' })
+      const log = execFileSync(
+        'git',
+        ['-C', ROOT, 'log', '--format=%ad|%s', '--date=format-local:%Y-%m-%d'],
+        { encoding: 'utf8', env: { ...process.env, TZ: 'UTC0' } },
+      )
       const dates = log
         .split(/\r?\n/)
         .filter(Boolean)
@@ -1124,7 +1134,34 @@ const main = async () => {
   ok('the human view names what fact 2 dropped, not just a count', /fix-old-1/.test(abText), abText)
 
   // ══════════════════════════════════════════════════════════════════════════
-  // `--closed-refs` — the EXACT-REF screen for `state.pendingOverflow`.
+  // X213 — a PERMANENT regression anchor, not a synthesized fixture. Commit
+  // 6d9e9a8 ("4.8.3: A safety rule broke the question it was supposed to
+  // protect") is real, committed history that will never change: its author
+  // date is 2026-08-30T21:57:28Z — `date:"2026-08-30"` by `stampDate()`'s own
+  // UTC convention — but plain `git log --date=short` renders it
+  // `2026-08-31` (this repo's committer offset is +03:00, past local
+  // midnight). `--already-built` used the un-forced call, so a row genuinely
+  // built AFTER that wrap but stamped `"2026-08-30"` (same UTC day) read as
+  // `"2026-08-31" > "2026-08-30"` — swept, though nothing had shipped it.
+  // This is the live case that was reported and reproduced against the real
+  // ledger before this fix. BOTH directions, against the SAME real commit:
+  // ══════════════════════════════════════════════════════════════════════════
+  section("35b · X213 — `--already-built`'s wrap-date clock matches `stampDate()`'s UTC, not the committer's own offset")
+  const oldStyleDate = execFileSync('git', ['-C', ROOT, 'log', '-1', '--format=%ad', '--date=short', '6d9e9a85ee683bafbec8f7e8a503ad6a4b013bb1'], { encoding: 'utf8' }).trim()
+  const utcDate = execFileSync(
+    'git',
+    ['-C', ROOT, 'log', '-1', '--format=%ad', '--date=format-local:%Y-%m-%d', '6d9e9a85ee683bafbec8f7e8a503ad6a4b013bb1'],
+    { encoding: 'utf8', env: { ...process.env, TZ: 'UTC0' } },
+  ).trim()
+  ok('fires on the bad input: the un-forced call disagrees with UTC for this real commit', oldStyleDate !== utcDate, { oldStyleDate, utcDate })
+  ok('the UTC call gives the ledger-matching day', utcDate === '2026-08-30', utcDate)
+  const x217Tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'x217-')), 'ledger.jsonl')
+  // Built the SAME UTC day as that real wrap, by a run that happened AFTER
+  // it — must survive. Under the un-forced clock this exact row was, and
+  // would again be, wrongly dropped.
+  fs.writeFileSync(x217Tmp, JSON.stringify({ date: utcDate, runId: 'test', lane: 'matchmaker', ref: 'x217-fix', finding: 'built same UTC day as a real wrap, after it landed', rootCause: 'src/fake/x217.ts:1', invariant: 'inv-x217', verdict: 'built', state: 'built' }) + '\n')
+  const x217Json = JSON.parse(execFileSync(process.execPath, [STATS, '--already-built', '--json', '--ledger', x217Tmp], { encoding: 'utf8' }))
+  ok('stays silent on the good one: survives against REAL git history, not just a mock', x217Json.some((r) => r.ref === 'x217-fix'), x217Json)
   // Deliberately proven on the SAME kind of row `--already-built` sweeps away
   // (an old `built` ref with a real wrap since), on the SAME real git history,
   // so the two commands' disagreement on that one row is asserted directly —
@@ -1283,8 +1320,8 @@ const main = async () => {
     calledPhase(clearsOnSecondBounce.calls, 'Verify').map((c) => `${c.label}:${c.opts && c.opts.model}`),
   )
   ok(
-    'the bouncer itself is NEVER model-overridden on either recheck — only the build side escalates',
-    !('model' in (called(clearsOnSecondBounce.calls, 'bouncer:recheck(1)')[0] || {}).opts) && !('model' in (called(clearsOnSecondBounce.calls, 'bouncer:recheck2(1)')[0] || {}).opts),
+    'the recheck escalates in lockstep with the rebuild it is checking — round 2 gets fable, never a weaker-tier reviewer judging a stronger-tier fix',
+    (called(clearsOnSecondBounce.calls, 'bouncer:recheck(1)')[0] || {}).opts.model === 'opus' && (called(clearsOnSecondBounce.calls, 'bouncer:recheck2(1)')[0] || {}).opts.model === 'fable',
     calledPhase(clearsOnSecondBounce.calls, 'Verify').map((c) => `${c.label}:${JSON.stringify(c.opts && c.opts.model)}`),
   )
   ok(

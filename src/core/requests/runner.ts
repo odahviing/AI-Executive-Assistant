@@ -19,9 +19,9 @@
 import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
-import { getDueRequests, updateRequest } from '../../db/requests';
+import { getDueRequests, updateRequest, createRequest, getRequestByIdempotencyKey, buildIdempotencyKey } from '../../db/requests';
 import { getOutreachJobByRequestId } from '../../db/jobs';
-import { workTimeBaseFromNow } from '../../utils/workHours';
+import { workTimeBaseFromNow, addWorkdays } from '../../utils/workHours';
 import { isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
@@ -32,6 +32,12 @@ import type { SendOptions, SendResult } from '../../connections/types';
 import { logActivity } from './logActivity';
 import { runColleagueOofRecheck, runOofReengageReask } from './colleagueOofReengage';
 import { postOwnerDecision } from '../../utils/ownerDailyThread';
+import { composeOwnerAskText } from '../approvals/approvalCallbacks';
+import {
+  findPersistentUnaskedTimezoneDivergences,
+  markTimezoneTempAskedById,
+  type TimezonePersistenceCandidate,
+} from '../../db/people';
 import logger from '../../utils/logger';
 
 /**
@@ -77,6 +83,18 @@ export async function sweepDueRequests(opts: {
   app?: App;
   profilesByUserId: Map<string, UserProfile>;
 }): Promise<{ swept: number; closed: number; rearmed: number }> {
+  // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — raise
+  // half of the TZ-persistence ask (see raiseTimezonePersistenceAsks below).
+  // Runs on this SAME 5-min cadence — no new timer, no new loop (R1);
+  // throttled internally to hourly since it watches a 7-day-TTL signal.
+  // Independent of the due-request sweep below — a detection-query hiccup
+  // here must never block it.
+  try {
+    await raiseTimezonePersistenceAsks(opts.profilesByUserId);
+  } catch (err) {
+    logger.warn('sweepDueRequests — raiseTimezonePersistenceAsks threw — continuing', { err: String(err).slice(0, 200) });
+  }
+
   const due = getDueRequests();
   let closed = 0;
   let rearmed = 0;
@@ -902,4 +920,193 @@ async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Prom
     nextCheckHandler: 'freeform_flag_retry',
   });
   return 'rearmed';
+}
+
+/**
+ * pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — the
+ * raise/track/resolve half of the TZ-persistence ask, built on top of the
+ * detection API db/people.ts owns: `findPersistentUnaskedTimezoneDivergences`
+ * finds WHICH streaks have re-confirmed the same differing value, unbroken,
+ * across a full TTL window and haven't been asked about yet.
+ *
+ * R1 — one spine, no second waiting mechanism: this mints an ordinary
+ * kind='approval' subkind='timezone_persistence' row (state=awaiting_owner),
+ * DM'd through the SAME daily-decision-thread path (postOwnerDecision, R8)
+ * every other approval uses. The owner's yes replays deterministically (R2)
+ * via the 'promote_timezone_temp' on_approve callback — see
+ * approvalCallbacks.ts's RESOLVER_REPLAY_TOOLS and
+ * deferredActionReplay.ts's direct db/people.ts branch. A reject / silent
+ * expiry needs no further action: `on_reject` is deliberately omitted (the
+ * resolver's default is just close + notify-if-requester, and there is no
+ * requester here), and `markTimezoneTempAskedById` — called only once
+ * delivery is CONFIRMED — already blocks this exact streak from being
+ * asked again (db/people.ts's own one-ask-budget contract).
+ *
+ * Idempotency (R11 — never raise a duplicate): the key is derived from
+ * (personId, since, value) — the STREAK itself, not a timestamp — so a crash
+ * between raising the row and confirming delivery re-raises onto the SAME
+ * row on the next pass (idempotency_key UNIQUE collision → look up and
+ * retry delivery) instead of minting a second approval for one streak. A
+ * genuinely NEW streak (different `since`, because the value changed or the
+ * old streak lapsed) gets its own fresh key by construction.
+ *
+ * db/people.ts's `timezone_temp` is NOT owner-scoped (single-tenant data
+ * model — no owner_user_id column on people_memory), so this raises under
+ * whichever profile is loaded first; a later profile in the same pass sees
+ * the streak already asked once the first has raised it. Multi-owner
+ * colleague-data scoping, if that ever lands, is db/people.ts's (Librarian's)
+ * to add — not re-derived here.
+ */
+const TZ_PERSISTENCE_CHECK_INTERVAL_MS = 60 * 60 * 1000;  // hourly — a 7-day-TTL signal, not a 5-min one
+let lastTzPersistenceCheckMs = 0;
+
+async function raiseTimezonePersistenceAsks(profilesByUserId: Map<string, UserProfile>): Promise<void> {
+  const now = Date.now();
+  if (now - lastTzPersistenceCheckMs < TZ_PERSISTENCE_CHECK_INTERVAL_MS) return;
+  lastTzPersistenceCheckMs = now;
+
+  const profile = [...profilesByUserId.values()][0];
+  if (!profile) return;
+  const ownerUserId = profile.user.slack_user_id;
+
+  let candidates: TimezonePersistenceCandidate[];
+  try {
+    candidates = findPersistentUnaskedTimezoneDivergences();
+  } catch (err) {
+    logger.warn('raiseTimezonePersistenceAsks — detection query threw', { err: String(err).slice(0, 200) });
+    return;
+  }
+  if (candidates.length === 0) return;
+
+  const conn = getConnection(ownerUserId, 'slack');
+  if (!conn) return;
+
+  for (const c of candidates) {
+    try {
+      await raiseOneTimezonePersistenceAsk(c, profile, ownerUserId, conn);
+    } catch (err) {
+      logger.warn('raiseTimezonePersistenceAsks — one candidate threw, continuing', {
+        personId: c.personId, err: String(err).slice(0, 200),
+      });
+    }
+  }
+}
+
+async function raiseOneTimezonePersistenceAsk(
+  c: TimezonePersistenceCandidate,
+  profile: UserProfile,
+  ownerUserId: string,
+  conn: NonNullable<ReturnType<typeof getConnection>>,
+): Promise<void> {
+  // R4 — unlike create_approval's live-conversation asks (always raised
+  // mid-turn, so they're inherently "now"), this is a BACKGROUND sweep that
+  // can trip at any hour. Nothing here is urgent (R10 is for alarms; this is
+  // its opposite — a routine low-priority FYI), so the raise itself, not just
+  // the later midpoint nag, defaults to the owner's own work hours. Nothing
+  // is created or marked asked on a skip — the streak stays un-asked and the
+  // next hourly pass picks it back up, so it reaches him inside work hours
+  // exactly once, never lost.
+  const deferMs = Date.parse(workTimeBaseFromNow(profile));
+  if (Number.isFinite(deferMs) && deferMs > Date.now() + 60_000) {
+    logger.info('raiseTimezonePersistenceAsks — outside owner work hours, deferring this candidate to a later pass', {
+      personId: c.personId,
+    });
+    return;
+  }
+
+  const first = (c.name ?? 'They').split(' ')[0];
+  const sourceLabel = c.source === 'chat' ? 'Chat messages have' : 'Slack has';
+  const sinceDt = DateTime.fromISO(c.since);
+  const daysAgo = sinceDt.isValid ? Math.max(1, Math.round(DateTime.now().diff(sinceDt, 'days').days)) : 7;
+  const askText = `${sourceLabel} had ${first} on ${c.value} for ${daysAgo} days now — has ${first} actually moved? Say yes to update their stored timezone to ${c.value}; no (or nothing) leaves it as is.`;
+
+  // Streak-scoped key — see the header comment above for why (personId,
+  // since, value), never a timestamp.
+  const idempotencyKey = buildIdempotencyKey({
+    ownerUserId, kind: 'approval', subject: `timezone_persistence ${c.personId} ${c.since} ${c.value}`,
+  });
+
+  const callbacks = {
+    on_approve: { tool: 'promote_timezone_temp', args: { person_id: c.personId, expected_value: c.value } },
+  };
+
+  // Owner-facing decision windows, same convention create_approval raises
+  // with (R4 — the midpoint nag defers to his work hours by construction via
+  // runApprovalReminder above).
+  const base = workTimeBaseFromNow(profile);
+  const expiresAt = addWorkdays(base, 2, profile);
+  const expiresMs = Date.parse(expiresAt);
+  const createdMs = Date.now();
+  const midIso = expiresMs > createdMs + 60_000
+    ? new Date(createdMs + Math.floor((expiresMs - createdMs) / 2)).toISOString()
+    : null;
+  const nextCheckAt = midIso ?? expiresAt;
+  const nextCheckHandler: NextCheckHandler = midIso ? 'approval_reminder' : 'expiry';
+
+  let row: RequestRow;
+  try {
+    row = createRequest({
+      ownerUserId, initiatedBy: ownerUserId, initiatedByRole: 'system',
+      kind: 'approval', subkind: 'timezone_persistence',
+      subject: `${first}'s timezone — still ${c.value}?`,
+      description: askText,
+      state: 'awaiting_owner',
+      expiresAt, nextCheckAt, nextCheckHandler,
+      idempotencyKey,
+      details: { question: askText, callbacks },
+    });
+  } catch (err) {
+    const msg = String(err);
+    if (!(msg.includes('UNIQUE constraint failed') && msg.includes('idempotency_key'))) throw err;
+    const existing = getRequestByIdempotencyKey(idempotencyKey);
+    if (!existing) throw err;  // UNIQUE fired but lookup missed — don't swallow a real bug
+    if (existing.terminal_dm_msg_ts) {
+      // Already raised AND delivered on an earlier pass — delivery confirmation
+      // was the only thing that didn't complete (e.g. a crash right after the
+      // DM). Just stamp askedAt now so detection stops resurfacing it.
+      markTimezoneTempAskedById(c.personId, c.value);
+      return;
+    }
+    // Row exists, delivery was never confirmed — retry against the SAME row,
+    // never mint a second one for this streak.
+    await deliverTimezonePersistenceAsk(existing, askText, profile, conn, c);
+    return;
+  }
+
+  await deliverTimezonePersistenceAsk(row, askText, profile, conn, c);
+}
+
+/**
+ * Compose (via the ONE shared composer every decision surface uses —
+ * approvalCallbacks.ts's composeOwnerAskText) + post +, ONLY once delivery is
+ * confirmed, burn the one-ask budget (markTimezoneTempAskedById). A failed
+ * post leaves askedAt unset so the next hourly pass retries against this same
+ * row (see raiseOneTimezonePersistenceAsk's UNIQUE-collision branch above) —
+ * db/people.ts's own contract: "a delivery failure doesn't silently burn the
+ * one-ask budget."
+ */
+async function deliverTimezonePersistenceAsk(
+  row: RequestRow,
+  askText: string,
+  profile: UserProfile,
+  conn: NonNullable<ReturnType<typeof getConnection>>,
+  candidate: { personId: string; value: string },
+): Promise<void> {
+  const dmText = await composeOwnerAskText({
+    askText, details: parseDetails(row), profile, requestId: row.id,
+  });
+  const posted = await postOwnerDecision({ profile, conn, text: dmText, label: 'timezone persistence ask' });
+  if (!posted.ok) {
+    logger.warn('raiseTimezonePersistenceAsks — owner DM failed, will retry next pass', {
+      requestId: row.id, reason: posted.reason,
+    });
+    return;
+  }
+  updateRequest(row.id, {
+    ownerDmChannel: posted.channel, ownerDmThreadTs: posted.threadTs, terminalDmMsgTs: posted.ts,
+  });
+  markTimezoneTempAskedById(candidate.personId, candidate.value);
+  logger.info('raiseTimezonePersistenceAsks — raised + delivered', {
+    requestId: row.id, personId: candidate.personId,
+  });
 }

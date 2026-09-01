@@ -163,6 +163,15 @@ export function buildConsequenceText(
       const subj = (args.meeting_subject as string) ?? 'the meeting';
       return `If yes → I'll update "${subj}".`;
     }
+    // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — the
+    // TZ-persistence ask's on_approve (core/requests/runner.ts's
+    // raiseTimezonePersistenceAsks / deferredActionReplay.ts). Not a meeting
+    // tool — a direct db/people.ts write, verbalized here like every other
+    // on_approve so the owner still sees what a yes actually does.
+    case 'promote_timezone_temp': {
+      const val = (args.expected_value as string) ?? 'that timezone';
+      return `If yes → I'll update their stored timezone to ${val}.`;
+    }
     default:
       return `If yes → I'll run ${tool}.`;
   }
@@ -360,8 +369,11 @@ export function mergeAmendIntoApprove(
 /**
  * Tools the resolver knows how to replay autonomously. The deferred-action
  * replay path (`runDeferredAction`) loads SchedulingSkill / CalendarHealthSkill
- * for these; anything else falls back to "close + Sonnet next turn" behavior.
- * Keep this set in sync with deferredActionReplay.ts.
+ * for the meeting tools below; `promote_timezone_temp` is the one exception —
+ * a direct db/people.ts write, handled inline before that skill dispatch (see
+ * its own comment there). Anything NOT in this set falls back to "close +
+ * Sonnet next turn" behavior in runApproveCallback. Keep this set in sync
+ * with deferredActionReplay.ts.
  */
 export const RESOLVER_REPLAY_TOOLS = new Set<string>([
   'create_meeting',
@@ -369,4 +381,9 @@ export const RESOLVER_REPLAY_TOOLS = new Set<string>([
   'delete_meeting',
   'update_meeting',
   'book_floating_block',
+  // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) —
+  // core/requests/runner.ts's raiseTimezonePersistenceAsks on_approve.
+  // Membership here is what makes runApproveCallback treat it as a real
+  // replay instead of the inert "not replayable, close without firing" path.
+  'promote_timezone_temp',
 ]);

@@ -7,7 +7,8 @@ import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 import type { RuleCheckResult } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
-import { attendeeTzForDay } from '../../utils/attendeeAvailability';
+import { attendeeTzForDay, tzTempDifferingForDay } from '../../utils/attendeeAvailability';
+import type { TimezoneTempSource } from '../../db/people';
 
 /**
  * ONE offered-slot shape. Was written out inline three times (the return type,
@@ -33,7 +34,14 @@ type SlotCandidate = {
   // onto an 'off_hours' conflict — true when the underlying hours came from a
   // GUESSED default (#M3, no stored profile), never confirmed. Only ever set
   // on 'off_hours' entries; a 'busy' entry is a real calendar read, not a guess.
-  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }>;
+  // `tzTempDiffering` mirrors AttendeeAvailabilityEntry.tzTempDiffering — the
+  // hours ARE stored/real (computed off the attendee's PERMANENT zone), but a
+  // later, differing auto-tier reading currently exists for them (TTL'd) —
+  // surface that assumption rather than asserting the verdict as unqualified
+  // fact (o#262/o#265, owner ruling 2026-08-31). `source` says which auto-tier
+  // writer produced it — a surfacing caller attributes by it, never hard-codes
+  // "Slack" (the capture-pass 'chat' writer post-dates that assumption).
+  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean; tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource } }>;
 };
 
 /**
@@ -173,6 +181,12 @@ export async function findAvailableSlots(params: {
     // GUESSED default (loadAttendeeAvailabilityForEmails). Carried onto an
     // 'off_hours' conflict below so callers can hedge instead of asserting it.
     assumed?: boolean;
+    // v4.8.x (o#262/o#265) — set when a real stored profile exists but a
+    // later, differing auto-tier reading (TTL'd) currently exists, other than
+    // the permanent one the hours above are computed from. Carried onto an
+    // 'off_hours' conflict the same way `assumed` is. `source` says which
+    // auto-tier writer (Slack sync vs chat capture) produced the reading.
+    tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
   }>;
   // Rule 6 — attendee free/busy is a HELPER, never a blocker. When true, a slot
   // where an attendee is busy / off-hours is KEPT and TAGGED (attendee_conflicts)
@@ -1220,7 +1234,18 @@ export async function findAvailableSlots(params: {
             for (const att of params.attendeeAvailability) {
               if (!attendeeOutsideHours(att)) continue;
               if (attendeeConflicts.some(c => c.email === att.email)) continue;
-              attendeeConflicts.push({ email: att.email, reason: 'off_hours', ...(att.assumed ? { assumed: true } : {}) });
+              // tzTempDiffering is a discrepancy against the attendee's
+              // PERMANENT zone (o#262/o#265) and is only speakable about a day
+              // whose clip actually ran in that zone — `tzTempDifferingForDay`
+              // owns that decision for every surfacing caller (a travel day's
+              // clip ran in the TRIP zone via `attendeeTzForDay` just above).
+              const tzTemp = tzTempDifferingForDay(att, candidateDayIso);
+              attendeeConflicts.push({
+                email: att.email,
+                reason: 'off_hours',
+                ...(att.assumed ? { assumed: true } : {}),
+                ...(tzTemp ? { tzTempDiffering: tzTemp } : {}),
+              });
             }
           } else {
             const blockingAttendee = params.attendeeAvailability.find(attendeeOutsideHours);

@@ -691,11 +691,16 @@ async function runApproveCallback(
   }
 
   // Inject the override flag matching the tool. Same semantics as the
-  // legacy deferred_action replay (v2.7.2 / v2.8.6).
+  // legacy deferred_action replay (v2.7.2 / v2.8.6). Scoped to the MEETING
+  // tools explicitly (rather than "everything except delete_meeting") since
+  // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) added
+  // `promote_timezone_temp` to RESOLVER_REPLAY_TOOLS — a direct db/people.ts
+  // write with no `relaxed`/override concept of its own; the old catch-all
+  // would have silently stamped an unused field onto its args.
   const replayArgs: Record<string, unknown> = { ...args };
   if (tool === 'book_floating_block') {
     replayArgs.confirm_outside_window = true;
-  } else if (tool !== 'delete_meeting') {
+  } else if (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'update_meeting') {
     replayArgs.relaxed = true;
   }
   // v3.4.6 (spine collapse) — the HARD approve→book link. Stamp the

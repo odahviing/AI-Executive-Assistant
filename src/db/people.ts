@@ -135,6 +135,17 @@ export interface PersonMemory {
   // + working_hours_auto for slot search and time-of-day display. Cleared
   // (set to NULL) once `until` is in the past. Read via getCurrentTravel().
   currently_traveling?: string;
+  // v4.8.x — timezone permanent/temp split (owner ruling 2026-08-31). JSON:
+  // TimezoneTemp ({ value, expiresAt, source }). Sibling to
+  // `currently_traveling`: holds a LATER auto-tier timezone reading (Slack
+  // profile sync OR the Haiku capture pass's chat extraction — `source` says
+  // which) that DIFFERS from the already-established (permanent) `timezone`
+  // value, so neither a routine re-sync nor a background capture pass can
+  // clobber a settled home zone. TTL'd,
+  // self-clearing on read (`getTimezoneTempById`). Read the permanent value
+  // for real computation; surface this only as "currently reads as X, expires
+  // <date> — flag me if that's wrong."
+  timezone_temp?: string;
   notes: string;                // JSON: PersonNote[]   — personal/relationship knowledge
   interaction_log: string;      // JSON: PersonInteraction[] — chronological activity timeline
   profile_json: string;         // JSON: PersonProfile  — structured behavioral model
@@ -347,6 +358,409 @@ export function getTravelRecordById(personId: string): CurrentTravel | null {
   }
 }
 
+// ── v4.8.x — timezone permanent/temp split (owner ruling 2026-08-31) ─────────
+//
+// PERMANENT = first-established `timezone` value (Slack profile at first
+// login, or an owner/person-stated correction) — it already rides the
+// provenance chokepoint above (owner > person > auto). The gap this closes:
+// once that first value was ALSO 'auto'-ranked (the common case — nobody
+// stated a zone, Slack sync just set it), a LATER Slack sync reading a
+// DIFFERENT zone carried the same 'auto' rank and silently overwrote it
+// (`setCoreFieldWithProvenanceById` only refuses a write when the incoming
+// rank is strictly LOWER than the stored one — same-rank-different-value was
+// never a refusal case, because until now nothing needed it to be). A person
+// with a stale/misconfigured Slack timezone, or one whose Slack client
+// briefly reports a different zone (VPN, travel through a city they're not
+// staying in), would have their permanent, correct zone quietly replaced.
+// The SAME clobber was reachable from a second auto-tier signal — the Haiku
+// capture pass's chat-extracted zone (memory/capturePass.ts) — which is why
+// the divert lives in `applyAutoTimezoneById` below rather than inline in the
+// Slack sync, and why a temp reading carries a `source` (2026-09-01).
+//
+// TEMP = that later differing auto reading. It does not overwrite `timezone`
+// — it lands in the sibling `timezone_temp` column instead, TTL'd (default 1
+// week, the owner's tentative number), modeled exactly like
+// `currently_traveling` above: self-clearing on read, never swept.
+//
+// Consumers (e.g. Matchmaker's scheduling code) call `getEffectiveTimezoneById`
+// for BOTH halves at once: the permanent value for real computation, and the
+// temp flag purely for surfacing ("assuming X is on <permanent tz> — flag me
+// if that's wrong"). The temp value must never silently substitute for the
+// permanent one in a scheduling decision.
+//
+// SCOPE — this tier is keyed to Slack-SYNCED rows, which is NOT the
+// internal/external line planMeeting draws by email domain. The Slack sync
+// upserts every workspace member it touches — email, zone and all, with no
+// domain filter (the search-persist loop in connections/slack/index.ts; the
+// MPIM member loop in connectors/slack/app/handlers.ts) — so a Slack-identified
+// person whose email domain differs from the owner's (a guest or partner
+// present in the workspace) carries temp readings like any teammate, even
+// while planMeeting classifies them EXTERNAL by domain. Only an email-ONLY
+// person (no Slack row) can never carry one: nothing re-syncs their zone —
+// the sole auto-tier writer for an email-keyed person is
+// `setPersonTimezoneByEmail`, and its one caller (connectors/email/inbound.ts)
+// writes the base field only when the base is EMPTY. When such a person's
+// base zone IS set and a mail signature states a different one, that path
+// deliberately routes to `currently_traveling` instead (a dated, self-expiring
+// record — owner ruling 2026-08-30), which is their temp tier and is read with
+// `getCurrentTravelById`, never here. The two are NOT interchangeable:
+// `currently_traveling` SUBSTITUTES the zone downstream (attendeeTzForDay,
+// anyParticipantRemote), while `timezone_temp` never does — folding them into
+// one reader would make "assuming they're on their permanent zone" a false
+// claim about a person whose zone the search already swapped.
+
+/** Which auto-tier signal produced a temp reading. A caller that SURFACES
+ *  the reading must attribute it to this — "Slack currently reads X" is a
+ *  false claim about a zone Haiku extracted from a chat turn. */
+export type TimezoneTempSource = 'slack' | 'chat';
+
+export interface TimezoneTemp {
+  value: string;
+  expiresAt: string;  // ISO yyyy-MM-dd — TTL; read as expired once past
+  source: TimezoneTempSource;
+  // v4.8.x (2026-09-02, pre-existing-clobbered-tz-now-locked-wrong-forever) —
+  // ISO yyyy-MM-dd, the first day THIS value was recorded as differing,
+  // carried forward unbroken across every re-stamp of the SAME value since
+  // (setTimezoneTempById below). Resets to today the moment the value
+  // changes OR the streak lapses (TTL expiry clears the row — see
+  // getTimezoneTempById). This is the PERSISTENCE clock the owner's ruling
+  // asks for: "the same differing value re-read across a full TTL window
+  // without lapsing" — never inferred backward for a row written before this
+  // field existed (that row's streak is read as starting today, not
+  // backfilled — "build the path, not the data").
+  since?: string;
+  // ISO yyyy-MM-dd — set once the owner has actually been asked about THIS
+  // persisted streak (by the caller that raises the ask, once delivery is
+  // confirmed — see markTimezoneTempAskedById). Ensures the ask fires ONCE
+  // per settled change, never again on every later re-stamp of the same
+  // value. Cleared automatically whenever the streak resets.
+  askedAt?: string;
+}
+
+/** `applyAutoTimezoneById`'s outcome. Every `CoreFieldWrite` case, plus the
+ *  one this divert adds: the reading was recorded as temp and the PERMANENT
+ *  column did not move. Anything other than 'applied' / 'already_set' means
+ *  the stored zone is NOT the value you passed in. */
+export type AutoTimezoneWrite = CoreFieldWrite | 'diverted_temp';
+
+const TIMEZONE_TEMP_TTL_DAYS = 7; // owner's tentative number, 2026-08-31
+
+/**
+ * Records a LATER auto-tier timezone reading that differs from the stored
+ * permanent value. Never touches the `timezone` column itself. Module-local on
+ * purpose: `applyAutoTimezoneById` below is the ONLY caller, and every
+ * auto-tier timezone writer routes through it — nothing outside this file may
+ * mint a temp reading.
+ */
+function setTimezoneTempById(
+  personId: string,
+  value: string,
+  source: TimezoneTempSource,
+  ttlDays: number = TIMEZONE_TEMP_TTL_DAYS,
+): void {
+  const db = getDb();
+  const now = DateTime.now();
+  const today = now.toISODate() ?? '';
+  // Carry `since`/`askedAt` forward across re-stamps of the SAME value — that
+  // unbroken streak is the persistence signal the owner's ruling asks for
+  // (pre-existing-clobbered-tz-now-locked-wrong-forever). A DIFFERENT value,
+  // or no active prior record (none yet, or the old one already lapsed past
+  // its TTL — getTimezoneTempById returns null and clears it in that case),
+  // starts a fresh streak: `since` resets to today and any earlier `askedAt`
+  // is dropped, so a changed reading (or one that blipped and came back)
+  // earns its own persistence window and its own ask, never inherits a
+  // question already answered/pending about a different value.
+  const existing = getTimezoneTempById(personId);
+  const sameValue = !!existing && existing.value === value;
+  const temp: TimezoneTemp = {
+    value,
+    expiresAt: now.plus({ days: ttlDays }).toISODate() ?? '',
+    source,
+    since: sameValue ? (existing!.since ?? today) : today,
+    askedAt: sameValue ? existing!.askedAt : undefined,
+  };
+  db.prepare(
+    `UPDATE people_memory SET timezone_temp = ?, updated_at = datetime('now') WHERE person_id = ?`,
+  ).run(JSON.stringify(temp), personId);
+}
+
+function clearTimezoneTempById(personId: string): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE people_memory SET timezone_temp = NULL, updated_at = datetime('now') WHERE person_id = ?`,
+  ).run(personId);
+}
+
+/**
+ * Returns the active temp/differing timezone reading, or null if none /
+ * expired. Lazy cleanup on read, same pattern as `getCurrentTravelById`.
+ */
+function getTimezoneTempById(personId: string): TimezoneTemp | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT timezone_temp FROM people_memory WHERE person_id = ?`,
+  ).get(personId) as { timezone_temp?: string | null } | undefined;
+  if (!row || !row.timezone_temp) return null;
+  try {
+    const t = JSON.parse(row.timezone_temp) as Partial<TimezoneTemp>;
+    if (!t.value || !t.expiresAt) return null;
+    const today = DateTime.now().toISODate() ?? '';
+    if (t.expiresAt < today) {
+      clearTimezoneTempById(personId);
+      return null;
+    }
+    // `source` post-dates the column by a wave; a row written without it can
+    // only have come from the Slack sync, which was then the sole writer.
+    // `since`/`askedAt` post-date it by a further wave; a row written before
+    // either existed reads as undefined here — setTimezoneTempById's own
+    // fallback (`existing!.since ?? today`) is what starts its streak fresh
+    // on the very next re-stamp, never inferred backward.
+    return {
+      value: t.value,
+      expiresAt: t.expiresAt,
+      source: t.source === 'chat' ? 'chat' : 'slack',
+      since: typeof t.since === 'string' ? t.since : undefined,
+      askedAt: typeof t.askedAt === 'string' ? t.askedAt : undefined,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+export interface EffectiveTimezone {
+  timezone: string | undefined;        // PERMANENT value — always what real computation uses
+  // Set only when a later AUTO-TIER reading — the Slack profile sync or the
+  // Haiku capture pass's chat extraction, `tempDiffering.source` says which —
+  // differed from the permanent one and the TTL hasn't lapsed. Null for every
+  // email-only external by construction: both writers are slack_id-keyed (see
+  // the SCOPE note above; their equivalent signal is `getCurrentTravelById`).
+  // ATTRIBUTE IT BY `source` when surfacing — never hard-code "Slack".
+  tempDiffering: TimezoneTemp | null;
+}
+
+/**
+ * THE reader for a person's timezone. Returns the permanent stored value for
+ * actual scheduling math, plus a temp/differing flag for surfacing only. A
+ * caller that reads `timezone` off `people_memory` directly and skips this
+ * gets the permanent value anyway (it's the same column) but silently misses
+ * the "this might be stale/wrong right now" signal — prefer this over a raw
+ * column read wherever the answer feeds a user-facing certainty claim.
+ */
+export function getEffectiveTimezoneById(personId: string): EffectiveTimezone {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT timezone FROM people_memory WHERE person_id = ?`,
+  ).get(personId) as { timezone?: string | null } | undefined;
+  return {
+    timezone: row?.timezone ?? undefined,
+    tempDiffering: getTimezoneTempById(personId),
+  };
+}
+
+/**
+ * v4.8.x (2026-09-01) — THE writer for an 'auto'-tier timezone reading,
+ * whichever signal produced it (Slack users.info/profile sync, or the Haiku
+ * capture pass's chat-extracted delta). Applies the SAME divert documented
+ * above `TimezoneTemp`: a first-ever/matching auto reading writes the
+ * permanent column; a LATER auto reading that differs from an already-
+ * established (auto or untagged) permanent value never overwrites it — it
+ * lands in `timezone_temp` instead.
+ *
+ * `upsertPersonMemory`'s Slack-sync path used to run this logic inline, which
+ * is what left a second 'auto' writer — the capture pass, calling
+ * `setCoreFieldWithProvenance(…, 'auto')` directly — free to reproduce the
+ * exact clobber the divert exists to stop (the Maayan Sulami case, on a
+ * second path). Every auto-tier writer that would OVERWRITE an established
+ * `timezone` must route through here; calling the bare provenance chokepoint
+ * at 'auto' for `timezone` is the bug. (The one auto-tier writer that stays
+ * outside is `setPersonTimezoneByEmail` — connectors/email/inbound.ts:325
+ * writes only when the base zone is EMPTY, so it can never clobber, and an
+ * email-only person has no slack_id to re-sync anyway.)
+ *
+ * RETURNS a distinct `'diverted_temp'` when the permanent column did NOT
+ * move: a caller that mirrors the value anywhere else (the capture pass's .md
+ * prompt context) must be able to tell that apart from a real write, or it
+ * publishes a record contradicting the column this divert just protected.
+ */
+export function applyAutoTimezoneById(
+  personId: string,
+  value: string,
+  source: TimezoneTempSource,
+): AutoTimezoneWrite {
+  const tz = (value ?? '').trim();
+  if (!tz) return 'no_value';
+  const db = getDb();
+  const existing = db.prepare(
+    `SELECT timezone, timezone_set_by FROM people_memory WHERE person_id = ?`,
+  ).get(personId) as { timezone: string | null; timezone_set_by: CoreFieldSetBy | null } | undefined;
+  if (!existing) return 'no_person';
+
+  const establishedRank = existing.timezone_set_by ? SET_BY_RANK[existing.timezone_set_by] : 0;
+  const permanentAutoDiffers =
+    !!existing.timezone &&
+    establishedRank <= SET_BY_RANK.auto &&
+    existing.timezone !== tz;
+
+  if (permanentAutoDiffers) {
+    // Don't touch `timezone` — record the differing reading as temp/TTL'd.
+    // No promotion when the TTL lapses, deliberately (see the divert notes
+    // above): a genuine relocation is corrected the way every other core
+    // field is, by a stated (person/owner) correction, which outranks 'auto'
+    // and lands on the permanent value via setCoreFieldWithProvenanceById.
+    setTimezoneTempById(personId, tz, source);
+    return 'diverted_temp';
+  }
+
+  const outcome = setCoreFieldWithProvenanceById(personId, 'timezone', tz, 'auto');
+  // Refresh the auto-derived working hours off whatever zone is now STORED
+  // (the write above may have been refused as lower-authority). Cheap,
+  // idempotent inside the helper.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { refreshAutoWorkingHoursById } = require('../utils/workingHoursDefault') as
+      typeof import('../utils/workingHoursDefault');
+    refreshAutoWorkingHoursById(personId);
+  } catch { /* never block memory writes */ }
+  return outcome;
+}
+
+/** slack_id-keyed adapter over `applyAutoTimezoneById` — for Slack-keyed
+ *  'auto' writers (the capture pass). */
+export function applyAutoTimezone(
+  slackId: string,
+  value: string,
+  source: TimezoneTempSource,
+): AutoTimezoneWrite {
+  const pid = personIdForSlackId(slackId);
+  return pid ? applyAutoTimezoneById(pid, value, source) : 'no_person';
+}
+
+// ── v4.8.x (2026-09-02) — the persistence-ask trigger ───────────────────────
+// Owner ruling (pre-existing-clobbered-tz-now-locked-wrong-forever): the
+// always-temp divert above is permanent — no differing auto reading EVER
+// silently promotes — but a streak that keeps re-confirming the SAME value,
+// unbroken, across a full TTL window earns exactly one question to the
+// owner ("Slack has had X on Y for two weeks now, has he moved?"), and the
+// promotion happens ONLY on his answer. NO code here writes the permanent
+// column on its own and none of it decides WHEN to raise the ask on a
+// schedule — it is the DETECTION half only:
+//   - `checkTimezonePersistenceById` / `findPersistentUnaskedTimezoneDivergences`
+//     tell a caller WHICH streaks have earned the question and haven't been
+//     asked yet;
+//   - `markTimezoneTempAskedById` records that the question was actually
+//     delivered, so the same streak is never asked twice;
+//   - `promoteTimezoneTempById` is the one door out of the divert, and it
+//     writes at owner rank ONLY — it is meant to fire from the owner's
+//     explicit yes, never from a timer or a guess.
+// Raising the ask durably (so it survives until answered — the requests
+// spine) and wiring the owner's reply back to `promoteTimezoneTempById` is
+// deliberately NOT built here — it belongs with whichever caller owns that
+// raise/track/resolve lifecycle (the requests spine), reusing its own
+// callback/replay machinery rather than this file inventing a second
+// waiting mechanism.
+
+/** A temp streak that has persisted a full TTL window, unbroken, and has not
+ *  yet been asked about. */
+export interface TimezonePersistence {
+  personId: string;
+  value: string;
+  source: TimezoneTempSource;
+  /** ISO yyyy-MM-dd — when this unbroken streak started. */
+  since: string;
+}
+
+/**
+ * Does this person's CURRENT temp streak earn the owner's one question?
+ * True only when: an active (non-lapsed) temp reading exists, its streak
+ * (`since`) started at least `ttlDays` ago, and it hasn't been asked about
+ * yet (`askedAt` unset). A streak that changed value or lapsed along the way
+ * never reaches this — `since` (via setTimezoneTempById) only ever tracks an
+ * UNBROKEN run of the same value, so this function never has to re-derive
+ * "did it lapse" itself.
+ */
+function checkTimezonePersistenceById(
+  personId: string,
+  ttlDays: number = TIMEZONE_TEMP_TTL_DAYS,
+): TimezonePersistence | null {
+  const temp = getTimezoneTempById(personId);
+  if (!temp || temp.askedAt) return null;
+  // No `since` (a row from before this field existed, not yet re-stamped) —
+  // never inferred backward; nothing to report until a later re-stamp starts
+  // its streak for real (see setTimezoneTempById / getTimezoneTempById notes).
+  if (!temp.since) return null;
+  const sinceDt = DateTime.fromISO(temp.since);
+  if (!sinceDt.isValid) return null;
+  const daysSince = DateTime.now().diff(sinceDt, 'days').days;
+  if (daysSince < ttlDays) return null;
+  return { personId, value: temp.value, source: temp.source, since: temp.since };
+}
+
+/** Every currently-active temp streak (any Slack-synced person) that has
+ *  earned the owner's persistence question and hasn't been asked yet — the
+ *  candidate list a scheduled raiser sweeps. `slackId`/`name` are carried
+ *  along purely so a caller can compose the ask text without a second
+ *  lookup. */
+export interface TimezonePersistenceCandidate extends TimezonePersistence {
+  slackId: string | null;
+  name: string | null;
+}
+
+export function findPersistentUnaskedTimezoneDivergences(
+  ttlDays: number = TIMEZONE_TEMP_TTL_DAYS,
+): TimezonePersistenceCandidate[] {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT person_id, slack_id, name FROM people_memory WHERE timezone_temp IS NOT NULL`,
+  ).all() as Array<{ person_id: string; slack_id: string | null; name: string | null }>;
+  const out: TimezonePersistenceCandidate[] = [];
+  for (const row of rows) {
+    const hit = checkTimezonePersistenceById(row.person_id, ttlDays);
+    if (hit) out.push({ ...hit, slackId: row.slack_id, name: row.name });
+  }
+  return out;
+}
+
+/**
+ * Records that the owner has actually been asked about the CURRENT streak —
+ * call this once delivery of the ask is confirmed (durably, on whatever
+ * spine raised it), never before, so a delivery failure doesn't silently
+ * burn the one-ask budget. No-ops if the streak already moved on (value
+ * changed / lapsed) under the caller — a stale ask has nothing left to mark,
+ * and the NEW streak (if any) gets its own un-asked window.
+ */
+export function markTimezoneTempAskedById(personId: string, value: string): void {
+  const temp = getTimezoneTempById(personId);
+  if (!temp || temp.value !== value || temp.askedAt) return;
+  const db = getDb();
+  const next: TimezoneTemp = { ...temp, askedAt: DateTime.now().toISODate() ?? '' };
+  db.prepare(
+    `UPDATE people_memory SET timezone_temp = ?, updated_at = datetime('now') WHERE person_id = ?`,
+  ).run(JSON.stringify(next), personId);
+}
+
+/**
+ * THE one door out of the always-temp divert — and it opens ONLY on the
+ * owner's explicit say-so. `expectedValue` must match what's CURRENTLY
+ * stored in `timezone_temp`: the owner's yes answers the streak he was
+ * asked about, never whatever happens to be sitting there by the time he
+ * replies (a lapsed/changed streak between the ask and the answer refuses
+ * with `'stale_streak'` rather than promoting the wrong value). On a match,
+ * writes at owner rank via the same chokepoint every other core field uses
+ * (`setCoreFieldWithProvenanceById`) — nothing auto-tier can ever overwrite
+ * it again — whose own side effect already clears `timezone_temp` once a
+ * human-ranked write lands (see the comment above that write, this file).
+ */
+export type PromoteTimezoneTempOutcome = CoreFieldWrite | 'stale_streak';
+
+export function promoteTimezoneTempById(
+  personId: string,
+  expectedValue: string,
+): PromoteTimezoneTempOutcome {
+  const temp = getTimezoneTempById(personId);
+  if (!temp || temp.value !== expectedValue) return 'stale_streak';
+  return setCoreFieldWithProvenanceById(personId, 'timezone', temp.value, 'owner');
+}
+
 // ── v3.2.6 — VIP flag ────────────────────────────────────────────────────────
 // Owner-curated, like engagement_rank. VIP calendars are ALWAYS pulled into a
 // thread-booking free/busy search; non-VIPs are invite-only (annotated, never
@@ -468,6 +882,20 @@ export function setCoreFieldWithProvenanceById(
     db.prepare(`UPDATE people_memory SET gender_confirmed = 1 WHERE person_id = ?`).run(personId);
   }
 
+  // v4.8.x (2026-09-01) — drop a now-meaningless temp reading when a HUMAN
+  // states the zone. A `timezone_temp` row means "an auto signal read a zone
+  // differing from THE PERMANENT VALUE AT CAPTURE TIME"; once a person/owner
+  // statement replaces what's permanent, that comparison is against a value
+  // that no longer exists, and the surfaced assumption note either reads back
+  // as a nonsensical "currently reads <the value you just corrected to>" or
+  // contrasts an old auto reading with a permanent zone it was never checked
+  // against. This is caveat hygiene, NOT a repair path for rows clobbered
+  // before the divert shipped — that case is open on the owner's desk
+  // (ref pre-existing-clobbered-tz-now-locked-wrong-forever).
+  if (field === 'timezone' && by !== 'auto') {
+    db.prepare(`UPDATE people_memory SET timezone_temp = NULL WHERE person_id = ?`).run(personId);
+  }
+
   return 'applied';
 }
 
@@ -529,6 +957,28 @@ export function upsertPersonMemory(params: {
    */
   timezone?: string;
   gender?: PersonGender;
+  /**
+   * Provenance tier for `name`/`timezone` in THIS call. Defaults to 'auto' —
+   * every remaining caller (Slack users.info/profile pull, @mention resolve,
+   * colleague message) is a genuine Slack-derived signal and keeps routing
+   * through the auto-tier chokepoints exactly as before: `applyAutoTimezoneById`
+   * (with its permanent/temp divert) for timezone, `setCoreFieldWithProvenanceById`
+   * at 'auto' for name.
+   *
+   * 'owner' is for the two synthetic self-seed callers (assistantSelf.ts,
+   * ownerSelf.ts): `profile.user.timezone` / `profile.assistant.name` are
+   * OWNER-AUTHORED CONFIG, not a live Slack read — reconciling them carries the
+   * owner's own authority (L2), not the Slack-sync 'auto' tier. Routing a config
+   * value through the auto tier is what let the v4.8.x permanent/temp divert
+   * treat a later config correction as a second differing auto reading and
+   * silently park it in `timezone_temp` forever instead of updating the
+   * permanent column (assistantSelf's own drift check then re-ran the same
+   * no-op write every boot, since the permanent value it compared against never
+   * moved). An 'owner'-tier call bypasses the auto-tier path entirely — both
+   * fields land via `setCoreFieldWithProvenanceById` at the stated rank, which
+   * is where an owner statement belongs.
+   */
+  by?: CoreFieldSetBy;
 }): void {
   if (!params.slackId) return;
   const db = getDb();
@@ -570,7 +1020,7 @@ export function upsertPersonMemory(params: {
   // name_he, not name) — so this closes the SYNC half of the gap (a sync can
   // no longer stomp a higher-authority value) ahead of the correction flow
   // existing. The moment one is built, it is already protected.
-  if (params.name) setCoreFieldWithProvenanceById(personId, 'name', params.name, 'auto');
+  if (params.name) setCoreFieldWithProvenanceById(personId, 'name', params.name, params.by ?? 'auto');
 
   // Timezone rides the provenance chokepoint (owner > person > auto). It used to
   // be a `COALESCE(@timezone, timezone)` in the statement above, which OVERWROTE
@@ -579,16 +1029,37 @@ export function upsertPersonMemory(params: {
   // Harmless while owner-set zones only ever lived on calendar rows this function
   // never touched; the moment a merge folds such a row onto a Slack row (which is
   // now the point) it would silently clobber a taught timezone.
+  //
+  // v4.8.x (owner ruling 2026-08-31) — the rank chain above only refuses a
+  // write when the incoming rank is strictly LOWER than the stored one. Once
+  // the FIRST-ever auto sync established a permanent 'auto'-ranked timezone,
+  // every LATER sync carries that same 'auto' rank, so a differing reading
+  // was never refused — it silently overwrote the permanent value. That first
+  // auto value is PERMANENT (same status as an owner/person-stated one for
+  // this purpose); a later differing auto reading is TEMP and lands in the
+  // TTL'd sibling column instead of touching `timezone`.
+  //
+  // The divert covers an UNTAGGED stored zone (`timezone_set_by` NULL — a
+  // legacy row written before provenance existed) as well as an 'auto' one:
+  // both are established values nobody ever stated, and the clobber they take
+  // from a differing sync is identical, so the rule has to reach both. A
+  // stored zone at PERSON or OWNER rank is deliberately NOT diverted — the
+  // chokepoint already refuses the write outright, and a zone its own subject
+  // (or the owner) stated is settled, not something to keep re-flagging.
+  // v4.8.x — delegates to `applyAutoTimezoneById`, the one writer for every
+  // 'auto'-tier timezone reading (this Slack sync AND the Haiku capture pass).
+  // Used to run the divert inline here only, which is what left the capture
+  // pass free to reproduce the clobber on its own path (2026-09-01).
+  //
+  // An 'owner'/'person' call (self-seed only, see `by` above) is not a sync
+  // signal and must never pass through the auto-tier divert — it writes the
+  // permanent column directly, at its own stated rank.
   if (params.timezone) {
-    setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, 'auto');
-    // v2.2.2 (#46) — refresh the auto-derived working hours off whatever zone is
-    // now STORED (the write above may have been refused as lower-authority).
-    // Cheap; idempotent inside the helper.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { refreshAutoWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
-      refreshAutoWorkingHours(params.slackId);
-    } catch { /* never block memory writes */ }
+    if ((params.by ?? 'auto') === 'auto') {
+      applyAutoTimezoneById(personId, params.timezone, 'slack');
+    } else {
+      setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, params.by!);
+    }
   }
 
   // The Slack profile is authoritative for a Slack person's address AT THE
@@ -1188,6 +1659,7 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     proactive_pending:    Math.max(survivor.proactive_pending ?? 0, loser.proactive_pending ?? 0),
     working_hours_auto:   survivor.working_hours_auto ?? loser.working_hours_auto ?? null,
     currently_traveling:  survivor.currently_traveling ?? loser.currently_traveling ?? null,
+    timezone_temp:        survivor.timezone_temp ?? loser.timezone_temp ?? null,
     notes:                unionDated<PersonNote>(
                             survivor.notes, loser.notes,
                             n => `${n.date ?? ''}|${n.note ?? ''}`, n => n.date ?? '', 50),
@@ -1216,6 +1688,7 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
         gender = @gender, gender_set_by = @gender_set_by, gender_confirmed = @gender_confirmed,
         is_vip = @is_vip, engagement_rank = @engagement_rank, proactive_pending = @proactive_pending,
         working_hours_auto = @working_hours_auto, currently_traveling = @currently_traveling,
+        timezone_temp = @timezone_temp,
         notes = @notes, interaction_log = @interaction_log, profile_json = @profile_json,
         last_seen = @last_seen, last_social_at = @last_social_at, last_initiated_at = @last_initiated_at,
         last_inbound_lang = @last_inbound_lang, last_inbound_lang_at = @last_inbound_lang_at,

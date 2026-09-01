@@ -44,6 +44,37 @@ function seriesKeyOf(ev: { type?: string; seriesMasterId?: string; id: string })
 }
 
 /**
+ * notOrganizerRefusal — THE "he's an attendee, not the organizer" refusal for
+ * the move path, one spelling for the two places that can reach that verdict:
+ * handleMoveMeeting's own ownership gate (its findMeetingOwner call) and
+ * planMeeting's `refuse_not_owners` further down. Same fact, same words, so
+ * the two can never drift into two different refusals (M1).
+ *
+ * `organizerEmail` is REQUIRED, and that is the whole point: findMeetingOwner
+ * fail-CLOSES — a Graph organizer read that failed (stale / hallucinated id,
+ * transient 4xx) returns ownerIsOrganizer=false with a NULL organizer, which
+ * is not evidence about who organizes the meeting. Neither caller may reach
+ * this without a resolved organizer, so this text can never claim someone
+ * organized a meeting nobody was able to look up.
+ */
+function notOrganizerRefusal(opts: {
+  subject: unknown;
+  ownerFullName: string;
+  organizerName: string | null;
+  organizerEmail: string;
+}): Record<string, unknown> {
+  const ownerFirst = opts.ownerFullName.split(' ')[0];
+  const orgName = opts.organizerName ?? opts.organizerEmail;
+  return {
+    error: 'not_organizer',
+    meeting_subject: opts.subject,
+    organizer_name: orgName,
+    organizer_email: opts.organizerEmail,
+    message: `Can't move "${opts.subject}" — ${orgName} organized that one, not ${ownerFirst}. The organizer is the only one who can shift the time. Want me to flag it to ${ownerFirst} so he can ping them, or skip?`,
+  };
+}
+
+/**
  * checkSameSubjectCollision — same-subject-collision disambiguation guard,
  * shared by update_meeting (gated on attendeeChangeRequested — see its call
  * site) and move_meeting (unconditional — move has no such field to gate
@@ -1212,18 +1243,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             meetingConcernsName = ownerInfo.requesterName ?? undefined;
           }
           if (!ownerInfo.ownerIsOrganizer && ownerInfo.organizerEmail) {
-            const ownerFirst = context.profile.user.name.split(' ')[0];
-            const orgName = ownerInfo.organizerName ?? ownerInfo.organizerEmail;
             logger.info('move_meeting refused — owner is attendee, not organizer', {
               meetingId: args.meeting_id, organizer: ownerInfo.organizerEmail,
             });
-            return {
-              error: 'not_organizer',
-              meeting_subject: args.meeting_subject,
-              organizer_name: orgName,
-              organizer_email: ownerInfo.organizerEmail,
-              message: `Can't move "${args.meeting_subject}" — ${orgName} organized that one, not ${ownerFirst}. The organizer is the only one who can shift the time. Want me to flag it to ${ownerFirst} so he can ping them, or skip?`,
-            };
+            return notOrganizerRefusal({
+              subject: args.meeting_subject,
+              ownerFullName: context.profile.user.name,
+              organizerName: ownerInfo.organizerName,
+              organizerEmail: ownerInfo.organizerEmail,
+            });
           }
         } catch (err) {
           logger.warn('move_meeting ownership lookup threw — proceeding', { err: String(err) });
@@ -1498,15 +1526,39 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // fetch returns the exact shape at any distance (and gives fix A its attendees).
           const { getEventForAttendeeUpdate } = await import('../../../../connectors/graph/calendar');
           const movingEvent = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
-          const priorStartIso = movingEvent?.startIso;
+          // log-movemeeting-refuse-not-owners-unhandled (2026-08-31) — the source
+          // event could not be READ. getEventForAttendeeUpdate returns null for
+          // both causes (an id that doesn't resolve — the live incident passed the
+          // literal string "MISSING_ID" — and a transient Graph read error) and
+          // never throws, and this result used to go unchecked. Everything after
+          // it then ran blind: planMeeting planned with no attendees, no prior
+          // slot and no categories (the degraded plan #B below exists to prevent),
+          // its ownership lookup fail-closed to `refuse_not_owners` on a null
+          // organizer, and the move fell through to the Graph PATCH, which threw a
+          // raw ErrorInvalidIdMalformed at the model (2026-08-31T09:06:52Z).
+          // A move is a WRITE: an unreadable source event is refused cleanly and
+          // retryably, never written blind — the same policy the planMeeting catch
+          // at the bottom of this block states for a plan that didn't complete.
+          if (!movingEvent) {
+            logger.warn('move_meeting — source event unreadable, refusing (no blind write)', {
+              meetingId: args.meeting_id, newStart: effectiveStart,
+            });
+            return {
+              success: false,
+              error: 'event_load_failed',
+              meeting_subject: args.meeting_subject,
+              message: `Couldn't load "${args.meeting_subject}" from the calendar — that meeting id didn't resolve, so nothing was changed. Re-read the day with get_calendar and retry the move with the id it returns.`,
+            };
+          }
+          const priorStartIso = movingEvent.startIso;
           // v2.8.5 — prior END lets planMeeting's freebusy overlap exclude the source
           // event when an attendee's calendar still shows it (a 13:00→13:15 nudge
           // otherwise trips confirm_override on the very meeting being moved).
-          const priorEndIso = movingEvent?.endIso;
-          const existingCats = movingEvent?.categories ?? [];
-          const existingLocation = movingEvent?.location;
-          const existingIsOnline = movingEvent?.isOnline;
-          const moveAttendees = movingEvent?.attendees ?? [];
+          const priorEndIso = movingEvent.endIso;
+          const existingCats = movingEvent.categories;
+          const existingLocation = movingEvent.location;
+          const existingIsOnline = movingEvent.isOnline;
+          const moveAttendees = movingEvent.attendees;
           preMoveAttendeeEmails = moveAttendees.map(a => a.email).filter(Boolean);
           // v4.4.x (#154) — resolved ONCE; both allowRelaxed and ownerRoomBend
           // below read this same grant so they can never disagree.
@@ -1557,6 +1609,43 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             priorStart: priorStartIso, newStart: effectiveStart,
             reasoning: 'reasoning' in movePlan ? movePlan.reasoning : undefined,
           });
+          // Owner is an attendee, not the organizer. Pre-fix this action fell
+          // through every action-specific `if` below and reached the Graph
+          // mutation unguarded. It is answered here ONLY when the organizer
+          // actually resolved: planMeeting's findMeetingOwner fail-CLOSES, so a
+          // failed organizer read returns this same action with a NULL organizer
+          // — "the lookup broke" is not "someone else organized it", and saying
+          // so about the owner's own meeting would be a confident false claim.
+          // Unresolved says only that, and says it as a RETRYABLE error rather
+          // than a verdict: this action means planMeeting returned before the
+          // rules pipeline ever ran, so falling through would PATCH the calendar
+          // with a destination nothing validated — the degrade the catch at the
+          // bottom of this block refuses for the same reason. (The unreadable-id
+          // case that produced this in the live incident is already refused at
+          // the source-event load above; what reaches here is a Graph organizer
+          // read that blipped on an event that otherwise reads fine.)
+          if (movePlan.action === 'refuse_not_owners') {
+            if (movePlan.organizerEmail) {
+              logger.info('move_meeting refused — planMeeting resolved owner as attendee, not organizer', {
+                meetingId: args.meeting_id, organizer: movePlan.organizerEmail,
+              });
+              return notOrganizerRefusal({
+                subject: args.meeting_subject,
+                ownerFullName: context.profile.user.name,
+                organizerName: movePlan.organizerName,
+                organizerEmail: movePlan.organizerEmail,
+              });
+            }
+            logger.warn('move_meeting — refuse_not_owners with an UNRESOLVED organizer (Graph organizer read failed); refusing without claiming anything about who organized it', {
+              meetingId: args.meeting_id,
+            });
+            return {
+              success: false,
+              error: 'ownership_unverified',
+              meeting_subject: args.meeting_subject,
+              message: `Couldn't check who organizes "${args.meeting_subject}" — the calendar lookup didn't come back, so I left the meeting exactly as it was. Try the move again in a moment; if it keeps failing, re-read the day with get_calendar and retry with the id it returns.`,
+            };
+          }
           // v3.2.x (#8) — colleague reschedule onto a soft-rule-breaking slot:
           // offer nearby rule-compliant alternatives before escalating.
           if (movePlan.action === 'propose_alternative') {

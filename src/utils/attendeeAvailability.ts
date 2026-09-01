@@ -18,6 +18,7 @@
 
 import logger from './logger';
 import type { WeekDay } from './floatingBlocks';
+import type { TimezoneTempSource } from '../db/people';
 
 export interface AttendeeAvailabilityEntry {
   email: string;
@@ -64,6 +65,27 @@ export interface AttendeeAvailabilityEntry {
    * (attendee_hours in find_available_slots), which IS a real statement.
    */
   assumed?: boolean;
+  /**
+   * v4.8.x (o#262/o#265, owner ruling 2026-08-31) — set when this attendee is
+   * currently on a TEMP timezone reading (a later auto-tier value differing
+   * from their established PERMANENT zone, TTL'd — see
+   * `getEffectiveTimezoneById`, src/db/people.ts). `timezone`/`hoursStart`/
+   * `hoursEnd` above are ALWAYS computed off the permanent zone regardless —
+   * this is surfacing-only ("assuming X is on <permanent>, we currently see Y")
+   * so a wrong-but-stated-once zone never gets silently corrected back onto
+   * the very booking it's stale for. `source` says which auto-tier writer
+   * produced the reading (Slack profile sync vs the Haiku chat-capture pass —
+   * `TimezoneTempSource`, src/db/people.ts) — a caller that surfaces this to
+   * a human MUST attribute by `source`, never hard-code "Slack": until
+   * 2026-09-01 that writer was the only one, so the wording was true then and
+   * would be a false provenance claim now.
+   *
+   * NEVER read this field directly when surfacing it for a specific DAY —
+   * resolve it through `tzTempDifferingForDay` below. The reading is a
+   * discrepancy against the PERMANENT zone, which is only the zone the day's
+   * clip actually ran in when the attendee isn't travelling that day.
+   */
+  tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
 }
 
 /**
@@ -78,6 +100,43 @@ export function attendeeTzForDay(
   const tw = entry.travelWindow;
   if (tw && isoDate >= tw.from && isoDate <= tw.until) return tw.timezone;
   return entry.homeTimezone ?? entry.timezone;
+}
+
+/**
+ * v4.8.x (2026-09-01) — the temp-timezone hedge, resolved PER DAY. The ONE
+ * place that decides whether `tzTempDiffering` may be spoken about a given
+ * calendar day; every surfacing caller goes through it (the per-slot conflict
+ * line and the day_summary grounding note both did the check themselves, and
+ * only one of them had it).
+ *
+ * `tzTempDiffering` is a discrepancy measured against the attendee's PERMANENT
+ * zone, so the hedge it produces ("assuming they're on their usual zone, we
+ * currently read X") is only a true account of the math when the day's clip
+ * actually ran in that permanent zone. On a day inside `travelWindow` it did
+ * not: `attendeeTzForDay` already swapped the TRIP zone into the work-hours
+ * clip, so the sentence describes a calculation that never happened — and when
+ * the passive reading came from a client sitting in the destination (the
+ * co-existence `db/people.ts` documents above `TimezoneTemp`, people.ts:57-76)
+ * it degenerates into "their timezone on file is America/New_York, but we
+ * currently read America/New_York". The dated travel record is the stated
+ * signal and outranks the passive reading (M12), so those days need no hedge
+ * at all.
+ *
+ * A travel record that did NOT swap the zone (destination unresolvable in the
+ * static map, or same zone as home) never becomes a `travelWindow` in the first
+ * place — `loadAttendeeAvailabilityForEmails` only writes one when
+ * `travelTz && travelTz !== resolvedTz` — so those days keep the hedge, exactly
+ * like a non-traveller. Same gate as `planMeeting.ts`'s
+ * `travelActuallySwappedZone`, on the entry that already encodes it.
+ */
+export function tzTempDifferingForDay(
+  entry: Pick<AttendeeAvailabilityEntry, 'travelWindow' | 'tzTempDiffering'>,
+  isoDate: string,
+): AttendeeAvailabilityEntry['tzTempDiffering'] | undefined {
+  if (!entry.tzTempDiffering) return undefined;
+  const tw = entry.travelWindow;
+  if (tw && isoDate >= tw.from && isoDate <= tw.until) return undefined;
+  return entry.tzTempDiffering;
 }
 
 /**
@@ -109,7 +168,7 @@ export function loadAttendeeAvailabilityForEmails(
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory, getTravelRecordById } = require('../db') as typeof import('../db');
+    const { searchPeopleMemory, getTravelRecordById, getEffectiveTimezoneById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('./workingHoursDefault') as
       typeof import('./workingHoursDefault');
@@ -124,15 +183,23 @@ export function loadAttendeeAvailabilityForEmails(
       if (lower === ownerLower) continue;
       const matches = searchPeopleMemory(email);
       const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
+      // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — read the PERMANENT
+      // stored zone via getEffectiveTimezoneById, never the raw column: a
+      // later differing Slack-auto reading lands in a TTL'd sibling value
+      // (`tzTempDiffering` below) instead of silently overwriting the
+      // established zone, so working-hours math is never computed against a
+      // stale/transient reading (o#265 — Maayan stored/read as ET drove a
+      // whole search's "outside working hours" verdicts wrong).
+      const effectiveTz = person ? getEffectiveTimezoneById(person.person_id) : undefined;
       // #M3 (2026-07-23 owner direction) — an attendee with no stored timezone is
       // ASSUMED to be in the requester's frame (fallbackTimezone = owner's TZ) with
       // standard hours, instead of being SKIPPED (which left them unclipped so the
       // search could offer owner-morning to a would-be-remote person). A human-stated
       // TZ/time still overrides via search_window_timezone. When fallbackTimezone is
       // omitted (other callers) → unchanged: skip the no-TZ attendee.
-      const resolvedTz = person?.timezone ?? fallbackTimezone;
+      const resolvedTz = effectiveTz?.timezone ?? fallbackTimezone;
       if (!resolvedTz) continue;
-      const wh = person?.timezone ? getEffectiveWorkingHours(person) : defaultWorkingHoursForTz(resolvedTz);
+      const wh = effectiveTz?.timezone ? getEffectiveWorkingHours(person!) : defaultWorkingHoursForTz(resolvedTz);
       if (!wh) continue;
 
       let timezone = resolvedTz;
@@ -187,10 +254,21 @@ export function loadAttendeeAvailabilityForEmails(
         homeTimezone: resolvedTz,
         ...(travelMeta ? { travel: travelMeta } : {}),
         ...(travelWindow ? { travelWindow } : {}),
-        // #M3 — no stored person.timezone means resolvedTz came from the
+        // #M3 — no stored permanent timezone means resolvedTz came from the
         // fallback (requester's frame) and wh came from the generic zone
         // default, not this attendee's own profile. A GUESS, flag it.
-        ...(person?.timezone ? {} : { assumed: true }),
+        ...(effectiveTz?.timezone ? {} : { assumed: true }),
+        // v4.8.x (o#262/o#265) — permanent zone is known and used for the math
+        // above, but a later auto-tier reading currently differs (TTL'd) —
+        // surface-only, never substituted into the computation itself. `source`
+        // rides along so a surfacing caller attributes it correctly.
+        ...(effectiveTz?.tempDiffering
+          ? { tzTempDiffering: {
+              tempZone: effectiveTz.tempDiffering.value,
+              expiresAt: effectiveTz.tempDiffering.expiresAt,
+              source: effectiveTz.tempDiffering.source,
+            } }
+          : {}),
       });
     }
 

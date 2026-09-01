@@ -2,6 +2,55 @@
 
 ---
 
+## 4.8.4 — A stored timezone is no longer allowed to silently drive an answer
+
+One symptom, chased to the bottom across the whole path it travels. A colleague's stored timezone was wrong — Israel, recorded as US Eastern — and nothing anywhere said so. It silently clipped her working hours, four separate availability searches came back "nobody is free," each was stated to the owner as settled fact, and he had to notice it himself eight messages in. This release closes every stage of that: how a wrong zone gets written, how it stays wrong, whether Maelle admits she is assuming it, and what she does when a zone genuinely changes.
+
+### Fixed (high-impact)
+- **A settled timezone can no longer be silently overwritten.** Both automatic writers — the Slack profile sync and the background capture pass that infers facts from conversation — used to overwrite a person's established zone outright, at equal authority, with no signal that anything had changed. A differing automatic reading now goes to a separate temporary slot instead, and the permanent value it disagrees with is left alone. A zone the owner or the person themselves stated was already protected; this closes the case where an automatic value silently replaced another automatic value.
+- **Maelle now says when she is assuming someone's timezone**, in availability answers and in booking confirmations, and the sentence is accurate about where the assumption came from — Slack's profile or something the person mentioned in chat. Previously the assumption was invisible, so a wrong zone produced a confident wrong answer with nothing to push back on.
+- **When someone actually moves, she asks once and waits.** A differing reading that keeps re-appearing across a full week — a real relocation, not a night in another city — raises a single question to the owner in his usual decision thread, and only his yes updates the stored zone. Nothing is ever promoted silently. The question rides the existing request spine, so it survives restarts and cannot evaporate unanswered.
+- **A cross-timezone attendee is no longer treated as proof they are physically elsewhere.** A stored home zone differing from the owner's used to force a meeting online with a Teams link, even for a guest sitting in the office. Two real invites went out wrong this way on 30 August.
+- **A colleague's undecided cancellation request no longer closes itself** when an unrelated change lands on the same meeting. It used to be marked resolved, with a confident "locked in" message, while the owner had never actually ruled on it.
+- **"I'll move it myself" no longer books the meeting.** The owner saying he would handle something personally matched the pattern for agreeing to a proposal, so Maelle went ahead and changed a six-person meeting he had just said he would fix himself.
+- **A moved meeting whose source event cannot be read now refuses cleanly** instead of crashing with a raw calendar error. An unreadable event and a genuinely missing one were indistinguishable, so a transient read failure could be reported as a fact about the meeting.
+
+### Fixed (small)
+- A social aside no longer fires in the middle of an unfinished task when Maelle's own reply just asked a question and it has not been answered.
+- The morning brief's closure narration matched a value nothing in the code ever wrote, so that wording had never once appeared.
+- A vanished-meeting cleanup that closed only a request logged nothing and reported zero, so it looked like it had done nothing.
+- A person's memory file no longer records a timezone the database refused to store.
+
+### Fixed (the same night, unattended)
+The nightly run picked up this release's own leftovers and closed ten more, most of them residuals of the timezone work above:
+- **A cancelled meeting whose organizer could not be looked up was declined anyway**, as though Maelle had established the owner was not the organizer. A transient calendar read failure now refuses retryably instead of sending a real decline on an unproven fact.
+- **The travel hedge no longer contradicts the arithmetic it describes.** When a colleague was travelling, availability said "assuming their usual zone" while the search had already clipped their hours in the trip zone. The decision is now made once, per day, in one place.
+- **A guest travelling TO the owner's own city is no longer forced online.** A travel record was read as "remote" without ever looking at the destination.
+- **An attendee whose trip destination cannot be resolved keeps the assumption note**, instead of silently losing it.
+- The same assumption is no longer stated twice in one confirmation.
+- A person's memory file now records only what the database actually stored, on every field rather than just the timezone.
+- Maelle's own record no longer drifts from the owner's configured timezone, and the boot-time check that kept re-firing over it now settles.
+- A note written during self-capture no longer inverts the meaning of a correction.
+- Two internal-only guards: an approval's sub-type is validated at the one place they are minted, and a helper meant to be private is no longer exposed as if it were supported.
+
+### Not changed
+- The wrong-zone case where the stored value and the live profile *agree* is still unguarded — the fix keys on disagreement, so a profile that is simply wrong at the source produces no temporary reading, no hedge and no question. Named here because it is the original incident's own shape, reachable by a different route.
+
+### Invariants preserved
+- Authority order on person data is unchanged: what the owner or the person states still outranks anything automatic, and a stated correction still clears any temporary reading.
+- No promotion of a timezone ever happens without the owner's explicit yes. The temporary tier is the default and the owner is the only door out of it.
+- The new question is an ordinary request row — no second waiting mechanism was introduced, and reminders, expiry and resolution all reuse what already existed.
+
+### Migration
+- New nullable `people_memory.timezone_temp` column, written only by the automatic-tier divert and self-clearing on read. No backfill, no data rewritten. Existing rows with no value behave exactly as before.
+
+### Framework (other chats, bundled)
+- **A dedup list was silently discarding work that had not shipped.** Wrap-commit dates were read in the committing machine's own offset while ledger rows are stamped in UTC, so a wrap landing after local midnight read a day later than it truly was — and four genuinely-uncommitted fixes were swept off the list as already-shipped. Now forced to UTC on both sides, with a permanent regression test anchored to the real commit that exposed it. Two sibling readers with the identical defect are filed and deliberately left open rather than folded in.
+- **A bounce re-check now escalates in lockstep with the rebuild it is judging** — a second-round fix built on the stronger model is no longer reviewed by the weaker one. This reverses a previously recorded decision to keep the re-check pinned, and matches what this release's own final pass demonstrated: the stronger reviewer found real issues the weaker one had cleared twice. **It ships without its own framework-ledger row and needs one** — named here so it is recorded history rather than an unexplained diff.
+- A workflow dispatch label was renamed for readability; no functional consumer.
+
+---
+
 ## 4.8.3 — A safety rule broke the question it was supposed to protect
 
 A same-day regression, caught and fixed within hours: a claim-checker rule shipped this morning (v4.8.2, to stop a real fabricated-calendar-fact incident) turned out to also fire on the single most common colleague question — "is he free at X?" — because it couldn't tell a genuine, correctly-computed fast-path answer from a fabrication. Reverted the rule outright rather than patch around it, then fixed the actual root cause so the fast path is recognized as real evidence going forward. Verified by a new 30-item regression battery built the same day specifically because of this incident.

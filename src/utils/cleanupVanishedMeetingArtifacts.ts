@@ -170,7 +170,12 @@ export async function cleanupVanishedMeetingArtifacts(params: {
         // this sweep's job), but no human is told an outcome we cannot vouch for.
         inferredFromAbsence: true,
       });
-      const total = cleaned.tasksCancelled + cleaned.outreachClosed + cleaned.calendarIssuesResolved;
+      // vanished-sweep-request-close-invisible (2026-08-31) — a mutation whose
+      // ONLY effect was closing a spine request (no task/outreach/calendar-
+      // issue row touched) used to sum to 0 here, so this sweep silently
+      // dropped it from both `result.cleaned` and its own info log below.
+      const total = cleaned.tasksCancelled + cleaned.outreachClosed + cleaned.calendarIssuesResolved
+        + cleaned.requestsClosed;
       if (total > 0) {
         result.cleaned++;
         logger.info('cleanupVanishedMeetingArtifacts: closed orphan artifacts', {

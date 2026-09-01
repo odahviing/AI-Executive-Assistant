@@ -368,13 +368,35 @@ if (argv.includes('--architect')) {
 //      still-open row against this repo's actual history).
 //
 // SAFE BY CONSTRUCTION: this can only ever SHRINK the naive "every
-// verdict:built row" set — it never invents an entry, so a wrong exclusion
-// costs one wasted re-dispatch that comes back `already-fixed` — the accepted
-// cost gh#195 itself names — never a real bug silently swallowed. Two rows
-// dated the SAME DAY as a wrap are leant TOWARD KEEPING (`>` is strict), since
-// day-level dates cannot order same-day events. When git is unavailable, fact
-// 2 is skipped entirely rather than guessed at (same rule `--open` follows for
-// its own git-backed checks) and only fact 1 applies.
+// verdict:built row" set — it never invents an entry, so a wrong exclusion of
+// a row that HAS actually shipped costs one wasted re-dispatch that comes back
+// `already-fixed` — the accepted cost gh#195 itself names. A wrong exclusion
+// of a row that has NOT shipped is the expensive direction instead: the code
+// is not in the tree, so a re-dispatch cannot discover "already-fixed" — it
+// just rebuilds the same fix a second time, paying full build cost for work
+// that already exists (X213 below is exactly this). Two rows dated the SAME
+// DAY as a wrap are leant TOWARD KEEPING (`>` is strict), since day-level
+// dates cannot order same-day events. When git is unavailable, fact 2 is
+// skipped entirely rather than guessed at (same rule `--open` follows for its
+// own git-backed checks) and only fact 1 applies.
+//
+// X213 · BOTH DATES HAVE TO SHARE ONE CLOCK. `stampDate()` (ledger-file.cjs)
+// always stamps UTC (`new Date().toISOString().slice(0,10)`) — but `wrapDates`
+// used to be read via plain `--date=short`, which renders a commit's date in
+// the OFFSET IT WAS COMMITTED WITH (this repo's committer is +03:00), never
+// UTC and never the viewer's own clock. Measured live on the 4.8.3 wrap: its
+// commits landed at 2026-08-30 21:57-21:59 UTC, i.e. `date: "2026-08-30"` by
+// the ledger's own convention — but `--date=short` printed `2026-08-31`
+// (already past local midnight). A same-night run built 4 fixes on top of
+// that wrap and stamped them, correctly, `"2026-08-30"` (UTC, same day as the
+// wrap) — and the OLD comparison read `"2026-08-31" > "2026-08-30"` as TRUE,
+// sweeping 4 genuinely still-uncommitted rows as if a wrap had already shipped
+// them. The wrap and the run were less than 3 hours apart in real time and on
+// the SAME UTC day; only the mismatched clock made them look a day apart.
+// `TZ: 'UTC0'` + `--date=format-local:%Y-%m-%d` forces git to render in UTC
+// regardless of the committing machine's own offset, matching `stampDate()`
+// exactly — the fix is which clock, not the `>` logic (that already leans
+// toward keeping on a true tie; it just never saw the tie).
 if (argv.includes('--already-built')) {
   const ledgerPath = argOf('--ledger') || LEDGER;
   if (!fs.existsSync(ledgerPath)) {
@@ -407,7 +429,14 @@ if (argv.includes('--already-built')) {
   let wrapDates = [];
   let gitChecked = false;
   try {
-    const log = require('child_process').execFileSync('git', ['-C', REPO, 'log', '--format=%ad|%s', '--date=short'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    // X213 · UTC, forced — see the comment above. `--date=short` alone renders
+    // in the COMMIT's own offset, not UTC; `format-local` + `TZ=UTC0` is what
+    // actually makes git compute in UTC, matching `stampDate()`.
+    const log = require('child_process').execFileSync(
+      'git',
+      ['-C', REPO, 'log', '--format=%ad|%s', '--date=format-local:%Y-%m-%d'],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: { ...process.env, TZ: 'UTC0' } },
+    );
     wrapDates = [...new Set(log.split(/\r?\n/).filter((l) => /^\d{4}-\d{2}-\d{2}\|\d+\.\d+\.\d+/.test(l)).map((l) => l.split('|')[0]))];
     gitChecked = true;
   } catch {

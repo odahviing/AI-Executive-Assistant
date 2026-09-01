@@ -29,7 +29,7 @@ import {
   getPendingRequestCountForColleague,
   type MaelleEvent,
 } from '../db';
-import type { RequestKind, RequestRow } from '../core/requests/types';
+import type { RequestKind, RequestRow, ApprovalSubkind as ApprovalSubkindCanonical } from '../core/requests/types';
 import { parseDetails, toTimerInstant } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
@@ -38,12 +38,19 @@ import { logLlmUsage } from '../utils/usageLog';
 
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
 
+// The TOOL-facing subset of core/requests/types.ts's canonical
+// APPROVAL_SUBKINDS — everything create_approval may mint. `satisfies`
+// ties this list to that canonical set at compile time, so a value here that
+// isn't also documented there fails typecheck instead of silently drifting
+// (approval-subkind-union-enforces-nothing, 2026-09). Deliberately narrower:
+// 'timezone_persistence' is system-raised only (never via this tool) — see
+// core/requests/types.ts and runner.ts's raiseTimezonePersistenceAsks.
 const APPROVAL_SUBKINDS = [
   'duration_override',
   'policy_exception',
   'unknown_person',
   'freeform',
-] as const;
+] as const satisfies readonly ApprovalSubkindCanonical[];
 type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
 
 const anthropic = getAnthropicClient();

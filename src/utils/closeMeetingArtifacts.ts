@@ -71,6 +71,18 @@ export interface CloseMeetingArtifactsResult {
   calendarIssuesResolved: number;
   /** v4.2.x — colleagues told that the time they were given no longer holds. */
   correctionsRelayed: number;
+  /**
+   * vanished-sweep-request-close-invisible (2026-08-31) — step 5's spine
+   * request closures (closeMatchedRequestWithRelay, both the direct
+   * outcome_external_event_id tier and the details/thread/orphaned-approval
+   * tier) never had a counter of their own, so a mutation whose ONLY effect
+   * was closing a request — no task, no outreach, no calendar-issue row —
+   * left every field above at 0. That made the closure invisible to this
+   * function's own cascade-fired log gate below AND to
+   * cleanupVanishedMeetingArtifacts.ts's `total`/cleaned-count, which summed
+   * only the other three fields.
+   */
+  requestsClosed: number;
 }
 
 export async function closeMeetingArtifacts(params: {
@@ -161,6 +173,7 @@ export async function closeMeetingArtifacts(params: {
     outreachClosed: 0,
     calendarIssuesResolved: 0,
     correctionsRelayed: 0,
+    requestsClosed: 0,
   };
 
   if (!params.meetingId) return result;
@@ -193,7 +206,7 @@ export async function closeMeetingArtifacts(params: {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOpenRescheduleOutreach } = require('../db/jobs') as typeof import('../db/jobs');
       const matchingOutreach = getOpenRescheduleOutreach(params.ownerUserId)
-        .filter(row => payloadReferencesMeeting(row.context_json, params.meetingId));
+        .filter(row => payloadReferencesMeeting(row.context_json, params.meetingId, params.reason));
 
       if (matchingOutreach.length > 0) {
         // 2a. (v4.2.x — owner decision "option C") CORRECT THE COLLEAGUE BEFORE
@@ -292,7 +305,7 @@ export async function closeMeetingArtifacts(params: {
 
     const matchingTaskIds: string[] = [];
     for (const row of openTasks) {
-      if (payloadReferencesMeeting(row.context, params.meetingId)) {
+      if (payloadReferencesMeeting(row.context, params.meetingId, params.reason)) {
         matchingTaskIds.push(row.id);
       }
     }
@@ -374,6 +387,7 @@ export async function closeMeetingArtifacts(params: {
         // The helper is shared anyway so the two tiers cannot drift on outcome
         // state again — not because a requester is expected here.
         await closeMatchedRequestWithRelay(r, params);
+        result.requestsClosed++;
       }
 
       // Fallback — sweep open top-level requests: match by meeting_id in
@@ -443,7 +457,7 @@ export async function closeMeetingArtifacts(params: {
         // tier-0 (the resolver owns that request's close + relay) is already
         // excluded from `open` itself, above — nothing left to skip here for it.
         if (directMatches.some(d => d.id === r.id)) continue;
-        let matched = payloadReferencesMeeting(r.details_json, params.meetingId);
+        let matched = payloadReferencesMeeting(r.details_json, params.meetingId, params.reason);
 
         // Colleague linkage for NON-resolver bookings (direct create, or a
         // booking that landed in a free turn): the request originated in the
@@ -454,11 +468,24 @@ export async function closeMeetingArtifacts(params: {
         // (resolver-driven) + this thread-match cover the real cases, and a
         // renamed meeting never false-matches a stale same-subject request.
         if (!matched && threadMatchId && r.id === threadMatchId) {
-          matched = true;
-          logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
-            requestId: r.id, subject: r.subject,
-            bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
-          });
+          // thread-match-tier-no-deferred-action-check (2026-08-31) — a thread
+          // match only proves this is the sole open colleague request in the
+          // booking thread, not that the mutation which just fired is the one
+          // this request's own pending deferred_action is waiting on. Same
+          // guard payloadReferencesMeeting's own deferred_action branch
+          // already applies for meeting-id-referencing candidates.
+          if (deferredActionSettledBy(params.reason, requestDeferredActionTool(r.details_json))) {
+            matched = true;
+            logger.info('closeMeetingArtifacts — colleague-request thread-match fired', {
+              requestId: r.id, subject: r.subject,
+              bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
+            });
+          } else {
+            logger.info('closeMeetingArtifacts — thread-match candidate has a pending deferred action this mutation does not settle, not auto-closing', {
+              requestId: r.id, subject: r.subject, reason: params.reason,
+              bookingThreadTs: params.bookingThreadTs, meetingId: params.meetingId,
+            });
+          }
         }
         if (!matched && approvalMatchId && r.id === approvalMatchId) {
           matched = true;
@@ -478,6 +505,7 @@ export async function closeMeetingArtifacts(params: {
           // (Mike Naumenko / req_1787571380436_otils trace, the
           // inferredFromAbsence constraint, the wording split).
           await closeMatchedRequestWithRelay(r, params);
+          result.requestsClosed++;
         }
       }
     } catch (err) {
@@ -487,7 +515,7 @@ export async function closeMeetingArtifacts(params: {
     }
 
     if (result.tasksCancelled > 0 || result.outreachClosed > 0 || result.calendarIssuesResolved > 0
-        || result.correctionsRelayed > 0) {
+        || result.correctionsRelayed > 0 || result.requestsClosed > 0) {
       logger.info('closeMeetingArtifacts — cascade fired', {
         meetingId: params.meetingId,
         reason: params.reason,
@@ -732,7 +760,59 @@ async function relayCancellationToOutreachColleague(
   }
 }
 
-function payloadReferencesMeeting(payloadJson: string | null | undefined, meetingId: string): boolean {
+const TOOL_FOR_MUTATION_REASON: Partial<Record<MeetingArtifactReason, string>> = {
+  created: 'create_meeting',
+  moved: 'move_meeting',
+  updated: 'update_meeting',
+};
+
+/**
+ * thread-match-tier-no-deferred-action-check (2026-08-31) — shared by every
+ * tier that may auto-close a request carrying a pending `deferred_action`
+ * (the tool the resolver replays when an approval is decided): does the
+ * mutation that just fired actually SETTLE that specific action, or is it an
+ * unrelated mutation that merely happened to touch the same meeting? The
+ * meeting being gone outright settles every pending action on it (nothing is
+ * left for ANY tool to run against it); short of that, only the SAME tool the
+ * deferred action names counts — a move landing must never resolve a pending
+ * cancel (or vice versa) just because both happened on the same event. A
+ * request with no deferred_action at all (a plain outreach ask, no deviation
+ * pending) has nothing to gate on and is always considered settled — the
+ * guard exists only to stop a pending DEVIATION from being silently overtaken
+ * by an unrelated mutation.
+ *
+ * `payloadReferencesMeeting`'s own deferred_action branch already applied
+ * this rule (delete-approval-resolved-by-unrelated-positive-mutation,
+ * 2026-08-31) for candidates found by meeting-id reference. The thread-match
+ * tier below found candidates a different way — same open request, same
+ * booking thread — and set `matched = true` with no equivalent check, so a
+ * colleague's still-pending cancel approval sitting alone in a thread got
+ * silently closed 'resolved' ("locked in ... calendar invite is on its way")
+ * the moment ANY other booking landed in that same thread, e.g. a move the
+ * colleague asked for right after the still-undecided cancel ask — the
+ * opposite outcome of what he asked for, with the owner never ruling on it.
+ */
+function deferredActionSettledBy(reason: MeetingArtifactReason, tool: string | undefined): boolean {
+  if (!tool) return true;
+  if (reason === 'deleted') return true;
+  return tool === TOOL_FOR_MUTATION_REASON[reason];
+}
+
+function requestDeferredActionTool(detailsJson: string | null | undefined): string | undefined {
+  if (!detailsJson) return undefined;
+  try {
+    const details = JSON.parse(detailsJson) as { deferred_action?: { tool?: string } };
+    return details.deferred_action?.tool;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function payloadReferencesMeeting(
+  payloadJson: string | null | undefined,
+  meetingId: string,
+  reason: MeetingArtifactReason,
+): boolean {
   if (!payloadJson) return false;
   try {
     const payload = JSON.parse(payloadJson) as Record<string, unknown>;
@@ -751,13 +831,29 @@ function payloadReferencesMeeting(payloadJson: string | null | undefined, meetin
     // close, or notify that approval's requester. Confirmed live:
     // req_1787571380436_otils's details_json carries `deferred_action.args.
     // meeting_id` only, no top-level meeting_id.
-    const deferredArgs = (payload.deferred_action as { args?: Record<string, unknown> } | undefined)?.args;
-    if (deferredArgs) {
-      for (const key of candidateKeys) {
-        if (deferredArgs[key] === meetingId) return true;
-      }
-    }
-    return false;
+    const deferred = payload.deferred_action as { tool?: string; args?: Record<string, unknown> } | undefined;
+    const deferredArgs = deferred?.args;
+    if (!deferredArgs) return false;
+    const referencesThisMeeting = candidateKeys.some(key => deferredArgs[key] === meetingId);
+    if (!referencesThisMeeting) return false;
+    // delete-approval-resolved-by-unrelated-positive-mutation (2026-08-31,
+    // guard-filter-narrower-than-what-it-gates) — the deferredArgs match above
+    // only proves this pending approval's own deferred action TARGETS this
+    // meeting, not that the mutation actually being cascaded is the one this
+    // approval is waiting on. Before this guard, ANY mutation on the meeting —
+    // including an unrelated positive one (owner moves/renames it for reasons
+    // that have nothing to do with the pending ask) — closed a pending
+    // `delete_meeting` cancel-request as `resolved` with a "locked in ... on
+    // its way" message: the colleague's still-undecided cancel ask got told
+    // the opposite of what he asked for, and the owner never got to rule on
+    // it. A deferred action only counts as overtaken by events when either
+    // the meeting is gone outright (nothing is left for ANY tool to act on —
+    // 'deleted' always settles every pending action on it, matching this
+    // branch's original delete_meeting case) or the mutation that fired IS
+    // the same tool this approval would run when resolved. Cross-tool
+    // coincidence (a move/update/create closing a pending delete, or vice
+    // versa) never matches.
+    return deferredActionSettledBy(reason, deferred?.tool);
   } catch (_) {
     return false;
   }

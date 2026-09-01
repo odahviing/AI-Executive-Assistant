@@ -44,6 +44,7 @@ import {
   getPersonMemory,
   updatePersonProfile,
   setCoreFieldWithProvenance,
+  applyAutoTimezone,
   appendPersonNote,
   appendPersonInteraction,
   type PersonProfile,
@@ -195,12 +196,16 @@ function parseDelta(raw: string): CaptureDelta | null {
 /**
  * Apply a Haiku delta to BOTH the DB and the colleague's .md file.
  *
- * DB writes use the existing provenance-aware helpers (`_set_by='auto'`
- * via setCoreFieldWithProvenance for timezone/state; updatePersonProfile
+ * DB writes use the existing provenance-aware helpers (`_set_by='auto'` via
+ * setCoreFieldWithProvenance for state/name_he; timezone goes through
+ * applyAutoTimezone, the shared auto-tier divert, so a differing chat reading
+ * lands as temp instead of clobbering an established zone; updatePersonProfile
  * for profile_json fields). Owner-direct writes still trump auto.
  *
  * MD mirroring: each structured field maps to a section in the .md file
  * template (Residence / Workplace / Working hours / Communication style).
+ * Mirrors what the DB write actually LANDED, not the raw delta — the .md is
+ * prompt context, so a refused or diverted value must never appear there.
  * Updates REPLACE the section body. Interaction history APPENDS to the
  * "What we've discussed" section. Owner can hand-edit any section; the
  * next capture pass replaces only the auto-managed sections.
@@ -221,7 +226,19 @@ async function applyDelta(
   // when the candidate fails the IANA check.
   if (delta.timezone) {
     if (isStrictIana(delta.timezone)) {
-      setCoreFieldWithProvenance(slackId, 'timezone', delta.timezone, 'auto');
+      // v4.8.x (2026-09-01) — routes through the same divert as the Slack
+      // sync (`applyAutoTimezone`), not the bare provenance chokepoint: a
+      // later Haiku-extracted reading that differs from an already-
+      // established permanent zone must land as temp/TTL'd, not clobber it
+      // outright (the Maayan Sulami case, reproduced on this second path).
+      // Tagged 'chat' so whoever surfaces the temp reading attributes it to
+      // the conversation, not to Slack.
+      const tzWrite = applyAutoTimezone(slackId, delta.timezone, 'chat');
+      if (tzWrite === 'diverted_temp') {
+        logger.info('capturePass — chat-extracted timezone differs from the established zone; recorded as temp, permanent zone untouched', {
+          slackId, candidate: delta.timezone,
+        });
+      }
     } else {
       logger.warn('capturePass — dropped non-IANA timezone from Haiku capture', {
         slackId, candidate: delta.timezone,
@@ -267,11 +284,27 @@ async function applyDelta(
   // v3.2.0 — md files are keyed by person_id now. A known colleague always has
   // a row (written at message arrival); fall back to the legacy name-slug only
   // if somehow absent so a write never silently drops.
-  const personId = getPersonMemory(slackId)?.person_id ?? slugifyName(colleagueName);
+  const stored = getPersonMemory(slackId);
+  const personId = stored?.person_id ?? slugifyName(colleagueName);
 
   const residenceLines: string[] = [];
-  if (delta.state) residenceLines.push(`Lives in ${delta.state}.`);
-  if (delta.timezone) residenceLines.push(`Timezone: ${delta.timezone}.`);
+  // Mirror what's actually STORED after the write above (line 248), never the
+  // raw Haiku delta — same rule as the timezone fix directly below, applied to
+  // its sibling field. setCoreFieldWithProvenance can return
+  // 'refused_lower_authority' (an owner/person-stated residence beats an
+  // 'auto' chat reading) and a line built from the delta would then assert a
+  // fact the DB just refused, contradicting the very column that guards it.
+  if (delta.state && stored?.state) residenceLines.push(`Lives in ${stored.state}.`);
+  // v4.8.x (2026-09-01) — mirror the zone that is actually STORED after the
+  // write above, never the raw Haiku delta. The .md is prompt context (injected
+  // as "MEMORY ON <person>" by orchestrator/systemPrompt.ts, and returned by the
+  // person-lookup tool), so a line written from the delta is read back as fact:
+  // when the delta was diverted to `timezone_temp`, refused as lower-authority,
+  // or dropped as non-IANA, the column did not move and the .md would stand as a
+  // false record contradicting the very column the divert protects. A temp
+  // reading is surfaced on the booking path (the assumption note), never here —
+  // the .md carries only the permanent zone.
+  if (delta.timezone && stored?.timezone) residenceLines.push(`Timezone: ${stored.timezone}.`);
   if (residenceLines.length > 0) {
     await writePersonSection({
       profile, personId, displayName: colleagueName,
@@ -395,7 +428,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         // (facts about MAELLE herself, not about the speaker). Owner direction:
         // "do the same we did in the memory of persons / tell haiku to keep
         // as much as he can about maelle, but no duplicates."
-        await runSelfCapture(profile, anthropic, row.thread_ts, ownerName);
+        await runSelfCapture(profile, anthropic, row.thread_ts, ownerName, row.captured_at);
         // v3.0 follow-up — subject reconciliation for OWNER's own subjects.
         // The owner's own gaming/movies/family/etc. social subjects live in
         // social_subjects keyed on person_slack_id = ownerSlackId. End-of-chat
@@ -623,6 +656,7 @@ async function runSelfCapture(
   anthropic: ReturnType<typeof getAnthropicClient>,
   threadTs: string,
   ownerName: string,
+  previousCapturedAt: string | null,
 ): Promise<void> {
   try {
     const selfId = selfSlackId(profile.user.slack_user_id);
@@ -652,7 +686,31 @@ async function runSelfCapture(
 
     const messages = getConversationHistory(threadTs);
     if (messages.length === 0) return;
-    const transcript = chatToTranscript(messages, ownerName);
+    // gh#(log-selfcapture-note-inverts-correction-polarity) — scope to what's
+    // NEW since the last capture, not the whole stored (up-to-20) window.
+    // This is the one field with no structured ground truth to check a
+    // re-derivation against (colleague capture at least compares against the
+    // stored profile/md; here it's only free-text `existingNotes`, and a
+    // fact this system dropped — correctly, as non-identity — is never on
+    // that list). Re-summarizing an already-resolved older exchange from
+    // scratch on every later, unrelated turn risks a fresh, inconsistent (or
+    // outright inverted) reading of it each time Haiku sees it again. Once a
+    // capture has run for this thread, only messages that arrived after that
+    // capture can teach anything NEW — replay the same window instead of
+    // dropping to the very last message: real corrections often span more
+    // than one message, and this file's dedup (existingNotes) already
+    // guards duplicate emission for anything actually persisted.
+    const sinceMs = previousCapturedAt
+      ? Date.parse(previousCapturedAt.replace(' ', 'T') + 'Z') // SQLite datetime() is UTC, no marker
+      : null;
+    const newMessages = sinceMs !== null && !Number.isNaN(sinceMs)
+      ? messages.filter(m => {
+          const tsMs = parseFloat(m.ts || '0') * 1000;
+          return tsMs === 0 || tsMs > sinceMs; // no ts (legacy row) — keep rather than silently drop
+        })
+      : messages;
+    if (newMessages.length === 0) return;
+    const transcript = chatToTranscript(newMessages, ownerName);
 
     const assistantName = profile.assistant.name;
     const userMsg = [

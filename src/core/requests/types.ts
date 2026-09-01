@@ -25,11 +25,33 @@ export type RequestKind =
   | 'research'         // owner-self: "look this up and tell me"
   | 'social_outreach'; // proactive social DM to a colleague
 
-export type ApprovalSubkind =
-  | 'duration_override'
-  | 'policy_exception'
-  | 'unknown_person'
-  | 'freeform';
+/**
+ * Canonical, RUNTIME-checkable set of every legal `requests.subkind` value
+ * for `kind='approval'`. A plain `type` union documents this and enforces
+ * nothing — nothing at the one place that writes the row (db/requests.ts's
+ * createRequest) ever checked a value against it, so the documented set and
+ * what the DB actually holds could drift apart silently (approval-subkind-
+ * union-enforces-nothing, 2026-09). Exported as a `const` array (mirroring
+ * `isPhaseValidForKind`'s existing namespace/kind guard, the precedent for
+ * this exact class of problem) so createRequest can validate against it, and
+ * tasks/skill.ts's tool-facing `APPROVAL_SUBKINDS` can be typed as a subset
+ * of it instead of an independently-hand-kept duplicate list.
+ *
+ * Not every member is reachable via the create_approval TOOL:
+ * 'timezone_persistence' is system-raised (v4.8.x, 2026-09-02,
+ * pre-existing-clobbered-tz-now-locked-wrong-forever) — see
+ * core/requests/runner.ts's raiseTimezonePersistenceAsks — and deliberately
+ * excluded from tasks/skill.ts's tool-facing APPROVAL_SUBKINDS/gateApprovalAsk.
+ */
+export const APPROVAL_SUBKINDS = [
+  'duration_override',
+  'policy_exception',
+  'unknown_person',
+  'freeform',
+  'timezone_persistence',
+] as const;
+
+export type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
 
 export type RequestState =
   | 'awaiting_owner'      // owner action blocks progress (most approvals start here)

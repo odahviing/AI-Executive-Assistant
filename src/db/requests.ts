@@ -17,6 +17,7 @@ import type {
   RequestRow,
   RequestState,
 } from '../core/requests/types';
+import { APPROVAL_SUBKINDS } from '../core/requests/types';
 import { ACTIVITY_REVERTIBILITY } from '../core/requests/activityRevertibility';
 import logger from '../utils/logger';
 
@@ -61,6 +62,27 @@ function isPhaseValidForKind(phase: string, kind: string): boolean {
   return ns === 'outreach' && (kind === 'outreach' || kind === 'social_outreach');
 }
 
+/**
+ * Same shape of guard as `isPhaseValidForKind`, for `subkind` on kind='approval'
+ * (approval-subkind-union-enforces-nothing, 2026-09). `subkind` is a genuinely
+ * free-form label on every OTHER kind (outreach/reminder/follow_up/research/
+ * social_outreach each mint their own ad-hoc values — 'dm', 'auto_move',
+ * 'colleague_booking_record', etc.) so this only constrains kind='approval',
+ * where core/requests/types.ts's APPROVAL_SUBKINDS is the one documented,
+ * canonical set.
+ *
+ * state='logged' is excluded: that vocabulary is DIFFERENT on purpose — a
+ * logged approval activity row's subkind carries the RESOLUTION VERDICT
+ * ('approve'/'reject'/'amend'/'cancel', tasks/skill.ts's post-resolveRequest
+ * logActivity call), not the raise-time reason category APPROVAL_SUBKINDS
+ * documents. Namespacing this on kind alone (like isPhaseValidForKind does)
+ * would silently null out every logged approval's outcome label.
+ */
+function isSubkindValidForKind(subkind: string, kind: string, state: string): boolean {
+  if (kind !== 'approval' || state === 'logged') return true;
+  return (APPROVAL_SUBKINDS as readonly string[]).includes(subkind);
+}
+
 // ── create ──────────────────────────────────────────────────────────────────
 
 export function createRequest(input: CreateRequestInput): RequestRow {
@@ -74,6 +96,17 @@ export function createRequest(input: CreateRequestInput): RequestRow {
   if (phase !== null && !isPhaseValidForKind(phase, input.kind)) {
     logger.warn('createRequest — phase namespace/kind mismatch, dropping phase write', { kind: input.kind, phase });
     phase = null;
+  }
+
+  // Validate subkind at the one chokepoint every request row is created
+  // through — the tool gate (tasks/skill.ts's gateApprovalAsk) already
+  // enforces this for the create_approval path, but a system-raised approval
+  // (e.g. runner.ts's raiseTimezonePersistenceAsks) never touches that gate,
+  // and nothing else stood between an arbitrary string and the DB.
+  let subkind: string | null = input.subkind ?? null;
+  if (subkind !== null && !isSubkindValidForKind(subkind, input.kind, input.state)) {
+    logger.warn('createRequest — subkind not in APPROVAL_SUBKINDS for kind=approval, dropping subkind write', { kind: input.kind, subkind });
+    subkind = null;
   }
 
   const idempotencyKey = input.idempotencyKey ?? buildIdempotencyKey({
@@ -122,7 +155,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
     initiated_by_role: input.initiatedByRole,
     parent_request_id: input.parentRequestId ?? null,
     kind: input.kind,
-    subkind: input.subkind ?? null,
+    subkind,
     subject: input.subject,
     description: input.description ?? null,
     state: input.state,
@@ -150,7 +183,7 @@ export function createRequest(input: CreateRequestInput): RequestRow {
 
   const row = getRequest(id)!;
   logger.info('createRequest', {
-    id, kind: input.kind, subkind: input.subkind, state: input.state,
+    id, kind: input.kind, subkind: row.subkind, state: input.state,
     initiatedByRole: input.initiatedByRole, parentRequestId: input.parentRequestId,
   });
   return row;

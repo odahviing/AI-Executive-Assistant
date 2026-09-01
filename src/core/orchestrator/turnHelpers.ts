@@ -351,7 +351,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             : [];
         // WHOLE-day off only. `vacation_or_off_day` is a genuine day-level
         // skip: the `{ kind: 'day_skip', dayKey, ... }` verdict returned at
-        // connectors/graph/findAvailableSlots.ts:1047 lands in the per-day
+        // connectors/graph/findAvailableSlots.ts:1061 lands in the per-day
         // reason map once per day.
         // `owner_out_of_office` is NOT that shape — it is a per-slot
         // `reject` outcome (:998) routed through `trackReject` (:878), which

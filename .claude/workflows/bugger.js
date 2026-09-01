@@ -2071,7 +2071,7 @@ if (VERIFY) {
         (waveFiles.length
           ? `THIS WAVE TOUCHED THESE FILES — any battery item whose anchors hit one of them needs its anchor's current load-bearing line quoted in \`evidence\`, per the battery header's pass rule:\n${waveFiles.map((f) => `  • ${f}`).join('\n')}`
           : `No wave file list was available — apply the battery header's lighter one-line pass rule to every item.`),
-      { label: 'golden:battery', phase: 'Verify', agentType: 'general-purpose', model: 'sonnet', effort: EFFORT.golden, schema: GOLDEN_OUT },
+      { label: 'traces', phase: 'Verify', agentType: 'general-purpose', model: 'sonnet', effort: EFFORT.golden, schema: GOLDEN_OUT },
     )
 
     const check = await agent(
@@ -2402,7 +2402,7 @@ if (VERIFY) {
                 null,
                 2,
               )}`,
-            { label: `bouncer:recheck${round > 1 ? round : ''}(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
+            { label: `bouncer:recheck${round > 1 ? round : ''}(${rebuilt.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, model, schema: VERIFY_OUT },
           )
         : null
       const thisRecheckRan = !!recheck

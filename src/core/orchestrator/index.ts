@@ -1476,7 +1476,28 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // person speaks again or another turn already answered) — a resolved
     // booking is exactly the "natural lull" v2.2.1 was built for, same as a
     // question answered or a note saved.
-    const codaEligible = !turnLeftWorkPending;
+    // o#266 (2026-08-31) / coda-no-suppression-on-unanswered-prose-followup —
+    // the signals above (awaitingDecision/failedMutation/errored, ~:1002-1038)
+    // only catch a pending decision when a HANDLER put it in a structured
+    // field. They miss the case where Sonnet composes the open question
+    // itself in prose over a plain read: get_calendar's raw event list has
+    // no "ambiguous" shape, and move_meeting's own structured
+    // ambiguous_meeting_subject check (moveMeeting.ts checkSameSubjectCollision,
+    // ~:93) is colleague-path only — "Owner-path is exempt — he can see his
+    // own calendar and disambiguate himself" — so an owner-path multi-match
+    // disambiguation is unavoidably free text with no tool-shape signal to
+    // read. Observed live: get_calendar returned 4 same-family "Offensive
+    // Hub" events, Sonnet's final reply asked "Which one do you want to
+    // move?" with no structural signal set anywhere in the tool loop, and
+    // the coda fired a minute later mid-exchange (owner report o#266,
+    // 2026-08-31 11:58-12:07 session). A trailing "?" in Maelle's own
+    // composed reply is the one thing every one of these free-text opens
+    // shares — a deterministic string check on `finalReply`, already in
+    // scope, not a new LLM call (W12.2) — and erring toward suppression
+    // costs nothing per L7: work always outranks the coda, and a missed
+    // slot just gets retried on the normal cadence next time.
+    const replyEndsInOpenQuestion = finalReply.trim().endsWith('?');
+    const codaEligible = !turnLeftWorkPending && !replyEndsInOpenQuestion;
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports

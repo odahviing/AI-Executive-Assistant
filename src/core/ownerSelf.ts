@@ -43,6 +43,10 @@ export function seedOwnerSelf(profile: UserProfile): void {
     timezone: profile.user.timezone,
     // Gender unknown by default; owner can confirm via confirm_gender if/when
     // it becomes relevant for Hebrew gendered forms in self-narration.
+    // name/timezone are OWNER-AUTHORED CONFIG describing the owner himself,
+    // never a live Slack read — 'owner' rank (see upsertPersonMemory's `by`
+    // doc in db/people.ts; same fix as assistantSelf.ts's self-row).
+    by: 'owner',
   });
   logger.info('Seeded owner self-memory row', {
     ownerId,
