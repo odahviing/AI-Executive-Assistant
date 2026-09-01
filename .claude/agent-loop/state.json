@@ -1,8 +1,8 @@
 {
   "_thisFileNote": "CURRENT STATE ONLY, and that is the rule this file lost: the keys documented in .claude/skills/manager/SKILL.md 'State you own', ONE operating note each, and the run in progress or the last one (its `note` = what went in, `_resultNote` = what came out). Everything older is HISTORY and history is ledger.jsonl, which is append-only and queryable. Reduced 2026-07-31 from 114 KB / 44 prose keys against 7 documented ones; every ruling in those 44 was verified to be a ledger row already before a byte was deleted. A `_previousRun*` key, a second note on one field, or a note about a run that has ended means it is regrowing - move it to the ledger and delete it. The wrap is where this is checked.",
-  "lastSeenIso": "2026-09-01T00:09:49+0000",
+  "lastSeenIso": "2026-09-01T21:22:58+0000",
   "_lastSeenIsoNote": "Set to the run's START, not its end. wf_386bf586-bf1 ran 2026-08-03T12:20 -> ~12:54 (duration_ms 2008790); anything said during that window is still unreviewed, and re-reading it costs almost nothing while skipping it can lose a real bug.",
-  "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask.",
+  "_lastRunNote": "status MUST be one of complete | running | stopped. `stopped` exists because a run the owner kills leaves `running` set forever, and the resume rule then re-fired on every subsequent turn — a restart loop that spawned wf_79ce66bb-efc while wf_62f4811d-7fe was already dead. NEVER auto-resume: a dead run and a slow one are indistinguishable from this file, so resuming is a guess. Report the state and ask. `id` is not always a Workflow id: WRAP_UP.md's step 1 writes `wrap-<timestamp>` here for the wrap's whole duration, the same field and the same STOP checks, so a wrap and a `run` can no longer land on the tree at once (added after wf_f81323f1-791 landed mid-wrap unseen). A `wrap-` id has no `resumeFromRunId` path — see manager/SKILL.md's STOP-2 entry.",
   "lastWrapIso": "2026-09-01T08:28:08+03:00",
   "_lastCleanShaNote": "The CLEANER's own watermark (X131) — a commit SHA, not a timestamp, and deliberately NOT lastWrapIso: they are two different clocks and reusing one for both is what conflated the cleaner's scope with the bouncer's. A sha because `git log --name-only <sha>..HEAD` is an exact range anchor, where a `--since` timestamp reads COMMIT DATE and silently skips or double-counts across a rebase, a cherry-pick or clock skew. ADVANCED 2026-08-28 by a second unscoped full sweep (Opus, owner-dispatched between wraps) — full src/ (205 files) + scripts/ (28) + .claude/*.md (52), detect-only over all YAML + framework surfaces; zero dead files/exports found, several dead-code/stale-citation fixes landed, uncommitted. Set to 45736ff7488aa14165ca30f83bffac6ed1c259ac (HEAD at the time — the wrap-4.7.5 bookkeeping commit; the cleaner never commits and deliberately never looked at the uncommitted tree on top of it, per C4). ONLY AN UNSCOPED SWEEP ADVANCES IT (X135) — a scoped run advances nothing, because this field means all of src/ is judged up to this commit. The rule and the two sentences the chat must print are in SKILL.md's `cleaner` entry and cleaner.md C4.",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
@@ -10,52 +10,61 @@
   "nextReportId": 268,
   "_inFlightNote": "What is being worked RIGHT NOW — add on dispatch, remove on return, and check it before dispatching so one item is never sent twice. EMPTY THIS IN THE SAME TURN A RUN RETURNS: a stale entry is the STOP 1 lock and refuses the next run. It went stale for three consecutive rounds on 2026-08-06 because every return fed straight into the next dispatch instead of into this file, and the final bouncer pass is what caught it.",
   "inFlight": [],
-  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. REPLACED 2026-09-01 after wf_f81323f1-791 drained all 9 prior entries (all built or confirmed-other-lane). This 1 is what that run left behind.",
+  "_pendingOverflowNote": "Verify DISCOVERIES and over-cap items, shaped for args.issues. Pass on the next `build` and the engine prepends them itself, then delete what manifest.carry names. REPLACED 2026-09-01 after the hand-run nightly wf_4e424460-e50 and the 4.8.5 pre-wrap Fable pass: the 5 previous entries were all BUILT by that run and were wrongly still listed here -- the pre-wrap pass caught it, and a build passed the stale array would have re-dispatched 5 shipped fixes. These 6 are what the nightly run and the pre-wrap pass actually left open.",
   "pendingOverflow": [
     {
-      "id": "reverted-auto-reading-never-retires-temp-row",
-      "lane": "librarian",
+      "id": "owner-own-trip-read-is-not-date-scoped-books-online-after-trip-ends",
+      "lane": "matchmaker",
       "severity": "medium",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "A temp timezone reading is never cleared when the incoming auto value goes back to matching the permanent zone, so a hedge can claim 'Slack currently reads X' for up to a week after Slack stopped reading X, and a persistence ask can fire on a divergence that has already ended.",
-      "evidence": "src/db/people.ts:598-616 -- applyAutoTimezoneById clears nothing on a re-match. Discovery from the pre-wrap Fable pass over the 4.8.4 tree."
+      "symptom": "Booking a meeting for a date AFTER the owner's current trip ends, while he is still away, lands it online with a Teams link and no room instead of the office. His OWN travel is the one travel read in planMeeting still gated on today rather than on the date being booked.",
+      "evidence": "src/skills/meetings/planMeeting.ts:322-323. HIGHEST-VALUE ROW ON THIS QUEUE: the nightly run date-scoped every ATTENDEE travel read; the owner own was missed. The attendee bug lost a hedge, this one books the wrong meeting mode."
     },
     {
-      "id": "timezone-ask-retries-delivery-against-a-closed-row",
+      "id": "outreach-model-supplied-tz-written-as-a-slack-reading",
+      "lane": "registrar",
+      "severity": "medium",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "A send_message outreach where the model supplies colleague_tz writes that model-asserted zone at auto tier tagged as a SLACK reading. It can silently retire a live temp-timezone divergence, and the hedge would then attribute a model guess to Slack.",
+      "evidence": "src/skills/outreach.ts:428. Directly undermines the source attribution shipped in 4.8.4, which exists so Maelle never says Slack said something Slack did not say."
+    },
+    {
+      "id": "boundhint-note-does-not-strip-quotes-from-colleague-text",
       "lane": "registrar",
       "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "If the timezone-persistence ask DM fails for its whole 2-workday window the request row closes but askedAt is never set, so the next pass retries delivery against the CLOSED row -- the owner can be asked a question whose yes resolves nothing.",
-      "evidence": "src/core/requests/runner.ts -- the UNIQUE-collision retry branch checks terminal_dm_msg_ts but not the row's state. Fix is one state check in that branch."
+      "symptom": "The bound-approval SYSTEM NOTE sanitizes brackets and newlines out of colleague-supplied text but not quotes, so an imperative inside a request subject can sit inline in the note.",
+      "evidence": "src/connectors/slack/app/processMessage.ts, sanitizeForInstruction. The 4.8.5 Fable pass proved the structural containment holds and stated the model-judgment half is unproven rather than claiming it safe."
     },
     {
-      "id": "internal-colleague-travelling-to-owners-city-still-forced-online",
+      "id": "timezone-ask-revival-corner-nondm-resolution",
+      "lane": "registrar",
+      "severity": "low",
+      "clarity": "clear",
+      "source": "verify",
+      "symptom": "A timezone-persistence row resolved through a non-DM surface while terminal_dm_msg_ts is still null would be revived and the owner asked once more.",
+      "evidence": "src/core/requests/runner.ts -- the revival branch keys on terminal_dm_msg_ts, which a non-DM resolution never sets. promote_timezone_temp's expected_value bounds the harm."
+    },
+    {
+      "id": "categoryrules-owner-worded-colleague-explanation-is-dead",
       "lane": "matchmaker",
       "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "An INTERNAL cross-timezone colleague travelling to the owner's own city is still forced online with a Teams link -- the residual half of the guest-facing fix that shipped in 4.8.4.",
-      "evidence": "src/skills/meetings/planMeeting.ts:409-411 -- the #M5 internal check never consults the travel destination the same loop resolved three lines earlier."
+      "symptom": "Two template branches build an owner-worded colleague_explanation ('you already have...') no caller can ever read, since scheduleRules picks human_explanation whenever ownerReads is true.",
+      "evidence": "src/utils/categoryRules.ts:192,218 -- W5 dead code introduced by the reader split shipped in this same wave."
     },
     {
-      "id": "hedge-suppression-is-trip-scoped-not-meeting-date-scoped",
-      "lane": "matchmaker",
+      "id": "people-ts-scope-header-cites-an-unreachable-path",
+      "lane": "librarian",
       "severity": "low",
       "clarity": "clear",
       "source": "verify",
-      "symptom": "The booking-time timezone hedge is suppressed whenever a trip is active TODAY, even when the meeting falls after that trip ends -- that date clipped on the permanent zone, so the hedge is wrongly absent.",
-      "evidence": "src/skills/meetings/planMeeting.ts:426 -- trip-scoped where the search path is correctly day-scoped. Math right, sentence missing."
-    },
-    {
-      "id": "whatsapp-timestamp-unit-mismatch-ms-vs-seconds",
-      "lane": "diplomat",
-      "severity": "low",
-      "clarity": "clear",
-      "source": "verify",
-      "symptom": "A WhatsApp turn writes its conversation-history timestamp in milliseconds while every other transport writes seconds.",
-      "evidence": "src/connectors/whatsapp.ts:334 -- cheap unit fix; dormant transport so low urgency."
+      "symptom": "The timezone SCOPE header tells the next lane that an email-only person's travel record is read with getCurrentTravelById -- after this wave no reachable path does that.",
+      "evidence": "src/db/people.ts:406 -- W10, a contract comment the next lane reads as fact."
     }
   ],
   "_verifiedCleanNote": "Passed to bugger/feature as `priorClean` so a verify does not re-audit settled ground. ONE PROVEN CLAIM PER ENTRY. DROP an entry the moment a wave changes the code it describes. PASS IT VERBATIM: `priorCleanDropped` keys on the INDEX in the array you passed (X84). UPDATED 2026-08-05 run (wf_5c89df46-081): dropped 15 of 98 entries invalidated by this run's diff (meetings.ts, ops.ts, calendarIssues.ts, autoMove.ts, checkHealth.ts, findAvailableSlots.ts, coordinator.ts citations), kept 83, added 19 fresh claims from this run's bouncer pass. Now 102 entries.",
@@ -274,8 +283,11 @@
     "observableClosed": 10
   },
   "lastRun": {
-    "id": "wf_f81323f1-791",
+    "id": "wf_4e424460-e50",
     "status": "complete",
-    "note": "Unattended nightly cron run; drained the 9 queued discoveries plus 1 fresh log finding, built 10, 0 on his desk. Landed mid-wrap, which forced the pre-wrap Fable pass and golden battery to be re-run over the grown tree."
+    "startedIso": "2026-09-01T21:22:58Z",
+    "returnedIso": "2026-09-01T22:37:19Z",
+    "note": "The nightly pass, run by hand after Maelle-Manager-Nightly was disabled for the night. Sources github+logs+backlog, watermark 2026-09-01T00:09:49Z.",
+    "_resultNote": "7 built, 0 overturned, 0 bounced, 0 on his desk. Queue fully drained: all 5 carried discoveries built, plus 1 fresh log finding and its dependency. alreadyBuilt dropped 1 correctly (the log review re-found the approval-binding fix and it was deduped instead of rebuilt). Golden 30/30, 0 stale anchors. Backlog: the whatsapp row was re-read still-real, then built."
   }
 }

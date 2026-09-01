@@ -25,6 +25,14 @@
  *
  * Fails open: any miss/uncertainty/error → pass_to_sonnet. No turn ever breaks.
  *
+ * What survives a decline (gh#bare-verb-binds-to-a-resolved-approval): when
+ * the thread holds exactly ONE open approval, that identification is returned
+ * as `boundHint` even though Module D itself resolved nothing, so the caller
+ * can hand the orchestrator the request id instead of letting Sonnet re-read
+ * the thread and re-attribute the reply — which can land on a DIFFERENT, even
+ * already-resolved, approval. The hint is an id, never a verdict: what the
+ * owner decided is read from his own words on the orchestrator turn.
+ *
  * Gate: profile.behavior.deterministic_approval_resolve. Caller checks the flag.
  */
 
@@ -49,9 +57,30 @@ export interface AutoResolveResult {
   request_id?: string;
   /** Why we didn't shortcut (logging aid). */
   reason?: string;
+  /**
+   * WHICH request this thread is about, on every path that did NOT resolve —
+   * set only when exactly one open approval is bound to the thread, so it is
+   * a deterministic fact about the thread, not a guess. The caller hands it
+   * to the orchestrator so Sonnet executes against the request the code
+   * already identified instead of re-deriving one from thread history and
+   * landing on a DIFFERENT — even already-resolved — request
+   * (gh#bare-verb-binds-to-a-resolved-approval).
+   *
+   * Deliberately carries NO verdict. Module D's classifier never sees the
+   * candidates the eligibility filters removed, so on exactly these paths
+   * there IS no classified verdict to pass on — and inventing one would make
+   * a Haiku read of "cancel" (a reject exemplar in the prompt below) decide a
+   * colleague-facing resolve on an approval whose own pending action IS a
+   * cancellation. Reading the decision stays the orchestrator turn's job; the
+   * only thing lost at the hand-off, and the only thing restored here, is the
+   * identity of the request.
+   */
+  boundHint?: {
+    requestId: string;
+    /** One-line human-readable description of the bound request. */
+    summary: string;
+  };
 }
-
-const PASS: AutoResolveResult = { resolved: false, reason: 'pass_to_sonnet' };
 
 interface BoundCandidate {
   id: string;
@@ -103,15 +132,27 @@ function isSilentResolveSafe(c: BoundCandidate, ownerUserId: string): boolean {
 }
 
 /**
- * Find the approvals a reply in `threadTs` could SILENTLY resolve (Module D).
- * Per-message match takes priority (precise); else the daily-thread match
- * returns every open approval sharing that day's thread. Only replay-eligible
- * AND silent-safe (owner-internal) candidates qualify — colleague-requested
- * approvals are deliberately left for the orchestrator so Maelle narrates.
+ * The approvals a reply in `threadTs` bears on, split by what may be DONE with
+ * them. Per-message match takes priority (precise); else the daily-thread
+ * match returns every open approval sharing that day's thread. Nothing
+ * terminal can appear in either set: `getAwaitingOwnerRequests` selects
+ * `state='awaiting_owner'` only, so an approval resolved hours earlier is not
+ * a candidate for anything here.
+ *
+ *  - `matched` — every OPEN approval bound to the thread. Identification.
+ *  - `eligible` — the subset Module D may resolve ALONE: replay-eligible AND
+ *    silent-safe. A colleague-requested approval is deliberately excluded so
+ *    the orchestrator narrates it (v3.4.8), and it stays in `matched`, which
+ *    is what keeps its identity alive across the hand-off.
  */
-function findCandidates(ownerUserId: string, threadTs: string): BoundCandidate[] {
+function findCandidates(ownerUserId: string, threadTs: string): { matched: BoundCandidate[]; eligible: BoundCandidate[] } {
   const requests = getAwaitingOwnerRequests(ownerUserId);
-  const eligible = (c: BoundCandidate): boolean => {
+  const byMessage = requests.filter(r => r.terminal_dm_msg_ts === threadTs);
+  const rows = byMessage.length >= 1
+    ? byMessage
+    : requests.filter(r => !!r.owner_dm_thread_ts && r.owner_dm_thread_ts === threadTs);
+  const matched = rows.map(toCandidate);
+  const eligible = matched.filter(c => {
     if (!isReplayEligible(c)) return false;
     if (!isSilentResolveSafe(c, ownerUserId)) {
       logger.info('autoResolveThreadBound — deferring colleague-requested approval to orchestrator (narration needed)', {
@@ -120,11 +161,37 @@ function findCandidates(ownerUserId: string, threadTs: string): BoundCandidate[]
       return false;
     }
     return true;
-  };
-  const byMessage = requests.filter(r => r.terminal_dm_msg_ts === threadTs);
-  if (byMessage.length >= 1) return byMessage.map(toCandidate).filter(eligible);
-  const byDaily = requests.filter(r => !!r.owner_dm_thread_ts && r.owner_dm_thread_ts === threadTs);
-  return byDaily.map(toCandidate).filter(eligible);
+  });
+  return { matched, eligible };
+}
+
+/**
+ * Strip a candidate line down before it can be interpolated into the
+ * orchestrator's `[SYSTEM NOTE …]` block: it carries colleague-authored text
+ * (`subject`, `details.question`), which must read as one short quoted clause
+ * there, never as extra bracketed instructions.
+ */
+function sanitizeForInstruction(line: string): string {
+  return line.replace(/[[\]\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+/**
+ * The identification the orchestrator inherits when Module D resolves nothing
+ * — emitted ONLY when exactly one open approval is bound to the thread.
+ *
+ * That single-candidate condition is not caution for its own sake: it is the
+ * same condition `resolve_approval`'s anchor gate (tasks/skill.ts,
+ * `dailyThreadAnchored`) requires before it will bind a bare ack typed in the
+ * daily decision thread — down to counting `kind='approval'` rows only, the
+ * gate's own `otherOpenApprovals`. With 2+ open approvals sharing the thread
+ * that gate refuses and asks which one, so a hint there would be overridden
+ * anyway, and naming one would only push Sonnet toward a bind the tool is
+ * about to reject.
+ */
+function soleBoundHint(matched: BoundCandidate[], profile: UserProfile): AutoResolveResult['boundHint'] {
+  const approvals = matched.filter(c => c.kind === 'approval');
+  if (approvals.length !== 1) return undefined;
+  return { requestId: approvals[0].id, summary: sanitizeForInstruction(candidateContextLine(approvals[0], profile)) };
 }
 
 function candidateContextLine(c: BoundCandidate, profile: UserProfile): string {
@@ -154,8 +221,14 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   // Cost pre-filter: very long messages are almost never pure acks.
   if (message.trim().length > 400) return { resolved: false, reason: 'message_too_long' };
 
-  const candidates = findCandidates(ownerUserId, threadTs);
-  if (candidates.length === 0) return { resolved: false, reason: 'no_thread_match' };
+  const { matched, eligible: candidates } = findCandidates(ownerUserId, threadTs);
+  // Every decline from here on carries the identification when the thread has
+  // one — Module D not acting must never mean the caller starts from nothing.
+  const boundHint = soleBoundHint(matched, profile);
+  const pass = (reason: string): AutoResolveResult => ({ resolved: false, reason, boundHint });
+  if (candidates.length === 0) {
+    return pass(matched.length === 0 ? 'no_thread_match' : 'no_silent_resolve_candidate');
+  }
 
   const ownerFirst = profile.user.name.split(' ')[0];
 
@@ -213,21 +286,21 @@ Rules:
     const raw = toolUse?.input;
     if (!raw || typeof raw.target !== 'number' || !raw.verdict) {
       logger.warn('autoResolveThreadBound — no/partial verdict, passing to Sonnet');
-      return PASS;
+      return pass('pass_to_sonnet');
     }
-    if (raw.verdict !== 'approve' && raw.verdict !== 'reject' && raw.verdict !== 'pass_to_sonnet') return PASS;
+    if (raw.verdict !== 'approve' && raw.verdict !== 'reject' && raw.verdict !== 'pass_to_sonnet') return pass('pass_to_sonnet');
     target = raw.target;
     verdict = raw.verdict;
   } catch (err) {
     logger.warn('autoResolveThreadBound — classifier threw, passing to Sonnet', { err: String(err).slice(0, 200) });
-    return PASS;
+    return pass('pass_to_sonnet');
   }
 
   if (verdict === 'pass_to_sonnet' || target < 1 || target > candidates.length) {
     logger.info('autoResolveThreadBound — no confident resolve, passing to Sonnet', {
       threadTs, candidateCount: candidates.length, target, verdict,
     });
-    return { resolved: false, reason: 'classifier_pass_or_ambiguous' };
+    return pass('classifier_pass_or_ambiguous');
   }
 
   const bound = candidates[target - 1];
@@ -250,7 +323,7 @@ Rules:
       logger.warn('autoResolveThreadBound — resolveRequest not-ok, passing to Sonnet to recover', {
         requestId: bound.id, verdict, reason: result.reason,
       });
-      return { resolved: false, reason: `resolver_not_ok:${result.reason ?? 'unknown'}` };
+      return pass(`resolver_not_ok:${result.reason ?? 'unknown'}`);
     }
     logger.info('autoResolveThreadBound — resolved without Sonnet turn', {
       requestId: bound.id, verdict, effect: result.effect,
@@ -260,6 +333,6 @@ Rules:
     logger.warn('autoResolveThreadBound — resolveRequest threw, passing to Sonnet', {
       err: String(err).slice(0, 200), requestId: bound.id, verdict,
     });
-    return { resolved: false, reason: 'resolver_threw' };
+    return pass('resolver_threw');
   }
 }

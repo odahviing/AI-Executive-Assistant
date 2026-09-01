@@ -1043,18 +1043,19 @@ async function raiseOneTimezonePersistenceAsk(
   const nextCheckAt = midIso ?? expiresAt;
   const nextCheckHandler: NextCheckHandler = midIso ? 'approval_reminder' : 'expiry';
 
+  const requestFields = {
+    ownerUserId, initiatedBy: ownerUserId, initiatedByRole: 'system' as const,
+    kind: 'approval' as const, subkind: 'timezone_persistence',
+    subject: `${first}'s timezone — still ${c.value}?`,
+    description: askText,
+    state: 'awaiting_owner' as const,
+    expiresAt, nextCheckAt, nextCheckHandler,
+    details: { question: askText, callbacks },
+  };
+
   let row: RequestRow;
   try {
-    row = createRequest({
-      ownerUserId, initiatedBy: ownerUserId, initiatedByRole: 'system',
-      kind: 'approval', subkind: 'timezone_persistence',
-      subject: `${first}'s timezone — still ${c.value}?`,
-      description: askText,
-      state: 'awaiting_owner',
-      expiresAt, nextCheckAt, nextCheckHandler,
-      idempotencyKey,
-      details: { question: askText, callbacks },
-    });
+    row = createRequest({ ...requestFields, idempotencyKey });
   } catch (err) {
     const msg = String(err);
     if (!(msg.includes('UNIQUE constraint failed') && msg.includes('idempotency_key'))) throw err;
@@ -1067,8 +1068,24 @@ async function raiseOneTimezonePersistenceAsk(
       markTimezoneTempAskedById(c.personId, c.value);
       return;
     }
-    // Row exists, delivery was never confirmed — retry against the SAME row,
-    // never mint a second one for this streak.
+    if (existing.state !== 'awaiting_owner') {
+      // The row reached a TERMINAL state (e.g. its whole 2-workday window
+      // expired) with delivery never confirmed — nobody was actually asked,
+      // so there's no decision pinned to it and resolveRequest refuses any
+      // verdict against a non-open row (resolver.ts's `state !==
+      // 'awaiting_owner' && state !== 'awaiting_colleague'` guard) — a "yes"
+      // replayed against this dead row would resolve nothing. Retire its
+      // idempotency key (the dead row keeps its history for audit) and mint
+      // a genuinely fresh row for the still-open streak — never retry
+      // delivery against a row nobody can ever act on, and never silently
+      // burn the one-ask budget for an ask that was never delivered.
+      updateRequest(existing.id, { idempotencyKey: `${idempotencyKey}:dead:${existing.id}` });
+      const revived = createRequest({ ...requestFields, idempotencyKey });
+      await deliverTimezonePersistenceAsk(revived, askText, profile, conn, c);
+      return;
+    }
+    // Row exists, still open, delivery was never confirmed — retry against
+    // the SAME row, never mint a second one for this streak.
     await deliverTimezonePersistenceAsk(existing, askText, profile, conn, c);
     return;
   }

@@ -975,6 +975,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       events: input.events,
       profile,
       excludeEventId: input.excludeEventIds?.[0],  // checkCategorySlot supports single exclude
+      ownerReads,
     });
     if (!catCheck.allowed) {
       const map: Record<string, RuleViolationKind> = {
@@ -982,10 +983,18 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         per_day: 'category_per_day',
         per_week: 'category_per_week',
       };
+      // 2026-09-01 (owner ruling) — per_day/per_week carry the owner's exact
+      // cap + current count, which is his to see and nobody else's (M9/M10).
+      // day_type has no arithmetic, so colleague_explanation is unset there
+      // and this falls through to human_explanation for both readers,
+      // unchanged. See categoryRules.ts's field docs.
+      const label = ownerReads
+        ? catCheck.human_explanation
+        : (catCheck.colleague_explanation ?? catCheck.human_explanation);
       return {
         passes: false,
         violation_kind: map[catCheck.rule_broken!] ?? 'category_day_type',
-        violation_label: catCheck.human_explanation ?? `${input.category} category rule violated`,
+        violation_label: label ?? `${input.category} category rule violated`,
         ...slotFacts,
       };
     }

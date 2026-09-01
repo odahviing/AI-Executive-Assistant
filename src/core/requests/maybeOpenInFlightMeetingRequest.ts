@@ -42,6 +42,17 @@ const TRACKED_TOOLS = new Set([
   'delete_meeting',
 ]);
 
+// gh#placeholder-id-persisted-into-artifact — a real Microsoft Graph event id
+// is a long base64url blob (observed 148 chars, "AAMkAD…", via db-query.cjs
+// against a resolved outcome_external_event_id); a model-invented id
+// ("placeholder", "event_id_from_calendar_placeholder") is nowhere close. 40
+// is a wide margin under that observed length — comfortably clears any real
+// id shape while still catching every invented one actually seen in the DB.
+const MIN_PLAUSIBLE_GRAPH_ID_LENGTH = 40;
+function looksLikeGraphEventId(id: string): boolean {
+  return id.length >= MIN_PLAUSIBLE_GRAPH_ID_LENGTH;
+}
+
 export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   // Owner-initiated only. Colleague-initiated meeting work is tracked via the
   // existing outreach/approval flows.
@@ -118,6 +129,22 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   }
 
   if (!spilled) return;
+
+  // gh#placeholder-id-persisted-into-artifact — find_available_slots never
+  // surfaces a Graph-side error for a moving_event_ids entry that doesn't
+  // resolve (findAvailableSlots.ts soft-skips a non-qualifying id and still
+  // returns a clean slots result), so that branch's `eventId` above is
+  // whatever the model typed, never Graph-confirmed. Persisting it anyway
+  // opens a row this same guard can never close — the success-retry cascade
+  // matches on the real event id — the exact "guaranteed orphan" this file
+  // already refuses for an errored mutation result (#124g, above). Same
+  // refusal for a garbage id riding a clean result instead.
+  if (eventId !== undefined && !looksLikeGraphEventId(eventId)) {
+    logger.warn('maybeOpenInFlightMeetingRequest — tool-supplied id is not Graph-shaped, refusing to persist it', {
+      tool: input.toolName, eventId,
+    });
+    return;
+  }
 
   // Idempotency — same (owner, thread, subject/event) shouldn't double-open.
   // We key on event_id when available (most reliable), subject otherwise.

@@ -1129,11 +1129,19 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     profile: context.profile,
                     // v2.6 — pass category so move_meeting colleague-path also
                     // enforces day_type / per_day / per_week limits at
-                    // the destination. The destination day's count excludes
-                    // the event being moved (it's leaving its current day);
-                    // findAvailableSlots widens its event fetch when
-                    // category is set so day/week counts are accurate.
+                    // the destination. findAvailableSlots widens its event
+                    // fetch when category is set so day/week counts are
+                    // accurate.
                     category: args.category as string | undefined,
+                    // move-meeting-counts-the-moving-event-against-its-own-per-day-cap
+                    // (2026-09-01) — the event being moved must never count
+                    // against its own destination-day cap: a same-day move
+                    // read 3 as 4 and was refused with `category_per_day` for
+                    // a count that never actually changed. Owner ruling:
+                    // unconditional, not same-day-only — a cross-day move also
+                    // vacates its old day, same as autoMove.ts already assumes
+                    // at its four `excludeEventIds: [movable.id]` call sites.
+                    excludeEventIds: [args.meeting_id as string],
                     diagnosticsOut: diagnostics,
                     // v3.0.6 — single-slot validation; see the parallel comment
                     // in create_meeting Guard B. Auto-expand would re-query the

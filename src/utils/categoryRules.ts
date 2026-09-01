@@ -39,6 +39,16 @@ export interface CategoryCheckResult {
   rule_value?: number;       // limit.per_day = 2 → rule_value = 2
   current_count?: number;    // events already on the calendar in the window
   human_explanation?: string;
+  /**
+   * 2026-09-01 (owner ruling) — a mechanism-free twin of `human_explanation`,
+   * for per_day/per_week only (day_type carries no arithmetic to begin with,
+   * so it has none — callers fall back to human_explanation). The owner's
+   * quota and his current count are private: "he already has too many
+   * Weeklys today" is shareable, "Weekly limit is 3 per day; already has 3"
+   * is not, because a colleague can back-derive the cap AND the count from
+   * it. Set only where `rule_broken` is 'per_day' or 'per_week'.
+   */
+  colleague_explanation?: string;
 }
 
 type ProfileCategory = NonNullable<UserProfile['categories']>[number];
@@ -102,7 +112,10 @@ export function countCategoryOccurrences(opts: {
  *
  * The first failing rule short-circuits — caller gets ONE rule_broken
  * + a human_explanation suitable for an approval ask_text or a tool
- * result message.
+ * result message addressed to the OWNER, and (for per_day/per_week)
+ * a colleague_explanation for anyone else — see that field's doc.
+ * Which one a caller should use is WHO reads it (`opts.ownerReads`),
+ * the same signal `checkSlot` already threads through every other rule.
  *
  * Returns { allowed: true } when the category isn't found in profile,
  * has no rules, or the slot passes — keeps callers simple. The
@@ -116,10 +129,21 @@ export function checkCategorySlot(opts: {
   events: CalendarEvent[]; // owner's events covering at least the slot's week
   profile: UserProfile;
   excludeEventId?: string; // for move_meeting: exclude the event being moved
+  /**
+   * M9/M10, 2026-09-01 — WHO reads `human_explanation` on THIS call. Only
+   * changes which string `colleague_explanation` gets built as (arithmetic
+   * never differs by reader — it's the same fact either way); the caller
+   * still picks between `human_explanation` / `colleague_explanation`
+   * itself. Omitted → treated as non-owner (safe default, W9).
+   */
+  ownerReads?: boolean;
 }): CategoryCheckResult {
   if (!opts.categoryName) return { allowed: true };
   const cat = getProfileCategoryByName(opts.profile, opts.categoryName);
   if (!cat) return { allowed: true };
+  const ownerReads = opts.ownerReads === true;
+  const ownerFirst = opts.profile.user.name.split(' ')[0];
+  const who = ownerReads ? 'you' : ownerFirst;
 
   // ── Rule 1: day_type ────────────────────────────────────────────────────
   const dayType = cat.day_type ?? 'any';
@@ -156,12 +180,16 @@ export function checkCategorySlot(opts: {
       excludeEventId: opts.excludeEventId,
     });
     if (count >= perDay) {
+      const dayLabel = dayStart.toFormat('EEEE d MMMM');
       return {
         allowed: false,
         rule_broken: 'per_day',
         rule_value: perDay,
         current_count: count,
-        human_explanation: `${cat.name} limit is ${perDay} per day; ${dayStart.toFormat('EEEE d MMMM')} already has ${count}.`,
+        human_explanation: `${cat.name} limit is ${perDay} per day; ${dayLabel} already has ${count}.`,
+        // Shape stays shareable (M9), arithmetic doesn't (2026-09-01 ruling):
+        // "he already has too many Weeklys" — no cap, no count.
+        colleague_explanation: `${who} already ha${ownerReads ? 've' : 's'} too many ${cat.name}s on ${dayLabel}.`,
       };
     }
   }
@@ -180,12 +208,14 @@ export function checkCategorySlot(opts: {
       excludeEventId: opts.excludeEventId,
     });
     if (count >= perWeek) {
+      const weekLabel = weekStart.toFormat('d MMMM');
       return {
         allowed: false,
         rule_broken: 'per_week',
         rule_value: perWeek,
         current_count: count,
-        human_explanation: `${cat.name} limit is ${perWeek} per week; the week of ${weekStart.toFormat('d MMMM')} already has ${count}.`,
+        human_explanation: `${cat.name} limit is ${perWeek} per week; the week of ${weekLabel} already has ${count}.`,
+        colleague_explanation: `${who} already ha${ownerReads ? 've' : 's'} too many ${cat.name}s the week of ${weekLabel}.`,
       };
     }
   }

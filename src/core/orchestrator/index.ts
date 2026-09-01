@@ -1490,12 +1490,25 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // Hub" events, Sonnet's final reply asked "Which one do you want to
     // move?" with no structural signal set anywhere in the tool loop, and
     // the coda fired a minute later mid-exchange (owner report o#266,
-    // 2026-08-31 11:58-12:07 session). A trailing "?" in Maelle's own
-    // composed reply is the one thing every one of these free-text opens
-    // shares — a deterministic string check on `finalReply`, already in
-    // scope, not a new LLM call (W12.2) — and erring toward suppression
-    // costs nothing per L7: work always outranks the coda, and a missed
-    // slot just gets retried on the normal cadence next time.
+    // 2026-08-31 11:58-12:07 session). A trailing "?" catches a free-text
+    // OPEN QUESTION cheaply — a deterministic string check on `finalReply`,
+    // already in scope, not a new LLM call (W12.2) — and erring toward
+    // suppression costs nothing per L7: work always outranks the coda, and a
+    // missed slot just gets retried on the normal cadence next time.
+    // KNOWN GAP (owner report 2026-09-01, coda-open-item-guard-only-catches-
+    // a-literal-question-mark): a free-text open item can also be phrased as
+    // a STATEMENT with no "?" — "Yael's weekly is still sitting at Wed 2 Sep
+    // 14:00, since that was a separate move, let me know if you want that
+    // touched too." reads as unresolved to a person but has no punctuation
+    // this check can key on, and the turn's own tool activity (a *different*
+    // meeting's successful delete_meeting) carries no signal about it either.
+    // A trailing "?" is NOT "the one thing every one of these free-text
+    // opens shares" — that claim is falsified by this case. Widening this
+    // past punctuation needs a meaning-level judgment (an open item vs a
+    // closed statement), which this repo does only via an LLM classifier
+    // (W4 — no regex on natural language, multilingual) — a new judgment
+    // point on this path is an owner call (W12.2), not a lane default.
+    // Left as the punctuation-only check pending that decision.
     const replyEndsInOpenQuestion = finalReply.trim().endsWith('?');
     const codaEligible = !turnLeftWorkPending && !replyEndsInOpenQuestion;
     if (codaEligible) {

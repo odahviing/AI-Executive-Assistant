@@ -698,6 +698,20 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // Latency drops from ~3s to ~300ms; saves a ~50k-token Sonnet turn.
             // Fails open: any mismatch / ambiguity / classifier error →
             // falls through to runOrchestrator as before.
+            //
+            // gh#bare-verb-binds-to-a-resolved-approval — a decline is not a
+            // blank slate. When Module D found exactly ONE open approval bound
+            // to this thread but couldn't silently resolve it (colleague-
+            // requested → needs Sonnet's own narration, or no replay
+            // callback), `autoResolve.boundHint` carries that identification
+            // into the orchestrator turn as a one-shot `extraInstruction`.
+            // Without it Sonnet re-reads the whole thread and can bind the
+            // reply to a DIFFERENT, even already-resolved, approval (2026-09-01:
+            // the owner's "Cancel" on Elinor's open request came back as a
+            // question about a Yael meeting approval closed three hours
+            // earlier). WHICH request only — the verdict stays Sonnet's read of
+            // his actual words.
+            let boundApprovalHint: string | undefined;
             if (
               profile.behavior?.deterministic_approval_resolve === true
               && role === 'owner'
@@ -731,6 +745,16 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                 logger.debug('Module D — auto-resolve declined, falling through to orchestrator', {
                   reason: autoResolve.reason,
                 });
+                if (autoResolve.boundHint) {
+                  const { requestId, summary } = autoResolve.boundHint;
+                  boundApprovalHint = `The only approval still awaiting his decision in this thread is ${requestId} — "${summary}". `
+                    + `If his message decides a pending approval, it is THAT one: pass ${requestId} to resolve_approval. `
+                    + `Never treat it as being about a different approval, and never about one that was already resolved earlier. `
+                    + `What he decided is whatever his own words say — this note settles which request, not the answer.`;
+                  logger.info('Module D — passing bound-approval identification to orchestrator', {
+                    senderId, threadTs, requestId, reason: autoResolve.reason,
+                  });
+                }
               } catch (err) {
                 logger.warn('Module D — auto-resolve threw, falling through to orchestrator', {
                   err: String(err).slice(0, 200),
@@ -751,7 +775,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                 senderId, channelId, threadTs,
               });
             }
-            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext, spansMultipleSenders });
+            logger.info('Calling orchestrator', { senderId, role, channelId, threadTs, isOwnerInGroup: isOwnerInGroup ?? false, historyLength: history.length, imageCount: images?.length ?? 0, forceTool: forceToolOnFirstTurn?.name, batched: mergedText !== framedText, hasPriorOutboundContext: !!priorOutboundContext, hasBoundApprovalHint: !!boundApprovalHint, spansMultipleSenders });
             // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop (round 2) —
             // captured so closeOutreachReplyIfResolvedThisTurn (below) can tell
             // a fresh approval THIS turn raised apart from one that was already
@@ -779,6 +803,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               signal,
               onWriteExecuted: () => markWrite(),
               priorOutboundContext,
+              extraInstruction: boundApprovalHint,
             });
             logger.info('Orchestrator completed', { senderId, threadTs });
 

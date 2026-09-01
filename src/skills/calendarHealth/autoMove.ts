@@ -359,7 +359,18 @@ export async function pullInternalMeetingToAbut(params: {
     gridAlignStart: true,           // off-grid anchor end → aligned back-to-back start
     profile,
   });
-  const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
+  // M2 — clean-strict beats WE-optional beats "whatever's first": this pick used
+  // to read ONLY disturbs_floating_block (does taking this slot itself disturb a
+  // floating block?), with no read of `over_optional` (does the slot SIT ON a
+  // Working-Elsewhere/optional event?) at all — so among chronologically-ordered
+  // candidates, an earlier WE-optional slot beat a later genuinely-clean one
+  // (the Elan triweekly auto-moved onto a 15:45 WE slot while a clean slot
+  // existed later the same day). Mirrors the same clean › WE-optional ladder
+  // `pickSpreadSlots` already runs for offered slots (calendarReads.ts) — this
+  // is the auto-move's own pick catching up to it, not a new preference.
+  const top = slots.find(s => !s.disturbs_floating_block && !s.over_optional)
+    ?? slots.find(s => !s.disturbs_floating_block)
+    ?? slots[0];
   // Net-improvement guard: the chosen slot must NOT itself open a dead gap —
   // never just shove the sliver onto the next meeting.
   let cleanTarget = false;

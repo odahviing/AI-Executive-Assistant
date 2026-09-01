@@ -2,6 +2,34 @@
 
 ---
 
+## 4.8.5 — The day 4.8.4 shipped, using her turned up eleven more things
+
+Four of these came straight out of the owner's own Slack that afternoon, within hours of 4.8.4 going live. None of them is a new capability; every one is a place where a rule was right in principle and wrong at one edge — a count that included the thing being counted, a decision the code had already made and then discarded, a preference one code path knew about and its twin didn't.
+
+### Fixed (high-impact)
+- **Moving a meeting within the same day no longer trips the daily cap for its own category.** The meeting being moved was counted against the limit it already occupied, so a request to shift a weekly an hour earlier read as adding a fourth to a day that allows three — and was refused, or escalated for an override that was never actually needed. The colleague who reported it said so at the time and was argued with.
+- **A colleague is no longer told the owner's exact quota or how much of it is used.** A refusal used to carry the arithmetic outright — the cap and the current count. It now names the category and the fact that the day is full, and nothing more; the owner still sees the numbers in his own approval, which is where they were always meant to be.
+- **A one-word reply can no longer resolve the wrong request.** Answering "Cancel" in the owner's decision thread could land on an approval he had already closed hours earlier, because the code identified the right one, declined to act on it, and then handed the turn no record of what it had found. The identification now travels with the decline. What he actually decided is still read from his own words.
+- **Booking a meeting for a date after a trip ends no longer treats the traveller as away.** Travel was read as a yes-or-no about today rather than about the day being booked, so a colleague back home by the meeting date was still assumed elsewhere — with the wrong hours, and a note claiming an assumption the search hadn't made.
+- **A colleague travelling to the owner's own city is no longer forced online.** The guest-facing half of this shipped in 4.8.4; this closes the same gap for people inside the company.
+
+### Fixed (small)
+- The calendar-health auto-move prefers a genuinely free slot over one sitting on a Working-Elsewhere event. It already did when offering options; now it does when moving something itself.
+- A timezone reading held temporarily is retired once the source agrees again, so she can't describe a disagreement that has already ended.
+- A cleanup that could never finish, because a malformed meeting id was treated as an unknown error rather than a meeting that cannot exist — plus the code that stored the malformed id in the first place.
+- A pending question about someone's timezone can no longer be re-asked after its request has closed.
+- WhatsApp wrote one shared timestamp field in different units from every other transport.
+
+### Invariants preserved
+- Explaining a refusal is unchanged: every "no" still carries the real reason, complete enough to push back on. Only the arithmetic behind it became owner-only.
+- The owner still receives the full cap and count on every surface he reads; a reader split that quietly hid them from him too was caught mid-build and closed in the same change.
+- The timezone tiers are untouched: automatic readings stay temporary, and only the owner promotes one.
+
+### Framework (other chats, bundled)
+- Documentation and battery citations re-pinned after a large file grew under them. The same four went stale twice in eighteen hours, which is now a question on the owner's desk rather than a chore repeated every release.
+
+---
+
 ## 4.8.4 — A stored timezone is no longer allowed to silently drive an answer
 
 One symptom, chased to the bottom across the whole path it travels. A colleague's stored timezone was wrong — Israel, recorded as US Eastern — and nothing anywhere said so. It silently clipped her working hours, four separate availability searches came back "nobody is free," each was stated to the owner as settled fact, and he had to notice it himself eight messages in. This release closes every stage of that: how a wrong zone gets written, how it stays wrong, whether Maelle admits she is assuming it, and what she does when a zone genuinely changes.

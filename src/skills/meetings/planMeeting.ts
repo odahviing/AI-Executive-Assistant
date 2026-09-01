@@ -45,7 +45,7 @@ import { profileDualClock } from '../../utils/weTimeResolver';
 import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner } from './findMeetingOwner';
-import { getCurrentTravel, getCurrentTravelById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory } from '../../db/people';
+import { getCurrentTravel, getTravelRecordById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory, type CurrentTravel } from '../../db/people';
 import { getVenueTravelTimeMinutes, isCompanyLocation } from '../../db/venues';
 import { inferTimezoneFromStateStatic } from '../../utils/locationTz';
 import logger from '../../utils/logger';
@@ -342,7 +342,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // v4.8.x — mirrors attendeeAvailability.ts's own gate for whether a travel
   // record actually swapped the attendee's effective zone for the search's
   // clip: resolvable via the static map AND different from home. A raw
-  // `getCurrentTravelById` hit is NOT enough to suppress the tempDiffering
+  // travel-record hit is NOT enough to suppress the tempDiffering
   // hedge below — an unresolvable destination (map miss) or a same-zone trip
   // both leave the clip on the home zone (attendeeTzForDay falls through to
   // homeTimezone in both cases), so treating "traveling" alone as "the search
@@ -352,6 +352,26 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     if (!travel) return false;
     const travelTz = inferTimezoneFromStateStatic(travel.location);
     return !!travelTz && travelTz !== homeTz;
+  };
+  // v4.8.x (2026-09-02, gh hedge-suppression-is-trip-scoped-not-meeting-date-
+  // scoped) — resolve travel by the MEETING's own date, not "today".
+  // `getCurrentTravelById` answers "are they traveling right now", which is
+  // right for narration but wrong for a booking decision: a trip active today
+  // that ends before this slot's date (or one that starts later but will be
+  // underway by then) must be judged against the meeting's day, exactly like
+  // attendeeAvailability.ts's `attendeeTzForDay` / `tzTempDifferingForDay`
+  // already judge the search path per candidate day — "math right, sentence
+  // missing" for the direct-book path until now. `getTravelRecordById` is the
+  // raw record (gated only on "not entirely in the past"), so a future trip
+  // that will be underway on the meeting's date is visible here too.
+  const meetingIsoDate = input.slotStartIso
+    ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toISODate()
+    : null;
+  const travelForMeetingDay = (personId: string): CurrentTravel | null => {
+    const t = getTravelRecordById(personId);
+    if (!t) return null;
+    const day = meetingIsoDate ?? new Date().toISOString().slice(0, 10);
+    return (day >= t.from && day <= t.until) ? t : null;
   };
   // v4.8.x (2026-09-01, gh full-maayan-symptom) — this loop used to `break` the
   // instant `anyParticipantRemote` went true (whether that arrived pre-set from
@@ -366,7 +386,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // v4.8.x (o#262) — resolve person_id from slack_id OR email so a
     // pure-email external (no slack_id) is travel-checked too. The old
     // `p.slack_id`-only gate silently skipped every such external —
-    // `getCurrentTravelById` is person_id-keyed and works for both.
+    // `travelForMeetingDay` is person_id-keyed and works for both.
     let personId: string | null = p.slack_id ? personIdForSlackId(p.slack_id) : null;
     if (!personId && pEmail) {
       const match = searchPeopleMemory(pEmail).find(x => (x.email ?? '').toLowerCase() === pEmail);
@@ -379,7 +399,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // neither needs it (flag already true AND no temp reading to hedge) — a
     // per-participant row read is not free.
     const travel = (!anyParticipantRemote || eff.tempDiffering)
-      ? getCurrentTravelById(personId)
+      ? travelForMeetingDay(personId)
       : null;
     // v4.8.x — a travel record alone doesn't make this attendee "remote" for
     // THIS meeting: a guest traveling TO the owner's own city/zone is heading
@@ -408,7 +428,19 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // below.
     if (!anyParticipantRemote) {
       const isInternal = !!pEmail && pEmail.endsWith('@' + ownerDomain);
-      if (isInternal && eff.timezone && eff.timezone !== profile.user.timezone) anyParticipantRemote = true;
+      // v4.8.x (2026-09-02, gh internal-colleague-travelling-to-owners-city-
+      // still-forced-online) — this check never consulted the travel
+      // destination the block above just resolved. By construction, reaching
+      // here with `travel` still truthy means the check above did NOT flip
+      // `anyParticipantRemote` — the only way that happens is the resolved
+      // destination equals the owner's own zone (any other outcome — unresolvable,
+      // or resolved elsewhere — already set it true). So a live `travel` record
+      // here means this colleague is heading TOWARD the room today, same class
+      // as the guest-facing carve-out just above: a differing PERMANENT home
+      // zone is not evidence they're not physically in it.
+      if (isInternal && eff.timezone && eff.timezone !== profile.user.timezone && !travel) {
+        anyParticipantRemote = true;
+      }
     }
     // v4.8.x (2026-09-01) — NOT for a person on an active trip. The hedge
     // claims she assumed their ESTABLISHED permanent zone; for a traveller
@@ -610,7 +642,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         // zone the search actually swapped for a trip — but only when the
         // trip record really did (resolvable AND different from home; see
         // `travelActuallySwappedZone`), not merely because a trip is on file.
-        if (eff?.tempDiffering && exact && !travelActuallySwappedZone(getCurrentTravelById(exact.person_id), tz) && !tzAssumptionNotedIds.has(exact.person_id)) {
+        if (eff?.tempDiffering && exact && !travelActuallySwappedZone(travelForMeetingDay(exact.person_id), tz) && !tzAssumptionNotedIds.has(exact.person_id)) {
           // Attribute by `source` — same honesty fix as the participant loop
           // above (2026-09-01, capturepass-haiku-zone dep): the chat-capture
           // pass is now a second writer of this reading, not only Slack.

@@ -1059,7 +1059,16 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                     // "moved Eli onto lunch at 12:45, then shoved lunch to
                     // 13:30" damage — a free post-lunch slot wins over the
                     // earliest-but-lunch-colliding one.
-                    const top = slots.find(s => !s.disturbs_floating_block) ?? slots[0];
+                    // 2026-09-02 — same clean-strict-beats-WE-optional gap as
+                    // pullInternalMeetingToAbut (autoMove.ts): this pick read
+                    // ONLY disturbs_floating_block, never `over_optional`, so a
+                    // chronologically-earlier WE-optional slot beat a later
+                    // genuinely-clean one. Mirrors the search's own clean ›
+                    // WE-optional ladder (pickSpreadSlots) — the auto-move's own
+                    // pick catching up to it, not a new preference.
+                    const top = slots.find(s => !s.disturbs_floating_block && !s.over_optional)
+                      ?? slots.find(s => !s.disturbs_floating_block)
+                      ?? slots[0];
                     if (!top) {
                       // v3.2.6 (Part A) — no in-week slot free for everyone. Per
                       // owner direction: do NOT push to next week — return it to him.

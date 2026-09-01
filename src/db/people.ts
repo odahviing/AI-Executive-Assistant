@@ -611,6 +611,17 @@ export function applyAutoTimezoneById(
     return 'diverted_temp';
   }
 
+  // A later auto reading that goes back to matching the permanent value
+  // retires any stale temp/differing row left by an earlier divergence.
+  // setCoreFieldWithProvenanceById's own temp-clear (line ~896) only fires
+  // for a HUMAN write (`by !== 'auto'`) — an auto-tier re-match never hits
+  // that guard, so without this the row (and its "Slack currently reads X"
+  // surfacing, plus a live persistence-ask streak) can survive up to a full
+  // TTL window after Slack/chat stopped reading the differing value.
+  if (tz === existing.timezone) {
+    clearTimezoneTempById(personId);
+  }
+
   const outcome = setCoreFieldWithProvenanceById(personId, 'timezone', tz, 'auto');
   // Refresh the auto-derived working hours off whatever zone is now STORED
   // (the write above may have been refused as lower-authority). Cheap,

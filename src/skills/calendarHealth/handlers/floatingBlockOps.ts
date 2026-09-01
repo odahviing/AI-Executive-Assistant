@@ -190,6 +190,11 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               participants: [],
               allowRelaxed: true,  // override path always bypasses soft rules
               isFloatingBlock: true,  // skip owner_busy_collision — focus/lunch blocks coexist with meetings
+              // Floating blocks are always owner-initiated (never a colleague
+              // surface) — without this, checkSlot's viewer defaults to
+              // 'other' and, per the 2026-09-01 category-quota reader split,
+              // would mask the owner's OWN violation label to himself.
+              viewer: 'owner',
             });
             if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
               // Should be unreachable with allowRelaxed=true. If somehow
@@ -459,6 +464,11 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             // pointing Sonnet to retry with confirm_outside_window=true.
             allowRelaxed: false,
             isFloatingBlock: true,  // skip owner_busy_collision — focus/lunch blocks coexist with meetings
+            // Floating blocks are always owner-initiated (never a colleague
+            // surface) — without this, checkSlot's viewer defaults to
+            // 'other' and, per the 2026-09-01 category-quota reader split,
+            // would mask the owner's OWN violation label to himself.
+            viewer: 'owner',
           });
           if (plan.action === 'confirm_override' || plan.action === 'escalate_approval') {
             return {

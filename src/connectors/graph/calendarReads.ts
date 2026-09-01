@@ -1303,8 +1303,10 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
 
 /**
  * v2.1.6 — post-delete verification. Returns true when Graph confirms the
- * event is no longer retrievable (HTTP 404 on GET), false when it's still
- * there despite the delete call returning success. Any other error is
+ * event is no longer retrievable (HTTP 404 on GET) OR the id was never a
+ * resolvable Graph id in the first place (400 ErrorInvalidIdMalformed / "The
+ * Id is invalid" — a malformed id can't resolve to a real event either, same
+ * carve-out as delete_meeting's own preflight probe). Any other error is
  * treated as "unknown / assume still present" so the caller narrates
  * honestly rather than falsely confirming a delete. Mirrors the spirit of
  * `create_meeting`'s pre-check (same trust-but-verify principle for
@@ -1321,7 +1323,18 @@ export async function verifyEventDeleted(
     return false;
   } catch (err: any) {
     const code = err?.statusCode ?? err?.code;
-    if (code === 404 || code === 'ErrorItemNotFound') return true;
+    const message = String(err?.message ?? err);
+    // A malformed id (400 ErrorInvalidIdMalformed / "The Id is invalid")
+    // can never resolve to a real event either, so it's equivalent to
+    // not-found — same carve-out as delete_meeting's own preflight probe
+    // (ops/handlers/calendarReads.ts, gh#delete-meeting-invalid-id-cascades).
+    // Without this, a junk/placeholder id parked in an artifact's
+    // details_json permanently reads as "unknown, assume not deleted" and
+    // cleanupVanishedMeetingArtifacts' sweep can never close it out.
+    const notFound = code === 404 || code === 'ErrorItemNotFound'
+      || code === 'ErrorInvalidIdMalformed'
+      || /the id is invalid/i.test(message);
+    if (notFound) return true;
     logger.warn('verifyEventDeleted: unexpected error, assuming NOT deleted', {
       meetingId, code, message: err?.message,
     });

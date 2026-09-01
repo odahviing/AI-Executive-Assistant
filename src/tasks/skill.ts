@@ -836,6 +836,45 @@ export async function createApprovalRequest(
             || deferredTool === 'move_meeting'
             || deferredTool === 'delete_meeting';
 
+          // gh#placeholder-id-persisted-into-approval — an existing-event change
+          // is the ONE deferred_action shape whose meeting_id is never re-derived
+          // (the #142c checkSlot pass a few lines down explicitly skips it — no
+          // slot to re-check), so a model-invented id (never resolved via
+          // get_calendar this turn — the "event_id_from_calendar_placeholder"
+          // case, gh#delete-meeting-invalid-id-cascades) rode straight into
+          // `payload` and out through `details: { ...payload }` below with
+          // nothing ever having looked at it. Once persisted it sat in an open
+          // request's details_json forever: verifyEventDeleted's malformed-id
+          // carve-out (calendarReads.ts) lets the vanished-meeting sweep close
+          // it out AFTER the fact, but nothing stopped it being written in the
+          // first place. Same carve-out, same tool, used here as an existence
+          // check instead of a deletion check — refuse before persisting rather
+          // than clean up after.
+          if (isExistingEventChange) {
+            const deferredArgs = (payload.deferred_action as { args?: Record<string, unknown> } | undefined)?.args;
+            const targetMeetingId = typeof deferredArgs?.meeting_id === 'string' ? deferredArgs.meeting_id.trim() : '';
+            if (targetMeetingId) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { verifyEventDeleted } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
+                const unresolvable = await verifyEventDeleted(profile.user.email, targetMeetingId);
+                if (unresolvable) {
+                  logger.warn('create_approval — deferred_action meeting_id does not resolve on the calendar, refusing to persist', {
+                    kind: subkind, tool: deferredTool, meetingId: targetMeetingId,
+                  });
+                  return {
+                    error: 'meeting_id_not_resolvable',
+                    reason: `The meeting id for this ${deferredTool} approval ("${targetMeetingId}") doesn't resolve on the calendar — it's either invented or stale. Re-read the calendar (get_calendar) for the real id and retry; I won't raise an approval the owner could never actually act on.`,
+                  };
+                }
+              } catch (err) {
+                logger.warn('create_approval — meeting_id existence check threw; proceeding (fail-open)', {
+                  err: String(err).slice(0, 200), meetingId: targetMeetingId,
+                });
+              }
+            }
+          }
+
           const hasSubject = typeof payload.subject === 'string' && payload.subject.trim().length > 0;
           const hasStart = typeof payload.start === 'string' && payload.start.trim().length > 0;
           const hasEnd = typeof payload.end === 'string' && payload.end.trim().length > 0;

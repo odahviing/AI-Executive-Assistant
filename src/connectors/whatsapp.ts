@@ -331,7 +331,11 @@ async function handleWhatsAppMessage(
   appendToConversation(threadTs, channelId, {
     role: 'user',
     content: voiceInput ? `[Voice message]: ${inputText}` : inputText,
-    ts: String(Date.now()),
+    // Conversation history `ts` is unix SECONDS everywhere else (Slack's
+    // format — see core/assistant.ts's `DateTime.fromSeconds(Number(m.ts))`
+    // grounding read). Date.now() is milliseconds; keep the same unit here
+    // so a later reader doesn't land ~50,000 years in the future.
+    ts: String(Math.floor(Date.now() / 1000)),
   });
 
   // Best-effort presence/typing hint.
