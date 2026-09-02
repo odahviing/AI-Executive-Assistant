@@ -1068,11 +1068,27 @@ async function raiseOneTimezonePersistenceAsk(
       markTimezoneTempAskedById(c.personId, c.value);
       return;
     }
-    if (existing.state !== 'awaiting_owner') {
-      // The row reached a TERMINAL state (e.g. its whole 2-workday window
-      // expired) with delivery never confirmed — nobody was actually asked,
-      // so there's no decision pinned to it and resolveRequest refuses any
-      // verdict against a non-open row (resolver.ts's `state !==
+    if (existing.state !== 'awaiting_owner' && existing.state !== 'expired') {
+      // registrar fix (timezone-ask-revival-corner-nondm-resolution) — a
+      // genuine decision (resolved/cancelled) can land on this row through a
+      // surface that never touches `terminal_dm_msg_ts` at all: resolve_approval
+      // reached directly by request id (e.g. after list_pending_approvals, or
+      // Module D's thread-bound auto-resolve) from OUTSIDE this ask's own DM —
+      // terminal_dm_msg_ts is stamped only by THIS ask's own delivery
+      // (deliverTimezonePersistenceAsk), never by however it was resolved. The
+      // owner already got that outcome from whatever closed it; reviving here
+      // would ask him again about something he already decided (R3: never
+      // twice). Burn the one-ask budget instead — a reject/cancel takes no
+      // db/people.ts action, so without this the same still-differing streak
+      // would keep re-surfacing as a "fresh" candidate every hourly pass.
+      markTimezoneTempAskedById(c.personId, c.value);
+      return;
+    }
+    if (existing.state === 'expired') {
+      // The row timed out (generic 'expiry' closure, e.g. its whole 2-workday
+      // window elapsed) with delivery never confirmed — nobody was actually
+      // asked, so there's no decision pinned to it and resolveRequest refuses
+      // any verdict against a non-open row (resolver.ts's `state !==
       // 'awaiting_owner' && state !== 'awaiting_colleague'` guard) — a "yes"
       // replayed against this dead row would resolve nothing. Retire its
       // idempotency key (the dead row keeps its history for audit) and mint

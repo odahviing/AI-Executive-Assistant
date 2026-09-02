@@ -673,7 +673,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
               const u = info.user as any;
               const name = u?.real_name || u?.name || id;
               if (id !== profile.user.slack_user_id) {
-                upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz });
+                upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz, timezoneReadingAbsent: !u?.tz });
               }
               nameEntries.push(`${name} (slack_id: ${id})`);
               mpimMemberNames.push(name);
@@ -1011,7 +1011,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
                 const name = u?.real_name || u?.name || id;
                 threadNamesById.set(id, name);
                 if (id !== profile.user.slack_user_id) {
-                  upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz });
+                  upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz, timezoneReadingAbsent: !u?.tz });
                 }
                 nameEntries.push(`${name} (slack_id: ${id})`);
               } catch (_) {
@@ -1088,7 +1088,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
                 // resolves VIP/email READ-ONLY (getPersonMemory). MPIMs are group
                 // DMs Maelle is part of, not blind channels — keep their upsert.
                 if (id !== profile.user.slack_user_id && isMpimChannel) {
-                  upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz });
+                  upsertPersonMemory({ slackId: id, name, email: u?.profile?.email, timezone: u?.tz, timezoneReadingAbsent: !u?.tz });
                 }
               } catch (_) {
                 nameEntries.push(id);

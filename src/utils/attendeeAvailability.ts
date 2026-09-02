@@ -210,7 +210,7 @@ export function loadAttendeeAvailabilityForEmails(
       // email-only external (no slack_id) can carry a travel record too (the
       // email-inbound stated-zone path writes one), and the slack_id-keyed
       // lookup silently returned null for every such row — write succeeded,
-      // read never happened (same class as getCurrentTravelById's doc,
+      // read never happened (same class as getTravelRecordById's doc,
       // db/people.ts). Also no longer gated on a stored base timezone: a
       // fallback-assumed attendee (#M3) with a travel record has a STATED
       // zone for the trip's days — inside the window that record outranks the

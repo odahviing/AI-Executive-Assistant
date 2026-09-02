@@ -421,11 +421,27 @@ Only send messages the user explicitly asks for — never reach out to people on
         // keeps its stored name (same stomp class fixed in
         // resolvePersonTarget.ts: a partial/omitted arg must not overwrite a
         // real name).
+        //
+        // registrar fix (outreach-model-supplied-tz-written-as-a-slack-
+        // reading) — `timezone: args.colleague_tz` used to ride this same
+        // call into `upsertPersonMemory`'s default 'auto' tier, which hardcodes
+        // source:'slack' (people.ts:1104). `args.colleague_tz` is a model tool
+        // arg (the schema only ASKS the model to copy it from a prior
+        // find_slack_user call — nothing verifies it did), not a genuine Slack
+        // API read; tagging it 'slack' let a model-asserted zone retire a real
+        // live temp-timezone divergence and let the persistence hedge
+        // ("Slack has...") attribute a model guess to Slack. The real Slack
+        // signal for this person is already persisted at its true source —
+        // find_slack_user's own match loop (connections/slack/index.ts:312-317)
+        // upserts `m.tz` straight off the Slack API — so this second, weaker-
+        // provenance write was redundant when the model relayed it faithfully
+        // and actively wrong when it didn't. Dropped; `args.colleague_tz` still
+        // feeds the reply-deadline calc + job payload below (payload use, not
+        // a provenance-bearing memory write).
         const existingColleague = getPersonMemory(colleagueSlackId);
         upsertPersonMemory({
           slackId:  colleagueSlackId,
           name:     existingColleague?.name?.trim() || (args.colleague_name as string),
-          timezone: args.colleague_tz as string | undefined,
         });
         // v1.6.8 — DON'T write to interaction_log here. The outreach_jobs row and
         // its paired request already track this message end-to-end (state, reply,

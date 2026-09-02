@@ -114,8 +114,10 @@ export function countCategoryOccurrences(opts: {
  * + a human_explanation suitable for an approval ask_text or a tool
  * result message addressed to the OWNER, and (for per_day/per_week)
  * a colleague_explanation for anyone else — see that field's doc.
- * Which one a caller should use is WHO reads it (`opts.ownerReads`),
- * the same signal `checkSlot` already threads through every other rule.
+ * Which one a caller should use is WHO reads it — the caller's own call,
+ * not this function's: `colleague_explanation` is always built in the
+ * non-owner voice (owner's first name, third person) since a caller only
+ * ever surfaces it on the non-owner branch.
  *
  * Returns { allowed: true } when the category isn't found in profile,
  * has no rules, or the slot passes — keeps callers simple. The
@@ -129,21 +131,11 @@ export function checkCategorySlot(opts: {
   events: CalendarEvent[]; // owner's events covering at least the slot's week
   profile: UserProfile;
   excludeEventId?: string; // for move_meeting: exclude the event being moved
-  /**
-   * M9/M10, 2026-09-01 — WHO reads `human_explanation` on THIS call. Only
-   * changes which string `colleague_explanation` gets built as (arithmetic
-   * never differs by reader — it's the same fact either way); the caller
-   * still picks between `human_explanation` / `colleague_explanation`
-   * itself. Omitted → treated as non-owner (safe default, W9).
-   */
-  ownerReads?: boolean;
 }): CategoryCheckResult {
   if (!opts.categoryName) return { allowed: true };
   const cat = getProfileCategoryByName(opts.profile, opts.categoryName);
   if (!cat) return { allowed: true };
-  const ownerReads = opts.ownerReads === true;
   const ownerFirst = opts.profile.user.name.split(' ')[0];
-  const who = ownerReads ? 'you' : ownerFirst;
 
   // ── Rule 1: day_type ────────────────────────────────────────────────────
   const dayType = cat.day_type ?? 'any';
@@ -189,7 +181,7 @@ export function checkCategorySlot(opts: {
         human_explanation: `${cat.name} limit is ${perDay} per day; ${dayLabel} already has ${count}.`,
         // Shape stays shareable (M9), arithmetic doesn't (2026-09-01 ruling):
         // "he already has too many Weeklys" — no cap, no count.
-        colleague_explanation: `${who} already ha${ownerReads ? 've' : 's'} too many ${cat.name}s on ${dayLabel}.`,
+        colleague_explanation: `${ownerFirst} already has too many ${cat.name}s on ${dayLabel}.`,
       };
     }
   }
@@ -215,7 +207,7 @@ export function checkCategorySlot(opts: {
         rule_value: perWeek,
         current_count: count,
         human_explanation: `${cat.name} limit is ${perWeek} per week; the week of ${weekLabel} already has ${count}.`,
-        colleague_explanation: `${who} already ha${ownerReads ? 've' : 's'} too many ${cat.name}s the week of ${weekLabel}.`,
+        colleague_explanation: `${ownerFirst} already has too many ${cat.name}s the week of ${weekLabel}.`,
       };
     }
   }

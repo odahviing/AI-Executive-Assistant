@@ -308,7 +308,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     //   base timezone SET → the original incident's shape (a real, correct
     //     zone on file) — route through the SAME dated, self-expiring
     //     mechanism `update_person_profile`'s `currently_traveling` argument
-    //     already uses (`setCurrentTravelById`/`getCurrentTravelById`,
+    //     already uses (`setCurrentTravelById`/`getTravelRecordById`,
     //     people.ts) — a bounded window rather than a permanent, unprotected
     //     overwrite. `location` carries the raw stated text (not the resolved
     //     IANA string) so it re-resolves through the identical

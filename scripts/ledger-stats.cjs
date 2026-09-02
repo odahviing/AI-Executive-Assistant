@@ -65,13 +65,24 @@ const REPO = path.join(__dirname, '..');
 //
 // COMMITTED history only, and the output says so: an uncommitted edit carries no
 // date to compare against, and this repo is uncommitted by default.
+//
+// X214 · same UTC clock as X213. `%cs` (committer date, short form) is a FIXED
+// placeholder — neither `TZ` nor `--date` can move it, it always renders in the
+// committer's own offset (measured live: `TZ=UTC0 git log --pretty=%cs` still
+// printed the committer-offset day). `row.date` below (X38/X59's `needsRecheck`)
+// is stamped UTC by `stampDate()` (ledger-file.cjs), so comparing it against a
+// `%cs` day is the identical clock mismatch X213 fixed for `--already-built`:
+// `%cd` + `--date=format-local:%Y-%m-%d` + `TZ=UTC0` is what actually computes
+// in UTC, matching `stampDate()`. Also moves `--since=${sinceDay}` onto the same
+// UTC clock (previously interpreted in the machine's local offset while
+// `sinceDay` is itself a UTC ledger date) — one env change fixes both reads.
 const fileTouchDates = (sinceDay) => {
   let out = '';
   try {
     out = require('child_process').execFileSync(
       'git',
-      ['-C', REPO, 'log', `--since=${sinceDay}`, '--name-only', '--pretty=format:%x01%cs'],
-      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+      ['-C', REPO, 'log', `--since=${sinceDay}`, '--name-only', '--pretty=format:%x01%cd', '--date=format-local:%Y-%m-%d'],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: { ...process.env, TZ: 'UTC0' } },
     );
   } catch {
     return null; // no git, or not a repo — reported as "not checked", NEVER as still-real
@@ -197,7 +208,7 @@ const citesReleaseFile = (cited, releaseFiles) => {
 // GitHub-sync-closed ticket) so it never misreads as a fresh open decision.
 const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
 
-module.exports = { citesReleaseFile, CLOSED };
+module.exports = { citesReleaseFile, CLOSED, fileTouchDates };
 // Required by the fixture for that function alone, and by `ledger-file.cjs`
 // for `CLOSED`. Everything below is the CLI and ends in `process.exit`, so a
 // plain `require` of this file from anywhere else would run the whole script.
@@ -623,10 +634,17 @@ if (argv.includes('--open-known')) {
 if (argOf('--wrap')) {
   const V = argOf('--wrap');
   const { execFileSync } = require('child_process');
-  const git = (args) => execFileSync('git', ['-C', REPO, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const git = (args, extraEnv) => execFileSync('git', ['-C', REPO, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...extraEnv } });
   let log = '';
   try {
-    log = git(['log', '--format=%H|%ad|%s', '--date=short']);
+    // X214 · same UTC fix as X213 (--already-built). `--date=short` alone
+    // renders in the COMMITTER's own offset, not UTC, and `newest.date` below
+    // gates the phantom-candidate `examined()` check further down against
+    // ledger rows stamped UTC via `stampDate()` — the identical clock mismatch,
+    // at a sibling call site X213 deliberately left open. `format-local` +
+    // `TZ=UTC0` is what actually computes in UTC; see section 35c's real-commit
+    // anchor in check-design-door.cjs for the reproduced boundary case.
+    log = git(['log', '--format=%H|%ad|%s', '--date=format-local:%Y-%m-%d'], { TZ: 'UTC0' });
   } catch {
     console.error('\nNo git history here, so a wrap cannot be reconstructed.\n');
     process.exit(1);

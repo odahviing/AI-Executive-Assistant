@@ -975,7 +975,6 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       events: input.events,
       profile,
       excludeEventId: input.excludeEventIds?.[0],  // checkCategorySlot supports single exclude
-      ownerReads,
     });
     if (!catCheck.allowed) {
       const map: Record<string, RuleViolationKind> = {

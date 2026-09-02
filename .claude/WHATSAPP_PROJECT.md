@@ -257,11 +257,11 @@ in WhatsApp JID form** (`<phone>@c.us`).
 
 ### 4.3 Identity — phone ↔ person (THE core hard part)
 
-`resolvePerson` (`db/people.ts:1892`) matches `slack_id → email → fuzzy name` and
+`resolvePerson` (`db/people.ts:1932`) matches `slack_id → email → fuzzy name` and
 **does not take phone today**, even though `people_memory.phone` already exists
 (`client.ts:784`). Extend it:
 
-- Add `phone?` to `ResolvePersonInput` (`db/people.ts:1848`) and a `getPersonByPhone`
+- Add `phone?` to `ResolvePersonInput` (`db/people.ts:1888`) and a `getPersonByPhone`
   helper.
 - Insert a **phone match step** in `resolvePerson` (after slack_id, alongside
   email — phone is a strong logical key like email). Merge-by-attach: if matched
@@ -435,7 +435,7 @@ The placeholder is single-tenant. Fix all of it:
   needed verifying was wrong.
 - `src/connectors/slack/app.ts:77-78,111-112` — the `registerConnection` +
   `getSenderRole` patterns to mirror.
-- `src/db/people.ts:1848,1892` — add `phone` to `ResolvePersonInput` + a phone match
+- `src/db/people.ts:1888,1932` — add `phone` to `ResolvePersonInput` + a phone match
   step + `getPersonByPhone`. `people_memory.phone` column exists
   (`src/db/client.ts:938`).
 - `src/core/orchestrator/index.ts:217,219,376-385` — orchestrator already takes

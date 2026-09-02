@@ -256,8 +256,10 @@ If you already have an email for the person, you don't need this tool to book a 
               .map(p => ({
                 slack_id: p.slack_id,
                 name: p.name,
-                tz_iana: p.timezone || 'UTC',
-                tz_note: p.timezone && !p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined,
+                tz_iana: p.timezone || undefined,
+                tz_note: p.timezone
+                  ? (!p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined)
+                  : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
                 state: p.state || undefined,
                 email: p.email || undefined,
               }));
@@ -274,7 +276,7 @@ If you already have an email for the person, you don't need this tool to book a 
           }
 
           // Store full raw member alongside match so we can read pronouns/image later
-          const matches: Array<{ slack_id: string; name: string; timezone: string; email?: string; _raw: any }> = [];
+          const matches: Array<{ slack_id: string; name: string; timezone?: string; email?: string; _raw: any }> = [];
           let cursor: string | undefined;
 
           // Paginate through all workspace members — avoids missing people in large workspaces
@@ -296,7 +298,16 @@ If you already have an email for the person, you don't need this tool to book a 
                 matches.push({
                   slack_id: m.id,
                   name:     m.real_name || m.profile?.display_name || m.name,
-                  timezone: m.tz || 'UTC',
+                  // v4.8.x — `m.tz` absent means Slack reported NOTHING; falling
+                  // back to 'UTC' here used to write that default into
+                  // people_memory as though it were a real Slack reading, which
+                  // the permanent/temp divert (applyAutoTimezoneById) then reads
+                  // back as "Slack currently reads UTC" and can raise an owner
+                  // question about a zone Slack never actually said. Leave it
+                  // undefined so upsertPersonMemory's `if (params.timezone)`
+                  // guard skips the write entirely — no signal in, no signal
+                  // fabricated out.
+                  timezone: m.tz || undefined,
                   email:    m.profile?.email,
                   _raw:     m,
                 });
@@ -314,6 +325,10 @@ If you already have an email for the person, you don't need this tool to book a 
               name:     match.name,
               email:    match.email,
               timezone: match.timezone,
+              // A real users.list() read — `match.timezone` is `m.tz || undefined`
+              // above, so its absence means Slack reported no zone for this
+              // person, not that this call skipped looking.
+              timezoneReadingAbsent: !match.timezone,
             });
             detectAndSaveGender({
               slackId:  match.slack_id,
@@ -337,7 +352,9 @@ If you already have an email for the person, you don't need this tool to book a 
                   matches.push({
                     slack_id: u.id,
                     name: u.real_name || u.profile?.display_name || u.name,
-                    timezone: u.tz || 'UTC',
+                    // See the 'UTC' note above the users.list() loop — same
+                    // fabrication risk, same fix: no reading, no default.
+                    timezone: u.tz || undefined,
                     email: u.profile?.email,
                     _raw: u,
                   });
@@ -345,7 +362,11 @@ If you already have an email for the person, you don't need this tool to book a 
                     slackId: u.id,
                     name: u.real_name || u.profile?.display_name || u.name,
                     email: u.profile?.email,
-                    timezone: u.tz || 'UTC',
+                    timezone: u.tz || undefined,
+                    // A real users.info() read (guest-user fallback, inside
+                    // the try above) — absent `u.tz` means Slack reported no
+                    // zone, not that the lookup failed (a throw skips this line).
+                    timezoneReadingAbsent: !u.tz,
                   });
                   logger.info('Found guest user via users.info fallback', { slackId: u.id, name: u.real_name });
                 }
@@ -364,8 +385,10 @@ If you already have an email for the person, you don't need this tool to book a 
             void _raw;
             return {
               ...m,
-              tz_iana: timezone || 'UTC',
-              tz_note: timezone ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined,
+              tz_iana: timezone || undefined,
+              tz_note: timezone
+                ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.'
+                : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
               state: undefined,
             };
           });

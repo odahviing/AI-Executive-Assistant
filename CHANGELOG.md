@@ -20,6 +20,21 @@ Four of these came straight out of the owner's own Slack that afternoon, within 
 - A pending question about someone's timezone can no longer be re-asked after its request has closed.
 - WhatsApp wrote one shared timestamp field in different units from every other transport.
 
+### Fixed — second wave, same version
+
+Twelve more, folded in after 4.8.5 was already live. Almost all of one piece: **the absence of a fact must stay distinguishable from the fact.**
+
+- **Slack's silence about someone's timezone is no longer stored, or spoken, as a timezone.** When Slack held no zone for a person, the code substituted "UTC" — and once stored, that was indistinguishable from something Slack had actually said. The honesty work in this same release then faithfully reported it, so the owner could be asked "Slack has had her on UTC for a week, has she moved?" about a zone nobody ever reported. Fixed at the write, at the read, and at the seven places a real Slack profile read happens; a person with genuinely no zone on file now produces no zone, and Maelle is told to say so rather than assume one.
+- **A trip that has not started yet is no longer described as where someone is now.** The check asked only whether the trip had ended.
+- **Booking a meeting for a date after the owner's own trip ends no longer treats him as away** — it lands in the office, not online. The attendee side of this was already fixed; his own was the one read still asking about today rather than about the day being booked.
+- **A timezone the model supplied is no longer recorded as though Slack had reported it.**
+- A stale timezone reading is retired once a real profile read shows the source no longer says it.
+- A pending timezone question is no longer re-asked after its request has already been decided elsewhere.
+- Two dead branches and one now-orphaned reader removed; a quote-stripping gap closed in an internal note that quotes colleague-authored text.
+
+### Known and accepted
+- A timezone reading fabricated before this fix can still raise **one** question before it expires on its own (owner's ruling: accept it rather than migrate data). Values written to the *permanent* field pre-fix are a separate, still-open question — they do not expire.
+
 ### Invariants preserved
 - Explaining a refusal is unchanged: every "no" still carries the real reason, complete enough to push back on. Only the arithmetic behind it became owner-only.
 - The owner still receives the full cap and count on every surface he reads; a reader split that quietly hid them from him too was caught mid-build and closed in the same change.

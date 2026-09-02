@@ -37,7 +37,8 @@ const STATS = path.join(__dirname, 'ledger-stats.cjs')
 // X172 · the phantom-candidate file matcher, required directly rather than
 // re-implemented — `ledger-stats.cjs` stops before touching argv/the ledger
 // when `require.main !== module`, so this is the one live function, not a copy.
-const { citesReleaseFile } = require(STATS)
+// X214 · `fileTouchDates` required the same way, for section 35c below.
+const { citesReleaseFile, fileTouchDates } = require(STATS)
 
 let failed = 0
 let passed = 0
@@ -1166,7 +1167,49 @@ const main = async () => {
   // (an old `built` ref with a real wrap since), on the SAME real git history,
   // so the two commands' disagreement on that one row is asserted directly —
   // that disagreement is the entire reason bugger.js needs both lists.
+
   // ══════════════════════════════════════════════════════════════════════════
+  // X214 — two SIBLINGS of X213's exact clock defect, deliberately left open by
+  // X213's scoped repair (its own note names both). Same real, permanent
+  // commits prove both, at each site, against the ACTUAL production code:
+  //   (a) `--wrap`'s own `newest.date` (gates the phantom-candidate `examined()`
+  //       check) used `--date=short` same as `--already-built` used to.
+  //   (b) `fileTouchDates` (X38/X59 staleness, feeds `--open`/`--architect`) used
+  //       `%cs` — a FIXED placeholder that neither `TZ` nor `--date` can move,
+  //       measured directly below, so it needed the same `%cd`+format-local swap.
+  // ══════════════════════════════════════════════════════════════════════════
+  section("35c · X214 — `--wrap`'s newest.date and `fileTouchDates` share X213's clock, fixed the same way")
+  // Real wrap 4.8.3, newest commit 7bbd269 (a bookkeeping-only commit touching
+  // only ledger.jsonl): committed 2026-08-31T00:59:12+03:00 — UTC day
+  // 2026-08-30, one day EARLIER than the un-forced `--date=short` rendering.
+  // Never mocked: the ACTUAL `--wrap` command against the ACTUAL committed
+  // ledger and the ACTUAL, permanent commit history for a real, already-shipped
+  // wrap that will never change.
+  const oldStyleWrapDate = execFileSync('git', ['-C', ROOT, 'log', '-1', '--format=%ad', '--date=short', '7bbd269b18b479eee5d45d032a4a45bcfc8e9668'], { encoding: 'utf8' }).trim()
+  ok("fires on the bad input: the un-forced clock disagrees with UTC for this real commit", oldStyleWrapDate === '2026-08-31', oldStyleWrapDate)
+  const wrap483 = execFileSync(process.execPath, [STATS, '--wrap', '4.8.3'], { encoding: 'utf8' })
+  ok(
+    "stays silent on the good one: `--wrap 4.8.3`'s own header reports the real commit's UTC day (2026-08-30), not the committer-offset day (2026-08-31)",
+    /^4\.8\.3 — 4 commit\(s\) 2026-08-30\b/m.test(wrap483),
+    wrap483.split('\n')[0],
+  )
+  // `fileTouchDates` — same fact, a DIFFERENT real commit (6d9e9a8, X213's own
+  // anchor) and the ACTUAL exported function, not a reimplementation. `%cs` is
+  // a fixed placeholder: `TZ=UTC0` does not move it, proven directly here so
+  // the claim that it needed the same `%cd`+format-local swap as the other two
+  // sites is measured, not assumed. `.claude/commands/golden.md` has exactly
+  // ONE commit in its entire history (`git log --follow` confirms) and is not
+  // expected to be touched again, so its "latest touch" stays pinned to that
+  // one real, permanent commit for as long as that holds.
+  const csIgnoresUtc = execFileSync('git', ['-C', ROOT, 'log', '-1', '--pretty=format:%cs', '6d9e9a85ee683bafbec8f7e8a503ad6a4b013bb1'], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC0' } }).trim()
+  ok('fires on the bad input: `%cs` still renders the committer-offset day even under `TZ=UTC0` — it cannot be forced', csIgnoresUtc === '2026-08-31', csIgnoresUtc)
+  const touchedReal = fileTouchDates('2026-08-01')
+  ok(
+    "stays silent on the good one: fileTouchDates resolves this real commit to its UTC day (2026-08-30), not the committer-offset day",
+    touchedReal && touchedReal.get('.claude/commands/golden.md') === '2026-08-30',
+    touchedReal && touchedReal.get('.claude/commands/golden.md'),
+  )
+
   section('36 · `--closed-refs` — CLOSED by any verdict, no wrap-sweep  (fires on the bad input, silent on the good one)')
   const crTmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'closed-refs-')), 'ledger.jsonl')
   const crRows = [

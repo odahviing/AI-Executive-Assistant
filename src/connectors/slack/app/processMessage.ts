@@ -219,6 +219,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           name:     senderName,
           email:    colleagueSenderUser?.profile?.email   || undefined,
           timezone: colleagueSenderUser?.tz               || undefined,
+          // A real users.info() read (inside the try above — a throw leaves
+          // `colleagueIdentified` false and this line never runs) — absent
+          // `.tz` means Slack reported no zone, not that the lookup failed.
+          timezoneReadingAbsent: !colleagueSenderUser?.tz,
         });
         // Detect gender in background if not yet known
         const colImageUrl = colleagueSenderUser?.profile?.image_192 || colleagueSenderUser?.profile?.image_72 || undefined;

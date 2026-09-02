@@ -45,7 +45,7 @@ import { profileDualClock } from '../../utils/weTimeResolver';
 import { findNearbyAlternatives, type NearbyAlternative } from './nearbyAlternatives';
 import { detectCategory } from './detectCategory';
 import { findMeetingOwner } from './findMeetingOwner';
-import { getCurrentTravel, getTravelRecordById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory, type CurrentTravel } from '../../db/people';
+import { getTravelRecordById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory, type CurrentTravel } from '../../db/people';
 import { getVenueTravelTimeMinutes, isCompanyLocation } from '../../db/venues';
 import { inferTimezoneFromStateStatic } from '../../utils/locationTz';
 import logger from '../../utils/logger';
@@ -319,7 +319,25 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 
   // ── Owner state (load preferences first) ────────────────────────────────
   // Travel state lookup
-  const ownerTravel = getCurrentTravel(profile.user.slack_user_id);
+  // v4.8.x (2026-09-02, gh owner-own-trip-read-is-not-date-scoped-books-online-
+  // after-trip-ends) — resolve the OWNER's own travel by the MEETING's date,
+  // not "today", same fix as the per-attendee loop below
+  // (gh hedge-suppression-is-trip-scoped-not-meeting-date-scoped) applied to
+  // every attendee but missed the owner: the read here answered "is he
+  // traveling right now", so booking a date AFTER a trip that's active today
+  // still read the trip as active and forced the meeting online. `meetingIsoDate`
+  // and `travelForMeetingDay` are defined right below and reused by that loop.
+  const meetingIsoDate = input.slotStartIso
+    ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toISODate()
+    : null;
+  const travelForMeetingDay = (personId: string): CurrentTravel | null => {
+    const t = getTravelRecordById(personId);
+    if (!t) return null;
+    const day = meetingIsoDate ?? new Date().toISOString().slice(0, 10);
+    return (day >= t.from && day <= t.until) ? t : null;
+  };
+  const ownerPersonId = personIdForSlackId(profile.user.slack_user_id);
+  const ownerTravel = ownerPersonId ? travelForMeetingDay(ownerPersonId) : null;
   let anyParticipantRemote = !!ownerTravel;
   const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
   // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a participant currently on
@@ -354,25 +372,9 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     return !!travelTz && travelTz !== homeTz;
   };
   // v4.8.x (2026-09-02, gh hedge-suppression-is-trip-scoped-not-meeting-date-
-  // scoped) — resolve travel by the MEETING's own date, not "today".
-  // `getCurrentTravelById` answers "are they traveling right now", which is
-  // right for narration but wrong for a booking decision: a trip active today
-  // that ends before this slot's date (or one that starts later but will be
-  // underway by then) must be judged against the meeting's day, exactly like
-  // attendeeAvailability.ts's `attendeeTzForDay` / `tzTempDifferingForDay`
-  // already judge the search path per candidate day — "math right, sentence
-  // missing" for the direct-book path until now. `getTravelRecordById` is the
-  // raw record (gated only on "not entirely in the past"), so a future trip
-  // that will be underway on the meeting's date is visible here too.
-  const meetingIsoDate = input.slotStartIso
-    ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toISODate()
-    : null;
-  const travelForMeetingDay = (personId: string): CurrentTravel | null => {
-    const t = getTravelRecordById(personId);
-    if (!t) return null;
-    const day = meetingIsoDate ?? new Date().toISOString().slice(0, 10);
-    return (day >= t.from && day <= t.until) ? t : null;
-  };
+  // scoped) — `meetingIsoDate` and `travelForMeetingDay` (both resolve travel
+  // by the MEETING's own date, not "today") are defined above, right next to
+  // the owner's own travel read, and reused here for every attendee.
   // v4.8.x (2026-09-01, gh full-maayan-symptom) — this loop used to `break` the
   // instant `anyParticipantRemote` went true (whether that arrived pre-set from
   // the owner's OWN travel above, or from an earlier participant in this same

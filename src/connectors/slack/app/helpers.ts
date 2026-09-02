@@ -66,6 +66,10 @@ export async function resolveSlackMentions(ctx: SlackAppContext, text: string): 
             name,
             email:    u?.profile?.email   || undefined,
             timezone: u?.tz               || undefined,
+            // A real users.info() read (inside the try above — a throw skips
+            // this line entirely) — absent `u?.tz` means Slack reported no
+            // zone for this person, not that the lookup failed or was skipped.
+            timezoneReadingAbsent: !u?.tz,
           });
           // Fire-and-forget gender detection: pronouns first, then profile image
           const imageUrl = u?.profile?.image_192 || u?.profile?.image_72 || undefined;

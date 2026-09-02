@@ -133,7 +133,7 @@ export interface PersonMemory {
   // is free text ("Boston", "NYC", "London"), from/until are ISO yyyy-MM-dd.
   // When set and `until` is in the future, this overrides `state` + `timezone`
   // + working_hours_auto for slot search and time-of-day display. Cleared
-  // (set to NULL) once `until` is in the past. Read via getCurrentTravel().
+  // (set to NULL) once `until` is in the past. Read via getTravelRecordById().
   currently_traveling?: string;
   // v4.8.x — timezone permanent/temp split (owner ruling 2026-08-31). JSON:
   // TimezoneTemp ({ value, expiresAt, source }). Sibling to
@@ -250,8 +250,8 @@ export function readInteractionLog(
 // reasoning during the window.
 //
 // `currently_traveling` column holds JSON: { location, from, until }. The
-// reader (`getCurrentTravel`) returns null when the window is in the past —
-// callers don't need to filter. Cleanup happens lazily on read; we don't run
+// reader (`getTravelRecordById`) returns null when the window is already over
+// — callers don't need to filter. Cleanup happens lazily on read; we don't run
 // a sweep.
 
 export interface CurrentTravel {
@@ -282,62 +282,37 @@ export function clearCurrentTravelById(personId: string): void {
 }
 
 /**
- * Returns the active travel record for the person, or null if none / expired.
- * Lazy cleanup: when the window is in the past, this returns null AND clears
- * the column so the next reader sees a clean slate.
+ * The reader every SCHEDULING consumer of `currently_traveling` goes through.
+ * One raw read exists besides it: `formatPeopleMemoryForPrompt` below parses
+ * the column straight off its own SELECT row to render the ", currently in X
+ * until Y" / ", upcoming travel to X from F until Y" contact line — different
+ * semantics (no lazy clear here; a `from` gate there tells an already-started
+ * trip apart from one that's merely on file for later). Returns the trip
+ * record when it is not already over (until >= today), INCLUDING one that
+ * hasn't started yet, or null. Lazy cleanup: a window entirely in the past
+ * returns null AND clears the column, so the next reader sees a clean slate.
  *
- * v4.4.x (#170) — person_id-keyed worker (works for externals too). The
- * slack_id-only original silently returned null for every email-only person
- * (externals, and any colleague whose row hadn't yet had a slack_id attached)
- * — not because they weren't traveling, but because the query couldn't reach
- * their row at all.
- */
-export function getCurrentTravelById(personId: string): CurrentTravel | null {
-  const db = getDb();
-  const row = db.prepare(
-    `SELECT currently_traveling FROM people_memory WHERE person_id = ?`
-  ).get(personId) as { currently_traveling?: string | null } | undefined;
-  if (!row || !row.currently_traveling) return null;
-  try {
-    const t = JSON.parse(row.currently_traveling) as CurrentTravel;
-    if (!t.location || !t.from || !t.until) return null;
-    const today = new Date().toISOString().slice(0, 10);
-    // Past trip → auto-clear and treat as not active.
-    if (t.until < today) {
-      clearCurrentTravelById(personId);
-      return null;
-    }
-    // Future trip (saved ahead of departure) → not active yet, fall back to
-    // stored profile. Do NOT clear — the record is still useful, it just
-    // shouldn't override TZ until the trip actually starts.
-    if (t.from > today) return null;
-    return t;
-  } catch (_) {
-    return null;
-  }
-}
-
-export function getCurrentTravel(slackId: string): CurrentTravel | null {
-  const pid = personIdForSlackId(slackId);
-  return pid ? getCurrentTravelById(pid) : null;
-}
-
-/**
- * v3.3.8 — raw travel record, gated only on "not already over" (until >= today).
+ * v3.3.8 — the gate is deliberately "not already over", never "active right
+ * now". Every consumer asks "what timezone are they in on the day I care
+ * about", and a trip that starts Friday is decisive for a Friday search while
+ * invisible to now-semantics. Real incident (Daniel, 2026-06-11): the owner
+ * taught "she's back in Israel on Tuesday", the record was saved correctly
+ * ({Israel, from/until 2026-06-16}), and the Tuesday search still applied
+ * Tokyo because the now-semantics reader of the day dropped future trips.
+ * Every SCHEDULING caller date-scopes the record itself:
+ * `loadAttendeeAvailabilityForEmails` (utils/attendeeAvailability.ts) builds a
+ * dated `travelWindow` per attendee (`attendeeTzForDay` consumes it
+ * downstream), and `planMeeting`'s `travelForMeetingDay` scopes the owner's
+ * own trip to the meeting date. One caller deliberately does NOT scope: the
+ * email-inbound stomp guard (connectors/email/inbound.ts) asks "does ANY
+ * active-or-future record exist" before writing a new one — adding scoping
+ * there would break the guard.
  *
- * getCurrentTravel answers "are they traveling NOW" — right for narration and
- * social. The slot finder needs a different question: "what timezone are they
- * in on the day being SEARCHED" — and a trip that starts Friday is invisible
- * to now-semantics while being decisive for a Friday search. Real incident
- * (Daniel, 2026-06-11): the owner taught "she's back in Israel on Tuesday",
- * the record was saved correctly ({Israel, from/until 2026-06-16}), and the
- * Tuesday search still applied Tokyo because getCurrentTravel returned null
- * for a future trip. Consumers resolve per-day via
- * `attendeeAvailability.attendeeTzForDay`.
+ * v4.4.x (#170) — person_id-keyed, so it reaches externals and any colleague
+ * whose row has no slack_id attached yet. The slack_id-only original silently
+ * returned null for every email-only person — not because they weren't
+ * traveling, but because the query couldn't reach their row at all.
  */
-/** v4.4.x (#170) — person_id-keyed worker (works for externals too); see
- *  getCurrentTravelById for why the slack_id-only original silently missed
- *  every email-only person. */
 export function getTravelRecordById(personId: string): CurrentTravel | null {
   const db = getDb();
   const row = db.prepare(
@@ -403,7 +378,12 @@ export function getTravelRecordById(personId: string): CurrentTravel | null {
 // base zone IS set and a mail signature states a different one, that path
 // deliberately routes to `currently_traveling` instead (a dated, self-expiring
 // record — owner ruling 2026-08-30), which is their temp tier and is read with
-// `getCurrentTravelById`, never here. The two are NOT interchangeable:
+// `getTravelRecordById` — the reader every scheduling consumer goes through
+// (one raw contact-line read exists in formatPeopleMemoryForPrompt; see the
+// reader's own doc), person_id-keyed and so reachable for an email-only
+// person, date-scoped by its scheduling callers
+// (loadAttendeeAvailabilityForEmails per attendee-day, planMeeting.ts for the
+// owner's own trip) — never here. The two are NOT interchangeable:
 // `currently_traveling` SUBSTITUTES the zone downstream (attendeeTzForDay,
 // anyParticipantRemote), while `timezone_temp` never does — folding them into
 // one reader would make "assuming they're on their permanent zone" a false
@@ -493,7 +473,7 @@ function clearTimezoneTempById(personId: string): void {
 
 /**
  * Returns the active temp/differing timezone reading, or null if none /
- * expired. Lazy cleanup on read, same pattern as `getCurrentTravelById`.
+ * expired. Lazy cleanup on read, same pattern as `getTravelRecordById`.
  */
 function getTimezoneTempById(personId: string): TimezoneTemp | null {
   const db = getDb();
@@ -533,7 +513,7 @@ export interface EffectiveTimezone {
   // Haiku capture pass's chat extraction, `tempDiffering.source` says which —
   // differed from the permanent one and the TTL hasn't lapsed. Null for every
   // email-only external by construction: both writers are slack_id-keyed (see
-  // the SCOPE note above; their equivalent signal is `getCurrentTravelById`).
+  // the SCOPE note above; their equivalent signal is `getTravelRecordById`).
   // ATTRIBUTE IT BY `source` when surfacing — never hard-code "Slack".
   tempDiffering: TimezoneTemp | null;
 }
@@ -644,6 +624,46 @@ export function applyAutoTimezone(
 ): AutoTimezoneWrite {
   const pid = personIdForSlackId(slackId);
   return pid ? applyAutoTimezoneById(pid, value, source) : 'no_person';
+}
+
+/**
+ * v4.8.x (2026-09-02, pre-existing-fabricated-utc-temp-rows-still-feed-the-ask)
+ * — a Slack profile read RAN for this person and reproduced no timezone at
+ * all. Retires any 'slack'-sourced `timezone_temp` row, whatever its value.
+ *
+ * A temp row at source 'slack' asserts exactly one LIVE fact: the Slack
+ * profile currently reads a zone that DIFFERS from the established permanent
+ * one. A profile read carrying no zone withdraws that assertion — the
+ * divergence is no longer reproducible — so the row must stop feeding the
+ * "Slack currently reads X" caveat (skills/meetings/planMeeting.ts:476,:653)
+ * and must never mature into the owner's persistence question
+ * (findPersistentUnaskedTimezoneDivergences below). Letting the TTL handle it
+ * is NOT enough: the streak (`since`) matures at `since` + TTL while the row
+ * lives until `lastStamp` + TTL, and every re-stamp widens that gap — which
+ * is exactly how a reading nothing reproduces still buys one false question.
+ *
+ * REPRODUCIBILITY is the discriminator, deliberately NOT the value. Before
+ * 2026-09-02 an absent `m.tz` was defaulted to the literal 'UTC' by the Slack
+ * sync (connections/slack/index.ts, `m.tz || 'UTC'`, now `|| undefined`) and
+ * stored as though Slack had reported it. Such a fabricated row is
+ * indistinguishable BY VALUE from a genuine Slack reading of UTC — same
+ * string, same source tag, two producers — so clearing on the value would
+ * blind the divert to a real UTC divergence for good. What separates them is
+ * that the fabricated reading can never be read from Slack again, while a
+ * genuine one is re-read by every sync.
+ *
+ * A 'chat'-sourced row is untouched: a Slack profile read says nothing about
+ * what the person stated in a chat turn. The PERMANENT `timezone` column is
+ * untouched too — the absence of a new reading is never a reason to unlearn a
+ * zone already established.
+ */
+function retireSlackTimezoneTempOnAbsentReading(personId: string): void {
+  const temp = getTimezoneTempById(personId);
+  if (!temp || temp.source !== 'slack') return;
+  clearTimezoneTempById(personId);
+  logger.info('timezone_temp retired — a Slack profile read reproduced no zone', {
+    personId, retiredValue: temp.value, since: temp.since, hadBeenAsked: !!temp.askedAt,
+  });
 }
 
 // ── v4.8.x (2026-09-02) — the persistence-ask trigger ───────────────────────
@@ -967,6 +987,20 @@ export function upsertPersonMemory(params: {
    * reportable outcome; the parameter went with the duplicate.
    */
   timezone?: string;
+  /**
+   * TRUE only when this caller made a real Slack profile read (users.list /
+   * users.info) that SUCCEEDED and carried NO `tz` field — "Slack reports no
+   * zone for this person". It is never "this caller didn't look" (most callers
+   * pass no zone simply because they never fetched one) and never a failed or
+   * skipped lookup, which is UNKNOWN rather than absent. This is the one
+   * signal that retires a live slack-sourced `timezone_temp` reading, which
+   * asserts a divergence the current profile no longer reproduces — see
+   * `retireSlackTimezoneTempOnAbsentReading` above. Ignored when `timezone` is
+   * supplied (a present reading is the stronger signal) and when `by` is not
+   * 'auto' (owner-authored config is not a Slack read). Never touches the
+   * permanent `timezone` column.
+   */
+  timezoneReadingAbsent?: boolean;
   gender?: PersonGender;
   /**
    * Provenance tier for `name`/`timezone` in THIS call. Defaults to 'auto' —
@@ -1071,6 +1105,12 @@ export function upsertPersonMemory(params: {
     } else {
       setCoreFieldWithProvenanceById(personId, 'timezone', params.timezone, params.by!);
     }
+  } else if (params.timezoneReadingAbsent && (params.by ?? 'auto') === 'auto') {
+    // The profile read ran and carried no zone: any slack-sourced temp
+    // divergence on file is no longer reproducible, so it is retired rather
+    // than left to ride out its TTL (and mature into the owner's persistence
+    // question) on a reading nothing can re-read.
+    retireSlackTimezoneTempOnAbsentReading(personId);
   }
 
   // The Slack profile is authoritative for a Slack person's address AT THE
@@ -2185,14 +2225,20 @@ export function formatPeopleMemoryForPrompt(
     // v2.2.4 (bug 5) — surface active travel windows in the contact line so
     // Sonnet sees "currently in Boston until 22 Jun" right next to the
     // default state/timezone. Stored profile is the default; travel is the
-    // override for the window. Reader auto-clears past trips, so anything
-    // that lands here is current.
+    // override for the window. NOTE: raw column read, NOT getTravelRecordById
+    // — no lazy clear (the until>=today check below filters expired trips for
+    // this render only). A `from` gate distinguishes an already-started trip
+    // ("currently in") from one that's merely on file for a future date
+    // ("upcoming travel to") — a not-yet-started trip is real data worth
+    // keeping in the prompt, it just isn't a present-tense fact yet (L13).
     let travelTag = '';
     if (p.currently_traveling) {
       try {
         const t = JSON.parse(p.currently_traveling) as { location: string; from: string; until: string };
         if (t.location && t.until && t.until >= today) {
-          travelTag = `, currently in ${t.location} until ${t.until}`;
+          travelTag = (t.from && t.from > today)
+            ? `, upcoming travel to ${t.location} from ${t.from} until ${t.until}`
+            : `, currently in ${t.location} until ${t.until}`;
         }
       } catch (_) { /* fail silent — travel field stays unrendered */ }
     }
