@@ -180,8 +180,8 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
  * flagged as a phantom action and sent to rewriteOwningTheMiss.
  *
  * No outcome gate here, unlike a real tool call: an internal action is only ever
- * emitted AFTER its mutation succeeded (checkHealth.ts:727 gates on `ok && created`;
- * autoMove.ts:206 pushes once the move and its notifications have landed), so the
+ * emitted AFTER its mutation succeeded (checkHealth.ts:836 gates on `ok && created`;
+ * autoMove.ts:273 pushes once the move and its notifications have landed), so the
  * entry's existence IS the confirmation. Reusing MUTATION_DOMAIN keeps coverage
  * identical to the tool path — set_event_category and rebalance_floating_blocks are
  * not in it, and were not in the old alternations either, so they stay unmarked.
@@ -198,6 +198,25 @@ function summarizeInternalAction(tool: string, viaTool: string, detail?: string)
  */
 function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown): string {
   try {
+    // createmeeting-failed-summary-drops-counter-offer-reason (2026-09-04) — a
+    // soft counter-proposal (create_meeting's efficiency_counter path,
+    // createMeeting.ts:1464-1478) carries a real, specific `counter_offer.reason`
+    // the tool itself computed — not a black-box failure. The generic FAILED
+    // branch below kept only the short error CODE ('efficiency_counter'), so a
+    // checker-visible summary could never back the very explanation the tool
+    // supplied, and a true claim ("packs it back to back with what's after")
+    // read as invented and got rewritten into a generic question. Read
+    // generically off the `counter_offer` shape (not by tool name) so any tool
+    // that returns this same structure is covered, not just this one call site
+    // (G2: carry the tool's own reason, don't drop it before the checker sees it).
+    if (result && typeof result === 'object') {
+      const co = (result as { counter_offer?: { suggested_start?: unknown; reason?: unknown } }).counter_offer;
+      if (co && typeof co.reason === 'string') {
+        const suggested = typeof co.suggested_start === 'string' ? ` suggested=${co.suggested_start}` : '';
+        const reason = co.reason.replace(/\s+/g, ' ').trim().slice(0, 160);
+        return `[${toolName} FAILED: counter-offer${suggested} — ${reason}]`;
+      }
+    }
     // v3.0.5 — generic FAILED detection. registry.ts wraps every thrown
     // tool call in `{ error: 'Tool "X" failed: <reason>' }`, and skills also
     // return `{ error: ... }` for non-thrown refusals. Surface both as

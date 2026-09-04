@@ -415,6 +415,19 @@ export interface TimezoneTemp {
   // per settled change, never again on every later re-stamp of the same
   // value. Cleared automatically whenever the streak resets.
   askedAt?: string;
+  // v4.8.x (2026-09-03, persistence-ask-asserts-continuity-never-observed) —
+  // ISO yyyy-MM-dd, the MOST RECENT day an auto-tier read actually reproduced
+  // this value; rewritten to today on every re-stamp, reset alongside `since`
+  // whenever the streak resets. `since`..`lastSeen` is therefore the span the
+  // value was genuinely OBSERVED across, and it is the only span anything may
+  // claim: `since`/`expiresAt` mature on the clock alone (one write's TTL
+  // already spans the whole ask window), so reads confined to a single day —
+  // one read, or a burst of ten — would otherwise mature into "Slack has had
+  // X on Y for N days" days later, asserting a continuity nothing re-observed.
+  // Undefined on a row written before this field existed: never inferred
+  // backward, so that row has no observed span until its next re-stamp
+  // supplies one (see checkTimezonePersistenceById).
+  lastSeen?: string;
 }
 
 /** `applyAutoTimezoneById`'s outcome. Every `CoreFieldWrite` case, plus the
@@ -458,6 +471,11 @@ function setTimezoneTempById(
     source,
     since: sameValue ? (existing!.since ?? today) : today,
     askedAt: sameValue ? existing!.askedAt : undefined,
+    // Every write IS an observation of `value` today — on a same-value
+    // re-stamp this extends the observed span (`since`..`lastSeen`); on a
+    // new/changed streak it collapses it to zero, this being its first (and
+    // so far only) sighting.
+    lastSeen: today,
   };
   db.prepare(
     `UPDATE people_memory SET timezone_temp = ?, updated_at = datetime('now') WHERE person_id = ?`,
@@ -501,6 +519,11 @@ function getTimezoneTempById(personId: string): TimezoneTemp | null {
       source: t.source === 'chat' ? 'chat' : 'slack',
       since: typeof t.since === 'string' ? t.since : undefined,
       askedAt: typeof t.askedAt === 'string' ? t.askedAt : undefined,
+      // Pre-existing rows written before `lastSeen` existed read as undefined
+      // — the next re-stamp stamps it with that day's real read, never
+      // backfilled, same never-inferred-backward pattern as `since`/`askedAt`
+      // above. Until then the streak has no observed span and earns no ask.
+      lastSeen: typeof t.lastSeen === 'string' ? t.lastSeen : undefined,
     };
   } catch (_) {
     return null;
@@ -654,8 +677,14 @@ export function applyAutoTimezone(
  *
  * A 'chat'-sourced row is untouched: a Slack profile read says nothing about
  * what the person stated in a chat turn. The PERMANENT `timezone` column is
- * untouched too — the absence of a new reading is never a reason to unlearn a
- * zone already established.
+ * untouched by THIS function — a general "unreproducible auto reading" is not
+ * by itself grounds to erase an established zone relied on for real
+ * computation, unlike this disposable temp row. The permanent-column
+ * counterpart (fabricated auto-rank 'UTC' rows written by the pre-2026-09-02
+ * `m.tz || 'UTC'` fallback) is not a live per-read path — see the one-shot
+ * sweep (chat-derived-timezone-lost-on-next-auto-read-miss, owner ruling
+ * 2026-09-04): that fallback's population is finite and closed, so it is
+ * healed once on the VM rather than re-checked on every absent reading.
  */
 function retireSlackTimezoneTempOnAbsentReading(personId: string): void {
   const temp = getTimezoneTempById(personId);
@@ -690,24 +719,44 @@ function retireSlackTimezoneTempOnAbsentReading(personId: string): void {
 // callback/replay machinery rather than this file inventing a second
 // waiting mechanism.
 
-/** A temp streak that has persisted a full TTL window, unbroken, and has not
- *  yet been asked about. */
+/** A temp streak that has been RE-OBSERVED across a full TTL window, unbroken,
+ *  and has not yet been asked about. */
 export interface TimezonePersistence {
   personId: string;
   value: string;
   source: TimezoneTempSource;
-  /** ISO yyyy-MM-dd — when this unbroken streak started. */
+  /** ISO yyyy-MM-dd — when this unbroken streak started. Identity of the
+   *  streak (a caller keys its once-per-streak bookkeeping on it), NOT a
+   *  duration: `now - since` is elapsed clock time and is NOT backed by
+   *  observation. */
   since: string;
+  /** Whole days between the FIRST and the LAST read that actually reproduced
+   *  this value (`since`..`lastSeen`), always >= the TTL window by the time a
+   *  streak is returned here. THE only figure anything may state to the owner
+   *  as "on this zone for N days" — see checkTimezonePersistenceById. */
+  observedDays: number;
 }
 
 /**
  * Does this person's CURRENT temp streak earn the owner's one question?
- * True only when: an active (non-lapsed) temp reading exists, its streak
- * (`since`) started at least `ttlDays` ago, and it hasn't been asked about
- * yet (`askedAt` unset). A streak that changed value or lapsed along the way
- * never reaches this — `since` (via setTimezoneTempById) only ever tracks an
- * UNBROKEN run of the same value, so this function never has to re-derive
- * "did it lapse" itself.
+ * True only when: an active (non-lapsed) temp reading exists, it hasn't been
+ * asked about yet (`askedAt` unset), and reads that actually REPRODUCED this
+ * value span at least `ttlDays` — the distance from the first sighting
+ * (`since`) to the latest one (`lastSeen`), never the distance from `since`
+ * to now. That is the whole of the maturity test, and it deliberately
+ * subsumes the old elapsed-time one: since `lastSeen` can never be later than
+ * today, an observed span of `ttlDays` already means `since` is at least
+ * `ttlDays` back. The clock cannot mature a streak on its own here
+ * (persistence-ask-asserts-continuity-never-observed) — one write's TTL
+ * spans the entire ask window, so reads confined to a single day, whether one
+ * or ten of them, produce an observed span of 0 and no ask, however much
+ * calendar time passes afterwards. Nothing re-read the value, so nothing may
+ * claim it held.
+ *
+ * "Unbroken" needs no separate check: a lapse clears the row (getTimezoneTempById)
+ * and a changed value restarts `since`/`lastSeen` (setTimezoneTempById), so a
+ * span of `ttlDays` can only be reached by reads renewing the TTL the whole
+ * way across it.
  */
 function checkTimezonePersistenceById(
   personId: string,
@@ -715,15 +764,17 @@ function checkTimezonePersistenceById(
 ): TimezonePersistence | null {
   const temp = getTimezoneTempById(personId);
   if (!temp || temp.askedAt) return null;
-  // No `since` (a row from before this field existed, not yet re-stamped) —
-  // never inferred backward; nothing to report until a later re-stamp starts
-  // its streak for real (see setTimezoneTempById / getTimezoneTempById notes).
-  if (!temp.since) return null;
+  // No `since`/`lastSeen` (a row from before those fields existed, not yet
+  // re-stamped) — never inferred backward; nothing to report until a later
+  // re-stamp supplies a real observation (see setTimezoneTempById /
+  // getTimezoneTempById notes).
+  if (!temp.since || !temp.lastSeen) return null;
   const sinceDt = DateTime.fromISO(temp.since);
-  if (!sinceDt.isValid) return null;
-  const daysSince = DateTime.now().diff(sinceDt, 'days').days;
-  if (daysSince < ttlDays) return null;
-  return { personId, value: temp.value, source: temp.source, since: temp.since };
+  const lastSeenDt = DateTime.fromISO(temp.lastSeen);
+  if (!sinceDt.isValid || !lastSeenDt.isValid) return null;
+  const observedDays = Math.floor(lastSeenDt.diff(sinceDt, 'days').days);
+  if (observedDays < ttlDays) return null;
+  return { personId, value: temp.value, source: temp.source, since: temp.since, observedDays };
 }
 
 /** Every currently-active temp streak (any Slack-synced person) that has
@@ -992,13 +1043,16 @@ export function upsertPersonMemory(params: {
    * users.info) that SUCCEEDED and carried NO `tz` field — "Slack reports no
    * zone for this person". It is never "this caller didn't look" (most callers
    * pass no zone simply because they never fetched one) and never a failed or
-   * skipped lookup, which is UNKNOWN rather than absent. This is the one
-   * signal that retires a live slack-sourced `timezone_temp` reading, which
-   * asserts a divergence the current profile no longer reproduces — see
-   * `retireSlackTimezoneTempOnAbsentReading` above. Ignored when `timezone` is
-   * supplied (a present reading is the stronger signal) and when `by` is not
-   * 'auto' (owner-authored config is not a Slack read). Never touches the
-   * permanent `timezone` column.
+   * skipped lookup, which is UNKNOWN rather than absent. This is the signal
+   * that retires a live slack-sourced `timezone_temp` reading, which asserts a
+   * divergence the current profile no longer reproduces — see
+   * `retireSlackTimezoneTempOnAbsentReading`. A PERMANENT `timezone`
+   * fabricated by the old `m.tz || 'UTC'` fallback (closed 2026-09-02) is
+   * healed by a one-shot sweep, not by this per-read signal (owner ruling
+   * 2026-09-04, chat-derived-timezone-lost-on-next-auto-read-miss).
+   * Ignored when `timezone` is supplied (a present reading is the stronger
+   * signal) and when `by` is not 'auto' (owner-authored config is not a Slack
+   * read).
    */
   timezoneReadingAbsent?: boolean;
   gender?: PersonGender;
@@ -1109,7 +1163,10 @@ export function upsertPersonMemory(params: {
     // The profile read ran and carried no zone: any slack-sourced temp
     // divergence on file is no longer reproducible, so it is retired rather
     // than left to ride out its TTL (and mature into the owner's persistence
-    // question) on a reading nothing can re-read.
+    // question) on a reading nothing can re-read. A PERMANENT value fabricated
+    // by the old `m.tz || 'UTC'` fallback (closed 2026-09-02) is NOT retired
+    // here — that population is finite and closed, healed once by a one-shot
+    // sweep rather than a permanent per-read check (owner ruling 2026-09-04).
     retireSlackTimezoneTempOnAbsentReading(personId);
   }
 

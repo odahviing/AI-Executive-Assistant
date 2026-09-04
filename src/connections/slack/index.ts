@@ -106,21 +106,34 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
     // users.info → { timezone, pronouns, imageUrl, email, displayName }.
     // Slack doesn't expose a `state` (city/country) field directly, so we
     // skip that — owner-volunteered or state-from-state-via-locationTz fills.
+    //
+    // Contract (matches the interface doc): null means Slack CONFIRMED the
+    // ref doesn't resolve (`user_not_found`) — the only case a caller may
+    // read as "there is nothing there" and act accordingly (e.g. clear a
+    // stale auto value). Any OTHER failure — rate limit, network blip,
+    // `account_inactive`, a transient socket error — is "we don't know",
+    // not "Slack says no", and must not collapse into the same null a
+    // confirmed-absent read produces; that conflation is the exact failure
+    // class the retired `m.tz || 'UTC'` fallback had (a missing READING
+    // fabricated a permanent value). So those throw instead, and the caller
+    // decides how to handle "couldn't read this one" (retry later, skip).
     async collectCoreInfo(ref) {
+      let info;
       try {
-        const info = await app.client.users.info({ token: botToken, user: ref });
-        const u = info.user as any;
-        if (!u) return null;
-        return {
-          timezone:    u?.tz || undefined,
-          pronouns:    u?.profile?.pronouns || undefined,
-          imageUrl:    u?.profile?.image_192 || u?.profile?.image_72 || undefined,
-          email:       u?.profile?.email || undefined,
-          displayName: u?.real_name || u?.name || undefined,
-        };
-      } catch {
-        return null;
+        info = await app.client.users.info({ token: botToken, user: ref });
+      } catch (err: any) {
+        if (err?.data?.error === 'user_not_found') return null;
+        throw err;
       }
+      const u = info.user as any;
+      if (!u) return null;
+      return {
+        timezone:    u?.tz || undefined,
+        pronouns:    u?.profile?.pronouns || undefined,
+        imageUrl:    u?.profile?.image_192 || u?.profile?.image_72 || undefined,
+        email:       u?.profile?.email || undefined,
+        displayName: u?.real_name || u?.name || undefined,
+      };
     },
 
     // v2.6.4 — Slack-specific tools owned by the Connection itself, not by a
@@ -253,16 +266,29 @@ If you already have an email for the person, you don't need this tool to book a 
             const memoryHits = searchPeopleMemory(args.name as string);
             const cleanFromMemory = memoryHits
               .filter(p => p.slack_id && /^[UW][A-Z0-9]{6,}$/.test(p.slack_id))
-              .map(p => ({
-                slack_id: p.slack_id,
-                name: p.name,
-                tz_iana: p.timezone || undefined,
-                tz_note: p.timezone
-                  ? (!p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : undefined)
-                  : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
-                state: p.state || undefined,
-                email: p.email || undefined,
-              }));
+              .map(p => {
+                // v4.8.x — mirror formatPeopleMemoryForPrompt's unconfirmed-guess
+                // marker (the `tzUnconfirmed` const in that function, src/db/people.ts
+                // — no line number: that file churns daily), not just its
+                // "city unknown" suffix. An
+                // auto-inferred zone (timezone_set_by === 'auto') is a guess, same
+                // as on owner-path; presenting it as settled fact here just because
+                // the caller is a colleague-path tool call is the same honesty gap
+                // the comment above already closed for the city-unknown case.
+                const tzUnconfirmed = p.timezone && p.timezone_set_by === 'auto'
+                  ? ' Guessed, not confirmed — confirm before presenting their local time as fact.'
+                  : '';
+                return {
+                  slack_id: p.slack_id,
+                  name: p.name,
+                  tz_iana: p.timezone || undefined,
+                  tz_note: p.timezone
+                    ? `${!p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : ''}${tzUnconfirmed}`.trim() || undefined
+                    : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
+                  state: p.state || undefined,
+                  email: p.email || undefined,
+                };
+              });
             if (cleanFromMemory.length > 0) {
               logger.info('find_slack_user — people_memory hit', {
                 query: args.name, matches: cleanFromMemory.length,

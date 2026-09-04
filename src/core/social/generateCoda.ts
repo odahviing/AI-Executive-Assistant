@@ -102,7 +102,7 @@ export interface CodaGrounding {
 // derived from the IANA timezone. Only covers the zones actually seen in the
 // person store; an unmapped zone returns null rather than guessing — this
 // feeds a search QUERY, not a stored fact, but "never infer a city from a
-// timezone" (people.ts:1506) still holds, so the fallback stays country-level
+// timezone" (people.ts:formatPeopleMemoryForPrompt) still holds, so the fallback stays country-level
 // and conservative (unmapped → omit location from the query entirely).
 const TZ_COUNTRY: Record<string, string> = {
   'Asia/Jerusalem': 'Israel',
@@ -298,7 +298,7 @@ async function generateSocialCoda(params: {
   } else {
     // Only 'continue' and 'raise_new' ever reach this composer (composeSocialCoda's
     // only caller is the coda-eligible orchestrator path, which never produces a
-    // PendingSocialCoda for any other mode — orchestrator/index.ts:1411). 'celebrate'
+    // PendingSocialCoda for any other mode — orchestrator/index.ts:codaEligible). 'celebrate'
     // and 'engage' belong to the separate in-prompt directive (directiveForPersonSocial,
     // rendered by formatDirectiveForPromptBlock into the system prompt, never routed
     // through this file) — deleted here as unreachable (gh#198 answer 0). This branch

@@ -505,7 +505,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // rewriter and the date swapper each append their correction), but the colleague
   // leg's rewriters — securityGate, humanGate — append nothing, so a leak the gates
   // caught and scrubbed was stored intact and replayed three ways: the next turn's
-  // model context (processMessage.ts:256), `recall_interactions`
+  // model context (processMessage.ts:getConversationHistory), `recall_interactions`
   // (core/assistant.ts:552), and the capture pass that mines the transcript for the
   // social subjects the coda is built from (memory/capturePass.ts:418). The gates
   // protected the wire and not the record — 2026-07-26 08:42:57, humanGate rewrote a
@@ -552,7 +552,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     // ahead of every real message — scrambling the order the model sees on
     // every catch-up merge, independent of (and in addition to) the
     // duplication bug the `m.user !== ctx.botUserId` exclusion above already
-    // closed (processMessage.ts:360). This write runs strictly after the
+    // closed (processMessage.ts:appendToConversation). This write runs strictly after the
     // user's message ts and strictly before this turn's real Slack post, so
     // the synthetic value sorts correctly relative to both.
     ts: (Date.now() / 1000).toFixed(6),

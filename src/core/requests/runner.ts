@@ -1016,9 +1016,13 @@ async function raiseOneTimezonePersistenceAsk(
 
   const first = (c.name ?? 'They').split(' ')[0];
   const sourceLabel = c.source === 'chat' ? 'Chat messages have' : 'Slack has';
-  const sinceDt = DateTime.fromISO(c.since);
-  const daysAgo = sinceDt.isValid ? Math.max(1, Math.round(DateTime.now().diff(sinceDt, 'days').days)) : 7;
-  const askText = `${sourceLabel} had ${first} on ${c.value} for ${daysAgo} days now — has ${first} actually moved? Say yes to update their stored timezone to ${c.value}; no (or nothing) leaves it as is.`;
+  // c.observedDays is the span that actually REPRODUCED this value
+  // (since..lastSeen) — the only figure this ask may state (see
+  // TimezonePersistence in src/db/people.ts). `now - since` is elapsed clock
+  // time, not backed by observation, and can overstate the streak by
+  // whatever a work-hours defer held this candidate before sending
+  // (persistence-ask-asserts-continuity-never-observed).
+  const askText = `${sourceLabel} had ${first} on ${c.value} for ${c.observedDays} days now — has ${first} actually moved? Say yes to update their stored timezone to ${c.value}; no (or nothing) leaves it as is.`;
 
   // Streak-scoped key — see the header comment above for why (personId,
   // since, value), never a timestamp.

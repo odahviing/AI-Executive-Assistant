@@ -51,3 +51,14 @@
 {"ts":"2026-09-02T06:21:27.966Z","runId":"wf_be3085b6-5f8","stamp":"results-in"}
 {"ts":"2026-09-02T06:21:28.034Z","runId":"wf_1394220b-06f","stamp":"results-in"}
 {"ts":"2026-09-02T06:22:45.717Z","runId":"wf_eb0329a1-354","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-02T23:08:07.194Z","runId":"wf_12ace68e-edd","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-02T23:46:49.625Z","runId":"wf_12ace68e-edd","stamp":"results-in"}
+{"ts":"2026-09-02T23:46:54.273Z","runId":"wf_12ace68e-edd","stamp":"report-written","headline":"Since the 4.8.5 commit -- 3 owner-triggered builds + 1 chained dependency + 1 run by another chat + 1 owner-triggered full pass (wf_12ace68e-edd)\nout: 16 built . 0 confirmed-other-lane . 1 needs-owner-decision . 1 bounced . 0/0 joint-traced . 2 discoveries queued\nboard: 3 open rows -- 0 still-real . 3 need a re-read . 0 cite no file . 3 rulable . 0 waiting on a verb\n1 row awaits you -- 1 from tonight run . 0 re-surfaced . 0 left over","pendingOwner":1}
+{"ts":"2026-09-03T23:11:00.355Z","runId":"wf_c9a3a1b9-a43","stamp":"triggered","trigger":"cron"}
+{"ts":"2026-09-04T00:05:08.789Z","runId":"wf_c9a3a1b9-a43","stamp":"results-in"}
+{"ts":"2026-09-04T00:10:20.040Z","runId":"wf_c9a3a1b9-a43","stamp":"report-written","headline":"Since the 4.8.5 commit — 3 owner-triggered builds + 1 chained dependency + 1 run by another chat + 2 owner-triggered full passes (wf_12ace68e-edd, wf_c9a3a1b9-a43)\nout: 21 built · 0 confirmed-other-lane · 1 needs-owner-decision · 4 bounced · 0/0 joint-traced · 2 discoveries queued\nboard: 3 open rows — 0 still-real · 3 need a re-read · 0 cite no file · 3 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)\n1 row awaits you — 1 from tonight's run · 0 re-surfaced · 0 left over.","pendingOwner":1}
+{"ts":"2026-09-04T13:52:38.097Z","runId":"wf_54d6f2e4-17f","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-04T17:14:31.792Z","runId":"wf_eb0329a1-354","stamp":"results-in"}
+{"ts":"2026-09-04T17:14:31.864Z","runId":"wf_54d6f2e4-17f","stamp":"results-in"}
+{"ts":"2026-09-04T18:20:55.322Z","runId":"wf_54d6f2e4-17f","stamp":"report-written","headline":"Timezone provenance reduced to three columns; the fabricated-UTC sweep deleted as dead on arrival","pendingOwner":0}
+{"ts":"2026-09-04T18:20:55.393Z","runId":"wf_eb0329a1-354","stamp":"report-written","headline":"Slack silence no longer stored or spoken as a timezone; retirement path wired at seven call sites","pendingOwner":0}

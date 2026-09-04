@@ -111,7 +111,7 @@ One deployment can host several executives. Each tenant is a YAML file at `confi
 ## Approvals / requests flow, end to end
 
 1. A tool call (owner or colleague path) hits a rule and returns `rule_violation` with a `_deferred_action_hint`, OR the model calls `create_approval` directly (`tasks/skill.ts`).
-2. The orchestrator loop auto-attaches the captured hint to the approval payload (`core/orchestrator/index.ts:624-648`).
+2. The orchestrator loop auto-attaches the captured hint to the approval payload (`core/orchestrator/index.ts:lastDeferredActionHint`).
 3. `createRequest()` (`db/requests.ts:66`) inserts a `kind='approval'` row, `state='awaiting_owner'`, with `details_json.callbacks` set (or the legacy `deferred_action` shape, transparently bridged by `extractCallbacks()` in `approvalCallbacks.ts`).
 4. The owner sees it in his **owner daily decision thread** (`utils/ownerDailyThread.ts`, `owner_daily_threads` table, `db/client.ts:945-952`) — one lazily-created thread per owner per effective day, holding every approval ask that day.
 5. Owner reacts (✅/❌) or replies in chat → `resolve_approval` → `resolveRequest()` (`resolver.ts:192`).

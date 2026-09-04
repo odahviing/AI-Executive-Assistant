@@ -891,7 +891,7 @@ export async function sendMorningBriefing(
     // recorded it in `conversations`, so that reply loaded an empty history and
     // she had to re-derive the whole day — the same gap the routine dispatcher
     // had. On the ON-DEMAND path the gap is half as wide and just as real: the
-    // brief short-circuit (processMessage.ts:500) returns before postReply, so
+    // brief short-circuit (processMessage.ts:isBriefRequest) returns before postReply, so
     // his ask was stored and the answer wasn't.
     //
     // Same appendToConversation the interactive path uses, one assistant row, no

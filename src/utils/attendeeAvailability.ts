@@ -116,7 +116,7 @@ export function attendeeTzForDay(
  * not: `attendeeTzForDay` already swapped the TRIP zone into the work-hours
  * clip, so the sentence describes a calculation that never happened — and when
  * the passive reading came from a client sitting in the destination (the
- * co-existence `db/people.ts` documents above `TimezoneTemp`, people.ts:361-417)
+ * co-existence `db/people.ts` documents above `TimezoneTemp`, people.ts:TimezoneTemp)
  * it degenerates into "their timezone on file is America/New_York, but we
  * currently read America/New_York". The dated travel record is the stated
  * signal and outranks the passive reading (M12), so those days need no hedge

@@ -252,7 +252,7 @@ export function enqueueMessage(params: {
       //
       // Nothing is lost by that, which is why the abort branch doesn't bother
       // restoring it: every inbound message is written to conversation history at
-      // ARRIVAL, before it is ever enqueued (processMessage.ts:288), and the turn
+      // ARRIVAL, before it is ever enqueued (processMessage.ts:appendToConversation), and the turn
       // that ends up running is the LAST message's runner (:278-280) — whose
       // history snapshot was taken after the earlier message was already stored.
       // The superseded message reaches the model as the preceding user turn in

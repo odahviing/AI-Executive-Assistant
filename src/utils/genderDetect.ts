@@ -239,7 +239,7 @@ export async function detectAndSaveGender(params: {
   // `confirm_gender` tool (assistant.ts → confirmPersonGenderById), which
   // writes through setCoreFieldWithProvenanceById directly. That rank check
   // only refuses a write when the incoming rank is STRICTLY LOWER than the
-  // current one (people.ts:407-420), so a person's own later correction —
+  // current one (people.ts:setCoreFieldWithProvenanceById), so a person's own later correction —
   // arriving at the same 'person' rank as whatever is already stored — always
   // lands; verified in the store, no change needed there.
   if (gender === 'unknown' && selfText && detectMessageLanguage(selfText) === 'Hebrew') {

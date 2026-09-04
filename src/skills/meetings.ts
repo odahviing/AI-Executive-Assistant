@@ -1171,7 +1171,7 @@ When ${firstName} explicitly asks for something that would violate a soft rule (
 \`create_approval(kind=policy_exception)\` is COLLEAGUE-PATH only — when a colleague is requesting something that needs ${firstName}'s sign-off in his own DM.
 
 NO WORKING-HOURS PREAMBLE when asking about time.
-When asking ${firstName} or a colleague "what time?" for a booking, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
+Time is computed, not requested (see PROPOSE DON'T ASK ABOUT TIME above — same STATE test, owner or colleague, and it holds even when he's answering your own clarifying question): once you hold attendee + duration + day/window, search and offer slots instead of asking "what time works?". Ask here only when the day, duration, or attendee itself is still open — and even then, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
     })();
 
     return `

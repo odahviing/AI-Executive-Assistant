@@ -233,7 +233,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // real channel, she claims she messaged someone or moved something, and the
   // phantom-action check never ran, because the group-DM fix repaired the MPIM
   // half of the clamp with `isOwnerInGroup` and there is no `isOwnerInChannel`
-  // on this side of the wire (processMessage.ts:122 computes one and never
+  // on this side of the wire (processMessage.ts:isOwnerInChannel computes one and never
   // passes it). Keyed on the authenticated identity in code, this covers every
   // present and future surface without a third flag to plumb or forget (shared
   // rule 10, G1). It can only ADD the honesty check, never drop it: `role ===
@@ -494,7 +494,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // a miss. filterColleagueReply runs leak-scan-only when they are absent, so
     // withholding them is the control (shared rule 10 — scope the payload; don't
     // hand a check inputs it must not act on). Today colleagueName is undefined
-    // for an owner-in-group turn anyway (processMessage.ts:386) — this stops that
+    // for an owner-in-group turn anyway (processMessage.ts:colleagueName) — this stops that
     // cross-lane accident from being the only thing holding the branch shut.
     // 2026-08-14 (bouncer overturn) — `history` is a PRE-TURN snapshot:
     // processMessage.ts reads it (:281) BEFORE this turn's own message is

@@ -2,6 +2,30 @@
 
 ---
 
+## 4.8.6 — Absence, told apart from a fact
+
+The end of a four-day run at one idea: **not knowing something must stay distinguishable from knowing it.** This release closes the last places where Maelle turned a missing answer into a confident one, and then removes the scaffolding built along the way.
+
+### Fixed (high-impact)
+- **She no longer asks what time a meeting should be when she can work it out.** Given a day, a person and a duration, finding the slot is the job — she was bundling "what time works?" into her clarifying questions and handing the search back to the owner. A rule forbidding exactly this already existed, but it only fired when *he* phrased the request as an availability question; answering her own question with a date slipped past it.
+- **A colleague is no longer told a workable slot is blocked.** Asked about three times for a meeting, Maelle correctly found one of them open — then an output check rewrote that into a refusal and re-offered the same slot under a different clock, because the evidence it checks against carried a bare time with no timezone on it. Both the verdict lines and the checker that reads them now name the zone.
+- **Slack's silence about a timezone is no longer stored, or spoken, as a timezone.** Where a profile had no zone, the code substituted "UTC" — indistinguishable, once written, from something Slack had actually reported. The owner could then be asked to confirm a zone nobody ever stated. Closed at the write, at the read, and at every place a real profile read happens.
+- **A person's stated timezone can no longer be erased by a routine sync.** A zone learned from a conversation was treated the same as an automatic guess and dropped the next time a profile read came back empty.
+- **A trip that has not begun is no longer described as where someone is now**, and booking for a date after a trip ends no longer treats the traveller as away.
+
+### Changed
+- The person record keeps **three** facts about a timezone — the value, who stands behind it, and whether something currently disagrees — rather than four. A fourth was added during this work and removed again: it existed only to make a cleanup safe, and the cleanup itself turned out to be unnecessary.
+- A Slack lookup that fails now says so instead of reporting "nobody there." Every failure — a rate limit, a dropped connection, a deactivated account — used to look identical to a confirmed absence, which is what made erasing real data on a transient hiccup possible.
+
+### Removed
+- The one-shot repair written for zones fabricated before this fix. Checked against the live record: there were none to repair, the cause is closed, and its own search would have started matching legitimate stated timezones instead. Deleted rather than kept as a tool nobody should run.
+
+### Not changed
+- A stored timezone still never silently drives an answer, and only the owner promotes a disputed one to permanent.
+
+### Framework (other chats, bundled)
+- Documentation and comments now cite code by symbol name rather than line number where the target has a name. The same four citations had gone stale three times in a single day; a name costs a reader one search and cannot rot.
+
 ## 4.8.5 — The day 4.8.4 shipped, using her turned up eleven more things
 
 Four of these came straight out of the owner's own Slack that afternoon, within hours of 4.8.4 going live. None of them is a new capability; every one is a place where a rule was right in principle and wrong at one edge — a count that included the thing being counted, a decision the code had already made and then discarded, a preference one code path knew about and its twin didn't.

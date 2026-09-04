@@ -133,7 +133,7 @@ interface NormalizedSlot {
  * It used to return `instant_iso`, i.e. the MODEL did the offset arithmetic, and
  * on 2026-07-27 that put this pre-check an hour away from the search on the very
  * same phrase: "16:00 CET" reached `find_available_slots`, which converts in code
- * (`reinterpretClockInZone`, findAvailableSlots.ts:266, Europe/Brussels = CEST
+ * (`reinterpretClockInZone`, findAvailableSlots.ts:400, Europe/Brussels = CEST
  * = +02:00 in August) and correctly landed on 17:00 owner-local — while a bare
  * "16:00" from the same Brussels colleague reached here and was read as 16:00
  * OWNER-local, one hour off, `owner_busy_collision`, recorded into the hard-block
@@ -1081,6 +1081,23 @@ export async function precheckAvailability(params: {
  * are equally real, checker-relevant facts. All instants owner-local; the
  * undecided frame (`other`) renders BOTH readings so no consumer can treat the
  * primary one as the answer.
+ *
+ * 2026-09-04 (availability-precheck-summary-carries-no-timezone) — every clause
+ * now carries the IANA zone its instant is stated in, INLINE on the head, not
+ * just implied by this doc comment. Neither the drafting model nor the
+ * slot-grounding checker (claimChecker.ts) can read this file's comments — a
+ * bare `2026-09-08T23:00` handed to a colleague in a different zone got
+ * rendered as "11pm EST" (it was owner-local, not EST) and re-tripped the
+ * checker twice more in the same thread because the line gave it nothing to
+ * verify a timezone-converted restatement against. G2: carry the frame, don't
+ * make the reader guess it.
+ *
+ * The zone token is ALWAYS the owner's, on BOTH readings of an undecided-frame
+ * line — `other` is the asker's clock already converted to owner-local
+ * (`readClockIn` .setZone(ownerTz), :386), so stamping `other.zone` on its
+ * instant would state a time in a frame it is not in. `same clock read in
+ * <zone>` names only which reading produced the verdict, exactly as the
+ * `frames` log line at :648 renders the same pair.
  */
 function renderToolSummaryLines(
   verdicts: SlotVerdict[],
@@ -1088,8 +1105,10 @@ function renderToolSummaryLines(
   tz: string,
   fallbackDurationMin: number,
 ): string[] {
+  // `tz` is closed over rather than passed: every instant reaching here is
+  // already owner-local, so there is no call site that may stamp another zone.
   const clause = (o: SlotOutcome): string => {
-    const head = `${o.date}T${o.time} dur=${o.durationMin ?? fallbackDurationMin}m`;
+    const head = `${o.date}T${o.time} ${tz} dur=${o.durationMin ?? fallbackDurationMin}m`;
     if (o.bookable) {
       return typeof o.maxFreeMinutes === 'number'
         ? `${head}: bookable maxFree=${o.maxFreeMinutes}m`
@@ -1107,7 +1126,7 @@ function renderToolSummaryLines(
       .filter(dt => dt.isValid)
       .map(dt => dt.toFormat("yyyy-MM-dd'T'HH:mm"));
     if (starts.length > 0) {
-      lines.push(`[availability_precheck alternatives (bookable): ${starts.join(', ')}]`);
+      lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}]`);
     }
   }
   return lines;

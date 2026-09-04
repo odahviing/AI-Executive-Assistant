@@ -40,7 +40,13 @@ export interface SlackUserSearchResult {
   name: string;
   real_name: string;
   email?: string;
-  tz: string;
+  // v4.8.x — optional, not defaulted. `m.tz` absent means Slack reported NO
+  // zone for this user; a `?? 'UTC'` default here would make a fabricated
+  // reading indistinguishable from a real one to every future consumer of
+  // this type (the same class the people_memory write path was fixed for in
+  // connections/slack/index.ts — see the 4.8.5 "absence of a fact must stay
+  // distinguishable from the fact" commit).
+  tz?: string;
 }
 
 export interface SlackChannelSearchResult {
@@ -380,7 +386,7 @@ export async function findUserByName(
         name: m.name,
         real_name: m.real_name ?? m.name,
         email: m.profile?.email ?? undefined,
-        tz: m.tz ?? 'UTC',
+        tz: m.tz || undefined,
       }));
   } catch (err) {
     logger.error('findUserByName failed', { err: String(err), name });

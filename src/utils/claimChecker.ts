@@ -565,10 +565,11 @@ Flag when EITHER holds:
 Judge by MEANING, in any language — a CONFIRMED slot re-expressed in a different clock/timezone, or rounded/truncated the same way the draft rounds every other number, is still grounded.
 
 \`[availability_precheck …]\` lines are REAL ground truth with the SAME standing as a find_available_slots result — a deterministic, rule-aware calendar check that ran before drafting, not a guess. Read them by meaning:
-- \`… <instant> dur=<n>m: bookable\` (with or without \`maxFree=…\`) — confirms THAT instant as available: a draft offering it is GROUNDED.
-- \`… <instant> dur=<n>m: not bookable (<reason>)\` — confirms that instant is NOT free: a draft correctly reporting it as unavailable/busy is GROUNDED, and a draft offering that same instant as available inverts the verdict — flag under (b).
-- \`[availability_precheck alternatives (bookable): <instant>, <instant>, …]\` — confirms EACH listed instant as available: a draft offering any of them is GROUNDED.
-- A dual-reading line (\`… bookable | same clock read in <zone>: … not bookable …\`) carries a SEPARATE verdict per timezone reading — judge each reading's instant by its own verdict only.
+- EVERY instant on these lines is stated in the IANA zone printed right after it (\`<instant> <zone>\`) — read it in THAT zone, and treat a draft that converts it correctly into anyone else's zone as the same instant.
+- \`… <instant> <zone> dur=<n>m: bookable\` (with or without \`maxFree=…\`) — confirms THAT instant as available: a draft offering it is GROUNDED.
+- \`… <instant> <zone> dur=<n>m: not bookable (<reason>)\` — confirms that instant is NOT free: a draft correctly reporting it as unavailable/busy is GROUNDED, and a draft offering that same instant as available inverts the verdict — flag under (b).
+- \`[availability_precheck alternatives (bookable, <zone>): <instant>, <instant>, …]\` — confirms EACH listed instant, in the named zone, as available: a draft offering any of them is GROUNDED.
+- A dual-reading line (\`… <instant> <zone> …: bookable | same clock read in <asker-zone>: <instant> <zone> …: not bookable\`) carries a SEPARATE verdict per timezone reading — judge each reading's instant by its own verdict only. \`same clock read in <asker-zone>\` names only WHICH reading produced the second verdict; that instant is still stated in the \`<zone>\` printed after it, like every other instant here.
 
 Do NOT flag:
 - A vague, non-specific offer with no clock time ("let me look for time next week", "I'll check some options") — nothing to verify.

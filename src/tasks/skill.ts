@@ -139,7 +139,7 @@ async function colleaguePendingCapRefusal(
       const conn = getConnection(ownerUserId, context.inboundConnectionId ?? 'slack');
       if (conn) {
         // bouncer fix (2026-08-10) — only a CONFIRMED send marks the
-        // colleague notified, matching orchestrator/index.ts:865-869's
+        // colleague notified, matching orchestrator/index.ts:messagedColleaguesOkThisTurn's
         // `?.ok === true` gate. sendDirect never throws (transports catch
         // internally and resolve `{ok:false,...}` on failure), so marking
         // after any non-throwing call used to mark a cap notice as sent
