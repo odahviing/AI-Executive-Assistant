@@ -26,6 +26,14 @@ The repair that followed is deliberately not more prompt text. Every tool that e
 ### Not changed
 - The 4.8.3 rule stands: a quiet turn is not evidence of a fabrication. Availability answered from the deterministic pre-check ships unhedged, and that path is byte-identical.
 
+### Changed — colleague conflicts stop reaching the owner
+
+A second pass on the same day, on the owner's ruling: *"if a colleague want to move a meeting [or create] when someone else is busy, i don't care… just make sure yael knows."*
+
+- **A colleague booking or moving over another colleague's busy time is now told, and decides.** It no longer reaches the owner. `move` already knew and escalated anyway; `create` never looked at all, so it could not have said anything. Both now run one shared path.
+- **Everyone blocked is named, not the first one.** The first attempt named one person and then booked over all of them — the availability walker only recorded the earliest conflict, and a second check discarded even that when it rejected a slot for travel time. Both closed at the root, and the confirmation no longer skips the check: it re-runs it and simply stops refusing, so a booking proceeds through exactly the conflicts it has just named.
+- **Someone booked over is told the truth.** Every internal attendee used to receive "I checked your calendar and booked…", including the person whose conflict had just been overridden — a sentence that was unfounded anyway, since `create` never read their calendar. It now says what happened, or says the calendar could not be read.
+- Owner-rule violations still escalate exactly as before, the owner's own bookings never enter this path, and external attendees are unchanged.
 ### Framework (other chats, bundled)
 - Golden-path anchors re-pinned twice against a tree that moved under them, and three code citations repaired that this same day's edits had made stale.
 

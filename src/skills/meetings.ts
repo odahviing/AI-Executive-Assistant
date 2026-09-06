@@ -423,6 +423,10 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
             },
+            confirm_attendee_conflict: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Colleague-path only. On a colleague booking, create_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at this slot; the message is already phrased as "Just FYI — <reason>. Want me to book it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call create_meeting with the SAME args plus confirm_attendee_conflict=true to book. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the booking proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that books over someone\'s busy time silently.',
+            },
             sensitivity: {
               type: 'string',
               enum: ['normal', 'personal', 'private', 'confidential'],
@@ -475,6 +479,10 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             override_hold: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner-only. The tool refuses with error="slot_on_hold" when the move target is tentatively held for someone else, surfacing "X asked to reserve that — move anyway?". Pass TRUE on the retry after the owner says move it anyway — it moves the meeting, releases the hold, and DMs the holder it was let go.',
+            },
+            confirm_attendee_conflict: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Colleague-path only. On a colleague-requested move, move_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at the new time; the message is already phrased as "Just FYI — <reason>. Want me to move it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call move_meeting with the SAME args plus confirm_attendee_conflict=true to move it. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the move proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that moves over someone\'s busy time silently.',
             },
           },
           required: ['meeting_id', 'meeting_subject', 'new_start'],

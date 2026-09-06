@@ -9,11 +9,12 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
-import { humanizeViolationLabel } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal } from '../../ops/violationLabels';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
   updateMeeting,
+  type AttendeeConflictTag,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
@@ -1105,16 +1106,27 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // and the slot is never tested).
                 const fromIso = startDt.toUTC().toISO();
                 const toIso = endDt.toUTC().toISO();
-                let validSlots: Array<{ start: string }> = [];
+                let validSlots: Array<{ start: string; attendee_conflicts?: AttendeeConflictTag[] }> = [];
                 const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
                 // v3.5.x (step 2) — check the OTHER required attendees too: everyone
                 // required EXCEPT the owner (checked via userEmail) and the asker (whose
                 // own busy doesn't block their own request). attendeeCheckParams passes
-                // their busy + work-hours/tz, so findAvailableSlots' diagnostics can name
-                // WHO is unavailable in the escalation below (attendee_busy_collision /
-                // outside_attendee_work_hours → nameForEmail).
+                // their busy + work-hours/tz, so the walker can tag WHO the new time
+                // doesn't work for.
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { attendeeCheckParams } = require('../../../../utils/attendeeAvailability') as typeof import('../../../../utils/attendeeAvailability');
+                const { attendeeCheckParams } = require('../../../../utils/attendeeAvailability') as
+                  typeof import('../../../../utils/attendeeAvailability');
+                // 2026-09-06 owner ruling — an ATTENDEE conflict is the
+                // REQUESTER's call, never an owner escalation; the ruling and
+                // the refusal shape are written down ONCE, in
+                // ops/violationLabels.ts's `attendeeConflictRefusal`. The list
+                // below is the full one on EVERY call including the confirm
+                // retry: `tagAttendeeConflicts` keeps the slot and tags EVERY
+                // blocked attendee, so the confirm changes exactly one thing —
+                // we move anyway — and never what gets checked. Emptying it on
+                // the retry (as this first shipped) told the requester about one
+                // person and then moved over everyone.
+                const attendeeConflictConfirmed = args.confirm_attendee_conflict === true;
                 const moveCheckAttendees = requiredAttendees
                   .map(a => a.email)
                   .filter(e => e !== ownerEmailLc && e !== askerEmail);
@@ -1125,20 +1137,21 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // loadAttendeeAvailabilityForEmails silently `continue`s past
                 // any attendee with no stored people_memory timezone
                 // (attendeeAvailability.ts:200-201) — dropped from the
-                // work-hours clip entirely, so outside_attendee_work_hours
-                // could never name them and an off-hours move went through
-                // unflagged. Captured in a variable (not spread inline) so
-                // the narration below can read each entry's `assumed` flag
-                // and hedge honestly when the zone was guessed, not stated.
-                let moveAttendeeAvailability: ReturnType<typeof attendeeCheckParams>['attendeeAvailability'];
+                // work-hours clip entirely, so an off-hours move went through
+                // unflagged. The `assumed` flag that fallback sets rides out on
+                // the conflict tag itself (findAvailableSlots.ts), so the
+                // sentence the requester hears hedges an assumed zone without
+                // this handler re-reading the availability list.
                 if (fromIso && toIso) {
-                  const moveCheckParams = attendeeCheckParams(moveCheckAttendees, userEmail, timezone);
-                  moveAttendeeAvailability = moveCheckParams.attendeeAvailability;
                   validSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
                     durationMinutes: durationMin,
-                    ...moveCheckParams,
+                    ...attendeeCheckParams(moveCheckAttendees, userEmail, timezone),
+                    // Attendee conflicts TAG, never drop (rule 6 / M16): the
+                    // slot comes back carrying everyone it doesn't work for, so
+                    // a missing slot means an OWNER rule and nothing else.
+                    tagAttendeeConflicts: true,
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
@@ -1165,14 +1178,40 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     autoExpand: false,
                   });
                 }
-                const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
-                if (!matches) {
-                  // Surface the SPECIFIC blocker (step 2 vs step 3) so the
-                  // approval tells the owner — and, downstream, the requester —
-                  // exactly why. Attendee-scoped diagnostic keys
-                  // (`attendee_busy_collision:<email>` /
-                  // `outside_attendee_work_hours:<email>`) name the person; the
-                  // rest are owner-rule violations. (ownerFirst from the gate above.)
+                const matched = validSlots.find(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+                // The new time is rule-clean for the OWNER but doesn't work for
+                // one or more of the other attendees. TAG mode guarantees this
+                // list is everyone (findAvailableSlots.ts), so the requester
+                // hears about ALL of them in one sentence — and the confirm
+                // retry re-runs the identical check, so what it moves over is
+                // what she was told (see attendeeConflictRefusal's doc for the
+                // one residual case).
+                const attendeeConflicts = matched?.attendee_conflicts ?? [];
+                if (matched && attendeeConflicts.length > 0) {
+                  if (!attendeeConflictConfirmed) {
+                    logger.info('move_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
+                      meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
+                      blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
+                    });
+                    return {
+                      ...attendeeConflictRefusal(attendeeConflicts, viewerEmailFor(context), 'move'),
+                      meeting_subject: args.meeting_subject,
+                      requested_start: newStart,
+                      requested_end: newEnd,
+                    };
+                  }
+                  // M18 — the requester's confirmed move-over, named and queryable.
+                  logger.info('move_meeting colleague-path — moving over attendee conflicts the requester confirmed', {
+                    meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
+                    blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
+                  });
+                }
+                if (!matched) {
+                  // Surface the SPECIFIC blocker so the approval tells the
+                  // owner — and, downstream, the requester — exactly why. Every
+                  // reason reaching here is an OWNER-rule violation: in TAG mode
+                  // no attendee-side check can drop a slot, so an attendee-scoped
+                  // reason can't appear in these diagnostics.
                   // THE shared humanizer (ops/violationLabels). This was the last
                   // inline copy of the switch: it never learned the six reasons
                   // 4.2.0 added, so a Friday target, a past target and a
@@ -1181,34 +1220,11 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // can't tell which one" — the mechanical non-answer M9 forbids.
                   const labelFor = (reason: string | undefined): string =>
                     humanizeViolationLabel(reason, ownerFirst);
-                  const nameForEmail = (em: string): string =>
-                    requiredAttendees.find(a => a.email === em.toLowerCase())?.name?.split(/\s+/)[0] ?? 'another attendee';
                   const counts = diagnostics.rejectedCounts ?? {};
                   const fired = Object.keys(counts);
                   const brokenRule = fired[0];
-                  let reasonCode: string;
-                  let humanReason: string;
-                  if (brokenRule && brokenRule.startsWith('attendee_busy_collision')) {
-                    reasonCode = 'attendee_unavailable';
-                    humanReason = `${nameForEmail(brokenRule.split(':')[1] ?? '')} isn't free then`;
-                  } else if (brokenRule && brokenRule.startsWith('outside_attendee_work_hours')) {
-                    reasonCode = 'attendee_unavailable';
-                    const flaggedEmail = brokenRule.split(':')[1] ?? '';
-                    // assumed-attendee-hours-narrated-as-fact (4.4.9, 3e839d6) —
-                    // when the flagged attendee had no stored timezone and this
-                    // check ran on the #M3 owner-frame fallback (`assumed:
-                    // true`), say so honestly instead of asserting a guess as
-                    // fact — same wording as the search path's off_hours+assumed
-                    // hedge (findAvailableSlots.ts:221-224).
-                    const assumedZone = moveAttendeeAvailability
-                      ?.find(a => a.email.toLowerCase() === flaggedEmail.toLowerCase())?.assumed === true;
-                    humanReason = assumedZone
-                      ? `it's probably outside ${nameForEmail(flaggedEmail)}'s working hours — I'm not certain of their actual schedule`
-                      : `it's outside ${nameForEmail(flaggedEmail)}'s working hours`;
-                  } else {
-                    reasonCode = 'not_rule_compliant';
-                    humanReason = labelFor(brokenRule);
-                  }
+                  const reasonCode = 'not_rule_compliant';
+                  const humanReason = labelFor(brokenRule);
                   logger.info('move_meeting colleague-path refused — new slot blocked', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
                     broken_rule: brokenRule ?? 'unknown', reason_code: reasonCode, human_reason: humanReason,

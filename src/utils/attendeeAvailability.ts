@@ -290,6 +290,22 @@ export function loadAttendeeAvailabilityForEmails(
 }
 
 /**
+ * The two ATTENDEE-scoped rejection prefixes the slot walker emits as
+ * `<prefix>:<email>` (findAvailableSlots.ts) when it is DROPPING conflicted
+ * slots. Declared once for the walker and its own day-summary splitter
+ * (findAvailableSlots.ts's splitDayReasons), which imports it instead of
+ * carrying a copy.
+ *
+ * The only declaration in the codebase: core/orchestrator/turnHelpers.ts's
+ * `attendeeCheckSource` imports this constant rather than hand-typing the two
+ * strings (landed 2026-09-06) — deliberately NOT widened to also match
+ * `travel_buffer_collision`, since owner-side `checkSlot` padding and this
+ * attendee-side check both emit that label with no email on purpose, so it's
+ * indistinguishable from the owner's own constraint at that call site.
+ */
+export const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'] as const;
+
+/**
  * The full attendee-check param bundle for `findAvailableSlots`, in ONE call.
  *
  * The finder only checks attendees when BOTH `attendeeBusyEmails` (busy

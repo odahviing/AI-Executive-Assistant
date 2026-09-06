@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../../llm/client';
 import { logLlmUsage } from '../../utils/usageLog';
 import logger from '../../utils/logger';
+import { ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
 
 const anthropic = getAnthropicClient();
 
@@ -220,7 +221,7 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'refu
   const r = result as Record<string, unknown>;
   const isAttendeeReason = (reason: unknown): boolean =>
     typeof reason === 'string'
-    && ['attendee_busy_collision', 'outside_attendee_work_hours'].some(p => reason === p || reason.startsWith(`${p}:`));
+    && ATTENDEE_REASON_PREFIXES.some(p => reason === p || reason.startsWith(`${p}:`));
   const nonEmpty = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
   switch (toolName) {
     case 'find_available_slots': {
@@ -510,9 +511,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             ? (result as any).day_summary
             : [];
         // WHOLE-day off only. `vacation_or_off_day` is a genuine day-level
-        // skip: the `{ kind: 'day_skip', dayKey, ... }` verdict returned at
-        // connectors/graph/findAvailableSlots.ts:1082 lands in the per-day
-        // reason map once per day.
+        // skip: the `{ kind: 'day_skip', dayKey, reason: 'vacation_or_off_day' }`
+        // verdict, returned from evaluateCursor's workday-gate branch in
+        // connectors/graph/findAvailableSlots.ts, lands in the per-day reason map once per day.
         // `owner_out_of_office` is NOT that shape — it is a per-slot
         // `reject` outcome (:998) routed through `trackReject` (:878), which
         // still lands in `dayReasons` (same reason recorded for every slot

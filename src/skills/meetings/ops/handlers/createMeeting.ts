@@ -9,13 +9,14 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity } from '../../ops/helpers';
-import { humanizeViolationLabel } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getOwnerEventsForDecision,
   getEventEndInstant,
   findDuplicateEvent,
   findReschedulableSibling,
+  type AttendeeConflictTag,
   type DaySummaryEntry,
   type ConflictingEventEntry,
   getFreeBusyForDecision,
@@ -45,6 +46,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
   // instead of only private ones — owner ruled email out of scope for this
   // build; see viewerEmailFor's doc comment in utils/displaySubject.ts.
   const viewerEmail = viewerEmailFor(context);
+  // The internal attendees this booking is going over with the requester's
+  // confirmation (2026-09-06 ruling) — set by Guard B below, read by the
+  // post-booking heads-up DMs so the one person we KNOW has a clash isn't told
+  // "I checked your calendar and booked". Empty on every other path.
+  let bookedOverAttendees: AttendeeConflictTag[] = [];
+  // Same DM, the other half of the same claim: internal attendees whose
+  // free/busy Guard B could not actually read.
+  let attendeesNotVerified: string[] = [];
         // meeting-title-minimum-descriptiveness-required (2026-08-12, owner
         // ruling) — refuse to silently book a cryptic title (empty,
         // initials-only, or under ~3 meaningful characters) rather than make
@@ -739,7 +748,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // fields, so sub-second drift doesn't matter.
               const fromIso = startDt.toUTC().toISO();
               const toIso = endDt.toUTC().toISO();
-              let validSlots: Array<{ start: string }> = [];
+              let validSlots: Array<{ start: string; attendee_conflicts?: AttendeeConflictTag[] }> = [];
               // v2.6.1 — collect rejection diagnostics from findAvailableSlots
               // by reference so we can name THIS slot's broken rule in the
               // refusal returned to Sonnet (instead of forcing her to guess,
@@ -760,38 +769,80 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // whenever rejectedCounts is non-empty. Already formatted by
                 // the walker; read below, never re-derived.
                 daySummary?: DaySummaryEntry[];
+                // Attendees whose free/busy was never actually read for this
+                // window (a bad address, a Graph fault). Empty busy by nobody
+                // asking, not by freedom — so the post-booking DM must not tell
+                // them their calendar was checked.
+                unresolvedAttendees?: string[];
+                attendeesNotChecked?: string[];
               } = {};
+              // 2026-09-06 owner ruling — an ATTENDEE conflict (another
+              // colleague busy, boxed in, or outside their hours) is the
+              // REQUESTER's call, never an owner escalation. The ruling itself
+              // and the shape of the refusal are written down ONCE, in
+              // ops/violationLabels.ts's `attendeeConflictRefusal`.
+              // create_meeting never looked at the OTHER required attendees at
+              // all (unlike move_meeting's guard, which already did). It does
+              // now, inside the SAME narrow-window call that enforces the
+              // owner's own rules, through the SAME shared helper — one check,
+              // not two implementations that happen to agree (M1).
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { attendeeCheckParams } = require('../../../../utils/attendeeAvailability') as
+                typeof import('../../../../utils/attendeeAvailability');
+              // The full internal list, on EVERY call including the confirm
+              // retry. `tagAttendeeConflicts` (below) makes the walker keep the
+              // slot and tag EVERY attendee it doesn't work for, so this answers
+              // "who is blocked" completely; the confirm changes exactly one
+              // thing — we book anyway — and never what gets checked. Emptying
+              // the list on the retry instead (as this first shipped) meant a
+              // requester told about Erez confirmed, and the booking rode over
+              // Dana too: someone nobody had ever mentioned.
+              const attendeeConflictConfirmed = args.confirm_attendee_conflict === true;
+              const ownerEmailLowerForGuardB = userEmail.toLowerCase();
+              const ownerDomainForGuardB = ownerEmailLowerForGuardB.includes('@')
+                ? ownerEmailLowerForGuardB.split('@')[1] : '';
+              const otherRequiredAttendeeEmails = attendees
+                .map(a => (a.email ?? '').toLowerCase())
+                .filter(e => e && e !== ownerEmailLowerForGuardB && e !== requesterEmail
+                  && !!ownerDomainForGuardB && e.endsWith('@' + ownerDomainForGuardB));
               if (fromIso && toIso) {
-                const runSlotCheck = () => findAvailableSlots({
-                  userEmail,
-                  timezone,
-                  durationMinutes: durationMin,
-                  searchFrom: fromIso,
-                  searchTo: toIso,
-                  profile: context.profile,
-                  // v2.6 — pass category so colleague-path rule-check also
-                  // enforces day_type / per_day / per_week limits. When a
-                  // colleague tries to book a slot that would push the
-                  // owner over a category limit, the slot is filtered out
-                  // here; outer matches() returns false; Sonnet escalates
-                  // to create_approval with the rule name (RULE-NAMING).
-                  category: args.category as string | undefined,
-                  // #165b — matches the masking `subjectViewerFor` already
-                  // applied to the conflicting-event subject below; without it
-                  // checkSlot's own occupancy scan falls back to its own
-                  // 'other' default, which happens to agree here but should
-                  // not depend on happening to agree.
-                  viewer: subjectViewerFor(context),
-                  viewerEmail,
-                  diagnosticsOut: diagnostics,
-                  // v3.0.6 — single-slot yes/no validation. The window is
-                  // exactly [start, end], so findAvailableSlots returns ≤1 slot →
-                  // <3 → auto-expand would re-query the calendar 2-3 more times at
-                  // widening ranges on every colleague booking, and the expanded
-                  // slots are discarded anyway (matches checks ±60s of the
-                  // requested start). Disable it.
-                  autoExpand: false,
-                });
+                const runSlotCheck = () => {
+                  return findAvailableSlots({
+                    userEmail,
+                    timezone,
+                    durationMinutes: durationMin,
+                    ...attendeeCheckParams(otherRequiredAttendeeEmails, userEmail, timezone),
+                    // Attendee conflicts TAG, never drop (rule 6 / M16): the
+                    // slot comes back carrying everyone it doesn't work for, so
+                    // a missing slot means an OWNER rule and nothing else.
+                    tagAttendeeConflicts: true,
+                    searchFrom: fromIso,
+                    searchTo: toIso,
+                    profile: context.profile,
+                    // v2.6 — pass category so colleague-path rule-check also
+                    // enforces day_type / per_day / per_week limits. When a
+                    // colleague tries to book a slot that would push the
+                    // owner over a category limit, the slot is filtered out
+                    // here; outer matches() returns false; Sonnet escalates
+                    // to create_approval with the rule name (RULE-NAMING).
+                    category: args.category as string | undefined,
+                    // #165b — matches the masking `subjectViewerFor` already
+                    // applied to the conflicting-event subject below; without it
+                    // checkSlot's own occupancy scan falls back to its own
+                    // 'other' default, which happens to agree here but should
+                    // not depend on happening to agree.
+                    viewer: subjectViewerFor(context),
+                    viewerEmail,
+                    diagnosticsOut: diagnostics,
+                    // v3.0.6 — single-slot yes/no validation. The window is
+                    // exactly [start, end], so findAvailableSlots returns ≤1 slot →
+                    // <3 → auto-expand would re-query the calendar 2-3 more times at
+                    // widening ranges on every colleague booking, and the expanded
+                    // slots are discarded anyway (matches checks ±60s of the
+                    // requested start). Disable it.
+                    autoExpand: false,
+                  });
+                };
                 // v3.7.x (#137) — a transient Graph free/busy fault (e.g.
                 // ErrorInvalidMergedFreeBusyInterval) must NOT masquerade as a
                 // rule violation. A single blip on this verification fetch was
@@ -819,8 +870,42 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   validSlots = await runSlotCheck();
                 }
               }
-              const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
-              if (!matches) {
+              // Whose free/busy this check could NOT actually read — a bad
+              // address (`unresolvedAttendees`) or a Graph fault
+              // (`attendeesNotChecked`). Their empty busy means nobody asked,
+              // not that they're free, so the post-booking DM must not tell
+              // them their calendar was checked.
+              attendeesNotVerified = [
+                ...(diagnostics.unresolvedAttendees ?? []),
+                ...(diagnostics.attendeesNotChecked ?? []),
+              ].map(e => e.toLowerCase());
+              const matched = validSlots.find(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+              // The slot is rule-clean for the OWNER but doesn't work for one or
+              // more of the other attendees. TAG mode guarantees this list is
+              // everyone (findAvailableSlots.ts), so the requester hears about
+              // ALL of them in one sentence — and the confirm retry re-runs the
+              // identical check, so what it books over is what she was told
+              // (see attendeeConflictRefusal's doc for the one residual case).
+              const attendeeConflicts = matched?.attendee_conflicts ?? [];
+              if (matched && attendeeConflicts.length > 0) {
+                if (!attendeeConflictConfirmed) {
+                  logger.info('create_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
+                    start: args.start, end: args.end, requester: context.userId,
+                    blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
+                  });
+                  return attendeeConflictRefusal(attendeeConflicts, viewerEmail, 'book');
+                }
+                // M18 — the requester's confirmed book-over, named and queryable.
+                bookedOverAttendees = attendeeConflicts;
+                logger.info('create_meeting colleague-path — booking over attendee conflicts the requester confirmed', {
+                  start: args.start, end: args.end, requester: context.userId,
+                  blocked: attendeeConflicts.map(c => `${c.email}:${c.reason}`),
+                });
+              }
+              if (!matched) {
+                // Every reason that reaches here is an OWNER-rule violation: in
+                // TAG mode no attendee-side check can drop a slot, so the two
+                // attendee-scoped reasons can't appear in these diagnostics.
                 const ownerFirst = context.profile.user.name.split(' ')[0];
                 // v2.6.1 — derive a one-phrase human label for the rule that
                 // rejected this slot. Sonnet pastes this verbatim into
@@ -1990,7 +2075,21 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     continue;
                   }
                   const heuristicFirstName = (att.name ?? '').split(' ')[0];
-                  const text = `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}. I checked your calendar and booked "${args.subject}" for ${whenLabel}. See you then.`;
+                  // 2026-09-06 — "I checked your calendar and booked" was an
+                  // unfounded claim (create never read anyone else's free/busy);
+                  // Guard B above now does, which makes it checkable — and makes
+                  // the two cases where it is FALSE nameable. Someone the
+                  // requester knowingly booked over hears what actually
+                  // happened: not asking him is the ruling, telling him
+                  // something untrue is not (M9). Someone whose calendar Graph
+                  // couldn't read is told exactly that, rather than being
+                  // assured of a check that never ran.
+                  const bookedOver = bookedOverAttendees.find(c => c.email.toLowerCase() === e);
+                  const text = bookedOver
+                    ? `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}, and I booked "${args.subject}" for ${whenLabel}. Heads up: ${attendeeConflictLine(bookedOver, e)} — ${requesterName} asked me to go ahead anyway, so tell me if that doesn't work and I'll sort it out.`
+                    : attendeesNotVerified.includes(e)
+                      ? `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}, so I booked "${args.subject}" for ${whenLabel}. I couldn't see your calendar for that time, so tell me if it doesn't work. See you then.`
+                      : `Hi ${heuristicFirstName} — ${requesterName} asked for a meeting with you and ${ownerFirst}. I checked your calendar and booked "${args.subject}" for ${whenLabel}. See you then.`;
                   void conn.sendDirect(targetSlackId, text).catch(err => {
                     logger.warn('post-booking heads-up DM failed', { email: e, err: String(err).slice(0, 200) });
                   });

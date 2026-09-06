@@ -7,8 +7,37 @@ import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 import type { RuleCheckResult } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
-import { attendeeTzForDay, tzTempDifferingForDay } from '../../utils/attendeeAvailability';
+import { attendeeTzForDay, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
+
+/**
+ * ONE attendee-side conflict tagged onto a KEPT slot (see `tagAttendeeConflicts`
+ * below). THE shape for "who can't make this slot, and why" — the search path
+ * renders it into prose (`attendeeConflictLine`, skills/meetings/ops/
+ * violationLabels.ts) and the two colleague-path booking Guards
+ * (createMeeting.ts / moveMeeting.ts) read the SAME array to tell the requester
+ * about EVERY blocked attendee before booking over them.
+ *
+ * `assumed` mirrors AttendeeAvailabilityEntry.assumed (utils/attendeeAvailability.ts)
+ * onto an 'off_hours' conflict — true when the underlying hours came from a
+ * GUESSED default (#M3, no stored profile), never confirmed. Only ever set
+ * on 'off_hours' entries; a 'busy' entry is a real calendar read, not a guess.
+ * `tzTempDiffering` mirrors AttendeeAvailabilityEntry.tzTempDiffering — the
+ * hours ARE stored/real (computed off the attendee's PERMANENT zone), but a
+ * later, differing auto-tier reading currently exists for them (TTL'd) —
+ * surface that assumption rather than asserting the verdict as unqualified
+ * fact (o#262/o#265, owner ruling 2026-08-31). `source` says which auto-tier
+ * writer produced it — a surfacing caller attributes by it, never hard-codes
+ * "Slack" (the capture-pass 'chat' writer post-dates that assumption).
+ * 'travel_buffer' — the attendee is free DURING the slot but has a commitment
+ * adjacent to it, and the category needs travel padding either side.
+ */
+export type AttendeeConflictTag = {
+  email: string;
+  reason: 'busy' | 'off_hours' | 'travel_buffer';
+  assumed?: boolean;
+  tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
+};
 
 /**
  * ONE offered-slot shape. Was written out inline three times (the return type,
@@ -30,18 +59,9 @@ type SlotCandidate = {
    * colleague must never see.
    */
   broken_rule_label?: string;
-  // `assumed` mirrors AttendeeAvailabilityEntry.assumed (utils/attendeeAvailability.ts)
-  // onto an 'off_hours' conflict — true when the underlying hours came from a
-  // GUESSED default (#M3, no stored profile), never confirmed. Only ever set
-  // on 'off_hours' entries; a 'busy' entry is a real calendar read, not a guess.
-  // `tzTempDiffering` mirrors AttendeeAvailabilityEntry.tzTempDiffering — the
-  // hours ARE stored/real (computed off the attendee's PERMANENT zone), but a
-  // later, differing auto-tier reading currently exists for them (TTL'd) —
-  // surface that assumption rather than asserting the verdict as unqualified
-  // fact (o#262/o#265, owner ruling 2026-08-31). `source` says which auto-tier
-  // writer produced it — a surfacing caller attributes by it, never hard-codes
-  // "Slack" (the capture-pass 'chat' writer post-dates that assumption).
-  attendee_conflicts?: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean; tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource } }>;
+  // Every attendee this slot doesn't work for (AttendeeConflictTag, above) —
+  // complete, never just the first one.
+  attendee_conflicts?: AttendeeConflictTag[];
 };
 
 /**
@@ -210,15 +230,26 @@ export async function findAvailableSlots(params: {
     tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
   }>;
   // Rule 6 — attendee free/busy is a HELPER, never a blocker. When true, a slot
-  // where an attendee is busy / off-hours is KEPT and TAGGED (attendee_conflicts)
-  // instead of dropped — WITHOUT relaxing any of the OWNER's own rules (his
-  // work-hours, own busy, focus floor, floating blocks all still apply via
+  // where an attendee is busy / off-hours / short of travel padding is KEPT and
+  // TAGGED (attendee_conflicts) instead of dropped — WITHOUT relaxing any of
+  // the OWNER's own rules (his work-hours, own busy, focus floor, floating
+  // blocks all still apply via
   // checkSlot). This is the decoupled half of `relaxed`: `relaxed` tags attendee
   // conflicts too, but as part of a TOTAL owner-rule override (rule 11); this
   // flag tags them while the owner's day stays strict — so the owner-path
   // backstop can surface "his genuinely open times + who can't make each" when
   // no slot is clean for everyone. Requires attendeeBusyEmails/attendeeAvailability
   // to be passed (that's what populates the conflict data). No effect otherwise.
+  //
+  // THE INVARIANT this mode guarantees, and that the two colleague-path booking
+  // Guards (createMeeting.ts / moveMeeting.ts) depend on: with it on, NO
+  // attendee-side check can drop a slot — busy, off-hours and travel-padding
+  // all tag. So a slot missing from the result is an OWNER-rule verdict and
+  // nothing else, and a returned slot's `attendee_conflicts` is the COMPLETE
+  // list of who it doesn't work for. Before 2026-09-06 the attendee travel-
+  // buffer check still dropped, which both hid the busy tags already collected
+  // for that slot and sent an attendee's problem to the owner as if it were one
+  // of his own rules.
   tagAttendeeConflicts?: boolean;
   // Owner-override "show me everything" mode. It bends the owner's SOFT rules
   // only — it can never surface a slot a real commitment already holds. See the
@@ -1176,11 +1207,12 @@ export async function findAvailableSlots(params: {
       // REJECT conflicted slots so the owner is offered clean options. When the
       // caller opts into keeping them (`relaxed` = total owner override, rule 11;
       // or `tagAttendeeConflicts` = owner rules stay strict, attendee busy is a
-      // helper only): KEEP the slot but TAG who's busy / off-hours so the owner
+      // helper only): KEEP the slot but TAG who's busy / off-hours / short of
+      // travel padding — ALL THREE, for EVERY attendee — so whoever is deciding
       // is TOLD (rule 7) — never silently dropped. The OWNER's busy is owned by
       // checkSlot below, off his CalendarEvents. ──
       const keepAttendeeConflicts = params.relaxed || params.tagAttendeeConflicts;
-      const attendeeConflicts: Array<{ email: string; reason: 'busy' | 'off_hours'; assumed?: boolean }> = [];
+      const attendeeConflicts: AttendeeConflictTag[] = [];
       {
         // v2.7.6 — attendee busy (free/busy pool), attributed by email.
         // v3.7.x (1.1/1.2) — TAG mode records EVERY conflicting attendee, not just
@@ -1215,13 +1247,29 @@ export async function findAvailableSlots(params: {
         // What remains here is the half checkSlot cannot see: an ATTENDEE's
         // busy block too close to the slot. Same canonical label so day_summary
         // narration is unchanged.
-        if (!params.relaxed) {
-          const withinBuffer = bufferMs > 0 && allBusy.find(busy =>
+        //
+        // 2026-09-06 — KEEP mode tags this like the two checks around it
+        // instead of dropping. Dropping here threw away the busy tags this
+        // slot had already collected (so a second blocked attendee vanished),
+        // and — because the label carries no email — handed an ATTENDEE's
+        // problem to the colleague-path Guards as an unattributed
+        // `travel_buffer_collision`, indistinguishable from the OWNER's own
+        // padding rule (checkSlot's, same label) and escalated to him as
+        // "no room for travel time around it". Never his call to make.
+        if (!params.relaxed && bufferMs > 0) {
+          const overlapsBuffer = (busy: { email: string; start: Date; end: Date }) =>
             busy.email !== ownerEmailLower &&
             cursor.getTime() < busy.end.getTime() + bufferMs &&
-            slotEnd.getTime() > busy.start.getTime() - bufferMs
-          );
-          if (withinBuffer) {
+            slotEnd.getTime() > busy.start.getTime() - bufferMs;
+          if (keepAttendeeConflicts) {
+            for (const busy of allBusy) {
+              // Already tagged 'busy' (they overlap the slot itself) — the
+              // stronger, more specific fact wins, exactly as DROP mode's
+              // ordering does; one reason per person, both modes agreeing.
+              if (attendeeConflicts.some(c => c.email === busy.email)) continue;
+              if (overlapsBuffer(busy)) attendeeConflicts.push({ email: busy.email, reason: 'travel_buffer' });
+            }
+          } else if (allBusy.find(overlapsBuffer)) {
             return { kind: 'reject', reason: 'travel_buffer_collision', iso: cursorDt.toISO()! };
           }
         }
@@ -1584,7 +1632,11 @@ export async function findAvailableSlots(params: {
         // (2026-09-06) added the second reader; it first shipped with its OWN
         // copy of this prefix-parsing, two parses of the same strings that
         // could drift apart — one parse now, both readers off it.
-        const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'];
+        // 2026-09-06 — the prefix pair itself now lives in
+        // utils/attendeeAvailability.ts (imported above); this splitter reads it
+        // rather than re-typing it. The two colleague-path booking Guards never
+        // parse these strings at all — they run in `tagAttendeeConflicts` mode,
+        // where an attendee conflict is a tagged slot, not a rejection reason.
         const splitDayReasons = (reasons: Map<string, number>) => {
           const perAttendee = new Map<string, number>();
           const reasonCounts = new Map<string, number>();

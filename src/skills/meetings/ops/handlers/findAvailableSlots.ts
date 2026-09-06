@@ -8,7 +8,7 @@
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
-import { humanizeViolationLabel } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeFirstName, attendeeConflictLine } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
@@ -17,7 +17,7 @@ import {
   GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
-import { getPersonByEmail, getPersonMemory } from '../../../../db';
+import { getPersonMemory } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { bookingLeadTimeHours, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
@@ -163,14 +163,15 @@ function attendeeHoursGroundingNotes(
 
 /**
  * scanner-relay-first-person-attendee-status (2026-08-30) — viewer-bound,
- * pre-rendered prose for the two per-slot attendee facts (`attendee_status`,
- * `attendee_conflicts`). Both used to ship bare ({email, kind, status} /
- * {email, reason, assumed?}) and Sonnet free-wrote the sentence, perspective
- * included — which is how a colleague reading about her OWN calendar got
- * "I show tentative then" (first person, as if it were Maelle's calendar).
- * The perspective is deterministic — does the entry's email match the
- * authenticated person Maelle is replying to (`viewerEmailFor`)? — so it is
- * bound HERE in code, the same pattern as `presentation_local` /
+ * pre-rendered prose for the two per-slot attendee facts (`attendee_status`
+ * here, `attendee_conflicts` in ops/violationLabels.ts's `attendeeConflictLine`,
+ * shared with the two booking doors since 2026-09-06). Both used to ship bare
+ * ({email, kind, status} / {email, reason, assumed?}) and Sonnet free-wrote the
+ * sentence, perspective included — which is how a colleague reading about her
+ * OWN calendar got "I show tentative then" (first person, as if it were
+ * Maelle's calendar). The perspective is deterministic — does the entry's email
+ * match the authenticated person Maelle is replying to (`viewerEmailFor`)? — so
+ * it is bound in code, the same pattern as `presentation_local` /
  * `broken_rule_label` / the M13 dual-clock strings: second person for the
  * recipient's own calendar, third person BY NAME for anyone else's, never
  * "I". The result notes tell Sonnet to quote `line` verbatim.
@@ -180,11 +181,6 @@ function attendeeHoursGroundingNotes(
  * owner and for a room (multiple readers); the email leg strips both fields
  * entirely before the model sees them (ops.ts's email scrub).
  */
-function attendeeFirstName(email: string): string {
-  const stored = getPersonByEmail(email)?.name?.trim();
-  return stored ? stored.split(/\s+/)[0] : email;
-}
-
 function renderAttendeeStatusLine(
   email: string,
   status: string,
@@ -207,39 +203,6 @@ function renderAttendeeStatusLine(
       ? 'your calendar couldn\'t be checked for this time'
       : `${name}'s calendar couldn't be checked for this time`;
   }
-}
-
-function renderAttendeeConflictLine(
-  conflict: { email: string; reason: string; assumed?: boolean; tzTempDiffering?: { tempZone: string; expiresAt: string; source: 'slack' | 'chat' } },
-  viewerEmail: string | null | undefined,
-): string {
-  const you = !!viewerEmail && conflict.email.toLowerCase() === viewerEmail;
-  const name = attendeeFirstName(conflict.email);
-  if (conflict.reason === 'off_hours') {
-    // The assumed-hours hedge (o#213 / #M3): a guessed default is never
-    // narrated as fact — the hedge ships inside the line itself.
-    if (conflict.assumed === true) {
-      return you
-        ? 'probably outside your working hours then — though I\'m not certain of your actual schedule'
-        : `probably outside ${name}'s working hours then — though I'm not certain of their actual schedule`;
-    }
-    // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a real stored profile
-    // exists but a differing, TTL'd auto-tier reading currently exists —
-    // surface the assumption rather than asserting the exclusion as settled
-    // fact. Attribute by `source` (2026-09-01, capturepass-haiku-zone dep) —
-    // the reading can now come from a chat mention, never hard-code "Slack".
-    if (conflict.tzTempDiffering) {
-      const t = conflict.tzTempDiffering;
-      const readingClause = t.source === 'chat'
-        ? (you ? `you mentioned ${t.tempZone} in a recent chat` : `they mentioned ${t.tempZone} in a recent chat`)
-        : (you ? `Slack currently shows you on ${t.tempZone}` : `Slack currently shows them on ${t.tempZone}`);
-      return you
-        ? `probably outside your working hours then, assuming your usual zone — ${readingClause} (through ${t.expiresAt}), flag me if that's changed`
-        : `probably outside ${name}'s working hours then, assuming their usual zone — ${readingClause} (through ${t.expiresAt}), flag me if that's changed`;
-    }
-    return you ? 'that\'s outside your working hours' : `that's outside ${name}'s working hours`;
-  }
-  return you ? 'you\'re busy then' : `${name}'s busy then`;
 }
 
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
@@ -2118,7 +2081,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (!Array.isArray(s.attendee_conflicts) || s.attendee_conflicts.length === 0) return s;
               return {
                 ...s,
-                attendee_conflicts: s.attendee_conflicts.map((c: any) => ({ ...c, line: renderAttendeeConflictLine(c, viewerEmail) })),
+                attendee_conflicts: s.attendee_conflicts.map((c: any) => ({ ...c, line: attendeeConflictLine(c, viewerEmail) })),
               };
             });
             const hasAttendeeConflicts = annotatedSlots.some(
