@@ -7,7 +7,7 @@ import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
 import type { RuleCheckResult } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
-import { attendeeTzForDay, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
+import { attendeeTzForDay, tzTempDifferingForDay } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
 
 /**
@@ -1584,11 +1584,7 @@ export async function findAvailableSlots(params: {
         // (2026-09-06) added the second reader; it first shipped with its OWN
         // copy of this prefix-parsing, two parses of the same strings that
         // could drift apart — one parse now, both readers off it.
-        // 2026-09-06 — hoisted to utils/attendeeAvailability.ts (imported
-        // above) so create_meeting/move_meeting's colleague-path Guard
-        // (classifyAttendeeConflict, same file) reads the identical two
-        // strings this walker emits, instead of a third, separately
-        // hand-typed copy.
+        const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'];
         const splitDayReasons = (reasons: Map<string, number>) => {
           const perAttendee = new Map<string, number>();
           const reasonCounts = new Map<string, number>();

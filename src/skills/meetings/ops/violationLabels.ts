@@ -55,29 +55,3 @@ export function humanizeViolationLabel(reason: string | undefined, ownerFirst: s
     default: return 'unknown';
   }
 }
-
-/**
- * The plain-English phrase for an ATTENDEE conflict — named (never generic),
- * so the requester hears WHO and WHY (M9), never a rule code. ONE
- * implementation shared by create_meeting and move_meeting's colleague-path
- * Guard (2026-09-06 owner ruling: this reason never escalates to the owner —
- * the requester decides after being told). Was two near-identical inline
- * copies in move_meeting alone before this was extracted; create_meeting
- * never had one at all.
- */
-export function attendeeConflictReason(
-  verdict: { reasonCode: 'attendee_busy_collision' | 'outside_attendee_work_hours'; assumedZone: boolean },
-  attendeeFirstName: string,
-): string {
-  if (verdict.reasonCode === 'attendee_busy_collision') {
-    return `${attendeeFirstName} isn't free then`;
-  }
-  // assumed-attendee-hours-narrated-as-fact (4.4.9, 3e839d6) — when the
-  // flagged attendee had no stored timezone and the check ran on the #M3
-  // owner-frame fallback, say so honestly instead of asserting a guess as
-  // fact — same wording as the search path's off_hours+assumed hedge
-  // (findAvailableSlots.ts's renderAttendeeConflictLine).
-  return verdict.assumedZone
-    ? `it's probably outside ${attendeeFirstName}'s working hours — I'm not certain of their actual schedule`
-    : `it's outside ${attendeeFirstName}'s working hours`;
-}
