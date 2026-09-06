@@ -3,7 +3,7 @@
 ```
 Run — nothing since the wrap · in: 0 tickets · 0 day(s) of logs · 0 backlog re-reads
 out: 0 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 0/0 joint-traced · 0/0 outcome-traced · 0 converted · 0 queued
-board: net 0 → 7 open rows — 3 still-real · 4 need a re-read · 0 cite no file · 7 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+board: net 0 → 7 open rows — 7 still-real · 0 need a re-read · 0 cite no file · 7 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 your 7 rows await you: 0 from tonight · 0 re-surfaced · 7 found by the loop
 ```
 **7 rows await you** — but none needs a decision: every one is a queued discovery that drains itself into the next build, and the pending-owner table is genuinely empty.
