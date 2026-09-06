@@ -290,6 +290,17 @@ export function loadAttendeeAvailabilityForEmails(
 }
 
 /**
+ * The two ATTENDEE-scoped rejection prefixes the slot walker emits as
+ * `<prefix>:<email>` (findAvailableSlots.ts). THE one declaration — the
+ * walker's own day-summary splitter (findAvailableSlots.ts's
+ * splitDayReasons) imports this instead of carrying its own copy, and
+ * `classifyAttendeeConflict` below is built on it too, so a third rejection
+ * reason never needs updating two places to be recognized as attendee-scoped
+ * everywhere it's read.
+ */
+export const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'] as const;
+
+/**
  * The full attendee-check param bundle for `findAvailableSlots`, in ONE call.
  *
  * The finder only checks attendees when BOTH `attendeeBusyEmails` (busy
@@ -310,4 +321,54 @@ export function attendeeCheckParams(
 ): { attendeeBusyEmails: string[]; attendeeAvailability?: AttendeeAvailabilityEntry[] } {
   const availability = loadAttendeeAvailabilityForEmails(emails, ownerEmail, fallbackTimezone);
   return { attendeeBusyEmails: emails, ...(availability ? { attendeeAvailability: availability } : {}) };
+}
+
+/**
+ * The verdict `classifyAttendeeConflict` (below) returns — a single ATTENDEE-
+ * scoped rejection reason, as opposed to an owner-rule reason.
+ */
+export interface AttendeeConflictVerdict {
+  reasonCode: 'attendee_busy_collision' | 'outside_attendee_work_hours';
+  email: string;
+  /** True when the flagged attendee had no stored timezone and this ran on
+   * the #M3 owner-frame fallback — a GUESS, never asserted as fact (M9). */
+  assumedZone: boolean;
+}
+
+/**
+ * 2026-09-06 owner ruling (verbatim: "if a colleague want to move a meeting
+ * [or create] when someone else is busy, i don't care ... we don't need to
+ * ask the other guy, confirm. just make sure yael knows") — an ATTENDEE
+ * conflict (another colleague busy, or outside their assumed hours) is a
+ * DIFFERENT kind of rejection than an owner-rule violation: it never
+ * escalates to the owner, the requester decides after being told. This is
+ * the ONE place that tells the two apart from a `findAvailableSlots`
+ * diagnostics result — shared by create_meeting and move_meeting's
+ * colleague-path Guard (M1: the same question, asked once) so the two
+ * doors can't disagree about which reason is which.
+ *
+ * `rejectedCounts` keys carry the attendee's email as a `<reason>:<email>`
+ * suffix (the walker's per-attendee attribution) — returns undefined when
+ * neither of the two attendee-scoped reasons fired (an owner-rule reason,
+ * or no rejection at all).
+ */
+export function classifyAttendeeConflict(
+  rejectedCounts: Record<string, number> | undefined,
+  attendeeAvailability: AttendeeAvailabilityEntry[] | undefined,
+): AttendeeConflictVerdict | undefined {
+  const fired = Object.keys(rejectedCounts ?? {});
+  // Priority order matches ATTENDEE_REASON_PREFIXES: a busy collision outranks
+  // an hours mismatch when (rarely) both fire for the one instant tested.
+  for (const prefix of ATTENDEE_REASON_PREFIXES) {
+    const key = fired.find(k => k === prefix || k.startsWith(`${prefix}:`));
+    if (!key) continue;
+    const email = key.includes(':') ? key.slice(key.indexOf(':') + 1) : '';
+    if (prefix === 'attendee_busy_collision') {
+      return { reasonCode: 'attendee_busy_collision', email, assumedZone: false };
+    }
+    const assumedZone = attendeeAvailability
+      ?.find(a => a.email.toLowerCase() === email.toLowerCase())?.assumed === true;
+    return { reasonCode: 'outside_attendee_work_hours', email, assumedZone };
+  }
+  return undefined;
 }

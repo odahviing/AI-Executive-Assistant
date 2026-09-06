@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
-import { humanizeViolationLabel } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictReason } from '../../ops/violationLabels';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
@@ -1114,8 +1114,18 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 // WHO is unavailable in the escalation below (attendee_busy_collision /
                 // outside_attendee_work_hours → nameForEmail).
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { attendeeCheckParams } = require('../../../../utils/attendeeAvailability') as typeof import('../../../../utils/attendeeAvailability');
-                const moveCheckAttendees = requiredAttendees
+                const { attendeeCheckParams, classifyAttendeeConflict } = require('../../../../utils/attendeeAvailability') as
+                  typeof import('../../../../utils/attendeeAvailability');
+                // 2026-09-06 owner ruling — "if a colleague wants to move a
+                // meeting [or create] when someone else is busy, i don't care
+                // ... just make sure yael knows." Once the requester has been
+                // told and confirms (confirm_attendee_conflict:true on the
+                // retry), skip the attendee check entirely for THIS call —
+                // owner-rule checks (category, day-type, etc.) below still run
+                // exactly as before. Empty list is a documented no-op for
+                // attendeeCheckParams (attendeeAvailability.ts), not a special case.
+                const attendeeConflictConfirmed = args.confirm_attendee_conflict === true;
+                const moveCheckAttendees = attendeeConflictConfirmed ? [] : requiredAttendees
                   .map(a => a.email)
                   .filter(e => e !== ownerEmailLc && e !== askerEmail);
                 // move-check-attendee-no-stated-zone-must-not-be-skipped
@@ -1167,12 +1177,55 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 }
                 const matches = validSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
                 if (!matches) {
-                  // Surface the SPECIFIC blocker (step 2 vs step 3) so the
-                  // approval tells the owner — and, downstream, the requester —
-                  // exactly why. Attendee-scoped diagnostic keys
-                  // (`attendee_busy_collision:<email>` /
-                  // `outside_attendee_work_hours:<email>`) name the person; the
-                  // rest are owner-rule violations. (ownerFirst from the gate above.)
+                  const nameForEmail = (em: string): string =>
+                    requiredAttendees.find(a => a.email === em.toLowerCase())?.name?.split(/\s+/)[0] ?? 'another attendee';
+                  // 2026-09-06 owner ruling (verbatim: "if a colleague want to
+                  // move a meeting [or create] when someone else is busy, i
+                  // don't care ... we don't need to ask the other guy, confirm.
+                  // just make sure yael knows") — an ATTENDEE conflict (another
+                  // colleague busy, or outside their assumed hours) is never an
+                  // owner-rule violation: it never escalates to him. THE shared
+                  // classifier (also used by create_meeting's Guard B) asks the
+                  // SAME question of the SAME diagnostics (M1) so the two doors
+                  // can't disagree about which reason is which.
+                  const conflictVerdict = classifyAttendeeConflict(diagnostics.rejectedCounts, moveAttendeeAvailability);
+                  if (conflictVerdict) {
+                    const humanReason = attendeeConflictReason(conflictVerdict, nameForEmail(conflictVerdict.email));
+                    logger.info('move_meeting colleague-path — attendee conflict surfaced to requester, no owner escalation', {
+                      meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
+                      broken_rule: conflictVerdict.reasonCode, blocked_email: conflictVerdict.email,
+                    });
+                    return {
+                      success: false,
+                      error: 'attendee_conflict',
+                      // v3.2.5 end-of-turn coda guard (orchestrator/index.ts) —
+                      // a question is open this turn; don't let a social line
+                      // ride on top of it.
+                      needs_confirmation: true,
+                      broken_rule: conflictVerdict.reasonCode,
+                      // no-fourth-restatement (2026-09-06) — `broken_rule_label`
+                      // deliberately omitted here: it's the sole field the static
+                      // RULE-COMPLIANCE REFUSAL block (meetings.ts) keys on to steer
+                      // `create_approval`, and an attendee conflict must NEVER
+                      // escalate to the owner (2026-09-06 ruling, see above).
+                      // Nothing reads this field on the attendee_conflict shape —
+                      // the requester-facing sentence lives in `message` /
+                      // `_attendee_busy_note`, and the grounding marker
+                      // (turnHelpers.ts's attendeeCheckSource) keys on
+                      // `_attendee_busy_note`, not this. Deleting the trigger
+                      // instead of adding a fourth prompt instruction to ignore it.
+                      _attendee_busy_note: humanReason,
+                      meeting_subject: args.meeting_subject,
+                      requested_start: newStart,
+                      requested_end: newEnd,
+                      message: `Just FYI — ${humanReason}. Want me to move it anyway?`,
+                      _note: 'This is the REQUESTER\'s call, not the owner\'s — do NOT call create_approval for this. Tell them plainly, and if they say to move it anyway, re-call move_meeting with the SAME args plus confirm_attendee_conflict:true.',
+                    };
+                  }
+                  // Surface the SPECIFIC blocker so the approval tells the
+                  // owner — and, downstream, the requester — exactly why. Every
+                  // reason reaching here is an OWNER-rule violation (the two
+                  // attendee-scoped reasons above already returned).
                   // THE shared humanizer (ops/violationLabels). This was the last
                   // inline copy of the switch: it never learned the six reasons
                   // 4.2.0 added, so a Friday target, a past target and a
@@ -1181,34 +1234,11 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // can't tell which one" — the mechanical non-answer M9 forbids.
                   const labelFor = (reason: string | undefined): string =>
                     humanizeViolationLabel(reason, ownerFirst);
-                  const nameForEmail = (em: string): string =>
-                    requiredAttendees.find(a => a.email === em.toLowerCase())?.name?.split(/\s+/)[0] ?? 'another attendee';
                   const counts = diagnostics.rejectedCounts ?? {};
                   const fired = Object.keys(counts);
                   const brokenRule = fired[0];
-                  let reasonCode: string;
-                  let humanReason: string;
-                  if (brokenRule && brokenRule.startsWith('attendee_busy_collision')) {
-                    reasonCode = 'attendee_unavailable';
-                    humanReason = `${nameForEmail(brokenRule.split(':')[1] ?? '')} isn't free then`;
-                  } else if (brokenRule && brokenRule.startsWith('outside_attendee_work_hours')) {
-                    reasonCode = 'attendee_unavailable';
-                    const flaggedEmail = brokenRule.split(':')[1] ?? '';
-                    // assumed-attendee-hours-narrated-as-fact (4.4.9, 3e839d6) —
-                    // when the flagged attendee had no stored timezone and this
-                    // check ran on the #M3 owner-frame fallback (`assumed:
-                    // true`), say so honestly instead of asserting a guess as
-                    // fact — same wording as the search path's off_hours+assumed
-                    // hedge (findAvailableSlots.ts:221-224).
-                    const assumedZone = moveAttendeeAvailability
-                      ?.find(a => a.email.toLowerCase() === flaggedEmail.toLowerCase())?.assumed === true;
-                    humanReason = assumedZone
-                      ? `it's probably outside ${nameForEmail(flaggedEmail)}'s working hours — I'm not certain of their actual schedule`
-                      : `it's outside ${nameForEmail(flaggedEmail)}'s working hours`;
-                  } else {
-                    reasonCode = 'not_rule_compliant';
-                    humanReason = labelFor(brokenRule);
-                  }
+                  const reasonCode = 'not_rule_compliant';
+                  const humanReason = labelFor(brokenRule);
                   logger.info('move_meeting colleague-path refused — new slot blocked', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
                     broken_rule: brokenRule ?? 'unknown', reason_code: reasonCode, human_reason: humanReason,
