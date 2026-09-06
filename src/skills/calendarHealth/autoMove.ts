@@ -13,6 +13,7 @@ import {
   findAvailableSlots,
 } from '../../connectors/graph/calendar';
 import { updateCalendarIssueStatus, type CalendarIssueRow } from '../../db';
+import { closeMeetingArtifacts } from '../../utils/closeMeetingArtifacts';
 import logger from '../../utils/logger';
 import { displaySubject } from '../../utils/displaySubject';
 import type { UserProfile } from '../../config/userProfile';
@@ -234,6 +235,45 @@ export async function executeInternalAutoMove(params: {
       return;
     }
   }
+
+  // elan-hold-survives-the-move-that-resolved-it (2026-09-06) — every OTHER
+  // meeting-mutation path calls closeMeetingArtifacts (moveMeeting.ts:1942);
+  // this autonomous path never did, so a colleague already DM'd a (now-stale)
+  // time for this meeting via an open outreach request never got corrected
+  // and their request never closed. Mirrors moveMeeting.ts's call verbatim:
+  // same reason/newStartIso/newEndIso shape, placed here past verifyEventMoved
+  // for the same reason moveMeeting.ts places it there — only a write we've
+  // confirmed landed may be relayed as fact. `correctedColleagueSlackIds`
+  // (registrar-added return) lets the notify loop below skip anyone this
+  // cascade already told, so Elan doesn't get a correction AND a fresh
+  // "I moved it" DM for the same move.
+  const artifactsResult = await closeMeetingArtifacts({
+    ownerUserId,
+    meetingId: movable.id,
+    reason: 'moved',
+    subject: subj,
+    bookingThreadTs: context.threadTs,
+    newStartIso,
+    newEndIso,
+    // Tier-0 skip (closeMeetingArtifacts.ts's `fulfillingRequestId`) — THIS
+    // run's own auto_move row is stamped `outcome_external_event_id = movable.id`
+    // and is still `in_flight` at this instant, so step 5's
+    // `getRequestsByExternalEventId` (open states only, db/requests.ts:545)
+    // would match it and close it `resolved / meeting_moved`, leaving the
+    // `closeRequest(auto_move_executed)` below a no-op on an already-terminal
+    // row (closeRequest.ts's terminal guard). That closure_reason is
+    // load-bearing twice: it is the ONLY shape REVERTIBLE_ACTIVITY_PREDICATE
+    // accepts for an auto-move (db/requests.ts:590 — "revert" / "undo that"
+    // would stop finding this move while the shadow DM below still offers it),
+    // and it is what `getRecentlyAutoMovedEventIds` (db/requests.ts:647) reads
+    // to stop the next active-mode sweep re-moving an event the owner just
+    // reverted (the 2026-07-13 re-move loop). Same contract the resolver uses:
+    // this caller owns its own row's close, every OTHER artifact still
+    // cascades.
+    ...(autoMoveReq ? { fulfillingRequestId: autoMoveReq.id } : {}),
+  });
+  const correctedColleagueSlackIds = new Set(artifactsResult.correctedColleagueSlackIds);
+
   try {
     const { rebalanceFloatingBlocksAfterMutation } = await import('../../utils/rebalanceFloatingBlocks');
     await rebalanceFloatingBlocksAfterMutation({ profile, affectedSlotIso: newStartIso, ownerSlackId: ownerUserId });
@@ -243,7 +283,10 @@ export async function executeInternalAutoMove(params: {
 
   // Notify each non-owner internal attendee (resolve slack_id from email). The
   // notice is a meeting_reschedule(already_moved) so a "doesn't work" reply
-  // routes back to the owner with a revert option.
+  // routes back to the owner with a revert option. Skip anyone
+  // closeMeetingArtifacts already corrected above — they've already been told
+  // the real new time via the relay; a second "I moved it" DM would be a
+  // duplicate notice for the same move.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { notifyColleagueOfMove } = require('../meetingReschedule') as typeof import('../meetingReschedule');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -254,6 +297,7 @@ export async function executeInternalAutoMove(params: {
     if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
     const row = getPersonByEmail(email.trim().toLowerCase());
     if (!row?.slack_id) continue;
+    if (correctedColleagueSlackIds.has(row.slack_id)) continue;
     await notifyColleagueOfMove({
       profile, ownerChannel: context.channelId, ownerThreadTs: context.threadTs,
       colleagueSlackId: row.slack_id,

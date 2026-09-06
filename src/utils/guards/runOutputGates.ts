@@ -994,6 +994,28 @@ async function runClaimCheckAndMaybeRewrite(
     // log already follows).
     const mutationCarried = !!verdict.action_type
       && toolSummariesText.includes(`mutated=${verdict.action_type}`);
+    // check-claimed-that-never-ran (2026-09-06, bounce 2) — the READ-side
+    // marker, for the one fact-shaped class RULE A itself raises. A finding
+    // about a named third party's hours / busy time is backed when a slot or
+    // meeting tool actually evaluated attendees — summarizeToolCall stamps
+    // `attendee_check=` on exactly those calls (turnHelpers.ts
+    // attendeeCheckSource) — and, like `mutated=`, the marker is scanned in
+    // THIS turn's tape AND prior turns' persisted rows: on the turn AFTER a
+    // search, "I checked, the mornings are outside Erez's hours" is a truthful
+    // recap, and rewriting it into "I haven't checked" would make her lie
+    // (G5). The checker's prompt only ever sees this turn, so this is where
+    // the "no matter which turn" promise of its own RULE A exemption is kept.
+    const attendeeCheckCarried = verdict.action_type === 'invented_third_party_fact'
+      && toolSummariesText.includes('attendee_check=');
+    // A misreport of what a check FOUND (the tape says "busy", the draft says
+    // "outside their hours" — the 2026-09-05 incident) is this class's
+    // specifics mismatch, and it can only have been judged against a line the
+    // checker actually saw: this turn's. With no marker this turn the flag
+    // rests on a prior turn's check, and the bit is ignored whatever the model
+    // set — the destructive path stays on a deterministic trigger (G3).
+    const specificsMismatch = verdict.claim_specifics_mismatch === true
+      && (verdict.action_type !== 'invented_third_party_fact'
+        || (result.toolSummaries ?? []).join(' ').includes('attendee_check='));
 
     // The one class where WHO matters: a DM sent to Yael does not make "already
     // flagged it to Simon" honest. The recipient is already in the summary
@@ -1005,7 +1027,7 @@ async function runClaimCheckAndMaybeRewrite(
       || !verdict.target_name
       || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase());
 
-    const matchingToolAlreadyRan = mutationCarried && targetMatches;
+    const matchingToolAlreadyRan = (mutationCarried || attendeeCheckCarried) && targetMatches;
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the
     // tool that ran doesn't cover (e.g. "updated to 25 min" claim while only
@@ -1016,7 +1038,7 @@ async function runClaimCheckAndMaybeRewrite(
     // in tool activity). When the LLM has explicitly identified the field
     // mismatch, trust the verdict — let the retry fire. Retry already carries
     // this turn's tool summaries (v2.3.4) so no duplicate-mutation risk.
-    if (matchingToolAlreadyRan && !verdict.claim_specifics_mismatch) {
+    if (matchingToolAlreadyRan && !specificsMismatch) {
       // v3.8.x — accurate reason: matchingToolAlreadyRan scans THIS turn's
       // summaries AND prior-turn markers (the #recap shield). When NO tool ran
       // this turn, the match came from a prior turn — a truthful recap of an
@@ -1035,7 +1057,7 @@ async function runClaimCheckAndMaybeRewrite(
       });
       return cleanReply;
     }
-    if (matchingToolAlreadyRan && verdict.claim_specifics_mismatch) {
+    if (matchingToolAlreadyRan && specificsMismatch) {
       logger.warn('Claim-checker shield bypassed — specifics mismatch identified, rewrite will fire', {
         senderId: ctx.senderId,
         threadTs: ctx.threadTs,
@@ -1361,7 +1383,7 @@ async function runClaimCheckAndMaybeRewrite(
  *
  * o#259 (2026-08-28) — an assistant row is stored as
  * `toolSummaries.join(' ') + '\n' + replyText` ONLY when there were tool
- * summaries that turn (postReply.ts:541-543) — a no-tool-call turn stores
+ * summaries that turn (postReply.ts:545-547) — a no-tool-call turn stores
  * `cleanReply` alone, with NO tape and no synthetic `\n` prefix. Tool tape
  * deliberately RAW and prepended (the claim-checker's `mutated=<domain>`
  * shield reads it later — never touch that storage format). Slicing 220
@@ -1374,7 +1396,7 @@ async function runClaimCheckAndMaybeRewrite(
  * silently dropped the real first line of every such row.
  *
  * Detect tape STRUCTURALLY instead: every tool-summary entry
- * (`summarizeToolCall`/`summarizeInternalAction`, turnHelpers.ts:155,189)
+ * (`summarizeToolCall`/`summarizeInternalAction`, turnHelpers.ts)
  * is bracket-wrapped (`[tool ...]` or `[tool FAILED: ...]`), optionally
  * followed by ` mutated=<domain>`, and multiple entries are space-joined —
  * so the pre-`\n` segment of a REAL tape always starts with `[` and contains

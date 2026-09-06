@@ -506,8 +506,12 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // leg's rewriters — securityGate, humanGate — append nothing, so a leak the gates
   // caught and scrubbed was stored intact and replayed three ways: the next turn's
   // model context (processMessage.ts:getConversationHistory), `recall_interactions`
-  // (core/assistant.ts:552), and the capture pass that mines the transcript for the
-  // social subjects the coda is built from (memory/capturePass.ts:418). The gates
+  // (core/assistant.ts:591 — the getRecentChannelMessages call whose rows become
+  // `recent_exchange`), and the capture pass that mines the transcript for the
+  // social subjects the coda is built from (memory/capturePass.ts:461 and its
+  // reconciliation counterpart at :1030, both reading getConversationHistory —
+  // not :418, which is the DM-counterpart resolver, a different step of the
+  // same pass). The gates
   // protected the wire and not the record — 2026-07-26 08:42:57, humanGate rewrote a
   // colleague reply in thread 1784807021.443139; it also changed the QUESTION the
   // draft asked, so history had Maelle asking something she never asked.

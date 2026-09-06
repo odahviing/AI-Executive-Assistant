@@ -76,6 +76,52 @@
  * 'slot_grounding' mode recognizes them as real ground truth for
  * offered/rejected times — see the slotGroundingPrompt below and
  * runOutputGates.ts's `groundedToolLines` filter.
+ *
+ * check-claimed-that-never-ran (2026-09-06; reshaped at bounce 2) — a FIFTH
+ * action_type, 'invented_third_party_fact', raised by RULE A's own
+ * (default/'action' mode) prompt — NOT a sixth mode, and NOT the reverted
+ * CLASS 2 above. CLASS 2 flagged ANY zero-tool-call calendar-state claim; this
+ * flags one thing only: a finding about a NAMED THIRD PARTY's working hours or
+ * busy time that the draft attributes to a check ("per the check I ran") and
+ * that the tool log does not back. Such checks are real and routine —
+ * per-attendee hours live in people_memory (utils/attendeeAvailability.ts)
+ * and drive the slot/meeting tools — and every call that ran one carries the
+ * marker `attendee_check=<source>` on its compact line (turnHelpers.ts
+ * attendeeCheckSource, the read-side sibling of `mutated=`; G2). Two shapes,
+ * both judged against that marker:
+ *   - MISREPORTED: a line carrying `attendee_check=` exists THIS turn and the
+ *     draft says something other than what it found. This is the live
+ *     incident (2026-09-05T20:05:29Z): move_meeting's own plan found Erez and
+ *     Yael BUSY at 10:15 (`planMeeting — attendee availability collision`,
+ *     hoursBlockedEmails=[]) and attached that as `_attendee_busy_note`; the
+ *     draft narrated "outside Erez and Yael's normal hours per the check I
+ *     ran" — the owner's own 10:30 office start read onto two colleagues. The
+ *     check DID run; its result was misreported. Flagged with
+ *     claim_specifics_mismatch=true; the rewrite restates the finding AS THE
+ *     LINE HAS IT (a real fact handed in — never a hedge, never "I didn't
+ *     check": she did). The first build of this class assumed that turn had
+ *     no signal at all and would have waved the draft through once the note
+ *     reached the tape.
+ *   - UNBACKED: no line carrying `attendee_check=` this turn. Flagged with
+ *     claim_specifics_mismatch=false. The caller's shield (runOutputGates.ts,
+ *     the matchingToolAlreadyRan block) then scans PRIOR turns' persisted tape
+ *     for the same marker before anything is rewritten — on the turn after a
+ *     search, "I checked, the mornings are outside Erez's hours" is a truthful
+ *     recap and ships untouched — and ignores the mismatch bit when no marker
+ *     is in THIS turn (a misreport can only be judged against a line the
+ *     checker saw). Only with no marker anywhere does the rewrite run, and it
+ *     drops the framing and the finding, saying at most that she has not
+ *     checked that person's hours here.
+ * This is the ONE exception to RULE A's object-scoped "a CHECKED statement is
+ * informational" exemption, and the prompt names it as such in both places
+ * (the exemption paragraph and the NOT-a-false-claim list) so no reader has
+ * to hold two canonical sentences at once. Not its target, by text: the
+ * owner's own hours (governed elsewhere), a clock/timezone conversion (the
+ * contacts list's timezones are in front of her with no tool call), and a
+ * plain statement about someone's schedule that claims no check. The
+ * colleague-path precheck cannot collide with it twice over: RULE A does not
+ * run on a colleague's own turn, and `[availability_precheck …]` lines
+ * describe the OWNER. Same Haiku call as the rest of RULE A — no new LLM call.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -302,7 +348,7 @@ export interface ClaimCheckInput {
   };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | 'ungrounded_slot_claim' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | 'ungrounded_slot_claim' | 'invented_third_party_fact' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -321,6 +367,10 @@ export interface ClaimCheckResult {
    * start changed, duration didn't. Without this bit, the shield treated any
    * calendar mutation as covering any book-class claim and the false
    * specifics claim shipped (warn observed 2026-05-06).
+   * check-claimed-that-never-ran (2026-09-06) — for
+   * `invented_third_party_fact` the same bit means "an `attendee_check=` line
+   * exists this turn and the draft misreports what it found"; the caller
+   * honours it only when that marker is in THIS turn's tape.
    */
   claim_specifics_mismatch?: boolean;
   elapsedMs: number;
@@ -607,7 +657,7 @@ You check ONE rule: FALSE ACTION CLAIM (sets claimed_action).
 
 Does the draft state or imply the assistant JUST did an external action (sent / pinged / messaged / told someone, booked / scheduled / moved a meeting, created a task / reminder / note) — AND that action is NOT backed by a matching tool call in the activity list above?
 
-RULE A is about those EXTERNAL actions ONLY. A statement that the assistant CHECKED / looked at / confirmed / verified / reviewed a CALENDAR, an INBOX, or a DOCUMENT (an object, not a person or a booking) is INFORMATIONAL, not one of the four action classes above — it is NEVER a false claim under this rule, no matter which turn the checking happened in or whether a tool ran for it THIS turn. "As I confirmed earlier, you're free Thursday" / "checked — no conflicts" / "already looked into it" are honest by definition; do not flag them. This exemption is OBJECT-SCOPED and CANONICAL for the whole prompt: it does NOT cover "confirmed with <person>", "confirmed the booking", or "confirmed the meeting" — those claim an external action (telling someone, locking in a booking) happened, and are judged as ordinary RULE A action claims, honest only when a matching tool call (message_colleague / create_meeting / update_meeting / etc) appears in TOOL ACTIVITY THIS TURN.
+RULE A is about those EXTERNAL actions ONLY. A statement that the assistant CHECKED / looked at / confirmed / verified / reviewed a CALENDAR, an INBOX, or a DOCUMENT (an object, not a person or a booking) is INFORMATIONAL, not one of the four action classes above — it is NEVER a false claim under this rule, no matter which turn the checking happened in or whether a tool ran for it THIS turn. "As I confirmed earlier, you're free Thursday" / "checked — no conflicts" / "already looked into it" are honest by definition; do not flag them. This exemption is OBJECT-SCOPED and CANONICAL for the whole prompt: it does NOT cover "confirmed with <person>", "confirmed the booking", or "confirmed the meeting" — those claim an external action (telling someone, locking in a booking) happened, and are judged as ordinary RULE A action claims, honest only when a matching tool call (message_colleague / create_meeting / update_meeting / etc) appears in TOOL ACTIVITY THIS TURN. It also has ONE exception of its own, stated once and in full under "CRITICAL — a third-party availability finding" below: a finding about a NAMED THIRD PARTY's working hours or busy time that the draft attributes to a check is judged against the tool log, because the log carries exactly what such a check finds. Every other CHECKED / verified / confirmed-the-calendar statement stays exempt here.
 
 Paraphrase, tense, and language don't matter. Judge by meaning. Hebrew, English, anything.
 
@@ -651,6 +701,15 @@ The action-based mutation tools and their mutating actions:
 
 So if the draft says "Done. Calendar health now runs at 7:00, briefing at 7:30" and TOOL ACTIVITY shows \`[manage_routine: action=update]\` twice, the claim is HONEST — don't flag. Same for "noted that" + \`[update_person_memory: ...]\`, "saved the preference" + \`[manage_preference: action=set]\`, "marked the lunch gap as fine" + \`[manage_calendar_issue: action=approve]\`, etc. Only flag if the matching action-tool didn't run, or ran with \`FAILED\` outcome.
 
+This covers a CONVERSATIONAL acknowledgment of a correction just as much as formal "Done" phrasing — "noted, dropping it" / "noted as resolved, no longer tracking that" / "marking that closed" / "not flagging again" are claims that a PERSISTED state changed (a flagged item dropped or resolved, a hold released, a note recorded) exactly like "Done, updated" is, and need the SAME matching action-tool (\`update_task\`, \`update_person_memory\`, \`manage_calendar_issue\`, etc.) to have run THIS turn — with nothing matching, flag claimed_action=true, action_type="other". A BARE future self-correction with no claimed state change — "I'll be stricter about that filter going forward" — is NOT this rule's target; it asserts no object's state changed, so it stays covered by the future-commitment exemption below (do not flag it just because it appears alongside a flagged sentence).
+
+CRITICAL — a third-party availability finding (the ONE exception to the object-scoped CHECKED exemption under RULE A above):
+The draft can report, as the result of a check it ran — "per the check I ran", "I checked and", "based on what I verified", any tense or language — that a time lands outside a NAMED PERSON's (someone other than ${input.ownerFirstName}) working hours, or that a named attendee is busy / has a conflict then. Such checks are real and routine: the slot and meeting tools evaluate attendees' stored hours and busy time, and every call that did so carries the marker \`attendee_check=\` on its TOOL ACTIVITY line, whose own text says what it found and about whom (a busy collision, "outside … working hours", a refused move, a per-day clip). Judge the draft's finding against that text:
+- A line carrying \`attendee_check=\` whose finding the draft reports faithfully — same KIND (busy / a conflict vs. outside working hours) and the same people — makes the claim HONEST: do NOT flag. Do not require the line to name the person (some signals are name-free) and do not try to work out which attendee a name-free signal refers to.
+- A line carrying \`attendee_check=\` whose finding the draft MISREPORTS — the line says they are busy or have a conflict and the draft says the time is outside their working hours (or the reverse), or the draft extends the finding to a person the line does not cover — is a false claim about what the check found: flag claimed_action=true, action_type="invented_third_party_fact", claim_specifics_mismatch=true, target_name=the named person.
+- NO line carrying \`attendee_check=\` in TOOL ACTIVITY THIS TURN, and the draft still attributes such a finding to a check: flag claimed_action=true, action_type="invented_third_party_fact", claim_specifics_mismatch=false, target_name=the named person. (A check from an EARLIER turn of this thread is recognised by the caller, not by you — you see this turn only.)
+NOT this rule's target: a claim about ${input.ownerFirstName}'s OWN hours or availability (governed elsewhere); a clock/timezone conversion ("that's 03:15 for her in New York" — contacts' timezones are always in front of the assistant with no tool call); a plain statement about a third party's schedule that claims no check ("Erez usually starts at 10", something they or ${input.ownerFirstName} said earlier).
+
 CRITICAL — file / image delivery:
 A draft can claim it just DELIVERED a file or image TO THE READER in this very message — "here's the image", "here it is, attached", "with the image attached", "see attached", "sharing the file", "attached is the deck". ${input.ownerFirstName}'s assistant replies in plain text: a reply carries an attachment ONLY when a file/image-send tool actually ran this turn (an upload / send-file / attach tool with an OK outcome in TOOL ACTIVITY). So a "delivered it here" claim is HONEST only when such a send appears in the activity; with NO file/image send in the activity the attachment does NOT exist — flag claimed_action=true (action_type "deliver_file"). Judge by whether an upload HAPPENED, not by the wording — this holds in any language.
 NOT a delivery claim (do NOT flag): describing that a THIRD PARTY attached or sent a file ("Oran attached an image to his note", "the deck he sent over"), OFFERING to send one ("want me to forward the image?"), or pointing to a link / where to find it. Only a claim that the file is attached HERE, now, for the reader — with no matching send this turn — is false.
@@ -668,7 +727,7 @@ If the draft claims a SPECIFIC change that the tool that ran does NOT cover — 
 Set claim_specifics_mismatch=false when the overclaim is about whether the action happened AT ALL (e.g. "I sent X" but no \`message_colleague\` ran; "I booked it" but no booking tool ran). The default for honest drafts (claimed_action=false) is also false.
 
 NOT a false claim:
-- A CHECKED / confirmed / verified / reviewed / looked-into statement about the calendar, an inbox, or a document — see the object-scoped exemption (and its exclusions) stated under RULE A above; never flag these here.
+- A CHECKED / confirmed / verified / reviewed / looked-into statement about the calendar, an inbox, or a document — see the object-scoped exemption stated under RULE A above, and its exclusions, including its ONE exception: the third-party availability finding (IS-a-false-claim list below). Every other such statement is never flagged here.
 - Any send/book/task claim where the matching tool appears in TOOL ACTIVITY THIS TURN above.
 - Describing what's ALREADY on the calendar ("Elan's triweekly is at 13:00").
 - Proposing / offering / recommending a future action — EVEN when it names a specific meeting, time, or person. "Best fit: Wednesday 13:00 — want me to move the interview there?", "I can book that", "Want me to reach out?", "Shall I move it?" are PROPOSALS awaiting the owner's yes, NOT completed actions. A draft that recommends or asks-before-acting is claimed_action=false no matter how specific it is. COMPOUND CASE (important): a reply can report a COMPLETED action AND, in the same breath, OFFER a follow-up — "Moved it to 13:45. As expected, Oran, Onn and Daniel are all busy then. Want me to let them know about the change?" The trailing interrogative offer to notify ("want me to let them know / tell them / notify them?") is a PROPOSAL on the follow-up, NOT a completed send — even when the reply names those people and reports a real action. Key on the interrogative/offer FORM, not the names or topic. A notify claim is a false send ONLY when it is DECLARATIVE-past ("I've let them know", "told them") with no matching message_colleague this turn. Only flag when the draft states the action ALREADY happened ("moved", "booked", "done", "sent", "scheduled it"). When the turn was a reply to an attachment/screenshot, the draft is analysis + a proposal off that image — don't treat its specifics as a phantom action.
@@ -684,6 +743,8 @@ IS a false claim:
 - IMPORTANT MPIM EXCEPTION: if MPIM CONTEXT is present above and the \`<@USERID>\` mention is for a PARTICIPANT in the listed group thread, that's LEGITIMATE in-room addressing — NOT a phantom send. Do not flag it. Only flag pings to people NOT in the participant list.
 - A claim that a file/image is attached HERE / delivered to the reader in THIS message ("here's the image", "see attached", "with the image attached") when NO file/image-send tool ran this turn — the text reply carries no attachment unless a send tool fired (see "file / image delivery" above).
 - A declarative claim that ${input.ownerFirstName} granted a permission / approved a rule-bend / cleared something previously blocked ("all good, we can continue", "he said yes") when APPROVAL STATUS FOR THIS THREAD above says NOT RESOLVED — see the approval/permission-granted CRITICAL section above.
+- A finding about a named third party's (not ${input.ownerFirstName}'s) working hours or busy time that the draft attributes to a check, when either NO TOOL ACTIVITY line this turn carries \`attendee_check=\`, or such a line exists and the draft misreports what it found — see "CRITICAL — a third-party availability finding" above (action_type "invented_third_party_fact"; claim_specifics_mismatch=true only for the misreport).
+- A conversational "noted, dropping it" / "no longer tracking that" / "marking that resolved" claim when no matching action-tool (\`update_task\`, \`update_person_memory\`, \`manage_calendar_issue\`, etc.) ran THIS turn — see the "action-based verb tools" CRITICAL section above.
 
 ═════════════════════════════════════════════════════════════════════════════
 OUTPUT SCHEMA
@@ -691,14 +752,14 @@ OUTPUT SCHEMA
 
 {
   "claimed_action": boolean,
-  "action_type": "message" | "book" | "task" | "deliver_file" | "permission_granted" | "other" | null,
+  "action_type": "message" | "book" | "task" | "deliver_file" | "permission_granted" | "other" | "invented_third_party_fact" | null,
   "claim_specifics_mismatch": boolean,
   "target_name": string | null,
   "action_summary": string | null
 }
 
 Field semantics:
-- claim_specifics_mismatch — see "CRITICAL — specifics mismatch" above. False unless claimed_action=true AND the claim names a specific change the tool that ran doesn't cover.
+- claim_specifics_mismatch — see "CRITICAL — specifics mismatch" above. False unless claimed_action=true AND the claim names a specific change the tool that ran doesn't cover — or, for action_type="invented_third_party_fact", the draft misreports what a line carrying \`attendee_check=\` found (see that CRITICAL section).
 - target_name — fill with the person named in the draft when action_type="message". Optional otherwise.
 - action_summary — one-line reason for claimed_action only, ≤120 chars. Null when claimed_action=false.
 
@@ -918,6 +979,18 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * find_available_slots / check_join_availability result, so the rewrite is
  * told the ACTUAL times rather than merely told to hedge — the model is
  * substituting from facts we hand it, never inventing a replacement time.
+ *
+ * check-claimed-that-never-ran (2026-09-06) — reused again (G1) for a FOURTH
+ * flag shape: `actionType === 'invented_third_party_fact'`, from RULE A's own
+ * default 'action' mode (NOT a new mode — see claimChecker.ts's top-of-file
+ * doc comment for why this is deliberately narrower than the reverted CLASS
+ * 2). Same fact-shaped family as `invented_fact`, but the subject is a NAMED
+ * THIRD PARTY's working hours/availability attributed to a check — either
+ * misreported against the `attendee_check=` line that backs it (the rewrite
+ * then restates that line's own finding, the way slot_grounding substitutes
+ * real times) or with no such line at all (dropped). `invented_fact`'s prompt
+ * is hardcoded to a claim about the owner himself, so this needed its own
+ * STEP 1/2/3 prompt rather than a shared one.
  */
 export async function rewriteOwningTheMiss(opts: {
   draft: string;
@@ -968,6 +1041,16 @@ export async function rewriteOwningTheMiss(opts: {
   // sent it over yet" — needs its own STEP1/2/3 prompt, same family as the two
   // fact-shaped flags above.
   const isPermissionGranted = opts.actionType === 'permission_granted';
+  // check-claimed-that-never-ran (2026-09-06) — a fourth fact-shaped flag,
+  // same family as invented_fact/ungrounded_slot_claim: the false part is a
+  // finding about a NAMED THIRD PARTY's working hours/availability that the
+  // draft attributes to a check, and that the `attendee_check=` line backing
+  // it either contradicts (misreported) or that no such line backs at all
+  // (see the RULE A prompt's CRITICAL section above). Needs its own prompt
+  // because invented_fact's is hardcoded to a claim ABOUT
+  // ${opts.ownerFirstName} himself — reusing it here would tell the rewriter
+  // the wrong subject.
+  const isInventedThirdPartyFact = opts.actionType === 'invented_third_party_fact';
 
   const what = opts.actionSummary
     || (isInventedOwnerFact
@@ -976,9 +1059,11 @@ export async function rewriteOwningTheMiss(opts: {
         ? 'a specific time offered as available'
         : isPermissionGranted
           ? `${opts.ownerFirstName}'s decision on a pending request, stated as already back`
-          : opts.actionType === 'message'
-            ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
-            : 'that action');
+          : isInventedThirdPartyFact
+            ? (opts.targetName ? `a working-hours/availability finding about ${opts.targetName}` : 'a working-hours/availability finding about a named person')
+            : opts.actionType === 'message'
+              ? `sending a message${opts.targetName ? ` to ${opts.targetName}` : ''}`
+              : 'that action');
 
   const toolBlock = (opts.toolSummaries && opts.toolSummaries.length)
     ? opts.toolSummaries.map(s => `  - ${s}`).join('\n')
@@ -1045,6 +1130,41 @@ SAFE-MISS — the hard rule. If you cannot tell whether the draft truly claims t
 Draft:
 ${opts.draft}` : null;
 
+  // check-claimed-that-never-ran (2026-09-06) — same STEP 1/2/3 +
+  // minimalRedaction shape as invented_fact above, but the subject is a NAMED
+  // THIRD PARTY's working hours/availability attributed to a check that the
+  // tool log either contradicts or does not carry — not a claim about
+  // ${opts.ownerFirstName} himself, so invented_fact's hardcoded prompt
+  // cannot be reused verbatim. No fixed audience framing (this class fires
+  // on the owner-private leg, unlike invented_fact/permission_granted which
+  // are colleague-only). The caller only routes a flag here when no
+  // `attendee_check=` marker is in a PRIOR turn either, or when one is in
+  // THIS turn and the checker judged the draft misreports it — so STEP 2(b)'s
+  // "she has not checked here" is true whenever it is reached.
+  const thirdPartyFactPrompt = isInventedThirdPartyFact ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as reporting, as the result of a check it ran, a working-hours or availability finding about a NAMED THIRD PARTY (not ${opts.ownerFirstName} himself) — ${what} — that the tool log does not back. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+
+TOOL ACTIVITY THIS TURN (a line carrying \`attendee_check=\` is one where a slot/meeting tool really evaluated attendees' hours or busy time, or a person's notes were read; its own text says WHAT it found and about whom — a busy collision, "outside … working hours", a refused move, a per-day clip. A line that names nobody still counts):
+${toolBlock}
+FLAGGED CLAIM: ${what}
+
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT attribute the finding to a check it ran (it is hedged, or quotes what someone said), or if it is a clock/timezone conversion ("that's 03:15 for her"), or if a line carrying \`attendee_check=\` states the SAME finding — same kind (busy / a conflict vs. outside working hours), same people; a name-free line counts. Do not manufacture a problem that isn't one.
+
+STEP 2 — Call verdict="rewrite" in exactly two cases. Put the corrected reply in \`message\`.
+(a) A line carrying \`attendee_check=\` exists but the draft MISREPORTS what it found (the line says busy / a conflict, the draft says outside their hours, or the reverse; or the draft names someone the line does not cover): restate the finding EXACTLY as that line has it — its kind, its people, nothing more — in place of the draft's version. The check happened; only its result was misstated, so never say she didn't check.
+(b) NO line carries \`attendee_check=\`: drop the "per the check I ran" framing and the specific finding CLEANLY — never restate it as a hedge that still asserts the same fact ("probably outside their hours" is the same invented claim in softer words). If the message still needs to say something about it, say only that she has not actually checked that person's hours here — NEVER that no such data exists or that it isn't on file (their hours may well be stored; what is untrue is the check, not the data).
+In both cases the rewrite must also:
+- NOT invent a DIFFERENT unbacked claim about the named person in its place.
+- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Sound like a real person, never a disclaimer or a system message.
+- Match the language of the draft (Hebrew/English/etc).
+
+STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candidate: the draft with ONLY the flagged claim deleted or blanked out and NOTHING else touched — no new sentences, no paraphrasing, no added hedge, every other word copied verbatim from the draft. This is the fallback used if \`message\` cannot be trusted; fill it even when you are confident in \`message\`.
+
+SAFE-MISS — the hard rule. If you cannot tell whether the draft's finding differs from what a marked line found, or whether it is attributed to a check at all, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a confident "I checked/verified" finding about a named third party that the log either contradicts or does not carry.
+
+Draft:
+${opts.draft}` : null;
+
   const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
@@ -1065,7 +1185,7 @@ STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candi
 SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a bare, confident, unsupported personal claim about ${opts.ownerFirstName}.
 
 Draft:
-${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : isPermissionGranted ? permissionGrantedPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : isPermissionGranted ? permissionGrantedPrompt! : isInventedThirdPartyFact ? thirdPartyFactPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
@@ -1104,7 +1224,9 @@ ${opts.draft}`;
             ? 'Report whether the draft offers a specific time as available that this turn\'s real availability search does not confirm, and if so the corrected reply.'
             : isPermissionGranted
               ? 'Report whether the draft falsely states the owner\'s decision on a pending request already came back, and if so the corrected reply.'
-              : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
+              : isInventedThirdPartyFact
+                ? 'Report whether the draft falsely self-attributes a named third party\'s working-hours/availability finding to a check it ran, and if so the corrected reply.'
+                : 'Report whether the draft falsely claims a completed action, and if so the corrected reply.',
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -1117,7 +1239,9 @@ ${opts.draft}`;
                   ? '"keep" = the draft is fine (the time genuinely matches the real result WITH A POSITIVE/AVAILABLE verdict, or nothing specific was offered). "rewrite" = the draft offers a specific time as available that the real result does not confirm — including when the matched result is itself marked unavailable/negative.'
                   : isPermissionGranted
                     ? '"keep" = the draft is fine (it only says the request was sent/escalated and is still pending, or is already hedged/in-progress). "rewrite" = the draft states, as settled fact, that the owner\'s decision on this pending request already came back.'
-                    : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
+                    : isInventedThirdPartyFact
+                      ? '"keep" = the draft is fine (hedged / not attributed to a check, a timezone conversion, or a line carrying attendee_check= states the same finding — a name-free line counts). "rewrite" = the draft attributes a named third party\'s working-hours/availability finding to a check, and the tool activity either carries no attendee_check= line at all or carries one whose finding the draft misreports.'
+                      : '"keep" = the draft is fine (proposal/offer/future-commit, or the action actually happened). "rewrite" = the draft falsely states a completed action no tool performed.',
             },
             message: {
               type: 'string',
@@ -1127,7 +1251,9 @@ ${opts.draft}`;
                   ? 'Only when verdict="rewrite": the corrected reply text, using the REAL confirmed time(s) in place of the fabricated one (or honestly saying none was confirmed). Omit for "keep".'
                   : isPermissionGranted
                     ? 'Only when verdict="rewrite": the corrected reply text, making clear the decision is still pending WHILE keeping intact any true statement that the request was already sent/escalated. Omit for "keep".'
-                    : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
+                    : isInventedThirdPartyFact
+                      ? 'Only when verdict="rewrite": the corrected reply text — the finding restated exactly as the attendee_check= line has it when one exists and was misreported, otherwise with the flagged claim removed (never restated as a softer-worded hedge that still asserts the same fact). Omit for "keep".'
+                      : 'Only when verdict="rewrite": the corrected reply text, honest that the action has not happened yet. Omit for "keep".',
             },
             noPendingActionClaim: {
               type: 'boolean',
@@ -1145,9 +1271,13 @@ ${opts.draft}`;
               type: 'boolean',
               description: 'Only for a permission_granted rewrite (verdict="rewrite", flagged claim was the owner\'s decision on a pending request stated as already back): self-check `message` before returning it. Set true ONLY if `message` no longer asserts, as settled fact, that the owner\'s decision already came back, AND still preserves any true statement that the request was already sent/escalated to him. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
             },
+            noUnfoundedThirdPartyClaim: {
+              type: 'boolean',
+              description: 'Only for an invented-third-party-fact rewrite (verdict="rewrite", flagged claim was a named third party\'s working-hours/availability finding attributed to a check the tool log does not back): self-check `message` before returning it. Set true ONLY if every working-hours/availability statement `message` makes about that person is exactly what a line carrying attendee_check= in TOOL ACTIVITY states — nothing asserted beyond it, and no softer hedge of the flagged finding. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+            },
             minimalRedaction: {
               type: 'string',
-              description: 'Only for an invented-owner-fact, ungrounded-slot-claim, or permission_granted rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
+              description: 'Only for an invented-owner-fact, ungrounded-slot-claim, permission_granted, or invented-third-party-fact rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
             },
             minimalRedactionPreservesRest: {
               type: 'boolean',
@@ -1173,6 +1303,7 @@ ${opts.draft}`;
       noUnfoundedOwnerClaim?: boolean;
       noUngroundedTimeClaim?: boolean;
       noResolvedDecisionClaim?: boolean;
+      noUnfoundedThirdPartyClaim?: boolean;
       minimalRedaction?: string;
       minimalRedactionPreservesRest?: boolean;
     };
@@ -1224,7 +1355,7 @@ ${opts.draft}`;
         action_type: opts.actionType,
         messagePreview: message.slice(0, 160),
       });
-      return (isInventedOwnerFact || isUngroundedSlotClaim || isPermissionGranted) ? resolveMinimalRedactionFallback() : GENERIC_HONEST_MISS;
+      return (isInventedOwnerFact || isUngroundedSlotClaim || isPermissionGranted || isInventedThirdPartyFact) ? resolveMinimalRedactionFallback() : GENERIC_HONEST_MISS;
     }
 
     if (isInventedOwnerFact) {
@@ -1265,6 +1396,22 @@ ${opts.draft}`;
       // phantom-action framing below (which would deny the send itself).
       if (input.noResolvedDecisionClaim !== true) {
         logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the resolved-decision claim while preserving a true send; shipping a scoped fallback (never the known-false original)', {
+          action_type: opts.actionType,
+          messagePreview: message.slice(0, 160),
+        });
+        return resolveMinimalRedactionFallback();
+      }
+      return message;
+    }
+
+    if (isInventedThirdPartyFact) {
+      // check-claimed-that-never-ran (2026-09-06) — same self-attest pattern
+      // as the branches above, checking that the rewrite asserts nothing
+      // about the person's hours/availability beyond what an
+      // `attendee_check=` line in TOOL ACTIVITY states (a misreport is
+      // corrected to the line; an unbacked finding is dropped).
+      if (input.noUnfoundedThirdPartyClaim !== true) {
+        logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the unfounded third-party claim; shipping a scoped fallback (never the known-false original)', {
           action_type: opts.actionType,
           messagePreview: message.slice(0, 160),
         });

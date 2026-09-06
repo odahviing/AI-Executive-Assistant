@@ -245,7 +245,20 @@ export type PlanAction =
       level?: 'free' | 'optional' | 'unfiltered';
     }
   | { action: 'find_slots'; category: string | null; reasoning: string }
-  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
+  // `attendeeBusyLabel` is set ONLY when this gate came from the internal-
+  // attendee freebusy/hours collision (`attendeeBusyLabel`/`busyAttendees`
+  // below) — never for the unrelated 'in the past' confirm_override. Carries
+  // the SAME text as `violationLabel` in that case; its PRESENCE (not its
+  // wording) is what a caller keys on to tell an attendee-caused block apart
+  // from a plain owner-rule one, the same convention move_meeting's
+  // `_attendee_busy_note` already established (field presence, never parsed).
+  // gh#4.8.7 combined-ask variant — `ask_location_mode` and
+  // `room_unavailable_large` (below) carry the SAME field, for the SAME
+  // reason: the attendee-collision gate can still have fired even when a
+  // location or room gate outranks it for the returned `action`. The local
+  // is only ever assigned alongside the 'attendee_busy' gate push, so its
+  // presence here is exactly as reliable as on `confirm_override`.
+  | { action: 'confirm_override'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; attendeeBusyLabel?: string }
   | { action: 'escalate_approval'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null }
   /**
    * Two lists, never one. `alternatives` is what exists on the day the
@@ -258,8 +271,8 @@ export type PlanAction =
   | { action: 'propose_alternative'; violationLabel: string; suggestedAskText: string; openQuestions: PlanOpenQuestions; alternatives: Array<{ start: string; end: string; label: string }>; widenedAlternatives: Array<{ start: string; end: string; label: string }>; requestedDay: string; category: string | null }
   | { action: 'decline_as_attendee'; organizerName: string | null; organizerEmail: string | null }
   | { action: 'refuse_not_owners'; organizerName: string | null; organizerEmail: string | null }
-  | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string }
-  | { action: 'room_unavailable_large'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string };
+  | { action: 'ask_location_mode'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string; attendeeBusyLabel?: string }
+  | { action: 'room_unavailable_large'; suggestedAskText: string; openQuestions: PlanOpenQuestions; category: string | null; reasoning: string; attendeeBusyLabel?: string };
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
@@ -1202,6 +1215,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         openQuestions,
         category,
         reasoning: locationAskReasoning ?? 'location mode unresolved',
+        // gh#4.8.7 — carries the attendee-collision note through when the
+        // location gate outranks it for `action`; see the field's own
+        // comment on the type union above.
+        attendeeBusyLabel,
       };
     }
     if (ruleViolationLabel) {
@@ -1234,6 +1251,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         openQuestions,
         category,
         reasoning: 'meeting room mailbox busy and ≥6 people — small fallback not viable',
+        // gh#4.8.7 — same carry-through as `ask_location_mode` above.
+        attendeeBusyLabel,
       };
     }
     return {
@@ -1242,6 +1261,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       suggestedAskText,
       openQuestions,
       category,
+      // gh#4.8.7 attendee-signal-dropped-on-create-refusal — surfaced ONLY
+      // when this gate is the attendee-collision one (never the room/rule
+      // gates above, which return before reaching here). Lets the caller
+      // (createMeeting.ts) carry real attendee identity on its FAILED
+      // return, the same way move_meeting's `_attendee_busy_note` already
+      // does for its own (booked-through) path.
+      attendeeBusyLabel,
     };
   }
 

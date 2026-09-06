@@ -2,6 +2,34 @@
 
 ---
 
+## 4.8.7 — What she checked, and what she said she checked
+
+Almost everything here comes from one long conversation and one morning brief, and from the discovery — halfway through fixing it — that the reported bug was not the bug. Maelle told the owner two colleagues were outside their working hours "per the check I ran." The first fix was built to catch a check that never happened. The logs said otherwise: a check *had* run, it found the two of them **busy**, and she reported that as *outside their hours*. A misreported finding, not an invented one, and the guard aimed at the wrong target would never have caught it.
+
+The repair that followed is deliberately not more prompt text. Every tool that examines someone's availability now leaves a mark on the tool log saying what it looked at, and the honesty check reads the mark instead of guessing from silence. It survives across turns, so a true "I checked, the mornings don't work for Erez" answered from context one turn later is protected rather than retracted.
+
+### Fixed (high-impact)
+- **A real check reported as the wrong finding is now caught.** Availability results carry an identifying mark through the tool log; asserting something different from what the check found is flagged, and the correction restates the tool's own finding rather than claiming nothing was checked.
+- **A true statement is no longer deleted because the turn was quiet.** Two output paths described a search's outcome without ever naming why an attendee was excluded, so a correct explanation looked unsupported. Three separate branches were found and closed; the fourth — the turn *after* a search, answered from context — is now covered by the mark surviving in history.
+- **A commitment made in conversation now has to be backed by something.** "Noted, dropping it" and "no longer tracking that" assert a change that outlives the reply; three such promises shipped in one message with nothing written behind them and every flag returned the next morning.
+- **A cancellation notice that really was sent is no longer taken back.** The claim was true, an output check could not see what backed it, and undoing it took two further messages.
+- **The list of meetings already pulled up in a thread has been empty since 4.0.0.** Two independent faults on one line — a guard testing a field the result does not have, and a filter testing another. Cancelling a recurring occurrence had to rediscover the event first.
+- **The owner's own working hours stopped being read as a colleague's.** They were rendered on every turn with nothing saying whose day they describe.
+- **A colleague with no stored timezone is no longer dropped from the availability check on a move.** Not narrated wrongly — omitted entirely, so an out-of-hours move could not be flagged at all. Bringing move level with slot search closed it; no live lookup was needed, because Slack timezones already reach the person record through the existing sync.
+- **A request stays open only while its work is unfinished.** A hold survived the move that resolved it and resurfaced every morning; the auto-move was closing its own record through the wrong path and losing the reason that a revert depends on.
+- **The morning brief no longer counts the company's own publications as outside coverage.** The single check on that list only asked whether an item mentioned the company — which its own blog does, so the one piece of code there was favouring exactly what should have been excluded. The test is now the publisher, not the domain, so a self-published video on someone else's platform is caught too.
+
+### Changed
+- Availability findings travel as structured fields rather than prose, on booking as well as on moves, so downstream checks read a value instead of parsing a sentence.
+- An empty person-memory lookup no longer counts as a completed check.
+
+### Not changed
+- The 4.8.3 rule stands: a quiet turn is not evidence of a fabrication. Availability answered from the deterministic pre-check ships unhedged, and that path is byte-identical.
+
+### Framework (other chats, bundled)
+- Golden-path anchors re-pinned twice against a tree that moved under them, and three code citations repaired that this same day's edits had made stale.
+
+
 ## 4.8.6 — Absence, told apart from a fact
 
 The end of a four-day run at one idea: **not knowing something must stay distinguishable from knowing it.** This release closes the last places where Maelle turned a missing answer into a confident one, and then removes the scaffolding built along the way.

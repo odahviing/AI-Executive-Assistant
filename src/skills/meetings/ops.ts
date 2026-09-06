@@ -105,12 +105,18 @@ export class SchedulingSkill {
     // here, the one point every direct op returns through, rather than gate
     // each handler's attach site individually. Rule 10: when the audience is
     // unclear, return less.
-    // (`_attendee_busy_note`, moveMeeting.ts's twin of this note, is NOT
-    // stripped here — move_meeting is absent from CHANNEL_TOOL_CLAMP.email
-    // (registry.ts), so it structurally can never reach an email-leg result;
-    // deleting a key that can never be present was dead code.)
+    // gh#4.8.7 attendee-signal-dropped-on-create-refusal — `_attendee_busy_note`
+    // used to be move_meeting-only, and move_meeting is absent from
+    // CHANNEL_TOOL_CLAMP.email (registry.ts), so stripping it here was
+    // previously dead code (a key that could never be present). It is no
+    // longer dead: create_meeting's FAILED confirm_override return now also
+    // carries it (createMeeting.ts, sourced from planMeeting's
+    // `attendeeBusyLabel`) — the same "who's busy" prose as `override_notice`
+    // above, and create_meeting IS one of the four email-leg tools. Strip it
+    // here too, same reasoning, same chokepoint.
     if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
       delete (result as Record<string, unknown>).override_notice;
+      delete (result as Record<string, unknown>)._attendee_busy_note;
       // floating-block-impact-preflight (2026-08-27) — same class of leak as
       // `override_notice` just above: second-person owner admin narration
       // ("this leaves no room for your lunch") that has no owner-facing side
@@ -248,9 +254,18 @@ export class SchedulingSkill {
       // hours (attendeeHoursGroundingNotes).
       // Neither is caught by the walks above — they live one level further
       // out, on r.day_summary[] rather than r.results[] / r.slots[].
+      // slots-returned-turn-carries-no-attendee-rejection-reason (2026-09-06)
+      // — `attendee_partial_conflicts` is `blocked_by`'s twin for a day that
+      // DID yield slots ({email, slots_blocked}, same per-attendee split, same
+      // raw address), so it is stripped with it. Without this the field would
+      // be the one attendee-identifying key on the payload that survives this
+      // leg — and it would also reach the persisted tool-summary line
+      // (turnHelpers' `attendee_partial=`), which renders from the
+      // POST-scrub result, so this one delete closes both.
       if (Array.isArray(r.day_summary)) {
         for (const day of r.day_summary as Array<Record<string, unknown>>) {
           delete day.blocked_by;
+          delete day.attendee_partial_conflicts;
           delete day.attendee_hours_note;
         }
       }

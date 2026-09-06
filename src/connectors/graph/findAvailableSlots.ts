@@ -109,6 +109,27 @@ export interface DaySummaryEntry {
    * proposed days, each re-explained, with no end ever named).
    */
   oof_until_display?: string;
+  /**
+   * slots-returned-turn-carries-no-attendee-rejection-reason (2026-09-06) —
+   * per-attendee blame for THIS day even when `accepted` > 0 (a genuinely
+   * PARTIALLY-rejected day: some quarter-hours on it collided with an
+   * attendee, others survived and made it into the offered slots).
+   * `blocked_by` above stays gated to accepted===0 (whole day dead) — this is
+   * the same per-attendee tally, from the same `dayReasons` map, but for the
+   * case blocked_by never covers. Filtered to ONLY the two attendee-scoped
+   * reject labels (`attendee_busy_collision:<email>` /
+   * `outside_attendee_work_hours:<email>`) — never a whole-day-off reason,
+   * which has no meaning on a day that already yielded slots. Lets
+   * claimChecker's invented_third_party_fact rule ground a true "Isaac can't
+   * make some of today's options" instead of having nothing to check against
+   * on a turn that returned slots.
+   *
+   * Same audience scoping as `blocked_by` — it carries the identical fact (a
+   * raw internal address + that person's busy count), so the email leg strips
+   * it at the ops chokepoint alongside it (`skills/meetings/ops.ts`, the
+   * `r.day_summary` walk). Any new consumer of this field inherits that rule.
+   */
+  attendee_partial_conflicts?: Array<{ email: string; slots_blocked: number }>;
 }
 
 /**
@@ -1552,49 +1573,60 @@ export async function findAvailableSlots(params: {
           acceptedPerDay.set(day, (acceptedPerDay.get(day) ?? 0) + 1);
         }
         const allDays = new Set<string>([...acceptedPerDay.keys(), ...dayReasons.keys()]);
+        // ONE parse of a day's reason map, read by BOTH per-attendee consumers
+        // below. Per-attendee labels (`attendee_busy_collision:<email>` /
+        // `outside_attendee_work_hours:<email>`) split out into a per-email
+        // tally, and collapse to their canonical prefix in `reasonCounts` so
+        // `top_reasons` stays clean. Readers: `blocked_by` (accepted===0 — the
+        // whole day is dead) and `attendee_partial_conflicts` (accepted > 0 —
+        // the day yielded slots but an attendee still lost quarter-hours on
+        // it). slots-returned-turn-carries-no-attendee-rejection-reason
+        // (2026-09-06) added the second reader; it first shipped with its OWN
+        // copy of this prefix-parsing, two parses of the same strings that
+        // could drift apart — one parse now, both readers off it.
+        const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'];
+        const splitDayReasons = (reasons: Map<string, number>) => {
+          const perAttendee = new Map<string, number>();
+          const reasonCounts = new Map<string, number>();
+          for (const [r, c] of reasons.entries()) {
+            const prefix = ATTENDEE_REASON_PREFIXES.find(p => r.startsWith(`${p}:`));
+            if (prefix) {
+              const email = r.slice(prefix.length + 1);
+              perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
+              reasonCounts.set(prefix, (reasonCounts.get(prefix) ?? 0) + c);
+            } else {
+              reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + c);
+            }
+          }
+          return { perAttendee, reasonCounts };
+        };
+        const rankAttendees = (perAttendee: Map<string, number>) =>
+          [...perAttendee.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([email, slots_blocked]) => ({ email, slots_blocked }));
         const daySummary = [...allDays].sort().map(date => {
           const accepted = acceptedPerDay.get(date) ?? 0;
+          const reasons = dayReasons.get(date);
+          const split = reasons ? splitDayReasons(reasons) : undefined;
           let top_reasons: string[] = [];
           let blocked_by: Array<{ email: string; slots_blocked: number }> | undefined;
-          if (accepted === 0) {
-            const reasons = dayReasons.get(date);
-            if (reasons) {
-              // Split per-attendee labels (`attendee_busy_collision:<email>`
-              // and `outside_attendee_work_hours:<email>`) out into the
-              // blocked_by aggregate, and collapse them to the single canonical
-              // label in top_reasons so output stays clean.
-              const perAttendee = new Map<string, number>();
-              const reasonCounts = new Map<string, number>();
-              for (const [r, c] of reasons.entries()) {
-                if (r.startsWith('attendee_busy_collision:')) {
-                  const email = r.slice('attendee_busy_collision:'.length);
-                  perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
-                  reasonCounts.set('attendee_busy_collision',
-                    (reasonCounts.get('attendee_busy_collision') ?? 0) + c);
-                } else if (r.startsWith('outside_attendee_work_hours:')) {
-                  const email = r.slice('outside_attendee_work_hours:'.length);
-                  perAttendee.set(email, (perAttendee.get(email) ?? 0) + c);
-                  reasonCounts.set('outside_attendee_work_hours',
-                    (reasonCounts.get('outside_attendee_work_hours') ?? 0) + c);
-                } else {
-                  reasonCounts.set(r, (reasonCounts.get(r) ?? 0) + c);
-                }
-              }
-              const ranked = [...reasonCounts.entries()]
-                .filter(([r]) => !IRRELEVANT_FOR_DAY.has(r))
-                .sort((a, b) => b[1] - a[1])
-                .map(([r]) => r);
-              top_reasons = ranked.slice(0, 2);
-              if (top_reasons.length === 0 && reasonCounts.size > 0) {
-                const first = reasonCounts.keys().next().value;
-                if (first) top_reasons = [first];
-              }
-              if (perAttendee.size > 0) {
-                blocked_by = [...perAttendee.entries()]
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([email, slots_blocked]) => ({ email, slots_blocked }));
-              }
+          // Partial-day attendee signal — only meaningful when the day DID
+          // yield slots (accepted > 0); the accepted===0 case already carries
+          // the equivalent fact via `blocked_by` below, and a whole-day-off
+          // reason has no meaning on a day that already produced offers.
+          const attendee_partial_conflicts = (accepted > 0 && split && split.perAttendee.size > 0)
+            ? rankAttendees(split.perAttendee) : undefined;
+          if (accepted === 0 && split) {
+            const ranked = [...split.reasonCounts.entries()]
+              .filter(([r]) => !IRRELEVANT_FOR_DAY.has(r))
+              .sort((a, b) => b[1] - a[1])
+              .map(([r]) => r);
+            top_reasons = ranked.slice(0, 2);
+            if (top_reasons.length === 0 && split.reasonCounts.size > 0) {
+              const first = split.reasonCounts.keys().next().value;
+              if (first) top_reasons = [first];
             }
+            if (split.perAttendee.size > 0) blocked_by = rankAttendees(split.perAttendee);
           }
           // gh#200 — the away span's real end (already formatted — see
           // oofUntilByDay above), only when it reaches past this one day
@@ -1604,6 +1636,7 @@ export async function findAvailableSlots(params: {
           return {
             date, accepted, top_reasons,
             ...(blocked_by ? { blocked_by } : {}),
+            ...(attendee_partial_conflicts ? { attendee_partial_conflicts } : {}),
             ...(oof_until_display ? { oof_until_display } : {}),
           };
         });

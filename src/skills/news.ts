@@ -287,16 +287,69 @@ function isEntityMentionGoal(goal: string, entity: string): boolean {
   return entity.length > 0 && goal.toLowerCase().includes(entity);
 }
 
-function filterUngroundedEntitySources(goal: string, sources: NewsSource[], ownerCompany: string): NewsSource[] {
+// URL segments that namespace an ACCOUNT on a third-party host — the segment
+// right after one of these is the account holder's own handle
+// (youtube.com/c/x, youtube.com/channel/x, youtube.com/user/x,
+// linkedin.com/company/x). Deliberately narrow: a directory / tag / article
+// segment that merely names the entity is a genuine external mention.
+const ACCOUNT_NAMESPACE_SEGMENTS = new Set(['c', 'channel', 'user', 'company']);
+
+// news-brief-admits-owner-own-published-sources — grounding alone isn't the
+// whole test. The owner's OWN blog posts and case studies trivially "mention"
+// his own company (they ARE about it), so the containment check above admits
+// exactly the self-promotional material a "Reflectiz mentions" topic exists
+// to EXCLUDE (the topic is explicitly scoped "outside reflectiz.com"). A plain
+// domain block on the tenant's own domain isn't enough either — the owner
+// named YouTube specifically, and a company's own channel is self-published
+// from a host it doesn't own. So the test is self-SOURCE, not self-domain.
+// A source is self-published if (a) its host IS the tenant's own domain
+// (derived from `profile.user.email`'s domain — never hardcoded, so this
+// holds for any tenant), or (b) its URL carries the entity as an ACCOUNT
+// HANDLE — an `@entity` segment (youtube.com/@reflectiz, medium.com/@reflectiz)
+// or `entity` directly under an account namespace (youtube.com/c/reflectiz).
+// A bare path segment naming the entity is NOT self-published: third-party
+// directory, tag and article URLs legitimately carry it
+// (cybernews.com/companies/reflectiz, crunchbase.com/organization/reflectiz,
+// g2.com/products/reflectiz/reviews, a news site's /tag/reflectiz hub) and
+// those are exactly the external mentions the topic wants.
+// `entity` must already be lowercased by the caller.
+function isSelfPublishedSource(url: string, entity: string, ownDomain: string): boolean {
+  let hostname = '';
+  let pathname = '';
+  try {
+    const parsed = new URL(url);
+    hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    pathname = parsed.pathname.toLowerCase();
+  } catch {
+    return false; // malformed URL — fail open (not excluded), matches the rest of this file's fail-open discipline
+  }
+  if (ownDomain && (hostname === ownDomain || hostname.endsWith(`.${ownDomain}`))) return true;
+  const entitySlug = entity.replace(/[^\p{L}\p{N}]/gu, '');
+  if (!entitySlug) return false;
+  const segments = pathname.split('/').filter(Boolean);
+  return segments.some((seg, i) => {
+    if (seg.replace(/^@/, '').replace(/[^\p{L}\p{N}]/gu, '') !== entitySlug) return false;
+    if (seg.startsWith('@')) return true;                                    // youtube.com/@x, medium.com/@x
+    return i > 0 && ACCOUNT_NAMESPACE_SEGMENTS.has(segments[i - 1]);         // youtube.com/c/x, linkedin.com/company/x
+  });
+}
+
+function filterUngroundedEntitySources(
+  goal: string,
+  sources: NewsSource[],
+  ownerCompany: string,
+  ownDomain: string,
+): NewsSource[] {
   const entity = ownerCompany.trim().toLowerCase();
   if (!isEntityMentionGoal(goal, entity)) return sources; // not an "own company mention" goal — untouched
   const grounded = sources.filter(s => containsEntity(s.title, entity) || containsEntity(s.snippet, entity));
-  if (grounded.length !== sources.length) {
-    logger.info('news — dropped ungrounded entity-mention source(s)', {
-      goal, before: sources.length, after: grounded.length,
+  const external = grounded.filter(s => !isSelfPublishedSource(s.url, entity, ownDomain));
+  if (external.length !== sources.length) {
+    logger.info('news — dropped ungrounded/self-published entity-mention source(s)', {
+      goal, before: sources.length, groundedButSelf: grounded.length - external.length, after: external.length,
     });
   }
-  return grounded;
+  return external;
 }
 
 /**
@@ -309,6 +362,9 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     const recency = opts.recencyDays ?? NEWS_MORNING_RECENCY_DAYS;
     const prefs = parseNewsPrefs(readSkillPreferences(profile, 'news'));
     const ownerCompany = (profile.user.company ?? '').trim();
+    // Tenant's own domain, derived from his work email — never hardcoded, so
+    // this holds for any tenant (news-brief-admits-owner-own-published-sources).
+    const ownDomain = (profile.user.email.split('@')[1] ?? '').trim().toLowerCase();
 
     // Goal set: a narrowed topic short-circuits the planner (the owner asked for
     // ONE thing — search it broad, the compose weighs sources). Otherwise the LLM
@@ -340,7 +396,7 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     // before it ever reaches the brief-composition prompt as a candidate.
     const perGoal = await Promise.all(goals.map(async g => {
       const found = await searchGoal(g, recency, steer);
-      return filterUngroundedEntitySources(g, found, ownerCompany);
+      return filterUngroundedEntitySources(g, found, ownerCompany, ownDomain);
     }));
 
     const sources: NewsSource[] = [];

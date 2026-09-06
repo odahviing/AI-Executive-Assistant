@@ -804,21 +804,28 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // history within a couple turns; the (separate, capped) viewed-ledger keeps
         // it referenceable. Non-fatal + shape-guarded so an unexpected result is a
         // no-op, never a throw.
-        if (toolUse.name === 'get_calendar' && Array.isArray((r as any).events) && input.threadTs) {
+        if (toolUse.name === 'get_calendar' && input.threadTs) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { recordViewedThreadEvents } = require('../../utils/threadEventLedger') as
               typeof import('../../utils/threadEventLedger');
-            const viewed = ((r as any).events as Array<Record<string, any>>)
-              .filter(e => typeof e?.id === 'string' && typeof e?.start?.dateTime === 'string')
-              .map(e => {
-                const d = DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? profile.user.timezone });
-                return {
-                  subject: typeof e.subject === 'string' ? e.subject : undefined,
-                  eventId: e.id as string,
-                  dateIso: d.isValid ? d.toFormat('yyyy-MM-dd') : '',
-                };
-              });
+            // get_calendar has TWO result shapes: a BARE ProcessedEvent[] when it has
+            // no note to attach, and the SAME list wrapped as `{ events, ...notes }`
+            // the moment it does - WE day, optional-join, colleague view
+            // (calendarReads.ts:311). Reading only the wrapped shape left this ledger
+            // dead on the ordinary owner read, which is most of them. Same dual-shape
+            // normalisation as the tool summary in turnHelpers.ts:270.
+            // ProcessedEvent (src/skills/meetings/ops/analysis.ts:92)
+            // — no `.start.dateTime`; the local date lives in `_localDate`
+            // (already yyyy-MM-dd, owner TZ), matching LedgerEntry.dateIso directly.
+            const rawViewed = Array.isArray(result) ? result : (r as any).events;
+            const viewed = (Array.isArray(rawViewed) ? rawViewed as Array<Record<string, any>> : [])
+              .filter(e => typeof e?.id === 'string' && typeof e?._localDate === 'string')
+              .map(e => ({
+                subject: typeof e.subject === 'string' ? e.subject : undefined,
+                eventId: e.id as string,
+                dateIso: e._localDate as string,
+              }));
             recordViewedThreadEvents(input.threadTs, viewed);
           } catch { /* non-fatal */ }
         }

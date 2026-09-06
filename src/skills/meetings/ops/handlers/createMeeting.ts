@@ -1275,6 +1275,18 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             category: plan.category,
+            // gh#4.8.7 attendee-signal-dropped-on-create-refusal — when this
+            // FAILED confirm is the attendee-collision gate (planMeeting sets
+            // `attendeeBusyLabel` only for that gate, never for the unrelated
+            // 'time already passed' confirm_override), carry the same
+            // structured notice field move_meeting's booked-through path
+            // already uses (`_attendee_busy_note`, moveMeeting.ts:2239) so a
+            // downstream reader can tell a real attendee-availability check
+            // ran here too, from field presence — never by parsing
+            // `violation_label`'s prose.
+            ...(plan.action === 'confirm_override' && plan.attendeeBusyLabel
+              ? { _attendee_busy_note: plan.attendeeBusyLabel }
+              : {}),
             // v2.7.2 — deferred_action_hint: the original tool call, ready to be
             // stamped on a follow-up create_approval. Orchestrator auto-attaches
             // this to payload.deferred_action when Sonnet raises a
@@ -1304,6 +1316,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             category: plan.category,
+            // gh#4.8.7 combined-ask variant — the attendee-collision gate can
+            // still have fired even though location outranked it for `action`
+            // here; same field, same presence-only convention as the
+            // confirm_override branch above.
+            ...(plan.attendeeBusyLabel ? { _attendee_busy_note: plan.attendeeBusyLabel } : {}),
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: 'Office day + external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call create_meeting with either is_online=true or location=<full office address>.',
           };
@@ -1317,6 +1334,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             category: plan.category,
+            // gh#4.8.7 combined-ask variant — same carry-through as
+            // ask_location_mode above.
+            ...(plan.attendeeBusyLabel ? { _attendee_busy_note: plan.attendeeBusyLabel } : {}),
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
             _note: 'Meeting Room is taken at this time and the group is too large for the small-room fallback. Ask the owner whether to push the time, trim the attendee list, or pick a different day.',
           };

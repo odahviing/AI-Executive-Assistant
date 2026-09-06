@@ -1180,7 +1180,7 @@ Everything about booking meetings — direct calendar operations — lives here.
 
 ${isOwner === false
   ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots enforces all of it (hours, days, buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
-  : `${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly.
+  : `${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly. This describes ${firstName}'s OWN day only — a colleague's working hours are a separate fact, from \`get_person_memory\` or what they've told you directly, never inferred from his numbers below.
 - Office days: ${officeDays} · ${officeHours}
 - Home days: ${homeDays} · ${homeHours}
 - Days not listed above are days OFF. Never propose work meetings on those days.

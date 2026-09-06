@@ -12,8 +12,9 @@
  *
  *   1. (v3.4.6) Close matching spine REQUESTS — pending approvals are requests
  *      now (the legacy approvals table is retired). Match order: tier-0
- *      fulfillingRequestId (skip — the resolver owns it), then
- *      outcome_external_event_id, details meeting_id, origin_thread_ts, and
+ *      fulfillingRequestId (skip — whichever caller stamped it owns that one
+ *      request's close: a resolver-driven replay, or autoMove's own auto_move
+ *      row), then outcome_external_event_id, details meeting_id, origin_thread_ts, and
  *      (v4.5.x) subject+start for an orphaned create_meeting approval that a
  *      direct tool call fulfilled with none of the above to go on.
  *      See step 5 for the full cascade.
@@ -72,6 +73,25 @@ export interface CloseMeetingArtifactsResult {
   /** v4.2.x — colleagues told that the time they were given no longer holds. */
   correctionsRelayed: number;
   /**
+   * elan-hold-survives-the-move-that-resolved-it (2026-09-06) — the
+   * `colleague_slack_id` of every colleague step 2a (`relayVoidedNotices`)
+   * ACTUALLY delivered a corrected time to (a strict subset of
+   * `correctionsRelayed`'s count — same population, just named). Exists so a
+   * caller that ALSO runs its own colleague-notify loop after calling this
+   * function (autoMove.ts's `executeInternalAutoMove`, which DMs every
+   * attendee "meeting moved" unconditionally) can skip re-notifying someone
+   * this cascade just told, without re-deriving the match itself.
+   *
+   * Deliberately NOT widened to "every colleague whose request this cascade
+   * closed" — most of step 2's closures are SILENT (no cap slot left today,
+   * profile missing, or the told time happened to already match) precisely
+   * because relayVoidedNotices declined to speak. A colleague in that
+   * population was told NOTHING by this function, so a caller skipping them
+   * on this list's say-so would leave them with no notice at all — the exact
+   * silence R3 bars. Only a CONFIRMED delivery belongs here.
+   */
+  correctedColleagueSlackIds: string[];
+  /**
    * vanished-sweep-request-close-invisible (2026-08-31) — step 5's spine
    * request closures (closeMatchedRequestWithRelay, both the direct
    * outcome_external_event_id tier and the details/thread/orphaned-approval
@@ -104,11 +124,20 @@ export async function closeMeetingArtifacts(params: {
    */
   bookingThreadTs?: string;
   /**
-   * v3.4.6 (spine collapse) — the HARD approve→book link. When this booking is
-   * a resolver-driven replay fulfilling a specific request, the resolver stamps
-   * that request's id here (via the replay args → tool handler). This function
-   * then SKIPS that exact request — the resolver owns its close + relay right
-   * after the replay returns. This is what removes the resolver-vs-cascade
+   * v3.4.6 (spine collapse) — the HARD approve→book link. The caller that owns
+   * this request's own close stamps its id here; this function then SKIPS
+   * that exact request so the caller's close + relay is the only one that
+   * runs on it. Two stampers today: (1) a resolver-driven replay fulfilling a
+   * specific request stamps it via the replay args → tool handler (the
+   * `_fulfilling_request_id` plumbing in skills/meetings/ops/handlers/
+   * {calendarReads,createMeeting,moveMeeting}.ts) — the resolver owns that
+   * request's close + relay right after the replay returns; (2) (2026-09-06)
+   * calendarHealth/autoMove.ts stamps its OWN in_flight `auto_move` row's id
+   * here (autoMove.ts:273) and closes that row itself, resolved /
+   * `auto_move_executed`, right after the notify loop (autoMove.ts:327) —
+   * that closure_reason is load-bearing for the revert path and the re-move
+   * guard, so this cascade must not race it closed first with a different
+   * reason. Either way, this is what removes the resolver/caller-vs-cascade
    * relay race at the root: exactly one owner per booking, decided by id, not
    * reconstructed by fuzzy subject/thread match. All OTHER artifacts still
    * cascade normally.
@@ -173,6 +202,7 @@ export async function closeMeetingArtifacts(params: {
     outreachClosed: 0,
     calendarIssuesResolved: 0,
     correctionsRelayed: 0,
+    correctedColleagueSlackIds: [],
     requestsClosed: 0,
   };
 
@@ -234,7 +264,9 @@ export async function closeMeetingArtifacts(params: {
         // unchanged time is. So it fires ONLY when the executed instant differs
         // from what that colleague was actually told, and at most once per event
         // per day.
-        result.correctionsRelayed = await relayVoidedNotices(params, matchingOutreach);
+        const voidedRelay = await relayVoidedNotices(params, matchingOutreach);
+        result.correctionsRelayed = voidedRelay.relayedCount;
+        result.correctedColleagueSlackIds = voidedRelay.correctedColleagueSlackIds;
 
         // v3.1.1 — close the linked REQUEST for each match: the request owns the
         // lifecycle, so closing it IS closing the outreach, and it is what drops the
@@ -362,7 +394,11 @@ export async function closeMeetingArtifacts(params: {
 
       const directMatches = getRequestsByExternalEventId(params.ownerUserId, params.meetingId);
       for (const r of directMatches) {
-        // tier-0 skip — the resolver owns this request's close + relay.
+        // tier-0 skip — the caller that stamped this id owns its close +
+        // relay: a resolver-driven replay, or calendarHealth/autoMove.ts:273
+        // stamping its OWN auto_move row and closing it resolved /
+        // `auto_move_executed` itself at autoMove.ts:326. See the
+        // `fulfillingRequestId` param doc for both.
         if (params.fulfillingRequestId && r.id === params.fulfillingRequestId) continue;
         // event-id-linked-request-never-notified-on-delete (2026-08-30) — this
         // tier used to hardcode `state: 'cancelled'` regardless of `reason`, so
@@ -454,8 +490,9 @@ export async function closeMeetingArtifacts(params: {
       );
 
       for (const r of open) {
-        // tier-0 (the resolver owns that request's close + relay) is already
-        // excluded from `open` itself, above — nothing left to skip here for it.
+        // tier-0 (the caller that stamped it owns that request's close +
+        // relay) is already excluded from `open` itself, above — nothing left
+        // to skip here for it.
         if (directMatches.some(d => d.id === r.id)) continue;
         let matched = payloadReferencesMeeting(r.details_json, params.meetingId, params.reason);
 
@@ -465,8 +502,9 @@ export async function closeMeetingArtifacts(params: {
         // Robust to the meeting being titled differently from the request
         // (Dina: "Gong call" vs "Gong <> Reflectiz"). v3.4.6 — the fragile
         // exact-subject tier that used to back this up is DELETED; tier-0
-        // (resolver-driven) + this thread-match cover the real cases, and a
-        // renamed meeting never false-matches a stale same-subject request.
+        // (the stamping caller's own skip) + this thread-match cover the real
+        // cases, and a renamed meeting never false-matches a stale
+        // same-subject request.
         if (!matched && threadMatchId && r.id === threadMatchId) {
           // thread-match-tier-no-deferred-action-check (2026-08-31) — a thread
           // match only proves this is the sole open colleague request in the
@@ -561,7 +599,12 @@ function readToldNotice(payloadJson: string | null | undefined): { start?: strin
  * outreach + request pair) is not in that snapshot and is therefore not closed by
  * the same pass — it becomes the new record of what the colleague was last told.
  *
- * Returns the number of colleagues actually told.
+ * Returns the number of colleagues actually told, and their slack ids
+ * (elan-hold-survives-the-move-that-resolved-it, 2026-09-06 — so a caller
+ * that runs its own colleague-notify loop after this function can skip
+ * anyone it just confirmed telling; see CloseMeetingArtifactsResult's
+ * `correctedColleagueSlackIds` doc for why this is a CONFIRMED-delivery list
+ * only, never every colleague this pass merely closed).
  */
 async function relayVoidedNotices(
   params: {
@@ -572,13 +615,14 @@ async function relayVoidedNotices(
     newEndIso?: string;
   },
   openNotices: OutreachJob[],
-): Promise<number> {
+): Promise<{ relayedCount: number; correctedColleagueSlackIds: string[] }> {
+  const none = { relayedCount: 0, correctedColleagueSlackIds: [] as string[] };
   // FAIL-SAFE. A call site that supplies no executed time cannot tell us whether
   // anything was voided, so nothing is said. This is what makes the two halves of
   // option C safe to land in either order.
-  if (!params.newStartIso || !params.newEndIso) return 0;
+  if (!params.newStartIso || !params.newEndIso) return none;
   const newMs = new Date(params.newStartIso).getTime();
-  if (!Number.isFinite(newMs)) return 0;
+  if (!Number.isFinite(newMs)) return none;
 
   // Only notices this write actually CONTRADICTS. Instants, not strings: the told
   // value carries an offset ("...T12:45:00.000+03:00") and the executed value is
@@ -594,7 +638,7 @@ async function relayVoidedNotices(
     if (!Number.isFinite(toldMs) || toldMs === newMs) continue;
     contradicted.push({ row, told, subject });
   }
-  if (contradicted.length === 0) return 0;
+  if (contradicted.length === 0) return none;
 
   // The owner's cap: at most ONE correction per event per day. Checked ONCE, before
   // the loop — a meeting with three notified attendees is one correction pass, not
@@ -608,7 +652,7 @@ async function relayVoidedNotices(
     logger.info('closeMeetingArtifacts — correction already relayed for this event today, staying quiet', {
       meetingId: params.meetingId, wouldHaveTold: contradicted.length,
     });
-    return 0;
+    return none;
   }
 
   // Profile carries the owner's name + timezone for the notice. Cached behind
@@ -621,7 +665,7 @@ async function relayVoidedNotices(
     logger.warn('closeMeetingArtifacts — no profile for owner, voided notice NOT relayed', {
       ownerUserId: params.ownerUserId, meetingId: params.meetingId, wouldHaveTold: contradicted.length,
     });
-    return 0;
+    return none;
   }
 
   // Not a hand-rolled send: the SAME function that sent the notice being corrected.
@@ -635,6 +679,7 @@ async function relayVoidedNotices(
     typeof import('../skills/meetingReschedule');
 
   let relayed = 0;
+  const correctedColleagueSlackIds: string[] = [];
   for (const { row, told, subject } of contradicted) {
     try {
       const delivered = await notifyColleagueOfMove({
@@ -656,7 +701,10 @@ async function relayVoidedNotices(
       });
       // Count only what actually landed — an undelivered notice cancels its own
       // ask through the spine and must not be reported as a correction made.
-      if (delivered) relayed++;
+      if (delivered) {
+        relayed++;
+        correctedColleagueSlackIds.push(row.colleague_slack_id);
+      }
     } catch (err) {
       // One colleague failing must not silence the rest.
       logger.warn('closeMeetingArtifacts — voided-notice relay threw for one colleague, continuing', {
@@ -670,7 +718,11 @@ async function relayVoidedNotices(
       meetingId: params.meetingId, count: relayed, newStart: params.newStartIso,
     });
   }
-  return relayed;
+  // Dedup'd — a colleague can hold two open reschedule notices on the same
+  // meeting (two prior corrections, say), and `relayed` above intentionally
+  // still counts each row told; but a caller consuming this to decide
+  // "skip re-notifying this person" wants each id once.
+  return { relayedCount: relayed, correctedColleagueSlackIds: [...new Set(correctedColleagueSlackIds)] };
 }
 
 /**
@@ -925,8 +977,9 @@ async function closeMatchedRequestWithRelay(
     try {
       // Routed through the spine's ONE shared closure relay
       // (core/requests/requesterRelay.ts) — this path only fires for
-      // NON-resolver bookings (tier-0 hands resolver-driven requests back to
-      // the resolver, whose notifyRequesterOfDecision owns those). The helper
+      // bookings that stamped no tier-0 id (a stamped request goes back to
+      // the caller that stamped it — the resolver's notifyRequesterOfDecision
+      // for a replay, autoMove's own closeRequest for its auto_move row). The helper
       // carries the requester's language, the leak filter (params.subject/
       // r.subject could print an internal auto-generated "… needs your
       // input" verbatim into a colleague's DM), origin-thread MPIM/DM

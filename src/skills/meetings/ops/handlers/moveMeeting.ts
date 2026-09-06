@@ -1118,12 +1118,27 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 const moveCheckAttendees = requiredAttendees
                   .map(a => a.email)
                   .filter(e => e !== ownerEmailLc && e !== askerEmail);
+                // move-check-attendee-no-stated-zone-must-not-be-skipped
+                // (2026-09-06, owner ruling) — pass the owner's TZ as the #M3
+                // fallback, exactly as find_available_slots does
+                // (findAvailableSlots.ts:935). Without a fallback,
+                // loadAttendeeAvailabilityForEmails silently `continue`s past
+                // any attendee with no stored people_memory timezone
+                // (attendeeAvailability.ts:200-201) — dropped from the
+                // work-hours clip entirely, so outside_attendee_work_hours
+                // could never name them and an off-hours move went through
+                // unflagged. Captured in a variable (not spread inline) so
+                // the narration below can read each entry's `assumed` flag
+                // and hedge honestly when the zone was guessed, not stated.
+                let moveAttendeeAvailability: ReturnType<typeof attendeeCheckParams>['attendeeAvailability'];
                 if (fromIso && toIso) {
+                  const moveCheckParams = attendeeCheckParams(moveCheckAttendees, userEmail, timezone);
+                  moveAttendeeAvailability = moveCheckParams.attendeeAvailability;
                   validSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
                     durationMinutes: durationMin,
-                    ...attendeeCheckParams(moveCheckAttendees, userEmail),
+                    ...moveCheckParams,
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
@@ -1178,7 +1193,18 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     humanReason = `${nameForEmail(brokenRule.split(':')[1] ?? '')} isn't free then`;
                   } else if (brokenRule && brokenRule.startsWith('outside_attendee_work_hours')) {
                     reasonCode = 'attendee_unavailable';
-                    humanReason = `it's outside ${nameForEmail(brokenRule.split(':')[1] ?? '')}'s working hours`;
+                    const flaggedEmail = brokenRule.split(':')[1] ?? '';
+                    // assumed-attendee-hours-narrated-as-fact (4.4.9, 3e839d6) —
+                    // when the flagged attendee had no stored timezone and this
+                    // check ran on the #M3 owner-frame fallback (`assumed:
+                    // true`), say so honestly instead of asserting a guess as
+                    // fact — same wording as the search path's off_hours+assumed
+                    // hedge (findAvailableSlots.ts:221-224).
+                    const assumedZone = moveAttendeeAvailability
+                      ?.find(a => a.email.toLowerCase() === flaggedEmail.toLowerCase())?.assumed === true;
+                    humanReason = assumedZone
+                      ? `it's probably outside ${nameForEmail(flaggedEmail)}'s working hours — I'm not certain of their actual schedule`
+                      : `it's outside ${nameForEmail(flaggedEmail)}'s working hours`;
                   } else {
                     reasonCode = 'not_rule_compliant';
                     humanReason = labelFor(brokenRule);
