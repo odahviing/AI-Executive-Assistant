@@ -384,7 +384,7 @@ ${pendingApprovalsSection}` : '';
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
 
   // The tool set this request actually ships — the same allowlist + scope
-  // filter the dispatch chokepoint enforces (registry.ts:487/517). Everything
+  // filter the dispatch chokepoint enforces (registry.ts's filterToolsByScope). Everything
   // below that CLAIMS a capability derives from this set, so the prompt cannot
   // describe a tool the request omits, and cannot drift when the allowlist
   // changes. `authority` must match the real getSkillTools call in
@@ -397,8 +397,8 @@ ${pendingApprovalsSection}` : '';
   // caller can reach one of its tools. This used to be COLLEAGUE-only (the
   // owner branch called buildSkillsPromptSection directly, unfiltered) on the
   // theory that the classifier already narrows the owner's tools and each
-  // skill's own `if (scopes && …) return ''` self-gate (calendarHealth.ts:217,
-  // summary.ts:1170, venue.ts:361) covers the rest. That theory misses two
+  // skill's own `if (scopes && …) return ''` self-gate (calendarHealth.ts:230,
+  // summary.ts:1194, venue.ts:381) covers the rest. That theory misses two
   // real cases: (1) several active skills — meetings.ts, social.ts,
   // outreach.ts, tasks/skill.ts — never added that self-gate at all, so their
   // full prose always rendered regardless of scope; (2) NONE of those
@@ -421,7 +421,7 @@ ${pendingApprovalsSection}` : '';
   // gh#24 row 124 (owner ruling) — 'social' is a SECOND deliberate exception,
   // for a different reason than 'news'. The axis this filter polices is
   // CAPABILITY prose: a promise to DM/research/escalate that dies on
-  // `not_permitted` when the backing tool didn't ship. social.ts:261's
+  // `not_permitted` when the backing tool didn't ship. social.ts:267's
   // PERSONA block is IDENTITY prose — who she IS (friend-of-the-team
   // warmth), not what she can do — and it self-gates on nothing, same as
   // every turn before row 121 existed. Gating identity on tool reachability
@@ -831,6 +831,7 @@ RULE 2d — Close the loop when the owner handles something himself. When the ow
 
 RULE 3 — Never promise to relay without recording it.
 Before the turn ends, any "I'll let ${firstName} know / flag this / check with him / get back to you / pass this along" MUST be backed by a real tool call (create_task, create_approval for owner-decision asks, manage_preference, shadow notify). Same applies to scheduling escalations ("let me check with him about moving his lunch" → MUST call create_approval with kind=policy_exception this turn). If no tool fits: don't promise — "That's something ${firstName} handles directly — can you ping him?" Empty promises permanently burn trust.
+When that promise names a TIME (a reminder, follow-up, or task), state the time the tool actually returned (create_task's \`due\`, update_task's \`new_due\`) — same whether you're telling ${firstName} or the colleague who asked — even when it lands earlier/later than what they said (e.g. a work-hours default). That returned value is what you say back, never the requester's own phrasing or a smoothed-over guess.
 
 RULE 4 — Honest about info sources, human in phrasing.
 ${webLookup ? `You have ${webLookup}. ` : ''}Say "I looked into it" / "from what I found" — never "web search / extract / browsing" in replies.
@@ -979,7 +980,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // gh#24 row 121 (Part B, the owner's own ask) — EXTENDED in place, not
   // duplicated. The GATE already treats this text as external — runOutputGates
   // routes transport:'email' to its own leg, which calls
-  // runHumanGate(..., 'external', ...) unconditionally (runOutputGates.ts:562)
+  // runHumanGate(..., 'external', ...) unconditionally (runOutputGates.ts:773)
   // — but the PROMPT still read as an ordinary internal owner turn. Two more
   // requirements, both his words: a voice that works on a stranger (no
   // internal shorthand, no assuming the reader knows who's writing or that an
@@ -988,7 +989,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // gate can enforce, so they belong here, not in code.
   //
   // gh#24 row 124 — this precedence clause never had to name what it beat,
-  // because until row 124 the PERSONA block (social.ts:261) was silently
+  // because until row 124 the PERSONA block (social.ts:267) was silently
   // absent from every email turn (caught by the same channel clamp as its
   // tools), so there was nothing to be ambiguous against in production. Now
   // that PERSONA renders on email too, "the general chat rules above" is not

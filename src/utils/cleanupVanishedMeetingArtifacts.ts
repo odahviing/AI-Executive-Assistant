@@ -164,7 +164,7 @@ export async function cleanupVanishedMeetingArtifacts(params: {
         reason: 'deleted',
         // requester-close-loop-never-notifies-cancelled-hold (2026-08-30) — this
         // sweep INFERS the delete from `verifyEventDeleted`, which is true on any
-        // 404 (calendarReads.ts:1313-1329): a rotated or stale id reads exactly
+        // 404 (connectors/graph/calendarReads.ts): a rotated or stale id reads exactly
         // like a real cancellation. The cascade's colleague close-loop is
         // therefore suppressed for this caller — artifacts still close (that is
         // this sweep's job), but no human is told an outcome we cannot vouch for.

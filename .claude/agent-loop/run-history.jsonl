@@ -74,3 +74,8 @@
 {"ts":"2026-09-06T08:57:07.793Z","runId":"wf_f67c3cd9-c31","stamp":"triggered","trigger":"user"}
 {"ts":"2026-09-06T09:32:37.591Z","runId":"wf_f67c3cd9-c31","stamp":"results-in"}
 {"ts":"2026-09-06T09:35:03.379Z","runId":"wf_f67c3cd9-c31","stamp":"report-written","headline":"Run wf_f67c3cd9-c31 — in: 0 tickets · 0 day(s) of logs · 0 backlog re-reads (owner-ruled preset, editor skipped)\nout: 13 built · 0 already-fixed · 0 built-with-gap · 8 bounced (7 cleared / 1 ruled by you) · 4/4 joint-traced (0 disagree) · 13/13 outcome-traced · 0 converted · 1 queued\nboard: net -2 → 1 open row — 0 still-real · 1 need a re-read · 0 cite no file · 1 rulable · 0 waiting on a verb\nyour 1 row awaits you: 0 from tonight · 0 re-surfaced · 1 found by the loop","pendingOwner":0}
+{"ts":"2026-09-06T23:05:06.006Z","runId":"wf_4851e2ec-a37","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-06T23:46:21.738Z","runId":"wf_4851e2ec-a37","stamp":"results-in"}
+{"ts":"2026-09-06T23:46:54.950Z","runId":"wf_4851e2ec-a37","stamp":"report-written","headline":"Run wf_4851e2ec-a37 — in: 0 tickets, 1 day of logs, 0 backlog re-reads / out: 1 built, 1 bounced (cleared), 2 queued / board: net +1 -> 8 open rows, 8 rulable / your 8 rows await you: 0 from tonight, 0 re-surfaced, 8 found by the loop","pendingOwner":0}
+{"ts":"2026-09-07T10:35:59.640Z","runId":"wf_55ef2447-54f","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-07T11:15:30.988Z","runId":"wf_55ef2447-54f","stamp":"results-in"}

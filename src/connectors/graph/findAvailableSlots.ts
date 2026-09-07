@@ -5,10 +5,46 @@ import { slotDayMinutes } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
-import type { RuleCheckResult } from '../../utils/scheduleRules';
+import type { RuleCheckResult, SearchRejectLabel } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
+// Re-exported (not just imported) so a reader of the search-path vocabulary
+// (violationLabels.ts, turnHelpers.ts) can pull `SearchRejectLabel` from
+// whichever of the two files it already imports from — this one for the
+// combined `SearchRejectReason`, scheduleRules.ts for the checkSlot-facing
+// `RuleViolationKind` side — without needing both import paths.
+export type { SearchRejectLabel };
 import { attendeeTzForDay, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
+
+/**
+ * AttendeeTaggedReason — the two `ATTENDEE_REASON_PREFIXES`
+ * (utils/attendeeAvailability.ts) as the walker actually emits them: tagged
+ * `:<email>` at the two reject sites below (`attendee_busy_collision:…` /
+ * `outside_attendee_work_hours:…`). Combined with `SearchRejectLabel`
+ * (scheduleRules.ts — the owner-rule half of this same vocabulary) into
+ * `SearchRejectReason`, which is what `CursorOutcome.reason` and
+ * `diagnosticsOut.rejectedCounts`/`rejectedExamples` are typed against below —
+ * this file is where both halves are already imported, so it is the one place
+ * that can name the combined type without a new cross-import.
+ */
+export type AttendeeTaggedReason = `${(typeof ATTENDEE_REASON_PREFIXES)[number]}:${string}`;
+export type SearchRejectReason = SearchRejectLabel | AttendeeTaggedReason;
+
+/**
+ * The first search-path reject reason a diagnostics probe recorded, typed
+ * against the declared vocabulary. `Object.keys` erases a `Record`'s literal
+ * key type back to `string[]` regardless of how the object was declared, so
+ * every caller that used to do its own `Object.keys(counts)[0]` (createMeeting.ts,
+ * moveMeeting.ts, this file's own candidate-slots / preferred-slot branches)
+ * got an untyped `string` back — one cast, here, instead of four un-typed
+ * copies. A narrow single-slot check normally has exactly one entry; when
+ * several fire (rare), the caller gets some real fact rather than none.
+ */
+export function firstRejectReason(
+  counts: Partial<Record<SearchRejectReason, number>> | undefined,
+): SearchRejectReason | undefined {
+  return (Object.keys(counts ?? {}) as SearchRejectReason[])[0];
+}
 
 /**
  * ONE attendee-side conflict tagged onto a KEPT slot (see `tagAttendeeConflicts`
@@ -86,12 +122,12 @@ type CursorOutcome =
   | { kind: 'accept'; dayKey: string; candidate: SlotCandidate & { density?: number } }
   | {
       kind: 'reject';
-      reason: string;
+      reason: SearchRejectReason;
       iso: string;
       outOfWorkHours?: boolean;
       conflicting?: NonNullable<RuleCheckResult['overCommitment']>;
     }
-  | { kind: 'day_skip'; dayKey: string; reason: string }
+  | { kind: 'day_skip'; dayKey: string; reason: SearchRejectLabel }
   | { kind: 'silent' };
 
 /**
@@ -338,8 +374,8 @@ export async function findAvailableSlots(params: {
   // diagnostics ride on the same call. No return-shape change so existing
   // callers are unaffected.
   diagnosticsOut?: {
-    rejectedCounts?: Record<string, number>;
-    rejectedExamples?: Record<string, string[]>;
+    rejectedCounts?: Partial<Record<SearchRejectReason, number>>;
+    rejectedExamples?: Partial<Record<SearchRejectReason, string[]>>;
     /**
      * Per-day summary across the search window. One entry per workday touched
      * by the slot walker (off-workweek days like Friday/Saturday are omitted).
@@ -901,12 +937,15 @@ export async function findAvailableSlots(params: {
     // rejected?" by showing the per-rule breakdown at the end of the search.
     // Each rejection point increments its bucket; we also track up to 5 example
     // rejected slots per reason for grepping in logs.
-    const rejectedCounts: Record<string, number> = {};
-    const rejectedExamples: Record<string, string[]> = {};
+    const rejectedCounts: Partial<Record<SearchRejectReason, number>> = {};
+    const rejectedExamples: Partial<Record<SearchRejectReason, string[]>> = {};
     // Per-day reason aggregation. Same trackReject feeds both global counts
     // and per-day. The per-day map drives the daySummary that's surfaced to
     // Sonnet via diagnosticsOut so she can narrate "Monday was fully booked"
-    // instead of fabricating "Monday is a day off."
+    // instead of fabricating "Monday is a day off." Kept keyed by plain
+    // `string` (not SearchRejectReason): `splitDayReasons` below collapses an
+    // attendee-tagged reason to its bare prefix before it ever lands here, a
+    // narration-only domain of its own, not the declared per-slot vocabulary.
     const dayReasons = new Map<string, Map<string, number>>();
     // Map a checkSlot verdict to the search-path reject label so day_summary
     // narration is unchanged after the validator unification. Moved to
@@ -941,12 +980,12 @@ export async function findAvailableSlots(params: {
     // out-of-hours-ness was inferred from the label; the day a hard collision
     // started outranking rule 5, out-of-hours slots stopped being noise and a
     // 20:30 dinner became the reported reason a day was blocked.
-    const trackReject = (reason: string, slotIso: string, outOfWorkHours = false) => {
+    const trackReject = (reason: SearchRejectReason, slotIso: string, outOfWorkHours = false) => {
       rejectedCounts[reason] = (rejectedCounts[reason] ?? 0) + 1;
-      if (!rejectedExamples[reason]) rejectedExamples[reason] = [];
-      if (rejectedExamples[reason].length < 5) rejectedExamples[reason].push(slotIso);
+      const examples = rejectedExamples[reason] ?? (rejectedExamples[reason] = []);
+      if (examples.length < 5) examples.push(slotIso);
       const day = slotIso.slice(0, 10);  // yyyy-MM-dd prefix of ISO
-      const dayReason = outOfWorkHours ? 'outside_owner_work_hours' : reason;
+      const dayReason: SearchRejectReason = outOfWorkHours ? 'outside_owner_work_hours' : reason;
       let dayMap = dayReasons.get(day);
       if (!dayMap) { dayMap = new Map(); dayReasons.set(day, dayMap); }
       dayMap.set(dayReason, (dayMap.get(dayReason) ?? 0) + 1);

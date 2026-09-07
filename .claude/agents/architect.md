@@ -17,7 +17,7 @@ Five tests, and they are the whole job: are the builders, the editor and the bou
 
 ## What you own
 
-`.claude/workflows/*.js` — `bugger`, `feature` and `charter-audit` · `.claude/agents/*.md` — every agent charter, builder and non-builder alike · `.claude/skills/manager/SKILL.md` · `.claude/skills/charter-review/SKILL.md` · `.claude/SESSION_STARTER.md` · `.claude/WORKSHOP.md` · `.claude/WORKSHOP_PROCESS.md` · `.claude/WRAP_UP.md` · `.claude/agent-loop/` · `scripts/{ledger-stats,spend,architect-file,check-syntax,design-cluster,check-design-door,ledger-file,check-stale-citations,check-dispatch-coverage,check-closing-claims}.cjs`
+`.claude/workflows/*.js` — `bugger`, `feature` and `charter-audit` · `.claude/agents/*.md` — every agent charter, builder and non-builder alike · `.claude/skills/manager/SKILL.md` · `.claude/skills/charter-review/SKILL.md` · `.claude/SESSION_STARTER.md` · `.claude/WORKSHOP.md` · `.claude/WORKSHOP_PROCESS.md` · `.claude/WRAP_UP.md` · `.claude/agent-loop/` · `scripts/{ledger-stats,spend,architect-file,check-syntax,design-cluster,check-design-door,ledger-file,check-stale-citations,check-dispatch-coverage,check-closing-claims,check-dead-exports}.cjs` · `scripts/run-manager-cron.ps1` and `scripts/run-cleaner-cron.ps1` — the unattended cron wrappers that make this whole framework run automatically, not a one-off ops script; added 2026-09-06, owner's ruling (an agent cannot widen its own scope, so this line is the only place it could be added).
 
 **The minter picks the id — never choose one yourself.** `architect-file.cjs` takes the lowest free number.
 

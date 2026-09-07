@@ -6,7 +6,82 @@
  * booking doors can't describe the same fact differently.
  */
 import { getPersonByEmail } from '../../../db';
-import type { AttendeeConflictTag } from '../../../connectors/graph/findAvailableSlots';
+import type { AttendeeConflictTag, SearchRejectLabel, SearchRejectReason } from '../../../connectors/graph/findAvailableSlots';
+import { ATTENDEE_REASON_PREFIXES } from '../../../utils/attendeeAvailability';
+
+/**
+ * ONE phrase per `SearchRejectLabel` (connectors/graph/findAvailableSlots.ts)
+ * — a `Record`, not a `switch`, so adding a label there without adding an
+ * entry HERE is a compile error (a missing key) instead of a silent
+ * "unknown" at runtime, and a typo'd/removed key is caught the same way
+ * (Record<K,V> rejects both extra and missing keys). This is the exhaustive
+ * half of search-path-reject-labels-have-no-declaration-anywhere: every
+ * OTHER reader of this vocabulary (turnHelpers.ts, createMeeting.ts,
+ * moveMeeting.ts, ops/handlers/findAvailableSlots.ts) only needs a curated
+ * SUBSET and stays a Set/comparison; this one has to say something about
+ * EVERY member, so it's the one place exhaustiveness is actually load-bearing.
+ *
+ * `oofUntilDisplay` (gh#200) — the away span's real end, ALREADY FORMATTED
+ * ("Friday 29 Aug") by its own producer (checkSlot's
+ * overCommitment.allDayOutOfOfficeUntilDisplay, or the search walker's
+ * day_summary.oof_until_display) — quoted verbatim, never re-derived here.
+ * Only `owner_out_of_office` reads it; every other reason ignores it.
+ */
+const SEARCH_REJECT_PHRASES: Record<SearchRejectLabel, (ownerFirst: string, oofUntilDisplay?: string) => string> = {
+  outside_owner_work_hours: (ownerFirst) => `outside ${ownerFirst}'s work hours`,
+  within_lead_time: (ownerFirst) => `too soon — ${ownerFirst} needs more notice than that`,
+  in_the_past: () => `that time has already passed`,
+  wrong_day_type: (ownerFirst) => `not the right kind of day for that (${ownerFirst} is not in the office then)`,
+  outside_requested_window: () => `outside the time window that was asked for`,
+  travel_buffer_collision: () => `no room for travel time around it`,
+  vacation_or_off_day: (ownerFirst) => `${ownerFirst} is off that day`,
+  // The search's day-level verdict when his own calendar carries an all-day
+  // out-of-office. Distinct from owner_busy_collision on purpose: "the whole
+  // day is gone" and "that hour clashes" invite completely different next
+  // moves from the person reading it. gh#200 — when the away span reaches
+  // past this one day, name its real, already-formatted end instead of a
+  // fresh day-scoped "that whole day" — same phrasing convention as
+  // hardBlockClassPhrase's own all-day branch (availabilityGate.ts), so the
+  // two never disagree about the wording.
+  owner_out_of_office: (ownerFirst, oofUntilDisplay) => oofUntilDisplay
+    ? `${ownerFirst} is away through ${oofUntilDisplay}`
+    : `${ownerFirst} is out of office that whole day`,
+  // Adjectival, like every other label here — "That time is X" is the
+  // template several callers plug this into (createMeeting.ts), and a verb
+  // phrase there read as "That time is conflicts with..." (owner report,
+  // 2026-07-30).
+  owner_busy_collision: (ownerFirst) => `in conflict with another meeting on ${ownerFirst}'s calendar`,
+  overlaps_meeting_being_moved: () => `overlaps the meeting being moved`,
+  focus_time_office: (ownerFirst) => `would leave ${ownerFirst} under the free-time floor (office day)`,
+  focus_time_home: (ownerFirst) => `would leave ${ownerFirst} under the free-time floor (home day)`,
+  floating_block_no_room: (ownerFirst) => `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`,
+  category_day_type: () => `wrong day type for this category (e.g. office-only category on a home day)`,
+  category_per_day: (ownerFirst) => `over ${ownerFirst}'s per-day limit for this category`,
+  category_per_week: (ownerFirst) => `over ${ownerFirst}'s per-week limit for this category`,
+};
+
+/**
+ * The ATTENDEE-scoped half — a DIFFERENT closed vocabulary
+ * (`ATTENDEE_REASON_PREFIXES`, utils/attendeeAvailability.ts), kept as its
+ * own exhaustive Record so a third prefix declared there also forces an
+ * entry here, independent of `SEARCH_REJECT_PHRASES` above.
+ */
+const ATTENDEE_REJECT_PHRASES: Record<(typeof ATTENDEE_REASON_PREFIXES)[number], string> = {
+  outside_attendee_work_hours: `outside the attendee's working hours`,
+  attendee_busy_collision: `an attendee is already booked then`,
+};
+
+function asSearchRejectLabel(kind: string | undefined): SearchRejectLabel | undefined {
+  return kind !== undefined && Object.prototype.hasOwnProperty.call(SEARCH_REJECT_PHRASES, kind)
+    ? (kind as SearchRejectLabel)
+    : undefined;
+}
+
+function asAttendeePrefix(kind: string | undefined): (typeof ATTENDEE_REASON_PREFIXES)[number] | undefined {
+  return kind !== undefined && (ATTENDEE_REASON_PREFIXES as readonly string[]).includes(kind)
+    ? (kind as (typeof ATTENDEE_REASON_PREFIXES)[number])
+    : undefined;
+}
 
 /**
  * Human one-phrase label for a checkSlot/search rejection reason. v2.6.1 —
@@ -15,55 +90,25 @@ import type { AttendeeConflictTag } from '../../../connectors/graph/findAvailabl
  * owner_buffer_collision label (connected back-to-backs are fine). Extracted
  * (v3.7.x) from three identical inline copies in ops.ts.
  *
- * `oofUntilDisplay` (gh#200) — the away span's real end, ALREADY FORMATTED
- * ("Friday 29 Aug") by its own producer (checkSlot's
- * overCommitment.allDayOutOfOfficeUntilDisplay, or the search walker's
- * day_summary.oof_until_display) — quoted verbatim, never re-derived here.
- * Only the `owner_out_of_office` case reads it; every other reason ignores it.
+ * Parameter tightened to `SearchRejectReason` (was bare `string`) —
+ * search-path-reject-labels-have-no-declaration-anywhere: every call site
+ * (createMeeting.ts, moveMeeting.ts, ops/handlers/findAvailableSlots.ts) now
+ * passes a value typed against the same declared vocabulary instead of an
+ * untyped string. The legacy `owner_busy_or_buffer_collision` alias is
+ * DROPPED (2026-09-07): grepped, it had no producer left anywhere in the
+ * codebase, so removing it changes nothing reachable (W5).
  */
-export function humanizeViolationLabel(reason: string | undefined, ownerFirst: string, oofUntilDisplay?: string): string {
+export function humanizeViolationLabel(reason: SearchRejectReason | undefined, ownerFirst: string, oofUntilDisplay?: string): string {
   // The walker tags per-attendee rejections as `<reason>:<email>` so day_summary
   // can attribute blame. Strip the suffix (structured string, not natural
   // language) — otherwise every attendee-blamed reason humanized to "unknown",
   // which is exactly the mechanical non-answer M9 forbids.
   const kind = typeof reason === 'string' && reason.includes(':') ? reason.split(':')[0] : reason;
-  switch (kind) {
-    case 'outside_owner_work_hours': return `outside ${ownerFirst}'s work hours`;
-    case 'outside_attendee_work_hours': return `outside the attendee's working hours`;
-    case 'attendee_busy_collision': return `an attendee is already booked then`;
-    case 'within_lead_time': return `too soon — ${ownerFirst} needs more notice than that`;
-    case 'in_the_past': return `that time has already passed`;
-    case 'wrong_day_type': return `not the right kind of day for that (${ownerFirst} is not in the office then)`;
-    case 'outside_requested_window': return `outside the time window that was asked for`;
-    case 'travel_buffer_collision': return `no room for travel time around it`;
-    case 'vacation_or_off_day': return `${ownerFirst} is off that day`;
-    // The search's day-level verdict when his own calendar carries an
-    // all-day out-of-office. Distinct from owner_busy_collision on purpose: "the
-    // whole day is gone" and "that hour clashes" invite completely different
-    // next moves from the person reading it.
-    // gh#200 — when the away span reaches past this one day, name its real,
-    // already-formatted end instead of a fresh day-scoped "that whole day" —
-    // same phrasing convention as hardBlockClassPhrase's own all-day branch
-    // (availabilityGate.ts), so the two never disagree about the wording.
-    case 'owner_out_of_office': return oofUntilDisplay
-      ? `${ownerFirst} is away through ${oofUntilDisplay}`
-      : `${ownerFirst} is out of office that whole day`;
-    // Adjectival, like every other label here — "That time is X" is the
-    // template several callers plug this into (createMeeting.ts), and a verb
-    // phrase there read as "That time is conflicts with..." (owner report,
-    // 2026-07-30).
-    case 'owner_busy_collision': return `in conflict with another meeting on ${ownerFirst}'s calendar`;
-    // legacy label name kept as alias in case any older diagnostics path still emits it
-    case 'owner_busy_or_buffer_collision': return `in conflict with another meeting on ${ownerFirst}'s calendar`;
-    case 'overlaps_meeting_being_moved': return `overlaps the meeting being moved`;
-    case 'focus_time_office': return `would leave ${ownerFirst} under the free-time floor (office day)`;
-    case 'focus_time_home': return `would leave ${ownerFirst} under the free-time floor (home day)`;
-    case 'floating_block_no_room': return `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`;
-    case 'category_day_type': return `wrong day type for this category (e.g. office-only category on a home day)`;
-    case 'category_per_day': return `over ${ownerFirst}'s per-day limit for this category`;
-    case 'category_per_week': return `over ${ownerFirst}'s per-week limit for this category`;
-    default: return 'unknown';
-  }
+  const searchLabel = asSearchRejectLabel(kind);
+  if (searchLabel) return SEARCH_REJECT_PHRASES[searchLabel](ownerFirst, oofUntilDisplay);
+  const attendeePrefix = asAttendeePrefix(kind);
+  if (attendeePrefix) return ATTENDEE_REJECT_PHRASES[attendeePrefix];
+  return 'unknown';
 }
 
 /**

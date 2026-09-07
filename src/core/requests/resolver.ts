@@ -170,7 +170,7 @@ export interface ResolveResult {
 // arriving close together (an emoji ✅ and a typed reply; a double-tap) both
 // pass this check while the first is still mid-flight, and both then execute
 // their own booking/notify side effects — closeRequest's OWN idempotency
-// guard (closeRequest.ts:49) only catches the SECOND request-state write, not
+// guard (closeRequest.ts:54) only catches the SECOND request-state write, not
 // the duplicated work that already happened before either call reached it.
 // Single fork process (ecosystem.config.js: exec_mode 'fork', never cluster),
 // so an in-process lock is a complete fix, not a partial one.
@@ -784,7 +784,7 @@ async function runApproveCallback(
     // id — "re-read the day with get_calendar if it should still exist" is
     // the explicit instruction, not optional colour. Auto-closing this as
     // "cancelled" without that check is the phantom-confirmed-booking class
-    // INVERTED (deferredActionReplay.ts:84-90): it tells the requester and
+    // INVERTED (deferredActionReplay.ts:89-94): it tells the requester and
     // owner a meeting is gone when it may still be live, and closes the
     // request so nobody is left watching to catch the miss. So this no
     // longer assumes either outcome — it hands the model the same kind of
@@ -821,7 +821,7 @@ async function runApproveCallback(
   // #141 Change 5 — link the booked event id on the approval row when a
   // colleague requested it. The replay runs as a SYNTHETIC owner
   // (deferredActionReplay forces senderRole:'owner'), so the direct colleague
-  // requester-link at createMeeting.ts:244 (isGenuineColleague ? context.userId
+  // requester-link at createMeeting.ts:282 (isGenuineColleague ? context.userId
   // : undefined — moved off ops.ts when the v3.7.x handler split landed) never
   // fires for approval-booked meetings, and no id was ever recorded — a
   // colleague who requested a meeting via approval then couldn't move it (the
@@ -1364,7 +1364,7 @@ RULES:
   // origin_thread_ts: conversation-history lookup (buildTurnContext / the merge
   // in processMessage.ts) is keyed purely on thread_ts. A plain, unthreaded
   // reply — or one in a different thread/channel — mints its OWN thread_ts
-  // (handlers.ts:399, `threadTs = message.thread_ts ?? ts`), so that lookup
+  // (handlers.ts:459, `threadTs = message.thread_ts ?? ts`), so that lookup
   // finds nothing and gh#179's contradictory-status relay can still fire.
   // Rather than a second thread-keyed mechanism, stamp this relay through the
   // existing per-colleague, CROSS-THREAD, time-windowed tracker

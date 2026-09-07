@@ -893,11 +893,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           viewerEmail: input.viewerEmail,
         });
         if (alt.onAnchorDays.length + alt.beyond.length > 0) {
-          // Narrow to the THREE fields this payload DECLARES (:221 / the two
+          // Narrow to the THREE fields this payload DECLARES (:271 / the two
           // accumulators above). `NearbyAlternative` also carries `overOptional`,
           // and this path has no reader for it while both handlers pass these
           // objects WHOLESALE into a colleague-facing tool result
-          // (createMeeting.ts:849-850, moveMeeting.ts:1146-1147). TypeScript
+          // (createMeeting.ts:1285-1286, moveMeeting.ts:1720-1721). TypeScript
           // permits the wider object (not a fresh literal), so the field would
           // have ridden into the model's context undeclared and unread, carrying a
           // soft commitment's real subject whenever that event isn't private
@@ -1007,10 +1007,20 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // busy above; a busy attendee's heads-up already covers them.
           const hoursCheckEmails = internalEmails.filter(e => !busyAttendees.includes(e));
           const hoursBlockedEmails: string[] = [];
+          const hoursBlockedAssumedEmails = new Set<string>();
           if (hoursCheckEmails.length > 0) {
             try {
-              const availability = loadAttendeeAvailabilityForEmails(hoursCheckEmails, ownerEmail);
+              // #M3 (2026-07-23 owner ruling) — pass the owner's own zone as the
+              // fallback, the same convention as find_available_slots / Guard B /
+              // move_meeting's colleague-path (attendeeAvailability.ts:165). Without
+              // it, loadAttendeeAvailabilityForEmails silently `continue`s past any
+              // attendee with no stored timezone (attendeeAvailability.ts:200-201) —
+              // dropped from THIS owner-path hours check entirely, so the owner could
+              // book a no-TZ attendee (e.g. Simon) at 07:00 THEIR time with no
+              // heads-up at all.
+              const availability = loadAttendeeAvailabilityForEmails(hoursCheckEmails, ownerEmail, profile.user.timezone);
               if (availability && availability.length > 0) {
+                const assumedEmails = new Set(availability.filter(a => a.assumed).map(a => a.email.toLowerCase()));
                 const hoursDiag: { rejectedCounts?: Record<string, number> } = {};
                 await findAvailableSlots({
                   userEmail: ownerEmail,
@@ -1029,7 +1039,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
                 });
                 for (const key of Object.keys(hoursDiag.rejectedCounts ?? {})) {
                   if (key.startsWith('outside_attendee_work_hours:')) {
-                    hoursBlockedEmails.push(key.slice('outside_attendee_work_hours:'.length));
+                    const email = key.slice('outside_attendee_work_hours:'.length);
+                    hoursBlockedEmails.push(email);
+                    // #M3 hedge — a no-TZ attendee's hours here are a GUESS
+                    // (owner's frame + default hours), never narrated to the
+                    // owner as a fact (same hedge as violationLabels.ts's
+                    // attendeeConflictLine).
+                    if (assumedEmails.has(email.toLowerCase())) hoursBlockedAssumedEmails.add(email);
                   }
                 }
               }
@@ -1065,9 +1081,17 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               // states the time itself.
               parts.push(`${who} ${busyAttendees.length === 1 ? 'is' : 'are'} busy`);
             }
-            if (hoursBlockedEmails.length > 0) {
-              const who = joinNames(hoursBlockedEmails);
+            const hoursBlockedStated = hoursBlockedEmails.filter(e => !hoursBlockedAssumedEmails.has(e));
+            const hoursBlockedAssumed = hoursBlockedEmails.filter(e => hoursBlockedAssumedEmails.has(e));
+            if (hoursBlockedStated.length > 0) {
+              const who = joinNames(hoursBlockedStated);
               parts.push(`it's outside ${who}'s working hours`);
+            }
+            if (hoursBlockedAssumed.length > 0) {
+              // #M3 hedge — no stored timezone, so this is a guess (owner's
+              // frame + default hours), never stated as confirmed fact (M9).
+              const who = joinNames(hoursBlockedAssumed);
+              parts.push(`it's probably outside ${who}'s working hours (no timezone on file, so this is a guess)`);
             }
             const label = parts.join('; ');
             logger.info('planMeeting — attendee availability collision', {
@@ -1297,7 +1321,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
 // over whatever was really there. A read that fails now throws
 // CalendarOfflineError (one retry already spent inside), the tool surface turns
 // it into "his calendar is offline", and nothing is booked on a guess.
-async function loadEventsForCheck(profile: UserProfile, slotStartIso: string): Promise<CalendarEvent[]> {
+//
+// EXPORTED 2026-09-07 for update_meeting's colleague-path rule gate
+// (ops/handlers/moveMeeting.ts's `colleagueUpdateRuleGate`), which validates an
+// EDIT with the same checkSlot against the same window — the two-week span is
+// what makes the category per-WEEK count correct, and hand-rolling a second
+// window there would have been the classic way for the two to disagree (M1).
+export async function loadEventsForCheck(profile: UserProfile, slotStartIso: string): Promise<CalendarEvent[]> {
   const tz = profile.user.timezone;
   const start = DateTime.fromISO(slotStartIso, { zone: tz, setZone: true }).setZone(tz).startOf('week');
   const end = start.plus({ weeks: 2 });

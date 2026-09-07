@@ -292,11 +292,11 @@ action='create' — set up a new routine. Required: title, prompt, schedule_type
   Routines run autonomously and report results to the owner's DM. They have full access to all active skills.
   IMPORTANT: before creating, call manage_routine(action='list') to check if a similar one already exists — prefer 'update' over duplicate.
 
-action='update' — modify a routine's title, prompt, schedule, status (pause/resume), or flags. Required: routine_id. Pass only the fields you want to change.
+action='update' — modify a routine's title, prompt, schedule, status (pause/resume), or flags. Required: routine_id. Pass only the fields you want to change. The morning briefing is a built-in routine: change its time here with schedule_time, which reschedules it and persists the new time.
 
 action='delete' — permanently delete a routine. Required: routine_id. Use when asked to "remove", "delete", or "stop" a recurring task.
 
-action='list' — list all routines (active and paused). Call when asked "what routines do you have?", "show my recurring tasks", "what runs automatically?".`,
+action='list' — list all routines (active and paused), each with its schedule. Call when asked "what routines do you have?", "show my recurring tasks", "what runs automatically?" — and to answer WHEN something runs ("when does the calendar check run?", "what time is my morning brief?"): the schedule comes back here, whereas the routine's own tool would DO the work instead of reporting it (an active health check books blocks and DMs the owner; send_briefing_now sends the brief).`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -315,7 +315,7 @@ action='list' — list all routines (active and paused). Call when asked "what r
             },
             prompt: {
               type: 'string',
-              description: 'create: REQUIRED. The full instruction to execute each time. update: optional.',
+              description: 'create: REQUIRED. The full instruction to execute each time — write it self-contained, since it fires with no conversation history to resolve a reference against. update: optional.',
             },
             schedule_type: {
               type: 'string',
@@ -396,7 +396,7 @@ action='list' — list all routines (active and paused). Call when asked "what r
         if (looksLikeBriefing) {
           return {
             error: 'briefing_is_core',
-            message: `Morning briefing is a built-in routine — it runs automatically every working day. You don't need to create a routine for it. If the owner wants to change the briefing time, update their profile's briefing time. If they want a SECOND, different briefing (e.g. an afternoon recap), pick a different title — don't call it "briefing".`,
+            message: `Morning briefing is a built-in routine — it runs automatically every working day. You don't need to create a routine for it. If the owner wants to change the briefing time, use manage_routine(action='update', schedule_time=...) on the existing briefing routine. If they want a SECOND, different briefing (e.g. an afternoon recap), pick a different title — don't call it "briefing".`,
           };
         }
 
@@ -557,32 +557,25 @@ action='list' — list all routines (active and paused). Call when asked "what r
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
-    const workDays = getProfileWorkDays(profile);
-    const workDaysStr = workDays.join(', ');
-
-    return `## ROUTINES
-
-You can set up recurring routines — instructions that run automatically on a schedule and report results to your DM. Routines have full access to all active skills.
-
-Good uses:
-- Daily calendar hygiene ("Every work day at 8:30am, check today's calendar for back-to-backs, missing lunch, or conflicts")
-- Weekly prep ("Every Sunday at 9am, look at the week ahead and flag anything that needs attention")
-- Proactive scheduling ("Every Sunday, check if I have a lunch block — if not, suggest a free 45 min slot")
-- Periodic summaries ("Every Thursday at 4pm, summarise open tasks and outstanding coordinations")
-- Regular outreach ("First Sunday of each month, DM the team a reminder about 1:1 notes")
-
-SCHEDULE RULES:
-- "weekdays" means the user's configured work days: ${workDaysStr} — NOT Mon–Fri unless that matches
-- Before creating a routine, ALWAYS call \`manage_routine(action='list')\` first to check for duplicates. If a similar one exists, update it instead.
-- Add \`notify_on_skip: true\` to flag a routine as important — I'll DM you if a firing is skipped.
-
-META QUESTIONS — when the owner asks ABOUT a routine ("when does the calendar check run?", "what time is my morning brief?", "how often does X fire?"), use \`manage_routine(action='list')\` to look up the schedule and answer from there. DO NOT call the routine's underlying tool (\`check_calendar_health\`, \`send_briefing_now\`, etc.) just to "see what it would say" — that runs the actual side-effects (auto-fixes, brief sent) and answers the wrong question. The owner asked about the schedule, not for output.
-
-When creating a routine, write the prompt as a complete, self-contained instruction.
-
-Schedules: daily | weekdays (${workDaysStr}) | weekly (specify day) | monthly (specify day-of-month)
-
-Tool: \`manage_routine\` — one tool, four actions (create / update / delete / list).`;
+  getSystemPromptSection(_profile: UserProfile): string {
+    // Intentionally empty, and deliberately so — same as AssistantSkill's.
+    // CronsSkill is a CORE_MODULE (skills/registry.ts CORE_MODULES), and the
+    // prompt assembly at systemPrompt.ts:450 maps over getActiveSkills(), which
+    // returns SKILL_MAP entries only. Nothing returned here can ever render.
+    // The ROUTINES prose that sat here until 2026-09-07 had therefore never
+    // shipped. Most of it was already live, near-verbatim, in the manage_routine
+    // description; three rules were not, and were folded INTO that description
+    // rather than minted as new prose:
+    //   - answering WHEN something runs from action='list', instead of firing
+    //     the routine's own tool (which does the work: books blocks, sends
+    //     the brief).
+    //   - the morning briefing's time is changed through action='update' with
+    //     schedule_time, which reschedules AND persists it (the briefing_time
+    //     preference write below).
+    //   - a routine `prompt` must be self-contained: dispatchers/routine.ts
+    //     runs it with `conversationHistory: []`.
+    // "weekdays means the owner's own work days, not Mon-Fri" needs no rule at
+    // all — the schedule_type param interpolates the actual days.
+    return '';
   }
 }

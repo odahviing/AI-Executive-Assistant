@@ -1043,8 +1043,11 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                       timezone,
                       durationMinutes: durationMin,
                       // Check the attendees fully — never move the clash onto a time they're
-                      // busy OR outside their (cross-TZ) work hours.
-                      ...attendeeCheckParams(attendeeEmails, userEmail),
+                      // busy OR outside their (cross-TZ) work hours. #M3 — owner's zone as the
+                      // no-stored-TZ fallback (findAvailableSlots.ts:900 / createMeeting.ts /
+                      // moveMeeting.ts convention); without it a no-TZ attendee was silently
+                      // skipped from this hours check, so the clash-fix could land on their night.
+                      ...attendeeCheckParams(attendeeEmails, userEmail, timezone),
                       searchFrom,
                       searchTo,
                       // Don't auto-widen past the intended 2-day / week-clamped window

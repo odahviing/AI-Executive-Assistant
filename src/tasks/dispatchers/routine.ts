@@ -290,11 +290,13 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // `historyLength:0` on a reply to the health routine's own question).
       //
       // Thread memory is thread memory: the SAME appendToConversation the
-      // interactive path uses (postReply.ts:407 for the assistant turn), keyed on
+      // interactive path uses (postReply.ts:543 for the assistant turn), keyed on
       // the ts the owner replies under. No `user` row is invented — a scheduled
       // post has no inbound, and every other place Maelle speaks unprompted
-      // records exactly one assistant row too (handlers.ts:339 summary draft,
-      // :860 reaction resolve, coordinator.ts:343, meetingReschedule.ts:268).
+      // records exactly one assistant row too (handlers.ts:434 summary draft,
+      // :918 reaction resolve, meetingReschedule.ts:269 — coordinator.ts's own
+      // append was removed in 4.6.2 when handleOutreachReply stopped drafting
+      // replies itself and started handing off to the full orchestrator).
       // The bracketed label rides that same convention so the next turn knows
       // this was a scheduled post and not an answer to something he said.
       // Stored WITHOUT the glyph — that is transport decoration, and the

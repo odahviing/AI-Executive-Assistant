@@ -81,6 +81,7 @@
  */
 
 import { getAnthropicClient } from '../../llm/client';
+import { FREEFORM_OWNER_FLAG_SUBKIND } from '../../core/requests/types';
 import { SONNET, MODEL_SONNET } from '../../llm/models';
 
 import type { UserProfile } from '../../config/userProfile';
@@ -226,7 +227,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   //
   // v4.2.x — ownerIsActing now asks its question DIRECTLY, of the authenticated
   // Slack sender, instead of through a proxy that answered it for two surfaces out
-  // of three. `role` is derived from exactly this comparison (app.ts:95) and is then
+  // of three. `role` is derived from exactly this comparison (app.ts's getSenderRole) and is then
   // CLAMPED to 'colleague' in an MPIM and in a channel (processMessage.ts:123) —
   // so the old `role === 'owner' || isOwnerInGroup` pair covered the DM and the
   // group DM and silently missed the CHANNEL: the owner @-mentions Maelle in a
@@ -254,8 +255,8 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // merely unnecessary, it is WRONG. Its single distinguishing rule is "NEVER
   // refer to him in third person" (humanGate.ts:97) — but naming the owner to
   // the colleagues in the room is exactly what the drafting prompt asks for
-  // there (systemPrompt.ts:526 "SPEAK TO THE GROUP"), and 'internal' endorses
-  // that shape verbatim (humanGate.ts:171). Every other rule in the gate is
+  // there (systemPrompt.ts:628 "SPEAK TO THE GROUP"), and 'internal' endorses
+  // that shape verbatim (humanGate.ts:99). Every other rule in the gate is
   // identical across the two frames, so on a group reply the 'owner' frame could
   // only ever rewrite correct text — a G5 corruption, not a safe miss.
   const audience: HumanGateAudience = colleagueReadable ? 'internal' : 'owner';
@@ -310,7 +311,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   //
   // The job it was doing is owned UPSTREAM, where it belongs (W3/G2): the
   // mutation tools return their own `action_summary` / `_must_reply_with` for the
-  // drafting turn to narrate (skills/outreach.ts:348, :496) and the pinned action
+  // drafting turn to narrate (e.g. skills/outreach.ts's `_must_reply_with`) and the pinned action
   // tape replays confirmed mutations into the system prompt (turnHelpers.ts
   // extractActionTape). A draft that contradicts a mutation is a DRAFTING bug, so
   // it gets fixed where the draft is made, not policed afterwards.)
@@ -390,8 +391,8 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // have dropped it, and that trades one hole for another: the owner is IN the
     // room, he is the one directing the work, and he is the only person who can
     // go and chase an action Maelle said she'd done and hadn't. The checker was
-    // also BUILT for exactly this surface — its MPIM branch (claimChecker.ts:45,
-    // :124, :260, "inline mentions of these participants are LEGITIMATE
+    // also BUILT for exactly this surface — its MPIM branch (claimChecker.ts:27,
+    // :208, :456, "inline mentions of these participants are LEGITIMATE
     // addressing") is reachable on no other path, so dropping it here would make
     // that branch dead. Its owner-only-ness (claimChecker.ts:22) is a statement
     // of scope, not of safety: the remedy is a tool-less own-the-miss rewrite
@@ -651,8 +652,8 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
     // security rewriter and the voice rewriter, so a weekday word that either of them
     // introduced reached the colleague with nothing checking it: this is the only
     // gate whose subject a REWRITER can introduce, and neither rewriter's
-    // fact-preservation veto looks at weekday words (humanGate.ts:306 checks
-    // mentions, clock times, numeric dates and questions — a weekday is a WORD, and
+    // fact-preservation veto looks at weekday words (humanGate.ts's
+    // rewriteDroppedAFact checks mentions, clock times, numeric dates and questions — a weekday is a WORD, and
     // regex on weekday names is banned anyway, G8). Verifying the pre-rewrite draft
     // verified a string nobody received.
     //
@@ -690,7 +691,7 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
  *    about the owner is exactly as wrong landing in an external inbox as it
  *    is in a colleague's DM.
  *  - humanGate runs in the 'external' frame — a value the type has defined
- *    since v2.9 (humanGate.ts:83) and that no caller had ever passed until
+ *    since v2.9 (humanGate.ts:107) and that no caller had ever passed until
  *    this one: no owner-name third-person reference, professional register,
  *    because the reader is off-domain.
  *  - dateVerifier is MANDATORY here, not merely nice-to-have: a forwarded
@@ -1204,16 +1205,16 @@ async function runClaimCheckAndMaybeRewrite(
         //
         // gh#194-b-promised-resend-never-fired (2026-08-10, bouncer overturn) —
         // this function (runClaimCheckAndMaybeRewrite) has THREE call sites —
-        // the owner-private leg (:346), the colleague-readable leg gated by
-        // `ownerIsActing || approvalGrantContext` (:440), and the email leg,
-        // unconditional (:709, `runEmailLegGates`) — and the previous version of
+        // the owner-private leg (:366), the colleague-readable leg gated by
+        // `ownerIsActing || approvalGrantContext` (:460), and the email leg,
+        // unconditional (:750, `runEmailLegGates`) — and the previous version of
         // this comment asserted only the second was "colleague-reachable". That
-        // was the bug: the CALLER's gate at :440 restricts real colleague turns
+        // was the bug: the CALLER's gate at :460 restricts real colleague turns
         // correctly, but this check runs from ALL THREE sites and cannot rely on
         // caller-side scoping to know which one it's in — it must derive "real
         // colleague, real 1:1 DM" itself, from ctx, every time:
-        //   - EMAIL LEG excluded by transport: `inbound.ts:349` passes
-        //     `senderId: from`, an email address, which is trivially never equal
+        //   - EMAIL LEG excluded by transport: `inbound.ts`'s email OutputGateContext
+        //     construction passes `senderId: from`, an email address, which is trivially never equal
         //     to a Slack id — so `senderId !== slack_user_id` was ALWAYS true on
         //     that leg regardless of who actually sent it, and runEmailLegGates'
         //     own doc says every draft there IS the owner's own turn (the
@@ -1240,8 +1241,8 @@ async function runClaimCheckAndMaybeRewrite(
         // send claim opened a reminder that fabricates words the colleague
         // never said ("<X> asked me to pass this to you") AND never
         // surfaces the actual undelivered message. `verdict.target_name`
-        // (claimChecker.ts:270, already read above at :953-954 for the
-        // shield check) names whoever the draft claims it messaged —
+        // (declared on claimChecker.ts's ClaimCheckResult interface, already
+        // read above for the shield check) names whoever the draft claims it messaged —
         // comparing it against the owner's own name is the deterministic
         // gate. No match (name absent, or names someone else) is a safe MISS
         // — no reminder opens, same as before this backstop existed — never
@@ -1307,7 +1308,7 @@ async function runClaimCheckAndMaybeRewrite(
                 // 2026-08-18 — split apart once the shared value proved not unique
                 // enough for that sibling's own dedup lookup to tell the two backstops'
                 // rows apart). The two now share only the pending-cap exclusion:
-                // getPendingRequestCountForColleague (src/db/jobs.ts:92) excludes
+                // getPendingRequestCountForColleague (src/db/jobs.ts) excludes
                 // kind='reminder' AND subkind IN ('freeform_owner_flag',
                 // 'freeform_owner_ask') from the colleague's pending-cap count. This row is a durable backstop DM to
                 // the OWNER, not a tracked item the colleague asked for — without this it silently
@@ -1315,7 +1316,7 @@ async function runClaimCheckAndMaybeRewrite(
                 // gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions,
                 // 2026-08-10): two false-relay claims from one colleague would consume both slots
                 // and their next genuine create_task/create_approval gets refused.
-                subkind: 'freeform_owner_flag',
+                subkind: FREEFORM_OWNER_FLAG_SUBKIND,
                 subject: `Needs your read: ${requesterFirst} asked me to pass this to you`,
                 description: ctx.userMessage,
                 informed: 1,
@@ -1588,7 +1589,7 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
 
     // The asker's zone for THIS turn, off the AUTHENTICATED sender and out of the
     // same people-store field the pre-check reads when it builds the drafting block
-    // (buildTurnContext.ts:667) — so the two surfaces name a moment in the same clock.
+    // (buildTurnContext.ts:778) — so the two surfaces name a moment in the same clock.
     // Below the mutation check on purpose: a turn that already stood the floor down
     // pays for nothing. Absent zone, the owner's own turn, or an unusable value all
     // leave the stored owner-local rendering untouched.
@@ -1847,9 +1848,9 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       // bounce-fix finding 4 (2026-08-24) — pin the literal, not
       // `verdict.action_type`. `checkReplyClaims` does
       // `action_type: (parsed.action_type ?? 'other')` with no per-mode
-      // validation (claimChecker.ts:760), and a JSON-truncation recovery
+      // validation (claimChecker.ts:875), and a JSON-truncation recovery
       // path can yield an unexpected value. This call site already KNOWS it
-      // invoked `mode: 'slot_grounding'` (line 1737 above) — trusting an LLM
+      // invoked `mode: 'slot_grounding'` (:1830 above) — trusting an LLM
       // round-trip for control flow it already has the answer to would let a
       // malformed `action_type` silently fall through to the DEFAULT
       // phantom-action rewrite prompt (nonsense like "I'm not sure that went

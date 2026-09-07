@@ -13,6 +13,45 @@ import { PRIVATE_MASK } from '../../../utils/displaySubject';
 type UserProfileType = import('../../../config/userProfile').UserProfile;
 
 /**
+ * Tool-boundary error codes create_meeting and move_meeting both return for
+ * the SAME fact — declared once so the two doors can't spell it two ways
+ * (2026-09-07 cleaner sweep: each of these four was hand-typed independently
+ * in both handlers, 0 declared anywhere, so a future rename/typo in one would
+ * silently diverge from the other and the model would stop recognizing it on
+ * whichever side didn't get the edit).
+ *
+ * Lives here, not `ops/violationLabels.ts`, even though that file states an
+ * identical "one file so two doors can't disagree" goal: its own header
+ * scopes it to "every human-facing sentence a scheduling REJECTION turns
+ * into" — a closed vocabulary of English phrases the model relays verbatim.
+ * These four are the opposite: literal machine codes the model pattern-matches
+ * on at the tool boundary, never spoken, and three of the four
+ * (`LOCATION_MODE_UNSPECIFIED`, `MEETING_ROOM_UNAVAILABLE_LARGE_MEETING`,
+ * `ATTENDEE_MISSING_EMAIL`) aren't rule violations at all — filing them in a
+ * file named for violation labels would misdescribe them. This file is
+ * already the create/move shared-plumbing home for exactly this reason
+ * (`openQuestionsField`, `alternativesNote`: "ONE helper, both gate-bearing
+ * handlers, so create and move cannot drift") — same rationale, different
+ * vocabulary.
+ *
+ * `NOT_RULE_COMPLIANT` is written into two DIFFERENT payload fields ON
+ * PURPOSE — `error:` in createMeeting.ts's flat `success: false` refusal vs
+ * `reason:` in moveMeeting.ts's `needs_owner_approval: true` escalation — and
+ * that difference is not this file's to flatten: `turnHelpers.ts`'s
+ * `mutationOutcome` reader keys the payload's field name to the boolean flag
+ * that's set (`success:false` → read `error`, `needs_owner_approval:true` →
+ * read `reason`), not to which value it carries. Only the SPELLING is
+ * unified here; each call site keeps the field name its own return shape
+ * already requires.
+ */
+export const HANDLER_ERROR_CODE = {
+  ATTENDEE_MISSING_EMAIL: 'attendee_missing_email',
+  NOT_RULE_COMPLIANT: 'not_rule_compliant',
+  LOCATION_MODE_UNSPECIFIED: 'location_mode_unspecified',
+  MEETING_ROOM_UNAVAILABLE_LARGE_MEETING: 'meeting_room_unavailable_large_meeting',
+} as const;
+
+/**
  * v4.1.x (M3) — the plan's complete set of open questions, shaped for a tool
  * result. planMeeting now evaluates EVERY gate it can before returning, so a
  * booking that needs both a location decision and an attendee-conflict
@@ -210,7 +249,7 @@ export function isDescriptiveSubject(raw: string): boolean {
  * recently could be the NULL-slack_id one — silently abandoning capture for
  * an attendee who is in fact resolvable. `getPersonByEmail` is the
  * established fix for exactly this (already used the same way at
- * tasks/briefs.ts:18 and resolveAttendeeEmails.ts:174): its query orders by
+ * tasks/briefs.ts:17 and resolveAttendeeEmails.ts:174): its query orders by
  * `(slack_id IS NOT NULL) DESC` so the populated row always wins. Call it
  * directly instead of re-implementing the scan.
  *

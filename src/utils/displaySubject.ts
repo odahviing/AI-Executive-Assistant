@@ -178,7 +178,7 @@ export function subjectViewerFor(
  *
  * gh#room-origin-replay-narrates-unmasked-title-on-success (2026-08-12) — the
  * `surface === 'room'` check below moved BEFORE the `senderRole !== 'colleague'`
- * bail. A room-origin deferred-action replay (deferredActionReplay.ts:108,114)
+ * bail. A room-origin deferred-action replay (deferredActionReplay.ts:172,178)
  * hardcodes `senderRole: 'owner'` for every replay but sets `surface: 'room'`
  * only when the approval's own origin was a room — that combination is UNIQUE
  * to replay; a genuine LIVE turn from the owner while he is physically in a

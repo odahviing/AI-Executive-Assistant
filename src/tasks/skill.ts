@@ -21,6 +21,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
 import { logActivity } from '../core/requests/logActivity';
 import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
+import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
 import {
@@ -30,7 +31,7 @@ import {
   type MaelleEvent,
 } from '../db';
 import type { RequestKind, RequestRow, ApprovalSubkind as ApprovalSubkindCanonical } from '../core/requests/types';
-import { parseDetails, toTimerInstant } from '../core/requests/types';
+import { parseDetails, toTimerInstant, FREEFORM_OWNER_ASK_SUBKIND } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -89,7 +90,7 @@ async function colleaguePendingCapRefusal(
   // alone still isn't enough: processMessage.ts's debounce merge clamps
   // `effectiveAuthority` to 'colleague' for the WHOLE turn whenever the merged
   // batch spans multiple senders, even when the owner spoke last and
-  // `context.userId` is still his own Slack id (same case buildTurnContext.ts:739
+  // `context.userId` is still his own Slack id (same case buildTurnContext.ts:759-763
   // and orchestrator/index.ts:1106 already guard). Without the identity check,
   // the owner's own create_approval/create_task got refused under his
   // colleagues' pending-request cap, which is documented above as never
@@ -326,8 +327,8 @@ Judge by meaning, in any language. Bias to 'unsure' rather than guessing 'not_ca
  * so gating on it fired this DM at the owner ON HIMSELF whenever he raised an
  * ambiguous freeform from a room — requesterSlackId his own id, the message
  * claiming "a colleague raised something". `authority` stays 'owner' on every
- * surface (resolve_approval's own gates at 1434/1483/1705 already rely on the
- * same distinction), so it's the correct "is this genuinely the owner" check.
+ * surface (resolve_approval's own gates at 2019/2029/2036/2044 already rely on
+ * the same distinction), so it's the correct "is this genuinely the owner" check.
  */
 const FREEFORM_FLAG_DEDUP_WINDOW_MINUTES = 60;
 
@@ -341,7 +342,7 @@ async function flagUnresolvedFreeformForOwner(
   // spanning multiple senders clamps `authority` to 'colleague' for the whole
   // turn even when the owner spoke last, so `authority` alone can't tell
   // "genuinely a colleague" from "owner, clamped by the merge". Compare the
-  // authenticated identity directly (matches buildTurnContext.ts:739).
+  // authenticated identity directly (matches buildTurnContext.ts:759-763).
   // Without this, the owner got DM'd "a colleague raised something" about
   // his own message, with the requester resolved to his own id.
   if (context.authority !== 'colleague' || context.userId === ownerUserId) return;
@@ -390,7 +391,7 @@ async function flagUnresolvedFreeformForOwner(
       // backstop, which mints the same kind under the shared subkind
       // (round 3 fix, chris-kelley-oof-block-c, 2026-08-18 — see the header
       // comment above).
-      subkind: 'freeform_owner_ask',
+      subkind: FREEFORM_OWNER_ASK_SUBKIND,
       subject: `Needs your read: ${flagText.slice(0, 80)}`,
       description: flagText,
       informed: 1,
@@ -720,7 +721,7 @@ export async function createApprovalRequest(
             // legacy bridge keeps reading deferred_action (and refreshIfOpen's
             // deferred_action refresh keeps working). See extractCallbacks'
             // precedence note.
-            payload.callbacks = { on_amend: { mode: 'run_with_amend' } };
+            payload.callbacks = { on_amend: { mode: 'run_with_amend' } satisfies AmendDispatch };
             logger.info('create_approval — open calendar-conflict ask; stamped time-less move anchor', {
               meetingId, optionCount: openOptions.length,
               subject: typeof payload.subject === 'string' ? payload.subject : undefined,
@@ -986,7 +987,7 @@ export async function createApprovalRequest(
 
                 // gh#194-c — the collision may be a meeting THIS SAME requester
                 // already had booked. create_meeting's own advisory steer
-                // (createMeeting.ts:792-793) already named this exact conflicting
+                // (createMeeting.ts:1006-1012) already named this exact conflicting
                 // event and told the model to call update_meeting instead of
                 // raising a duplicate — but that steer lives in a return value
                 // from a DIFFERENT, independent tool call, and nothing stops the
@@ -1202,7 +1203,7 @@ export async function createApprovalRequest(
           const mergedDetails: Record<string, unknown> = { ...priorDetails, ...payload };
           if (changed) {
             // Problem B, narrowed by bouncer overturn (2026-08-10) —
-            // `honest_hard_reason` is CODE-authored only (line 393 strips it,
+            // `honest_hard_reason` is CODE-authored only (line 681 strips it,
             // the checkSlot re-derivation above is the ONLY place that
             // re-sets it). Once the ask has materially changed, the PRIOR
             // sentence must not survive onto a different ask by spread order
@@ -1211,7 +1212,7 @@ export async function createApprovalRequest(
             // read threw — `hardReasonReDerived` false in both). "Not
             // re-proved this turn" is not "disproved": a throw on a Graph
             // hiccup must not silently erase a hard collision proven true on
-            // an earlier turn (skill.ts:545-547, approvalCallbacks.ts:227-234
+            // an earlier turn (skill.ts:681, approvalCallbacks.ts:227-234
             // — this mechanism never flips that line off on a transient
             // read). Only clear it when the re-derivation completed and came
             // back clean/soft; keep the fresh string when it completed and
@@ -2369,52 +2370,31 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
   }
 
   getSystemPromptSection(_profile: UserProfile): string {
-    return `## TASKS
-
-Every future action becomes a task. When asked to remind, follow up, check back, research, or do anything at a future time — create a task.
-
-TASK LIFECYCLE (v2.7.0 — single state machine on the requests spine):
-- awaiting_owner   → waiting for your call (most approvals start here)
-- awaiting_colleague → waiting on a colleague reply
-- in_flight        → Maelle is working (research running, reminder scheduled, coord still collecting)
-- resolved         → done normally (terminal)
-- cancelled        → owner dropped (terminal)
-- expired          → no action within window (terminal)
-
-WHEN TO CREATE TASKS:
-- "Remind me about X tomorrow" → create_task type=reminder
-- "Follow up with Yael in 3 days" → create_task type=follow_up
-- "Research Y and send me a summary" → create_task type=research
-- Coordination and outreach tasks are created automatically by their respective tools.
-
-TASK RULES:
-- Always confirm task creation to the user with the scheduled date/time.
-- Before creating, check get_my_tasks to avoid duplicates.
-- When asked "what's pending?" → call get_my_tasks.
-- Tasks created in a private DM are never surfaced in group conversations.
-- edit_task to modify; don't cancel + recreate.
-
-MORNING BRIEFING:
-When the user changes their briefing time, update the system briefing routine via manage_routine(action='update', schedule_time=…) — it reschedules and persists the time. Owner-initiated brief requests are routed deterministically to send_briefing_now BEFORE the orchestrator runs.
-
-## APPROVALS — structured decisions from the owner
-
-Every decision the owner needs to make is a request of kind=approval. Do NOT freelance a DM asking "want me to do X?" — that gets lost in chat history and has no expiry. Use create_approval and let the system track it.
-
-WHEN TO CREATE AN APPROVAL:
-- Someone requested a non-standard meeting length → kind=duration_override
-- A scheduling rule would be violated, OR a meeting needs to be moved / attendees changed / cancelled with owner sign-off → kind=policy_exception (carry payload.deferred_action — create_meeting / move_meeting / update_meeting / delete_meeting — so the change fires on approve)
-- Booking with a person you don't have full contact info for → kind=unknown_person
-- A NON-CALENDAR yes/no (out-of-scope flag, content review, private judgment) → kind=freeform. A CALENDAR change NEVER uses freeform — the handler refuses it; route it through the tool → policy_exception above.
-
-WHEN OWNER REPLIES:
-- Read the PENDING APPROVALS section in the system prompt — that's the truth about what's open.
-- Pick the approval_id that matches the reply.
-- Call resolve_approval with verdict in { approve, reject, amend }.
-- amend = "not this but here's an alternative" — pass the alternative in counter.
-
-DEDUP: create_approval calls are LLM-judged against open requests for this (owner, requester). The same logical ask within 48h returns the existing request — safe to retry, no duplicate rows.
-
-EXPIRY: default 2 owner-workdays. Owner-silent past expiry → request expires and you DM a closure note. You don't chase manually.`;
+    // Intentionally empty, and deliberately so — same as AssistantSkill's.
+    // TasksSkill is a CORE_MODULE (skills/registry.ts CORE_MODULES), and the
+    // prompt assembly at systemPrompt.ts:450 maps over getActiveSkills(), which
+    // returns SKILL_MAP entries only. Nothing returned here can ever render.
+    // The TASKS + APPROVALS prose that sat here until 2026-09-07 had therefore
+    // never shipped; it was read rule by rule against the live prompt, every
+    // rule was either already live or no longer true, so none was promoted.
+    // Where the survivors live:
+    //   - confirm a task with the time the TOOL returned: RULE 3 in
+    //     systemPrompt.ts, which names create_task's `due` / update_task's
+    //     `new_due` as the value to say back.
+    //   - when to create a task, and the three types: the create_task
+    //     description in getTools above.
+    //   - "what's pending?": the get_my_tasks description above.
+    //   - every approval rule (kinds, deferred_action, dedup, expiry, the three
+    //     verdicts, id binding): the create_approval / resolve_approval
+    //     descriptions above, plus the PENDING APPROVALS block systemPrompt.ts
+    //     injects per turn while anything is open.
+    //   - changing the morning briefing time: manage_routine's action='update'
+    //     description in tasks/crons.ts.
+    // Two things stay OUT of the prompt on purpose: a DM-origin task cannot
+    // surface in a room by construction (`origin_is_mpim`, stamped at creation
+    // and gated on by every return-leg reader), and there is no create_task
+    // dedup to nudge her toward — if duplicate tasks become real, that is a
+    // check in the handler, not a line here.
+    return '';
   }
 }

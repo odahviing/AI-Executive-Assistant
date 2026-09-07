@@ -195,8 +195,13 @@ export function loadAttendeeAvailabilityForEmails(
       // ASSUMED to be in the requester's frame (fallbackTimezone = owner's TZ) with
       // standard hours, instead of being SKIPPED (which left them unclipped so the
       // search could offer owner-morning to a would-be-remote person). A human-stated
-      // TZ/time still overrides via search_window_timezone. When fallbackTimezone is
-      // omitted (other callers) → unchanged: skip the no-TZ attendee.
+      // TZ/time still overrides via search_window_timezone. `fallbackTimezone` being
+      // optional is a call-signature convenience, not a supported second mode: every
+      // caller of `loadAttendeeAvailabilityForEmails` / `attendeeCheckParams` now
+      // passes it (last five fixed 2026-09-07 — planMeeting.ts, createMeeting.ts's
+      // dense-packing counter-offer, autoMove.ts x2, checkHealth.ts). A caller that
+      // omits it silently reintroduces the pre-ruling skip below (`if (!resolvedTz)
+      // continue`) — that is a bug to fix at the call site, not current behaviour.
       const resolvedTz = effectiveTz?.timezone ?? fallbackTimezone;
       if (!resolvedTz) continue;
       const wh = effectiveTz?.timezone ? getEffectiveWorkingHours(person!) : defaultWorkingHoursForTz(resolvedTz);

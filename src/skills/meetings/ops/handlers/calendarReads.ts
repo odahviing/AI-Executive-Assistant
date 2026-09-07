@@ -340,7 +340,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
   // gh#154 fix — `senderRole` is DATA scope, clamped to 'colleague' on every
   // shared surface INCLUDING the owner's own turn there (processMessage.ts).
   // Every other action gate in this file reads `context.authority` instead
-  // (moveMeeting.ts:259,678; createMeeting.ts:469) — the authenticated actor,
+  // (moveMeeting.ts:127,377,964; createMeeting.ts:593) — the authenticated actor,
   // never clamped by surface. Reading senderRole here meant the owner could
   // never revert anything from a group DM; this brings the gate in line with
   // its siblings.
@@ -352,10 +352,10 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
   // revert-intent-and-single-step-undo-scope, piece 3 (2026-08-12) — a
   // specific target ("undo the move I did for Dana yesterday") resolves by
   // id via get_my_tasks' recent_activity (task_id === this row's id,
-  // tasks/skill.ts:1639/1649/1650 already exposes it plus target_name/
+  // tasks/skill.ts:1907/1917/1918 already exposes it plus target_name/
   // target_slack_id for the model to match a described person against).
   // `task_id` is the arg key to keep in step with that same field name — the
-  // tool's own input_schema (meetings.ts:120) now declares it. No target id →
+  // tool's own input_schema (meetings.ts:119) now declares it. No target id →
   // the old zero-arg "last thing" behavior, unchanged.
   const targetRequestId = typeof args.task_id === 'string' && args.task_id.trim()
     ? args.task_id.trim()
@@ -494,7 +494,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
       const curMs = DateTime.fromISO(probe.startDateTime, { zone: probe.startTimeZone || 'UTC' }).toUTC().toMillis();
       // priorNewStart is move_meeting's own outcome_json `new_start` — an
       // offsetless OWNER-LOCAL clock string per the tool schema
-      // (meetings.ts:441), not UTC. Parsing with no zone parsed it in the
+      // (meetings.ts:454), not UTC. Parsing with no zone parsed it in the
       // PROCESS zone (UTC on the VM), an offset-sized mismatch against the
       // correctly-zoned `curMs` that produced a false "already_changed".
       const expectedMs = DateTime.fromISO(priorNewStart, { zone: timezone }).toUTC().toMillis();

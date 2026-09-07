@@ -132,8 +132,9 @@ const ACTIVE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
  *   • SUPPRESSION — the answer flips the row terminal (markStaleResolved, once
  *     the category is present), the event_id lands in `getSuppressedEventIds`,
  *     and from then until the event ends a REAL double-booking on it is dropped
- *     at `checkHealth.ts:350` — no row, no narration, no log line. A silent
- *     missed conflict, which is worse than the bug #148 fixed.
+ *     at checkHealth.ts's `dismissedEventIds` overlap-skip — no row, no
+ *     narration, no log line. A silent missed conflict, worse than the bug
+ *     #148 fixed.
  *   • CLUSTERING / ROW IDENTITY — an uncategorized event that ALSO clashes emits
  *     both issues from the same `nonAllDay` set (checkHealth.ts:382), so they
  *     land in one cluster; the overlap anchors it (priority 3 vs 7) and

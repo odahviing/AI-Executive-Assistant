@@ -5,7 +5,7 @@
  * Windows are sliding — old hits expire after windowMs.
  *
  * These are defense-in-depth signals. The primary gate against abuse is the
- * security filter + coord guards. Rate limits catch the case where a malicious
+ * security filter. Rate limits catch the case where a malicious
  * colleague tries to brute-force repeated tool calls in a short burst.
  */
 

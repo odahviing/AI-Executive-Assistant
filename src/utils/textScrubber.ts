@@ -218,8 +218,8 @@ const SLACK_ID_ANNOTATION_RE = /(\s*)\(slack_id:\s*([^)]*)\)/gi;
 
 /**
  * An internal work-item id — the inverse of the four expressions that MINT one:
- * `req_` (db/requests.ts:51), `task_` (tasks/index.ts:13), `out_` (db/jobs.ts:164),
- * `ci_` (db/calendarIssues.ts:372). A structured token, so regex is the allowed kind.
+ * `req_` (db/requests.ts:90), `task_` (tasks/index.ts:14), `out_` (db/jobs.ts:242),
+ * `ci_` (db/calendarIssues.ts, three mint sites). A structured token, so regex is the allowed kind.
  *
  * `req_`/`task_` match loosely: neither prefix begins an English word, and a model
  * volunteering an id-SHAPED string it made up ("req_abc123") has to be caught too.

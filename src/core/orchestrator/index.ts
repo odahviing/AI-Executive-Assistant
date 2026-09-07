@@ -725,6 +725,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             toolName: toolUse.name,
             args: toolInputForCall,
             result,
+            writeTools: WRITE_TOOLS,
           });
         }
       }
@@ -814,7 +815,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             // the moment it does - WE day, optional-join, colleague view
             // (calendarReads.ts:311). Reading only the wrapped shape left this ledger
             // dead on the ordinary owner read, which is most of them. Same dual-shape
-            // normalisation as the tool summary in turnHelpers.ts:270.
+            // normalisation as the get_calendar case in turnHelpers.ts's renderToolSummary.
             // ProcessedEvent (src/skills/meetings/ops/analysis.ts:92)
             // — no `.start.dateTime`; the local date lives in `_localDate`
             // (already yyyy-MM-dd, owner TZ), matching LedgerEntry.dateIso directly.
@@ -1093,8 +1094,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // multiple senders, even when the runner (`input.userId`) is the owner's
       // own Slack id landing in the same room thread as a colleague's message
       // inside the debounce window. Compare the authenticated identity
-      // directly, same pattern as core/requests/runner.ts:449, so that case
-      // is covered too. Together these mean the owner can never open a
+      // directly, same pattern as core/requests/runner.ts's `rawRole` derivation,
+      // so that case is covered too. Together these mean the owner can never open a
       // tracking row keyed to his own slack id or get proactively DM'd as if
       // he were the colleague he was asking about.
       if (
@@ -1468,7 +1469,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // revival is designed behavior (`reviveSubject`, same file) — fed by two
     // independent triggers:
     // end-of-chat pivot detection (core/social/logEngagement.ts:92, called
-    // from memory/capturePass.ts:1217) and 24h resolve-on-read
+    // from memory/capturePass.ts:1335) and 24h resolve-on-read
     // (core/social/stateMachine.ts:300-311). This supersedes the older
     // `applyIgnoredRaiseDecay` (shipped 4.5.3, removed 4.6.0 in 025f6b5) — if
     // you find that name in ledger history, it's the predecessor to the

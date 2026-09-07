@@ -196,7 +196,7 @@ function initSchema(db: Database.Database): void {
   // table), so creating the index here would throw on every pre-#52 DB.
 
   // ── Migrations — safe to run every startup, idempotent ──────────────────────
-  // v3.4.x — the multi-party coord subsystem was removed. Drop its legacy
+  // v3.5.0 — the multi-party coord subsystem was removed. Drop its legacy
   // tables if they linger from an older DB (harmless no-op on a fresh DB).
   try { db.exec(`DROP TABLE IF EXISTS multi_coord_jobs`); } catch (_) {}
   try { db.exec(`DROP TABLE IF EXISTS coordination_jobs`); } catch (_) {}
@@ -989,9 +989,11 @@ function initSchema(db: Database.Database): void {
   `);
 
   // ── v2.7.0 — legacy bridge columns ────────────────────────────────────────
-  // outreach_jobs and coord_jobs stay as internal state machines but every row
-  // gets a request_id pointing at its user-facing requests-spine row. When the
-  // legacy table's status transitions to terminal, the linked request closes.
+  // outreach_jobs stays as an internal state machine (coord_jobs got the same
+  // bridge here originally; the whole coord subsystem — table included — was
+  // deleted in v3.5.0). Every row gets a request_id pointing at its
+  // user-facing requests-spine row; when status hits terminal, the linked
+  // request closes.
   try { db.exec(`ALTER TABLE outreach_jobs ADD COLUMN request_id TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_outreach_jobs_request ON outreach_jobs(request_id)`); } catch (_) {}
 
@@ -999,11 +1001,11 @@ function initSchema(db: Database.Database): void {
   // The requests spine becomes the SINGLE source of truth for status. `state`
   // is the universal lifecycle (open/terminal + who we're blocked on). `phase`
   // carries the finer kind-specific sub-state that used to live in
-  // coord_jobs.status / outreach_jobs.status — e.g. 'coord:collecting',
-  // 'coord:resolving', 'coord:negotiating', 'coord:waiting_owner',
-  // 'outreach:scheduled', 'outreach:awaiting_reply', 'outreach:nudged',
-  // 'outreach:no_response'. The side tables keep their DATA but no longer own
-  // status. Nullable — only multi-phase kinds (coord, outreach) populate it.
+  // coord_jobs.status / outreach_jobs.status — e.g. 'outreach:scheduled',
+  // 'outreach:awaiting_reply', 'outreach:nudged', 'outreach:no_response'
+  // (coord had its own phase values here too, until v3.5.0 deleted the coord
+  // subsystem; only outreach populates `phase` today). The side tables keep
+  // their DATA but no longer own status. Nullable.
   try { db.exec(`ALTER TABLE requests ADD COLUMN phase TEXT`); } catch (_) {}
   // Coord/outreach status reads filter by (owner, kind, state); index it.
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_owner_kind_state ON requests(owner_user_id, kind, state)`); } catch (_) {}

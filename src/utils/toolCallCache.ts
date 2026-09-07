@@ -27,39 +27,22 @@
  *                  (calendar moved in Outlook, etc.). 5s suppresses
  *                  same-turn duplicate calls; doesn't mask cross-turn
  *                  fresh reads.
+ *
+ * "Which tools are writes" is NOT declared here. It used to be a second,
+ * hand-typed Set that quietly drifted from the real classification in
+ * `skills/registry.ts` (WRITE_TOOLS) — five real write tools spent months
+ * on the 5s read TTL instead of the intended 60s. `skills/registry.ts` is
+ * the skill-loading hub (pulls in core/assistant, tasks, connections) and
+ * this is a foundational, always-on-the-hot-path cache util, so importing
+ * that Set here would run the classification backwards through the layers.
+ * Instead the caller — `core/orchestrator/index.ts`, which already holds
+ * both layers legitimately — passes the canonical Set in on every call.
+ * There is exactly one production caller; this is not a general-purpose
+ * default, it's the single injection point. Never re-add a local copy.
  */
 
 import crypto from 'crypto';
 import logger from './logger';
-
-const WRITE_TOOLS = new Set<string>([
-  // Calendar mutations
-  'create_meeting',
-  'move_meeting',
-  'update_meeting',
-  'delete_meeting',
-  'book_floating_block',
-  // Approval + decision side-effects (writes to requests + sends DMs)
-  'create_approval',
-  'resolve_approval',
-  // Outbound messaging
-  'message_colleague',
-  // Task / routine mutations (v2.9 — the routine tools merged into manage_routine)
-  'create_task',
-  'update_task',
-  'manage_routine',
-  // Person + knowledge writes
-  'update_person_profile',
-  'update_person_memory',
-  'note_about_person',
-  'note_about_self',
-  'log_interaction',
-  'confirm_gender',
-  'manage_preference',
-  'update_my_preferences',
-  'manage_knowledge',
-  'manage_calendar_issue',
-]);
 
 const WRITE_TTL_MS = 60 * 1000;
 const READ_TTL_MS = 5 * 1000;
@@ -88,8 +71,8 @@ function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: s
   return `${ownerUserId}|${threadTs ?? '-'}|${toolName}|${argsHash}`;
 }
 
-function ttlFor(toolName: string): number {
-  return WRITE_TOOLS.has(toolName) ? WRITE_TTL_MS : READ_TTL_MS;
+function ttlFor(toolName: string, writeTools: ReadonlySet<string>): number {
+  return writeTools.has(toolName) ? WRITE_TTL_MS : READ_TTL_MS;
 }
 
 /**
@@ -116,6 +99,10 @@ export function lookupRecentToolCall(input: {
 /**
  * Record a tool-call result so subsequent identical calls within TTL return
  * the cached result instead of re-firing. Called AFTER the tool succeeds.
+ *
+ * `writeTools` is the canonical classification (`skills/registry.ts`'s
+ * `WRITE_TOOLS`) — the caller passes it in rather than this module keeping
+ * its own copy; see the file header for why.
  */
 export function recordToolCall(input: {
   ownerUserId: string;
@@ -123,12 +110,13 @@ export function recordToolCall(input: {
   toolName: string;
   args: Record<string, unknown>;
   result: unknown;
+  writeTools: ReadonlySet<string>;
 }): void {
   const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args);
   const now = Date.now();
   cache.set(key, {
     result: input.result,
-    expiresAt: now + ttlFor(input.toolName),
+    expiresAt: now + ttlFor(input.toolName, input.writeTools),
     firstSeenAt: now,
   });
 

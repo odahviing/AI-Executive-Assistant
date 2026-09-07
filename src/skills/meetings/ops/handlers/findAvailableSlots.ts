@@ -13,7 +13,9 @@ import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getCalendarEvents,
   type DaySummaryEntry,
+  type SearchRejectReason,
   findAvailableSlots,
+  firstRejectReason,
   GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
@@ -563,7 +565,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // test above always fails for her. Admit the id only when the
                   // REQUESTS SPINE (a verified DB fact — who actually initiated
                   // the booking that produced this event, written for every
-                  // colleague direct booking at createMeeting.ts:1715-1734) names
+                  // colleague direct booking at createMeeting.ts:2193-2198) names
                   // her as its requester. Never trust the model's self-declared
                   // requester_is_attending flag alone for this — any colleague
                   // could set it on a guessed id and reopen the exact roster leak
@@ -1012,8 +1014,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // Diagnostics receiver — surfaces per-day summary to Sonnet so she
           // can honestly answer "why no Monday?" instead of fabricating.
           const diagnosticsOut: {
-            rejectedCounts?: Record<string, number>;
-            rejectedExamples?: Record<string, string[]>;
+            rejectedCounts?: Partial<Record<SearchRejectReason, number>>;
+            rejectedExamples?: Partial<Record<SearchRejectReason, string[]>>;
             daySummary?: Array<DaySummaryEntry & {
               // gh#168-a — grounded, code-computed strings for a day whose
               // top_reasons names `outside_attendee_work_hours`, so a follow-up
@@ -1106,7 +1108,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // this just binds ownerFirst for the call site below. gh#200 —
             // `oofUntilDisplay` passes through to the `owner_out_of_office`
             // case only; every other reason ignores it.
-            const labelFor = (reason: string | undefined, oofUntilDisplay?: string): string =>
+            const labelFor = (reason: SearchRejectReason | undefined, oofUntilDisplay?: string): string =>
               humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay);
 
             // #148 — the zone the candidate times were STATED in (searchWindowTz), or an
@@ -1132,7 +1134,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const perCandidateDiags: Array<{ unresolvedAttendees?: string[]; attendeesNotChecked?: string[] }> = [];
             const results = await Promise.all(normalized.map(async (cand) => {
               const diag: {
-                rejectedCounts?: Record<string, number>;
+                rejectedCounts?: Partial<Record<SearchRejectReason, number>>;
                 unresolvedAttendees?: string[];
                 attendeesNotChecked?: string[];
                 // gh#200 — populated by findAvailableSlots whenever any
@@ -1176,7 +1178,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // v3.7.x (#143) — an away day is now walked normally (its stated
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
-                const brokenRule = matches ? undefined : Object.keys(diag.rejectedCounts ?? {})[0];
+                const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts);
                 // gh#200 — an all-day OOF rejects every instant on that day
                 // before checkSlot ever runs, so the away span's real end
                 // lives on the day_summary entry for this candidate's date
@@ -1365,7 +1367,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // colleague-facing surface, a flat refusal on the other). Now
             // derived from the ONE shared kind list — see
             // OWNER_OVERRIDABLE_KINDS's doc in scheduleRules.ts.
-            const softRejectLabels = Object.keys(diagnosticsOut.rejectedCounts ?? {})
+            // Object.keys erases the Record's declared key type back to
+            // string[] — one cast here, at the boundary, rather than at each
+            // of the two re-indexing sites below (rejectedExamples/
+            // rejectedCounts by `l`).
+            const softRejectLabels = (Object.keys(diagnosticsOut.rejectedCounts ?? {}) as SearchRejectReason[])
               .filter(l => OWNER_OVERRIDABLE_SEARCH_LABELS.has(l));
             const softBlockedStarts = [...new Set(
               softRejectLabels.flatMap(l => diagnosticsOut.rejectedExamples?.[l] ?? []),
@@ -1790,7 +1796,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   const prefEndIso = prefStartDt.isValid
                     ? (prefStartDt.plus({ minutes: durMinPref }).toISO() ?? preferredSlot)
                     : preferredSlot;
-                  const prefDiag: { rejectedCounts?: Record<string, number> } = {};
+                  const prefDiag: { rejectedCounts?: Partial<Record<SearchRejectReason, number>> } = {};
                   const prefSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
@@ -1812,7 +1818,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     diagnosticsOut: prefDiag,
                   });
                   const prefAvailable = prefSlots.length > 0;
-                  const brokenRule = prefAvailable ? undefined : Object.keys(prefDiag.rejectedCounts ?? {})[0];
+                  const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts);
                   // Shared presentation-zone (presentTzForOutput, declared above) —
                   // this branch answers about the SAME preferred_slot instant the
                   // main `slots` list renders below, and must use the same zone, or

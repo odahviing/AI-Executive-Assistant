@@ -50,7 +50,7 @@
  * the SOFT line mandates, quietly narrowing #128's scope on the one surface that
  * had no business touching it. The booking path has always offered alternatives
  * to the soft tier AND kept the escalation ("Do NOT escalate yet… if they INSIST,
- * THEN create_approval" — createMeeting.ts:854, moveMeeting.ts:1151), so both
+ * THEN create_approval" — createMeeting.ts:1290, moveMeeting.ts:1725), so both
  * belong here too. The closing text now defers to those lines explicitly instead
  * of competing with them, and this file holds no copy of the tier split.
  *

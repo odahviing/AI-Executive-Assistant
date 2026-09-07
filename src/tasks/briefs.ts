@@ -797,7 +797,7 @@ export async function sendMorningBriefing(
       ]);
       // Read the tool's own `vacuous` flag ("nothing worth saying" —
       // checkHealth.ts:1618), the same structured signal dispatchRoutine rides
-      // (dispatchers/routine.ts:30). Pre-fix the brief threw the flag away and re-derived
+      // (dispatchers/routine.ts:204-212). Pre-fix the brief threw the flag away and re-derived
       // it with an English regex over the composed prose, which broke the
       // moment a template was reworded or an issue description happened to
       // contain "looks good" — and the brief itself is composed in the owner's

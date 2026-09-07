@@ -1187,7 +1187,19 @@ const main = async () => {
   // wrap that will never change.
   const oldStyleWrapDate = execFileSync('git', ['-C', ROOT, 'log', '-1', '--format=%ad', '--date=short', '7bbd269b18b479eee5d45d032a4a45bcfc8e9668'], { encoding: 'utf8' }).trim()
   ok("fires on the bad input: the un-forced clock disagrees with UTC for this real commit", oldStyleWrapDate === '2026-08-31', oldStyleWrapDate)
-  const wrap483 = execFileSync(process.execPath, [STATS, '--wrap', '4.8.3'], { encoding: 'utf8' })
+  // `--wrap` exits non-zero whenever the CURRENT ledger has any unresolved
+  // phantom candidate for this wrap's window — a real, deliberate gate, not a
+  // crash, and one that legitimately fires as the ledger keeps growing after
+  // 4.8.3 shipped. `execFileSync` throws on a non-zero exit by default, so a
+  // fixture that doesn't expect that stops mid-suite the moment a new phantom
+  // candidate appears anywhere in ledger history — this assertion only cares
+  // about the header line's date, not whether the ledger is currently clean.
+  let wrap483
+  try {
+    wrap483 = execFileSync(process.execPath, [STATS, '--wrap', '4.8.3'], { encoding: 'utf8' })
+  } catch (e) {
+    wrap483 = e.stdout || ''
+  }
   ok(
     "stays silent on the good one: `--wrap 4.8.3`'s own header reports the real commit's UTC day (2026-08-30), not the committer-offset day (2026-08-31)",
     /^4\.8\.3 — 4 commit\(s\) 2026-08-30\b/m.test(wrap483),

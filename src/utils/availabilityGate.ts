@@ -58,7 +58,7 @@
  * is made on data instead of on the story above.
  *
  * WHY no existing gate covers the class. `claimChecker` ran (:190) and passed correctly:
- * its inputs are `reply + toolSummaries + bookingOccurred` (claimChecker.ts:39-66)
+ * its inputs are `reply + toolSummaries + bookingOccurred` (claimChecker.ts's ClaimCheckInput)
  * and its ONE rule is "did the assistant claim to have DONE an external action".
  * "Wednesday works on his end" is not an action claim and no availability verdict
  * is anywhere in its context — it is structurally blind to this class, and making
@@ -111,6 +111,7 @@ import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { renderClockInZone } from './timezoneConvert';
 import { extractTimes, extractDates } from './dateTimeExtract';
+import type { RuleViolationKind } from './scheduleRules';
 
 // ── The class vocabulary ────────────────────────────────────────────────────
 
@@ -126,7 +127,7 @@ import { extractTimes, extractDates } from './dateTimeExtract';
  * what a blocked slot is allowed to say (G1/G2).
  */
 export function hardBlockClassPhrase(
-  kind: string | undefined,
+  kind: RuleViolationKind | undefined,
   opts: {
     ownerFirst: string;
     allDayOutOfOffice?: boolean;
@@ -187,7 +188,7 @@ export function hardBlockClassPhrase(
  * verdict as a hard line, and telling the drafter "that time has already passed" is
  * both true and useful. Only the ARMING is withdrawn.
  */
-const HARD_FLOOR_KINDS = new Set<string>([
+const HARD_FLOOR_KINDS: ReadonlySet<RuleViolationKind> = new Set<RuleViolationKind>([
   'owner_busy_collision',
   'vacation_or_off_day',
 ]);
@@ -212,8 +213,8 @@ const HARD_FLOOR_KINDS = new Set<string>([
  * leave the floor unarmed. Typed as a PREDICATE so the recorder's narrowing comes
  * from the same test that decides the tier, instead of a cast that could outlive it.
  */
-export function armsHardFloor(kind: string | undefined): kind is string {
-  return !!kind && HARD_FLOOR_KINDS.has(kind);
+export function armsHardFloor(kind: string | undefined): kind is RuleViolationKind {
+  return !!kind && HARD_FLOOR_KINDS.has(kind as RuleViolationKind);
 }
 
 // ── The established-block ledger ────────────────────────────────────────────
@@ -408,15 +409,15 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
  *   - availabilityPreCheck.ts:983 — a fresh verdict for that exact instant is NOT
  *     a hard block (invalidation rules 1 and 4 both resolve through this one line:
  *     "not every reading arms" is true whether there was one reading or two).
- *   - availabilityPreCheck.ts:1215 / :1221 — `forgetNamedInstantsFromHardBlockLedger`,
+ *   - availabilityPreCheck.ts:1234 / :1240 — `forgetNamedInstantsFromHardBlockLedger`,
  *     the named-attendee bail's text-matched forget (invalidation rule 5) — a
  *     DIFFERENT mechanism from the two lines above: no `checkSlot` call, a scope
  *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;
  *     it is not — rule 4 is the undecided-frame case at :967, and this is its own
  *     rule, corrected 2026-08 (o#190).
- *   - runOutputGates.ts:1647 — the pre-rewrite live re-check found this instant no
+ *   - runOutputGates.ts:1670 — the pre-rewrite live re-check found this instant no
  *     longer hard-blocked (invalidation rule 6); dropped WITHOUT a rewrite.
- *   - runOutputGates.ts:1673 — a rewrite landed on it (invalidation rule 3).
+ *   - runOutputGates.ts:1696 — a rewrite landed on it (invalidation rule 3).
  * A caller adding another should update this list AND the ledger's own
  * INVALIDATION doc above in the same change — this file's own header undercounted
  * its callers once already.

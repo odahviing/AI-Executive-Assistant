@@ -453,7 +453,7 @@ function draftLooksLeaky(draft: string): boolean {
     // flagging the very mentions this gate protects (2026-07-21), and is exactly
     // how this fallback's own copy silently drifted narrower than the canonical
     // (dropped `coord_` without noticing, since `coord_` was removed in v3.4.0 —
-    // db/client.ts:171-174 — and nothing mints one anymore). There is no second
+    // db/client.ts:199-202 — and nothing mints one anymore). There is no second
     // copy left here to drift.
     || RAW_SLACK_ID_RE.test(draft)
     || INTERNAL_WORK_ITEM_ID_RE.test(draft);

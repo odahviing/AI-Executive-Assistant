@@ -124,8 +124,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // one Haiku call (~1s) via classifyTurn. Each half is gated independently:
   //   - needIntent: social skill on + message has substance (owner OR colleague)
   //   - needScopes: intent_aware_tools on + owner PATH (the colleague path
-  //                 discards scopes for tool selection — registry.ts:486 — and
-  //                 systemPrompt.ts:319 is built on toolScopes being undefined
+  //                 discards scopes for tool selection — `needScopes` below is
+  //                 gated on `isOwnerPath` — and systemPrompt.ts's
+  //                 `toolScopes`-driven prose is built assuming it's undefined
   //                 there, so computing them off-path only skews the prose)
   // Result.scope feeds getSkillTools below (toolScopes); result.intent drives
   // the social directive. Both fail open (intent→other, scopes→general).
@@ -755,7 +756,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // reopens the exact "addressed him as a colleague in his own turn" bug the
   // v4.4.x comment above describes fixing. Compare the authenticated identity
   // directly, same pattern as orchestrator/index.ts's find_available_slots
-  // gate and core/requests/runner.ts:453.
+  // gate and core/requests/runner.ts's `rawRole` derivation (`runResearchRun`).
   if (
     input.authority === 'colleague'
     && input.userId !== profile.user.slack_user_id
@@ -771,8 +772,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // off both what he meant and what `find_available_slots` resolved for the
       // same phrase, which is how one requested time produced two opposite
       // availability verdicts and a false collision claim. Same row the search
-      // path already reads the attendee frame from (attendeeAvailability.ts:123);
-      // no stored timezone → undefined → the pre-check keeps the owner's zone.
+      // path already reads the attendee frame from (attendeeAvailability.ts's
+      // getEffectiveTimezoneById read); no stored timezone → undefined → the pre-check keeps the owner's zone.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getPersonMemory } = require('../../db') as typeof import('../../db');
       const askerTimezone = input.userId ? (getPersonMemory(input.userId)?.timezone ?? undefined) : undefined;
@@ -785,7 +786,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         recentThread: conversationHistory.slice(-4),
         // v4.2.x — thread identity for the alternatives block. When every tested
         // slot comes back blocked, nearbyAlternatives offers concrete times and
-        // records them into the offered-slots stash (ops/helpers.ts:82). Must be
+        // records them into the offered-slots stash (ops/helpers.ts's recordOfferedSlots). Must be
         // the SAME (channelId, threadTs) pair the stash READ below uses: the
         // stash keys group surfaces as `channelId|threadTs`, so passing only the
         // channel would file an MPIM's alternatives under `C…|_none_` while the
@@ -887,7 +888,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // "how packed is Thursday?", "am I free this afternoon?"), run
   // analyzeCalendar for today + tomorrow deterministically and inject the
   // real freeMin + gap structure into the prompt. Replaces the leaky
-  // meetings.ts:1298 "USE THE TOOL — don't math by hand" prompt rule that
+  // meetings.ts:1307 "USE THE TOOL — don't math by hand" prompt rule that
   // Sonnet kept ignoring, producing fabricated "2h45 free / healthy"
   // narrations. No NL regex — the classifier's LLM pre-pass decides
   // intent. Fails open: any error in analyze leaves the block empty and
@@ -934,13 +935,13 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
           const meetingsHh = Math.floor(totalMin / 60);
           const meetingsMm = totalMin % 60;
           const meetingsStr = meetingsHh > 0 ? `${meetingsHh}h${meetingsMm > 0 ? `${String(meetingsMm).padStart(2, '0')}m` : ''}` : `${meetingsMm}m`;
-          // An all-day OOO zeroes freeMin upstream (ops/analysis.ts:562),
+          // An all-day OOO zeroes freeMin upstream (ops/analysis.ts:600),
           // so the numeric line renders "0m free / 0m in meetings across 0
           // meetings" and reads as packed solid — the opposite of "he's away".
           // Same second-person idiom the validator already uses for this state
-          // (scheduleRules.ts:557). The meeting count survives on purpose: an
+          // (scheduleRules.ts:978). The meeting count survives on purpose: an
           // OOO day can still carry real bookings (that's the oof_with_meetings
-          // issue, analysis.ts:370) and dropping them would trade one wrong
+          // issue, analysis.ts:273) and dropping them would trade one wrong
           // answer for another. dayType is omitted — office/home says where he
           // works that day, which is moot when he isn't there.
           if (d.outOfOfficeAllDay) {
@@ -978,8 +979,8 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // of subject re-search.
   //
   // v4.2.x (#148) — the guidance now covers BOTH directions a row can be
-  // referenced. Health tracks `missing_category` (checkHealth.ts:1309, status
-  // awaiting_owner), so some rows are no longer a problem Maelle reported but a
+  // referenced. Health tracks `missing_category` (checkHealth.ts's day-loop
+  // issue push, status awaiting_owner), so some rows are no longer a problem Maelle reported but a
   // QUESTION she asked; the answer arrives as one word ("Meeting"), which read
   // as a fresh booking request while the text only taught delete/fix/cancel.
   // Class-keyed, not status-keyed: an awaiting_owner OVERLAP row is still a

@@ -20,8 +20,8 @@ const logger = winston.createLogger({
   transports: [
     // Structured JSON to file — full audit trail, rotated daily, 7-day retention.
     // Files: maelle-YYYY-MM-DD.log. Nothing operational lives here (meetings
-    // are in Graph calendar + tasks table, people in people_memory, coord
-    // state in coord_jobs, audit trail in audit_log). Safe to prune at 7d.
+    // are in Graph calendar + tasks table, people in people_memory, async
+    // work items in requests, audit trail in audit_log). Safe to prune at 7d.
     new DailyRotateFile({
       filename: path.join(logPath, 'maelle-%DATE%.log'),
       datePattern: 'YYYY-MM-DD',

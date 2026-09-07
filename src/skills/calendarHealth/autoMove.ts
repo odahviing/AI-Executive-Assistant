@@ -392,8 +392,12 @@ export async function pullInternalMeetingToAbut(params: {
   const slots = await findAvailableSlots({
     userEmail, timezone, durationMinutes: durationMin,
     // Only pull the meeting to where the attendees are actually free AND inside
-    // their (cross-TZ) work hours — never before their day starts.
-    ...attendeeCheckParams(attendeeEmails, userEmail),
+    // their (cross-TZ) work hours — never before their day starts. #M3 — pass
+    // the owner's zone as the no-stored-TZ fallback (same convention as
+    // findAvailableSlots.ts:900 / createMeeting.ts's Guard B / moveMeeting.ts):
+    // without it a no-TZ attendee was silently skipped from this hours check
+    // entirely, so an autonomous pull could land a meeting on their night.
+    ...attendeeCheckParams(attendeeEmails, userEmail, timezone),
     searchFrom: keptEndDt.toUTC().toISO()!,
     searchTo: mEnd.toUTC().toISO()!,
     minBufferHours: 0,              // owner-authority active move; no colleague lead-time
@@ -506,9 +510,11 @@ export async function pushInternalMeetingToAbutBefore(params: {
   // Attendee-free at the target (owner + required attendees, cross-TZ hours).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { attendeeCheckParams } = require('../../utils/attendeeAvailability') as typeof import('../../utils/attendeeAvailability');
+  // #M3 — owner's zone as the no-stored-TZ fallback (see pullInternalMeetingToAbut
+  // above); otherwise a no-TZ attendee dropped out of this hours check entirely.
   const slots = await findAvailableSlots({
     userEmail, timezone, durationMinutes: durationMin,
-    ...attendeeCheckParams(attendeeEmails, userEmail),
+    ...attendeeCheckParams(attendeeEmails, userEmail, timezone),
     searchFrom: targetStartDt.toUTC().toISO()!,
     searchTo: blockStartDt.toUTC().toISO()!,
     minBufferHours: 0,

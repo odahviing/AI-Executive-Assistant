@@ -296,7 +296,7 @@ export async function closeLoopOnOwnerHandled(params: {
     }
     // closeloop-silent-close-no-requester-relay (bounce fix, point 3) — a
     // structured resolve_approval call already touched this row THIS turn.
-    // That includes the case resolver.ts:753 deliberately leaves open
+    // That includes the case resolver.ts:794 deliberately leaves open
     // (on_approve replay failed, e.g. delete_meeting event_not_found) so the
     // owner can retry — the row is STILL "open" to this scanner's own query,
     // but a same-turn free-text match here would silently override that

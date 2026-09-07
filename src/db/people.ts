@@ -658,7 +658,7 @@ export function applyAutoTimezone(
  * profile currently reads a zone that DIFFERS from the established permanent
  * one. A profile read carrying no zone withdraws that assertion — the
  * divergence is no longer reproducible — so the row must stop feeding the
- * "Slack currently reads X" caveat (skills/meetings/planMeeting.ts:476,:653)
+ * "Slack currently reads X" caveat (skills/meetings/planMeeting.ts:489,:666)
  * and must never mature into the owner's persistence question
  * (findPersistentUnaskedTimezoneDivergences below). Letting the TTL handle it
  * is NOT enough: the streak (`since`) matures at `since` + TTL while the row
@@ -2166,7 +2166,7 @@ export function setPersonTimezoneByEmail(
  * block for the dynamic prompt section. Used by the colleague-path system
  * prompt so Sonnet sees email / tz / gender as DATA (no rules, no "never
  * ask"), and stops defensively asking the colleague for facts already on
- * file. Pre-fix, the handler-side auto-fill at meetings/ops/handlers/createMeeting.ts:412 covered
+ * file. Pre-fix, the handler-side auto-fill at meetings/ops/handlers/createMeeting.ts:452 covered
  * the WRITE side (filling missing emails from people_memory at create_meeting
  * time) but Sonnet's draft sometimes asked anyway because the prompt didn't
  * surface known data — root of the 2026-05-18 Maayan ask.

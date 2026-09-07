@@ -113,7 +113,7 @@ export function getActiveJobsForThread(ownerUserId: string, threadTs: string): {
   // is asked in exactly one place (db/jobs.ts). This is the most consequential
   // caller: what comes back is injected into the system prompt as "ACTIVE IN THIS
   // THREAD — you already committed to these" on every owner turn
-  // (core/orchestrator/buildTurnContext.ts:356), so a row that is finished but
+  // (core/orchestrator/buildTurnContext.ts:550), so a row that is finished but
   // reads as live is fed to the model as a live commitment.
   const outreachJobs = getActiveOutreachForThread(ownerUserId, threadTs);
 

@@ -7,6 +7,12 @@
  * They all call `checkSlot(...)` now and get ONE verdict + label.
  *
  * ── EVALUATION ORDER. First violation wins; the caller gets one label. ──────
+ * "First violation wins" is why `RuleCheckInput.onlyKinds` exists: a caller
+ * re-validating an EDIT to an already-booked slot needs the verdict for the
+ * rules its edit can actually break, and an earlier unrelated rule would
+ * short-circuit ahead of them. Under `onlyKinds` a rule outside the set is
+ * skipped and the ladder continues — so `passes:true` then means "none of the
+ * named rules is broken", never "bookable". See that field's own doc.
  * The numbers are historical and are cited cross-file, so they stay even where
  * the order no longer matches them (8 is evaluated second). `[relax]` = bypassed
  * when allow_relaxed; every rule except (1) is relaxable.
@@ -166,6 +172,54 @@ export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<R
 ]);
 
 /**
+ * SearchRejectLabel — the closed vocabulary of OWNER-rule reasons the search
+ * walker (`connectors/graph/findAvailableSlots.ts`) ever attaches to a
+ * rejected or skipped candidate: every literal any `evaluateCursor` branch
+ * there returns as a `reason`, plus every value `mapVerdictToRejectLabel`
+ * (below) can produce. Declared here — the file that already owns the
+ * checkSlot→search-label mapping — rather than in the walker itself, so this
+ * and `connectors/graph/findAvailableSlots.ts` (which imports it to type
+ * `CursorOutcome`/`diagnosticsOut`) can't drift apart, and so a caller lower
+ * in the import graph (this file) never has to reach up into the connector
+ * layer just to name its own output type.
+ *
+ * search-path-reject-labels-have-no-declaration-anywhere (2026-09-07) — before
+ * this, `CursorOutcome.reason` and `diagnosticsOut.rejectedCounts` /
+ * `rejectedExamples` were bare `string` / `Record<string, number>`, so six
+ * readers (violationLabels.ts, turnHelpers.ts, createMeeting.ts,
+ * moveMeeting.ts, this file's own `ops/handlers/findAvailableSlots.ts` sibling,
+ * and this gate's `availabilityGate.ts`) each hand-typed their own subset with
+ * zero compiler linkage. This is deliberately NOT `RuleViolationKind` (below,
+ * or above — whichever): the two are different strings for the same rule in
+ * several cases (`outside_working_hours` vs `outside_owner_work_hours`,
+ * `vacation_or_off_day` vs the search-only `wrong_day_type`), and
+ * `mapVerdictToRejectLabel` is the boundary between them. Two ATTENDEE-scoped
+ * prefixes (`attendee_busy_collision`, `outside_attendee_work_hours`) are
+ * deliberately NOT members here — those are a separate closed vocabulary
+ * (`ATTENDEE_REASON_PREFIXES`, utils/attendeeAvailability.ts) the walker tags
+ * with `:<email>`, combined with this one into `SearchRejectReason`
+ * (connectors/graph/findAvailableSlots.ts, the one file that already imports
+ * both halves).
+ */
+export type SearchRejectLabel =
+  | 'in_the_past'
+  | 'within_lead_time'
+  | 'vacation_or_off_day'
+  | 'wrong_day_type'
+  | 'owner_out_of_office'
+  | 'outside_owner_work_hours'
+  | 'floating_block_no_room'
+  | 'travel_buffer_collision'
+  | 'owner_busy_collision'
+  | 'focus_time_office'
+  | 'focus_time_home'
+  | 'category_day_type'
+  | 'category_per_day'
+  | 'category_per_week'
+  | 'outside_requested_window'
+  | 'overlaps_meeting_being_moved';
+
+/**
  * Map a checkSlot verdict kind to the search-path's own reject label. Single
  * source (moved from `connectors/graph/findAvailableSlots.ts` v4.x, which
  * hand-rolled this switch inline) so the walker's `trackReject` calls and
@@ -179,11 +233,14 @@ export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<R
  * elapsed times inside the soft/owner-overridable set, and the colleague hint
  * downstream described a time that had simply passed as merely "protective"
  * and invited a policy_exception over it.
+ *
+ * Return type tightened to `SearchRejectLabel` (was bare `string`) — every
+ * `return` below is now checked against the declared vocabulary above.
  */
 export function mapVerdictToRejectLabel(
   kind: string | undefined,
   dayType: 'office' | 'home' | 'other',
-): string {
+): SearchRejectLabel {
   switch (kind) {
     case 'in_the_past': return 'in_the_past';
     case 'within_lead_time': return 'within_lead_time';
@@ -368,6 +425,30 @@ export interface RuleCheckInput {
    * buffer-resolution function.
    */
   travelBufferMinutes?: number;
+  /**
+   * 2026-09-07 — RISK-SCOPED verdict. When present, checkSlot reports ONLY
+   * violations whose kind is in this set: a rule that fails but isn't named
+   * here is skipped and the ladder CONTINUES to the next rule, so an earlier
+   * unrelated failure can no longer mask the one the caller actually asked
+   * about (the ladder short-circuits, so `within_lead_time` on a meeting
+   * starting in 20 minutes used to hide every category and travel-buffer
+   * verdict behind it).
+   *
+   * READ THIS BEFORE ADDING A SECOND CALLER: under `onlyKinds`,
+   * `passes: true` does NOT mean "this slot is bookable" — it means "none of
+   * the rules you named is broken". Every other rule is UNEVALUATED. It is
+   * therefore only ever correct for re-validating an edit to an ALREADY-BOOKED
+   * slot, where the rules the edit cannot affect were settled when the meeting
+   * was booked and re-imposing them would refuse a harmless edit. The one
+   * caller today is `update_meeting`'s colleague-path gate
+   * (ops/handlers/moveMeeting.ts's `colleagueUpdateRuleGate`); a caller
+   * deciding WHETHER to book must pass a full, unscoped input.
+   *
+   * The M2 facts on `RuleCheckResult` (`level`, `overCommitment`,
+   * `overOptional`, `outsideWorkHours`) are computed unconditionally and are
+   * unaffected by this — only the violation REPORT is scoped.
+   */
+  onlyKinds?: ReadonlySet<RuleViolationKind>;
 }
 
 export interface RuleCheckResult {
@@ -768,6 +849,11 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const ownerReads = viewer === 'owner';
   const who = ownerReads ? 'you' : ownerFirst;
   const whose = ownerReads ? 'your' : `${ownerFirst}'s`;
+  // 2026-09-07 — the risk scope. See RuleCheckInput.onlyKinds: with no set the
+  // predicate is constantly true and every rule below behaves exactly as it did
+  // before. Guarding the CONDITION (not just the return) also skips the work
+  // for the rules a scoped caller didn't ask about.
+  const reports = (kind: RuleViolationKind): boolean => !input.onlyKinds || input.onlyKinds.has(kind);
 
   // ── (b) WORK-BAND FIT (rule 5's data) — unconditional, BEFORE the ladder ──
   // The arithmetic rule 5 reports on, computed once so it can be reported as a
@@ -885,7 +971,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // loop terminates (he CAN log a past meeting if he insists). find_available_slots
   // enforces the fuller booking lead-time for OFFERED slots; this is the
   // write-path floor that named-time create/move was missing.
-  if (!input.allowRelaxed && slotStart.toMillis() < DateTime.now().toMillis()) {
+  if (!input.allowRelaxed && reports('in_the_past') && slotStart.toMillis() < DateTime.now().toMillis()) {
     return {
       passes: false,
       violation_kind: 'in_the_past',
@@ -910,7 +996,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   //     silently double-book a meeting with attendees.
   //   • `isFloatingBlock: true` — focus / lunch / gym blocks are SIGNALS that
   //     coexist with meetings by design; never block them on owner_busy.
-  if (!input.allowRelaxed && !input.isFloatingBlock && overCommitment) {
+  if (!input.allowRelaxed && !input.isFloatingBlock && overCommitment && reports('owner_busy_collision')) {
     return {
       passes: false,
       violation_kind: 'owner_busy_collision',
@@ -940,7 +1026,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // caller's role via bookingLeadTimeHours, and the walker READS it from here.
   // Instant-only comparison (no zone inference — M11 forbids the server clock
   // for zones, not for "what time is it now").
-  if (!input.allowRelaxed && isWithinBookingLeadTime(slotStart.toMillis(), input.leadTimeHours)) {
+  if (!input.allowRelaxed && reports('within_lead_time') && isWithinBookingLeadTime(slotStart.toMillis(), input.leadTimeHours)) {
     return {
       passes: false,
       violation_kind: 'within_lead_time',
@@ -953,7 +1039,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // v3.7.x (#143) — via the effective day, so a per-date "off" override and a
   // normally-off yaml day read the same. No override → identical to the old
   // office/home name check.
-  if (!effectiveDay.isWorkday) {
+  if (!effectiveDay.isWorkday && reports('vacation_or_off_day')) {
     return {
       passes: false,
       violation_kind: 'vacation_or_off_day',
@@ -967,7 +1053,8 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // ── (2-4) category rules ────────────────────────────────────────────────
   // Bypassed under allowRelaxed — owner override is total (rule 11); the search
   // path likewise skips category in relaxed mode, so the two stay aligned.
-  if (!input.allowRelaxed) {
+  if (!input.allowRelaxed
+      && (reports('category_day_type') || reports('category_per_day') || reports('category_per_week'))) {
     const catCheck = checkCategorySlot({
       slotStart,
       slotEnd,
@@ -990,12 +1077,15 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       const label = ownerReads
         ? catCheck.human_explanation
         : (catCheck.colleague_explanation ?? catCheck.human_explanation);
-      return {
-        passes: false,
-        violation_kind: map[catCheck.rule_broken!] ?? 'category_day_type',
-        violation_label: label ?? `${input.category} category rule violated`,
-        ...slotFacts,
-      };
+      const catKind = map[catCheck.rule_broken!] ?? 'category_day_type';
+      if (reports(catKind)) {
+        return {
+          passes: false,
+          violation_kind: catKind,
+          violation_label: label ?? `${input.category} category rule violated`,
+          ...slotFacts,
+        };
+      }
     }
   }
 
@@ -1007,7 +1097,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // ladder (`fitsWorkWindow`), so the rule that reports the violation and the fact
   // every verdict carries can never be two different answers. This branch is the
   // REPORT half only.
-  if (!input.allowRelaxed && !fitsWorkWindow) {
+  if (!input.allowRelaxed && !fitsWorkWindow && reports('outside_working_hours')) {
     const windowsLabel = workWindows.length === 0
       ? '(no work hours configured for this day)'
       : workWindows.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
@@ -1039,7 +1129,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // v3.7.x (#143) — skip on an override day: no floating blocks live there, so
   // there's no lunch/gym window to protect (and a normal meeting isn't blocked
   // for a block that won't be booked that day).
-  if (!input.allowRelaxed && !effectiveDay.hasOverride) {
+  if (!input.allowRelaxed && !effectiveDay.hasOverride && reports('floating_block_overlap')) {
     for (const block of floatingBlockDefs) {
       // v4.1.x — honor the block's DAY SCOPE. This rule read the raw yaml list
       // and ignored `block.days`, so a Thursday-only coffee block constrained
@@ -1137,7 +1227,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // so a `travel_buffer_minutes: 60` search dropped slots the write path then
   // happily booked.
   const bufMin = travelBufferMinutesFor(profile, input.category, input.travelBufferMinutes);
-  if (bufMin > 0 && !input.allowRelaxed) {
+  if (bufMin > 0 && !input.allowRelaxed && reports('travel_buffer_collision')) {
     const beforeWindowStart = slotStart.minus({ minutes: bufMin });
     const afterWindowEnd = slotEnd.plus({ minutes: bufMin });
     for (const ev of input.events) {
@@ -1184,7 +1274,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // approval) and when isFloatingBlock=true (focus/lunch/gym blocks are
   // signals that coexist with meetings; the math already ignores showAs=free
   // anyway, but skip to match the rest of the relaxed semantics).
-  if (!input.allowRelaxed && !input.isFloatingBlock) {
+  if (!input.allowRelaxed && !input.isFloatingBlock && reports('focus_time_floor')) {
     // v3.7.x (#143) — office/home via the effective day; an away day (elsewhere)
     // skips the focus floor (a trip day isn't held to the home focus-time theory).
     // The window + total come from effectiveDay.windows, so a per-date hours

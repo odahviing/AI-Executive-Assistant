@@ -30,6 +30,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { OwnerTravelContext } from '../../utils/workingElsewhere';
 import { renderWeDualClock } from '../../utils/weTimeResolver';
 import logger from '../../utils/logger';
+import { PROMOTE_TIMEZONE_TEMP_TOOL, REPLAYABLE_TOOLS } from '../requests/types';
 
 export interface ToolCallback {
   tool: string;
@@ -168,7 +169,7 @@ export function buildConsequenceText(
     // raiseTimezonePersistenceAsks / deferredActionReplay.ts). Not a meeting
     // tool — a direct db/people.ts write, verbalized here like every other
     // on_approve so the owner still sees what a yes actually does.
-    case 'promote_timezone_temp': {
+    case PROMOTE_TIMEZONE_TEMP_TOOL: {
       const val = (args.expected_value as string) ?? 'that timezone';
       return `If yes → I'll update their stored timezone to ${val}.`;
     }
@@ -284,7 +285,7 @@ export async function composeOwnerAskText(input: {
   const { askText, details, profile, requestId, lead, reSurface } = input;
 
   // A stored counter is what a ✅ ACTUALLY replays: resolveRequest merges
-  // `details.counter` into on_approve before running it (resolver.ts:415-425),
+  // `details.counter` into on_approve before running it (resolver.ts:459-470),
   // for any amend round, owner's or colleague's. So the preview verbalizes the
   // MERGED action — otherwise a countered row bounced back to awaiting_owner
   // would promise the ORIGINAL slot and book the counter's: the "I thought yes
@@ -372,18 +373,16 @@ export function mergeAmendIntoApprove(
  * for the meeting tools below; `promote_timezone_temp` is the one exception —
  * a direct db/people.ts write, handled inline before that skill dispatch (see
  * its own comment there). Anything NOT in this set falls back to "close +
- * Sonnet next turn" behavior in runApproveCallback. Keep this set in sync
- * with deferredActionReplay.ts.
+ * Sonnet next turn" behavior in runApproveCallback.
+ *
+ * Membership is DERIVED from `REPLAYABLE_TOOLS` (core/requests/types.ts), the
+ * one declared list — not hand-kept in sync with deferredActionReplay.ts
+ * anymore: that module's dispatch switches over the same `ReplayableTool`
+ * union with a `never`-typed default, so a tool added here without a
+ * matching dispatch branch there fails `npm run typecheck` instead of
+ * silently hitting deferredActionReplay's old catch-all no-op. Typed `Set<
+ * string>` (not `Set<ReplayableTool>`) so the existing untyped `.has(tool)`
+ * call sites in resolver.ts — which check an arbitrary on_approve.tool, not
+ * just replayable ones — keep compiling unchanged.
  */
-export const RESOLVER_REPLAY_TOOLS = new Set<string>([
-  'create_meeting',
-  'move_meeting',
-  'delete_meeting',
-  'update_meeting',
-  'book_floating_block',
-  // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) —
-  // core/requests/runner.ts's raiseTimezonePersistenceAsks on_approve.
-  // Membership here is what makes runApproveCallback treat it as a real
-  // replay instead of the inert "not replayable, close without firing" path.
-  'promote_timezone_temp',
-]);
+export const RESOLVER_REPLAY_TOOLS: Set<string> = new Set(REPLAYABLE_TOOLS);

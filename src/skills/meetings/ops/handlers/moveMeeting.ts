@@ -8,19 +8,23 @@
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
-import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity } from '../../ops/helpers';
+import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
 import { humanizeViolationLabel, attendeeConflictRefusal } from '../../ops/violationLabels';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
+  getEventForAttendeeUpdate,
   updateMeeting,
   type AttendeeConflictTag,
+  type SearchRejectReason,
+  firstRejectReason,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
 import {
   auditLog,
   getPersonMemory,
 } from '../../../../db';
+import { checkSlot, type RuleViolationKind } from '../../../../utils/scheduleRules';
 import { grantRelaxed, emailStatedByHuman } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
@@ -77,11 +81,12 @@ function notOrganizerRefusal(opts: {
 
 /**
  * checkSameSubjectCollision — same-subject-collision disambiguation guard,
- * shared by update_meeting (gated on attendeeChangeRequested — see its call
- * site) and move_meeting (unconditional — move has no such field to gate
- * on). Originally elie-eli-name-confusion-noy-addition-unclear-confirmation
- * (2026-08-09) on the update path only; ported to move_meeting 2026-08-14,
- * then extracted here (bouncer, same night) so one rule has one spelling.
+ * shared by update_meeting and move_meeting, BOTH unconditional (2026-09-07 —
+ * update_meeting used to gate this on attendeeChangeRequested; widened, see
+ * the call site for why). Originally
+ * elie-eli-name-confusion-noy-addition-unclear-confirmation (2026-08-09) on
+ * the update path only; ported to move_meeting 2026-08-14, then extracted
+ * here (bouncer, same night) so one rule has one spelling.
  *
  * Every gate downstream (organizer check, requester-controls, the mutation
  * itself) trusts args.meeting_id verbatim, but on a colleague's bare
@@ -217,19 +222,316 @@ async function checkSameSubjectCollision(
   }
 }
 
+/** The post-PATCH shape of the event, as `colleagueUpdateRuleGate` must judge it. */
+interface PendingUpdate {
+  /** The event as it stands BEFORE the PATCH. Loaded lazily — see the gate. */
+  existing: Awaited<ReturnType<typeof getEventForAttendeeUpdate>> | undefined;
+  /** The category this edit WRITES. undefined = the edit doesn't touch the category. */
+  categoryOverride: string | undefined;
+  /** EXACTLY the `location` the updateMeeting call will send. undefined = untouched. */
+  patchLocation: string | undefined;
+  /** EXACTLY the `isOnline` the updateMeeting call will send. undefined = untouched. */
+  patchIsOnline: boolean | undefined;
+  /** The venue re-resolve pushed the room mailbox onto the invite. */
+  roomEmailAdded: boolean;
+  /** Post-edit participant count INCLUDING the owner (what the room check sizes on). */
+  participantCount: number | undefined;
+}
+
+/**
+ * colleagueUpdateRuleGate — THE rule re-validation for a colleague's
+ * `update_meeting`, scoped to what the edit actually puts at risk.
+ *
+ * WHY THIS EXISTS (owner ruling, 2026-09-07). Asked whether a colleague's
+ * update on his calendar should shadow-DM him, he said: *"i don't want to know
+ * abuot it, as long as its not breaking my rules"*. Silence, ON A CONDITION —
+ * and the condition was false: `handleUpdateMeeting` called neither `checkSlot`
+ * nor `planMeeting`, so once the requester-identity gate above passed, every
+ * field went into one raw Graph PATCH with no rule logic anywhere behind it. A
+ * requester could re-tag a meeting past a category cap, drop it onto a day the
+ * category isn't allowed on, or plant a venue inside another meeting's travel
+ * buffer, and nothing looked. So the fix he asked for is ENFORCEMENT, not
+ * notification — there is deliberately NO DM here; an ESCALATION is how he
+ * hears about it, and only when a rule would actually break.
+ *
+ * WHY NOT JUST CALL planMeeting, the way `move_meeting` does. A move changes
+ * WHEN — the input nearly every rule is about — so re-running the whole cascade
+ * is exactly right there. An update usually changes none of it, and a full
+ * re-validation would refuse a colleague's harmless rename because the meeting
+ * was already over a cap, already off-hours, or already double-booked when it
+ * was booked. Breaking edits that are fine today is worse than the gap being
+ * closed. So the check FOLLOWS THE CHANGE, not the tool:
+ *
+ *   nothing touched but the subject → nothing checked, no Graph read at all
+ *   the category changes            → that category's day_type + per_day + per_week
+ *   the venue changes               → the travel buffer around the (unchanged) slot
+ *   the room mailbox gets invited   → the room is actually free
+ *
+ * `checkSlot`'s `onlyKinds` (scheduleRules.ts) is what makes that precise
+ * rather than approximate: the rule ladder short-circuits on its first
+ * violation, so without it a pre-existing `within_lead_time` or
+ * `owner_busy_collision` on the meeting's own slot would mask the category
+ * verdict the edit actually needs. It is still THE one validator (M1) — the
+ * scope narrows which rules REPORT, never how any of them decides.
+ *
+ * WHAT IS DELIBERATELY NOT CHECKED, and why (each of these is a rule the edit
+ * cannot change the answer to, so re-imposing it would only refuse edits that
+ * are fine): the slot's own working-hours / off-day / lead-time / focus-floor /
+ * floating-block verdicts, and `owner_busy_collision` — the time isn't moving.
+ * An ADDED attendee's own busy time isn't checked either: busy is never a hard
+ * blocker (M16), the requester adding them is the one who decides, and the
+ * meeting isn't moving to accommodate them.
+ *
+ * OWNER PATH IS UNTOUCHED (M8) — the caller gates on
+ * `context.authority !== 'owner'`. His override is total; this closes the
+ * colleague hole only.
+ */
+async function colleagueUpdateRuleGate(
+  args: Record<string, unknown>,
+  ctx: OpCtx,
+  pending: PendingUpdate,
+): Promise<{ refusal?: Record<string, unknown>; roomSmallLabel?: string }> {
+  const { context, userEmail } = ctx;
+  const profile = context.profile;
+  const ownerFirst = profile.user.name.split(' ')[0];
+  const meetingId = args.meeting_id as string;
+  const askerFirst = getPersonMemory(context.userId)?.name?.split(/\s+/)[0] ?? 'They';
+
+  // Cheapest possible exit, and the one that keeps a bare rename free: decided
+  // from the args + the shape re-eval's own outputs, with NO Graph read. A
+  // rename (or an attendee add that didn't move the category or the venue)
+  // touches no rule input, so nothing below runs — not the event load, not the
+  // week fetch, not a free/busy probe.
+  // `categoryOverride`, NOT `args.category`: the category that reaches the PATCH
+  // is just as often the shape re-eval's own `detectCategory` verdict (a 5th
+  // internal attendee re-tags the meeting with no `category` arg anywhere in the
+  // call) — reading the arg alone would have exited here and skipped the cap
+  // check on the exact edit this gate was built for.
+  const touchesRuleInputs =
+    pending.categoryOverride !== undefined
+    || pending.patchLocation !== undefined
+    || pending.patchIsOnline !== undefined
+    || pending.roomEmailAdded;
+  if (!touchesRuleInputs) return {};
+
+  // The shape re-eval already loaded the event when it ran; an explicit
+  // `location`-only edit skips that branch entirely, so load it here.
+  let existing = pending.existing;
+  if (!existing) {
+    try {
+      existing = (await getEventForAttendeeUpdate(userEmail, meetingId)) ?? undefined;
+    } catch (err) {
+      if (err instanceof CalendarOfflineError) throw err;
+      logger.warn('update_meeting colleague gate — event load threw', { err: String(err).slice(0, 200) });
+    }
+  }
+
+  // Same "which category is this event in" read the shape re-eval above uses
+  // (`existing.categories[0]`) — not a second notion of it (M1).
+  const existingCategory = existing?.categories?.[0] ?? null;
+  const effectiveCategory = pending.categoryOverride ?? existingCategory;
+  const norm = (c: string | null | undefined): string => (c ?? '').trim().toLowerCase();
+  const categoryChanged =
+    pending.categoryOverride !== undefined && norm(pending.categoryOverride) !== norm(existingCategory);
+  const postLocation = (pending.patchLocation ?? existing?.location ?? '').trim();
+  const locationChanged =
+    (pending.patchLocation !== undefined && pending.patchLocation.trim() !== (existing?.location ?? '').trim())
+    || (pending.patchIsOnline !== undefined && pending.patchIsOnline !== existing?.isOnline);
+
+  const riskKinds = new Set<RuleViolationKind>();
+  if (categoryChanged) {
+    // The three rules that are FUNCTIONS OF THE CATEGORY. All of them live only
+    // inside checkSlot, which update_meeting never called — so re-tagging a
+    // meeting (a 5th internal attendee flips it, or `category` is passed
+    // outright) walked straight past the owner's own caps and day-type.
+    riskKinds.add('category_day_type');
+    riskKinds.add('category_per_day');
+    riskKinds.add('category_per_week');
+  }
+  // Rule 7 reads the CATEGORY's travel flag and the venue's catalog time, so
+  // either side changing re-opens it. One carve-out: a post-edit meeting with
+  // no physical location at all (pure Teams) has no commute — an edit that
+  // takes the venue AWAY strictly removes travel need and must never be the
+  // thing that refuses.
+  if ((categoryChanged || locationChanged) && postLocation !== '') {
+    riskKinds.add('travel_buffer_collision');
+  }
+
+  if (riskKinds.size === 0 && !pending.roomEmailAdded) return {};
+
+  // Past this point something IS at risk, so an unreadable slot is "can't
+  // check", never "nothing to check" — same stance as move_meeting's own
+  // colleague gate: the owner decides rather than the edit going through blind.
+  if (!existing?.startIso || !existing?.endIso) {
+    logger.warn('update_meeting colleague gate — could not read the meeting\'s own slot, escalating', {
+      meetingId, requester: context.userId, riskKinds: [...riskKinds],
+    });
+    return {
+      refusal: {
+        needs_owner_approval: true,
+        reason: 'rule_check_failed',
+        meeting_subject: args.meeting_subject,
+        message: `I couldn't read "${args.meeting_subject}" well enough to check that change against ${ownerFirst}'s rules. Raise create_approval(kind=policy_exception) so he can decide.`,
+        _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+      },
+    };
+  }
+
+  try {
+    if (riskKinds.size > 0) {
+      // gh#203-3/203-5 — the venue-sourced travel number, through the SAME
+      // catalog lookup planMeeting uses on create/move, so one venue's stated
+      // travel time means the same thing on all three paths.
+      //
+      // ONE deliberate difference from planMeeting's gate, which also requires
+      // `!isOnline`: there it reads a FRESH location verdict, where an explicit
+      // physical venue always comes back isOnline=false, so the clause only ever
+      // excluded the hybrid room-plus-Teams shape — which `isCompanyLocation`
+      // below excludes anyway. Here `isOnline` is the EVENT's existing flag, and
+      // an explicit `location` edit doesn't clear it: a meeting that still
+      // carries a Teams link would have skipped the lookup and been padded with
+      // the category default instead of the venue's real (possibly larger)
+      // travel time — under-padding the one check this is for. Physicality is
+      // decided by the location string, which is what the other two clauses
+      // already test.
+      let venueTravelMinutes: number | undefined;
+      if ((profile.skills as Record<string, unknown> | undefined)?.venue === true
+          && postLocation.length > 0) {
+        const { isPhoneLocationString } = await import('../../../../utils/resolveLocation');
+        const { getVenueTravelTimeMinutes, isCompanyLocation } = await import('../../../../db/venues');
+        if (!isPhoneLocationString(postLocation)
+            && !isCompanyLocation(postLocation, profile.meetings.office_location ?? {})) {
+          venueTravelMinutes = getVenueTravelTimeMinutes(profile.user.slack_user_id, postLocation) ?? undefined;
+        }
+      }
+      // THE validator, and THE two-week window planMeeting validates against
+      // (loadEventsForCheck) — the per-WEEK category count needs the whole week,
+      // and a second hand-rolled window here is how the two would disagree.
+      const { loadEventsForCheck } = await import('../../planMeeting');
+      const events = await loadEventsForCheck(profile, existing.startIso);
+      const verdict = checkSlot({
+        profile,
+        slotStartIso: existing.startIso,
+        slotEndIso: existing.endIso,
+        category: effectiveCategory,
+        events,
+        // The meeting being edited must never count against its own caps or
+        // collide with itself — it is already on the calendar (same reason
+        // move_meeting excludes it, moveMeeting.ts's own search call).
+        excludeEventIds: [meetingId],
+        onlyKinds: riskKinds,
+        travelBufferMinutes: venueTravelMinutes,
+        // M10 — the label can embed a neighbouring meeting's subject and, for a
+        // cap, the owner's own arithmetic. Scoped at the producer for the
+        // colleague who is reading it.
+        viewer: subjectViewerFor(context),
+        viewerEmail: viewerEmailFor(context),
+      });
+      if (!verdict.passes) {
+        const label = verdict.violation_label ?? 'it breaks one of his scheduling rules';
+        logger.info('update_meeting colleague gate refused — edit breaks an owner rule', {
+          meetingId, requester: context.userId,
+          risk: [...riskKinds],
+          broken_rule: verdict.violation_kind,
+          category_before: existingCategory, category_after: effectiveCategory,
+          location_changed: locationChanged,
+        });
+        return {
+          refusal: {
+            needs_owner_approval: true,
+            reason: HANDLER_ERROR_CODE.NOT_RULE_COMPLIANT,
+            broken_rule: verdict.violation_kind ?? 'unknown',
+            // M9 — the REAL reason, straight off the validator that produced it,
+            // never re-worded here. Quoted verbatim into the ask so the owner
+            // (and then the requester) sees the same sentence.
+            broken_rule_label: label,
+            meeting_subject: args.meeting_subject,
+            message: `${askerFirst} asked to change "${args.meeting_subject}", but that change breaks one of ${ownerFirst}'s scheduling rules. ${label} I can't do it on my own — call create_approval(kind=policy_exception) and pass that reason in ask_text so ${ownerFirst} knows what he's deciding.`,
+            _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+          },
+        };
+      }
+    }
+
+    // ── The room, when the venue re-resolve just invited it ────────────────
+    // Same three outcomes planMeeting applies on create/move (its
+    // `addRoomEmail` block) — never reached from update before, so a venue
+    // change quietly booked a room somebody else already had.
+    if (pending.roomEmailAdded) {
+      const { checkMeetingRoomAvailability } = await import('../../../../utils/meetingRoomAvailability');
+      const roomVerdict = await checkMeetingRoomAvailability({
+        profile,
+        startIso: existing.startIso,
+        endIso: existing.endIso,
+        participantCount: pending.participantCount ?? 0,
+      });
+      if (roomVerdict.kind === 'room_busy_small_fits') {
+        logger.info('update_meeting colleague gate — meeting room busy, falling back to the small room', {
+          meetingId, smallLabel: roomVerdict.smallLabel, participantCount: pending.participantCount,
+        });
+        return { roomSmallLabel: roomVerdict.smallLabel };
+      }
+      if (roomVerdict.kind === 'room_busy_too_big') {
+        logger.info('update_meeting colleague gate refused — meeting room busy + group too large', {
+          meetingId, requester: context.userId, participantCount: pending.participantCount,
+        });
+        return {
+          refusal: {
+            needs_owner_approval: true,
+            reason: HANDLER_ERROR_CODE.MEETING_ROOM_UNAVAILABLE_LARGE_MEETING,
+            meeting_subject: args.meeting_subject,
+            suggested_ask_text: roomVerdict.suggestedAskText,
+            message: `${askerFirst} asked to move "${args.meeting_subject}" into the meeting room, but it's taken then and the group is too big for the small room. Raise create_approval(kind=policy_exception) so ${ownerFirst} decides — push the time, trim the list, or grab space some other way.`,
+            _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+          },
+        };
+      }
+    }
+  } catch (err) {
+    // Same stance as move_meeting's colleague gate: an unreadable calendar is
+    // not a "couldn't verify, he decides" — it goes out as offline at the tool
+    // surface and nothing is written. Any other fault escalates rather than
+    // letting an unvalidated edit through.
+    if (err instanceof CalendarOfflineError) throw err;
+    logger.warn('update_meeting colleague gate threw — escalating to approval', { err: String(err).slice(0, 200) });
+    return {
+      refusal: {
+        needs_owner_approval: true,
+        reason: 'rule_check_failed',
+        meeting_subject: args.meeting_subject,
+        message: `I couldn't verify whether that change fits ${ownerFirst}'s rules right now. Raise create_approval(kind=policy_exception) so he can decide.`,
+        _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+      },
+    };
+  }
+
+  return {};
+}
+
 export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
 
         // elie-eli-name-confusion-noy-addition-unclear-confirmation (2026-08-09)
-        // — same-subject-collision guard for the update-by-name path, gated
-        // to attendee changes only (the field that exposed the original
-        // incident). Shared with move_meeting via checkSameSubjectCollision
-        // above (extracted 2026-08-14) — see that function's header for the
-        // full rationale, including the series-membership fix.
-        const attendeeChangeRequested =
-          (Array.isArray(args.add_attendees) && (args.add_attendees as unknown[]).length > 0)
-          || (Array.isArray(args.remove_attendees) && (args.remove_attendees as unknown[]).length > 0);
-        if (attendeeChangeRequested) {
+        // — same-subject-collision guard for the update-by-name path.
+        // Widened to UNCONDITIONAL 2026-09-07 (Fable finding): this used to
+        // be gated to attendeeChangeRequested (add/remove attendees only) —
+        // that was the field that exposed the ORIGINAL incident, never a
+        // claim that a rename/relocate/recategorize on an ambiguous
+        // meeting_id was safe. gh#154-W1's requester-controls gate further
+        // down is unconditional for EVERY field, so a colleague's bare
+        // "rename our Q&A" with two live "Q&A"s used to skip this check
+        // entirely, stamp `_deferred_action_hint` on the WRONG meeting_id,
+        // and get approved by the owner — whose replay runs with
+        // authority:'owner', which this very check exempts from
+        // disambiguation (see its header: "he can see his own calendar"),
+        // so nothing downstream ever caught the mismatch either. Running
+        // this unconditionally on the colleague-authority first pass catches
+        // the ambiguity before a corrupted hint can be stamped at all — same
+        // shape as move_meeting's own unconditional call below. Shared via
+        // checkSameSubjectCollision above (extracted 2026-08-14) — see that
+        // function's header for the full rationale, including the
+        // series-membership fix.
+        {
           const collision = await checkSameSubjectCollision(args, ctx, { toolName: 'update_meeting', actionPhrase: 'making the change' });
           if (collision) return collision;
         }
@@ -415,8 +717,10 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // approval instead, see meetings.ts:482/495/508), (b) load the
         // existing event, (c) compute the new attendee list, (d) re-evaluate
         // category + location ONLY when the change is shape-affecting
-        // (internal-only ↔ has-external, or count crossing 4↔5), and
-        // (e) call updateMeeting with the merged shape.
+        // (internal-only ↔ has-external, or count crossing 4↔5),
+        // (e) on the colleague path, re-check the owner's rules for whatever
+        // (d) actually changed — `colleagueUpdateRuleGate` above, and
+        // (f) call updateMeeting with the merged shape.
         const rawAdd = (args.add_attendees as Array<{ name?: string; email?: string; optional?: boolean }> | undefined) ?? [];
         const rawRemove = (args.remove_attendees as string[] | undefined) ?? [];
         const hasAttendeeChange = rawAdd.length > 0 || rawRemove.length > 0;
@@ -434,6 +738,14 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         let newCategoryFromShape: string | undefined;
         let newLocationFromShape: string | undefined;
         let newIsOnlineFromShape: boolean | undefined;
+        // 2026-09-07 — the three facts the colleague rule gate below needs from
+        // this branch when it runs. Hoisted rather than re-read: the gate loads
+        // the event itself ONLY on the paths that skip this branch entirely (an
+        // explicit `location`-only edit), so no colleague update ever costs two
+        // reads of the same event.
+        let existingEvent: Awaited<ReturnType<typeof getEventForAttendeeUpdate>> | undefined;
+        let roomEmailAdded = false;
+        let postEditParticipantCount: number | undefined;
         // jim-douglass follow-up (2026-08-30) — divergences between a supplied
         // address and the one actually invited (directory override, or a
         // human-stated address kept over a stale row), narrated on the success
@@ -501,14 +813,13 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
 
           if (addList.length === 0 && rawAdd.length > 0) {
             return {
-              error: 'attendee_missing_email',
+              error: HANDLER_ERROR_CODE.ATTENDEE_MISSING_EMAIL,
               meeting_subject: args.meeting_subject,
               message: `Can't add attendees without emails — at least one entry in add_attendees had no email. Pass each as { email: "...", name: "..." }.`,
             };
           }
 
           // Load existing event for current attendees + shape signals.
-          const { getEventForAttendeeUpdate } = await import('../../../../connectors/graph/calendar');
           const existing = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
           if (!existing) {
             return {
@@ -516,6 +827,42 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               meeting_subject: args.meeting_subject,
               message: `Couldn't load "${args.meeting_subject}" to update its attendees. The event may have been cancelled or moved.`,
             };
+          }
+          existingEvent = existing;
+
+          // Typo'd internal attendee guard — mirrors create_meeting's probe
+          // (createMeeting.ts) verbatim: a nonexistent @company mailbox
+          // returns no busy data → reads as fully free → the update ships
+          // with a phantom attendee who never gets the invite. Only the
+          // addresses actually being ADDED this call are probed (existing
+          // attendees were already verified when they were originally
+          // invited); external addresses are skipped (Graph never has their
+          // data), and the room mailbox is excluded.
+          try {
+            const ownerDomainLower = userEmail.includes('@') ? userEmail.split('@')[1].toLowerCase() : '';
+            const roomLower = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
+            const internalAddedEmails = addList
+              .map(a => a.email.toLowerCase())
+              .filter(e => e && ownerDomainLower && e.endsWith('@' + ownerDomainLower) && e !== roomLower);
+            if (internalAddedEmails.length > 0 && existing.startIso && existing.endIso) {
+              const { getFreeBusyForDecision } = await import('../../../../connectors/graph/calendar');
+              const { enrichUnresolvedInternal } = await import('../../ops/analysis');
+              const fbDiag: { unresolved?: string[] } = {};
+              await getFreeBusyForDecision(userEmail, internalAddedEmails, existing.startIso, existing.endIso, timezone, fbDiag);
+              const unresolvedInternal = (fbDiag.unresolved ?? []).filter(e => e.endsWith('@' + ownerDomainLower));
+              if (unresolvedInternal.length > 0) {
+                const entries = enrichUnresolvedInternal(unresolvedInternal, ownerDomainLower);
+                logger.warn('update_meeting — unresolved internal attendee email(s) in add_attendees, refusing to add a phantom', { entries });
+                return {
+                  success: false,
+                  error: 'unresolved_attendee',
+                  unresolved_attendee_emails: entries,
+                  message: 'One or more attendee addresses don\'t exist in the company directory — adding them would invite someone who never gets it (a nonexistent mailbox reads as fully free). Most likely a wrong address: use did_you_mean if shown, or find the person via find_slack_user, then retry with the corrected address. Do NOT say they were added until the address resolves.',
+                };
+              }
+            }
+          } catch (err) {
+            logger.warn('update_meeting — unresolved-attendee pre-check threw, proceeding', { err: String(err).slice(0, 200) });
           }
 
           // Build the merged list: keep all existing not in removeList,
@@ -554,6 +901,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             || (oldCount <= 4 && newCount >= 5)
             || (oldCount >= 5 && newCount <= 4);
           const shapeChanged = (wasExternal !== isExternalNow) || crossedThreshold;
+          postEditParticipantCount = newCount;
 
           if ((shapeChanged || venueChangeRequested) && existing.startIso) {
             logger.info('update_meeting — attendee shape changed, re-evaluating category + location', {
@@ -566,7 +914,13 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               const { resolveLocation } = await import('../../../../utils/resolveLocation');
               const catResult = await detectCategory({
                 profile: context.profile,
-                subject: args.meeting_subject as string,
+                // 2026-09-07 — the subject this edit is LEAVING BEHIND, when
+                // the same call renames it. This read `args.meeting_subject`
+                // (the old, caller-CLAIMED title), so a combined
+                // "rename it to Simon interview and add Simon" classified off
+                // the stale name and came back with the pre-rename category —
+                // the classifier's single strongest signal, silently withheld.
+                subject: ((args.new_subject as string | undefined)?.trim() || (args.meeting_subject as string)),
                 attendees: mergedAttendees,
                 isRecurring: false,
                 // Same gap as planMeeting's category detection (create_meeting's
@@ -617,6 +971,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                   if (loc.addRoomEmail && roomEmail && mergedAttendees
                       && !mergedAttendees.some(a => a.email.toLowerCase() === roomEmail)) {
                     mergedAttendees.push({ email: roomEmail, optional: true });
+                    // 2026-09-07 — flagged for the colleague rule gate below,
+                    // which is where the room's own free/busy is actually
+                    // checked (create/move do it in planMeeting; this push had
+                    // no check behind it at all).
+                    roomEmailAdded = true;
                   }
                 } else {
                   if (loc.location !== existing.location) newLocationFromShape = loc.location;
@@ -662,26 +1021,125 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           ? (args.location as string).trim()
           : undefined;
         const explicitIsOnline = typeof args.is_online === 'boolean' ? (args.is_online as boolean) : undefined;
+        // v3.7.x (#A) — on a venue change TRUST the derived verdict (location +
+        // online-ness from resolveLocation); the raw is_online flag no longer wins
+        // (it was the misread), and a physical venue coexists with the Teams link.
+        // Otherwise unchanged: an explicit `location` still wins, is_online=true
+        // with no venue is still Teams-as-location, and omitting both preserves.
+        //
+        // 2026-09-07 — resolved into these two values ONCE, ahead of the write,
+        // because the colleague rule gate below has to judge EXACTLY what the
+        // PATCH will send. Re-deriving the same ternaries at the gate is how a
+        // gate ends up blessing a different venue than the one that ships.
+        let patchLocation: string | undefined = venueChangeRequested
+          ? (newLocationFromShape ?? (explicitIsOnline === true ? '' : undefined))
+          : (explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape));
+        const patchIsOnline: boolean | undefined = venueChangeRequested
+          ? (newIsOnlineFromShape ?? explicitIsOnline)
+          : (explicitIsOnline ?? newIsOnlineFromShape);
+        const patchCategory: string | undefined =
+          (typeof args.category === 'string' && args.category.trim() ? args.category.trim() : undefined)
+          ?? newCategoryFromShape;
+
+        // 2026-09-07 — owner-direct venue change's room heads-up (see the
+        // `else if` below). Declared here, in scope for the success return
+        // far below, same shape as `attendeeEmailNotes`.
+        let ownerRoomBusyNotice: string | undefined;
+
+        // ── The owner's rules, re-checked for what this edit actually risks ──
+        // Colleague path only — his own edits are his call (M8). See
+        // `colleagueUpdateRuleGate` for the ruling behind this and for the list
+        // of rules it deliberately does NOT re-impose.
+        if (context.authority !== 'owner') {
+          const gate = await colleagueUpdateRuleGate(args, ctx, {
+            existing: existingEvent,
+            categoryOverride: patchCategory,
+            patchLocation,
+            patchIsOnline,
+            roomEmailAdded,
+            participantCount: postEditParticipantCount,
+          });
+          if (gate.refusal) return gate.refusal;
+          if (gate.roomSmallLabel) {
+            // Room taken but the group fits the small space — planMeeting's
+            // `room_busy_small_fits` outcome, applied here: swap the label and
+            // drop the room mailbox again so nothing double-books the room.
+            // `newLocationFromShape` too, so the narration below states the
+            // venue that actually shipped.
+            patchLocation = gate.roomSmallLabel;
+            newLocationFromShape = gate.roomSmallLabel;
+            const roomEmailLc = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
+            if (mergedAttendees && roomEmailLc) {
+              mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+            }
+          }
+        } else if (roomEmailAdded && existingEvent?.startIso && existingEvent?.endIso) {
+          // Owner-direct venue change — same probe, NO gate. Owner ruling
+          // (2026-09-07): "well if it can check if room is free great its the
+          // same busy/free as all other" — his override is total (M8), and
+          // nothing here blocks him; it's a heads-up so he can decide, exactly
+          // like every other availability check on his own booking (M8/M9/M16).
+          //
+          // Sharpened the SAME day, after the first pass here auto-swapped
+          // the small-room label on his behalf: "it should be as other
+          // people — when i want to book with yael maelle telling me heads up
+          // yeal is busy, then i can decide or not." The model is the
+          // ATTENDEE-busy heads-up, and it applies to the room too — so ALL
+          // THREE outcomes now degrade to notice-and-proceed, never a silent
+          // substitution: free → say nothing, room invited (unchanged); busy +
+          // small group → tell him plainly the room's taken AND that the
+          // small room is free, but do NOT rewrite the location — the venue
+          // text stays exactly what he asked for, and he says "use the small
+          // one" / "leave it" on his own next turn; busy + 6+
+          // (`room_busy_too_big`) has no fallback to name, so it's the same
+          // notice-and-proceed without one. Neither is an approval shape —
+          // there's no one else to ask when he's the one acting (M8). Both
+          // still drop the busy mailbox from the invite either way — inviting
+          // a resource that's already busy would just get it declined, which
+          // is a Graph-mailbox mechanic, not a decision being made for him.
+          try {
+            const { checkMeetingRoomAvailability } = await import('../../../../utils/meetingRoomAvailability');
+            const roomVerdict = await checkMeetingRoomAvailability({
+              profile: context.profile,
+              startIso: existingEvent.startIso,
+              endIso: existingEvent.endIso,
+              participantCount: postEditParticipantCount ?? 0,
+            });
+            const roomEmailLc = (context.profile.meetings.room_email ?? '').toLowerCase().trim();
+            if (roomVerdict.kind === 'room_busy_small_fits') {
+              if (mergedAttendees && roomEmailLc) {
+                mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+              }
+              ownerRoomBusyNotice = `the meeting room is already taken then; ${roomVerdict.smallLabel} is free if he'd rather use that instead — updated without inviting the room or changing the location`;
+              logger.info('update_meeting owner room check — room busy, small room free (notice only, no auto-swap)', {
+                meetingId: args.meeting_id, smallLabel: roomVerdict.smallLabel, participantCount: postEditParticipantCount,
+              });
+            } else if (roomVerdict.kind === 'room_busy_too_big') {
+              if (mergedAttendees && roomEmailLc) {
+                mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
+              }
+              ownerRoomBusyNotice = 'the meeting room is already taken then and the group is too big for the small room — he\'ll need to grab space himself if he still wants it there';
+              logger.info('update_meeting owner room check — room busy + group too large, proceeding without the room', {
+                meetingId: args.meeting_id, participantCount: postEditParticipantCount,
+              });
+            }
+          } catch (err) {
+            // Fail open — same stance as planMeeting's own room check: an
+            // unreadable room calendar proceeds with the invite as resolved;
+            // Outlook will tell him if it actually conflicts.
+            logger.warn('update_meeting owner room check threw, proceeding', { err: String(err).slice(0, 200) });
+          }
+        }
+
         await updateMeeting({
           userEmail,
           timezone,
           meetingId:  args.meeting_id  as string,
           subject:    args.new_subject as string | undefined,  // subjects allow " - " (owner direction)
-          categories: args.category
-            ? [args.category as string]
-            : (newCategoryFromShape ? [newCategoryFromShape] : undefined),
+          categories: patchCategory ? [patchCategory] : undefined,
           attendees: mergedAttendees,
-          // v3.7.x (#A) — on a venue change TRUST the derived verdict (location +
-          // online-ness from resolveLocation); the raw is_online flag no longer wins
-          // (it was the misread), and a physical venue coexists with the Teams link.
-          // Otherwise unchanged: an explicit `location` still wins, is_online=true
-          // with no venue is still Teams-as-location, and omitting both preserves.
-          location: venueChangeRequested
-            ? (newLocationFromShape ?? (explicitIsOnline === true ? '' : undefined))
-            : (explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape)),
-          isOnline: venueChangeRequested
-            ? (newIsOnlineFromShape ?? explicitIsOnline)
-            : (explicitIsOnline ?? newIsOnlineFromShape),
+          location: patchLocation,
+          isOnline: patchIsOnline,
         });
         await closeMeetingArtifacts({
           ownerUserId: context.profile.user.slack_user_id,
@@ -701,7 +1159,13 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             subject: args.meeting_subject,
             category: args.category,
             new_subject: args.new_subject,
-            added_attendees: (args.add_attendees as Array<{ email?: string }> | undefined)?.map(a => a.email).filter(Boolean),
+            // jim-douglass follow-up (2026-08-30) — RESOLVED addresses actually
+            // invited, not the raw model-supplied ones (the directory or a
+            // human-stated address may have overridden above). Mirrors the
+            // success return's `added_attendees` (below); this sibling was
+            // missed when that fix landed — an audit row that names an address
+            // that was never actually invited.
+            added_attendees: resolvedAddedEmails ?? rawAdd.map(a => a.email).filter(Boolean),
             removed_attendees: (args.remove_attendees as string[] | undefined),
             shape_recategorized: newCategoryFromShape ?? null,
             shape_relocated: newLocationFromShape ?? null,
@@ -765,6 +1229,24 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           ...(attendeeEmailNotes.length > 0
             ? { _attendee_email_note: `Attendee address resolution differed from the tool input — state the actual invited address(es) in the reply, never silently: ${attendeeEmailNotes.join(' ')}` }
             : {}),
+          // 2026-09-07 — owner-direct venue change, room busy (either
+          // fallback size). Notice, not a gate (M8) — say it plainly (M9)
+          // rather than silently inviting a mailbox that will decline, or
+          // silently rewriting the venue for him. Rides the SAME channel as
+          // the attendee-busy heads-up (`_attendee_busy_note`, used elsewhere
+          // in this file and in create_meeting) rather than a parallel field:
+          // his ruling was "it should be as other people" — same mechanism,
+          // tell him, he decides — and that channel already legitimately
+          // carries non-attendee content (planMeeting's joined
+          // `overrideNotice`, which this same file's move_meeting success
+          // return surfaces through this identical field, can itself be a
+          // room clash). A second field would just be invisible to the same
+          // grounding the first already gets (turnHelpers.ts's
+          // attendeeCheckSource only recognises `_attendee_busy_note` /
+          // `override_notice` by name).
+          ...(ownerRoomBusyNotice
+            ? { _attendee_busy_note: `Heads up — ${ownerRoomBusyNotice}. His call is total — say it plainly, don't re-ask permission.` }
+            : {}),
         };
 }
 
@@ -772,13 +1254,14 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
   const { context, userEmail, timezone } = ctx;
         // move-meeting-bare-subject-lookup-same-ambiguity-class (2026-08-14) —
         // move_meeting's own same-subject-collision guard. Unconditional for
-        // colleague-path (unlike update_meeting's gate, which is scoped to
-        // attendeeChangeRequested — move has no such optional field to gate
-        // on; every colleague move resolves a meeting_id off a bare
-        // reference). Shared with update_meeting via
-        // checkSameSubjectCollision above (extracted 2026-08-14) — see that
-        // function's header for the full rationale, including the
-        // series-membership fix for a recurring "move our weekly".
+        // colleague-path — move has no optional field to gate on; every
+        // colleague move resolves a meeting_id off a bare reference. (Was
+        // also the only unconditional one until 2026-09-07, when
+        // update_meeting's own gate widened to match — see its call site.)
+        // Shared with update_meeting via checkSameSubjectCollision above
+        // (extracted 2026-08-14) — see that function's header for the full
+        // rationale, including the series-membership fix for a recurring
+        // "move our weekly".
         {
           const collision = await checkSameSubjectCollision(args, ctx, { toolName: 'move_meeting', actionPhrase: 'moving it' });
           if (collision) return collision;
@@ -956,7 +1439,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // the ownerRoomBend-aware escalate_approval path built for exactly
         // this case (planMeeting.ts's PlanMeetingInput.ownerRoomBend) never
         // executed either. Same fix as resolve_approval's authority gate
-        // (tasks/skill.ts:1278): the owner keeps his move authority on every
+        // (tasks/skill.ts:2019): the owner keeps his move authority on every
         // surface (M8); only a genuine colleague needs this membership/rule
         // check.
         if (context.authority !== 'owner') {
@@ -978,7 +1461,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           let requiredAttendees: Array<{ name?: string; email: string }> = [];
           let attendeesLoaded = false;
           try {
-            const { getEventForAttendeeUpdate } = await import('../../../../connectors/graph/calendar');
             const ev = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
             if (ev) {
               requiredAttendees = (ev.attendees ?? [])
@@ -1107,7 +1589,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 const fromIso = startDt.toUTC().toISO();
                 const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string; attendee_conflicts?: AttendeeConflictTag[] }> = [];
-                const diagnostics: { rejectedCounts?: Record<string, number>; rejectedExamples?: Record<string, string[]> } = {};
+                const diagnostics: { rejectedCounts?: Partial<Record<SearchRejectReason, number>>; rejectedExamples?: Partial<Record<SearchRejectReason, string[]>> } = {};
                 // v3.5.x (step 2) — check the OTHER required attendees too: everyone
                 // required EXCEPT the owner (checked via userEmail) and the asker (whose
                 // own busy doesn't block their own request). attendeeCheckParams passes
@@ -1218,12 +1700,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // travel-buffer rejection all humanized to 'unknown' and the
                   // colleague was told "it doesn't pass his scheduling rules and I
                   // can't tell which one" — the mechanical non-answer M9 forbids.
-                  const labelFor = (reason: string | undefined): string =>
+                  const labelFor = (reason: SearchRejectReason | undefined): string =>
                     humanizeViolationLabel(reason, ownerFirst);
-                  const counts = diagnostics.rejectedCounts ?? {};
-                  const fired = Object.keys(counts);
-                  const brokenRule = fired[0];
-                  const reasonCode = 'not_rule_compliant';
+                  const brokenRule = firstRejectReason(diagnostics.rejectedCounts);
+                  const reasonCode = HANDLER_ERROR_CODE.NOT_RULE_COMPLIANT;
                   const humanReason = labelFor(brokenRule);
                   logger.info('move_meeting colleague-path refused — new slot blocked', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
@@ -1574,7 +2054,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // planMeeting re-detected the category from the owner alone (Meeting →
           // Logistic) and cleared the location ("Intro with Maya", Mon→Thu). The by-id
           // fetch returns the exact shape at any distance (and gives fix A its attendees).
-          const { getEventForAttendeeUpdate } = await import('../../../../connectors/graph/calendar');
           const movingEvent = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
           // log-movemeeting-refuse-not-owners-unhandled (2026-08-31) — the source
           // event could not be READ. getEventForAttendeeUpdate returns null for
@@ -1817,7 +2296,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           if (movePlan.action === 'ask_location_mode') {
             return {
               success: false,
-              error: 'location_mode_unspecified',
+              error: HANDLER_ERROR_CODE.LOCATION_MODE_UNSPECIFIED,
               meeting_subject: args.meeting_subject,
               suggested_ask_text: movePlan.suggestedAskText,
               ...openQuestionsField(movePlan.openQuestions),
@@ -1830,7 +2309,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           if (movePlan.action === 'room_unavailable_large') {
             return {
               success: false,
-              error: 'meeting_room_unavailable_large_meeting',
+              error: HANDLER_ERROR_CODE.MEETING_ROOM_UNAVAILABLE_LARGE_MEETING,
               meeting_subject: args.meeting_subject,
               suggested_ask_text: movePlan.suggestedAskText,
               ...openQuestionsField(movePlan.openQuestions),
@@ -1904,12 +2383,27 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               }
               // owner + override_hold:true → fall through and move; release fires on success.
             } else {
+              // Colleague moving onto ANOTHER colleague's hold — never silently.
+              // `override_hold: true` is REQUIRED, not decoration, for the exact
+              // reason createMeeting.ts's mirror gate spells out: replay runs as
+              // the OWNER (deferredActionReplay.ts, senderRole:'owner'), so a bare
+              // `{...args}` lands on the owner-confirm branch two lines up and
+              // returns success:false — the request sticks in awaiting_owner and
+              // create_approval's own no_verified_deviation gate (tasks/skill.ts)
+              // refuses every re-raise attempt with "do the action instead", which
+              // just re-enters this same gate forever. Without this hint the
+              // orchestrator (core/orchestrator/index.ts) has nothing to stamp as
+              // payload.deferred_action, so the request never actually reaches the
+              // owner. Missing until 2026-09-07 — this branch was never given the
+              // hint the create-path sibling above (and createMeeting.ts's own
+              // mirror) always had.
               return {
                 success: false,
                 error: 'slot_held_needs_owner_approval',
                 meeting_subject: args.meeting_subject,
                 hold_id: conflictHold.id,
                 message: `That time is tentatively held for someone else — don't move it there, and don't reveal who holds it. Raise create_approval(kind=policy_exception) with this slot so ${context.profile.user.name.split(' ')[0]} decides; tell the colleague warmly you're checking.`,
+                _deferred_action_hint: { tool: 'move_meeting', args: { ...args, override_hold: true } },
               };
             }
           }
@@ -2232,7 +2726,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         return {
           success: true,
           moved: movedSubject,
-          // #1.5 — the ACTUAL booked time (after the grid-snap at :4156), not the
+          // #1.5 — the ACTUAL booked time (after the grid-snap at :1376), not the
           // pre-snap arg. So narration AND the orchestrator's mutationActions
           // (→ dateVerifier + #135 honesty backstop) reflect where it truly landed.
           new_start: effectiveStart,

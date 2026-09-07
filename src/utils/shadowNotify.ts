@@ -27,7 +27,7 @@ const ownerDmChannelCache: Map<string, string> = new Map();
  * subsequent shadow with the same conversationKey threads under that ts.
  *
  * Conversation key is the inbound Slack threadTs in most cases (colleague DM
- * conversations, owner DM conversations, MPIM coord threads). Different
+ * conversations, owner DM conversations, MPIM threads). Different
  * threads = different conversation keys = different shadow threads in the
  * owner's DM. No timeout — Slack threadTs is unique-per-thread, so two
  * conversations a week apart naturally get different keys.
@@ -49,8 +49,8 @@ export async function shadowNotify(
      * the first shadow with this key creates a top-level owner-DM message
      * (with a header line); every subsequent shadow with the same key
      * threads under it. Use the inbound colleague threadTs for inbound-
-     * colleague shadows, owner_thread_ts for coord-side shadows, or any
-     * stable per-conversation id. Omit for system shadows (cron ticks,
+     * colleague shadows, the request's own origin thread for request-side
+     * shadows, or any stable per-conversation id. Omit for system shadows (cron ticks,
      * dispatchers without a conversation context) — those stay top-level.
      */
     conversationKey?: string;
@@ -94,7 +94,7 @@ export async function shadowNotify(
     // tagged this shadow with a conversationKey, use the cached anchor (or
     // create one) so all shadows from this conversation collapse into one
     // owner-DM thread. Independent of the caller's channel — works for
-    // colleague-DM conversations and coord state machine alike.
+    // colleague-DM conversations and the requests spine alike.
     if (params.conversationKey) {
       const cacheKey = `${ownerId}:${params.conversationKey}`;
       const anchorTs = shadowThreadAnchors.get(cacheKey);
@@ -141,7 +141,7 @@ export async function shadowNotify(
     }
 
     // v2.0.6 — if the caller passed a channel + threadTs AND the channel is
-    // the owner's own DM, post in-thread there. Any coord/outreach that the
+    // the owner's own DM, post in-thread there. Any outreach or request that the
     // owner started in a thread flows this way so the shadow messages stay
     // inside the conversation the owner is already reading.
     //
@@ -170,7 +170,7 @@ export async function shadowNotify(
     }
 
     // Default: standalone DM to the owner. Used when the originating context
-    // wasn't the owner's DM (e.g. coord initiated by a colleague, or top-level
+    // wasn't the owner's DM (e.g. a request initiated by a colleague, or top-level
     // ask with no thread_ts).
     const res = await conn.sendDirect(ownerId, text, { attachments: params.attachments });
     if (!res.ok) {

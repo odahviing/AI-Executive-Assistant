@@ -81,8 +81,8 @@ export class SchedulingSkill {
     // sitting right there. Removed — no field, no narration.
     //
     // No replacement owner-facing signal is needed on this path, unlike
-    // create_meeting/move_meeting's room-bend case (createMeeting.ts:1084,
-    // moveMeeting.ts:1234): those call createApprovalRequest and the owner
+    // create_meeting/move_meeting's room-bend case (createMeeting.ts:1304,
+    // moveMeeting.ts:1735): those call createApprovalRequest and the owner
     // learns the outcome through his own private approval DM thread, so the
     // room can stay silent AND he still finds out. find_available_slots is
     // read-only — no booking is pending and nothing needs his sign-off — so

@@ -8,7 +8,7 @@
  * A type belongs in this union ONLY if something creates rows of it AND
  * `dispatchers/index.ts` has an entry to execute it. A type with no dispatcher is
  * a stranded timer: getTasksDueNow picks the row up at its due_at and
- * runner.ts:83-86 marks it 'failed' with nothing else happening. That is exactly
+ * runner.ts:78-81 marks it 'failed' with nothing else happening. That is exactly
  * what the v4.2.x deletion of `outreach` removed — message_colleague minted a
  * third work-item row per send (beside the request and the outreach_job) whose
  * only real effect was that bogus 'failed' write.

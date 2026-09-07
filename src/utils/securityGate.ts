@@ -115,7 +115,7 @@ const TRIGGER_PATTERNS: Array<{ name: string; pattern: RegExp; class: TriggerCla
   // this token (RAW_SLACK_ID_RE, the one definition). The old pair here fired on a
   // PROPER `<@U…>` mention — the exact form the scrubber manufactures one step
   // earlier in the same pipeline (formatForSlack → scrubInternalLeakage, run at
-  // postReply.ts:425 before any gate) and the form humanGate explicitly protects.
+  // postReply.ts:452 before any gate) and the form humanGate explicitly protects.
   // So every colleague reply that @-mentioned anyone burned a Sonnet rewrite whose
   // own instructions then STRIPPED the mention: two correct replies to Alex
   // Wiggins shipped de-tagged on 2026-07-21 (log :838, :908). Dropped the

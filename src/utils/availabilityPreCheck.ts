@@ -133,8 +133,8 @@ interface NormalizedSlot {
  * It used to return `instant_iso`, i.e. the MODEL did the offset arithmetic, and
  * on 2026-07-27 that put this pre-check an hour away from the search on the very
  * same phrase: "16:00 CET" reached `find_available_slots`, which converts in code
- * (`reinterpretClockInZone`, findAvailableSlots.ts:400, Europe/Brussels = CEST
- * = +02:00 in August) and correctly landed on 17:00 owner-local — while a bare
+ * (`reinterpretClockInZone`, skills/meetings/ops/handlers/findAvailableSlots.ts,
+ * Europe/Brussels = CEST = +02:00 in August) and correctly landed on 17:00 owner-local — while a bare
  * "16:00" from the same Brussels colleague reached here and was read as 16:00
  * OWNER-local, one hour off, `owner_busy_collision`, recorded into the hard-block
  * ledger, and the output floor then rewrote an honest draft into a false
@@ -171,8 +171,8 @@ async function normalizeAvailabilitySlotsWithHaiku(
   // v4.2.x — strip the transport envelope BEFORE the 400-char cut, or the cut
   // eats the very thing this block exists to carry. A group-DM turn arrives
   // prefixed with the machine-written `<<GROUP DM — participants: … >>` preamble
-  // (handlers.ts:663, ~364 chars) and optionally `[THREAD PARTICIPANTS: …]`
-  // (handlers.ts:1082) — so on EVERY MPIM follow-up, `slice(0, 400)` returned the
+  // (`buildGroupDmPreamble`, helpers.ts, ~364 chars) and optionally `[THREAD PARTICIPANTS: …]`
+  // (handlers.ts:1097) — so on EVERY MPIM follow-up, `slice(0, 400)` returned the
   // preamble and about thirty characters of the human's actual words. Measured on
   // the 2026-07-27 incident: the earlier turn read "Bunnings next week -
   // important call- do you have a pref" and the bullet list holding "Tuesday 11
@@ -180,7 +180,7 @@ async function normalizeAvailabilitySlotsWithHaiku(
   // the pre-check queried the CURRENT week (log :208, start 2026-07-26) while the
   // conversation was about 11-13 August. Two verdicts, both for the wrong days.
   // Structural strip of a machine-generated envelope, not natural language — the
-  // same shape processMessage.ts:434 already uses for the same preamble (G8).
+  // same shape processMessage.ts's `framedText` split already uses for the same preamble (G8).
   const threadBlock = (recentThread ?? [])
     .slice(-4)
     .map(m => `${m.role === 'assistant' ? 'YOU' : 'COLLEAGUE'}: ${stripTransportEnvelope(m.content).slice(0, 400)}`)
@@ -395,7 +395,7 @@ interface SlotOutcome {
   date: string;        // YYYY-MM-DD
   time: string;        // HH:MM
   bookable: boolean;
-  rejection_reason?: string;
+  rejection_reason?: RuleViolationKind;
   /**
    * v3.6.x — gap query ("how much is free there?"): maxFreeMinutes is the
    * largest allowed duration that checkSlot passes FROM this exact start.
@@ -519,7 +519,7 @@ export async function precheckAvailability(params: {
   requesterTimezone?: string;
   // v4.2.x — thread identity, for the alternatives block's offered-slots binding
   // (nearbyAlternatives → recordProposedAlternatives). BOTH optional on purpose:
-  // the recorder returns early without a channelId (ops/helpers.ts:89), so a caller
+  // the recorder returns early without a channelId (`recordProposedAlternatives`), so a caller
   // that doesn't have one degrades to "alternatives offered, not bound" and nothing
   // throws. No guard here refuses their absence.
   channelId?: string;
@@ -722,8 +722,8 @@ export async function precheckAvailability(params: {
   // narrow-window findAvailableSlots the paragraph above removed, and it had a
   // third hole on top of (a) and (b): `searchFrom === searchTo` is a ZERO-WIDTH
   // window, and the walker's `cursor + durationMs <= searchEnd` guard is false
-  // on entry for any non-zero duration (findAvailableSlots.ts:850). Zero
-  // iterations, every time — `maxFit` was structurally always null and EVERY
+  // on entry for any non-zero duration (connectors/graph/findAvailableSlots.ts's
+  // own cursor loop). Zero iterations, every time — `maxFit` was structurally always null and EVERY
   // gap question rendered "nothing bookable there". Runtime: 5 gap pairs on
   // 2026-07-20/23/24, each preceded by 4× `getFreeBusy — zero or inverted
   // window, returning empty` (one per allowed duration) and followed by
@@ -845,7 +845,7 @@ export async function precheckAvailability(params: {
     return {
       date, time,
       bookable: false,
-      rejection_reason: check.violation_kind ?? 'unknown',
+      rejection_reason: check.violation_kind,
       ...(check.overCommitment?.allDayOutOfOffice ? { outOfOfficeAllDay: true as const } : {}),
       ...(check.overCommitment?.allDayOutOfOfficeUntilDisplay
         ? { outOfOfficeUntilDisplay: check.overCommitment.allDayOutOfOfficeUntilDisplay } : {}),
@@ -887,11 +887,11 @@ export async function precheckAvailability(params: {
       // Single-slot failure shouldn't break the rest; log and skip. The SKIP is what
       // keeps this honest: no verdict is emitted for this pair, and if every pair
       // fails the caller injects no block at all (`verdicts.length === 0` below →
-      // `ran: false` → buildTurnContext.ts:696 adds nothing), so a blind pre-check
+      // `ran: false` → buildTurnContext.ts's own `result.ran` check adds nothing), so a blind pre-check
       // can never assert "bookable" or "not bookable" with no data behind it. The
       // data source is built for that too: whether it's a typed `CalendarOfflineError`
       // (v4.3.x — `eventsForWeek` now reads via `getOwnerEventsForDecision`,
-      // calendarReads.ts:435, the SAME decision-safe helper the slot walker uses) or
+      // connectors/graph/calendarReads.ts:435, the SAME decision-safe helper the slot walker uses) or
       // any other propagated throw, "no events" and "a completely free week" are never
       // the same value here, so both land in this same catch and skip this same
       // pair — a later reader must not come here looking for an offline verdict
@@ -1019,7 +1019,7 @@ export async function precheckAvailability(params: {
   // question; this call site only supplies what it alone knows — the validated
   // durations and the category the verdicts were computed under (without the
   // category an alternative can break the very cap the original request broke,
-  // planMeeting.ts:625). It returns '' before any I/O when any tested slot was
+  // `checkCategorySlot` in categoryRules.ts). It returns '' before any I/O when any tested slot was
   // bookable, so the common path costs nothing.
   //
   // Appended AFTER the verdict lines because the block's own text refers to them.
@@ -1413,7 +1413,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
   });
   // v4.3.x (G164-a) — removed the duplicated reversal-honesty instruction
   // (now lives only in meetings.ts's MEETINGS HONESTY block); kept below is
-  // just the clock-mechanism fact, which meetings.ts:1377 also states.
+  // just the clock-mechanism fact, which meetings.ts:1422 also states.
   return `## AVAILABILITY CHECK (rule-aware, deterministic)
 
 I pre-checked the times in this colleague's question against ${profile.user.name.split(' ')[0]}'s real scheduling rules (work hours, buffer, focus blocks, category limits). Use these verdicts in your reply — do NOT eyeball get_calendar and disagree:

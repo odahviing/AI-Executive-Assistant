@@ -97,7 +97,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             intent: {
               type: 'string',
               enum: ['meeting_reschedule'],
-              description: 'REQUIRED when the message is about MOVING an existing meeting (not optional). Set to "meeting_reschedule" whenever you\'re relaying a request to shift / postpone / move / pull-forward / cancel an event that\'s already on the calendar — no matter who initiated it (owner asking to move his meeting, or colleague asking to move and you\'re relaying back to them after owner decides). When set, the `context` field MUST also be populated with { meeting_id, proposed_start, proposed_end }. Without this tag the colleague\'s reply gets classified as a NEW scheduling request and a duplicate coord coord spawns instead of patching the existing event — the actual move never happens. Omit ONLY when the message is about a brand-new meeting being scheduled fresh.',
+              description: 'REQUIRED when the message is about MOVING an existing meeting (not optional). Set to "meeting_reschedule" whenever you\'re relaying a request to shift / postpone / move / pull-forward / cancel an event that\'s already on the calendar — no matter who initiated it (owner asking to move his meeting, or colleague asking to move and you\'re relaying back to them after owner decides). When set, the `context` field MUST also be populated with { meeting_id, proposed_start, proposed_end }. Without this tag the colleague\'s reply gets classified as a NEW scheduling request and a duplicate coord spawns instead of patching the existing event — the actual move never happens. Omit ONLY when the message is about a brand-new meeting being scheduled fresh.',
             },
             context: {
               type: 'object',
@@ -715,33 +715,24 @@ Only send messages the user explicitly asks for — never reach out to people on
     }
   }
 
-  getSystemPromptSection(profile: UserProfile): string {
-    const firstName = profile.user.name.split(' ')[0];
-    return `## OUTREACH
-
-When the owner asks you to send someone a message, use message_colleague. Default is a DM; pass a channel_id for a Slack channel post (use find_slack_channel first to resolve the channel name). Pass send_at for scheduled future sends — those are driven by the task runner, not sent immediately.
-
-Never reach out to people on your own. Only on explicit owner request. If the colleague might reply, set await_reply=true so we'll track the response.
-
-## RESCHEDULE EXISTING MEETINGS — intent + context are MANDATORY
-
-Any message_colleague that talks about MOVING / SHIFTING / RESCHEDULING / CANCELLING an event already on the calendar MUST set intent='meeting_reschedule' AND context. This includes BOTH directions:
-- Owner asks you to relay a move TO a colleague ("ask Anna if we can start our weekly 15 min earlier") — set the intent.
-- Colleague asked owner to move, owner decided, you're relaying back ("${firstName} agreed — let's do Wed 15:00 your time") — STILL set the intent.
-
-Steps:
-1. Call get_calendar to find the existing meeting — note the meeting_id and current start/end.
-2. Call message_colleague with:
-   - colleague_slack_id, colleague_name, colleague_tz
-   - message: natural phrasing asking them to move
-   - await_reply: true
-   - intent: "meeting_reschedule"     ← REQUIRED
-   - context: { meeting_id, meeting_subject, proposed_start (ISO), proposed_end (ISO), original_start (ISO), original_end (ISO) }     ← REQUIRED
-
-When the colleague replies "yes" → the system automatically calls updateMeeting on the existing event, the calendar moves, the colleague gets the updated invite. NO new meeting spawned.
-
-When they decline or propose a different time → the system tells the owner; the owner decides next; if owner accepts the counter, you call message_colleague AGAIN with intent='meeting_reschedule' and the new proposed_start/end so the next yes also auto-moves.
-
-WHAT GOES WRONG IF YOU OMIT THE INTENT TAG: the colleague's reply falls through to the generic path instead of the structured reschedule handler — there is no stored meeting_id/proposed_start/proposed_end to replay, so a clear "yes" can't auto-call updateMeeting on the original event; it has to be worked out conversationally instead of moving the calendar immediately. Symptom: colleague says "got it, send me the invite" but no invite arrives because nothing was patched.`;
+  getSystemPromptSection(_profile: UserProfile): string {
+    // Intentionally empty, and deliberately so — same as AssistantSkill's.
+    // OutreachCoreSkill is a CORE_MODULE (skills/registry.ts CORE_MODULES), and
+    // the prompt assembly at systemPrompt.ts:450 maps over getActiveSkills(),
+    // which returns SKILL_MAP entries only. Nothing returned here can ever
+    // render. The OUTREACH prose that sat here until 2026-09-07 had therefore
+    // never shipped, and every rule in it was already live in the
+    // message_colleague description or on the parameter it governs — a strictly
+    // better place for it, since a param description sits right next to the
+    // field the model is filling in:
+    //   - DM by default, channel post, find_slack_channel first, and "never
+    //     reach out on your own": the message_colleague description above.
+    //   - scheduled future sends: the send_at param.
+    //   - the whole intent='meeting_reschedule' contract — mandatory on a move
+    //     in EITHER direction, the { meeting_id, proposed_start, proposed_end }
+    //     payload, meeting_id sourced from get_calendar, and what breaks when
+    //     the tag is missing: the intent and context params.
+    // So nothing was promoted out of it.
+    return '';
   }
 }

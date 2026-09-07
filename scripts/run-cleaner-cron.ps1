@@ -8,6 +8,19 @@
 # is -- the Task Scheduler trigger itself does this, since a local weekly
 # trigger automatically follows the machine's own OS timezone if it changes
 # (e.g. he travels). No gating logic needed here.
+#
+# INDEPENDENT DEAD-EXPORT FLOOR (below, after the agent returns): this sweep
+# is always unscoped, so of SKILL.md's three watermark answers only two can
+# ever apply here -- plus a fourth this wrapper adds, because a cron has no
+# human "dispatching chat" to catch the check silently not running. Never
+# trust the cleaner's own narration of having run check-dead-exports.cjs
+# clean (manager/SKILL.md's cleaner entry, cleaner.md C4) -- re-run it here,
+# fresh, independent of the just-returned agent turn. This script does NOT
+# write state.json itself (lastCleanSha is 28KB+ of hand-verified claims one
+# JSON round-trip could mangle) -- it only prints the ruling so the owner (or
+# a live Manager session) can act on it. A ruling that never got printed is
+# indistinguishable from one that said "advance" -- same doctrine as
+# everywhere else in this framework for a step that must not silently skip.
 
 $repoPath = "E:\Code\Maelle"
 $logDir = Join-Path $repoPath ".claude\agent-loop\cron-logs"
@@ -49,4 +62,35 @@ $exitCode = $LASTEXITCODE
 
 if ($exitCode -ne 0) {
     "=== Cleaner cron run FAILED (exit $exitCode) -- see this log for details ===" | Out-File -FilePath $logFile -Encoding utf8 -Append
+}
+
+# ── Independent dead-export floor -- runs regardless of the agent's own exit
+# code, since this check is about the state of the repo, not about whether
+# the cleaner's own turn succeeded. See header comment for why this lives
+# here rather than in $prompt: the whole point is that it is NOT the same
+# actor narrating its own pass.
+"=== Independent check-dead-exports.cjs re-run started ===" | Out-File -FilePath $logFile -Encoding utf8 -Append
+$deadExportsOutput = & node scripts/check-dead-exports.cjs 2>&1
+$deadExportsExit = $LASTEXITCODE
+$deadExportsOutput | Out-File -FilePath $logFile -Encoding utf8 -Append
+$deadExportsText = $deadExportsOutput -join "`n"
+
+# The exit code alone cannot tell "found dead exports" (a controlled exit 1)
+# apart from "crashed before it got that far" (an uncaught exception also
+# exits 1 in Node) -- so completion is judged on the script's own two
+# terminal print statements, not on the code by itself.
+$completed = ($deadExportsText -match 'No unexplained dead export among what this run checked\.') -or
+             ($deadExportsText -match '\d+ dead export\(s\)\. Confirm against HEAD')
+
+if (-not $completed) {
+    # THE CHECK ITSELF FAILED TO RUN. Reading a non-zero exit here as "dead
+    # exports found" would be exactly the silent-pass-that-looks-like-success
+    # this whole mechanism exists to prevent -- treat it as the same
+    # non-advance case, with an honest reason instead of a false count.
+    "RULING: check-dead-exports.cjs did NOT complete (exit $deadExportsExit, no completion banner in its own output) -- treated as a non-advance case -- lastCleanSha must NOT be advanced from this run" | Out-File -FilePath $logFile -Encoding utf8 -Append
+} elseif ($deadExportsExit -ne 0) {
+    "RULING: unscoped sweep completed, but check-dead-exports.cjs independently found unresolved dead export(s) (exit $deadExportsExit) -- lastCleanSha NOT advanced. See the DEAD lines above for file:line." | Out-File -FilePath $logFile -Encoding utf8 -Append
+} else {
+    $headSha = (git rev-parse HEAD 2>&1).Trim()
+    "RULING: unscoped sweep -- check-dead-exports.cjs independently confirmed clean at HEAD $headSha -- lastCleanSha may be advanced to $headSha. This script does not write state.json itself; the owner (or a live Manager session) applies the advance by hand after reviewing this log." | Out-File -FilePath $logFile -Encoding utf8 -Append
 }

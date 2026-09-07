@@ -25,7 +25,7 @@ import { workTimeBaseFromNow, addWorkdays } from '../../utils/workHours';
 import { isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { closeRequest } from './closeRequest';
 import type { NextCheckHandler, RequestRow } from './types';
-import { parseDetails, deriveOriginSurface } from './types';
+import { parseDetails, deriveOriginSurface, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
 import { relayClosureToRequester } from './requesterRelay';
 import { getConnection } from '../../connections/registry';
 import type { SendOptions, SendResult } from '../../connections/types';
@@ -352,6 +352,9 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
   const ownerId = profile.user.slack_user_id;
   const targetSlackId = row.target_slack_id ?? ownerId;
   const remindingSomeoneElse = targetSlackId !== ownerId;
+  // Delivery outcome, tracked so the requester loop-close below (R3) tells
+  // the truth about what actually happened rather than assuming success.
+  let delivered = false;
 
   try {
     const conn = getConnection(ownerId, 'slack');
@@ -365,6 +368,7 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
         const targetName = row.target_name ?? 'them';
         const framed = `${ownerFirst} asked me to remind you: ${message}`;
         const res = await sendTracked(conn, { dm: targetSlackId }, framed, undefined, 'runReminderFire colleague DM', row.id);
+        delivered = res.ok;
         if (res.ok) {
           await sendTracked(conn, { dm: ownerId }, `Reminded ${targetName} about "${row.subject ?? message}".`, undefined, 'runReminderFire owner report', row.id);
           // runReminderFire-same-invisibility-as-research (2026-08-14) — a
@@ -392,7 +396,8 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
         }
       } else {
         // Remind me — DM the owner the message.
-        await sendTracked(conn, { dm: ownerId }, message, undefined, 'runReminderFire owner reminder', row.id);
+        const res = await sendTracked(conn, { dm: ownerId }, message, undefined, 'runReminderFire owner reminder', row.id);
+        delivered = res.ok;
       }
     }
   } catch (err) {
@@ -412,6 +417,43 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
     closureReason: 'reminder_fired',
     closedBy: 'system',
   });
+  // R1/R3 requester loop-close — create_task is colleague-reachable (o#219),
+  // so a 'reminder' row can be raised BY a colleague and TARGET the owner (or
+  // someone else) — a promise made to that colleague ("I'll let you know once
+  // he's got it moving"), never fulfilled by the DM(s) above, which only tell
+  // the TARGET side. runExpiry and runFreeformFlagRetry already relay their
+  // own closures this way through the one shared composer (requesterRelay.ts)
+  // — this closure had none at all, so a colleague-raised reminder fired
+  // silently from the requester's side no matter what the fire itself did
+  // (live incident, Oran Frenkel/2026-09-06: told "I'll let you know" and
+  // never was). Skips by construction when requester_slack_id is unset or is
+  // the owner himself (a self-reminder needs no loop-close).
+  if (row.requester_slack_id && row.requester_slack_id !== ownerId) {
+    const targetName = row.target_name ?? 'them';
+    await relayClosureToRequester({
+      row,
+      profile,
+      label: 'runReminderFire requester loop-close',
+      compose: ({ lang, hi, ownerFirst, subject: relaySubject }) => {
+        if (remindingSomeoneElse) {
+          return delivered
+            ? (lang === 'he'
+              ? `${hi} — העברתי את התזכורת ל${targetName} לגבי ${relaySubject}.`
+              : `${hi} — passed the reminder on to ${targetName} about ${relaySubject}.`)
+            : (lang === 'he'
+              ? `${hi} — לא הצלחתי להשיג את ${targetName} כדי להעביר את התזכורת. שווה לפנות אליו/אליה ישירות.`
+              : `${hi} — couldn't reach ${targetName} to pass the reminder along. Worth pinging them directly.`);
+        }
+        return delivered
+          ? (lang === 'he'
+            ? `${hi} — זה הגיע ל${ownerFirst}, הוא/היא רואה את זה עכשיו.`
+            : `${hi} — this reached ${ownerFirst}, he's/she's got it now.`)
+          : (lang === 'he'
+            ? `${hi} — ניסיתי להעביר את זה ל${ownerFirst} אבל לא הצלחתי לוודא שזה הגיע. שווה לוודא ישירות.`
+            : `${hi} — I tried to get this to ${ownerFirst} but couldn't confirm it landed. Worth checking with him directly.`);
+      },
+    });
+  }
   return 'closed';
 }
 
@@ -632,6 +674,38 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
 }
 
 /**
+ * runSendScheduledOutreach's three give-up sites (below) all close 'cancelled'
+ * with nobody told at that moment — the third member of runner.ts's
+ * terminal-give-up family (runOutreachExpiryOrDecision DMs the owner,
+ * runFreeformFlagRetry relays the requester) that had no notify at all. There
+ * is no requester here to relay to — createOutreachJob's requests-bridge
+ * (db/jobs.ts) never sets requester_slack_id on an outreach row, so
+ * relayClosureToRequester would just bail — and the colleague never received
+ * anything (the send itself is what failed), so there's nothing to tell them
+ * either. The owner (or whoever asked Maelle to run this outreach — could be
+ * a colleague-initiated message_colleague call too) is the only side waiting,
+ * and `owner_dm_channel` is never populated for a SCHEDULED outreach (that
+ * write only happens on outreach.ts's non-scheduled send path, which a future
+ * send_at returns before reaching) — so this reads `origin_channel`/
+ * `origin_thread_ts` instead: outreach.ts only repurposes those from "whoever
+ * asked" to "the colleague's DM" AFTER a confirmed send, and every path that
+ * reaches here never got one, so they still anchor the asker's own thread.
+ */
+async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: UserProfile, body: string): Promise<void> {
+  if (!row.origin_channel) return;
+  const conn = getConnection(profile.user.slack_user_id, 'slack');
+  if (!conn) return;
+  await sendTracked(
+    conn,
+    { channel: row.origin_channel },
+    body,
+    { threadTs: row.origin_thread_ts ?? undefined },
+    'runSendScheduledOutreach give-up asker tombstone',
+    row.id,
+  );
+}
+
+/**
  * Scheduled outreach fires — actually send the DM now.
  * Outreach skill stamps details.message + target on the in_flight request;
  * here we send and flip state.
@@ -704,6 +778,9 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
         });
         if (attempts >= MAX_SEND_ATTEMPTS) {
           closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_channel_post_failed', closedBy: 'system' });
+          const channelLabel = typeof details.channel_name === 'string' ? `#${details.channel_name}` : 'the channel';
+          await notifyAskerScheduledOutreachFailed(row, profile,
+            `Couldn't post your scheduled message to ${row.target_name ?? 'them'} in ${channelLabel} — it kept failing, so I've given up. Nothing went out; let me know if you want to try again.`);
           return 'closed';
         }
         updateRequest(row.id, {
@@ -755,6 +832,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       });
       if (attempts >= MAX_SEND_ATTEMPTS) {
         closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_failed', closedBy: 'system' });
+        await notifyAskerScheduledOutreachFailed(row, profile,
+          `Couldn't send your scheduled message to ${row.target_name ?? 'them'} — it kept failing, so I've given up. Nothing went out; let me know if you want to try again.`);
         return 'closed';
       }
       updateRequest(row.id, {
@@ -808,6 +887,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     });
     if (attempts >= MAX_SEND_ATTEMPTS) {
       closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_failed', closedBy: 'system' });
+      await notifyAskerScheduledOutreachFailed(row, profile,
+        `Hit a repeated error trying to send your scheduled message to ${row.target_name ?? 'them'} — I've given up after ${attempts} tries. Nothing went out; let me know if you want to try again.`);
       return 'closed';
     }
     // Re-arm with linear backoff (10m, 20m), bump the attempt counter.
@@ -1031,7 +1112,7 @@ async function raiseOneTimezonePersistenceAsk(
   });
 
   const callbacks = {
-    on_approve: { tool: 'promote_timezone_temp', args: { person_id: c.personId, expected_value: c.value } },
+    on_approve: { tool: PROMOTE_TIMEZONE_TEMP_TOOL, args: { person_id: c.personId, expected_value: c.value } },
   };
 
   // Owner-facing decision windows, same convention create_approval raises

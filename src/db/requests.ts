@@ -17,7 +17,7 @@ import type {
   RequestRow,
   RequestState,
 } from '../core/requests/types';
-import { APPROVAL_SUBKINDS } from '../core/requests/types';
+import { APPROVAL_SUBKINDS, FREEFORM_OWNER_ASK_SUBKIND } from '../core/requests/types';
 import { ACTIVITY_REVERTIBILITY } from '../core/requests/activityRevertibility';
 import logger from '../utils/logger';
 
@@ -319,7 +319,7 @@ export function getLatestFreeformOwnerFlag(
       AND requester_slack_id = ?
       AND origin_thread_ts = ?
       AND kind = 'reminder'
-      AND subkind = 'freeform_owner_ask'
+      AND subkind = '${FREEFORM_OWNER_ASK_SUBKIND}'
     ORDER BY created_at DESC
     LIMIT 1
   `).get(ownerUserId, requesterSlackId, threadTs) as RequestRow | undefined;

@@ -3,7 +3,7 @@
  *
  * Confirmed root cause: when a colleague-initiated meeting search dead-ends
  * because the owner is in a known away period (an all-day Outlook "out of
- * office" event), `maybeOpenInFlightMeetingRequest.ts:48` deliberately
+ * office" event), `maybeOpenInFlightMeetingRequest.ts:57-59` deliberately
  * excludes colleague-initiated turns ("tracked via the existing outreach/
  * approval flows") — but a zero-slot search never calls `message_colleague`
  * or `create_approval`, so nothing durable gets written and the colleague's
@@ -686,7 +686,7 @@ export async function handleOofReengageReply(
       // gh#201-d (D1 fix, bouncer overturn) — this is a synthetic, re-entered
       // orchestrator turn whose output reaches a COLLEAGUE. Every other
       // colleague-facing reply is gated through runOutputGates before it
-      // leaves the process (postReply.ts:488 for Slack, inbound.ts:346 for
+      // leaves the process (postReply.ts:495 for Slack, inbound.ts:414 for
       // the email leg) — sending result.reply straight to the connector
       // skipped every one of those checks (leak/identity-spoof scan,
       // owner-fact-check-and-rewrite, humanGate, dateVerifier, the

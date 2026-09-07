@@ -1,5 +1,7 @@
 import { getDb } from './client';
 import { closeRequest } from '../core/requests/closeRequest';
+import type { NextCheckHandler } from '../core/requests/types';
+import { FREEFORM_OWNER_FLAG_SUBKIND, FREEFORM_OWNER_ASK_SUBKIND } from '../core/requests/types';
 
 // ══════════════════════════════════════════════════════════════════════════
 // ONE SPINE (#41, owner ruling 2026-07-26 — "only one spine") — read this once.
@@ -57,8 +59,8 @@ export function getLinkedRequestIdForOutreach(outreachId: string): string | null
 
 // v3.5.x — reverse lookup: the outreach detail row for a spine request. Used by
 // the reschedule_reask spine handler to re-ping the colleague from the request's
-// timer (mirrors getCoordJobByRequestId). Reads the existing request_id column —
-// no new state.
+// timer. Reads the existing request_id column — no new state (coord's own
+// mirror of this helper was deleted with the coord subsystem in v3.5.0).
 export function getOutreachJobByRequestId(requestId: string): OutreachJob | null {
   return getDb().prepare(`SELECT * FROM outreach_jobs WHERE request_id = ?`).get(requestId) as OutreachJob | null;
 }
@@ -89,7 +91,7 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
     WHERE owner_user_id = ?
     AND state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
     AND (requester_slack_id = ? OR target_slack_id = ?)
-    AND NOT (kind = 'reminder' AND (subkind IS 'freeform_owner_flag' OR subkind IS 'freeform_owner_ask'))
+    AND NOT (kind = 'reminder' AND (subkind IS '${FREEFORM_OWNER_FLAG_SUBKIND}' OR subkind IS '${FREEFORM_OWNER_ASK_SUBKIND}'))
   `).get(ownerUserId, colleagueSlackId, colleagueSlackId) as any)?.cnt ?? 0;
   return count;
 }
@@ -121,13 +123,13 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * the re-arm path from (1). So coordinator.ts is NOT a zero-producer site;
  * it is a conditional one.
  * Current producers: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
- * skills/meetingReschedule.ts:591, core/requests/colleagueOofReengage.ts:386,
- * skills/outreach.ts:286 — the isFuture ternary there also produces
+ * skills/meetingReschedule.ts:591, core/requests/colleagueOofReengage.ts:404,
+ * skills/outreach.ts:358 — the isFuture ternary there also produces
  * 'pending_scheduled', so it belongs in both lists),
- * 'pending_scheduled' (skills/outreach.ts:286), 'replied' (several sites in
- * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:617, and
- * coordinator.ts:390 above), 'cancelled' (skills/outreach.ts:378,388,513,
- * skills/meetingReschedule.ts:616, core/requests/colleagueOofReengage.ts:402,607).
+ * 'pending_scheduled' (skills/outreach.ts:358), 'replied' (several sites in
+ * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:647, and
+ * coordinator.ts:390 above), 'cancelled' (skills/outreach.ts:479,500,617,
+ * skills/meetingReschedule.ts:615, core/requests/colleagueOofReengage.ts:420,637).
  * The old union also carried 'done', 'expired', 'failed' and 'no_response' with
  * ZERO producers — the branches keyed on them were unreachable and went with the
  * column.
@@ -257,7 +259,7 @@ export function createOutreachJob(
     const requests = require('./requests') as typeof import('./requests');
     let reqState: 'in_flight' | 'awaiting_colleague' | 'resolved' | 'cancelled' = 'awaiting_colleague';
     let nextCheckAt: string | undefined;
-    let nextCheckHandler: 'send_scheduled_outreach' | 'outreach_expiry' | undefined;
+    let nextCheckHandler: Extract<NextCheckHandler, 'send_scheduled_outreach' | 'outreach_expiry'> | undefined;
     // v3.1 (Path 2) — phase carries the outreach activity sub-state ON the
     // request, so status reads never touch outreach_jobs.status.
     let phase: string | undefined;

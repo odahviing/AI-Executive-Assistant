@@ -2,6 +2,43 @@
 
 ---
 
+## 4.9.0 — One fact, one place
+
+A day that started with a colleague being told the wrong thing and ended somewhere else entirely. Maelle promised Oran she'd get a request to Idan "tonight" and had actually scheduled it for the next morning — the schedule was right, the sentence wasn't. Chasing why she said it turned up the real answer: the rule telling her to confirm a task with its stored time had **never once reached her**. Three core modules wrote prompt sections that nothing ever collected, so ~1,890 tokens of task, routine and outreach guidance had shipped to nobody, ever.
+
+That reframed a standing question — why nearly every session finds a bug when little new is being built. The answer, measured across the day rather than guessed: **the same fact lives in several places and nothing holds them together.** Sometimes that's a string typed twice. More often it's a job done at four call sites and forgotten at the fifth.
+
+Both halves got swept. The cheap half found seven. The expensive half — hunting for a sibling that should exist and doesn't — found seven more, and they were the ones that hurt.
+
+### Fixed (high-impact)
+- **A colleague asking to move a meeting into a held slot no longer loops forever.** The request never reached Idan at all; the colleague was told "I'm checking on it" and nothing ever happened. Create's version of that gate had been fixed; move's had not.
+- **A colleague with no timezone on file is no longer skipped when checking whether a time works for them.** Five more places dropped them silently, including the automatic clash-fixer — which could relocate a meeting onto someone's night without telling anyone. It now declines and leaves it. Where a zone is assumed rather than known, the reply says so.
+- **A calendar read was returning times with no timezone attached**, and four places read them as if they were Idan's. Every instant was off by the offset, and a late-evening meeting was read as the wrong *day* — so the wrong day-type rules applied. It also fed the rule check on every colleague move.
+- **`update_meeting` never ran Idan's scheduling rules at all.** Once it confirmed the colleague was the requester, every field went straight to a raw calendar write. A colleague could push a meeting over a category cap, onto a forbidden day type, or double-book the room. It now re-checks what the edit actually changes — a rename still costs nothing.
+- **A colleague renaming an ambiguously-named meeting could get the wrong one renamed**, escalated for approval with the wrong meeting already baked in, so approving it did the wrong thing and nothing downstream could catch it.
+- **A typo'd colleague could be "added" to a meeting they'd never be invited to.** Create had probed for that since it was built; update never did.
+- **A fired reminder told the colleague who raised it nothing.** "I'll let you know once he's got it moving" had no code path that could keep it, while two sibling paths already used the shared relay.
+- **A scheduled message that failed permanently told nobody at the time**, surfacing only in the next morning's brief.
+- **Five write tools had a five-second duplicate-protection window instead of sixty**, from a second copy of the tool list that had drifted five entries behind the real one.
+
+### Changed
+- When Maelle promises something at a particular time, she states the time actually stored rather than the one asked for.
+- A meeting room is now treated as another party whose time can be taken: if it's busy, she says so and Idan decides — the same as for a person, and never a block.
+- Scheduling rejection reasons, replayable tools and several other closed vocabularies are now declared once and checked by the compiler. Adding a new one without wiring it up no longer compiles.
+
+### Removed
+- Three prompt sections that had never been delivered, after checking each rule against the live code: most were already said elsewhere, and four had gone false — including a task-lifecycle legend describing six states where the code has seven, and an instruction to use a tool deleted in v2.9.
+- A second, stale copy of the write-tool list. A dead config key whose reader was removed in August. An unreachable branch in the honesty marker.
+
+### Not changed
+- Idan's override stays total everywhere. Every new check in this release is a heads-up he can walk past, not a gate.
+- A colleague still may only edit a meeting they requested themselves.
+
+### Framework (other chats, bundled)
+- Roughly 95 stale `file:line` citations corrected across ~30 files, and comments describing a subsystem deleted in v3.5.0 as though it were still live. Where a symbol name locates the target as well as a number, the number was dropped — one citation had gone stale twice in a single day.
+- A dead-export checker and its cleaner-cron wiring, from a parallel session.
+
+
 ## 4.8.7 — What she checked, and what she said she checked
 
 Almost everything here comes from one long conversation and one morning brief, and from the discovery — halfway through fixing it — that the reported bug was not the bug. Maelle told the owner two colleagues were outside their working hours "per the check I ran." The first fix was built to catch a check that never happened. The logs said otherwise: a check *had* run, it found the two of them **busy**, and she reported that as *outside their hours*. A misreported finding, not an invented one, and the guard aimed at the wrong target would never have caught it.

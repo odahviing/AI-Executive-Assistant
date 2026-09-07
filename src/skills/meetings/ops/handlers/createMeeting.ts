@@ -8,7 +8,7 @@
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
-import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity } from '../../ops/helpers';
+import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
 import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
@@ -19,6 +19,8 @@ import {
   type AttendeeConflictTag,
   type DaySummaryEntry,
   type ConflictingEventEntry,
+  type SearchRejectReason,
+  firstRejectReason,
   getFreeBusyForDecision,
   createMeeting,
   CalendarOfflineError,
@@ -245,7 +247,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // description already says this field should be omitted on the
         // colleague path ("it defaults to the colleague who is talking"); this
         // now enforces it instead of trusting the model to comply. requesterId
-        // isn't cosmetic — the `colleague_booking_record` write below (:1987)
+        // isn't cosmetic — the `colleague_booking_record` write below (:2193)
         // hands whoever it names control (add/rename/location via the
         // update_meeting + move_meeting gates) over a meeting the owner's
         // calendar now carries, so naming the wrong person there is a real
@@ -258,7 +260,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // owner-path-requester-slack-id-unvalidated (2026-08-30) — that owner-path
         // trust was UNCHECKED: a Sonnet-invented or misremembered slack id landed
         // as the meeting's controlling requester with no boundary check, unlike
-        // create_approval's own requester_slack_id (tasks/skill.ts:638-653), which
+        // create_approval's own requester_slack_id (tasks/skill.ts:646-653), which
         // runs the exact same field through resolveSlackId first. Same helper,
         // same shape here — a real slack-id format passes through unchanged; a
         // hallucinated one (a name slug, a stale id) resolves via people_memory
@@ -551,7 +553,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             });
             return {
               success: false,
-              error: 'attendee_missing_email',
+              error: HANDLER_ERROR_CODE.ATTENDEE_MISSING_EMAIL,
               message: `I don't have an email for ${missingEmail.map(a => a.name).join(', ')}, so I can't send the calendar invite. Get it (find_slack_user for an internal teammate, or ask ${ownerFirst}/the requester for an external), then re-call — I won't book a meeting no one can be invited to.`,
             };
           }
@@ -754,8 +756,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               // refusal returned to Sonnet (instead of forcing her to guess,
               // which leads to "rule-non-compliant" + fabricated reasons).
               const diagnostics: {
-                rejectedCounts?: Record<string, number>;
-                rejectedExamples?: Record<string, string[]>;
+                rejectedCounts?: Partial<Record<SearchRejectReason, number>>;
+                rejectedExamples?: Partial<Record<SearchRejectReason, string[]>>;
                 // #165b — the real event behind an owner_busy_collision, read
                 // straight off checkSlot's own occupancy scan (see below).
                 // gh#165-d — carries the structural all-day facts too, so the
@@ -919,16 +921,16 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // standard durations).
                 // gh#200 — `oofUntilDisplay` reaches the `owner_out_of_office`
                 // case only; every other reason ignores it.
-                const labelFor = (reason: string | undefined, oofUntilDisplay?: string): string =>
+                const labelFor = (reason: SearchRejectReason | undefined, oofUntilDisplay?: string): string =>
                   humanizeViolationLabel(reason, ownerFirst, oofUntilDisplay);
-                const counts = diagnostics.rejectedCounts ?? {};
-                const fired = Object.keys(counts);
                 // Pick the first reason that fired. Narrow window means
                 // typically only one rule rejects (one slot tested). When
                 // multiple appear (rare: e.g. both work-hours AND category),
                 // pick whichever shows up first — caller gets a real fact
-                // either way.
-                const brokenRule = fired[0];
+                // either way. `firstRejectReason` (connectors/graph/
+                // findAvailableSlots.ts) is the ONE place `Object.keys` on
+                // `rejectedCounts` gets cast back to the declared vocabulary.
+                const brokenRule = firstRejectReason(diagnostics.rejectedCounts);
                 // gh#200 — an all-day OOF rejects the whole day before
                 // checkSlot ever runs (so `conflictingEvent` below stays
                 // unset for it — see its own field doc); the away span's
@@ -995,7 +997,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 });
                 return {
                   success: false,
-                  error: 'not_rule_compliant',
+                  error: HANDLER_ERROR_CODE.NOT_RULE_COMPLIANT,
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
                   // The add-attendees steer only makes sense for a real, timed
@@ -1061,7 +1063,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // o#178 (M10) — this refusal is reachable on a colleague-readable
                 // path (the requester need not be the owner), so the predecessor's
                 // RAW subject must not leak if it's marked private. Same masking
-                // helper Guard B already uses (:431) — one path, not a second.
+                // helper Guard B already uses (:836) — one path, not a second.
                 const predecessorSubject = displaySubject(predecessor, context.profile, subjectViewerFor(context), viewerEmail);
                 logger.info('create_meeting refused — must_be_after_event_id ordering violated', {
                   predecessorId: mustBeAfterId,
@@ -1365,7 +1367,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // `attendeeBusyLabel` only for that gate, never for the unrelated
             // 'time already passed' confirm_override), carry the same
             // structured notice field move_meeting's booked-through path
-            // already uses (`_attendee_busy_note`, moveMeeting.ts:2239) so a
+            // already uses (`_attendee_busy_note`, moveMeeting.ts:2255) so a
             // downstream reader can tell a real attendee-availability check
             // ran here too, from field presence — never by parsing
             // `violation_label`'s prose.
@@ -1397,7 +1399,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         if (plan.action === 'ask_location_mode') {
           return {
             success: false,
-            error: 'location_mode_unspecified',
+            error: HANDLER_ERROR_CODE.LOCATION_MODE_UNSPECIFIED,
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             category: plan.category,
@@ -1415,7 +1417,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         if (plan.action === 'room_unavailable_large') {
           return {
             success: false,
-            error: 'meeting_room_unavailable_large_meeting',
+            error: HANDLER_ERROR_CODE.MEETING_ROOM_UNAVAILABLE_LARGE_MEETING,
             suggested_ask_text: plan.suggestedAskText,
             ...openQuestionsField(plan.openQuestions),
             category: plan.category,
@@ -1483,7 +1485,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               if (rs.isValid && re.isValid) {
                 // v4.2.2 — this block has the LAST WORD on where the meeting
                 // lands, and it used to read `'cached'`. planMeeting validated the
-                // REQUESTED time live (:818); this then re-decides the start from
+                // REQUESTED time live (planMeeting.ts:741); this then re-decides the start from
                 // its own copy of the day, and a warm copy up to
                 // CALENDAR_CACHE_TTL_SECONDS old is enough to double-book: ask
                 // "what's on Thursday" earlier in the thread, accept a 13:30 invite
@@ -1543,12 +1545,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // Re-check the candidate against the ATTENDEES too, not just the
                     // owner — attendeeCheckParams carries busy + hours/tz clip, so the cross-TZ
                     // guard (an earlier IL time BEFORE, or a later one AFTER, a US
-                    // attendee's hours) actually fires.
+                    // attendee's hours) actually fires. #M3 — pass tzc (owner's zone) as the
+                    // no-stored-TZ fallback (same convention as Guard B above / moveMeeting.ts);
+                    // without it a no-TZ attendee dropped out of this cross-TZ guard entirely.
                     const attSlots = await findAvailableSlots({
                       userEmail: context.profile.user.email,
                       timezone: tzc,
                       durationMinutes: Math.round(durMs / 60000),
-                      ...attendeeCheckParams(attEmails, context.profile.user.email),
+                      ...attendeeCheckParams(attEmails, context.profile.user.email, tzc),
                       searchFrom: candStartIso,
                       searchTo: candEndIso,
                       minBufferHours: 0,

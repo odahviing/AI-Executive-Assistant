@@ -1211,8 +1211,26 @@ export async function getEventEndInstant(
  * (so location resolution can re-evaluate day-type), categories, location,
  * isOnline. Single GET, no calendarView pagination.
  *
+ * `startIso` / `endIso` are ZONE-QUALIFIED instants (a full ISO string with an
+ * offset), NOT the raw Graph field. This GET sends no `Prefer:
+ * outlook.timezone` header, so Graph answers in UTC — and every consumer of
+ * these two fields interprets them as a scheduling instant: update_meeting's
+ * `resolveLocation` day-type re-eval, its trip-context override, its colleague
+ * rule gate, and move_meeting's `priorStartIso`/`priorEndIso` into planMeeting.
+ * Handing them a naive "2026-09-10T06:00:00.0000000" that each then anchored in
+ * the OWNER's zone is the M11 naive-parse-in-the-wrong-zone class: a 09:00
+ * Jerusalem meeting read as 06:00, and a late-evening one read as the WRONG
+ * DAY, hence the wrong day-type. Converted once, here, off the `timeZone` Graph
+ * returned alongside the value — so no caller can re-derive it differently and
+ * none has to know what header this request did or didn't send. `startTimeZone`
+ * is deliberately NOT returned: with the offset on the instant there is nothing
+ * left for a caller to do with it but re-parse.
+ *
  * Returns null when the event cannot be loaded (deleted, permission, etc.).
  * Caller treats null as "refuse the update with a clear message."
+ * `startIso`/`endIso` are undefined when the event carries no readable start —
+ * callers already gate on that, and a caller that VALIDATES against the instant
+ * must treat undefined as "can't check", never as "nothing to check".
  */
 export async function getEventForAttendeeUpdate(
   userEmail: string,
@@ -1221,7 +1239,6 @@ export async function getEventForAttendeeUpdate(
   attendees: Array<{ name?: string; email: string; optional?: boolean }>;
   startIso?: string;
   endIso?: string;
-  startTimeZone?: string;
   categories: string[];
   location?: string;
   isOnline?: boolean;
@@ -1240,11 +1257,25 @@ export async function getEventForAttendeeUpdate(
         email: String(a.emailAddress.address).toLowerCase(),
         optional: a.type === 'optional',
       }));
+    // See the header: the raw Graph pair is (naive local string, zone name).
+    // `?? 'utc'` matches this GET's actual behaviour (no Prefer header → UTC)
+    // and every other reader in this file; an unparseable zone name yields an
+    // invalid DateTime and we return undefined rather than a wrong instant.
+    const asInstant = (part: { dateTime?: string; timeZone?: string } | undefined): string | undefined => {
+      if (!part?.dateTime) return undefined;
+      const dt = DateTime.fromISO(part.dateTime, { zone: part.timeZone ?? 'utc' });
+      if (!dt.isValid) {
+        logger.warn('getEventForAttendeeUpdate — unreadable event instant, returning undefined', {
+          meetingId, dateTime: part.dateTime, timeZone: part.timeZone,
+        });
+        return undefined;
+      }
+      return dt.toISO()!;
+    };
     return {
       attendees,
-      startIso: event.start?.dateTime,
-      endIso: event.end?.dateTime,
-      startTimeZone: event.start?.timeZone,
+      startIso: asInstant(event.start),
+      endIso: asInstant(event.end),
       categories: (event.categories as string[]) ?? [],
       location: event.location?.displayName as string | undefined,
       isOnline: event.isOnlineMeeting as boolean | undefined,

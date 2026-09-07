@@ -410,14 +410,14 @@ export async function closeMeetingArtifacts(params: {
         //
         // The relay half of the shared helper cannot fire from THIS tier, and
         // that is structural, not an oversight: `getRequestsByExternalEventId`
-        // is filtered to open states (db/requests.ts:512), and every writer that
+        // is filtered to open states (db/requests.ts:540), and every writer that
         // stamps `outcome_external_event_id` on a still-OPEN row is owner- or
         // system-initiated with no requester at all —
         // maybeOpenInFlightMeetingRequest (owner-only by its first guard),
         // calendarHealth/autoMove.ts:166 (system), calendarHealth/handlers/
-        // categoryOps.ts:205 (owner). The two writers that DO carry a colleague
-        // requester stamp it on an already-terminal row (createMeeting.ts:2042
-        // writes state:'resolved'; resolver.ts:858 stamps it while closing), so
+        // categoryOps.ts:215 (owner). The two writers that DO carry a colleague
+        // requester stamp it on an already-terminal row (createMeeting.ts:2200
+        // writes state:'resolved'; resolver.ts:863 stamps it while closing), so
         // this query can never return one. Confirmed on the live DB: all 15
         // meeting_cascade closures with a requester came through the tier below.
         // The helper is shared anyway so the two tiers cannot drift on outcome

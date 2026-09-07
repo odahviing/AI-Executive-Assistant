@@ -4,6 +4,7 @@ import { getAnthropicClient } from '../../llm/client';
 import { logLlmUsage } from '../../utils/usageLog';
 import logger from '../../utils/logger';
 import { ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
+import type { SearchRejectLabel } from '../../connectors/graph/findAvailableSlots';
 
 const anthropic = getAnthropicClient();
 
@@ -189,26 +190,33 @@ function deliveredNotification(result: unknown): boolean {
  * turn's tape and in prior turns' persisted rows, instead of re-deriving it
  * from prose. The line's own text (the busy note, `unavailable (outside the
  * attendee's working hours: <email>)`, `attendee_partial=`, the refusal label)
- * still says WHAT the check found and about whom; the marker only says that
+ * still says WHAT the check found and about whom (`attendee_blocked=` is the
+ * `attendee_partial=` twin for a day the strict pass killed outright — the same
+ * per-attendee tally plus that day's canonical attendee reason);
+ * the marker only says that
  * one happened. The value names the source, for a log reader:
  *   slots   — find_available_slots rejected a candidate or quarter-hours on an
  *             attendee reason (`attendee_busy_collision:<email>` /
  *             `outside_attendee_work_hours:<email>`, or their per-day tallies
  *             `blocked_by` / `attendee_partial_conflicts`, which exist only
- *             for those two reasons — findAvailableSlots.ts:1617-1630).
- *   refused — a calendar mutation the colleague-path guard refused with
- *             reason `attendee_unavailable` (moveMeeting.ts:1214).
+ *             for those two reasons — findAvailableSlots.ts's daySummary builder).
  *   noted   — a create/move carrying planMeeting's heads-up (`_attendee_busy_note`
  *             / `override_notice`), whether the write went through OR was
- *             refused as a `rule_violation` confirm-ask (createMeeting.ts:1287-1289
- *             sets the note on the FAILED attendee-collision gate same as the OK
- *             booked-through path does — checked regardless of outcome). That
- *             notice is planMeeting's JOINED overrideNotice (planMeeting.ts:1261),
- *             so it can also carry a non-attendee heads-up (a level notice, a room
- *             clash); stamping on presence errs toward GROUNDING, the G5-safe
- *             direction, and the checker still reads the note's text for what
- *             it actually says. A structured busy/hours field on the result
- *             would make this exact; until one exists, presence.
+ *             refused as a `rule_violation` confirm-ask (createMeeting.ts's
+ *             confirm_override branch sets the note on the FAILED attendee-collision
+ *             gate same as the OK booked-through path does — checked regardless of
+ *             outcome), or as the colleague-path `attendeeConflictRefusal`
+ *             (violationLabels.ts) afce7fb now returns for an attendee conflict
+ *             instead of escalating to the owner — same note, unconditionally.
+ *             (There is no separate `refused` value any more: it named that OLD
+ *             escalation's `reason:'attendee_unavailable'`, a code afce7fb
+ *             retired with it — nothing writes it today.) That notice is
+ *             planMeeting's JOINED `overrideNotice` field, so it can also carry
+ *             a non-attendee heads-up (a level notice, a room clash); stamping
+ *             on presence errs toward GROUNDING, the G5-safe direction, and the
+ *             checker still reads the note's text for what it actually says. A
+ *             structured busy/hours field on the result would make this exact;
+ *             until one exists, presence.
  *   memory  — get_person_memory read a person's notes (which hold their
  *             stated hours); a `found:false` miss (assistant.ts:865-871, no
  *             `error` field) grounds nothing.
@@ -216,7 +224,7 @@ function deliveredNotification(result: unknown): boolean {
  * check_join_availability, the `[availability_precheck …]` lines) never carry
  * it: the class this grounds is a finding about someone else.
  */
-function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'refused' | 'noted' | 'memory' | null {
+function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'noted' | 'memory' | null {
   if (result == null || typeof result !== 'object') return null;
   const r = result as Record<string, unknown>;
   const isAttendeeReason = (reason: unknown): boolean =>
@@ -245,12 +253,12 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'refu
       // `override_notice` same as an OK booked-through write does; the old
       // `!outcome.ok` early return exited before ever looking at it, so that
       // FAILED turn produced NO attendee_check source at all. Check the note
-      // regardless of outcome; only the distinct colleague-path refusal shape
-      // (`needs_owner_approval` + `reason: 'attendee_unavailable'`,
-      // moveMeeting.ts:1216-1228, which never carries this note) still maps
-      // to 'refused'.
-      const outcome = mutationOutcome(result);
-      if (!outcome.ok && outcome.reason === 'attendee_unavailable') return 'refused';
+      // regardless of outcome — including the colleague-path attendee-conflict
+      // refusal (violationLabels.ts's `attendeeConflictRefusal`, afce7fb), which
+      // carries this SAME note unconditionally, so it needs no branch of its own;
+      // 'refused' (a distinct value for the OLD `needs_owner_approval` +
+      // `reason:'attendee_unavailable'` escalation afce7fb deleted) is retired —
+      // that reason code is written nowhere now.
       return (typeof r._attendee_busy_note === 'string' || typeof r.override_notice === 'string') ? 'noted' : null;
     }
     case 'get_person_memory':
@@ -307,7 +315,7 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
  *
  * No outcome gate here, unlike a real tool call: an internal action is only ever
  * emitted AFTER its mutation succeeded (checkHealth.ts:836 gates on `ok && created`;
- * autoMove.ts:273 pushes once the move and its notifications have landed), so the
+ * autoMove.ts pushes its own tape entry once the move and its notifications have landed), so the
  * entry's existence IS the confirmation. Reusing MUTATION_DOMAIN keeps coverage
  * identical to the tool path — set_event_category and rebalance_floating_blocks are
  * not in it, and were not in the old alternations either, so they stay unmarked.
@@ -325,8 +333,8 @@ function summarizeInternalAction(tool: string, viaTool: string, detail?: string)
 function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown): string {
   try {
     // createmeeting-failed-summary-drops-counter-offer-reason (2026-09-04) — a
-    // soft counter-proposal (create_meeting's efficiency_counter path,
-    // createMeeting.ts:1464-1478) carries a real, specific `counter_offer.reason`
+    // soft counter-proposal (create_meeting's efficiency_counter path in
+    // createMeeting.ts) carries a real, specific `counter_offer.reason`
     // the tool itself computed — not a black-box failure. The generic FAILED
     // branch below kept only the short error CODE ('efficiency_counter'), so a
     // checker-visible summary could never back the very explanation the tool
@@ -437,10 +445,10 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // check-claimed-that-never-ran (2026-09-06, bounce) — `broken_rule_label`
         // is the HUMANIZED phrase, and for the two attendee-scoped reasons it is
         // deliberately NAME-FREE ("outside the attendee's working hours",
-        // violationLabels.ts:22-23). The raw `broken_rule` beside it carries the
-        // blamed person as a `<reason>:<email>` suffix
-        // (findAvailableSlots.ts:1253) — a structured string, not natural
-        // language. Surface that email, so a checker reading this line can tell
+        // violationLabels.ts's SEARCH_REJECT_PHRASES). The raw `broken_rule`
+        // beside it carries the blamed person as a `<reason>:<email>` suffix
+        // (findAvailableSlots.ts's trackReject-populated reasons) — a structured
+        // string, not natural language. Surface that email, so a checker reading this line can tell
         // WHOSE hours/busy time blocked the candidate instead of only THAT
         // someone's did: a true "10:15 is outside Erez's hours" narration was
         // otherwise unverifiable against a line that never named Erez (G2).
@@ -454,8 +462,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             : `unavailable${v.broken_rule_label ? ` (${v.broken_rule_label}${blamedParty(v) ? `: ${blamedParty(v)}` : ''})` : ''}`;
 
         // bounce-fix finding 1 (2026-08-24) — candidate_validation is a
-        // SEPARATE shape with no `slots` key at all
-        // (findAvailableSlots.ts:1181-1190): `{ mode:'candidate_validation',
+        // SEPARATE shape with no `slots` key at all (findAvailableSlots.ts's
+        // candidate_validation return): `{ mode:'candidate_validation',
         // duration_minutes, candidates_checked, results:[{start,end,
         // available,...}] }`. Falling through to the slots-array path below
         // always read length 0 and rendered "0 slots" even when every named
@@ -484,8 +492,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // bounce-fix finding 2 (2026-08-24) — `preferred_slot_status` is a
         // tool-confirmed available (or unavailable, with its real reason)
         // instant that is DELIBERATELY excluded from `slots` itself
-        // (findAvailableSlots.ts:1744-1763, attached at :2062) — the handler
-        // tells Sonnet to "treat it as available and offer it alongside
+        // (findAvailableSlots.ts's preferredSlotStatus, attached to the result
+        // under this same key) — the handler tells Sonnet to "treat it as available and offer it alongside
         // `slots`; never imply it's blocked, and never stay silent about
         // it." Rendering only `slots` made this confirmed instant invisible
         // to the slot-grounding ground truth — worst case, if it were the
@@ -503,10 +511,10 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // no ground truth in TOOL ACTIVITY and claimChecker's owner_fact mode
         // hedged it into a false "you're inventing that". The handler attaches
         // day_summary on the WITH-slots return too
-        // (skills/meetings/ops/handlers/findAvailableSlots.ts:2170, alongside
-        // the zero-slot returns at :1514/:1581/:1615), so read it once here for
+        // (skills/meetings/ops/handlers/findAvailableSlots.ts:2185, alongside
+        // the zero-slot returns at :1529/:1596/:1630), so read it once here for
         // both branches.
-        const daySummary: Array<{ date?: string; accepted?: number; top_reasons?: string[]; oof_until_display?: string; attendee_partial_conflicts?: Array<{ email?: string; slots_blocked?: number }> }> =
+        const daySummary: Array<{ date?: string; accepted?: number; top_reasons?: string[]; oof_until_display?: string; attendee_partial_conflicts?: Array<{ email?: string; slots_blocked?: number }>; blocked_by?: Array<{ email?: string; slots_blocked?: number }> }> =
           (result && typeof result === 'object' && Array.isArray((result as any).day_summary))
             ? (result as any).day_summary
             : [];
@@ -523,12 +531,20 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // zero slots (:1534). A merely BUSY day must never render here —
         // that would ground a false "he's off that day", the exact
         // corruption this line exists to prevent (G2/G5).
-        const WHOLE_DAY_OFF_REASONS = new Set(['vacation_or_off_day', 'owner_out_of_office']);
+        // Typed against the declared vocabulary (connectors/graph/
+        // findAvailableSlots.ts) instead of two bare strings with nothing
+        // anchoring them — a rename or removal of either label there now
+        // fails THIS declaration to compile instead of silently going stale.
+        // `top_reasons` itself stays untyped JSON (the tool result's own
+        // shape), so the cast lives in ONE helper rather than at each
+        // `.has()` call below.
+        const WHOLE_DAY_OFF_REASONS: ReadonlySet<SearchRejectLabel> = new Set(['vacation_or_off_day', 'owner_out_of_office']);
+        const isWholeDayOff = (r: string): boolean => WHOLE_DAY_OFF_REASONS.has(r as SearchRejectLabel);
         const offDayParts = daySummary
           .filter(d => typeof d.date === 'string' && d.accepted === 0
-            && (d.top_reasons ?? []).some(r => WHOLE_DAY_OFF_REASONS.has(r)))
+            && (d.top_reasons ?? []).some(isWholeDayOff))
           .map(d => {
-            const reason = (d.top_reasons ?? []).find(r => WHOLE_DAY_OFF_REASONS.has(r));
+            const reason = (d.top_reasons ?? []).find(isWholeDayOff);
             return `${d.date}(${reason}${d.oof_until_display ? ` until ${d.oof_until_display}` : ''})`;
           });
         const offDaysPart = offDayParts.length ? ` off_days=${offDayParts.join(',')}` : '';
@@ -543,15 +559,45 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // same as offDaysPart does for whole-day-off — without this,
         // claimChecker's invented_third_party_fact rule has nothing to check
         // that true sentence against.
+        const byAttendee = (list: Array<{ email?: string; slots_blocked?: number }>) =>
+          list.map(a => `${a.email}:${a.slots_blocked}`).join('+');
         const attendeePartialParts = daySummary
           .filter(d => typeof d.date === 'string' && Array.isArray(d.attendee_partial_conflicts) && d.attendee_partial_conflicts.length > 0)
-          .map(d => {
-            const byAttendee = (d.attendee_partial_conflicts ?? [])
-              .map(a => `${a.email}:${a.slots_blocked}`)
-              .join('+');
-            return `${d.date}(${byAttendee})`;
-          });
+          .map(d => `${d.date}(${byAttendee(d.attendee_partial_conflicts ?? [])})`);
         const attendeePartialPart = attendeePartialParts.length ? ` attendee_partial=${attendeePartialParts.join(',')}` : '';
+        // recovery-path-day-summary-still-carries-no-attendee-signal (2026-09-07)
+        // — `blocked_by` is `attendee_partial_conflicts`' twin for a day the
+        // STRICT pass killed outright (findAvailableSlots.ts's accepted===0
+        // branch, same rankAttendees split), and nothing here rendered it. That
+        // is the ONE turn where it matters most: the rule-6 backstops
+        // (handlers/findAvailableSlots.ts's recoverAttendeeBlockedSlots)
+        // re-search after a strict wipeout and hand back the owner's own open
+        // times, while day_summary stays the STRICT one (the recovery call
+        // passes no diagnosticsOut, so isRecoveryResult's ternary there returns the pre-recovery blame).
+        // So the line took the WITH-slots return below, where the three existing
+        // day-level renders all miss it: reasonPart only runs on the zero-slot
+        // return, attendeePartialPart is accepted>0-only, offDaysPart is
+        // whole-day-off-only. The `attendee_check=slots` marker WAS already
+        // stamped (attendeeCheckSource reads blocked_by), but the line's own
+        // text said nothing about WHAT the check found or about whom — and that
+        // text is exactly what claimChecker's third-party rule judges the draft
+        // against (claimChecker.ts:707-709), so a true "Yael can't make any of
+        // these" had a marker with no finding behind it and could be flagged
+        // invented. Render the same per-attendee tally the partial case does,
+        // plus the day's attendee-scoped reason (the collapsed, name-free
+        // canonical prefix — the KIND the checker compares) so busy is not read
+        // as off-hours. Kept DAY-level, deliberately: a per-slot conflict tag
+        // would attach a negative verdict to an instant this line also offers,
+        // which is the slot-grounding check's own flag condition (:613) — the
+        // guard would then retract the owner's genuinely open times, the exact
+        // reply this row exists to protect (G5).
+        const attendeeBlockedParts = daySummary
+          .filter(d => typeof d.date === 'string' && Array.isArray(d.blocked_by) && d.blocked_by.length > 0)
+          .map(d => {
+            const kinds = (d.top_reasons ?? []).filter(r => (ATTENDEE_REASON_PREFIXES as readonly string[]).includes(r));
+            return `${d.date}(${byAttendee(d.blocked_by ?? [])}${kinds.length ? `,${kinds.join('+')}` : ''})`;
+          });
+        const attendeeBlockedPart = attendeeBlockedParts.length ? ` attendee_blocked=${attendeeBlockedParts.join(',')}` : '';
         if (slots.length === 0) {
           // gh#chris-kelley-oof-block-a — a zero-result day_summary (the
           // rejection reason for EVERY date, e.g. owner_out_of_office) used
@@ -577,7 +623,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           }
           return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${offDaysPart}${preferredPart}]`;
         }
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${attendeePartialPart}${preferredPart}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool
@@ -625,8 +671,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // check-claimed-that-never-ran (2026-09-06) — move_meeting's
         // `_attendee_busy_note` and create_meeting's `override_notice` carry
         // a real "who's busy / whose hours this breaks" heads-up (planMeeting's
-        // own overrideNotice, moveMeeting.ts:2228 / createMeeting.ts:2126) that
-        // was NEVER folded into `action_summary` — Sonnet sees it (it reads the
+        // own `overrideNotice` field, surfaced by each handler's success
+        // return) that was NEVER folded into `action_summary` — Sonnet sees it (it reads the
         // raw tool result), but the claim-checker only ever reads THIS compact
         // log, so a TRUE "that lands on Erez's busy time"/"outside Yael's hours"
         // narration had no ground truth here and risked being flagged as an
@@ -672,12 +718,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         }
         // check-claimed-that-never-ran (2026-09-06, bounce) — a refused
         // calendar mutation carries a `broken_rule_label` the handler already
-        // humanized WITH the blocking person's name ("it's outside Erez's
-        // working hours" / "Yael isn't free then", moveMeeting.ts:1183-1198,
-        // createMeeting's parallel guard). `outcome.reason` alone is the bare
-        // code (`attendee_unavailable`), so the one line a checker can read
-        // said an attendee blocked it but never which one — the same G2 gap as
-        // the candidate_validation line above. Carry the handler's own phrase.
+        // humanized for a genuine OWNER-rule violation ("it's outside working
+        // hours", moveMeeting.ts's NOT_RULE_COMPLIANT branch, createMeeting's
+        // parallel guard) — never for an attendee-scoped reason, which now
+        // returns `attendeeConflictRefusal` (violationLabels.ts) instead and
+        // carries no `broken_rule_label` at all (its sentence rides
+        // `_attendee_busy_note`, read separately by `attendeeCheckSource`
+        // above). `outcome.reason` alone is the bare code (e.g.
+        // `not_rule_compliant`), so the one line a checker can read said a
+        // rule blocked it but not which one — the same G2 gap as the
+        // candidate_validation line above. Carry the handler's own phrase.
         const brokenLabel = (result && typeof result === 'object'
           && typeof (result as { broken_rule_label?: unknown }).broken_rule_label === 'string')
           ? ` (${(result as { broken_rule_label: string }).broken_rule_label.replace(/\s+/g, ' ').trim().slice(0, 100)})`
@@ -742,15 +792,15 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // all `{ error: '<code>' }`.
         //
         // gh#200 (recheck, 200b) — a note-ONLY override is a legal success on
-        // its own (calendarReads.ts:684 lets `note` alone satisfy
-        // `nothing_to_set`), but `note` isn't in the handler's success result
-        // (calendarReads.ts:710-718 — only handleGetWorkScheduleOverrides
-        // echoes it back, :737), so this case rendered an EMPTY detail for a
-        // real success. `note` is the one field safe to read from `input`
-        // instead of `result`: the handler persists it unchanged (only a
-        // `.trim()`, calendarReads.ts:678,699) with no validation branch that
-        // can drop or alter it the way hours/off can — once `success:true`
-        // confirms the write, `input.note` IS the persisted value, not a guess.
+        // its own (handleSetWorkScheduleOverride's `nothing_to_set` gate lets
+        // `note` alone satisfy it), but `note` isn't in that handler's success
+        // result (only the sibling handleGetWorkScheduleOverrides echoes it
+        // back) — so this case rendered an EMPTY detail for a real success.
+        // `note` is the one field safe to read from `input` instead of
+        // `result`: the handler persists it unchanged (only a `.trim()`) with
+        // no validation branch that can drop or alter it the way hours/off
+        // can — once `success:true` confirms the write, `input.note` IS the
+        // persisted value, not a guess.
         const r = result as {
           dates?: unknown; cleared?: number;
           off?: boolean; hours?: unknown; location?: string; timezone?: string;

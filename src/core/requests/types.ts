@@ -53,6 +53,58 @@ export const APPROVAL_SUBKINDS = [
 
 export type ApprovalSubkind = (typeof APPROVAL_SUBKINDS)[number];
 
+/**
+ * The two `kind='reminder'` owner-flag subkinds — each written by exactly one
+ * backstop (tasks/skill.ts's flagUnresolvedFreeformForOwner mints
+ * FREEFORM_OWNER_ASK, runOutputGates.ts's claim-checker relay backstop mints
+ * FREEFORM_OWNER_FLAG; split apart in chris-kelley-oof-block-c round 3,
+ * 2026-08-18, because a shared value defeated the ask-side's own dedup
+ * lookup). db/jobs.ts's pending-cap exclusion and db/requests.ts's dedup
+ * lookup both match on these exact strings — declared once here so neither
+ * reader can drift from either writer's spelling.
+ */
+export const FREEFORM_OWNER_ASK_SUBKIND = 'freeform_owner_ask';
+export const FREEFORM_OWNER_FLAG_SUBKIND = 'freeform_owner_flag';
+
+/**
+ * The one on_approve tool that is NOT a meeting-skill call — a direct
+ * db/people.ts write (see deferredActionReplay.ts's own branch). Declared
+ * here, not retyped, because it used to be hand-spelled at four sites
+ * (approvalCallbacks.ts's verbalizer switch + its RESOLVER_REPLAY_TOOLS
+ * member, deferredActionReplay.ts's dispatch guard, runner.ts's
+ * raiseTimezonePersistenceAsks callback) with nothing to stop the four
+ * spellings drifting apart (promote-timezone-temp-hand-typed-4-sites,
+ * 2026-09-07).
+ */
+export const PROMOTE_TIMEZONE_TEMP_TOOL = 'promote_timezone_temp' as const;
+
+/**
+ * Every tool the resolver's replay engine (deferredActionReplay.ts) can fire
+ * on an approved on_approve callback — the canonical membership for
+ * approvalCallbacks.ts's `RESOLVER_REPLAY_TOOLS`. Declared as a `const`
+ * tuple (not just the Set) so `ReplayableTool` and `isReplayableTool` can be
+ * derived from the SAME list deferredActionReplay.ts switches over: its
+ * dispatch narrows `tool` to this union and its final `default` branch
+ * assigns it to a `never` — so a member added here without a matching
+ * dispatch branch there fails to COMPILE, not just silently no-ops at
+ * runtime (the drift the old "keep this set in sync with
+ * deferredActionReplay.ts" comment could only ask a human to remember).
+ */
+export const REPLAYABLE_TOOLS = [
+  'create_meeting',
+  'move_meeting',
+  'delete_meeting',
+  'update_meeting',
+  'book_floating_block',
+  PROMOTE_TIMEZONE_TEMP_TOOL,
+] as const;
+
+export type ReplayableTool = (typeof REPLAYABLE_TOOLS)[number];
+
+export function isReplayableTool(tool: string): tool is ReplayableTool {
+  return (REPLAYABLE_TOOLS as readonly string[]).includes(tool);
+}
+
 export type RequestState =
   | 'awaiting_owner'      // owner action blocks progress (most approvals start here)
   | 'awaiting_colleague'  // colleague reply blocks progress (most outreach lives here)

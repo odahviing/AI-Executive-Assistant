@@ -17,7 +17,7 @@
  * verbatim. The point stands either way: the recipient decides whether the
  * slot works — Maelle never assumes any of their meetings are movable.
  *
- * Falls back to status='unknown' on Graph error — never blocks coord.
+ * Falls back to status='unknown' on Graph error — never blocks the search.
  */
 
 import { DateTime } from 'luxon';

@@ -28,6 +28,7 @@
 import type { UserProfile } from '../../config/userProfile';
 import { getConnection } from '../../connections/registry';
 import logger from '../../utils/logger';
+import { PROMOTE_TIMEZONE_TEMP_TOOL, isReplayableTool } from './types';
 
 /**
  * Thrown when the replayed tool returned a structured `{ error }` / `{ success:
@@ -100,7 +101,22 @@ export interface RunDeferredActionInput {
  * undefined on the no-op paths (no connection / unsupported tool).
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
-  const { ownerUserId, profile, tool, args, requestId, originChannel, originThreadTs, surface } = input;
+  const { ownerUserId, profile, tool: rawTool, args, requestId, originChannel, originThreadTs, surface } = input;
+
+  // Every caller (resolver.ts) only reaches this function after checking
+  // RESOLVER_REPLAY_TOOLS.has(tool) — but that Set is untyped `Set<string>`
+  // (approvalCallbacks.ts), so nothing upstream actually PROVES `tool` is one
+  // of the six replayable tools at the type level. Re-check the same
+  // canonical list here (isReplayableTool, core/requests/types.ts) so the
+  // rest of this function can narrow to `ReplayableTool` and the switch below
+  // can be exhaustive — a stray/legacy tool string is the same no-op as
+  // before, just decided in one place instead of falling through the old
+  // per-branch "else, unsupported" at the bottom.
+  if (!isReplayableTool(rawTool)) {
+    logger.warn('runDeferredAction — tool is not in REPLAYABLE_TOOLS, skipping replay', { requestId, tool: rawTool });
+    return undefined;
+  }
+  const tool = rawTool;
 
   // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — NOT a
   // meeting-skill tool call: a direct write through the ONE door out of the
@@ -111,7 +127,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // swallows) on a refusal — same contract as the meeting-tool path: the
   // resolver keeps the request awaiting_owner rather than telling the owner
   // "done" for a write that didn't happen.
-  if (tool === 'promote_timezone_temp') {
+  if (tool === PROMOTE_TIMEZONE_TEMP_TOOL) {
     const personId = typeof args.person_id === 'string' ? args.person_id : '';
     const expectedValue = typeof args.expected_value === 'string' ? args.expected_value : '';
     if (!personId || !expectedValue) {
@@ -187,7 +203,15 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
       const m = require('../../skills/calendarHealth') as typeof import('../../skills/calendarHealth');
       skill = new (m as unknown as { CalendarHealthSkill: new () => unknown }).CalendarHealthSkill() as typeof skill;
     } else {
-      logger.warn('runDeferredAction — unsupported tool, skipping replay', { requestId, tool });
+      // Exhaustiveness tripwire, not a live path: PROMOTE_TIMEZONE_TEMP_TOOL
+      // returned above, and the branches before this `else` cover every other
+      // member of ReplayableTool — so `tool` can only type as `never` here.
+      // Add a member to REPLAYABLE_TOOLS (core/requests/types.ts) without
+      // adding a matching branch above, and this line fails to compile
+      // instead of silently reaching this "unsupported tool" no-op at
+      // runtime the way an untyped `else` used to.
+      const _exhaustive: never = tool;
+      logger.warn('runDeferredAction — unsupported tool, skipping replay', { requestId, tool: _exhaustive });
       return undefined;
     }
     if (!skill?.executeToolCall) {
