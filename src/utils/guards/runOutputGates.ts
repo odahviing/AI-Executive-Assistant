@@ -88,6 +88,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { SenderRole } from '../../connectors/slack/postReply';
 import type { HumanGateAudience } from '../humanGate';
 import type { OrchestratorOutput } from '../../core/orchestrator';
+import { toolLinesMatching } from '../../core/orchestrator/turnHelpers';
 import { formatForSlack } from '../../connections/slack/formatting';
 import logger from '../logger';
 import { logLlmUsage } from '../usageLog';
@@ -1373,36 +1374,37 @@ async function runClaimCheckAndMaybeRewrite(
 }
 
 /**
+ * o#259 (2026-08-28) — where a persisted assistant row's tool tape ends and
+ * its prose begins, decided by SHAPE. postReply.ts:545-547 stores a row as
+ * `toolSummaries.join(' ') + '\n' + replyText` ONLY when there were tool
+ * summaries that turn — a no-tool-call turn stores `cleanReply` alone, with
+ * NO tape and no synthetic `\n` prefix — and the tape is deliberately RAW
+ * (the claim-checker's `mutated=<domain>` shield reads it later — never touch
+ * that storage format). Splitting on the first `\n` unconditionally once
+ * dropped the real first line of every multi-line tool-less Slack reply.
+ * Every tool-summary entry (`summarizeToolCall`/`summarizeInternalAction`,
+ * turnHelpers.ts) is bracket-wrapped (`[tool ...]` or `[tool FAILED: ...]`),
+ * optionally followed by ` mutated=<domain>` / ` attendee_check=<source>`,
+ * space-joined — so a REAL tape's pre-`\n` segment starts with `[` and closes
+ * a `]` before that newline; anything else is prose in full. ONE splitter
+ * (G9) for the two readers below: the snippet wants the prose, the
+ * slot-grounding lift wants the tape.
+ */
+function splitAssistantRow(raw: string): { tape: string; text: string } {
+  const nl = raw.indexOf('\n');
+  const preNl = nl === -1 ? '' : raw.slice(0, nl);
+  return /^\[.*\]/.test(preNl) ? { tape: preNl, text: raw.slice(nl + 1) } : { tape: '', text: raw };
+}
+
+/**
  * bounce-fix (2026-08-26) — the SAME thread-history snippet Maelle drafted
  * from (`ctx.history`), capped (last 12 turns, 220 chars each) to bound
- * prompt size on checks that run every colleague-readable turn (G10). One
- * canonical builder (G9) shared by 'owner_fact' mode (an invented personal
- * fact may be something the owner said himself earlier) and 'slot_grounding'
- * mode (a time this thread already confirmed via a REAL search in an
- * EARLIER turn stays grounded even when THIS turn's own search result
- * doesn't repeat it) — was hand-copied per call site before this fix.
- *
- * o#259 (2026-08-28) — an assistant row is stored as
- * `toolSummaries.join(' ') + '\n' + replyText` ONLY when there were tool
- * summaries that turn (postReply.ts:545-547) — a no-tool-call turn stores
- * `cleanReply` alone, with NO tape and no synthetic `\n` prefix. Tool tape
- * deliberately RAW and prepended (the claim-checker's `mutated=<domain>`
- * shield reads it later — never touch that storage format). Slicing 220
- * chars from the FRONT of that string can burn the whole budget on a verbose
- * tool summary and leave none for the actual reply prose grounding needs to
- * see. Skip past the tool-tape prefix before slicing an assistant row — but
- * the first fix here (splitting on the first `\n` unconditionally) assumed
- * every assistant row's first `\n` was that separator, when a tool-less row
- * is just `cleanReply` and Slack replies are routinely multi-line: it
- * silently dropped the real first line of every such row.
- *
- * Detect tape STRUCTURALLY instead: every tool-summary entry
- * (`summarizeToolCall`/`summarizeInternalAction`, turnHelpers.ts)
- * is bracket-wrapped (`[tool ...]` or `[tool FAILED: ...]`), optionally
- * followed by ` mutated=<domain>`, and multiple entries are space-joined —
- * so the pre-`\n` segment of a REAL tape always starts with `[` and contains
- * a `]` before that newline. A row with no tool tape at all (no leading
- * `[...]`) keeps its full content, first line included.
+ * prompt size on a check that runs every colleague-readable turn (G10), for
+ * 'owner_fact' mode: an invented personal fact may be something the owner
+ * said himself earlier. 'slot_grounding' mode shared it from 2026-08-26 to
+ * 2026-09-09 and it never grounded anything there — the prose can't show
+ * that a real search backed an earlier offer; that mode reads the tape's own
+ * search lines now (`priorTurnAvailabilityLines` below).
  */
 function buildRecentHistorySnippet(ctx: OutputGateContext): string | undefined {
   const { profile } = ctx;
@@ -1410,13 +1412,46 @@ function buildRecentHistorySnippet(ctx: OutputGateContext): string | undefined {
     .slice(-12)
     .map(h => {
       const raw = h.content ?? '';
-      const nl = raw.indexOf('\n');
-      const preNl = nl === -1 ? '' : raw.slice(0, nl);
-      const hasToolTape = h.role === 'assistant' && /^\[.*\]/.test(preNl);
-      const text = hasToolTape ? raw.slice(nl + 1) : raw;
+      const text = h.role === 'assistant' ? splitAssistantRow(raw).text : raw;
       return `${h.role === 'assistant' ? profile.assistant.name : 'User'}: ${text.slice(0, 220)}`;
     })
     .join('\n') || undefined;
+}
+
+/**
+ * The three producers of an availability ground-truth line, ONE head (G9) for
+ * this turn's filter and the earlier-turn lift below: the two search tools'
+ * compact lines (turnHelpers.ts's `renderToolSummary`) and the precheck's
+ * synthetic `[availability_precheck …]` lines (availabilityPreCheck.ts's
+ * `renderToolSummaryLines`). Structured tool-line prefixes, not language (W4).
+ */
+const AVAILABILITY_LINE_HEAD = /^\[(?:find_available_slots|check_join_availability|availability_precheck)/;
+
+/**
+ * slot-grounding-rewrite-sourced-from-precheck (2026-09-09, Sharon Duret,
+ * 18:45:37Z) — the earlier turns' availability lines, lifted VERBATIM off the
+ * persisted tape. Why `recentHistorySnippet` never did this job: it strips
+ * the tape from every assistant row (`splitAssistantRow`) and hands the
+ * checker the earlier PROSE — "Good bets for Tuesday next week: 2pm or 3:45pm
+ * EDT…" — under an instruction to trust it only if "a REAL availability
+ * search" backed it, which prose cannot show. So the checker flagged a
+ * correct re-offer of the previous turn's 8 confirmed slots as "not confirmed
+ * in this turn's availability check", and the rewrite substituted the only
+ * lines it had — a mis-dated precheck's Jerusalem-local alternatives — into a
+ * Boston reader's reply. The tape is persisted RAW for exactly this kind of
+ * read (postReply.ts Step 3b; the `mutated=` shield reads it the same way),
+ * same 12-row window the snippet uses. Lifted with `toolLinesMatching`
+ * (turnHelpers.ts) because a search line nests `[local: …]` brackets.
+ * Prefixed `(earlier turn)` so the prompt scopes its NEGATIVE clause to this
+ * turn's lines: an earlier line can only GROUND a time (keep), never flag one
+ * — keep-only by construction (G5).
+ */
+function priorTurnAvailabilityLines(ctx: OutputGateContext): string[] {
+  return (ctx.history ?? [])
+    .slice(-12)
+    .filter(h => h.role === 'assistant')
+    .flatMap(h => toolLinesMatching(splitAssistantRow(h.content ?? '').tape, AVAILABILITY_LINE_HEAD))
+    .map(line => `(earlier turn) ${line}`);
 }
 
 /**
@@ -1472,8 +1507,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // reply, so "he can take a car call" reads as grounded when the owner
     // said exactly that three turns earlier in this same thread, and only as
     // invented when it has no such origin anywhere. See claimChecker.ts's
-    // `recentHistorySnippet` doc comment; builder shared with 'slot_grounding'
-    // mode below (G9).
+    // `recentHistorySnippet` doc comment.
     const recentHistorySnippet = buildRecentHistorySnippet(ctx);
 
     const verdict = await checkReplyClaims({
@@ -1487,6 +1521,20 @@ async function runOwnerFactCheckAndMaybeRewrite(
 
     if (!verdict.claimed_action) return cleanReply;
 
+    // owner-fact-check-deletes-true-attendee-availability-clause (2026-09-09)
+    // — do NOT add an `attendee_check=` shield here. That marker means "a real
+    // check evaluated someone OTHER than the owner" (turnHelpers.ts
+    // attendeeCheckSource, which explicitly never stamps owner-availability
+    // tools), so it is not ground truth for anything this mode judges: a claim
+    // about the OWNER's own hours, timezone or freeness. It is also carried by
+    // every ordinary `find_available_slots` call with an attendee — measured on
+    // the live VM over the 14 days to 2026-09-09, ALL of this check's firings
+    // (06:25:57 / 12:00:37 / 12:03:32 on 09-07, each a genuine ungrounded claim
+    // about Idan) sat on a turn whose own tape carried `attendee_check=slots`,
+    // so such a shield would suppress the guard on essentially every scheduling
+    // turn — the 2026-08-14 incident shape included. The tool-grounding this
+    // mode actually needs is already in its prompt (condition (a): a matching
+    // read in TOOL ACTIVITY THIS TURN makes the claim grounded).
     logger.warn('Owner-fact check: invented personal fact about the owner in a colleague-facing reply — rewriting to hedge/drop it (no tool re-fire)', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
@@ -1756,13 +1804,10 @@ async function runAvailabilityFloorAndMaybeRewrite(ctx: OutputGateContext, initi
  *
  * Fails open at every step — same contract as every other gate in this file.
  *
- * bounce-fix (2026-08-26, adversarial re-verify) — this turn's search result
- * is not the ONLY ground truth: a time a real search already confirmed in an
- * EARLIER turn of the same thread (colleague asks about a second day while a
- * first offer still stands) is passed too, via `recentHistorySnippet`
- * (`buildRecentHistorySnippet` above) — same field/builder 'owner_fact' mode
- * already uses (G9), so a genuinely-confirmed earlier offer restated
- * alongside a new search no longer reads as fabricated.
+ * bounce-fix (2026-08-26) tried to add EARLIER turns' confirmations via the
+ * prose `recentHistorySnippet`; replaced 2026-09-09 by the earlier turns'
+ * search LINES themselves (`priorTurnAvailabilityLines` above) — see that
+ * function for why the prose never grounded anything.
  */
 async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, initialReply: string): Promise<string> {
   const { profile, result } = ctx;
@@ -1787,40 +1832,36 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   // `[availability_precheck …]` verdict lines (2026-08-30), verbatim (never
   // re-derived). Absent on this turn ⇒ nothing to ground a claim against ⇒
   // nothing to check.
-  const groundedToolLines = (result.toolSummaries ?? []).filter(
-    line => line.startsWith('[find_available_slots')
-      || line.startsWith('[check_join_availability')
-      || line.startsWith('[availability_precheck'),
-  );
+  const thisTurnLines = (result.toolSummaries ?? []).filter(line => AVAILABILITY_LINE_HEAD.test(line));
   // bug 1.1 (2026-08-27, Mike Naumenko / D0ARQRD5H28) — a ZERO-tool-call turn
   // used to bail out here unconditionally, which is exactly how a stale time
   // recalled from three days earlier in the same thread shipped unchecked (no
   // search ran, so this checker never even looked at the draft). When THIS
   // turn was a detected colleague availability question
   // (`availabilityQuestionDetected`, set by `precheckAvailability`'s own `ran`
-  // in buildTurnContext.ts), still call the checker with an empty
-  // `groundedToolLines` — `checkReplyClaims`'s `slotGroundingPrompt` already
-  // handles that case correctly by design: it flags any specific-time-as-
-  // available claim not backed by this turn's real result OR the
-  // EARLIER-TURNS history block. Scoped to availability-question turns only
-  // (not every digit-bearing reply) to avoid a new LLM call on ordinary turns
-  // that have nothing to do with availability (G10). Since 2026-08-30 the
-  // precheck's own `[availability_precheck …]` lines normally populate
-  // `groundedToolLines` on exactly these turns (`ran` ⇒ ≥1 verdict line), so
-  // this empty-list branch is now the backstop for a threading failure, not
-  // the common path.
-  if (groundedToolLines.length === 0 && !result.availabilityQuestionDetected) return initialReply;
+  // in buildTurnContext.ts), still call the checker with no THIS-turn line —
+  // `checkReplyClaims`'s `slotGroundingPrompt` already handles that case
+  // correctly by design: it flags any specific-time-as-available claim not
+  // backed by this turn's real result OR an `(earlier turn)` line. Scoped to
+  // availability-question turns only (not every digit-bearing reply) to avoid
+  // a new LLM call on ordinary turns that have nothing to do with
+  // availability (G10). Since 2026-08-30 the precheck's own
+  // `[availability_precheck …]` lines normally populate `thisTurnLines` on
+  // exactly these turns (`ran` ⇒ ≥1 verdict line), so this branch is now the
+  // backstop for a threading failure, not the common path.
+  if (thisTurnLines.length === 0 && !result.availabilityQuestionDetected) return initialReply;
+
+  // This turn's lines first, then the earlier turns' — see
+  // `priorTurnAvailabilityLines` for the incident and why the order and the
+  // `(earlier turn)` prefix matter. Handed to the checker AND the rewriter
+  // (below) as one list, so a substitution can only ever come from a real
+  // search line — the 18:45:37Z rewrite reached for the precheck's
+  // alternatives because they were the only lines it was given.
+  const groundedToolLines = [...thisTurnLines, ...priorTurnAvailabilityLines(ctx)];
 
   let cleanReply = initialReply;
   try {
     const { checkReplyClaims, rewriteOwningTheMiss } = await import('../claimChecker');
-
-    // bounce-fix (2026-08-26) — a time confirmed by a real search in an
-    // EARLIER turn of this thread (colleague asks about a second day while a
-    // first offer still stands) has no other ground truth: this mode's own
-    // `groundedToolLines` is THIS TURN's search only. See
-    // claimChecker.ts's `recentHistorySnippet` doc comment.
-    const recentHistorySnippet = buildRecentHistorySnippet(ctx);
 
     const verdict = await checkReplyClaims({
       reply: cleanReply,
@@ -1829,12 +1870,11 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
       ownerFirstName: profile.user.name.split(' ')[0],
       mode: 'slot_grounding',
       slotGroundingContext: { groundedToolLines },
-      recentHistorySnippet,
     });
 
     if (!verdict.claimed_action) return cleanReply;
 
-    logger.warn('Slot-grounding check: draft offers a specific time as available that this turn\'s real search does not confirm — rewriting (no tool re-fire)', {
+    logger.warn('Slot-grounding check: draft offers a specific time as available that no real search (this turn or earlier in the thread) confirms — rewriting (no tool re-fire)', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       action_summary: verdict.action_summary,

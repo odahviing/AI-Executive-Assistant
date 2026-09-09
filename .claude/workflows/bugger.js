@@ -266,14 +266,21 @@ const OPEN_BACKLOG_RAW = asArray('openBacklog', A.openBacklog)
 // a run that passes none, and then the lanes coin new slugs — correct, that is how
 // a first one gets created.
 const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN, ...OPEN_BACKLOG_RAW].map((r) => r && r.invariant).filter(Boolean))]
-// ── X43 · THE READER FOR `state.pendingOverflow` ─────────────────────────────
-// The field was WRITE-ONLY. `grep pendingOverflow` returned SKILL.md:67, :231,
-// :385, :391 and state.json:20 — and nothing in either engine. X30 then made it
-// LOAD-BEARING: every verify discovery now routes ledger row → `pendingOverflow` →
-// the head of the next build, so the one link with no mechanism behind it became
-// the link the whole route depends on. A documented read is an instruction, and
-// nothing failed when it was skipped: a carried finding stopped here while its
-// ledger row read FLAGGED, which looks exactly like handled.
+// ── X43 · THE READER FOR `args.pendingOverflow` ──────────────────────────────
+// Originally `state.pendingOverflow`: a hand-synced JSON array with no write path
+// in code anywhere (a human edited state.json by hand on every drain) and no
+// delete step enforced either, so it drifted from the ledger in both directions —
+// stale entries never removed, fresh ones never added (X216, measured live
+// 2026-09-09: the array held 2 entries while the ledger's own queued-next-run
+// rows numbered 11). REDESIGNED X216: `node scripts/ledger-stats.cjs --queued
+// --json` derives this array FRESH off the ledger on every read — same
+// `verdict:'queued-next-run'` rows the Manager already writes for X30's route,
+// reshaped for `args.issues`. Nothing to delete afterward: a ref that ships
+// this build is simply absent from the very next `--queued` read, the moment
+// its `built` row lands. A `defer` on one is the SAME ledger `state:'deferred'`
+// marker used everywhere else (X88) and is excluded from `--queued`'s own output
+// for exactly one read — it never arrives here carrying a `deferred` marker at
+// all under normal operation; `carriedDeferred` below is a backstop, not the path.
 //
 // It carries on a BUILD invocation only. `args.issues` is what makes a run a
 // preset, so draining overflow into a discovery run would skip the editor and lose
@@ -282,14 +289,10 @@ const KNOWN_INVARIANTS = [...new Set([...ALREADY_BUILT, ...OPEN_KNOWN, ...OPEN_B
 // The drop is `openKnown` — the same list the editor drops against — because the one
 // thing this route must never do is re-dispatch something he parked or declined.
 //
-// X46 · and `alreadyBuilt` too, which is what makes the field DRAIN on the path it
-// never drained on. Most of his rulings are executed as a single direct `Agent`
-// dispatch (SKILL.md, the one-lane branch of `build`), where no engine runs, so
-// nothing there could read this field or delete an entry: an item carried once,
-// built by hand, then sat in `state.pendingOverflow` and rode into every later
-// build as duplicate work. The Manager now deletes what it hand-dispatches, and
-// this is the backstop for the night it forgets — the ledger already knows what
-// shipped, and `alreadyBuilt` is passed on every invocation.
+// X46 · and `alreadyBuilt`/`closedRefs` too — a same-turn-race backstop, not the
+// plan: the Manager derives this array fresh immediately before dispatch, so the
+// only way a stale ref rides in is something else (a concurrent hand dispatch)
+// building it in the gap between that derive and this call.
 const refKey = (v) => String(v || '').toLowerCase().replace(/^gh#|^#/, '').trim()
 const overflowArg = asArray('pendingOverflow', A.pendingOverflow)
 const parkedRefs = new Set(OPEN_KNOWN.map((o) => refKey(typeof o === 'string' ? o : o.ref)).filter(Boolean))
@@ -299,7 +302,7 @@ const builtRefs = new Set(ALREADY_BUILT.map((b) => refKey(typeof b === 'string' 
 // ref the moment any wrap has landed since it shipped, because a FRESH
 // github/logs finding rediscovering an old symptom past a wrap might be a
 // real regression — correct caution for intake, where the match is fuzzy.
-// `state.pendingOverflow` never carries a fuzzy match: every entry is the
+// `args.pendingOverflow` never carries a fuzzy match: every entry is the
 // EXACT ref of one specific tracked bug, re-injected verbatim, so there is no
 // "maybe it's a new regression" question to protect — a closed ref is closed,
 // however many wraps have landed since. Reusing `builtRefs` for both jobs is
@@ -375,7 +378,7 @@ if (carriedBuilt.length)
   argWarnings.push(
     `${carriedBuilt.length} \`pendingOverflow\` entr${carriedBuilt.length === 1 ? 'y' : 'ies'} matched an \`alreadyBuilt\` or \`closedRefs\` ref and were DROPPED, not re-built: ${carriedBuilt
       .map((i) => i.id || i.ref || '(no id)')
-      .join(', ')}. They shipped — most likely through a one-lane hand dispatch — and were never deleted from \`state.pendingOverflow\`. **Delete them now**, or they ride into the next build too.`,
+      .join(', ')}. They shipped — most likely through a one-lane hand dispatch that landed in the gap between deriving \`--queued\` and this call. Nothing to delete (X216): the array is re-derived fresh next time and will already be missing these.`,
   )
 // X128 · fires on a DISCOVERY run too, now that one drains the queue. A deferral
 // is a one-run skip and this run is the skip, whichever door the items came in.
@@ -383,7 +386,7 @@ if (carriedDeferred.length)
   argWarnings.push(
     `${carriedDeferred.length} \`pendingOverflow\` entr${carriedDeferred.length === 1 ? 'y is' : 'ies are'} marked \`deferred\` and ${carriedDeferred.length === 1 ? 'was' : 'were'} HELD, not built: ${carriedDeferred
       .map((i) => i.id || i.ref || '(no id)')
-      .join(', ')}. A deferral is a ONE-RUN skip and this run is the skip. **Now delete \`"state":"deferred"\` from those entries in \`state.pendingOverflow\`** — the skip has been served, so the next build takes them. An uncleared marker parks the item forever, which is the failure this reads for.`,
+      .join(', ')}. Unexpected under X216 — \`--queued\` should already exclude a ref parked this run, so this means the array was hand-typed rather than freshly derived. Nothing to clear: re-run \`ledger-stats.cjs --queued --json\` next time and the marker will already be gone once a run has passed.`,
   )
 // 2026-08-16 · THE PRESET DOOR HAD NO SCREEN AT ALL. `overflowArg` above is
 // checked against `parkedRefs`/`builtRefs` before it drains; `presetArg` —
@@ -437,8 +440,8 @@ const PRESET = presetArg.length ? [...carriedIn, ...presetClean] : null
 if (carriedIn.length)
   log(
     presetArg.length
-      ? `Carried in ${carriedIn.length} item(s) from state.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`
-      : `Queue: ${carriedIn.length} item(s) from state.pendingOverflow will MERGE into this run's buildable list AFTER the editor: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`,
+      ? `Carried in ${carriedIn.length} item(s) from args.pendingOverflow — they head this build's queue: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`
+      : `Queue: ${carriedIn.length} item(s) from args.pendingOverflow will MERGE into this run's buildable list AFTER the editor: ${carriedIn.map((i) => i.id || i.ref).join(', ')}`,
   )
 // X25 · THE READER FOR `awaitingOwner`. The deferred dependency asks below are
 // shaped for a copy-paste straight back into `args.issues` — that is the whole
@@ -1601,7 +1604,7 @@ if (!PRESET) {
   fromBacklog = mergedBacklog.length
   buildable = buildable.concat(mergedQueue, mergedBacklog)
   if (fromQueue || fromBacklog)
-    log(`Merged: ${fromEditor} from the editor + ${fromQueue} from state.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
+    log(`Merged: ${fromEditor} from the editor + ${fromQueue} from args.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
 }
 
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
@@ -2575,10 +2578,10 @@ const manifest = {
   // matters, because the field never coming back at all is indistinguishable
   // from the check never running.
   openBacklog: { passedIn: OPEN_BACKLOG.length, matched: matchedOpenBacklog.length, refs: matchedOpenBacklog, reported: openBacklogReported },
-  // X43 · what the run picked up out of `state.pendingOverflow`. **The Manager
-  // must DELETE `carry.refs` AND `carry.droppedAsBuiltRefs` from
-  // `state.pendingOverflow`** — the engine cannot write state, and an entry left
-  // there rides into every future run.
+  // X43 · what the run picked up out of `args.pendingOverflow`. **Nothing to
+  // delete** (X216): the Manager derives this array fresh off the ledger
+  // (`ledger-stats.cjs --queued --json`) on every invocation, so a ref this
+  // run built is simply absent from the very next derive.
   // X128 · a DISCOVERY run drains it too now, so zero-while-the-field-holds-rows
   // is a failure on BOTH doors, not just on a build. `editorRan` and the two
   // source counts below are the proof that the merge did not replace discovery:
@@ -2603,12 +2606,14 @@ const manifest = {
     carriedIn: carriedIn.length,
     refs: carriedIn.map((i) => i.id || i.ref || '(no id)'),
     droppedAsParked: carriedDropped.length,
-    // X46 · non-zero means the field did not drain on a hand dispatch. The refs are
-    // named so he can see WHICH stale entry rode in, and delete them from state.
+    // X46 · non-zero means a same-turn race — something built this ref between
+    // the Manager's `--queued` derive and this dispatch. The refs are named so
+    // he can see which; nothing to delete, the next derive already excludes them.
     droppedAsBuilt: carriedBuilt.length,
     droppedAsBuiltRefs: carriedBuilt.map((i) => i.id || i.ref || '(no id)'),
-    // X88 · non-zero means he deferred a carried item and this build honoured the
-    // skip. The refs are named because the marker has to be cleared by hand now.
+    // X88 · non-zero is unexpected under X216 — `--queued` should already exclude
+    // a ref parked this run, so this means the array was hand-typed. Nothing to
+    // clear; the marker is gone from the next `--queued` read once a run passes.
     heldAsDeferred: carriedDeferred.length,
     heldAsDeferredRefs: carriedDeferred.map((i) => i.id || i.ref || '(no id)'),
   },
@@ -3280,10 +3285,10 @@ return {
   // one by calling it a bonus: not blocking and not severe are different claims,
   // so a `high` discovery arrives first in the next queue.
   discoveries,
-  // X43 · what this build took out of `state.pendingOverflow` — the discoveries and
-  // over-cap items an earlier run parked there. **DELETE these from
-  // `state.pendingOverflow` when you persist**: the engine cannot write state, and
-  // an entry that stays rides into every future build as a duplicate dispatch.
+  // X43 · what this build took out of `args.pendingOverflow` — the discoveries and
+  // over-cap items an earlier run queued via the ledger. **Nothing to delete**
+  // (X216): it was derived fresh from `ledger-stats.cjs --queued --json`, and a
+  // ref this build ships is simply absent from the very next derive.
   carriedIn,
   // X42 · the stale rows this pass re-read, with what it found. `persist.backlog`
   // holds the same result pre-shaped for the ledger and the report — use that; this

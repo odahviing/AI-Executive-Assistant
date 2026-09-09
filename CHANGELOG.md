@@ -1,6 +1,47 @@
 # Changelog
 
 ---
+## 4.9.1 — The guard was the bug
+
+Sharon Duret asked for half an hour with Idan. Maelle searched, found real times, booked the right slot and said so correctly — and then a guard rewrote her correct message into a wrong one. Twice. She was corrected by a colleague, in public, for something she had got right, and apologised for a mistake she had not made.
+
+Three of the four gate firings in that thread were false positives. The claim-checker had been asked to judge whether "10:00am Boston" and "17:00 Jerusalem" name the same instant — a cross-timezone conversion — while running on Haiku with no rendering of the attendee's local time to compare against. It used a five-hour offset instead of seven, declared the correct draft an invented fact, and shipped its own arithmetic to the colleague.
+
+The fix is a deletion, not better arithmetic. Three layers of this codebase already carry an explicit written rule never to convert a timezone themselves; the checkers were the one layer with no such rule and no such data. Now the booking tools attach the attendee-local time the search path has attached since August, and every checker compares strings instead of computing offsets. Where there is no local text, it keeps the draft rather than guessing.
+
+### Fixed
+
+- A booking's confirmation line now carries the attendee's own local time, produced by one helper at four call sites instead of a rule the search path alone obeyed. No checker anywhere performs a timezone conversion; absent a local rendering it keeps rather than converts.
+- The availability precheck was resolving weekday words against today, so an accepted slot a week out was checked against this week, found busy, and retracted as "doesn't work on his end" — while the correct instants sat unread in the offer stash the drafter already uses. A precheck instant now rebinds to a still-standing confirmed offer.
+- The owner-fact check was firing on things its own prompt excludes by name — a meeting's time, ordinary scheduling logistics — and forced a promise to "double-check the timezone with Idan" one message after the colleague had stated both locations, about a stored profile fact. Its rewrite also stripped the zone labels off three offered times.
+- A rewrite could source replacement times from a tool line that was not a slot search, re-offering a precheck's wrong-week alternatives in the owner's zone to a reader in another. Earlier turns' real availability lines are now lifted verbatim off the tape.
+- A verdict that contradicted its own reasoning could still trigger a rewrite. The reason now comes first and the verdict must agree with it.
+- On the email leg, a refusal caused by a colleague's calendar put that colleague's name and busy state into fields nothing stripped — and the email reply is text the owner forwards onward essentially as-is. An internal person's availability could reach a client.
+- Confirming hours for someone reported success even when scheduling could not read them: the store holds one working window per person, so a day-specific exception was kept as prose and confirmed as set. The write now reports whether the hours are actually in force.
+- A colleague-path guard meant to stop someone editing a third party's profile was redirecting the write to the requester instead of refusing it, so a fact about one person landed on another. It refuses now, and the log records the row written rather than the model's label.
+- The scheduling-verdict translator answered "in conflict with another meeting on Idan's calendar" for any violation kind it did not recognise, naming a clash that did not exist. The mapping is exhaustive and the compiler now enforces it.
+- A confirmed booking's success return named nobody it had booked over; a failed create line carried its marker but not its finding; a location-only update that failed to load said it could not update the meeting's attendees.
+
+### Removed
+
+- The shadow-DM tool hint, dead since 2.0.7. It was built from raw tool names after the leak scrubber that deletes them, so it never once rendered a tool name — the empty parentheses were the shape of the deletion.
+
+### Changed
+
+- The leak scrubber's tool-name list is no longer hand-typed against a set living in another file. Six live tools were surviving the scrub in human-facing text and one retired tool was still listed; the skill registry now pushes the real set down on every turn, with the previous list kept as the floor.
+- Two prompts stopped naming tools retired in v2.9 — `cancel_task` in the system prompt and `recall_preferences` in the preferences index — along with a scanner comment that described a keyword pre-filter retired in v2.6.5.
+
+### Not changed
+
+- The store still holds one working window per person. Split schedules ("Wednesdays and Fridays 7–4, otherwise regular") remain unrepresentable; the owner ruled that stored hours stay uniform and a day-specific exception is stated per search, which the slot search already supports.
+
+### Framework (other chats, bundled)
+
+- Weekly cleaner-cron findings reached only a rotating log file and never the ledger or the report, so a needs-lane finding could die there unseen (X217).
+- The manager and report skills, both engines, the ledger tooling and both cron scripts carry the parallel session's edits.
+
+---
+
 
 ## 4.9.0 — One fact, one place
 

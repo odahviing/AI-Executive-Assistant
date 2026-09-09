@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
-import { savePreference, deletePreference, upsertPersonMemory, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, searchPeopleMemoryEitherDirection, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, getPersonSocialSummary, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
+import { savePreference, deletePreference, upsertPersonMemory, updatePersonProfile, getEventsByActor, getPersonMemory as getPersonMemoryRow, searchPeopleMemory, searchPeopleMemoryEitherDirection, resolvePerson, getRecentChannelMessages, readInteractionLog, BOOKING_SNAPSHOT_FRAME, getPersonSocialSummary, getPersonById, type PersonProfile, type PersonInteraction, type PersonNote, type CoreFieldWrite } from '../db';
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
@@ -10,6 +10,8 @@ import {
 } from '../memory/peopleMemory';
 import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
+import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
+import { getEffectiveWorkingHours } from '../utils/workingHoursDefault';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -43,6 +45,88 @@ function describeCoreWrites(
     ...(already.length > 0 ? { already_set: already } : {}),
     notes,
   };
+}
+
+/**
+ * The honest half of an HOURS write. `working_hours` (prose) stays on the row
+ * as the record of what was said, but nothing acts on it: scheduling reads
+ * `working_hours_structured` and then the timezone default
+ * (getEffectiveWorkingHours, utils/workingHoursDefault.ts), the colleague
+ * context block skips it on purpose (#135, db/people.ts), and get_person_memory
+ * never returns profile_json. A prose-only write therefore leaves every slot
+ * search exactly where it was — and a plain "noted" reads to the owner as "in
+ * force" (Lori Sarsfield, 2026-09-09: "East Coast, Wed/Fri 7am–4pm" stored as
+ * text, still clipped to the 09:00–17:00 default, owner told "Got it, noted").
+ * So read the row back AFTER the write and report the window scheduling will
+ * actually use, and whether the hours just received ARE that window. The
+ * signal is which field landed, never the message text (W4).
+ */
+function describeHoursWrite(
+  personId: string,
+  args: Record<string, unknown>,
+  name: string,
+): { scheduling_hours?: Record<string, unknown>; notes: string[] } {
+  const prose = typeof args.working_hours === 'string' && args.working_hours.trim() !== '';
+  // Anything non-null counts as an ATTEMPT: updatePersonProfileById stores a
+  // malformed value as-is and getEffectiveWorkingHours then ignores it, so the
+  // attempt must be reported as not landed rather than passed over.
+  const structured = args.working_hours_structured != null;
+  if (!prose && !structured) return { notes: [] };
+  const row = getPersonById(personId);
+  const eff = row ? getEffectiveWorkingHours(row) : null;
+  const tz = row?.timezone ?? null;
+  const window = eff
+    ? `${eff.workdays.map(d => d.slice(0, 3)).join('/')} ${eff.hoursStart}–${eff.hoursEnd}${tz ? ` ${tz}` : ''}`
+    : null;
+  if (structured && eff?.source === 'manual') {
+    return {
+      scheduling_hours: { in_force: true, workdays: eff.workdays, hoursStart: eff.hoursStart, hoursEnd: eff.hoursEnd, timezone: tz },
+      notes: [`${name}'s stated hours are in force: slot searches now clip to ${window}.`],
+    };
+  }
+  const still = eff
+    ? `${eff.source === 'auto' ? 'the timezone default' : 'the window stored earlier'}, ${window}`
+    : 'no stored window (no timezone on file — a slot search assumes the requester\'s zone with standard hours)';
+  return {
+    scheduling_hours: {
+      in_force: false,
+      ...(prose ? { stored_as: 'note' } : {}),
+      scheduling_uses: eff ? { source: eff.source, workdays: eff.workdays, hoursStart: eff.hoursStart, hoursEnd: eff.hoursEnd, timezone: tz } : null,
+    },
+    notes: [
+      structured
+        ? `working_hours_structured for ${name} did NOT land — it needs a non-empty workdays[] plus hoursStart/hoursEnd as HH:MM. Slot searches still use ${still}.`
+        : `${name}'s working_hours landed as a NOTE only — no scheduling path reads that text, so slot searches still use ${still}.`,
+      `Do not report these hours as set or honoured — say they're noted and that scheduling is unchanged. If they fit ONE window (one set of workdays, one start, one end), call again with working_hours_structured to put them in force; if they differ by day, say plainly that the store holds a single window per person today.`,
+    ],
+  };
+}
+
+/**
+ * Colleague-path target test for the id-keyed person writes (log_interaction,
+ * confirm_gender, update_person_profile). A colleague may write their OWN
+ * record and nobody else's (L5), so a call goes through only when the target
+ * it names IS the authenticated requester: by id, or — when the id slot is
+ * missing or malformed (an email, a slug, a bare name) — by the name matching
+ * the requester's own stored row, which is the one legitimate case the old
+ * rewrite salvaged ("Sharon" with the id dropped). A well-formed id for
+ * someone else, or a name that isn't the requester's, is a fact about a THIRD
+ * PARTY: the caller refuses it. From v2.9.3 to 4.9.0 it was silently
+ * RETARGETED onto the requester instead, which is how Paul Kammerzelt's stated
+ * Pacific zone landed on Sharon Duret's record (2026-09-09) — refusing costs
+ * at most a retry; redirecting corrupts a correct row and nothing says so.
+ *
+ * Structured inputs only — the slack_id shape and a store-name match — never
+ * the message text (W4).
+ */
+function colleagueTargetIsSelf(rawId: unknown, asCalled: string, requesterId: string): boolean {
+  const id = typeof rawId === 'string' ? rawId.trim() : '';
+  if (id === requesterId) return true;
+  if (SLACK_ID_RE.test(id)) return false;
+  const q = asCalled || id;
+  if (!q) return false;
+  const self = getPersonMemoryRow(requesterId);
+  return !!self && nameGenuinelyMatches(self.name, self.email, q);
 }
 
 /**
@@ -469,69 +553,49 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           (args as Record<string, unknown>).colleague_slack_id = context.userId;
         }
       }
-      // v2.9.3 — universal colleague-self rewrite (extends the v2.9.2
-      // note_about_person fix to every person-targeting tool). When a
-      // colleague calls log_interaction / confirm_gender /
-      // update_person_profile with a target that isn't themselves,
-      // silently rewrite the target to the requester instead of
-      // refusing with `not_permitted`. The prior refusal pattern killed
-      // Sonnet's response chain (the same class of bug that produced
-      // the empty-reply when Yael asked Maelle's name pre-v2.9.2). Now
-      // every colleague-side person-write is self-only by construction;
-      // Sonnet can't drift, the data lands on the right row, the chain
-      // continues. Owner direction: "everyone writes to himself."
-      //
-      // log_interaction uses `slack_id`; confirm_gender + update_person_profile
-      // use `colleague_slack_id`. Same rewrite logic, different arg name.
-      if (toolName === 'log_interaction') {
-        const targetId = args.slack_id as string | undefined;
-        // Force-self (see note_about_person above for the omit-target rationale).
-        if (targetId !== context.userId) {
-          if (targetId !== undefined) {
-            logger.info('log_interaction colleague-path — rewriting target to requester', {
-              originalTarget: targetId, requesterId: context.userId,
-            });
-          }
-          (args as Record<string, unknown>).slack_id = context.userId;
-        }
-      }
-      if (toolName === 'confirm_gender') {
-        const targetId = args.colleague_slack_id as string | undefined;
-        // Force-self (see note_about_person above for the omit-target rationale).
-        if (targetId !== context.userId) {
-          if (targetId !== undefined) {
-            logger.info('confirm_gender colleague-path — rewriting target to requester', {
-              originalTarget: targetId, requesterId: context.userId,
-            });
-          }
-          (args as Record<string, unknown>).colleague_slack_id = context.userId;
-        }
-      }
-      // v2.5.2 — update_person_profile: field allowlist still applies on
-      // colleague-self path (engagement_rank, role_summary, etc. are
-      // owner-curated and silently dropped). v2.9.3 — target check
-      // changed from refuse to rewrite, same shape as the other tools.
-      if (toolName === 'update_person_profile') {
-        // Clone before mutation. update_person_profile is handled BY
-        // AssistantSkill (this same file's switch below), so unlike
-        // note_about_person (#2) we don't need the shared-ref propagation —
-        // and we DO want isolation from the orchestrator's cached args
-        // object. The field-drop loop below removes owner-curated fields;
-        // mutating the caller's object would dirty the cache and cause
-        // retries to see a partial args shape.
+      // log_interaction / confirm_gender / update_person_profile — the id-keyed
+      // writes to a person's own record (engagement history, an authority-
+      // ranked gender, authority-ranked core fields). Self-only on the
+      // colleague path (L5): the call proceeds only when the target it names
+      // IS the requester (colleagueTargetIsSelf); anything else is REFUSED with
+      // a result the model can read and carry on from — never an `error`
+      // (the v2.9.2 `not_permitted` refusal ended the turn with no reply), and
+      // never a retarget (v2.9.3–4.9.0 rewrote the target to the requester,
+      // which put a third party's stated zone on Sharon Duret's row on
+      // 2026-09-09; the log_interaction branch also keyed on a `slack_id` arg
+      // the tool never had, so it never fired at all). Owner direction stands:
+      // "everyone writes to himself" — and nobody writes anyone else.
+      if (toolName === 'log_interaction' || toolName === 'confirm_gender' || toolName === 'update_person_profile') {
+        // Clone before mutation. All three are handled BY AssistantSkill (this
+        // file's switch below), so note_about_person's shared-ref propagation
+        // isn't needed — and the field-drop loop below must not dirty the
+        // orchestrator's cached args object (a retry would see a partial shape).
         args = { ...args };
-        const targetId = args.colleague_slack_id as string | undefined;
-        // Force-self (see note_about_person above for the omit-target rationale).
-        if (targetId !== context.userId) {
-          if (targetId !== undefined) {
-            logger.info('update_person_profile colleague-path — rewriting target to requester', {
-              originalTarget: targetId, requesterId: context.userId,
-            });
-          }
-          args.colleague_slack_id = context.userId;
+        const rawId = args.colleague_slack_id;
+        const asCalled = typeof args.colleague_name === 'string' ? args.colleague_name.trim() : '';
+        if (!colleagueTargetIsSelf(rawId, asCalled, context.userId)) {
+          const attempted = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name');
+          const label = asCalled || (typeof rawId === 'string' && rawId.trim()) || 'that person';
+          logger.info('colleague-path person write refused — target is not the requester', {
+            tool: toolName, originalTarget: rawId ?? null, colleagueName: asCalled || null, requesterId: context.userId, attempted,
+          });
+          const ownerFirst = context.profile.user.name.split(' ')[0];
+          const note = `Nothing was stored. ${label} is not the person you are talking with, and a colleague's word only ever updates their OWN record — facts about other people are recorded by ${ownerFirst} or by that person themselves. Do not say this was saved. If this is really about the requester under another name, retry with colleague_slack_id="${context.userId}".`;
+          if (toolName === 'log_interaction') return { logged: false, name: label, reason: 'not_your_record', _note: note };
+          if (toolName === 'confirm_gender') return { confirmed: false, name: label, reason: 'not_your_record', _note: note };
+          return {
+            updated: false, name: label, not_saved: attempted,
+            _note: `${note} Scheduling is unaffected: slot searches read each attendee's own stored zone and hours, not this call.`,
+          };
         }
+        args.colleague_slack_id = context.userId;
+      }
+      // v2.5.2 — update_person_profile: field allowlist on the colleague-self
+      // path (engagement_rank, role_summary, etc. are owner-curated and
+      // silently dropped).
+      if (toolName === 'update_person_profile') {
         // Opt-in allowlist: a colleague calling update_person_profile (on their
-        // own row, after the rewrite above) may only set operational metadata.
+        // own row — the self test above admitted it) may only set operational metadata.
         // Owner-curated fields (engagement_rank, role_summary, reports_to,
         // collaboration_notes, communication_style, response_speed, etc.) are
         // silently dropped. When adding a new field to `update_person_profile`,
@@ -739,9 +803,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
       case 'confirm_gender': {
         const name = (args.colleague_name as string | undefined) ?? '';
         // v3.2.0 — resolve identity through the person store (one route).
-        // Owner-path supports a pure-email external; colleague-path is forced
-        // to the requester's slack_id by the gate above, so it always resolves
-        // internally. Provenance: owner-path → 'owner', colleague-self → 'person'.
+        // Owner-path supports a pure-email external; colleague-path only reaches
+        // here self-targeted (the gate above refuses anything else), so it always
+        // resolves internally. Provenance: owner-path → 'owner', colleague-self → 'person'.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
         const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
@@ -1057,8 +1121,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           }
         };
         // L2 — provenance is derived from the AUTHENTICATED sender, never
-        // assumed. The colleague branch above force-rewrites the target to the
-        // requester's own row, so a colleague reaching here is a person stating
+        // assumed. The colleague gate above lets only a self-targeted call
+        // through (colleagueTargetIsSelf; anything else was refused before the
+        // switch), so a colleague reaching here is a person stating
         // a fact about THEMSELVES ('person'), not the owner stating it. Writing
         // 'owner' on every path recorded a false source in the very column L2's
         // stated-beats-derived rule reads. Same one-expression shape as
@@ -1157,11 +1222,13 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           applyTravel(personId);
           logger.info('Person profile updated (external)', { personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
-          const allNotes = [...described.notes, ...extraNotes];
+          const hours = describeHoursWrite(personId, args, target.name);
+          const allNotes = [...described.notes, ...hours.notes, ...extraNotes];
           return {
             updated: true, name: target.name, external: true,
             ...(described.not_saved ? { not_saved: described.not_saved } : {}),
             ...(described.already_set ? { already_set: described.already_set } : {}),
+            ...(hours.scheduling_hours ? { scheduling_hours: hours.scheduling_hours } : {}),
             ...(allNotes.length > 0 ? { _note: allNotes.join(' ') } : {}),
           };
         }
@@ -1292,21 +1359,24 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         applyTravel(target.personId);
 
         const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name');
-        logger.info('Person profile updated', { slackId, name, fields: fieldsWritten });
+        // Log the STORED name — the row actually written — not the model's label
+        // for it (this line once read "Paul Kammerzelt" against Sharon's slack_id).
+        logger.info('Person profile updated', { slackId, name: target.name, fields: fieldsWritten });
 
         // v3.0.7 — stale-slot-results signal. When the write touches a
         // field that affects find_available_slots' verdict for this person
-        // (timezone / workdays / work hours), enrich the tool result with
-        // a flag + note. The next Sonnet iteration sees the note in the
-        // raw tool result content and re-runs find_available_slots instead
+        // (timezone / structured work window / travel / email — never the
+        // prose `working_hours`, which no scheduling path reads; see
+        // describeHoursWrite), enrich the tool result with a flag + note. The
+        // next Sonnet iteration sees the note in the raw tool result content
+        // and re-runs find_available_slots instead
         // of mentally filtering its prior memory of slot options. Closes
         // the 2026-05-26 morning bug: owner said "Isaac works Mon-Fri",
         // Maelle wrote the profile, then narrated "Monday 11:00 is the
         // clean option" from her stale turn-1 memory without re-running
         // the tool to get an updated 3-option spread.
         const SLOT_RELEVANT_FIELDS = new Set([
-          'timezone', 'working_hours', 'working_hours_structured',
-          'workdays', 'work_hours', 'currently_traveling',
+          'timezone', 'working_hours_structured', 'currently_traveling',
           // v4.8.x — a corrected address changes whose calendar free/busy is
           // queried and where the invite goes; prior slot results used the old one.
           'email',
@@ -1342,6 +1412,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         }
         if (described.already_set) base.already_set = described.already_set;
         notes.push(...described.notes);
+
+        const hours = describeHoursWrite(target.personId, args, target.name);
+        if (hours.scheduling_hours) base.scheduling_hours = hours.scheduling_hours;
+        notes.push(...hours.notes);
 
         if (notes.length > 0) base._note = notes.join(' ');
         return base;

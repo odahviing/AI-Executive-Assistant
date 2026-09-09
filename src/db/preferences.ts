@@ -57,7 +57,7 @@ export function deletePreference(userId: string, key: string): boolean {
 
 /**
  * Compact catalog of what the user has taught — category + key list per row,
- * full text fetched on demand via recall_preferences(category|key). Mirrors
+ * full text fetched on demand via manage_preference(action='recall', category|key). Mirrors
  * the v2.2.1 people-memory pattern: cheap injection, on-demand loading. Closes
  * the v2.3.8-era prompt bloat where 110 prefs (~7,600 tokens) shipped to every
  * turn even though most weren't relevant.
@@ -82,13 +82,13 @@ export function formatPreferencesCatalog(userId: string): string {
   });
 
   return [
-    `PREFERENCES INDEX (${prefs.length} entries — call recall_preferences(category=...) or recall_preferences(key=...) to load full text):`,
+    `PREFERENCES INDEX (${prefs.length} entries — call manage_preference(action='recall', category=...) or manage_preference(action='recall', key=...) to load full text):`,
     ...lines,
   ].join('\n');
 }
 
 /**
- * Filtered fetch for the recall_preferences tool. Returns all prefs when both
+ * Filtered fetch for the manage_preference(action='recall') tool. Returns all prefs when both
  * args omitted (back-compat with v1.x callers). category filter narrows by
  * category; key filter returns at most one row by exact key match.
  */

@@ -278,14 +278,23 @@ export async function findAvailableSlots(params: {
   // to be passed (that's what populates the conflict data). No effect otherwise.
   //
   // THE INVARIANT this mode guarantees, and that the two colleague-path booking
-  // Guards (createMeeting.ts / moveMeeting.ts) depend on: with it on, NO
-  // attendee-side check can drop a slot — busy, off-hours and travel-padding
-  // all tag. So a slot missing from the result is an OWNER-rule verdict and
-  // nothing else, and a returned slot's `attendee_conflicts` is the COMPLETE
-  // list of who it doesn't work for. Before 2026-09-06 the attendee travel-
-  // buffer check still dropped, which both hid the busy tags already collected
-  // for that slot and sent an attendee's problem to the owner as if it were one
-  // of his own rules.
+  // Guards (createMeeting.ts / moveMeeting.ts) depend on — WITH `relaxed` OFF
+  // (true for both Guards, which never set it; owner override is a separate,
+  // owner-only path): with it on, NO attendee-side check can drop a slot —
+  // busy, off-hours and travel-padding all tag. So a slot missing from the
+  // result is an OWNER-rule verdict and nothing else, and a returned slot's
+  // `attendee_conflicts` is the COMPLETE list of who it doesn't work for.
+  // Before 2026-09-06 the attendee travel-buffer check still dropped, which
+  // both hid the busy tags already collected for that slot and sent an
+  // attendee's problem to the owner as if it were one of his own rules.
+  //
+  // attendee-conflict-docs-understate-their-own-residual (2026-09-09) — the
+  // COMPLETE-list guarantee above does NOT hold when `relaxed` is ALSO true:
+  // the attendee-side travel-buffer check further down is gated
+  // `!params.relaxed` and is skipped entirely in that combination, so a
+  // travel-buffer conflict can go untagged. Harmless for the two named Guards
+  // (neither sets `relaxed`), but any future caller that sets both flags
+  // together must not rely on this invariant.
   tagAttendeeConflicts?: boolean;
   // Owner-override "show me everything" mode. It bends the owner's SOFT rules
   // only — it can never surface a slot a real commitment already holds. See the

@@ -1639,43 +1639,37 @@ function mergeProfileJson(aJson: string, bJson: string): string {
 type PersonRow = PersonMemory & { engagement_rank?: number; proactive_pending?: number };
 
 /**
- * v4.0.4 — collapse TWO rows that are the SAME human into ONE, preserving the
- * union of what each side knew. Returns true when the merge happened.
+ * The read-only half of `mergePersonRows`: the row it would write for this
+ * pair, or the reason it refuses — with nothing touched. Split out so an
+ * irreversible merge can be shown before it is confirmed
+ * (`scripts/merge-person-rows.cjs` prints this as its dry run); the merge
+ * itself is this plan followed by the md fold and the row transaction, so the
+ * two can never disagree about what a merge does.
  *
  * Survivor choice is the CALLER's (the canonical rule is `getPersonByEmail`'s:
- * a slack_id-bearing row wins, then most-recently-seen) — this function only
+ * a slack_id-bearing row wins, then most-recently-seen) — the plan only
  * guarantees nothing is lost: handles are COALESCEd, provenance-tagged fields
  * keep the higher authority, notes / interaction_log are unioned + deduped,
  * profile_json is shallow-merged, `created_at` keeps the EARLIER date (we've
  * known the person since then), and the recency stamps keep the LATER value.
  *
- * The loser's per-person md file is folded into the survivor's BEFORE the rows
- * collapse, and a fold that didn't complete DEFERS the collapse — see the
- * comment at the call below for why that order is the only recoverable one.
- *
- * Three refusals. Two because merging would DESTROY identity rather than repair
- * it: a kind='self' row (Maelle's own row — merging it is how colleague gossip
- * would reach it), and two DIFFERENT slack_ids (two Slack accounts on one
- * address are two people; keeping them apart is the conservative read). The
- * third is the md fold above — a deferral, not a verdict on identity: the pair
- * stays visible to the sweep and the next attempt finishes the job.
+ * Two refusals here, both because merging would DESTROY identity rather than
+ * repair it: a kind='self' row (Maelle's own row — merging it is how colleague
+ * gossip would reach it), and two DIFFERENT slack_ids (two Slack accounts on
+ * one address are two people; keeping them apart is the conservative read).
  */
-export function mergePersonRows(survivorId: string, loserId: string): boolean {
-  if (!survivorId || !loserId || survivorId === loserId) return false;
-  const db = getDb();
+export function planPersonMerge(survivorId: string, loserId: string) {
+  if (!survivorId || !loserId) return { ok: false as const, reason: 'both ids are required' };
+  if (survivorId === loserId) return { ok: false as const, reason: 'survivor and loser are the same row' };
   const survivor = getPersonById(survivorId) as PersonRow | null;
   const loser = getPersonById(loserId) as PersonRow | null;
-  if (!survivor || !loser) return false;
-
+  if (!survivor) return { ok: false as const, reason: `no row ${survivorId}` };
+  if (!loser) return { ok: false as const, reason: `no row ${loserId}` };
   if (survivor.kind === 'self' || loser.kind === 'self') {
-    logger.warn('person store — refusing to merge a SELF row', { survivorId, loserId });
-    return false;
+    return { ok: false as const, reason: 'one side is the SELF row' };
   }
   if (survivor.slack_id && loser.slack_id && survivor.slack_id !== loser.slack_id) {
-    logger.warn('person store — refusing to merge two distinct slack identities', {
-      survivorId, loserId, survivorSlackId: survivor.slack_id, loserSlackId: loser.slack_id,
-    });
-    return false;
+    return { ok: false as const, reason: `two distinct slack identities (${survivor.slack_id} vs ${loser.slack_id})` };
   }
 
   const slackIdMerged = survivor.slack_id ?? loser.slack_id ?? null;
@@ -1782,6 +1776,28 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
     last_inbound_lang_at: laterOf(survivor.last_inbound_lang_at, loser.last_inbound_lang_at),
     created_at:           earlierOf(survivor.created_at, loser.created_at),
   };
+  return { ok: true as const, merged };
+}
+
+/**
+ * v4.0.4 — collapse TWO rows that are the SAME human into ONE, preserving the
+ * union of what each side knew (`planPersonMerge` decides the union and the
+ * identity refusals). Returns true when the merge happened.
+ *
+ * The loser's per-person md file is folded into the survivor's BEFORE the rows
+ * collapse, and a fold that didn't complete DEFERS the collapse — see the
+ * comment at the call below for why that order is the only recoverable one.
+ * That deferral is the one refusal added here: not a verdict on identity, the
+ * pair stays visible to the sweep and the next attempt finishes the job.
+ */
+export function mergePersonRows(survivorId: string, loserId: string): boolean {
+  const plan = planPersonMerge(survivorId, loserId);
+  if (!plan.ok) {
+    logger.warn('person store — refusing to merge', { survivorId, loserId, reason: plan.reason });
+    return false;
+  }
+  const { merged } = plan;
+  const db = getDb();
 
   const apply = db.transaction(() => {
     // DELETE first: when the survivor is adopting the loser's slack_id, the

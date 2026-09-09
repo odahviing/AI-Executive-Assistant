@@ -199,7 +199,13 @@ function deliveredNotification(result: unknown): boolean {
  *             attendee reason (`attendee_busy_collision:<email>` /
  *             `outside_attendee_work_hours:<email>`, or their per-day tallies
  *             `blocked_by` / `attendee_partial_conflicts`, which exist only
- *             for those two reasons — findAvailableSlots.ts's daySummary builder).
+ *             for those two reasons — findAvailableSlots.ts's daySummary builder)
+ *             — OR it KEPT a slot instead of rejecting it and tagged the finding
+ *             on the slot itself: a relaxed owner search's per-slot
+ *             `attendee_conflicts[]`, or a colleague-path search's per-slot
+ *             `attendee_status[]` with a real (non-`'unknown'`) status. Both are
+ *             a genuine third-party-hours/busy finding the tool told Maelle to
+ *             quote verbatim; a TAG is grounding same as a REJECTION.
  *   noted   — a create/move carrying planMeeting's heads-up (`_attendee_busy_note`
  *             / `override_notice`), whether the write went through OR was
  *             refused as a `rule_violation` confirm-ask (createMeeting.ts's
@@ -240,9 +246,27 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
       const days = Array.isArray(r.day_summary)
         ? (r.day_summary as Array<{ top_reasons?: unknown; blocked_by?: unknown; attendee_partial_conflicts?: unknown }>)
         : [];
-      const hit = days.some(d => nonEmpty(d.blocked_by) || nonEmpty(d.attendee_partial_conflicts)
+      const dayHit = days.some(d => nonEmpty(d.blocked_by) || nonEmpty(d.attendee_partial_conflicts)
         || (Array.isArray(d.top_reasons) && d.top_reasons.some(isAttendeeReason)));
-      return hit ? 'slots' : null;
+      if (dayHit) return 'slots';
+      // check-claimed-that-never-ran (2026-09-08) — day_summary only tallies
+      // slots the strict pass REJECTED. A relaxed owner search keeps an
+      // attendee-conflicted slot instead of dropping it (findAvailableSlots.ts
+      // attendee_conflicts[], reason 'busy'/'off_hours'/'travel_buffer' — none
+      // of them ATTENDEE_REASON_PREFIXES, those are rejection-only labels), and
+      // a colleague-path search tags a REAL per-attendee calendar read
+      // (attendee_status[], status !== 'unknown') on a slot it still offers.
+      // Both are a genuine third-party-hours finding — the tool told Maelle to
+      // quote the pre-rendered `line` verbatim (attendeeConflictLine /
+      // renderAttendeeStatusLine) — but neither is a rejection, so day_summary
+      // never saw it and the marker never fired, leaving a true quoted claim
+      // to be misread as invented (RULE A) and corrupted by own-the-miss.
+      const slots = Array.isArray(r.slots)
+        ? (r.slots as Array<{ attendee_conflicts?: unknown; attendee_status?: unknown }>)
+        : [];
+      const slotHit = slots.some(s => nonEmpty(s.attendee_conflicts)
+        || (Array.isArray(s.attendee_status) && (s.attendee_status as Array<{ status?: unknown }>).some(a => a.status !== 'unknown')));
+      return slotHit ? 'slots' : null;
     }
     case 'create_meeting':
     case 'move_meeting':
@@ -272,8 +296,8 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
   }
 }
 
-function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown): string {
-  const summary = renderToolSummary(toolName, input, result);
+function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
+  const summary = renderToolSummary(toolName, input, result, ownerTz);
   const domain = mutationDomain(toolName, result);
   // Stamped OUTSIDE the tool's bracket on purpose: MUTATION_OK_RE below lifts the
   // bracketed span verbatim into the pinned action tape, so keeping the marker out
@@ -330,7 +354,24 @@ function summarizeInternalAction(tool: string, viaTool: string, detail?: string)
  * Build a compact one-line summary of a tool call for conversation history.
  * This lets Claude know what it did on previous turns without storing the full JSON.
  */
-function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown): string {
+/**
+ * ONE renderer for the attendee-local reading of an instant (G9): the
+ * `presentation_local` string a meeting tool attached (findAvailableSlots.ts
+ * per slot; createMeeting.ts / moveMeeting.ts on a success return since
+ * 2026-09-09) rendered as ` [local: Wed 16 Sep 10:00 EDT]` beside the
+ * owner-local instant. Every checker prompt that reads a time names this exact
+ * `[local: …]` form as the text to match against instead of converting
+ * (claimChecker.ts's NO_TZ_ARITHMETIC) — a second spelling here would be a
+ * second thing for them to know. Absent or non-string → empty: an attendee
+ * with no stored zone is a legal case, and the checkers keep on it.
+ */
+function localSuffix(presentationLocal: unknown): string {
+  return typeof presentationLocal === 'string' && presentationLocal.trim().length > 0
+    ? ` [local: ${presentationLocal.trim()}]`
+    : '';
+}
+
+function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
   try {
     // createmeeting-failed-summary-drops-counter-offer-reason (2026-09-04) — a
     // soft counter-proposal (create_meeting's efficiency_counter path in
@@ -427,20 +468,27 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // corrupt a correct reply) both required removing the second cap.
         // bounce-fix (2026-08-26) — carry `presentation_local`
         // (src/skills/meetings/ops/handlers/findAvailableSlots.ts, e.g. "Thu
-        // 4 Sep 08:00 EDT") when the tool
-        // attached one. Without it, this line has ONLY the owner-local
-        // HH:MM with the UTC offset already sliced off — the slot-grounding
-        // and owner-fact prompts both ask the model to judge a
-        // "timezone-equivalent restatement" against ground truth that
-        // carries no timezone info at all, so a correct "08:00 ET" claim
-        // could not actually be verified, only guessed at (worst case,
-        // incorrectly rewritten into a wrong bare owner-clock number).
-        const fmt = (s: { start?: string; end?: string; presentation_local?: string }) => {
+        // 4 Sep 08:00 EDT") when the tool attached one. Without it, this line
+        // has ONLY the owner-local HH:MM with the UTC offset already sliced
+        // off, and a correct "08:00 ET" claim could not be verified against
+        // it — only guessed at (worst case, rewritten into a wrong bare
+        // owner-clock number). The checker prompts match the draft's time
+        // against this `[local: …]` TEXT and never convert
+        // (claimChecker.ts's NO_TZ_ARITHMETIC, 2026-09-09).
+        // slot-grounding-rewrite-drops-timezone-label-corrupts-time
+        // (2026-09-09) — the base HH:MM above is owner-local but carried NO
+        // zone of its own; `[availability_precheck …]`'s equivalent line
+        // (availabilityPreCheck.ts's `clause`) always stamps `${tz}` right
+        // after its instant for exactly this reason. Without it, a colleague
+        // in another zone read a bare "17:15" as their OWN clock, relayed it
+        // externally, and Maelle retracted the real 16:15 CET slot next turn
+        // — the draft was correct; the missing label made it unverifiable.
+        const fmt = (s: { start?: string; end?: string; presentation_local?: unknown }) => {
           if (!s.start) return '?';
           const t = String(s.start).slice(11, 16);  // 'HH:MM'
           const d = String(s.start).slice(0, 10);   // 'YYYY-MM-DD'
           const base = s.end ? `${d} ${t}-${String(s.end).slice(11, 16)}` : `${d} ${t}`;
-          return s.presentation_local ? `${base} [local: ${s.presentation_local}]` : base;
+          return `${base} ${ownerTz}${localSuffix(s.presentation_local)}`;
         };
         // check-claimed-that-never-ran (2026-09-06, bounce) — `broken_rule_label`
         // is the HUMANIZED phrase, and for the two attendee-scoped reasons it is
@@ -683,6 +731,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           (result as { override_notice?: unknown }).override_notice,
         ].find(v => typeof v === 'string') as string | undefined;
         const busyNotePart = attendeeBusyNote ? ` [${attendeeBusyNote.replace(/\s+/g, ' ').trim().slice(0, 160)}]` : '';
+        // timezone-arithmetic-in-the-checkers (2026-09-09) — the booked/moved
+        // instant's attendee-local reading, when the handler attached one
+        // (createMeeting.ts / moveMeeting.ts success returns carry the same
+        // top-level `presentation_local` findAvailableSlots.ts attaches per
+        // slot). The owner-fact checker read `Wed 16 Sep 17:00` here with no
+        // local text, converted it itself with the wrong offset, and rewrote a
+        // correct "10:00am Boston" into "12:00pm Boston" (Sharon Duret,
+        // 2026-09-08T20:28:14Z). Nesting a bracket on this line is fine:
+        // extractActionTape below lifts the span balanced, not with `[^\]]*`.
+        const localPart = localSuffix((result as { presentation_local?: unknown }).presentation_local);
 
         if (outcome.ok && typeof (result as { action_summary?: unknown }).action_summary === 'string') {
           const changes = (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 220);
@@ -699,8 +757,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             : [];
           const addedPart = addedEmails.length ? ` [added: ${addedEmails.join(', ')}]` : '';
           return changes
-            ? `[${toolName} OK — ${changes}${addedPart}${busyNotePart}${idPart}]`
-            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${addedPart}${busyNotePart}${idPart}]`;
+            ? `[${toolName} OK — ${changes}${localPart}${addedPart}${busyNotePart}${idPart}]`
+            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${localPart}${addedPart}${busyNotePart}${idPart}]`;
         }
 
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
@@ -714,7 +772,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const subj = (input as any).subject ?? (input as any).meeting_subject ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
         if (outcome.ok) {
-          return `[${toolName} OK${subjPart}${busyNotePart}${idPart}]`;
+          return `[${toolName} OK${subjPart}${localPart}${busyNotePart}${idPart}]`;
         }
         // check-claimed-that-never-ran (2026-09-06, bounce) — a refused
         // calendar mutation carries a `broken_rule_label` the handler already
@@ -728,9 +786,22 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // `not_rule_compliant`), so the one line a checker can read said a
         // rule blocked it but not which one — the same G2 gap as the
         // candidate_validation line above. Carry the handler's own phrase.
-        const brokenLabel = (result && typeof result === 'object'
-          && typeof (result as { broken_rule_label?: unknown }).broken_rule_label === 'string')
-          ? ` (${(result as { broken_rule_label: string }).broken_rule_label.replace(/\s+/g, ' ').trim().slice(0, 100)})`
+        // failed-create-line-carries-marker-but-no-finding-text (2026-09-09) —
+        // planMeeting's `confirm_override`/`escalate_approval`/
+        // `soft_rule_offer_alternatives` refusals (createMeeting.ts, moveMeeting.ts)
+        // humanize the SAME rule under a DIFFERENT field name, `violation_label`
+        // (plan.violationLabel), not `broken_rule_label` — a genuinely distinct
+        // refusal shape from the NOT_RULE_COMPLIANT one above, not a second copy of
+        // it. Reading only `broken_rule_label` left this shape's FAILED line with a
+        // marker (`error: 'rule_violation'`, `attendee_check=noted` when
+        // attendee-caused) but no finding text at all — exactly the gap this rule
+        // exists to close.
+        const brokenLabelText = (result && typeof result === 'object')
+          ? ((result as { broken_rule_label?: unknown }).broken_rule_label
+              ?? (result as { violation_label?: unknown }).violation_label)
+          : undefined;
+        const brokenLabel = typeof brokenLabelText === 'string'
+          ? ` (${brokenLabelText.replace(/\s+/g, ' ').trim().slice(0, 100)})`
           : '';
         return `[${toolName} FAILED${subjPart}${outcome.reason ? `: ${outcome.reason.slice(0, 60)}` : ''}${brokenLabel}]`;
       }
@@ -760,7 +831,24 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // EXPLICIT no-op is marked "NO calendar change"; an unknown resolve shape
         // (reject / amend / expired) stays neutral so the checker never
         // manufactures a flag off it (G5 safe-miss).
-        const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string };
+        //
+        // log-notify-requester-not-grounded-for-claimchecker — the resolver's
+        // return also now carries `requester_notify_outcome` (resolver.ts's
+        // RequesterNotifyOutcome): whether the requester-facing close-loop DM
+        // (R3) actually reached them, distinct from whether the underlying
+        // action replayed. Pre-fix this marker was silent on it, so a false "and
+        // I let them know" narration after a dead Slack connection or a failed
+        // send had nothing here to check it against. Only `failed` is worth a
+        // flag (G5 safe-miss): `sent` is the expected case and `no_requester`
+        // means nothing was ever owed (owner-internal ask), neither is a signal
+        // the checker needs to act on. NOT the same field as the sibling
+        // `requester_notified` boolean skill.ts spreads onto this same return
+        // (a different question — "skip message_colleague, they already know" —
+        // now itself derived straight off this same `requester_notify_outcome`,
+        // requester-notified-boolean-ignores-failed-relay 2026-09-09, so the two
+        // agree: a failed relay send is neither "notified" nor silent here).
+        const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string; requester_notify_outcome?: string };
+        const notifyFailedTail = r.requester_notify_outcome === 'failed' ? ' — requester NOT notified (relay DM failed)' : '';
         if (r.ok === false) {
           return `[resolve_approval — not resolved${typeof r.reason === 'string' ? `: ${r.reason.slice(0, 60)}` : ''}]`;
         }
@@ -770,12 +858,12 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         if (replayed) {
           const summ = typeof r.action_summary === 'string' && r.action_summary.trim().length
             ? `: ${r.action_summary.replace(/\s+/g, ' ').trim().slice(0, 120)}` : '';
-          return `[resolve_approval OK — replayed the approved action${summ}]`;
+          return `[resolve_approval OK — replayed the approved action${summ}${notifyFailedTail}]`;
         }
         if (effect.includes('no replay') || effect.includes('no action to replay')) {
-          return `[resolve_approval OK — decision recorded, NO calendar change]`;
+          return `[resolve_approval OK — decision recorded, NO calendar change${notifyFailedTail}]`;
         }
-        return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}]`;
+        return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}${notifyFailedTail}]`;
       }
       case 'set_work_schedule_override': {
         // gh#200 (200b) — before this case, the generic `default` below rendered
@@ -845,14 +933,58 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
 // confirmed successes belong on the tape. The closing line acknowledges the
 // tool-trust gap (Graph can return OK on a write that didn't actually land):
 // when the owner pushes back, Maelle re-checks instead of insisting.
-const MUTATION_OK_RE = /\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK[^\]]*\]/g;
+//
+// 2026-09-09 — was a `[^\]]*` regex, which stops at the FIRST `]`: a line that
+// nests a bracket (`[Heads-up: Erez is busy then]`, and now the attendee-local
+// `[local: …]` reading on every cross-zone booking) was pinned truncated, its
+// event_id and closing bracket cut off. The head stays a regex; the span is
+// lifted balanced by `toolLinesMatching` below.
+const MUTATION_OK_HEAD = /^\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK\b/;
+
+/**
+ * The bracketed tool line that starts at `start` (a `[`), brackets balanced so
+ * a nested `[local: …]` / `[Heads-up: …]` stays inside it. Falls back to the
+ * first `]` (the old `[^\]]*` behaviour) when a bracket never closes — a
+ * subject cut mid-`[…]` by the 40/220-char slices above — so a line is never
+ * lost to its own truncation.
+ */
+function bracketedLineAt(text: string, start: number): string {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '[') depth++;
+    else if (text[i] === ']' && --depth === 0) return text.slice(start, i + 1);
+  }
+  const firstClose = text.indexOf(']', start);
+  return firstClose === -1 ? text.slice(start) : text.slice(start, firstClose + 1);
+}
+
+/**
+ * Every tool line in a persisted tape (or a whole assistant row) whose head
+ * matches `head` — a `^\[…`-anchored regex tested where each line starts.
+ * ONE reader of the tape's shape (G9): the action tape below and
+ * runOutputGates.ts's `priorTurnAvailabilityLines` (earlier turns' search
+ * lines for the slot-grounding check) both lift lines through here.
+ */
+function toolLinesMatching(text: string, head: RegExp): string[] {
+  const out: string[] = [];
+  let i = text.indexOf('[');
+  while (i !== -1) {
+    if (head.test(text.slice(i))) {
+      const line = bracketedLineAt(text, i);
+      out.push(line);
+      i = text.indexOf('[', i + line.length);
+    } else {
+      i = text.indexOf('[', i + 1);
+    }
+  }
+  return out;
+}
 
 function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content: string }>): string[] {
   const out: string[] = [];
   for (const msg of history) {
     if (msg.role !== 'assistant') continue;
-    const matches = msg.content.match(MUTATION_OK_RE);
-    if (matches) out.push(...matches);
+    out.push(...toolLinesMatching(msg.content, MUTATION_OK_HEAD));
   }
   return out.slice(-20);
 }
@@ -884,5 +1016,6 @@ export {
   summarizeToolCall,
   summarizeInternalAction,
   extractActionTape,
+  toolLinesMatching,
   stampHistoryTime,
 };

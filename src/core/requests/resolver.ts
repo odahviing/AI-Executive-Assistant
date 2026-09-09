@@ -142,6 +142,24 @@ export interface ResolveContext {
   alreadyMessagedRequesterIds?: Set<string>;
 }
 
+/**
+ * log-notify-requester-not-grounded-for-claimchecker — notifyRequesterOfDecision
+ * used to return void: the resolver awaited it, closed the request, and told
+ * the model "approved" with zero signal on whether the requester's DM (the
+ * relay R3 requires) actually went out. A dead Slack connection or a failed
+ * `sendDirect` logged a warn and returned exactly like a clean send, so the
+ * claim-checker (turnHelpers.ts's resolve_approval case) had nothing to
+ * verify a "let them know" claim against — a silent relay failure read
+ * identically to a real one. `sent` covers a fresh send AND the two paths
+ * where the requester was already told this call (the reverse-order
+ * double-notify guard, the cascade re-check) — from the claim-checker's
+ * seat, both are "they know". `no_requester` is not a failure — the row has
+ * no requester_slack_id (owner-internal ask), nothing was ever owed here.
+ * `failed` is the one state that must reach the model: no Slack connection,
+ * the send itself came back not-ok, or the block threw.
+ */
+export type RequesterNotifyOutcome = 'sent' | 'no_requester' | 'failed';
+
 export interface ResolveResult {
   ok: boolean;
   request_id: string;
@@ -158,6 +176,24 @@ export interface ResolveResult {
   booked?: boolean;
   start?: string;
   action_summary?: string;
+  /**
+   * log-notify-requester-not-grounded-for-claimchecker — whether the
+   * requester-facing close-loop DM (R3) actually reached them. See
+   * RequesterNotifyOutcome above. Absent only on resolves that never call
+   * notifyRequesterOfDecision at all (the input-error early returns).
+   *
+   * Deliberately NOT named `requester_notified` — skill.ts's executeToolCall
+   * already spreads a field of exactly that name onto this same tool return
+   * (a fresh-DB-read boolean answering a different question: "should Sonnet
+   * skip message_colleague, they were already told" — true even on a
+   * still-open amend that was only relayed, not yet confirmed sent). That
+   * spread runs AFTER `...result`, so reusing the name here would have this
+   * field silently overwritten before it ever reached the claim-checker —
+   * exactly the kind of collision W5 exists to catch. This is a distinct
+   * question — did the send itself actually succeed — so it gets a distinct
+   * name.
+   */
+  requester_notify_outcome?: RequesterNotifyOutcome;
 }
 
 // ── Entry ───────────────────────────────────────────────────────────────────
@@ -325,10 +361,11 @@ async function resolveRequestInner(
       closureReason: reason,
       closedBy: 'owner',
     });
-    await notifyRequesterOfDecision(row, 'reject', null, verdict.reason, ctx);
+    const requesterNotified = await notifyRequesterOfDecision(row, 'reject', null, verdict.reason, ctx);
     return {
       ok: true, request_id: requestId, state: 'cancelled',
       effect: `${verdict.verdict}ed; linked work cancelled`,
+      requester_notify_outcome: requesterNotified,
     };
   }
 
@@ -351,8 +388,8 @@ async function resolveRequestInner(
           closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
           closedBy: 'expiry',
         });
-        await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
-        return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit' };
+        const requesterNotified = await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
+        return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit', requester_notify_outcome: requesterNotified };
       }
       // v2.9.1 — store latest counter in details.counter (regardless of who
       // sent it) so the eventual approve-merge picks up the most recent
@@ -414,8 +451,8 @@ async function resolveRequestInner(
         closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
         closedBy: 'expiry',
       });
-      await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
-      return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit' };
+      const requesterNotified = await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
+      return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit', requester_notify_outcome: requesterNotified };
     }
 
     // v2.9.1 — append to counter_history for audit; counter holds the latest.
@@ -440,10 +477,11 @@ async function resolveRequestInner(
     logger.info('resolveRequest — amend relayed, timers re-aimed at the colleague', {
       id: requestId, round: amendRound, expiresAt: colleagueTimers.expiresAt,
     });
-    await notifyRequesterOfDecision(row, 'amend', verdict.counter, verdict.reason, ctx);
+    const requesterNotified = await notifyRequesterOfDecision(row, 'amend', verdict.counter, verdict.reason, ctx);
     return {
       ok: true, request_id: requestId, state: 'awaiting_colleague',
       effect: `owner counter relayed to requester (round ${amendRound})`,
+      requester_notify_outcome: requesterNotified,
     };
   }
 
@@ -580,12 +618,13 @@ async function resolveRequestInner(
       closedBy: 'owner',
       outcomeJson: { approved: true, replayed: 'delete_meeting', already_gone: true, verified: true },
     });
-    await notifyRequesterOfDecision(row, 'approve', { replayed: 'delete_meeting' }, undefined, ctx, {
+    const requesterNotified = await notifyRequesterOfDecision(row, 'approve', { replayed: 'delete_meeting' }, undefined, ctx, {
       tool: 'delete_meeting', subject: row.subject ?? undefined,
     });
     return {
       ok: true, request_id: requestId, state: 'resolved',
       effect: 'approved — event confirmed already removed from the calendar',
+      requester_notify_outcome: requesterNotified,
     };
   }
   if (effectiveApprove && effectiveApprove.tool === 'delete_meeting'
@@ -622,13 +661,14 @@ async function resolveRequestInner(
     closedBy: 'owner',
     outcomeJson: { approved: true, data: approveData },
   });
-  await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
+  const requesterNotified = await notifyRequesterOfDecision(row, 'approve', approveData, undefined, ctx);
   // 138a — no kind/subkind jargon in the owner-facing return (same leak class
   // as the replay path): a pure yes/no approval just closes, Sonnet does any
   // follow-up work in chat.
   return {
     ok: true, request_id: requestId, state: 'resolved',
     effect: 'approved — no action to replay (handled in chat)',
+    requester_notify_outcome: requesterNotified,
   };
 }
 
@@ -662,8 +702,8 @@ async function runApproveCallback(
       closedBy: 'owner',
       outcomeJson: { approved: true, on_approve_tool: tool },
     });
-    await notifyRequesterOfDecision(row, 'approve', {}, undefined, ctx);
-    return { ok: true, request_id: row.id, state: 'resolved', effect: 'approved (no replay)' };
+    const requesterNotified = await notifyRequesterOfDecision(row, 'approve', {}, undefined, ctx);
+    return { ok: true, request_id: row.id, state: 'resolved', effect: 'approved (no replay)', requester_notify_outcome: requesterNotified };
   }
 
   // open-calendar-conflict (2026-08-30, Dina) — a move with NO new_start is the
@@ -821,7 +861,7 @@ async function runApproveCallback(
   // #141 Change 5 — link the booked event id on the approval row when a
   // colleague requested it. The replay runs as a SYNTHETIC owner
   // (deferredActionReplay forces senderRole:'owner'), so the direct colleague
-  // requester-link at createMeeting.ts:282 (isGenuineColleague ? context.userId
+  // requester-link at createMeeting.ts:240 (isGenuineColleague ? context.userId
   // : undefined — moved off ops.ts when the v3.7.x handler split landed) never
   // fires for approval-booked meetings, and no id was ever recorded — a
   // colleague who requested a meeting via approval then couldn't move it (the
@@ -871,7 +911,7 @@ async function runApproveCallback(
     },
   });
 
-  await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx, executed);
+  const requesterNotified = await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx, executed);
 
   // 138a + 138c (GH #140) — surface the CONCRETE outcome, not resolver jargon.
   // Pre-fix this returned `approved approval/policy_exception — replayed
@@ -894,6 +934,7 @@ async function runApproveCallback(
     ...(replaySubject ? { subject: replaySubject } : {}),
     ...(replayStart ? { start: replayStart } : {}),
     ...(replaySummary ? { action_summary: replaySummary } : {}),
+    requester_notify_outcome: requesterNotified,
   };
 }
 
@@ -946,7 +987,7 @@ export async function notifyRequesterOfDecision(
   reason: string | undefined,
   ctx: ResolveContext,
   executed?: ExecutedOutcome,
-): Promise<void> {
+): Promise<RequesterNotifyOutcome> {
   // Definitive relay tracing (Yael/Eve drop, 2026-06-18). This path used to log
   // nothing on the common 1:1-DM success route, so a silent miss couldn't be
   // pinned down. Now every outcome is provable from the log: an entry line, a
@@ -971,7 +1012,7 @@ export async function notifyRequesterOfDecision(
     logger.info('notifyRequesterOfDecision — skip: no requester_slack_id, or requester is the owner himself (owner-internal)', {
       id: row.id, requesterSlackId: requesterSlackId ?? null,
     });
-    return;  // owner-internal request, nothing to close back
+    return 'no_requester';  // owner-internal request, nothing to close back
   }
   // v3.4.7 — reverse-order double-notify guard. Sonnet already messaged this
   // requester THIS turn (message_colleague ran before resolve_approval), so this
@@ -987,7 +1028,7 @@ export async function notifyRequesterOfDecision(
     if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner') {
       try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
     }
-    return;
+    return 'sent';  // already told this turn via message_colleague — they know
   }
 
   const details = parseDetails(row) ?? {};
@@ -1060,7 +1101,7 @@ export async function notifyRequesterOfDecision(
   const conn = getConnection(row.owner_user_id, 'slack');
   if (!conn) {
     logger.warn('notifyRequesterOfDecision — no Slack connection', { id: row.id });
-    return;
+    return 'failed';
   }
 
   const ownerFirst = ctx.profile.user.name.split(' ')[0];
@@ -1333,7 +1374,7 @@ RULES:
   if (alreadyNotified) {
     logger.info('notifyRequesterOfDecision — requester already notified (cascade), shadow-only', { id: row.id });
     await fireOwnerShadow();
-    return;
+    return 'sent';
   }
 
   // gh#179-a — the relay was posted into origin_thread_ts (below) but never
@@ -1421,7 +1462,7 @@ RULES:
         recordRelayInHistory(row.origin_channel);
         stampIfTerminal();
         await fireOwnerShadow();
-        return;
+        return 'sent';
       }
       logger.warn('notifyRequesterOfDecision — MPIM post failed, falling back to 1:1 DM', {
         id: row.id, reason: res.reason,
@@ -1445,19 +1486,22 @@ RULES:
       logger.warn('notifyRequesterOfDecision — direct DM failed', {
         id: row.id, requesterSlackId, reason: res.reason,
       });
-    } else {
-      logger.info('notifyRequesterOfDecision — direct DM sent', {
-        id: row.id, requesterSlackId, verdict, threadTs: row.origin_thread_ts ?? null,
-      });
-      recordRelayInHistory(res.ref ?? null);
-      stampRelayInOutboundTracker(res.ref ?? null);
-      stampIfTerminal();
+      await fireOwnerShadow();
+      return 'failed';
     }
+    logger.info('notifyRequesterOfDecision — direct DM sent', {
+      id: row.id, requesterSlackId, verdict, threadTs: row.origin_thread_ts ?? null,
+    });
+    recordRelayInHistory(res.ref ?? null);
+    stampRelayInOutboundTracker(res.ref ?? null);
+    stampIfTerminal();
     await fireOwnerShadow();
+    return 'sent';
   } catch (err) {
     logger.warn('notifyRequesterOfDecision — threw, non-fatal', {
       id: row.id, err: String(err).slice(0, 200),
     });
+    return 'failed';
   }
 }
 

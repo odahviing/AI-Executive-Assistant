@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, openQuestionsField, alternativesNote, recordProposedAlternatives, isDescriptiveSubject, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
-import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal, attendeeConflictLine, bookedOverAttendeesNote } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
 import {
   getOwnerEventsForDecision,
@@ -29,6 +29,7 @@ import { getPersonMemory } from '../../../../db';
 import { resolveSlackId } from '../../../../utils/resolveSlackId';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
+import { presentationLocalFieldFor } from '../../../../utils/attendeeAvailability';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { alignUpQuarter, alignNearestQuarter } from '../../../../utils/calendarDensity';
 import { displaySubject, subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
@@ -618,6 +619,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 success: true,
                 meetingId: duplicate.id,
                 idempotent: true,
+                // Same attendee-local field as the booked return at the bottom of
+                // this handler — this `OK` line is read by the same output checker.
+                ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
                 action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string)}. Already booked, no action needed.`,
                 _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
               };
@@ -1184,6 +1188,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               success: true,
               meetingId: duplicate.id,
               idempotent: true,
+              // Same attendee-local field as the booked return below — this `OK`
+              // line is read by the same output checker.
+              ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
               action_summary: `'${requestedSubject}' is already on the calendar for ${renderWeDualClock(args.start as string, { isAway: !!tripDisplay, effectiveTz: tripDisplay?.tz ?? timezone, location: tripDisplay?.location ?? '' }, timezone, { endIso: args.end as string })}. Did not create a duplicate.`,
               _note: 'A meeting with this exact subject and start time was already on the calendar. Returning the existing event id instead of creating a duplicate. Do NOT call create_meeting again for this slot.',
             };
@@ -2221,9 +2228,21 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           const bookedTripNote = tripDisplay
             ? 'Travel day — state the booked time from `action_summary` VERBATIM (it carries both clocks, correctly labelled). Do NOT recompute it from `booked_start`/`booked_end`, which are the raw home-zone instant kept for verification only.'
             : undefined;
+          // 2026-09-09 (Sharon Duret, 2026-09-08T20:28Z) — the booked instant in the
+          // ATTENDEE's zone, under the SAME `presentation_local` key
+          // find_available_slots attaches per slot, so the tool-summary line the
+          // output checker reads (turnHelpers.ts renders it as ` [local: …]`)
+          // carries the attendee-local clock beside the owner-local one. Without it
+          // that line was owner-local only, the checker converted 17:00 Jerusalem to
+          // "12:00pm Boston" by itself (five hours, not seven) and rewrote a CORRECT
+          // "10:00am Boston" confirmation into a wrong one. Zone pick on the booked
+          // DAY (a travel window counts) and the no-zone → no-key rule live in
+          // presentationLocalFieldFor (attendeeAvailability.ts); the two idempotent
+          // short-circuits above spread the same field — same `OK` line, same reader.
           return {
             success: true,
             meetingId,
+            ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
             // #1.5 — surface the ACTUAL booked start/end (after the grid-snap at
             // :2274 + any TZ convert), so narration, dateVerifier, and the #135
             // honesty backstop (via the orchestrator's mutationActions) see where
@@ -2247,6 +2266,17 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // heads-up so Maelle mentions it ONCE ("Booked — note this dips your focus floor
             // to 1h55"), never a blocking re-ask. Undefined on clean bookings.
             ...(planOverrideNotice ? { override_notice: planOverrideNotice } : {}),
+            // confirm-success-return-does-not-name-who-was-booked-over
+            // (2026-09-09) — `bookedOverAttendees` (Guard B above) used to
+            // reach only the per-attendee post-booking DMs; the SUCCESS
+            // return itself carried no `_attendee_busy_note`, so a retry
+            // whose args drifted from the ones the FYI named left nothing
+            // downstream able to tell who was actually booked over. Same
+            // sentence-builder as the FYI refusal (`bookedOverAttendeesNote`)
+            // so this can never disagree with what the requester was told.
+            ...(bookedOverAttendees.length > 0
+              ? { _attendee_busy_note: `Booked over a conflict the requester confirmed — ${bookedOverAttendeesNote(bookedOverAttendees, viewerEmail)}. Say plainly what the clash is; they already said to go ahead, don't re-ask.` }
+              : {}),
             // floating-block-impact-preflight (2026-08-27) — the REAL
             // relocation-search answer for any floating block this booking
             // overlaps, computed pre-write above. Quote verbatim (same

@@ -105,24 +105,55 @@ export class SchedulingSkill {
     // here, the one point every direct op returns through, rather than gate
     // each handler's attach site individually. Rule 10: when the audience is
     // unclear, return less.
-    // gh#4.8.7 attendee-signal-dropped-on-create-refusal — `_attendee_busy_note`
-    // used to be move_meeting-only, and move_meeting is absent from
-    // CHANNEL_TOOL_CLAMP.email (registry.ts), so stripping it here was
-    // previously dead code (a key that could never be present). It is no
-    // longer dead: create_meeting's FAILED confirm_override return now also
-    // carries it (createMeeting.ts, sourced from planMeeting's
-    // `attendeeBusyLabel`) — the same "who's busy" prose as `override_notice`
-    // above, and create_meeting IS one of the four email-leg tools. Strip it
-    // here too, same reasoning, same chokepoint.
     if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
-      delete (result as Record<string, unknown>).override_notice;
-      delete (result as Record<string, unknown>)._attendee_busy_note;
+      const r = result as Record<string, unknown>;
+      delete r.override_notice;
+      // gh#4.8.7 attendee-signal-dropped-on-create-refusal — `_attendee_busy_note`
+      // used to be move_meeting-only, and move_meeting is absent from
+      // CHANNEL_TOOL_CLAMP.email (registry.ts), so stripping it here was
+      // previously dead code (a key that could never be present). It is no
+      // longer dead: create_meeting's FAILED confirm_override return carries it
+      // (createMeeting.ts, sourced from planMeeting's `attendeeBusyLabel`), and
+      // so do its ask_location_mode / room_unavailable_large returns when the
+      // attendee gate co-fired.
+      // create-refusal-colleague-availability-rides-email-leg (2026-09-10) —
+      // the note was never the only carrier of that prose, so deleting it alone
+      // stopped nothing: on the SAME return `violation_label` IS the identical
+      // string (planMeeting.ts sets `violationLabel: attendeeBusyLabel ?? '...'`
+      // for exactly this gate), `suggested_ask_text` embeds it ("Heads up —
+      // <name> is busy at <when>. Book anyway…"), and `open_questions` /
+      // `_ask_all_at_once` repeat it when a location or room gate co-fired. All
+      // of it reached the model's context (orchestrator/index.ts stringifies the
+      // post-scrub result) on the one leg whose whole reply the owner forwards
+      // verbatim to an external. The note's PRESENCE is the structured signal
+      // that this refusal is the attendee-collision gate (createMeeting.ts
+      // attaches it only then — never parsed, same convention turnHelpers'
+      // attendeeCheckSource keys on), so key on it here before it goes:
+      // `violation_label` becomes a name-free equivalent that still explains
+      // the "no" (M9); the owner-directed asks are dropped — a question to the
+      // owner has no side channel on this leg (gh#175a), the return's `_note`
+      // already says what is open, and the joined ask cannot be rebuilt
+      // name-free without parsing it (W4). Internal legs (Slack DM / room) are
+      // untouched: there a colleague's busy state is legitimately shown to the
+      // owner and to that colleague. Dropping the note itself also withholds the
+      // field attendeeCheckSource keys on for `attendee_check=noted` — right on
+      // this leg, where the reply is OFFER THE TIMES AND NOTHING ELSE, never a
+      // colleague-availability narration.
+      if (typeof r._attendee_busy_note === 'string') {
+        if (typeof r.violation_label === 'string') {
+          r.violation_label = `that time isn't confirmed to work for everyone on ${context.profile.user.name.split(' ')[0]}'s side`;
+        }
+        delete r.suggested_ask_text;
+        delete r.open_questions;
+        delete r._ask_all_at_once;
+      }
+      delete r._attendee_busy_note;
       // floating-block-impact-preflight (2026-08-27) — same class of leak as
       // `override_notice` just above: second-person owner admin narration
       // ("this leaves no room for your lunch") that has no owner-facing side
       // channel on the email leg — the whole reply is the client-forwardable
       // text. Strip here rather than gate the attach site in createMeeting.ts.
-      delete (result as Record<string, unknown>).floating_block_impact;
+      delete r.floating_block_impact;
 
       // Same class of leak, find_available_slots' side: the owner-trade-off note
       // family (_over_optional_note / _attendee_conflicts_note /
@@ -139,7 +170,6 @@ export class SchedulingSkill {
       // `!isOwnerInitiatedSearch`; the email leg is always
       // `senderRole:'owner'` so `isOwnerInitiatedSearch` is always true and the
       // key can never be present on this leg — deleting it was dead code.)
-      const r = result as Record<string, unknown>;
       delete r._over_optional_note;
       delete r._attendee_conflicts_note;
       delete r._no_all_attendee_free_note;

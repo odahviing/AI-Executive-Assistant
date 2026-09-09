@@ -7,6 +7,7 @@ import { OutreachCoreSkill } from './outreach';
 import { TasksSkill } from '../tasks/skill';
 import { CronsSkill } from '../tasks/crons';
 import { getConnection } from '../connections/registry';
+import { registerToolNames } from '../utils/textScrubber';
 
 // Core modules — always active, not toggled in user profile.
 // v1.6.0: MeetingsSkill (née CoordinationSkill) is now togglable.
@@ -652,6 +653,12 @@ export function getSkillTools(
     seen.add(t.name);
     return true;
   });
+
+  // Push the shipped names down to the leak scrubber (textScrubber.ts) BEFORE
+  // the role filter: a colleague turn must register the owner-only names too,
+  // since a name the model never received can still surface in text the
+  // scrubber runs over. The scrubber only rebuilds its regex when the set grows.
+  registerToolNames(deduped.map(t => t.name));
 
   // Colleagues only get the explicitly allowed subset — block everything else.
   // Scope filter does NOT apply on the colleague path (the static allowlist is

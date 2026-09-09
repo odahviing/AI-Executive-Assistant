@@ -25,7 +25,7 @@ import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/tim
 import { bookingLeadTimeHours, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
-import type { AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
+import { singleAttendeePresentationZone, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
 /**
  * Shared attendee-availability-warning construction for find_available_slots —
@@ -955,18 +955,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // time" — Israel clock, no ET rendering anywhere in the reply — and
           // only the owner noticing "6am is absurd" caught a 90-minute error
           // before it reached an external person; a subtler gap would not have
-          // been caught. Two or more DISTINCT non-owner zones → no single
-          // "their zone" to default to — leave it unset rather than guess, the
-          // same fallback-not-force philosophy as #M3 above. An explicit
-          // present_in_timezone from the caller always wins (each use site
-          // below checks it FIRST via `||`) — this only fills a gap, never
-          // overrides a stated value.
-          const nonOwnerAttendeeZones = [...new Set(
-            (attendeeAvailability ?? [])
-              .map(a => a.timezone)
-              .filter(tz => tz && tz !== timezone),
-          )];
-          const autoPresentTz = nonOwnerAttendeeZones.length === 1 ? nonOwnerAttendeeZones[0] : '';
+          // been caught. The zone pick itself is `singleAttendeePresentationZone`
+          // (attendeeAvailability.ts) — the same rule create_meeting / move_meeting
+          // apply to the booked instant, so search and write render one attendee's
+          // clock identically. An explicit present_in_timezone from the caller
+          // always wins (each use site below checks it FIRST via `||`) — this only
+          // fills a gap, never overrides a stated value.
+          const autoPresentTz = singleAttendeePresentationZone(attendeeAvailability, timezone);
           // The requester's explicit present_in_timezone always wins; autoPresentTz
           // only fills the gap when they didn't name one. Computed ONCE here —
           // the preferred_slot branch and the main slots list below both render
@@ -2215,8 +2210,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // the REQUESTER's call, NOT the owner's — Maelle serves the owner, not the
                   // attendee. Name who's busy, and if they still want it, book it directly.
                   // Never escalate to the owner: his own busy/rules never reach this set.
+                  // search-path-book-it-directly-note-collides-with-the-new-guard
+                  // (2026-09-09) — this used to tell the model "BOOK IT
+                  // directly with create_meeting" once the requester said yes,
+                  // as if that call would simply succeed. It doesn't:
+                  // create_meeting's own Guard B independently re-verifies in
+                  // real time and, per its tool schema, may NEVER accept
+                  // confirm_attendee_conflict on that first call — so it
+                  // re-raises the SAME "Just FYI — <reason>. Want me to book
+                  // it anyway?" question a second time, and the requester was
+                  // asked once here and again there. Fix: don't pre-empt that
+                  // check with a narration of our own — hand the slot straight
+                  // to create_meeting and let ITS refusal be the one and only
+                  // ask, sourced from ONE place instead of two that can drift
+                  // (M1).
                   result._attendee_busy_colleague_note =
-                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason, line}]\` names who; say ONLY that they're busy — you have no further detail, don't invent one). Tell the requester plainly by quoting each entry's \`line\` verbatim ("${ownerFirst}'s free at 4pm, but <line>") — it is already in the right person, including "you're busy then" when the busy attendee IS the requester; never restate it in first person ("I'm busy") — "I" is you, Maelle, and it's never your calendar. This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. If they still want it (they've usually synced with the attendee already, or they'll own the clash), BOOK IT directly with create_meeting at that slot — the attendee just gets the invite and can decline.`;
+                    `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason, line}]\` names who). This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. Present the slots plainly so they can pick one, but do NOT yourself ask "still want it?" or narrate who's busy as a decision point — once they pick a slot, call create_meeting there directly with NO confirm_attendee_conflict set. It independently re-verifies and its OWN refusal already asks "book it anyway?" naming everyone blocked (attendee_conflict error) — relay exactly THAT one question, don't ask your own version first. Once they answer yes to it, re-call create_meeting with the SAME args plus confirm_attendee_conflict:true to book. Never make them answer this twice.`;
                 } else {
                   // Owner-tagged backstop: no slot was clean for everyone, so these are his
                   // genuinely open times with each attendee conflict tagged. Honest framing:

@@ -2296,11 +2296,22 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           // v3.4.7 — tell Sonnet the canonical close-loop already ran, so she
           // doesn't reach for message_colleague to tell the SAME requester the
           // SAME outcome (the double-notify: a second DM in a new thread, Ayala
-          // Geni 2026-06-22). requester_notified is true when the relay landed
-          // (requester_notified_at stamped) or the amend counter was relayed
-          // (state=awaiting_colleague). The orchestrator also hard-suppresses a
-          // same-turn message_colleague to that requester — this is the nudge.
-          let requesterNotified = false;
+          // Geni 2026-06-22). The orchestrator also hard-suppresses a same-turn
+          // message_colleague to that requester — this is the nudge.
+          //
+          // requester-notified-boolean-ignores-failed-relay — this used to read
+          // `fresh.state === 'awaiting_colleague'` as a stand-in for "the amend
+          // counter was relayed", but resolver.ts flips the row to
+          // awaiting_colleague BEFORE it attempts the relay send (resolver.ts's
+          // amend branch), so a relay whose send genuinely failed still read as
+          // notified here — the colleague was never told the owner's counter,
+          // yet Sonnet was told not to message them either, and the request just
+          // sat until it expired. `result.requester_notify_outcome` already
+          // answers the exact question ("did the send confirmably land") —
+          // 'sent' only on a confirmed ok send or a real already-told-this-turn
+          // skip (see resolver.ts's RequesterNotifyOutcome) — so consume that
+          // instead of re-deriving a proxy from post-hoc row state.
+          const requesterNotified = result.requester_notify_outcome === 'sent';
           // OT-4 (gh#52 bouncer fix) — the request's own requester, when this
           // approval was colleague-originated, so the activity row this
           // decision earns below is with_person-filterable on them. Null for
@@ -2308,10 +2319,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           // null there) rather than guessing.
           let requesterSlackIdForLog: string | null = null;
           try {
-            const fresh = getRequest(result.request_id);
-            requesterNotified = !!(fresh?.requester_slack_id
-              && (fresh.requester_notified_at || fresh.state === 'awaiting_colleague'));
-            requesterSlackIdForLog = fresh?.requester_slack_id ?? null;
+            requesterSlackIdForLog = getRequest(result.request_id)?.requester_slack_id ?? null;
           } catch { /* best-effort nudge */ }
           // gh#52 (52-U2) — history/undo record of the decision itself (not the
           // downstream calendar action a replay may have fired — that's

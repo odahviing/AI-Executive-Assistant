@@ -195,6 +195,38 @@ function genericHonestHedge(draft: string, isOwnerAudience?: boolean): string {
   return "Actually, I'm not totally sure about that specific point — best to confirm it with him directly.";
 }
 
+/**
+ * timezone-arithmetic-in-the-checkers (2026-09-09, Sharon Duret thread) — the
+ * rule every OTHER layer that handles a cross-zone time already states in
+ * words (meetings.ts's `present_in_timezone` description, findAvailableSlots.ts's
+ * `_requested_time_local`: "NEVER do the timezone conversion yourself") and the
+ * checkers alone lacked — while being the only layer with no zone data on the
+ * line. Live cost (20:28:14Z): the owner-fact checker read `Wed 16 Sep 17:00`
+ * on a create_meeting line, did its own Jerusalem→Boston subtraction with a
+ * 5-hour offset instead of 7, flagged the draft's CORRECT "10:00am Boston",
+ * and the rewrite shipped "12:00pm Boston" to the colleague. The tool lines
+ * now carry the attendee-local reading as text (` [local: …]`, turnHelpers.ts's
+ * `localSuffix`, the same `presentation_local` findAvailableSlots.ts attaches),
+ * so the checker's job is string comparison — and where a line carries none
+ * (an attendee with no stored zone is a legal case), the conversion is
+ * unjudgeable and the draft is kept. ONE definition, interpolated into every
+ * checker and rewriter prompt that reads a time (G9) — the 4.9.0 third-party
+ * rewrite had this carve-out hand-typed inline while the owner-fact path,
+ * where it fired, had none.
+ */
+const NO_TZ_ARITHMETIC = 'Never compute a timezone conversion yourself. Where a tool line carries a pre-rendered local string (`[local: Wed 16 Sep 10:00 EDT]`), match the draft\'s time against that TEXT; where it carries none, the conversion cannot be judged here — treat the draft\'s time as consistent with the line and do not flag it.';
+
+/**
+ * Sibling of NO_TZ_ARITHMETIC for the FACT-shaped checks (owner_fact, RULE A's
+ * third-party finding, and their rewrite prompts): which clock a slot falls on
+ * is never a personal fact, so those checks have no time to judge at all. The
+ * owner-fact prompt already excluded "scheduling logistics" in words and still
+ * fired twice in one thread on a timezone (a zone label at 20:27:03Z, the
+ * conversion above at 20:28:14Z); the class fix is the same sentence on every
+ * door, the Sonnet veto's included.
+ */
+const TIME_IS_NOT_A_PERSONAL_FACT = 'Which clock time, date or timezone a slot falls on — as stated, converted or labelled — is scheduling logistics, never a fact about anyone, and never this rule\'s target.';
+
 export interface ClaimCheckInput {
   reply: string;
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
@@ -255,8 +287,9 @@ export interface ClaimCheckInput {
   // shape and `action_type: 'invented_fact'`, so callers don't branch.
   // proposed-slot-not-grounded-in-search-result (2026-08-24) — FOURTH mode.
   // 'slot_grounding' = check whether a SPECIFIC date/time the draft offers as
-  // available/clean/workable actually appears in THIS TURN's real
-  // find_available_slots / check_join_availability result. RULE A's own
+  // available/clean/workable actually appears in a real find_available_slots /
+  // check_join_availability / precheck result — this turn's, or an earlier
+  // turn's in the same thread. RULE A's own
   // "proposing a future time is never a claimed action, however specific"
   // exemption (see the NOT-a-false-claim list on the default prompt below) is
   // correct for what it guards — an EA offering a time is not claiming a
@@ -317,31 +350,31 @@ export interface ClaimCheckInput {
    * the check still runs on tool activity alone, same as before this field
    * existed.
    *
-   * bounce-fix (2026-08-26, adversarial re-verify of slot_grounding) —
-   * SECOND consumer, 'slot_grounding' mode. That mode's ground truth
-   * (`slotGroundingContext.groundedToolLines`) is THIS TURN's search result
-   * only, so a time confirmed by a real search in an EARLIER turn of the
-   * same thread (colleague asks about a second day while a first offer
-   * still stands) had nothing to ground it and was flagged/rewritten as
-   * fabricated — corrupting a genuinely-confirmed time (G5). Same field,
-   * same builder (runOutputGates.ts's `buildRecentHistorySnippet`), no new
-   * shape needed (G1/G9 — one canonical history snippet, not a
-   * mode-specific copy).
+   * 'owner_fact' only. 'slot_grounding' consumed it too from 2026-08-26 to
+   * 2026-09-09 and it never did that job: the builder strips the persisted
+   * tool tape off each assistant row (o#259), so the checker saw the earlier
+   * PROSE offer and not the search that backed it — and flagged it anyway
+   * (Sharon Duret, 2026-09-08T18:45:37Z). That mode now reads the earlier
+   * turns' search LINES themselves — see `slotGroundingContext`.
    */
   recentHistorySnippet?: string;
   /**
    * proposed-slot-not-grounded-in-search-result (2026-08-24) — ground truth
    * for 'slot_grounding' mode. The caller (runOutputGates.ts) builds this ONLY
-   * when `find_available_slots` or `check_join_availability` actually ran
-   * THIS turn — the deterministic structural pre-filter (G10) that keeps this
-   * mode from costing anything on the vast majority of turns that never
-   * search availability at all. `groundedToolLines` is the EXACT compact
-   * tool-summary line(s) for those calls — read verbatim off
+   * when an availability line exists THIS turn (or the turn was a detected
+   * availability question) — the deterministic structural pre-filter (G10)
+   * that keeps this mode from costing anything on the vast majority of turns
+   * that never search availability at all. `groundedToolLines` is the EXACT
+   * compact tool-summary line(s) for those calls — read verbatim off
    * `result.toolSummaries`, never re-derived or re-parsed here — so the model
    * sees the SAME real dates/times Sonnet herself saw this turn (G2: carry
-   * the truth, don't guess it). Undefined/absent → 'slot_grounding' mode is
-   * never invoked at all (the caller skips the whole check), so every
-   * pre-existing call site to this file stays byte-identical.
+   * the truth, don't guess it) — followed, since 2026-09-09, by the same
+   * kind of lines from EARLIER turns of the thread, lifted verbatim off the
+   * persisted tape (`priorTurnAvailabilityLines`, runOutputGates.ts) and
+   * prefixed `(earlier turn)`: a time a real search confirmed two turns ago
+   * is not a fabrication, and only a structured line can show the checker
+   * that a search backed it. Undefined/absent → 'slot_grounding' mode is
+   * never invoked at all (the caller skips the whole check).
    */
   slotGroundingContext?: {
     groundedToolLines: string[];
@@ -508,12 +541,12 @@ CRITICAL — subject-matter facts are NOT invented facts. This rule is ONLY abou
 - "Such a great pick for the role" about a third person — also off-tone (commentary on others)
 Mentioning a third party neutrally ("looking forward to your meeting with X") is fine. Only flag evaluative judgment.
 
-Output schema (REUSE the action-checker shape so callers don't branch):
+Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
+  "action_summary": string | null,  // one-line reason, ≤120 chars; null when nothing to flag
   "claimed_action": boolean,    // true = drop the coda
   "action_type": "invented_fact" | "gossipy" | null,
-  "target_name": string | null,  // for gossipy: the third party named; for invented_fact: the recipient
-  "action_summary": string | null  // one-line reason, ≤120 chars
+  "target_name": string | null  // for gossipy: the third party named; for invented_fact: the recipient
 }
 
 If the coda passes both checks (no invented facts, no gossipy commentary), set claimed_action=false and other fields null.
@@ -556,18 +589,18 @@ ${input.reply}
 """
 
 Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, not "let me check with him" — a specific PERSONAL capability, habit, preference, or availability characteristic of ${input.ownerFirstName} ("he can take a call from the car", "he's fine working through lunch", "he never minds a late reschedule") that ALL of the following hold:
-(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN (a people_memory / preference / calendar read that actually says this — this INCLUDES a find_available_slots result for that same date carrying \`reason=vacation_or_off_day\` or an out-of-office reason like \`owner_out_of_office\`, a find_available_slots result listing that same date under \`off_days=<date>(vacation_or_off_day)\` / \`off_days=<date>(owner_out_of_office …)\` — which appears even when the SAME search returned slots on OTHER dates in the range, so a search that found times later in the week still grounds "he's off Monday through Wednesday" for the dates it lists — or an analyze_calendar result whose per-day summary marks that same date \`day_off=<date>\` or \`owner_out_of_office=<date>\`: any of these structured markers is real ground truth for a plain "that day is a day off for him" / "he's away that day" statement about the SAME date, not an invented fact, even though it names no calendar event by title), AND
+(a) is NOT backed by anything in TOOL ACTIVITY THIS TURN — a people_memory / preference / calendar read that actually says this, or a structured off-day marker for the SAME date: a find_available_slots result carrying \`reason=vacation_or_off_day\` / \`owner_out_of_office\` or listing that date under \`off_days=<date>(…)\` (present even when the SAME search returned slots on OTHER dates in the range), or an analyze_calendar per-day \`day_off=<date>\` / \`owner_out_of_office=<date>\` — any of these grounds a plain "that day is a day off for him" / "he's away that day" statement about that date, even though it names no calendar event by title, AND
 (b) is not merely describing what's already scheduled on the calendar (a meeting's time, place or attendees is not a personal-capability claim), AND
 (c) has no origin anywhere in CONVERSATION HISTORY above either — if ${input.ownerFirstName} said this himself earlier in the visible history, or the assistant already stated it consistently earlier in the same thread, it is GROUNDED, not invented, even with no tool call behind it. Only a claim with NO origin anywhere — not tool activity, not history — counts as invented.
 
-A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. Ordinary scheduling logistics, proposals, and questions are NEVER this rule's target — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
+A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. ${TIME_IS_NOT_A_PERSONAL_FACT} ${NO_TZ_ARITHMETIC} Ordinary scheduling logistics (where he joins from, who sends the link), proposals, and questions are never this rule's target either — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
 
-Output schema (REUSE the action-checker shape so callers don't branch):
+Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
+  "action_summary": string | null, // one-line quote/paraphrase of the invented claim, ≤120 chars; null when the draft is clean
   "claimed_action": boolean,      // true = an invented personal fact about ${input.ownerFirstName} is present
   "action_type": "invented_fact" | null,
-  "target_name": string | null,   // "${input.ownerFirstName}" when claimed_action is true, else null
-  "action_summary": string | null // one-line quote/paraphrase of the invented claim, ≤120 chars
+  "target_name": string | null    // "${input.ownerFirstName}" when claimed_action is true, else null
 }
 
 If the draft is clean (no invented personal fact about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
@@ -581,63 +614,59 @@ Reminder: JSON only. Start with { end with }. No prose.`
   // `[availability_precheck …]` verdict/alternatives lines too (same
   // standing: a deterministic rule-aware check, not a guess; see the
   // top-of-file REVERTED note). bug 1.1 (2026-08-27) — the caller
-  // (runOutputGates.ts) also invokes this mode with an EMPTY
-  // `groundedToolLines` on a detected zero-tool-call availability question,
-  // so a stale time recalled from earlier in the thread still gets checked;
-  // the prompt below is written to handle both cases (an empty list plus the
-  // EARLIER-TURNS history block is what it falls back to when THIS turn
-  // produced no availability result at all).
-  // bounce-fix (2026-08-26) — an EARLIER turn's own real search can already
-  // have confirmed a time this turn's search never repeats (a colleague
-  // asking about a second day while a first offer still stands). See
-  // `recentHistorySnippet`'s doc comment above.
-  const slotGroundingHistoryBlock = input.recentHistorySnippet
-    ? `EARLIER TURNS IN THIS THREAD (this assistant may have already offered a specific time, backed by a REAL availability search, in an earlier turn of this same thread — that offer is STILL GROUNDED now even though THIS TURN'S result above does not repeat it; a new question about a different day/time does not retract an earlier confirmed offer still standing in the same reply):\n${input.recentHistorySnippet}\nWhen it is unclear whether this earlier-turns snippet actually confirms a time via a real search (the snippet is ambiguous or you cannot tell), do NOT flag on that basis alone — favor the safe miss.\n`
-    : '';
-
+  // (runOutputGates.ts) also invokes this mode with no THIS-turn line on a
+  // detected zero-tool-call availability question, so a stale time recalled
+  // from earlier in the thread still gets checked.
+  // 2026-09-09 — EARLIER turns' search lines ride `groundedToolLines` too,
+  // prefixed `(earlier turn)` by the caller (see `slotGroundingContext`'s
+  // doc). They can only GROUND a time (keep), never flag one: clause (b)
+  // below is scoped to THIS-turn lines on purpose — a later search may have
+  // changed an earlier negative, and the availability floor
+  // (runOutputGates.ts) already owns "established as blocked". This replaced
+  // the prose EARLIER-TURNS block (2026-08-26 → 2026-09-09), which could not
+  // show the checker that a search backed an earlier offer, and did not.
   const slotGroundingPrompt = input.mode === 'slot_grounding' && input.slotGroundingContext
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
 You audit a draft reply an executive assistant is about to send. Your one job: catch a SPECIFIC date/time offered as available/clean/workable that was NOT actually confirmed by a real availability search.
 
-THIS TURN'S REAL AVAILABILITY RESULT (find_available_slots / check_join_availability / availability_precheck — times/verdicts confirmed THIS turn):
+REAL AVAILABILITY RESULTS (find_available_slots / check_join_availability / availability_precheck — this turn's lines first; a line marked \`(earlier turn)\` is a real search from earlier in this thread, and a time it lists as available is STILL GROUNDED now):
 ${input.slotGroundingContext.groundedToolLines.map(l => `  ${l}`).join('\n')}
-${slotGroundingHistoryBlock}
+
 DRAFT REPLY:
 """
 ${input.reply}
 """
 
 Flag when EITHER holds:
-(a) the draft states a SPECIFIC clock time on a SPECIFIC date as available, free, clean, open, workable, or bookable for the people involved, AND that exact date+time does not appear, marked available/confirmed, anywhere — not in THIS TURN'S REAL AVAILABILITY RESULT above, and not as an already-confirmed earlier offer in EARLIER TURNS IN THIS THREAD above when present (not the same instant, not a timezone-converted restatement of one of those confirmed instants); OR
-(b) the draft sells as available/workable an exact date+time that DOES appear in THIS TURN'S REAL AVAILABILITY RESULT above but ONLY with a NEGATIVE verdict attached to that same instant (marked unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or carrying a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and offering that instant anyway inverts the search's own verdict.
+(a) the draft states a SPECIFIC clock time on a SPECIFIC date as available, free, clean, open, workable, or bookable for the people involved, AND that exact date+time does not appear, marked available/confirmed, on any line above — neither as a line's own instant nor as its \`[local: …]\` text; OR
+(b) the draft sells as available/workable an exact date+time that a THIS-TURN line above (not an \`(earlier turn)\` one) marks with a NEGATIVE verdict for that same instant (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or carrying a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and offering that instant anyway inverts the search's own verdict.
 
-Judge by MEANING, in any language — a CONFIRMED slot re-expressed in a different clock/timezone, or rounded/truncated the same way the draft rounds every other number, is still grounded.
+Judge by MEANING, in any language — a CONFIRMED slot rounded/truncated the same way the draft rounds every other number is still grounded. ${NO_TZ_ARITHMETIC}
 
 \`[availability_precheck …]\` lines are REAL ground truth with the SAME standing as a find_available_slots result — a deterministic, rule-aware calendar check that ran before drafting, not a guess. Read them by meaning:
-- EVERY instant on these lines is stated in the IANA zone printed right after it (\`<instant> <zone>\`) — read it in THAT zone, and treat a draft that converts it correctly into anyone else's zone as the same instant.
-- \`… <instant> <zone> dur=<n>m: bookable\` (with or without \`maxFree=…\`) — confirms THAT instant as available: a draft offering it is GROUNDED.
-- \`… <instant> <zone> dur=<n>m: not bookable (<reason>)\` — confirms that instant is NOT free: a draft correctly reporting it as unavailable/busy is GROUNDED, and a draft offering that same instant as available inverts the verdict — flag under (b).
-- \`[availability_precheck alternatives (bookable, <zone>): <instant>, <instant>, …]\` — confirms EACH listed instant, in the named zone, as available: a draft offering any of them is GROUNDED.
+- EVERY instant on these lines is stated in the IANA zone printed right after it (\`<instant> <zone>\`); a \`[local: …]\` text beside it, when present, is that same instant in another zone — match the draft against either text, never by converting.
+- \`… <instant> <zone> [local: …] dur=<n>m: bookable\` (with or without \`maxFree=…\`) — confirms THAT instant as available: a draft offering it is GROUNDED.
+- \`… <instant> <zone> [local: …] dur=<n>m: not bookable (<reason>)\` — confirms that instant is NOT free: a draft correctly reporting it as unavailable/busy is GROUNDED, and a draft offering that same instant as available inverts the verdict — flag under (b).
+- \`[availability_precheck alternatives (bookable, <zone>): <instant> [local: …], <instant> [local: …], …]\` — confirms EACH listed instant, in the named zone, as available: a draft offering any of them is GROUNDED.
 - A dual-reading line (\`… <instant> <zone> …: bookable | same clock read in <asker-zone>: <instant> <zone> …: not bookable\`) carries a SEPARATE verdict per timezone reading — judge each reading's instant by its own verdict only. \`same clock read in <asker-zone>\` names only WHICH reading produced the second verdict; that instant is still stated in the \`<zone>\` printed after it, like every other instant here.
 
 Do NOT flag:
 - A vague, non-specific offer with no clock time ("let me look for time next week", "I'll check some options") — nothing to verify.
 - A time correctly reported BY THE DRAFT as UNAVAILABLE, busy, blocked, or a conflict — that is the opposite of this rule's target.
-- A time that DOES match (or is a timezone-equivalent restatement of) one of the real times listed above WITH AN AVAILABLE/CONFIRMED verdict (a plain find_available_slots slot list with no verdict attached lists only confirmed-available slots by construction).
-- A time matching an offer this assistant already made and a real search already confirmed in an EARLIER TURN of this same thread (see EARLIER TURNS IN THIS THREAD above, when present).
+- A time that matches one of the real times listed above — a line's own instant or its \`[local: …]\` text, on a this-turn line or an \`(earlier turn)\` line alike — WITH AN AVAILABLE/CONFIRMED verdict (a plain find_available_slots slot list with no verdict attached lists only confirmed-available slots by construction).
 - A time describing an EXISTING meeting already on the calendar, not a newly offered slot.
 - Zero slots listed above ("0 slots") with the draft honestly saying nothing was found, or asking a clarifying question — only flag when it nonetheless states a SPECIFIC time as available despite the empty/negative result.
 
-Output schema (REUSE the action-checker shape so callers don't branch):
+Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
-  "claimed_action": boolean,       // true = the draft offers a specific time as available that this turn's real result does not confirm
+  "action_summary": string | null, // the fabricated date/time, quoted/paraphrased from the draft, ≤120 chars; null when every offered time is backed
+  "claimed_action": boolean,       // true = the draft offers a specific time as available that no line above confirms
   "action_type": "ungrounded_slot_claim" | null,
-  "target_name": null,
-  "action_summary": string | null  // the fabricated date/time, quoted/paraphrased from the draft, ≤120 chars
+  "target_name": null
 }
 
-If every specific time the draft offers as available is backed by THIS TURN'S REAL AVAILABILITY RESULT (or the draft offers no specific time at all), set claimed_action=false and the other fields null.
+If every specific time the draft offers as available is backed by a line above (or the draft offers no specific time at all), set claimed_action=false and the other fields null.
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
@@ -708,7 +737,7 @@ The draft can report, as the result of a check it ran — "per the check I ran",
 - A line carrying \`attendee_check=\` whose finding the draft reports faithfully — same KIND (busy / a conflict vs. outside working hours) and the same people — makes the claim HONEST: do NOT flag. Do not require the line to name the person (some signals are name-free) and do not try to work out which attendee a name-free signal refers to.
 - A line carrying \`attendee_check=\` whose finding the draft MISREPORTS — the line says they are busy or have a conflict and the draft says the time is outside their working hours (or the reverse), or the draft extends the finding to a person the line does not cover — is a false claim about what the check found: flag claimed_action=true, action_type="invented_third_party_fact", claim_specifics_mismatch=true, target_name=the named person.
 - NO line carrying \`attendee_check=\` in TOOL ACTIVITY THIS TURN, and the draft still attributes such a finding to a check: flag claimed_action=true, action_type="invented_third_party_fact", claim_specifics_mismatch=false, target_name=the named person. (A check from an EARLIER turn of this thread is recognised by the caller, not by you — you see this turn only.)
-NOT this rule's target: a claim about ${input.ownerFirstName}'s OWN hours or availability (governed elsewhere); a clock/timezone conversion ("that's 03:15 for her in New York" — contacts' timezones are always in front of the assistant with no tool call); a plain statement about a third party's schedule that claims no check ("Erez usually starts at 10", something they or ${input.ownerFirstName} said earlier).
+NOT this rule's target: a claim about ${input.ownerFirstName}'s OWN hours or availability (governed elsewhere); a plain statement about a third party's schedule that claims no check ("Erez usually starts at 10", something they or ${input.ownerFirstName} said earlier). ${TIME_IS_NOT_A_PERSONAL_FACT}
 
 CRITICAL — file / image delivery:
 A draft can claim it just DELIVERED a file or image TO THE READER in this very message — "here's the image", "here it is, attached", "with the image attached", "see attached", "sharing the file", "attached is the deck". ${input.ownerFirstName}'s assistant replies in plain text: a reply carries an attachment ONLY when a file/image-send tool actually ran this turn (an upload / send-file / attach tool with an OK outcome in TOOL ACTIVITY). So a "delivered it here" claim is HONEST only when such a send appears in the activity; with NO file/image send in the activity the attachment does NOT exist — flag claimed_action=true (action_type "deliver_file"). Judge by whether an upload HAPPENED, not by the wording — this holds in any language.
@@ -751,17 +780,17 @@ OUTPUT SCHEMA
 ═════════════════════════════════════════════════════════════════════════════
 
 {
+  "action_summary": string | null,
   "claimed_action": boolean,
   "action_type": "message" | "book" | "task" | "deliver_file" | "permission_granted" | "other" | "invented_third_party_fact" | null,
   "claim_specifics_mismatch": boolean,
-  "target_name": string | null,
-  "action_summary": string | null
+  "target_name": string | null
 }
 
 Field semantics:
+- action_summary — FIRST, so the verdict is written after the reason and must agree with it: one-line reason for claimed_action only, ≤120 chars. Null when there is nothing to flag.
 - claim_specifics_mismatch — see "CRITICAL — specifics mismatch" above. False unless claimed_action=true AND the claim names a specific change the tool that ran doesn't cover — or, for action_type="invented_third_party_fact", the draft misreports what a line carrying \`attendee_check=\` found (see that CRITICAL section).
 - target_name — fill with the person named in the draft when action_type="message". Optional otherwise.
-- action_summary — one-line reason for claimed_action only, ≤120 chars. Null when claimed_action=false.
 
 If the draft is honest (no false action claim): set claimed_action=false, action_type=null, target_name=null, action_summary=null, claim_specifics_mismatch=false.
 Reminder: JSON only. Start with { end with }. No prose. Be strict — false positives waste an orchestrator turn, but false negatives let a phantom send ship.`;
@@ -818,11 +847,16 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
     let parsed: any;
     try { parsed = JSON.parse(cleaned); }
     catch (err) {
-      // Recovery: when output is truncated mid-action_summary (e.g. max_tokens
-      // hit), the load-bearing fields claimed_action + action_type are already
-      // present at the top of the JSON. Extract via narrow regex so a true
-      // positive isn't silently fail-opened just because the explanation got
-      // cut off mid-string.
+      // Recovery: a malformed-but-complete object (a stray trailing comma, an
+      // unescaped quote inside action_summary) still carries the load-bearing
+      // fields — extract them via narrow regex so a true positive isn't
+      // silently fail-opened on a syntax slip. Since 2026-09-09 every schema
+      // puts action_summary FIRST — the verdict is written after the reason,
+      // so a self-refuting "…this matches, all four confirmed" summary can no
+      // longer sit beside claimed_action=true and drive a rewrite (Sharon
+      // Duret, 2026-09-08T18:44:10Z) — which means a max_tokens truncation
+      // now cuts the reason and never reaches claimed_action: that case fails
+      // OPEN below, a safe miss (G5), no longer a recovered flag.
       const claimedMatch = cleaned.match(/"claimed_action"\s*:\s*(true|false)/);
       const typeMatch = cleaned.match(/"action_type"\s*:\s*"([a-z_]+)"/);
       const targetMatch = cleaned.match(/"target_name"\s*:\s*(?:"([^"]*)"|null)/);
@@ -833,9 +867,9 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
           action_type: typeMatch ? typeMatch[1] : null,
           target_name: targetMatch && targetMatch[1] !== undefined ? targetMatch[1] : null,
           claim_specifics_mismatch: specificsMatch ? specificsMatch[1] === 'true' : false,
-          action_summary: '<truncated>',
+          action_summary: '<malformed>',
         };
-        logger.warn('Claim-checker: JSON truncated — recovered top fields', {
+        logger.warn('Claim-checker: JSON malformed — recovered load-bearing fields', {
           rawPreview: raw.slice(0, 200),
           elapsedMs,
           recovered_claimed_action: parsed.claimed_action,
@@ -975,10 +1009,11 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * a false FACT stated as settled, not an un-done action — so it shares that
  * branch's shape: a fact-preserving rewrite, the `minimalRedaction` fallback,
  * and `genericHonestHedge` as the last resort. What differs is the ground
- * truth handed to the model: `groundedToolLines`, this turn's own real
- * find_available_slots / check_join_availability result, so the rewrite is
- * told the ACTUAL times rather than merely told to hedge — the model is
- * substituting from facts we hand it, never inventing a replacement time.
+ * truth handed to the model: `groundedToolLines`, the real
+ * find_available_slots / check_join_availability / precheck lines (this
+ * turn's and earlier turns' of the thread), so the rewrite is told the ACTUAL
+ * times rather than merely told to hedge — the model is substituting from
+ * facts we hand it, never inventing a replacement time.
  *
  * check-claimed-that-never-ran (2026-09-06) — reused again (G1) for a FOURTH
  * flag shape: `actionType === 'invented_third_party_fact'`, from RULE A's own
@@ -1071,20 +1106,21 @@ export async function rewriteOwningTheMiss(opts: {
 
   // proposed-slot-not-grounded-in-search-result (2026-08-24) — same STEP
   // 1/2/3 + minimalRedaction shape as the invented-owner-fact branch, but the
-  // ground truth handed to the model is THIS TURN'S REAL slot/verdict list,
-  // not "check with the owner" — the corrected time comes from facts we hand
-  // it, never from the model's own head.
+  // ground truth handed to the model is the REAL slot/verdict lines (this
+  // turn's, and earlier turns' of the thread), not "check with the owner" —
+  // the corrected time comes from facts we hand it, never from the model's
+  // own head.
   const groundedSlotBlock = (opts.groundedToolLines && opts.groundedToolLines.length)
     ? opts.groundedToolLines.map(l => `  ${l}`).join('\n')
     : '  (the search ran and found nothing usable this turn)';
 
-  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that this turn's own availability search does not confirm — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that no real availability search confirms — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
-THIS TURN'S REAL AVAILABILITY RESULT (the ONLY times/verdicts actually confirmed — settled, do not re-judge):
+REAL AVAILABILITY RESULTS (this turn's, plus any \`(earlier turn)\` search from this thread — the ONLY times/verdicts actually confirmed; settled, do not re-judge):
 ${groundedSlotBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually offer that flagged time as available, or if it does and the time genuinely matches (or is a timezone-equivalent restatement of) one of the real results above WITH A POSITIVE/AVAILABLE verdict attached. Do NOT call verdict="keep" when the matched result carries a NEGATIVE verdict (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and that is exactly the case STEP 2 must rewrite, not keep. Do not manufacture a problem that isn't one.
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually offer that flagged time as available, or if it does and the time matches one of the real results above — a line's own instant or its \`[local: …]\` text — WITH A POSITIVE/AVAILABLE verdict attached. ${NO_TZ_ARITHMETIC} Do NOT call verdict="keep" when the matched result carries a NEGATIVE verdict (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and that is exactly the case STEP 2 must rewrite, not keep. Do not manufacture a problem that isn't one.
 
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states a specific time as available that the real result above does not back. Put the corrected reply in \`message\`. The rewrite must:
 - Replace the fabricated time with the REAL time(s) from the list above, if any exist — never invent a substitute time of your own.
@@ -1119,7 +1155,7 @@ STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states, as settl
 - Make clear his decision is STILL PENDING — he has not answered yet.
 - KEEP intact any true statement that the request was already sent/escalated to him this turn (if a create_approval / escalation tool ran, do NOT deny or walk back that it went out — the false part is only the decision outcome, never the fact that it was raised).
 - NOT invent a different unfounded claim about what ${opts.ownerFirstName} decided.
-- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Keep every OTHER fact in the message intact: names, times WITH their zone labels, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
 - Match the language of the draft (Hebrew/English/etc).
 
@@ -1147,14 +1183,14 @@ TOOL ACTIVITY THIS TURN (a line carrying \`attendee_check=\` is one where a slot
 ${toolBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT attribute the finding to a check it ran (it is hedged, or quotes what someone said), or if it is a clock/timezone conversion ("that's 03:15 for her"), or if a line carrying \`attendee_check=\` states the SAME finding — same kind (busy / a conflict vs. outside working hours), same people; a name-free line counts. Do not manufacture a problem that isn't one.
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT attribute the finding to a check it ran (it is hedged, or quotes what someone said), or if a line carrying \`attendee_check=\` states the SAME finding — same kind (busy / a conflict vs. outside working hours), same people; a name-free line counts. ${TIME_IS_NOT_A_PERSONAL_FACT} Do not manufacture a problem that isn't one.
 
 STEP 2 — Call verdict="rewrite" in exactly two cases. Put the corrected reply in \`message\`.
 (a) A line carrying \`attendee_check=\` exists but the draft MISREPORTS what it found (the line says busy / a conflict, the draft says outside their hours, or the reverse; or the draft names someone the line does not cover): restate the finding EXACTLY as that line has it — its kind, its people, nothing more — in place of the draft's version. The check happened; only its result was misstated, so never say she didn't check.
 (b) NO line carries \`attendee_check=\`: drop the "per the check I ran" framing and the specific finding CLEANLY — never restate it as a hedge that still asserts the same fact ("probably outside their hours" is the same invented claim in softer words). If the message still needs to say something about it, say only that she has not actually checked that person's hours here — NEVER that no such data exists or that it isn't on file (their hours may well be stored; what is untrue is the check, not the data).
 In both cases the rewrite must also:
 - NOT invent a DIFFERENT unbacked claim about the named person in its place.
-- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Keep every OTHER fact in the message intact: names, times WITH their zone labels, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
 - Match the language of the draft (Hebrew/English/etc).
 
@@ -1171,12 +1207,12 @@ TOOL ACTIVITY THIS TURN (anything that could ground the claim):
 ${toolBlock}
 FLAGGED CLAIM: ${what}
 
-STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read). Do not manufacture a problem that isn't one.
+STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually assert the flagged claim as a bare, settled fact — e.g. it is already hedged ("usually", "I think", "let me check"), it is a proposal or question, or the claim is plausibly backed by TOOL ACTIVITY above (a people_memory / preference / calendar read) — or if the flagged claim is not a personal capability, habit or preference of ${opts.ownerFirstName} at all: someone else's availability, what the calendar shows, or which time or zone a slot falls on. ${NO_TZ_ARITHMETIC} Do not manufacture a problem that isn't one.
 
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states the flagged personal claim about ${opts.ownerFirstName} as settled fact with nothing behind it. Put the corrected reply in \`message\`. The rewrite must:
 - Prefer dropping the specific unfounded claim CLEANLY over restating it in a hedge — especially when it is a stray/bonus detail the message didn't need (e.g. a leftover time or fact recalled from earlier in the conversation) rather than the actual thing being asked about. Only fall back to an honest hedge that still names the specific detail / an offer to confirm with ${opts.ownerFirstName} directly ("let me check with him and get back to you") when the flagged claim genuinely IS the thing being asked about and dropping it would leave the question unanswered.
 - NOT invent a DIFFERENT unfounded personal claim about ${opts.ownerFirstName} in its place.
-- Keep every OTHER fact in the message intact: names, times, dates, numbers, the rest of the answer.
+- Keep every OTHER fact in the message intact: names, times WITH their zone labels, dates, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
 - Match the language of the draft (Hebrew/English/etc).
 
@@ -1201,7 +1237,7 @@ Do not turn a proposal into an apology, and do not "own a miss" that isn't one.
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely STATES a completed action ("Done — booked Wed 12:15", "added X", "I've sent it to Yael") AND the TOOL ACTIVITY shows NO matching successful tool (the tool is absent, or its summary says FAILED). Put the corrected reply in \`message\`. The rewrite must:
 - Make it UNMISTAKABLE the thing has NOT gone through yet, so ${opts.ownerFirstName} knows it still needs to happen. (e.g. "Actually — hold on, that didn't go out yet, let me sort it.")
 - NOT claim it's done/sent/booked/flagged/handled, and NOT smooth it into "I'll take care of it" (reads as resolved) — and this BANS present-progressive reassurance just as much: "I'm handling it right now", "I'm on it now", "I'm taking care of it as we speak", Hebrew "אני דואגת לזה עכשיו" are the SAME false promise in a different tense — they claim an action is actively in motion this instant when NOTHING is happening and no tool call is queued behind this reply. The rewrite must leave the reader knowing nothing is in progress, only that the assistant noticed the miss.
-- Keep every other fact intact: names, times, dates, numbers, the rest of the message.
+- Keep every other fact intact: names, times with their zone labels, dates, numbers, the rest of the message.
 - Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
 
@@ -1221,7 +1257,7 @@ ${opts.draft}`;
         description: isInventedOwnerFact
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
           : isUngroundedSlotClaim
-            ? 'Report whether the draft offers a specific time as available that this turn\'s real availability search does not confirm, and if so the corrected reply.'
+            ? 'Report whether the draft offers a specific time as available that no real availability search confirms, and if so the corrected reply.'
             : isPermissionGranted
               ? 'Report whether the draft falsely states the owner\'s decision on a pending request already came back, and if so the corrected reply.'
               : isInventedThirdPartyFact
@@ -1265,7 +1301,7 @@ ${opts.draft}`;
             },
             noUngroundedTimeClaim: {
               type: 'boolean',
-              description: 'Only for an ungrounded-slot-claim rewrite (verdict="rewrite", flagged claim was a specific time offered as available with no backing in this turn\'s real search result): self-check `message` before returning it. Set true ONLY if `message` no longer states any specific time as available unless that time is one of the REAL confirmed times you were given. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
+              description: 'Only for an ungrounded-slot-claim rewrite (verdict="rewrite", flagged claim was a specific time offered as available with no backing in the real search results you were given): self-check `message` before returning it. Set true ONLY if `message` no longer states any specific time as available unless that time is one of the REAL confirmed times you were given. Set false whenever unsure; a false value here causes the caller to discard this rewrite.',
             },
             noResolvedDecisionClaim: {
               type: 'boolean',

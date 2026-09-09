@@ -44,6 +44,14 @@
  *   node scripts/ledger-file.cjs --ref "some-slug" --lane matchmaker --source verify \
  *     --finding "…" --verdict built --rootCause "src/foo.ts:1" --invariant none --bounces 1
  *
+ *   # The Manager's own step-3 run-manifest row (SKILL.md has documented this shape
+ *   # since before this writer existed; every row landed by hand, differently every
+ *   # time -- e.g. wf_2442c320-184 has no runId/kind at all, wf_85304306-16d and
+ *   # wf_2a48e808-0e1 do). This is the one correct shape going forward:
+ *   node scripts/ledger-file.cjs --run-manifest --runId wf_abc12345-def \
+ *     --finding "run manifest — 4 built, 0 bounced, 3 discoveries queued, 0/0 joint-traced, 4/4 outcome-traced, golden 30/30" \
+ *     --manifest '{"mode":"full", ...}'
+ *
  *   # WRAP_UP.md's GitHub-issues step, the built -> wrapped companion (no writer existed for this either):
  *   node scripts/ledger-file.cjs --wrap-companion --ref "some-slug" --version 4.4.8 --sha abc1234
  *
@@ -125,6 +133,7 @@ const KNOWN_FLAGS = new Set([
   '--wrap-companion', '--ref', '--version', '--sha',
   '--gh-sync', '--ghstate', '--note', '--recommend', '--verdict',
   '--recheck',
+  '--run-manifest', '--runId', '--manifest',
   '--lane', '--source', '--finding', '--rootCause', '--invariant',
   '--state', '--bounces', '--confirm-new-invariant', '--severity',
 ])
@@ -217,7 +226,7 @@ const nearestInvariants = (candidate, vocab) => {
 
 if (argv.includes('--targets') || argv.length === 0) {
   console.log(`\nUsage — see the file header, or:\n  node ${path.basename(__filename)} --ref "…" --lane <lane> --source <source> --finding "…" --verdict <verdict> --invariant "<slug>|none"\n`)
-  console.log(`Other modes: --wrap-companion, --gh-sync, --recheck (see the file header)`)
+  console.log(`Other modes: --wrap-companion, --gh-sync, --recheck, --run-manifest (see the file header)`)
   console.log(`Lanes: ${[...KNOWN_LANES].join(', ')}`)
   console.log(`Sources: ${[...KNOWN_SOURCES].join(', ')}`)
   console.log(`Verdicts: ${[...KNOWN_VERDICTS].join(', ')}`)
@@ -308,6 +317,45 @@ if (flag('--recheck')) {
   append(row)
   console.log(`\nAppended — ${ref} rechecked ${row.date}. It stays open and will no longer print as a PHANTOM CANDIDATE for this wrap.\n`)
   console.log(`  recheck : ${note}`)
+  process.exit(0)
+}
+
+// ── the run-manifest row: Manager step-3's own summary of a Workflow-invoked
+// run, one per run. Documented in SKILL.md since before this writer existed;
+// every prior row landed by hand instead, in whatever shape the moment
+// produced — some carry no `runId`/`kind` at all (wf_2442c320-184), some do
+// (wf_85304306-16d, wf_2a48e808-0e1, both themselves hand-typed backfills).
+// This is the one correct shape from here on: `runId` + `kind:"run-manifest"`
+// as the row's identity (so a future join or a duplicate-check can find it),
+// `verdict:audit`/`source:engine`/`ref:"run-manifest"`/`state:"n/a"` fixed —
+// same audit-row doctrine as every run-manifest row already in the ledger —
+// and `manifest` carrying the engine's own returned object VERBATIM, parsed
+// and re-serialized, never hand-retyped (hand-retyping a nested object this
+// large is exactly how a backfill note ends up needing to explain a
+// reconstruction in the first place).
+if (flag('--run-manifest')) {
+  const runId = argOf('--runId')
+  const manifestRaw = argOf('--manifest')
+  const finding = argOf('--finding')
+  const note = argOf('--note') || ''
+  if (!runId) die('no --runId.', 'The id the Workflow call returned, e.g. wf_abc12345-def.')
+  if (!/^wf_[0-9a-f]{4,}-[0-9a-f]{2,}$/i.test(runId)) die(`--runId "${runId}" does not look like a real run id.`, 'Expected shape: wf_<hex>-<hex>, e.g. wf_abc12345-def. A malformed id is refused, not silently recorded — it would be unjoinable later.')
+  if (!finding || finding.length < 20) die(finding ? `--finding is ${finding.length} chars.` : 'no --finding.', 'The run\'s own one-line summary, e.g. "run manifest — 4 built, 0 bounced, 3 discoveries queued, 0/0 joint-traced, 4/4 outcome-traced, golden 30/30".')
+  if (!manifestRaw) die('no --manifest.', 'The engine\'s own returned `manifest` object, as JSON — pass it verbatim, never hand-retyped.')
+  let manifest
+  try {
+    manifest = JSON.parse(manifestRaw)
+  } catch (e) {
+    die('--manifest is not valid JSON.', `Parse error: ${e.message}`)
+  }
+  const rows = readRows()
+  if (rows.some((r) => r.runId === runId && r.kind === 'run-manifest'))
+    die(`${runId} already has a run-manifest row.`, 'This script only appends — it cannot fix a duplicate after the fact. Check the ledger before re-filing.')
+  const row = { date: stampDate(), runId, kind: 'run-manifest', lane: '', source: 'engine', ref: 'run-manifest', verdict: 'audit', state: 'n/a', finding, manifest }
+  if (note) row.note = note
+  append(row)
+  console.log(`\nAppended — run-manifest row for ${runId}.\n`)
+  console.log(`  finding : ${finding.slice(0, 120)}`)
   process.exit(0)
 }
 

@@ -33,7 +33,8 @@
  *   node scripts/ledger-stats.cjs --index         # one line per identity — recurrence, regressions, coverage
  *   node scripts/ledger-stats.cjs --wrap 4.5.0    # this release's own rows, BUILT->WRAPPED, GITHUB sync, PHANTOM CANDIDATES
  *   node scripts/ledger-stats.cjs --open --json   # machine-readable open set — feeds --wrap's phantom check, nothing else consumes it
- *   node scripts/ledger-stats.cjs --closed-refs --json   # exact-ref screen for state.pendingOverflow (bugger.js args.closedRefs) — never for intake dedup
+ *   node scripts/ledger-stats.cjs --closed-refs --json   # exact-ref screen for args.pendingOverflow (bugger.js args.closedRefs) — never for intake dedup
+ *   node scripts/ledger-stats.cjs --queued --json   # every queued-next-run ref not held by a one-run defer, reshaped for args.issues/args.pendingOverflow directly (X216) — the state.pendingOverflow array's replacement, derived fresh every read
  *
  * `--open` exists because the backlog IS the ledger — every row whose verdict is
  * not `built` is still open, so a separate backlog file is a second copy that
@@ -520,13 +521,14 @@ if (argv.includes('--already-built')) {
   process.exit(0);
 }
 
-// ── `--closed-refs` — the EXACT-REF screen for `state.pendingOverflow`,
-// deliberately NOT `--already-built`. `--already-built` sweeps a ref the
-// moment ANY wrap has landed since it shipped, which is the right caution for
-// a FRESH github/logs finding (rediscovering an old symptom past a wrap might
-// be a genuine regression, so intake keeps investigating it rather than
-// silently dropping it) — but the pendingOverflow queue never carries a fresh,
-// fuzzy finding. Every entry is the EXACT ref of one specific tracked bug the
+// ── `--closed-refs` — the EXACT-REF screen for `args.pendingOverflow` (the
+// `--queued` derive below), deliberately NOT `--already-built`. `--already-built`
+// sweeps a ref the moment ANY wrap has landed since it shipped, which is the
+// right caution for a FRESH github/logs finding (rediscovering an old symptom
+// past a wrap might be a genuine regression, so intake keeps investigating it
+// rather than silently dropping it) — but the pendingOverflow queue never
+// carries a fresh, fuzzy finding. Every entry is the EXACT ref of one specific
+// tracked bug the
 // engine already knows about, re-injected verbatim, so there is no "maybe
 // it's a new regression" question to protect: once that ref is closed in the
 // ledger, in ANY way `CLOSED` recognises, it must never re-enter a dispatch,
@@ -572,7 +574,7 @@ if (argv.includes('--closed-refs')) {
     console.log(
       `\nCLOSED REFS — ${refs.length} ref(s) closed in the ledger by any verdict (built, wrapped, confirmed-other-lane, already-fixed, declined, converted, audit).`,
     );
-    console.log(`This is the EXACT-REF screen for \`state.pendingOverflow\` — never the intake dedup list. Pass --json for ["ref1","ref2",…] directly as \`args.closedRefs\`.\n`);
+    console.log(`This is the EXACT-REF screen for \`args.pendingOverflow\` (the \`--queued\` derive) — never the intake dedup list. Pass --json for ["ref1","ref2",…] directly as \`args.closedRefs\`.\n`);
   }
   process.exit(0);
 }
@@ -1550,98 +1552,99 @@ const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter
 // this file (and exported) so `ledger-file.cjs` can require the same set —
 // see there for the verdict-by-verdict rationale, not repeated twice here.
 
-// ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
-// A row is open unless it was built or proven already-fixed. Grouped by lane so
-// he can hand one lane its whole list in a single dispatch.
-if (openOnly) {
-  // ── COLLAPSE BY REF ────────────────────────────────────────────────────────
-  // The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
-  // on Monday, built on Tuesday. Filtering row-by-row therefore reported items as
-  // open that had already shipped — 37 "open" when the true number was 6. Two
-  // distinct causes, both handled here:
-  //
-  //   1. Same ref, later row closes it (P24, P25, P32, gh#148).
-  //   2. The closing row used a COMBINED ref because one dispatch covered several
-  //      items — `P29+P30`, `A2+A3`, `P27+P28+gate-order`, `gh#41-step1`. Those
-  //      never string-matched the original, so the item looked untouched.
-  //
-  // Tokenising handles both. Matching is exact per token, never substring, so
-  // `P2` is not closed by `P24`.
-  //
-  // X47 · every token is NORMALISED for the `gh#` / `#` prefix, because the ledger
-  // genuinely holds all three forms of the same issue. `bugger.js` has normalised
-  // them since the `alreadyBuilt` fix — its brief says `#147` = `gh#147` = `147` —
-  // and this reader did not, so an open row `gh#144` sat in the list while the row
-  // that closed it was written `144`: one falsely-open row out of 49, in the count
-  // the report headline is computed from.
-  //
-  // A SPACE is deliberately NOT a suffix separator. `gh#52 O3` is one piece of a
-  // multi-lane ticket, and minting `52` from it would let one piece close its
-  // parent — measured on 2026-07-30 as 4 extra collapses, three of them wrong.
-  const normRef = (t) => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '');
-  const refTokens = (ref) => {
-    const out = new Set();
-    const raw = String(ref || '').trim();
-    if (!raw) return out;
-    out.add(normRef(raw));
-    for (const part of raw.split(/[+,/]| and /i).map((s) => s.trim()).filter(Boolean)) {
-      out.add(normRef(part));
-      // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item. X34 · the
-      // suffix may now be NON-numeric — his scheme is `156-a` for a complaint and
-      // `153-blockA` for a raised blocker, so a suffix that was previously
-      // unmatchable had to become linkable or a child could never close its parent.
-      // Gated on the BASE looking like a bare id (`156`, `gh#158`, `P14`, `A2`)
-      // rather than on the suffix, which is what keeps a long slug ref like
-      // `gh#158-exception-must-be-name-scoped` from minting a junk base token.
-      const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*([a-z0-9]{1,6})$/i);
-      if (m && /^(?:gh#)?\d+$|^[a-z]\d+$/i.test(m[1])) out.add(normRef(m[1]));
-    }
-    return out;
-  };
+// ── COLLAPSE BY REF — shared by `--open` and `--queued` (X216) ─────────────
+// The ledger is APPEND-ONLY, so one item legitimately has several rows: parked
+// on Monday, built on Tuesday. Filtering row-by-row therefore reported items as
+// open that had already shipped — 37 "open" when the true number was 6. Two
+// distinct causes, both handled here:
+//
+//   1. Same ref, later row closes it (P24, P25, P32, gh#148).
+//   2. The closing row used a COMBINED ref because one dispatch covered several
+//      items — `P29+P30`, `A2+A3`, `P27+P28+gate-order`, `gh#41-step1`. Those
+//      never string-matched the original, so the item looked untouched.
+//
+// Tokenising handles both. Matching is exact per token, never substring, so
+// `P2` is not closed by `P24`.
+//
+// X47 · every token is NORMALISED for the `gh#` / `#` prefix, because the ledger
+// genuinely holds all three forms of the same issue. `bugger.js` has normalised
+// them since the `alreadyBuilt` fix — its brief says `#147` = `gh#147` = `147` —
+// and this reader did not, so an open row `gh#144` sat in the list while the row
+// that closed it was written `144`: one falsely-open row out of 49, in the count
+// the report headline is computed from.
+//
+// A SPACE is deliberately NOT a suffix separator. `gh#52 O3` is one piece of a
+// multi-lane ticket, and minting `52` from it would let one piece close its
+// parent — measured on 2026-07-30 as 4 extra collapses, three of them wrong.
+const normRef = (t) => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '');
+const refTokens = (ref) => {
+  const out = new Set();
+  const raw = String(ref || '').trim();
+  if (!raw) return out;
+  out.add(normRef(raw));
+  for (const part of raw.split(/[+,/]| and /i).map((s) => s.trim()).filter(Boolean)) {
+    out.add(normRef(part));
+    // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item. X34 · the
+    // suffix may now be NON-numeric — his scheme is `156-a` for a complaint and
+    // `153-blockA` for a raised blocker, so a suffix that was previously
+    // unmatchable had to become linkable or a child could never close its parent.
+    // Gated on the BASE looking like a bare id (`156`, `gh#158`, `P14`, `A2`)
+    // rather than on the suffix, which is what keeps a long slug ref like
+    // `gh#158-exception-must-be-name-scoped` from minting a junk base token.
+    const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*([a-z0-9]{1,6})$/i);
+    if (m && /^(?:gh#)?\d+$|^[a-z]\d+$/i.test(m[1])) out.add(normRef(m[1]));
+  }
+  return out;
+};
+// ── X85 · ONE BUG, SEVERAL REFS ────────────────────────────────────────────
+// A bug legitimately wears more than one ref: a complaint of a ticket (`gh#157-b`),
+// a slug minted when the same defect arrived through the logs
+// (`gh#157-no-history-with-colleague`), and a row filed under the retired letter
+// scheme. So this count was counting REFS and calling them open bugs, and each ref
+// needed its own closure — gh#157 held three and all three closed on one sentence
+// from him, five of the fourteen closures on wf_4bbfc750-1a9 being the count being
+// wrong rather than the product improving. That is the mechanical half of "the
+// framework fights against closing stuff": a backlog that inflates itself cannot
+// reach zero.
+//
+// NO NEW FIELD. His id scheme already names the parent — *"if you had ticket 153
+// and you got something that block it, it won't be 170, it will be 153-blockA"* —
+// so the owning bug is DERIVED from the ref at read time, which also works on the
+// rows already written and rewrites no history.
+//
+// A LEADING LETTER IS NEVER STRIPPED. `B157` is not `gh#157`: the retired scheme
+// minted its numbers off `nextReportId`, which had climbed to 177 while GitHub was
+// at 168 (X74), so collapsing the letter would merge two different bugs. Those
+// print as separate bugs and the list below is what makes them visible by eye.
+//
+// IT GROUPS; IT NEVER CLOSES. A parent ruling closing its children automatically
+// was built and MEASURED here first, and it closed exactly one row on this ledger:
+// `gh#24-cap-checks-wrong-address`, a re-read, still-real From-spoof exfiltration
+// path, because ten OTHER pieces filed under the bare `gh#24` had shipped. A suffix
+// means "complaint b of ticket 156" in his scheme and "a defect found while
+// building ticket 24" in half the ledger, and no read of the id can tell those
+// apart — so the grouping is shown to him and the closure stays an act somebody
+// performs. He rules on the group in one word; the wrap writes one closing row per
+// ref, which is the same ruling with nothing guessed.
+const parentOf = (ref) => {
+  const t = normRef(ref);
+  const m = t.match(/^((?:[a-z])?\d+)[-–_]/i);
+  return m && m[1] !== t ? m[1] : '';
+};
+const bugOf = (r) => parentOf(r.ref) || normRef(r.ref) || '(no ref)';
 
+// `collapseOpenRows` — ONE merge, two consumers. `--open` groups/prints it;
+// `--queued` (X216, replacing `state.pendingOverflow`'s hand-synced duplicate)
+// filters it to `verdict:'queued-next-run'` and reshapes it for `args.issues` /
+// `args.pendingOverflow` directly. One collapse means the two can never disagree
+// on what is open — the exact drift the hand-synced array used to have against
+// the ledger (a row could go stale in one direction, missing in the other).
+function collapseOpenRows(scopedRows) {
   const closedBy = new Map(); // ref token -> the row that closed it
-  for (const r of scoped) {
+  for (const r of scopedRows) {
     if (!CLOSED.has(r.verdict)) continue;
     for (const t of refTokens(r.ref)) if (!closedBy.has(t)) closedBy.set(t, r);
   }
-
-  // ── X85 · ONE BUG, SEVERAL REFS ────────────────────────────────────────────
-  // A bug legitimately wears more than one ref: a complaint of a ticket (`gh#157-b`),
-  // a slug minted when the same defect arrived through the logs
-  // (`gh#157-no-history-with-colleague`), and a row filed under the retired letter
-  // scheme. So this count was counting REFS and calling them open bugs, and each ref
-  // needed its own closure — gh#157 held three and all three closed on one sentence
-  // from him, five of the fourteen closures on wf_4bbfc750-1a9 being the count being
-  // wrong rather than the product improving. That is the mechanical half of "the
-  // framework fights against closing stuff": a backlog that inflates itself cannot
-  // reach zero.
-  //
-  // NO NEW FIELD. His id scheme already names the parent — *"if you had ticket 153
-  // and you got something that block it, it won't be 170, it will be 153-blockA"* —
-  // so the owning bug is DERIVED from the ref at read time, which also works on the
-  // rows already written and rewrites no history.
-  //
-  // A LEADING LETTER IS NEVER STRIPPED. `B157` is not `gh#157`: the retired scheme
-  // minted its numbers off `nextReportId`, which had climbed to 177 while GitHub was
-  // at 168 (X74), so collapsing the letter would merge two different bugs. Those
-  // print as separate bugs and the list below is what makes them visible by eye.
-  //
-  // IT GROUPS; IT NEVER CLOSES. A parent ruling closing its children automatically
-  // was built and MEASURED here first, and it closed exactly one row on this ledger:
-  // `gh#24-cap-checks-wrong-address`, a re-read, still-real From-spoof exfiltration
-  // path, because ten OTHER pieces filed under the bare `gh#24` had shipped. A suffix
-  // means "complaint b of ticket 156" in his scheme and "a defect found while
-  // building ticket 24" in half the ledger, and no read of the id can tell those
-  // apart — so the grouping is shown to him and the closure stays an act somebody
-  // performs. He rules on the group in one word; the wrap writes one closing row per
-  // ref, which is the same ruling with nothing guessed.
-  const parentOf = (ref) => {
-    const t = normRef(ref);
-    const m = t.match(/^((?:[a-z])?\d+)[-–_]/i);
-    return m && m[1] !== t ? m[1] : '';
-  };
-  const bugOf = (r) => parentOf(r.ref) || normRef(r.ref) || '(no ref)';
-
   // Keep the LATEST state per ref, so a re-raised item shows once with its newest
   // state. X47 · MERGED, not overwritten — the same fix `--architect` carries, for
   // the same reason: append-only means a row is legitimately several lines, and a
@@ -1652,7 +1655,7 @@ if (openOnly) {
   // label on any of them.
   const latest = new Map();
   const refless = [];
-  for (const r of scoped) {
+  for (const r of scopedRows) {
     if (CLOSED.has(r.verdict)) continue;
     if (!r.ref) { refless.push(r); continue; }
     latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r }); // ledger is chronological, so later fields win
@@ -1670,6 +1673,81 @@ if (openOnly) {
   }
   // A row with no ref cannot be collapsed — that is exactly what `ref` is for.
   open.push(...refless);
+  return { open, refless, collapsed };
+}
+
+// ── X88 DEFERRAL HELPERS — shared by `--open`'s OVERDUE line and `--queued`'s
+// hold-for-one-run screen (X216). Generic over verdict: a `deferred` marker on
+// ANY ref parks it for exactly one run, whatever verdict the row carries.
+// COMPUTED, not stored — the park is the LAST row that carried the marker; runs
+// since are the distinct later `wf_` runIds, which is what "a run" means here —
+// `direct-*` is a hand dispatch and `verify-*` is a pass, neither is a run he
+// could have ruled on. Self-clearing by the correct act: the latest-wins merge
+// above means appending the row's return (dropping the marker) clears the park.
+const deferredMark = (o) => o && (o.state === 'deferred' || o.verdict === 'deferred');
+function computeRunsSincePark(scopedRows) {
+  const parkedAt = new Map(); // ref -> index in `scopedRows` of the row that parked it
+  scopedRows.forEach((r, i) => {
+    if (r.ref && deferredMark(r)) parkedAt.set(r.ref, i);
+  });
+  const runsSincePark = (r) => {
+    const i = parkedAt.get(r.ref);
+    if (i === undefined) return 0;
+    const own = String(scopedRows[i].runId || '');
+    const later = new Set();
+    for (let j = i + 1; j < scopedRows.length; j++) {
+      const id = String(scopedRows[j].runId || '');
+      if (/^wf_/.test(id) && id !== own) later.add(id);
+    }
+    return later.size;
+  };
+  return { parkedAt, runsSincePark };
+}
+
+// ── --queued --json — the DERIVE-ON-READ replacement for `state.pendingOverflow`
+// (X216). `state.pendingOverflow` was a hand-synced duplicate of exactly this
+// query with NO write path in code (grep confirms zero `appendFileSync` /
+// `writeFileSync` of state.json anywhere) — a human edited it by hand on every
+// drain, and it drifted in BOTH directions (stale entries never deleted, fresh
+// ones never added; measured live 2026-09-09: state.json carried 2 entries while
+// this query returns 11). Deriving it fresh every read means it can neither go
+// stale (a built/declined/converted ref drops out of `collapseOpenRows` the same
+// run it closes) nor go missing (nothing to omit from — it is read straight off
+// the ledger). `heldNow` reuses X88's OWN one-run-defer mechanism rather than a
+// second one: the owner defers a queued discovery the SAME way he defers anything
+// else, a ledger row for that ref carrying `state:'deferred'` — no JSON array
+// entry to hand-edit, no marker to remember to delete.
+if (argv.includes('--queued')) {
+  const { open } = collapseOpenRows(scoped);
+  const { runsSincePark } = computeRunsSincePark(scoped);
+  const heldNow = (r) => deferredMark(r) && runsSincePark(r) === 0;
+  const queued = open.filter((r) => verdictOf(r) === 'queued-next-run' && !heldNow(r));
+  const shaped = queued.map((r) => ({
+    id: r.ref,
+    lane: r.lane || '',
+    severity: r.severity || 'medium',
+    clarity: 'clear',
+    source: r.source || 'verify',
+    symptom: r.finding || '',
+    evidence: r.rootCause || '',
+  }));
+  if (jsonOut) {
+    console.log(JSON.stringify(shaped));
+  } else {
+    const held = open.filter((r) => verdictOf(r) === 'queued-next-run' && heldNow(r));
+    console.log(`\nQUEUED — ${shaped.length} ref(s) ready to drain, derived fresh from the ledger (no state.json copy).`);
+    shaped.forEach((s) => console.log(`  [${s.lane}/${s.severity}] ${s.id} — ${String(s.symptom).slice(0, 90)}`));
+    if (held.length) console.log(`HELD (one-run defer, due next read): ${held.map((r) => r.ref).join(', ')}`);
+    console.log(`\nPass --json for the array directly as \`args.pendingOverflow\` / \`args.issues\`.\n`);
+  }
+  process.exit(0);
+}
+
+// ── --open: THE BACKLOG. Every row still awaiting the owner. ────────────────
+// A row is open unless it was built or proven already-fixed. Grouped by lane so
+// he can hand one lane its whole list in a single dispatch.
+if (openOnly) {
+  const { open, refless, collapsed } = collapseOpenRows(scoped);
   // X171 · JSON EXIT, before any of the human-readable prints below. `--wrap`
   // needs the exact same open set a person reads — every field ever written for
   // the ref, merged — never a re-derivation with its own bugs. Nothing else is
@@ -1754,28 +1832,13 @@ if (openOnly) {
   // attendee` by 5 — that one sat open across the release that fixed it, which is
   // exactly what X51 was written to prevent.
   //
-  // COMPUTED, not stored. The park is the LAST row that carried the marker; runs
-  // since are the distinct later `wf_` runIds, which is what "a run" means here —
-  // `direct-*` is a hand dispatch and `verify-*` is a pass, neither is a run he
-  // could have ruled on. Self-clearing by the correct act: the merge above keeps
-  // the latest fields per ref, so appending the row's return to his desk
-  // (`needs-owner-decision`, `state:'open'`) drops the marker and the count with it.
-  const deferredMark = (o) => o && (o.state === 'deferred' || o.verdict === 'deferred');
-  const parkedAt = new Map(); // ref -> index in `scoped` of the row that parked it
-  scoped.forEach((r, i) => {
-    if (r.ref && deferredMark(r)) parkedAt.set(r.ref, i);
-  });
-  const runsSincePark = (r) => {
-    const i = parkedAt.get(r.ref);
-    if (i === undefined) return 0;
-    const own = String(scoped[i].runId || '');
-    const later = new Set();
-    for (let j = i + 1; j < scoped.length; j++) {
-      const id = String(scoped[j].runId || '');
-      if (/^wf_/.test(id) && id !== own) later.add(id);
-    }
-    return later.size;
-  };
+  // COMPUTED, not stored. `deferredMark`/`computeRunsSincePark` are hoisted above
+  // `collapseOpenRows` (X216) — `--queued`'s hold-for-one-run screen reuses the
+  // identical function, never a second copy. Self-clearing by the correct act:
+  // the merge above keeps the latest fields per ref, so appending the row's
+  // return to his desk (`needs-owner-decision`, `state:'open'`) drops the marker
+  // and the count with it.
+  const { runsSincePark } = computeRunsSincePark(scoped);
   const overdue = open.filter((r) => deferredMark(r) && runsSincePark(r) > 0);
   // Parsed by `--report`, which gates on it. One line, whatever the count, so a
   // zero is a printed zero rather than a line that failed to appear.

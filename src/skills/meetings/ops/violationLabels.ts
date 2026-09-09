@@ -212,11 +212,16 @@ function joinClauses(items: string[]): string {
  * meetings.ts — the instructor lane's) or a new per-thread persisted stash (an
  * owner sign-off, W12.3). What the first buys instead: the confirm doesn't skip
  * the check, it re-runs the identical one, so the retry books over exactly the
- * people this same call named for these args. RESIDUAL, stated honestly: if the
- * retry ALSO adds an attendee who wasn't in the first call, that person's
- * conflict rides the same confirm unnamed — which is why the `_note` below
- * tells the model to re-call with the SAME args, and why every book-over is
- * logged with the emails it went over (M18).
+ * people this same call named for these args. RESIDUAL, stated honestly: the
+ * retry re-runs the check against whatever args and calendar state actually
+ * exist at THAT moment, not a replay of the first call's findings — so ANY
+ * drift between the FYI and the confirm (a changed time, a changed duration,
+ * an attendee added or removed, or simply the calendar changing in between)
+ * can make the confirm book over a DIFFERENT set of people than the ones this
+ * sentence named, not only the added-attendee case. That's why the `_note`
+ * below tells the model to re-call with the SAME args, and why every
+ * book-over is logged with the ACTUAL emails it went over (M18) rather than
+ * the ones this refusal named.
  *
  * `broken_rule_label` is deliberately ABSENT from this payload: it is the sole
  * field the static RULE-COMPLIANCE REFUSAL block (skills/meetings.ts) keys on
@@ -256,4 +261,28 @@ export function attendeeConflictRefusal(
     message: `Just FYI — ${humanReason}. Want me to ${action} it anyway?`,
     _note: `This is the REQUESTER's call, not the owner's — do NOT call create_approval for this. Tell them plainly${conflicts.length > 1 ? `, naming ALL ${conflicts.length} people above` : ''}, and if they say to ${action} it anyway, re-call ${tool} with the SAME args plus confirm_attendee_conflict:true. SAME args matters: the confirm ${action}s through exactly the conflicts this call just named.`,
   };
+}
+
+/**
+ * bookedOverAttendeesNote — the human sentence for a booking/move that
+ * actually went through OVER an attendee conflict the requester confirmed
+ * (M18), for the SUCCESS return's own `_attendee_busy_note`.
+ *
+ * confirm-success-return-does-not-name-who-was-booked-over (2026-09-09) —
+ * `bookedOverAttendees` (createMeeting.ts) / the confirmed-conflict list
+ * (moveMeeting.ts) reached only the per-attendee post-booking DMs; the
+ * SUCCESS return itself carried no `_attendee_busy_note`, so
+ * `attendeeCheckSource` (core/orchestrator/turnHelpers.ts) found no
+ * attendee_check marker for a confirmed book-over turn — if the retry's args
+ * drifted from the ones the FYI named (a changed time, a changed duration, an
+ * added attendee, or the calendar moving between the FYI and the confirm),
+ * nothing downstream could tell. Reuses `attendeeConflictLine` + the same
+ * `joinClauses` as `attendeeConflictRefusal` above, so the success note can
+ * never say something different from what the requester was originally told.
+ */
+export function bookedOverAttendeesNote(
+  conflicts: AttendeeConflictTag[],
+  viewerEmail: string | null | undefined,
+): string {
+  return joinClauses(conflicts.map(c => attendeeConflictLine(c, viewerEmail)));
 }

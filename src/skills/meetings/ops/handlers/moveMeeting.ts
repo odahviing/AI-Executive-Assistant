@@ -9,7 +9,7 @@ import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
 
 import { formatIsoTime, computeVacatedSlot, openQuestionsField, alternativesNote, recordProposedAlternatives, subjectsPlausiblyMatch, resolveActivityTargetIdentity, HANDLER_ERROR_CODE } from '../../ops/helpers';
-import { humanizeViolationLabel, attendeeConflictRefusal } from '../../ops/violationLabels';
+import { humanizeViolationLabel, attendeeConflictRefusal, bookedOverAttendeesNote } from '../../ops/violationLabels';
 import {
   getCalendarEvents,
   findSameSubjectSiblings,
@@ -28,6 +28,7 @@ import { checkSlot, type RuleViolationKind } from '../../../../utils/scheduleRul
 import { grantRelaxed, emailStatedByHuman } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
 import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
+import { presentationLocalFieldFor } from '../../../../utils/attendeeAvailability';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { alignNearestQuarter } from '../../../../utils/calendarDensity';
 import { displaySubject, subjectViewerFor, viewerEmailFor, isEventPrivate } from '../../../../utils/displaySubject';
@@ -314,8 +315,12 @@ async function colleagueUpdateRuleGate(
     || pending.roomEmailAdded;
   if (!touchesRuleInputs) return {};
 
-  // The shape re-eval already loaded the event when it ran; an explicit
-  // `location`-only edit skips that branch entirely, so load it here.
+  // The shape re-eval already loaded the event when it ran. Since 2026-09-09 an
+  // explicit `location` string enters that branch too, so the ONLY edit that
+  // still reaches this line with nothing loaded is a bare category-only one
+  // (`category` alone — no attendee change, no `is_online`, no `location`);
+  // load it here for that case. (A bare rename never gets this far: it touches
+  // no rule input and returned above.)
   let existing = pending.existing;
   if (!existing) {
     try {
@@ -734,15 +739,32 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         const venueChangeRequested =
           typeof args.is_online === 'boolean'
           && !(typeof args.location === 'string' && (args.location as string).trim());
+        // explicit-location-string-never-re-detects-the-category (2026-09-09)
+        // — a bare `location` string (no is_online flag, no attendee change)
+        // used to skip the whole shape-re-eval block below entirely, so an
+        // online meeting could be re-pointed at a physical venue while
+        // detectCategory never ran: the event kept its stale (online)
+        // category, which carries no travel-buffer flag, so
+        // colleagueUpdateRuleGate's rule 7 check silently found nothing to
+        // enforce (travelBufferMinutesFor falls back to the STALE category's
+        // own 0-minute default whenever the venue isn't in the catalog).
+        // On that path the block does exactly ONE thing more than before — it
+        // re-runs detectCategory with the new venue as its hint (gated further
+        // down on the string genuinely differing from what's on the event).
+        // It does NOT ship the attendee array (see `mergedAttendees` below) and
+        // does NOT run resolveLocation (see `rePlaceVenue` below): the explicit
+        // string is the venue, and the event's own online-ness is left alone.
+        const explicitLocationRequested = typeof args.location === 'string' && !!(args.location as string).trim();
         let mergedAttendees: Array<{ name?: string; email: string; optional?: boolean }> | undefined;
         let newCategoryFromShape: string | undefined;
         let newLocationFromShape: string | undefined;
         let newIsOnlineFromShape: boolean | undefined;
         // 2026-09-07 — the three facts the colleague rule gate below needs from
         // this branch when it runs. Hoisted rather than re-read: the gate loads
-        // the event itself ONLY on the paths that skip this branch entirely (an
-        // explicit `location`-only edit), so no colleague update ever costs two
-        // reads of the same event.
+        // the event itself ONLY on the one path that skips this branch entirely
+        // AND still touches a rule input — a bare category-only edit (no
+        // attendee change, no is_online flag, no explicit location) — so no
+        // colleague update ever costs two reads of the same event.
         let existingEvent: Awaited<ReturnType<typeof getEventForAttendeeUpdate>> | undefined;
         let roomEmailAdded = false;
         let postEditParticipantCount: number | undefined;
@@ -755,7 +777,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         const attendeeEmailNotes: string[] = [];
         let resolvedAddedEmails: string[] | undefined;
 
-        if (hasAttendeeChange || venueChangeRequested) {
+        if (hasAttendeeChange || venueChangeRequested || explicitLocationRequested) {
           // v3.1.4 — resolve name-only adds to emails from the directory
           // BEFORE the missing-email filter, via the shared resolver every
           // booking path uses. Without this, "add Eli Feldman" (no email) gets
@@ -822,10 +844,18 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // Load existing event for current attendees + shape signals.
           const existing = await getEventForAttendeeUpdate(userEmail, args.meeting_id as string);
           if (!existing) {
+            // Named from the flags that opened this block, not from the
+            // add/remove path it used to serve alone: since 2026-09-09 a
+            // location-only edit reaches here too, and "to update its
+            // attendees" was a false account of what that call attempted.
+            const attempted = [
+              ...(hasAttendeeChange ? ['its attendees'] : []),
+              ...((venueChangeRequested || explicitLocationRequested) ? ['its location'] : []),
+            ].join(' and ');
             return {
               error: 'event_load_failed',
               meeting_subject: args.meeting_subject,
-              message: `Couldn't load "${args.meeting_subject}" to update its attendees. The event may have been cancelled or moved.`,
+              message: `Couldn't load "${args.meeting_subject}" to update ${attempted}. The event may have been cancelled or moved.`,
             };
           }
           existingEvent = existing;
@@ -877,7 +907,17 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
             if (removeSet.has(a.email)) continue;  // a remove + add in same call: removed wins
             if (!merged.has(a.email)) merged.set(a.email, a);
           }
-          mergedAttendees = [...merged.values()];
+          const attendeesAfterEdit = [...merged.values()];
+          // The roster ships to Graph ONLY when this edit changes it (an
+          // add/remove) or re-places the venue (which may add the room mailbox).
+          // Never on a bare explicit-`location` edit: Graph replaces the WHOLE
+          // array on an attendees PATCH (calendarMutations.ts updateMeeting),
+          // and the read-back in getEventForAttendeeUpdate maps every non-
+          // 'optional' type — including the room's 'resource' — to
+          // optional:false, so an unchanged roster would be re-sent with the
+          // room mailbox as 'required'. `attendeesAfterEdit` still feeds the
+          // shape signals and detectCategory below on every path.
+          mergedAttendees = (hasAttendeeChange || venueChangeRequested) ? attendeesAfterEdit : undefined;
 
           // Shape change detection — same signals resolveLocation reads:
           // (a) has-external flipped, (b) participant count crossed 4↔5.
@@ -886,16 +926,16 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           const wasExternal = existing.attendees.some(a =>
             ownerDomain && a.email.endsWith('@' + ownerDomain) ? false : a.email !== ownerEmailLc
           );
-          const isExternalNow = mergedAttendees.some(a =>
+          const isExternalNow = attendeesAfterEdit.some(a =>
             ownerDomain && a.email.endsWith('@' + ownerDomain) ? false : a.email !== ownerEmailLc
           );
           // Count includes owner (resolveLocation reads total participantCount).
           const oldCount = existing.attendees.some(a => a.email === ownerEmailLc)
             ? existing.attendees.length
             : existing.attendees.length + 1;
-          const newCount = mergedAttendees.some(a => a.email === ownerEmailLc)
-            ? mergedAttendees.length
-            : mergedAttendees.length + 1;
+          const newCount = attendeesAfterEdit.some(a => a.email === ownerEmailLc)
+            ? attendeesAfterEdit.length
+            : attendeesAfterEdit.length + 1;
           const crossedThreshold = (oldCount <= 3 && newCount >= 4)
             || (oldCount >= 4 && newCount <= 3)
             || (oldCount <= 4 && newCount >= 5)
@@ -903,11 +943,27 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           const shapeChanged = (wasExternal !== isExternalNow) || crossedThreshold;
           postEditParticipantCount = newCount;
 
-          if ((shapeChanged || venueChangeRequested) && existing.startIso) {
-            logger.info('update_meeting — attendee shape changed, re-evaluating category + location', {
+          // explicit-location-string-never-re-detects-the-category — the
+          // other half of the fix above: entering the outer block isn't
+          // enough on its own, since THIS is the condition that actually
+          // fires detectCategory. Gated on a REAL difference from what's on
+          // the event (not just "a location arg was passed") so a resend of
+          // the same venue string doesn't cost a needless re-classify.
+          const explicitLocationChanged = typeof args.location === 'string'
+            && (args.location as string).trim() !== (existing.location ?? '').trim();
+          // Only a roster-moved shape or an `is_online` venue change re-PLACES
+          // the meeting (resolveLocation + the trip-day override). A bare
+          // explicit `location` re-classifies only — see the comment at the
+          // resolveLocation call.
+          const rePlaceVenue = shapeChanged || venueChangeRequested;
+
+          if ((rePlaceVenue || explicitLocationChanged) && existing.startIso) {
+            logger.info('update_meeting — shape / venue / explicit location changed, re-evaluating category', {
               meetingId: args.meeting_id,
               wasExternal, isExternalNow,
               oldCount, newCount,
+              explicitLocationChanged,
+              rePlaceVenue,
             });
             try {
               const { detectCategory } = await import('../../detectCategory');
@@ -921,7 +977,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                 // the stale name and came back with the pre-rename category —
                 // the classifier's single strongest signal, silently withheld.
                 subject: ((args.new_subject as string | undefined)?.trim() || (args.meeting_subject as string)),
-                attendees: mergedAttendees,
+                attendees: attendeesAfterEdit,
                 isRecurring: false,
                 // Same gap as planMeeting's category detection (create_meeting's
                 // onsite request read as "Meeting" instead of "Physical" because
@@ -946,17 +1002,29 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               // home-day internal→has-external transitions. Existing-state
               // fields stay populated for downstream callers but don't
               // gate the verdict.
-              const loc = resolveLocation({
-                profile: context.profile,
-                startIso: existing.startIso,
-                intent: 'new_booking',
-                category: newCategory ?? oldCategory ?? undefined,
-                participantCount: newCount,
-                hasExternalAttendee: isExternalNow,
-                existingLocation: existing.location,
-                existingIsOnline: existing.isOnline,
-              });
-              if (loc.kind === 'resolved') {
+              //
+              // Skipped on a bare explicit-`location` edit (`rePlaceVenue`
+              // false): the string itself is the venue that ships
+              // (`patchLocation` below), and resolveLocation's isOnline verdict
+              // is a function of day type + has-external + head-count — none of
+              // which changed — never of the string. Letting it through here
+              // would strip the Teams link from a still-internal meeting on a
+              // home day for no reason the owner asked for; his ruling is that a
+              // physical venue coexists with the join link (resolveLocation.ts,
+              // path 3c). The event's own isOnline stays untouched on this path.
+              const loc = rePlaceVenue
+                ? resolveLocation({
+                  profile: context.profile,
+                  startIso: existing.startIso,
+                  intent: 'new_booking',
+                  category: newCategory ?? oldCategory ?? undefined,
+                  participantCount: newCount,
+                  hasExternalAttendee: isExternalNow,
+                  existingLocation: existing.location,
+                  existingIsOnline: existing.isOnline,
+                })
+                : undefined;
+              if (loc?.kind === 'resolved') {
                 if (venueChangeRequested) {
                   // Venue change → apply the FULL verdict verbatim (trust
                   // resolveLocation), NOT gated on "differs from existing": the
@@ -987,13 +1055,15 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               // TRIP place, not the home day-type default (Huddle/Teams) the
               // re-eval above produced. This is the placeholder-update path —
               // adding people to a Boston-week meeting came back "Huddle" because
-              // the re-eval was travel-blind. Mirrors create/move. No-op off-trip.
+              // the re-eval was travel-blind. Mirrors create/move. No-op off-trip,
+              // and skipped on a bare explicit-`location` edit for the same reason
+              // resolveLocation is above — the string is the venue, isOnline stays.
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { getTravelContextForInstant } = require('../../../../utils/workingElsewhere') as
                   typeof import('../../../../utils/workingElsewhere');
                 const tctx = getTravelContextForInstant(existing.startIso, context.profile);
-                if (tctx.isAway && tctx.location && isExternalNow === false) {
+                if (rePlaceVenue && tctx.isAway && tctx.location && isExternalNow === false) {
                   newLocationFromShape = tctx.location;
                   newIsOnlineFromShape = false;
                   logger.info('update_meeting — trip day, location → trip place', { location: tctx.location });
@@ -1014,9 +1084,12 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // v3.5.x — explicit location / is_online change ("update the location to
         // The Bosworth"). Graph's updateMeeting already supports it; this exposes
         // it on the tool. An explicit arg WINS over the shape-derived location
-        // (which only fires on an attendee add/remove). Both omitted → undefined →
-        // the event's CURRENT location is preserved (a subject/attendee change
-        // never wipes the venue).
+        // (which fires on an attendee add/remove that moved the shape, or on an
+        // `is_online` venue change — an explicit `location` string alone, since
+        // 2026-09-09, re-runs detectCategory but never resolveLocation, so there
+        // is no derived venue or online-ness on that path at all). Both omitted →
+        // undefined → the event's CURRENT location is preserved (a
+        // subject/attendee change never wipes the venue).
         const explicitLocation = typeof args.location === 'string' && (args.location as string).trim()
           ? (args.location as string).trim()
           : undefined;
@@ -1189,7 +1262,9 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         if (rawRemove.length > 0) {
           updateChanges.push(`removed ${rawRemove.join(', ')}`);
         }
-        if (newCategoryFromShape) updateChanges.push(`category re-tagged ${newCategoryFromShape} (attendee shape changed)`);
+        // Not "(attendee shape changed)": since 2026-09-09 an explicit venue
+        // string re-classifies too, and the summary feeds the claim-checker.
+        if (newCategoryFromShape) updateChanges.push(`category re-tagged ${newCategoryFromShape} (re-classified after the attendee/venue change)`);
         // v3.6.x — narrate EXPLICIT location / online changes too (not just the
         // shape-derived one), so action_summary — and therefore the claim-checker
         // — can verify a "moved to X" / "switched to online" claim instead of
@@ -1252,6 +1327,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
 
 export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+  // confirm-success-return-does-not-name-who-was-booked-over (2026-09-09) —
+  // set by the colleague-path attendee-conflict Guard below on a confirmed
+  // move-over; read by the SUCCESS return far below to carry the same
+  // `_attendee_busy_note` marker create_meeting's success path now does.
+  let bookedOverAttendees: AttendeeConflictTag[] = [];
         // move-meeting-bare-subject-lookup-same-ambiguity-class (2026-08-14) —
         // move_meeting's own same-subject-collision guard. Unconditional for
         // colleague-path — move has no optional field to gate on; every
@@ -1682,6 +1762,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                       requested_end: newEnd,
                     };
                   }
+                  // confirm-success-return-does-not-name-who-was-booked-over —
+                  // carried to the SUCCESS return's own `_attendee_busy_note`
+                  // at the bottom of this handler, not just this log line.
+                  bookedOverAttendees = attendeeConflicts;
                   // M18 — the requester's confirmed move-over, named and queryable.
                   logger.info('move_meeting colleague-path — moving over attendee conflicts the requester confirmed', {
                     meetingId: args.meeting_id, newStart, newEnd, requester: context.userId,
@@ -2723,9 +2807,32 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // move_meeting is colleague-allowed — can never render a private
         // meeting's real title.
         const movedSubject = (preMoveSubject ?? args.meeting_subject) as string | undefined;
+        // confirm-success-return-does-not-name-who-was-booked-over
+        // (2026-09-09) — merge the requester-confirmed attendee book-over
+        // (`bookedOverAttendees`, set at the colleague-path Guard above) with
+        // planMeeting's own owner-side heads-up (`movePlanOverrideNotice`).
+        // The two are independent triggers (one colleague-path, one the
+        // owner's own slot) that could in principle both fire on the same
+        // move — state both rather than the old code silently keeping only
+        // whichever one happened to be written into this single field.
+        const attendeeBusyNoteParts: string[] = [];
+        if (bookedOverAttendees.length > 0) {
+          attendeeBusyNoteParts.push(`Moved over a conflict the requester confirmed — ${bookedOverAttendeesNote(bookedOverAttendees, viewerEmailFor(context))}. Say plainly what the clash is at the new time; they already said to go ahead, don't re-ask.`);
+        }
+        if (movePlanOverrideNotice) {
+          attendeeBusyNoteParts.push(`Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly what the clash is at the new time and offer to check with them or pick another slot — don't re-ask permission.`);
+        }
+        const attendeeBusyNote = attendeeBusyNoteParts.length > 0 ? attendeeBusyNoteParts.join(' ') : undefined;
+        // 2026-09-09 — the moved-to instant in the ATTENDEE's zone, same key and
+        // helper as create_meeting's success returns (see the booked return in
+        // createMeeting.ts for the incident) — the roster is `preMoveAttendeeEmails`,
+        // the event's own attendees, unchanged by a move. No single zone → no key.
+        // The floating-block owner-move return earlier in this handler carries no
+        // field: a block has no attendees, so there is no zone to render.
         return {
           success: true,
           moved: movedSubject,
+          ...presentationLocalFieldFor(preMoveAttendeeEmails, effectiveStart, userEmail, timezone),
           // #1.5 — the ACTUAL booked time (after the grid-snap at :1376), not the
           // pre-snap arg. So narration AND the orchestrator's mutationActions
           // (→ dateVerifier + #135 honesty backstop) reflect where it truly landed.
@@ -2746,7 +2853,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // v4.1.x (M2) — the same channel now also carries the booking LEVEL:
           // "this books over your optional <X>" / "this double-books you over
           // <Y> with 2 people on it". Same one-time flag, never a re-ask.
-          ...(movePlanOverrideNotice ? { _attendee_busy_note: `Heads up — ${movePlanOverrideNotice}. Moved anyway (your call is total); say plainly what the clash is at the new time and offer to check with them or pick another slot — don't re-ask permission.` } : {}),
+          ...(attendeeBusyNote ? { _attendee_busy_note: attendeeBusyNote } : {}),
           // v1.8.3 — past-tense summary the reply quotes verbatim. Issue #26 bug 1:
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")

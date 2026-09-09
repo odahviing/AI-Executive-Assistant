@@ -90,7 +90,7 @@ Why it matters: layer 1 (filter) keeps Sonnet from SEEING owner-only tools. Laye
 - Layer 1: leave them OUT of `COLLEAGUE_ALLOWED_TOOLS`.
 - Layer 2: the chokepoint reads the same Set; nothing to add (one source of truth).
 
-The 4-name `ownerOnlyTools` Set in `core/assistant.ts:430` is a NARROWER set (tools whose colleague-self rewrite makes no sense — e.g. `manage_preference`). The chokepoint at registry covers everything; the assistant.ts Set is in-handler defense for the specific tools that share AssistantSkill.
+The 4-name `ownerOnlyTools` Set in `core/assistant.ts:518` is a NARROWER set (tools whose colleague-self rewrite makes no sense — e.g. `manage_preference`). The chokepoint at registry covers everything; the assistant.ts Set is in-handler defense for the specific tools that share AssistantSkill.
 
 ---
 

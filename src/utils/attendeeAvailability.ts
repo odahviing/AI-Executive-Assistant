@@ -16,7 +16,9 @@
  * data — back-compat with the no-clip path that existed before v2.3.3.
  */
 
+import { DateTime } from 'luxon';
 import logger from './logger';
+import { renderClockInZone } from './timezoneConvert';
 import type { WeekDay } from './floatingBlocks';
 import type { TimezoneTempSource } from '../db/people';
 
@@ -331,4 +333,69 @@ export function attendeeCheckParams(
 ): { attendeeBusyEmails: string[]; attendeeAvailability?: AttendeeAvailabilityEntry[] } {
   const availability = loadAttendeeAvailabilityForEmails(emails, ownerEmail, fallbackTimezone);
   return { attendeeBusyEmails: emails, ...(availability ? { attendeeAvailability: availability } : {}) };
+}
+
+/**
+ * #24 (2026-07-29) — the ONE zone "their side" of an instant is presented in:
+ * the single distinct non-owner attendee zone, or '' when there is none or more
+ * than one (two zones → no single "their zone" to pick; leave it unset rather
+ * than guess — the #M3 fallback-not-force philosophy). An attendee with no
+ * stored zone arrives here already carrying the owner's zone (#M3 fallback) and
+ * is filtered out by the `!== ownerTz` test — so a missing zone yields NO
+ * presentation, never the owner's clock labelled as theirs.
+ *
+ * Declared ONCE (2026-09-09) for the three surfaces that attach the same
+ * `presentation_local` string (renderClockInZone in this zone): find_available_slots'
+ * `autoPresentTz` default per slot, and — via `presentationLocalFieldFor` below —
+ * every create_meeting / move_meeting success return on the written instant,
+ * idempotent short-circuits included. The write tools carried no attendee-local
+ * rendering at all until then, so the tool line the output checker reads was
+ * owner-local only — it did the ET arithmetic itself (17:00 Jerusalem → "12:00pm
+ * Boston", five hours instead of seven) and rewrote a CORRECT "10:00am Boston"
+ * booked-confirmation into a wrong one (Sharon Duret, 2026-09-08T20:28Z).
+ *
+ * `isoDate` (yyyy-MM-dd, owner-local) resolves each attendee's zone for THAT
+ * day via `attendeeTzForDay` — a dated travel window swaps the trip zone in —
+ * and is what a single booked instant passes. Omitted → the entry's current
+ * effective `timezone`, the only honest choice for a multi-day search that has
+ * no single day to resolve against.
+ */
+export function singleAttendeePresentationZone(
+  entries: ReadonlyArray<Pick<AttendeeAvailabilityEntry, 'timezone' | 'homeTimezone' | 'travelWindow'>> | undefined,
+  ownerTz: string,
+  isoDate?: string,
+): string {
+  const zones = new Set<string>();
+  for (const e of entries ?? []) {
+    const tz = isoDate ? attendeeTzForDay(e, isoDate) : e.timezone;
+    if (tz && tz !== ownerTz) zones.add(tz);
+  }
+  return zones.size === 1 ? [...zones][0] : '';
+}
+
+/**
+ * The `presentation_local` field for ONE written instant — spread into EVERY
+ * create_meeting / move_meeting success return the orchestrator's tool-summary
+ * line renders (turnHelpers.ts appends it as ` [local: …]`), the idempotent
+ * short-circuits included: a colleague following up on their own booking
+ * re-triggers create_meeting and lands there, and the output checker reads that
+ * `OK` line exactly like the first. Zone = singleAttendeePresentationZone on the
+ * instant's owner-local day; no single attendee zone → `{}`, nothing attached,
+ * never the owner's clock labelled as theirs (the reader degrades to owner-local).
+ * `attendeeEmails` may carry gaps (a name-only attendee) — dropped here.
+ */
+export function presentationLocalFieldFor(
+  attendeeEmails: ReadonlyArray<string | undefined>,
+  startIso: string,
+  ownerEmail: string,
+  ownerTz: string,
+): { presentation_local?: string } {
+  const emails = attendeeEmails.filter((e): e is string => typeof e === 'string' && e.length > 0);
+  const tz = singleAttendeePresentationZone(
+    loadAttendeeAvailabilityForEmails(emails, ownerEmail, ownerTz),
+    ownerTz,
+    DateTime.fromISO(startIso, { zone: ownerTz }).toFormat('yyyy-MM-dd'),
+  );
+  const rendered = tz ? renderClockInZone(startIso, ownerTz, tz) : '';
+  return rendered ? { presentation_local: rendered } : {};
 }

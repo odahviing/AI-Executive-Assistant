@@ -79,3 +79,9 @@
 {"ts":"2026-09-06T23:46:54.950Z","runId":"wf_4851e2ec-a37","stamp":"report-written","headline":"Run wf_4851e2ec-a37 — in: 0 tickets, 1 day of logs, 0 backlog re-reads / out: 1 built, 1 bounced (cleared), 2 queued / board: net +1 -> 8 open rows, 8 rulable / your 8 rows await you: 0 from tonight, 0 re-surfaced, 8 found by the loop","pendingOwner":0}
 {"ts":"2026-09-07T10:35:59.640Z","runId":"wf_55ef2447-54f","stamp":"triggered","trigger":"user"}
 {"ts":"2026-09-07T11:15:30.988Z","runId":"wf_55ef2447-54f","stamp":"results-in"}
+{"ts":"2026-09-07T23:05:31.811Z","runId":"wf_a19a0671-5c3","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-07T23:43:37.008Z","runId":"wf_a19a0671-5c3","stamp":"results-in"}
+{"ts":"2026-09-07T23:48:27.710Z","failed":true,"trigger":"cron","exitcode":0,"note":"died after: results-in"}
+{"ts":"2026-09-08T23:06:25.329Z","runId":"wf_36c74883-ad8","stamp":"triggered","trigger":"user"}
+{"ts":"2026-09-08T23:39:59.879Z","runId":"wf_36c74883-ad8","stamp":"results-in"}
+{"ts":"2026-09-08T23:46:02.725Z","runId":"wf_36c74883-ad8","stamp":"report-written","headline":"Run wf_36c74883-ad8 -- in: 0 tickets - 0 day(s) of logs - 4 backlog re-reads\nout: 3 built - 1 already-fixed - 0 built-with-gap - 1 bounced - 0/0 joint-traced - 0 converted - 2 queued\nboard: net -2 -> 10 open rows -- 8 still-real - 2 need a re-read - 0 cite no file - 10 rulable - 0 waiting on a verb\nyour 1 rows await you: 0 from tonight - 1 re-surfaced - 0 found by the loop","pendingOwner":1}

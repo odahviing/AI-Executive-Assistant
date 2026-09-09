@@ -1246,7 +1246,7 @@ const main = async () => {
   )
 
   // ══════════════════════════════════════════════════════════════════════════
-  // Measured 2026-08-19 (wf_b3690654-f4b): 5 of 11 `state.pendingOverflow`
+  // Measured 2026-08-19 (wf_b3690654-f4b): 5 of 11 `args.pendingOverflow`
   // items had shipped via a hand-dispatched backlog run and were swept out of
   // `alreadyBuilt` by the wraps that landed after, so bugger.js's queue screen
   // (which reused `alreadyBuilt` for both jobs) missed all 5 and each rode

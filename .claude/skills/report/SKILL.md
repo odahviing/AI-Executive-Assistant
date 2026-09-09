@@ -7,7 +7,7 @@ description: |
   or similar. Prints `.claude/agent-loop/report.md` as-is (no recomputation),
   then stays loaded to record a decline / defer the moment the owner gives
   one, using the SESSION_STARTER.md recipes. A "build" verdict either queues
-  the row for the next scheduled run (a ledger + state write, still this
+  the row for the next scheduled run (a single ledger write, still this
   door) or, when he wants it now, is named plainly and handed to the full
   Manager skill — same as a "convert" verdict always is. This door never
   dispatches a lane, touches `src/`, or wraps.
@@ -58,21 +58,16 @@ His five verbs, and what this skill does with each:
     - **He wants it built, just not tonight** — "queue it," "next run,"
       "later," or anything naming a future run rather than asking for one
       now (the path above is still there for "build it now"). This stays a
-      record, exactly like decline/defer, never a dispatch: write **both** of
-      these, every time — a `queued-next-run` ledger row with no matching
-      `pendingOverflow` entry drains nothing on the next run (its own
-      documented failure mode, X43):
-      1. `node scripts/ledger-file.cjs --ref "<the row's own ref>" --lane
-         <the row's own lane> --source owner --finding "Owner ruling
-         recorded from the report table, no fresh investigation." --verdict
-         queued-next-run --invariant none --recommend "build — <his reason
-         for queuing it>"`
-      2. `Edit` `.claude/agent-loop/state.json` and append to
-         `pendingOverflow`, shaped for `args.issues`: `{id: "<the row's own
-         ref>", lane: "<the row's own lane>", severity: "<the row's own
-         severity, or "medium" if none was stated>", clarity: "clear",
-         source: "owner", symptom: "<the row's own finding, one sentence>",
-         evidence: "<the row's own rootCause / file citation>"}`.
+      record, exactly like decline/defer, never a dispatch: write ONE
+      ledger row and nothing else — `ledger-stats.cjs --queued --json`
+      derives the `args.issues`-shaped drain queue off it fresh on every
+      future read (X216; there is no second, hand-synced list to also write):
+      `node scripts/ledger-file.cjs --ref "<the row's own ref>" --lane
+      <the row's own lane> --severity "<the row's own severity, or medium if
+      none was stated>" --source owner --finding "Owner ruling recorded
+      from the report table, no fresh investigation." --verdict
+      queued-next-run --invariant none --recommend "build — <his reason for
+      queuing it>"`
 - **`resend`** — same boundary as `build`: real dispatch work (the lane
   needs to be sent back with what it got wrong), not a record. Full Manager
   skill.
@@ -102,7 +97,6 @@ budget outside the table, so a wrong shape is caught here, not by him.
 This skill never dispatches a lane, never edits anything under `src/`, and
 never wraps. Read `report.md`, read `ledger-stats.cjs --open` when a `build`
 verdict needs the RE-READ check above, write a `declined`/`deferred`/
-`queued-next-run` ledger row (the last paired with a `state.pendingOverflow`
-append, never one without the other), and update the one row and headline on
+`queued-next-run` ledger row, and update the one row and headline on
 `report.md` that ruling changed (step 3) — nothing else. Anything bigger is
 the Manager skill's session.

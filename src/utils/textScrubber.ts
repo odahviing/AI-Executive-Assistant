@@ -3,7 +3,8 @@
  *
  * Strips content that should NEVER reach any user, on any channel:
  *   - Sentinel tokens (NO_ISSUES, ALL_CAPS_SNAKE_CASE in general)
- *   - Tool names (analyze_calendar, get_free_busy, ... all 57 of them)
+ *   - Tool names (analyze_calendar, get_free_busy, … — the TOOL_NAME_SEED floor
+ *     below, plus every name `registerToolNames` receives from `getSkillTools`)
  *   - "- " separators (AI writing tell, see systemPrompt PUNCTUATION rule)
  *   - Leftover orphan backticks, empty lines, doubled whitespace
  *   - The "Name (slack_id: ID)" inbound disambiguation label, if echoed back
@@ -21,18 +22,43 @@
  */
 
 import { DateTime } from 'luxon';
+import logger from './logger';
 
-// Tool names that must never appear verbatim in user-facing text. Keep in sync
-// with `name: '...'` tool definitions across src/skills/ + src/core/assistant.ts
-// + src/tasks/*.
-const TOOL_NAMES = [
+// Tool names that must never appear verbatim in user-facing text.
+//
+// INVARIANT — the seed below is the FLOOR; `registerToolNames` is what keeps it
+// current. `getSkillTools` (skills/registry.ts) calls it with every name it is about
+// to hand the model, on every turn and for both roles, so a name any tool declares is
+// in the scrub set from the first tool build onward whether or not it is typed here.
+// The seed is what holds BEFORE that first call (boot-window text from producers
+// other than the model — cron output, replayed notes) and on any path that never
+// reaches it. The set only grows: nothing a producer once shipped ever comes back
+// out. Checkable, not aspirational: `registerToolNames` is the one writer to
+// `toolNames` and never deletes; the registry imports this module, never the
+// reverse (utils do not import from skills), which is why the push-down runs in
+// that direction.
+//
+// LIVE (snapshot 2026-09-09) — every name an orchestrator tool declared that day:
+// the `getTools()` of src/skills/*, src/core/assistant.ts, src/tasks/{skill,crons}.ts,
+// src/connections/slack/index.ts. Forced-verdict tools (`classify`, `verdict`,
+// `pick_category`, …) are not here on purpose: that model turn's text never ships
+// (G4), so there is nothing to scrub.
+//
+// Only a name containing an underscore may be listed: `\b…\b` on a plain word also
+// strips it out of ordinary prose. `news` (skills/news.ts:733) is a real English
+// word and is deliberately ABSENT — a bare "news" in a reply is unreadable as a
+// tool name anyway, while stripping it would turn "any news on the venue?" into
+// "any on the venue?" (G5: a wrong fire must miss, never corrupt). Enforced in code
+// for registered names (`registerToolNames` drops them); by inspection for this seed.
+const TOOL_NAME_SEED = [
   // Calendar / meeting
   'analyze_calendar', 'book_floating_block',
   'check_calendar_health', 'check_join_availability',
-  'create_meeting', 'delete_meeting', 'escalate_to_user',
-  'find_available_slots', 'get_calendar', 'get_free_busy',
+  'create_meeting', 'delete_meeting',
+  'find_available_slots', 'get_calendar', 'get_free_busy', 'hold_slot',
   'move_meeting', 'set_event_category', 'update_meeting', 'manage_calendar_issue',
-  // Slack lookups
+  'revert_last_auto_move', 'get_work_schedule_overrides', 'set_work_schedule_override',
+  // Slack lookups (connections/slack/index.ts)
   'find_slack_channel', 'find_slack_user',
   // Knowledge
   'manage_knowledge', 'classify_document',
@@ -47,12 +73,18 @@ const TOOL_NAMES = [
   'get_briefing', 'send_briefing_now',
   'create_approval', 'resolve_approval', 'list_pending_approvals',
   // Outreach + web + summary
-  'message_colleague', 'web_extract', 'web_search',
+  'message_colleague', 'web_extract', 'web_search', 'web_research',
   'classify_summary_feedback', 'learn_summary_style', 'list_speaker_unknowns',
   'share_summary', 'update_summary_draft',
-  // Venue (v2.9)
+  // Venue
   'find_venue', 'rank_venue',
-  // Legacy names — kept so any leak still gets scrubbed during the rollout
+  // RETIRED — no tool declares these to the model any more, yet notes, tasks and
+  // summaries persisted while they existed can still echo them into user-facing
+  // text, which is why the scrub set keeps them. (`cancel_task` / `edit_task`
+  // also live on as internal dispatch aliases inside update_task,
+  // tasks/skill.ts:1714-1715 — internal only, never shipped as a name.)
+  // A name here that is live again belongs above, not here.
+  'escalate_to_user',
   'cancel_task', 'edit_task',
   'create_routine', 'delete_routine', 'update_routine', 'get_routines',
   'get_calendar_issues', 'update_calendar_issue',
@@ -61,7 +93,39 @@ const TOOL_NAMES = [
   'get_pending_requests', 'resolve_request', 'store_request', 'file_document',
   'classify_engagement',
 ];
-const TOOL_NAME_RE = new RegExp(`\\b(?:${TOOL_NAMES.join('|')})\\b`, 'g');
+const toolNames = new Set<string>(TOOL_NAME_SEED);
+// Rebuilt only when `toolNames` actually grows — see `registerToolNames`.
+let TOOL_NAME_RE = buildToolNameRe();
+function buildToolNameRe(): RegExp {
+  return new RegExp(`\\b(?:${[...toolNames].join('|')})\\b`, 'g');
+}
+// The tool-name alphabet (Anthropic's `^[a-zA-Z0-9_-]{1,64}$`): nothing that passes
+// it can be a regex metacharacter once interpolated into TOOL_NAME_RE.
+const TOOL_NAME_SHAPE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Push-down from `getSkillTools` (skills/registry.ts): the tool names about to ship
+ * to the model this turn, so the scrub set matches what the model can actually emit
+ * instead of a hand-typed copy of it. Hot path (every turn), so the common case —
+ * every name already known — is N `Set.has` lookups and one empty array; the regex
+ * is rebuilt only on genuine growth, with one info log per growth so a name that
+ * arrived late is visible in the log rather than silently absorbed (G7).
+ *
+ * Structured tokens only: a name must carry an underscore (the seed's rule — a plain
+ * word would be stripped out of prose) and fit TOOL_NAME_SHAPE, so a malformed name
+ * is dropped here instead of throwing inside every tool build (G5). Never removes.
+ */
+export function registerToolNames(names: string[]): void {
+  const added: string[] = [];
+  for (const name of names) {
+    if (toolNames.has(name) || !name.includes('_') || !TOOL_NAME_SHAPE.test(name)) continue;
+    toolNames.add(name);
+    added.push(name);
+  }
+  if (added.length === 0) return;
+  TOOL_NAME_RE = buildToolNameRe();
+  logger.info('textScrubber: tool-name scrub set grew', { added, size: toolNames.size });
+}
 // Matches ALL_CAPS_WITH_UNDERSCORES tokens (2+ segments). Real prose never
 // uses this shape; known internal flags always do. Safe to strip generically.
 const SENTINEL_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b/g;

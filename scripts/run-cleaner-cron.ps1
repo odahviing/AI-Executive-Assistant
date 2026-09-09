@@ -4,6 +4,16 @@
 # run-history stamps (those are scoped to bugger/feature Workflow runs only),
 # just a log file and an exit-code check.
 #
+# FINDINGS REACH THE LEDGER NOW (was log-file-only until this fix): the
+# interactive path has a Manager chat watching the cleaner's return to write
+# ledger rows and report.md's `pending owner` rows per SKILL.md's cleaner
+# entry -- an unattended cron dispatch has no such chat, so before this fix a
+# needs-lane finding could never reach a future build (nothing fed `--queued`)
+# and a needs-owner/needs-judgment finding could never reach the owner at all
+# outside someone opening this exact log file by hand. The $prompt below now
+# has the SAME top-level session stand in for that missing chat, in one turn:
+# dispatch the cleaner subagent, then apply the cleaner-verdict table itself.
+#
 # TIMEZONE: always Friday 4am wherever the owner (and this laptop) physically
 # is -- the Task Scheduler trigger itself does this, since a local weekly
 # trigger automatically follows the machine's own OS timezone if it changes
@@ -47,7 +57,7 @@ $env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = "10800000"
 
 Set-Location $repoPath
 
-$prompt = "Run the cleaner hygiene sweep now (unscoped -- everything new since its own last watermark, state.lastCleanSha). This is an unattended weekly run: follow cleaner.md exactly, act on what's provable, report needs-lane/needs-owner/needs-judgment findings as usual, and leave everything uncommitted for the owner to review and wrap by hand later. Do not commit, do not push, do not wrap."
+$prompt = "Run the cleaner hygiene sweep now (unscoped -- everything new since its own last watermark, state.lastCleanSha), per manager/SKILL.md's own 'cleaner' entry AND cleaner.md end to end -- this is an unattended weekly run with no separate Manager chat to do the parts SKILL.md assigns to the dispatcher, so YOU do both: (1) first check its REFUSE-while-live precondition yourself (state.lastRun.status is 'running', or state.inFlight is non-empty) -- if it applies, stop immediately and say so, do nothing else; (2) otherwise dispatch Agent({subagent_type:'cleaner'}) for the unscoped sweep; (3) when it returns, in this SAME turn, write a ledger.jsonl row (node scripts/ledger-file.cjs) for every finding per SKILL.md's cleaner-verdict table (this is what makes a needs-lane finding reachable by a future build, and a needs-owner/needs-judgment finding reach his desk -- a finding that stays only in this log is one he will never see), and rule on the watermark per cleaner.md C4, printing which of the three watermark answers applies. Leave everything uncommitted for the owner to review and wrap by hand later. Do not commit, do not push, do not wrap."
 
 "=== Cleaner cron run started: $timestamp ===" | Out-File -FilePath $logFile -Encoding utf8
 

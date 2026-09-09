@@ -238,7 +238,7 @@ export type SearchRejectLabel =
  * `return` below is now checked against the declared vocabulary above.
  */
 export function mapVerdictToRejectLabel(
-  kind: string | undefined,
+  kind: RuleViolationKind | undefined,
   dayType: 'office' | 'home' | 'other',
 ): SearchRejectLabel {
   switch (kind) {
@@ -252,8 +252,31 @@ export function mapVerdictToRejectLabel(
     case 'category_per_day': return 'category_per_day';
     case 'category_per_week': return 'category_per_week';
     case 'vacation_or_off_day': return 'wrong_day_type';
-    case 'owner_busy_collision':
-    default: return 'owner_busy_collision';
+    case 'owner_busy_collision': return 'owner_busy_collision';
+    // checkslot-verdict-translator-answers-owner-busy-for-anything-it-does-not-know
+    // (2026-09-09) — `attendee_busy_collision` is a member of RuleViolationKind
+    // for completeness, but checkSlot itself never sets it as violation_kind
+    // (the search walker tags per-attendee conflicts separately, never
+    // through this translator — see the type's own doc above). Kept as an
+    // explicit case, not folded into a catch-all, so it costs nothing to the
+    // exhaustiveness check below if that ever changes.
+    case 'attendee_busy_collision': return 'owner_busy_collision';
+    case undefined: return 'owner_busy_collision';
+    default: {
+      // Exhaustiveness guard, not a value guess: every member of
+      // RuleViolationKind above is a real `case`, so `kind` here can only be
+      // reached by a member THIS SWITCH DOES NOT KNOW ABOUT — a rename or an
+      // addition to the type that this function wasn't updated for. That used
+      // to fall through to `return 'owner_busy_collision'` silently: a
+      // colleague told "in conflict with another meeting on his calendar" —
+      // naming a clash that may not exist — for a rule that was never
+      // actually owner_busy_collision. TypeScript now refuses to compile this
+      // file the moment a kind is added/renamed without a matching case
+      // above (`kind` narrows to `never` only when every member is handled);
+      // the throw is defense-in-depth for the same fact at runtime.
+      const _exhaustive: never = kind;
+      throw new Error(`mapVerdictToRejectLabel — unmapped checkSlot violation_kind: ${String(_exhaustive)}`);
+    }
   }
 }
 

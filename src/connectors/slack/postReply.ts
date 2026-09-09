@@ -642,21 +642,21 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       const inboundPreview = inboundAttachmentNote && inboundAttachmentNote.trim().length > 0
         ? `[Image${inboundAttachmentNote}] ${rawInboundPreview}`
         : rawInboundPreview;
-      const distinctTools = [...new Set(
-        (result.toolSummaries ?? [])
-          .map(s => s.match(/^\[([a-z0-9_]+)/)?.[1] ?? '')
-          .filter(name => name.length > 0)
-      )];
-      const toolHint = distinctTools.length > 0 ? ` (${distinctTools.join(', ')})` : '';
       // v3.1.2 fix (#117) — ONE shadow per turn, not two. The v3.0.8 split
       // ("shadow post-gate", cc1ca30) put inbound + outbound in separate
       // shadowNotify calls, each rendering its own "Conversation with X"
       // header — owner saw a doubled DM stream. Re-merged: one post carrying
       // both sides under a single conversationHeader. If inbound text is
       // empty (reaction-only event), the outbound stands alone.
+      //
+      // No tool-name suffix here (removed 2026-09-09). Every Connection send
+      // verb runs formatForSlack → scrubInternalLeakage, which strips tool
+      // names by design, so the raw-name list this line carried since 2.0.7
+      // only ever rendered as empty parentheses. Write actions post their own
+      // receipts (createMeeting 'Meeting booked', outreach 'Message sent').
       const combinedDetail = inboundPreview.length > 0
-        ? `${who} said: "${inboundPreview}"\nI → ${who}: "${replyPreview}"${toolHint}`
-        : `I → ${who}: "${replyPreview}"${toolHint}`;
+        ? `${who} said: "${inboundPreview}"\nI → ${who}: "${replyPreview}"`
+        : `I → ${who}: "${replyPreview}"`;
       await shadowNotify(profile, {
         channel: channelId,
         threadTs,

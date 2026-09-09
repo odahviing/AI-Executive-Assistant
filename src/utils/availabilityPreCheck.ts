@@ -37,6 +37,7 @@ import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
 import { extractTimes, extractDates, type DateMatch } from './dateTimeExtract';
+import { getOfferedSlots, type OfferedSlot } from './offeredSlotsStash';
 
 // ── Detection regex ────────────────────────────────────────────────────────
 // Date/time extraction regex + helpers moved to dateTimeExtract.ts (o#260, G9)
@@ -518,10 +519,13 @@ export async function precheckAvailability(params: {
    */
   requesterTimezone?: string;
   // v4.2.x — thread identity, for the alternatives block's offered-slots binding
-  // (nearbyAlternatives → recordProposedAlternatives). BOTH optional on purpose:
-  // the recorder returns early without a channelId (`recordProposedAlternatives`), so a caller
-  // that doesn't have one degrades to "alternatives offered, not bound" and nothing
-  // throws. No guard here refuses their absence.
+  // (nearbyAlternatives → recordProposedAlternatives) and, since 2026-09-09, for
+  // READING that same stash before the verdicts (`bindPairsToStandingOffers`) so a
+  // pick of an offered slot is checked on the offer's date. BOTH optional on
+  // purpose: the recorder returns early without a channelId
+  // (`recordProposedAlternatives`) and the read is skipped, so a caller that
+  // doesn't have one degrades to "alternatives offered, not bound; pairs as
+  // extracted" and nothing throws. No guard here refuses their absence.
   channelId?: string;
   threadTs?: string;
   /**
@@ -695,6 +699,32 @@ export async function precheckAvailability(params: {
         pairs: pairs.map(p => `${p.date}T${p.time}${p.other ? ` OR ${p.other.date}T${p.other.time}` : ''}`),
       });
     }
+  }
+
+  // 2026-09-09 (Sharon Duret, 2026-09-08T18:45Z and T20:27Z) — bind a pair to
+  // the still-standing offer it names. The Haiku normalizer resolves a weekday
+  // word against TODAY, and twice in one thread that put this pre-check a week
+  // early: the search had offered "Tue 15 Sep 15:45 EDT" for "next week", the
+  // colleague picked "Tuesday 3:45pm Boston time", and the pair tested here was
+  // 2026-09-08T22:45 — that same Tuesday evening — owner_busy_collision, the
+  // hard-block ledger armed, and a FREE slot was retracted to her face. In the
+  // SAME turn the drafter's binding block (buildTurnContext.ts's
+  // offeredSlotsBlock) declared the offer's date authoritative and, one wave
+  // later, create_meeting booked 09-16 while this pre-check tested 09-09 — one
+  // phrase, two dates, one turn (M1). The offered-slots stash IS that
+  // authority; this pre-check now reads it too instead of re-deriving the date.
+  //
+  // Deterministic and structured — no natural language is read (W4): a pair is
+  // rebound only when EXACTLY ONE live offer shares its owner-local clock AND
+  // weekday and sits on a LATER date. Same weekday+clock, earlier date, is what
+  // nearest-occurrence resolution makes of a pick; a colleague naming a NEW day
+  // ("Thursday 3:45?") differs in weekday, and one naming a later same-weekday
+  // date outright ("the 22nd instead") resolves AFTER the offer — neither
+  // rebinds. An undecided frame whose OTHER reading is the match is decided by
+  // the offer (the clock they wrote is the one Maelle offered them in their own
+  // zone), so the fork collapses to that instant.
+  if (params.channelId) {
+    pairs = bindPairsToStandingOffers(pairs, getOfferedSlots(params.channelId, params.threadTs) ?? [], tz);
   }
 
   const verdicts: SlotVerdict[] = [];
@@ -1048,7 +1078,7 @@ export async function precheckAvailability(params: {
   // Same facts, second surface: the synthetic tool-summary lines (see the
   // AvailabilityPreCheckResult field doc). Rendered here so the prompt block and
   // the checker-visible lines come from the same verdicts and can never disagree.
-  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, durationMinutes);
+  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, requesterTz, durationMinutes);
   // v4.2.2 — log the TIER split, not just the count. `notBookable` sums the HARD
   // tier and the owner-overridable NOT CLEAN tier, and that ambiguity cost a day of
   // diagnosis: `bookable:0, notBookable:3` on 2026-07-27 (:187) was read as three
@@ -1098,17 +1128,33 @@ export async function precheckAvailability(params: {
  * instant would state a time in a frame it is not in. `same clock read in
  * <zone>` names only which reading produced the verdict, exactly as the
  * `frames` log line at :648 renders the same pair.
+ *
+ * 2026-09-09 — every instant (verdict and alternative) ALSO carries the asker's
+ * own clock as ` [local: <renderClockInZone>]`, byte-identical to the suffix the
+ * orchestrator's summary renderer appends from a slot's `presentation_local`
+ * (turnHelpers.ts, find_available_slots case), so the checker reads ONE format
+ * whichever surface produced the line. Same renderer as the prompt block's "(= …
+ * where they are)" (`requesterClock`), so the two surfaces cannot disagree.
+ * Absent when the asker shares the owner's zone or has none stored — then no
+ * suffix at all, never the owner's clock labelled as theirs. It had no zone but
+ * the owner's until now, and a correct "3:45pm Boston" restatement of a
+ * `2026-09-15T22:45 Asia/Jerusalem` line could only be guessed at, not verified.
  */
 function renderToolSummaryLines(
   verdicts: SlotVerdict[],
   alternatives: NearbyAlternative[],
   tz: string,
+  requesterTz: string,
   fallbackDurationMin: number,
 ): string[] {
   // `tz` is closed over rather than passed: every instant reaching here is
   // already owner-local, so there is no call site that may stamp another zone.
+  const localPart = (date: string, time: string): string => {
+    const theirs = requesterClock(date, time, tz, requesterTz);
+    return theirs ? ` [local: ${theirs}]` : '';
+  };
   const clause = (o: SlotOutcome): string => {
-    const head = `${o.date}T${o.time} ${tz} dur=${o.durationMin ?? fallbackDurationMin}m`;
+    const head = `${o.date}T${o.time} ${tz}${localPart(o.date, o.time)} dur=${o.durationMin ?? fallbackDurationMin}m`;
     if (o.bookable) {
       return typeof o.maxFreeMinutes === 'number'
         ? `${head}: bookable maxFree=${o.maxFreeMinutes}m`
@@ -1124,12 +1170,50 @@ function renderToolSummaryLines(
     const starts = alternatives
       .map(a => DateTime.fromISO(a.start, { zone: tz }))
       .filter(dt => dt.isValid)
-      .map(dt => dt.toFormat("yyyy-MM-dd'T'HH:mm"));
+      .map(dt => `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'))}`);
     if (starts.length > 0) {
       lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}]`);
     }
   }
   return lines;
+}
+
+/**
+ * 2026-09-09 — see the call site in `precheckAvailability` for the incident and
+ * the rule. Pure: a pair with no single matching live offer comes back as-is; a
+ * rebound pair keeps its asked length and gap flag, drops the undecided frame
+ * (`other`/`statedClock` — the offer settled it) and takes the offer's date.
+ * Owner-local throughout: `OfferedSlot.startIso` is the walker's offset-tagged
+ * instant, read in `ownerTz` exactly as `recordOfferedSlots` renders its display.
+ */
+function bindPairsToStandingOffers(pairs: Pair[], offered: OfferedSlot[], ownerTz: string): Pair[] {
+  if (pairs.length === 0 || offered.length === 0) return pairs;
+  const offers = offered
+    .map(o => DateTime.fromISO(o.startIso, { setZone: true }).setZone(ownerTz))
+    .filter(dt => dt.isValid)
+    .map(dt => ({ date: dt.toFormat('yyyy-MM-dd'), time: dt.toFormat('HH:mm'), weekday: dt.weekday }));
+  const offerFor = (r: { date: string; time: string }) => {
+    const dt = DateTime.fromISO(`${r.date}T${r.time}`, { zone: ownerTz });
+    if (!dt.isValid) return null;
+    const hits = offers.filter(o => o.time === r.time && o.weekday === dt.weekday && o.date > r.date);
+    return hits.length === 1 ? hits[0] : null;
+  };
+  return pairs.map(pair => {
+    const readings = [{ date: pair.date, time: pair.time }, ...(pair.other ? [pair.other] : [])];
+    const bound = readings.map(offerFor).filter((o): o is NonNullable<typeof o> => o !== null);
+    if (bound.length !== 1) return pair;
+    logger.info('availabilityPreCheck — pair rebound to a still-standing offer', {
+      resolved: readings.map(r => `${r.date}T${r.time}`),
+      offer: `${bound[0].date}T${bound[0].time}`,
+      ownerTz,
+    });
+    return {
+      date: bound[0].date,
+      time: bound[0].time,
+      ...(pair.durationMin ? { durationMin: pair.durationMin } : {}),
+      ...(pair.gapQuery ? { gapQuery: true } : {}),
+    };
+  });
 }
 
 interface Pair {

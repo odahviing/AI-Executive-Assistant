@@ -206,6 +206,26 @@ export interface OrchestratorOutput {
 }
 
 /**
+ * last-resort-fallback-english-only-non-english-thread (2026-09-09) — the
+ * orchestrator's two canned honesty fallbacks below (no tools/no text; every
+ * tool call failed) were hardcoded English, unlike every other canned line in
+ * this codebase (claimChecker.ts's `genericHonestHedge`, the coda/hedge
+ * sentinels) which detect and mirror the thread's script. Same detector
+ * (`detectMessageLanguage`, W4 — dominant Unicode script, no LLM call), same
+ * three specially-handled scripts (Hebrew/Russian/Arabic) as every sibling —
+ * a Latin-script language other than English (e.g. German, Spanish) has no
+ * script signal to key off and falls through to English, matching the
+ * accepted limitation `genericHonestHedge` already carries.
+ */
+function localizedFallback(userMessage: string, lines: { en: string; he: string; ru: string; ar: string }): string {
+  const lang = detectMessageLanguage(userMessage);
+  if (lang === 'Hebrew') return lines.he;
+  if (lang === 'Russian') return lines.ru;
+  if (lang === 'Arabic') return lines.ar;
+  return lines.en;
+}
+
+/**
  * The main agent loop.
  * Tools come from active skills — determined by the user's profile YAML.
  * Zero hardcoded business logic here.
@@ -322,6 +342,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // payload.deferred_action so the resolver can replay the booking on
   // approve. The "redirect URL token" pattern in code — no Sonnet copying.
   let lastDeferredActionHint: { tool: string; args: Record<string, unknown> } | null = null;
+  // log-move-meeting-blind-retry-loop (2026-09-07, Daniel Sharabi) —
+  // checkSameSubjectCollision (moveMeeting.ts) refuses an ambiguous
+  // same-subject match and tells the model in the error TEXT to ask, not
+  // guess — but nothing enforced it: pre-fix the model kept re-calling
+  // move_meeting/update_meeting with a different guessed meeting_id (the
+  // one field it can vary), 6x in one turn, burning ~3min/25K tokens before
+  // the iteration ceiling forced an escalation. Fingerprint on tool+subject,
+  // NOT meeting_id (the thing being guessed) or the full args (idempotency
+  // guards below use exact-args matching for a reason that doesn't apply
+  // here — the whole bug is that the args keep changing). Turn-scoped.
+  const ambiguousMeetingSubjectAttempts = new Map<string, { count: number; candidates?: unknown }>();
   let iteration = 0;
   const MAX_ITERATIONS = 10;
 
@@ -573,6 +604,43 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
+      // ── AMBIGUITY GUARD: same-subject collision, don't blind-retry
+      // (log-move-meeting-blind-retry-loop, 2026-09-07) ── see the Map's own
+      // comment above. Short-circuits the SECOND-and-later attempt at an
+      // already-flagged ambiguous subject before it reaches the tool (and the
+      // Graph calls inside it) at all.
+      if (toolUse.name === 'move_meeting' || toolUse.name === 'update_meeting') {
+        const subjectArg = (toolUse.input as any)?.meeting_subject;
+        if (typeof subjectArg === 'string' && subjectArg.trim()) {
+          const fp = `${toolUse.name}::${subjectArg.trim().toLowerCase()}`;
+          const seen = ambiguousMeetingSubjectAttempts.get(fp);
+          if (seen) {
+            seen.count++;
+            logger.warn('Orchestrator — repeated guess on an already-flagged ambiguous meeting subject, short-circuiting', {
+              threadTs, tool: toolUse.name, subject: subjectArg, attempt: seen.count,
+            });
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: JSON.stringify({
+                success: false,
+                error: 'ambiguous_meeting_subject_repeat',
+                meeting_subject: subjectArg,
+                candidates: seen.candidates,
+                _note: `You already got told "${subjectArg}" is ambiguous (more than one meeting with that name) earlier in THIS turn. Calling ${toolUse.name} again with a different guessed meeting_id is still guessing, not solving it — STOP calling this tool for "${subjectArg}" and ask the human which one they mean instead.`,
+              }),
+            });
+            // "FAILED" in the summary text (not just the JSON result) is
+            // deliberate: the grounded-fallback filter (below, same file) and
+            // the claim-checker both read this compact line, not the raw JSON
+            // sent to the model — omitting it would make a never-executed
+            // move/update look like a confirmed success downstream.
+            toolCallSummaries.push(`[${toolUse.name} FAILED] ${subjectArg} — repeated ambiguous-subject guess, short-circuited`);
+            continue;
+          }
+        }
+      }
+
       // ── RATE LIMIT: colleague tool calls ──
       if (input.senderRole === 'colleague' && !input.isOwnerInGroup) {
         const { checkAndRecord } = await import('../../utils/rateLimit');
@@ -606,7 +674,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
               message: `Respond briefly: "Let me check with ${ownerFirst} and come back to you on this." Do NOT mention rate limits, pausing, or needing to slow down.`,
             }),
           });
-          toolCallSummaries.push(`[${toolUse.name}] rate-limited — deferred to owner`);
+          // verify-flagged-fallback-treats-rate-limit-as-success (2026-09-09)
+          // — "FAILED" here is the same deliberate marker the ambiguous-
+          // subject-repeat short-circuit above uses: the tool never actually
+          // ran, so both the grounded-fallback filter (below, same file) and
+          // the claim-checker must read this as a non-execution, not a
+          // confirmed success. Omitting it let a rate-limited, deferred
+          // move_meeting/create_meeting still earn the fallback's "done" verb
+          // for a tool that was never called.
+          toolCallSummaries.push(`[${toolUse.name} FAILED] rate-limited — deferred to owner`);
           continue;
         }
       }
@@ -726,6 +802,25 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             args: toolInputForCall,
             result,
             writeTools: WRITE_TOOLS,
+          });
+        }
+      }
+
+      // log-move-meeting-blind-retry-loop (2026-09-07) — record the FIRST
+      // ambiguous_meeting_subject for this tool+subject so a same-turn
+      // repeat is caught by the pre-call guard above instead of re-hitting
+      // the tool (and its Graph reads) again.
+      if (
+        (toolUse.name === 'move_meeting' || toolUse.name === 'update_meeting')
+        && result && typeof result === 'object'
+        && (result as Record<string, unknown>).error === 'ambiguous_meeting_subject'
+      ) {
+        const subjectArg = (toolUse.input as any)?.meeting_subject;
+        if (typeof subjectArg === 'string' && subjectArg.trim()) {
+          const fp = `${toolUse.name}::${subjectArg.trim().toLowerCase()}`;
+          ambiguousMeetingSubjectAttempts.set(fp, {
+            count: 1,
+            candidates: (result as Record<string, unknown>).candidates,
           });
         }
       }
@@ -871,11 +966,19 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // v3.4.7 — record requesters the resolver relayed a NON-reject approval
         // outcome to this turn, so a same-turn message_colleague to them is
         // suppressed (the double-notify guard at the top of the loop; Ayala Geni
-        // 2026-06-22). Deterministic, no clock: requester_notified_at is stamped
-        // ONLY on a confirmed relay send, and state=awaiting_colleague means the
-        // amend counter was relayed — either way the requester already heard the
-        // substantive content. A failed/skipped relay leaves both unset, so
-        // message_colleague stays available (never a silent drop).
+        // 2026-06-22).
+        // requester-notified-boolean-ignores-failed-relay (2026-09-09) — this
+        // used to arm on `row.state === 'awaiting_colleague'` as a stand-in for
+        // "the amend counter was relayed", but resolver.ts flips the row to
+        // awaiting_colleague BEFORE it attempts the relay send, so a relay whose
+        // send genuinely failed still armed this guard — a same-turn
+        // message_colleague retry got HARD-BLOCKED (`requester_already_notified_
+        // by_resolver`, below) even though the requester had heard nothing.
+        // `result.requester_notified` (tasks/skill.ts's resolve_approval case)
+        // is the fixed, authoritative version of this exact question — sourced
+        // from resolver.ts's own `requester_notify_outcome === 'sent'` — so this
+        // reuses it instead of re-deriving a second, independently-stale proxy
+        // from row state.
         // AP1 (2026-07-23) — a `reject` relay is EXCLUDED here: it's a terminal
         // outcome notice, not content-bearing, so it must NOT arm the guard.
         // Arming it silently swallowed a DISTINCT follow-up message_colleague —
@@ -887,17 +990,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         if (toolUse.name === 'resolve_approval' && input.senderRole === 'owner'
             && result && typeof result === 'object' && (result as { ok?: boolean }).ok === true) {
           try {
-            const reqId = (result as { request_id?: string; approval_id?: string }).request_id
-              ?? (result as { approval_id?: string }).approval_id;
             const verdict = (toolUse.input as { verdict?: string })?.verdict;
-            if (typeof reqId === 'string' && verdict !== 'reject') {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { getRequest } = require('../../db/requests') as typeof import('../../db/requests');
-              const row = getRequest(reqId);
-              const requester = row?.requester_slack_id;
-              if (requester && requester !== profile.user.slack_user_id
-                  && (row!.requester_notified_at || row!.state === 'awaiting_colleague')) {
-                relayedRequestersThisTurn.add(requester);
+            const requesterNotifiedByResolver = (result as { requester_notified?: boolean }).requester_notified === true;
+            if (verdict !== 'reject' && requesterNotifiedByResolver) {
+              const reqId = (result as { request_id?: string; approval_id?: string }).request_id
+                ?? (result as { approval_id?: string }).approval_id;
+              if (typeof reqId === 'string') {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { getRequest } = require('../../db/requests') as typeof import('../../db/requests');
+                const requester = getRequest(reqId)?.requester_slack_id;
+                if (requester && requester !== profile.user.slack_user_id) {
+                  relayedRequestersThisTurn.add(requester);
+                }
               }
             }
           } catch (err) {
@@ -926,7 +1030,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       });
 
       // Build compact summary for conversation history persistence
-      toolCallSummaries.push(summarizeToolCall(toolUse.name, toolUse.input as Record<string, unknown>, result));
+      toolCallSummaries.push(summarizeToolCall(toolUse.name, toolUse.input as Record<string, unknown>, result, profile.user.timezone));
 
       // v2.8.3+ — rich mutation record for the claim-checker retry hint.
       // Mutations only (create/move/update/delete/finalize/book_floating_block);
@@ -1159,7 +1263,47 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           const m = s.match(/^\[([a-z0-9_]+)/);
           return m ? m[1] : 'something';
         });
-        const distinct = [...new Set(toolNames)];
+        // log-grounded-fallback-ignores-tool-failure (2026-09-07) — the
+        // fallback used to build `distinct` from raw tool NAMES with no
+        // success check, so a tool that failed every time it was called this
+        // turn still earned its verbMap "done" verb (move_meeting FAILED 6/6,
+        // update_meeting FAILED, fallback said "moved the meeting and updated
+        // the meeting" — claim-checker caught it a line later, but the
+        // fallback itself had no such check). Every summary line already
+        // carries this: renderToolSummary (turnHelpers.ts) stamps ANY tool
+        // whose result had a string `.error` as `[<tool> FAILED: ...]` before
+        // its per-tool branch even runs, and a mutation's own OK/FAILED
+        // branch does the same (the `[<tool> OK ...]` convention
+        // extractActionTape's MUTATION_OK_RE already reads). Drop a name from
+        // the fallback's candidate set when EVERY occurrence of it this turn
+        // was FAILED — a name with even one confirmed non-FAILED call still
+        // earns its verb (a partial success is still a real thing that
+        // happened). Anchored to the tape-line prefix on purpose: a summary
+        // embeds caller-supplied text after the name (renderToolSummary's
+        // default branch prints the first argument's value —
+        // `[create_task: title=chase the FAILED payment]`), so a bare
+        // `/ FAILED/` read a task title as a failed call. Every genuine
+        // FAILED line is stamped `[<tool> FAILED` at position 0
+        // (renderToolSummary, and the two short-circuit pushes above).
+        const isFailedLine = (s: string): boolean => /^\[[a-z0-9_]+ FAILED\b/.test(s);
+        const failedOccurrenceNames = new Set(
+          toolCallSummaries
+            .filter(isFailedLine)
+            .map(s => s.match(/^\[([a-z0-9_]+)/))
+            .filter((m): m is RegExpMatchArray => m !== null)
+            .map(m => m[1]),
+        );
+        const nonFailedOccurrenceNames = new Set(
+          toolCallSummaries
+            .filter(s => !isFailedLine(s))
+            .map(s => s.match(/^\[([a-z0-9_]+)/))
+            .filter((m): m is RegExpMatchArray => m !== null)
+            .map(m => m[1]),
+        );
+        const attempted = [...new Set(toolNames)];
+        const distinct = attempted.filter(
+          t => !failedOccurrenceNames.has(t) || nonFailedOccurrenceNames.has(t),
+        );
         // v2.3.9 (#78 Fix A) — observation/social tools are SIDE EFFECTS, not
         // the response. When the only tools that fired are these, the right
         // user-facing fallback is silence — narrating "I made a note about
@@ -1188,13 +1332,42 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'get_person_memory',
           'confirm_gender',
         ]);
-        if (distinct.every(t => SILENCE_ELIGIBLE.has(t))) {
+        if (attempted.every(t => SILENCE_ELIGIBLE.has(t))) {
+          // Tested on the ATTEMPTED set, before the failure filter is
+          // consulted: an observation tool has zero user-facing impact
+          // whether it succeeded or threw, so a turn that only ever tried
+          // these stays silent either way. `attempted` is non-empty here
+          // (the toolCallSummaries.length > 0 guard above), so this `.every`
+          // is never vacuous. Pre-fix this ran AFTER the all-FAILED branch
+          // below, so a colleague's "thanks" whose lone note_about_person
+          // threw got "That didn't go through on my end" instead of silence.
           // Leave finalReply empty — downstream gates (shadow-DM, send) all
           // check non-empty. AuditLog + social engine logging still run.
           logger.info('Orchestrator: only observation tools fired and no reply text — staying silent (Fix A #78)', {
             threadTs,
             iterations: iteration,
-            tools: distinct,
+            tools: attempted,
+          });
+        } else if (distinct.every(t => SILENCE_ELIGIBLE.has(t))) {
+          // log-grounded-fallback-ignores-tool-failure (2026-09-07) — at
+          // least one action tool was attempted (ruled above) and none of
+          // them survived the failure filter: `distinct` is either empty
+          // (every call FAILED — `[].every` is vacuously true) or holds only
+          // observation tools that rode alongside the failed action. Either
+          // way the thing the user asked for did not happen, and neither
+          // silence (v1.7.6 "never silence after the orchestrator runs",
+          // just below) nor the verbMap's "Done —" is honest. Give a
+          // non-tool-name-leaking "it didn't go through" instead.
+          finalReply = localizedFallback(input.userMessage, {
+            en: "That didn't go through on my end — I hit an issue completing it. Let me know if you'd like me to try again or take a different approach.",
+            he: 'זה לא עבר אצלי — נתקלתי בבעיה בהשלמת זה. תגידו לי אם תרצו שאנסה שוב או שאגש לזה אחרת.',
+            ru: 'У меня это не прошло — возникла проблема при выполнении. Дайте знать, если хотите, чтобы я попробовала снова или зашла с другой стороны.',
+            ar: 'لم ينجح ذلك من جهتي — واجهت مشكلة في إتمامه. أخبروني إذا كنتم تريدون أن أحاول مرة أخرى أو أتبع طريقة مختلفة.',
+          });
+          logger.warn('Orchestrator: every action tool call failed this turn — posted honest failure fallback', {
+            threadTs,
+            iterations: iteration,
+            attemptedTools: attempted,
           });
         } else {
         // Map tool names to human verbs the owner will understand.
@@ -1299,7 +1472,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // if Maelle put the read-receipt emoji, she should respond — even if
         // just to honestly say she didn't follow. Better to ask for help than
         // to leave the user hanging. (Pure-silence path is gone.)
-        finalReply = "Sorry, I didn't quite follow that one. Can you rephrase or give me a bit more context?";
+        finalReply = localizedFallback(input.userMessage, {
+          en: "Sorry, I didn't quite follow that one. Can you rephrase or give me a bit more context?",
+          he: 'סליחה, לא הבנתי בדיוק. תוכלו לנסח את זה אחרת או לתת קצת יותר הקשר?',
+          ru: 'Извините, я не совсем поняла. Не могли бы вы перефразировать или дать немного больше контекста?',
+          ar: 'آسفة، لم أفهم ذلك تمامًا. هل يمكنكم إعادة الصياغة أو إعطائي المزيد من السياق؟',
+        });
         logger.warn('Orchestrator: no tools, no text, no recovery — posted clarifying-confusion fallback', {
           threadTs,
           iterations: iteration,
@@ -1331,14 +1509,16 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // POST-GATE text (what the colleague actually receives), not the raw
   // draft. See postReply.ts Step 4.6.
 
-  // v2.4.2 — owner-said-done scanner (deterministic version of RULE 2d).
-  // Fire-and-forget after every owner turn — keyword pre-filter is cheap,
-  // LLM only runs when closure-signal words appear AND there are open
-  // items. Closes the long-standing pattern where owner says "Amazia is
-  // done, drop it" in chat, Sonnet acknowledges verbally but doesn't call
-  // cancel_task / cancel_coordination, and the row keeps surfacing in
-  // tomorrow's brief. Idempotent — re-running on already-closed items
-  // hits the active-status filter and finds nothing.
+  // v2.4.2 — owner-said-done scanner, the code-side backstop for RULE 2d.
+  // Fire-and-forget after every owner turn. LLM-only gate — no keyword
+  // pre-filter (retired v2.6.5 on owner direction, see the file header);
+  // the Haiku pass runs only when open spine items exist. Closes the
+  // long-standing pattern where owner says "Amazia is done, drop it" in
+  // chat, Sonnet acknowledges verbally but doesn't call
+  // update_task(action='cancel') / resolve_approval on the matching row,
+  // and it keeps surfacing in tomorrow's brief. Idempotent —
+  // getOpenScannerItems returns only awaiting_owner / awaiting_colleague /
+  // in_flight rows, so re-running on already-closed items finds nothing.
   if (input.senderRole === 'owner' && userMessage && userMessage.trim().length > 0) {
     void (async () => {
       try {
