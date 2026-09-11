@@ -16,6 +16,7 @@ Maelle resolves meeting times from the stated timezone and the travel dates that
 - Ask for clarification only when a requested bare local time is nonexistent or ambiguous, or a named timezone remains ambiguous after relevant person context. Explicit instants remain exact; broad search windows and historical display do not trigger incidental DST questions.
 - Use destination-local dates for contact trips across meeting search, approval labels, prechecks, email capture and contact timing. Preserve exact repeated-hour instants through the offered-slot store.
 - Apply configured working hours consistently to meetings and contact timers: include both repeated clock occurrences and skip nonexistent minutes.
+- A person's stored working hours are readable by the model from the store: the owner's contact roster and `get_person_memory` now carry the effective window with its timezone and whether it was stated or defaulted, so hours dictated earlier in a thread no longer vanish once they leave the history window, and a stated window outranks an older free-text note in the tool result. Scheduling already read this field; only the model's own view was missing.
 
 ### Data and charter updates
 

@@ -34,16 +34,20 @@ export interface PersonProfile {
   // e.g. "Hebrew" or "English" — learned from reply patterns
   language_preference?: string;
 
-  // When they're typically reachable — learned from timezone and reply patterns
+  // When they're typically reachable — the record of what was SAID, as said.
   // e.g. "Israel 9am–6pm" or "US Eastern, responds mornings"
-  // Free-text legacy. New writes should also populate working_hours_structured
-  // so #43 (intersect attendee availability in slot search) can read it.
+  // Free-text legacy: nothing reads it. Scheduling clips to
+  // working_hours_structured / the timezone default (getEffectiveWorkingHours),
+  // and every model-facing read either renders that effective window (owner
+  // roster line, get_person_memory) or no hours at all (#135, colleague work
+  // block) — never this prose, which is how a stale "Mon/Thu only" once
+  // outranked the corrected structured window (Isaac, 2026-05-26).
   working_hours?: string;
 
-  // v2.2.1 (#46) — structured working window. Populated alongside the free-text
-  // legacy when Maelle confirms the data via the colleague. Code paths that
-  // need to intersect (slot search, outreach gating) read this; LLM context
-  // still reads the free-text for natural narration.
+  // v2.2.1 (#46) — structured working window. Every reader goes through
+  // getEffectiveWorkingHours (utils/workingHoursDefault.ts): the scheduling
+  // intersects (slot search, outreach gating) AND the owner-path prompt reads
+  // (formatPeopleMemoryForPrompt, get_person_memory) — one window, one reader.
   working_hours_structured?: {
     workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
     hoursStart: string;   // 'HH:MM' in `timezone`, otherwise the person's dated timezone
@@ -2349,13 +2353,13 @@ export function formatPeopleMemoryForPrompt(
   if (people.length === 0) return '';
 
   const today = new Date().toISOString().split('T')[0];
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getEffectiveWorkingHours, formatWorkingHoursWindow } = require('../utils/workingHoursDefault') as
+    typeof import('../utils/workingHoursDefault');
   // Social bookkeeping keeps its existing UTC-day convention. Each trip below
   // is assessed in its destination's calendar, independent of the owner.
   const lines = people.map(p => {
     const notes: PersonNote[] = JSON.parse(p.notes || '[]');
-    const profile: PersonProfile = (() => {
-      try { return JSON.parse(p.profile_json || '{}'); } catch { return {}; }
-    })();
 
     const stateTag = p.state ? `, state: ${p.state}` : '';
 
@@ -2412,6 +2416,24 @@ export function formatPeopleMemoryForPrompt(
       ? `, tz: ${p.timezone}${!p.state ? ' (city not on file — TZ is reliable for time math; only ask for city when location/venue matters)' : ''}${tzUnconfirmed}`
       : '';
 
+    // 2026-09-11 — the EFFECTIVE working window, read from the store on every
+    // owner turn: the stated structured window first, else the timezone default
+    // (getEffectiveWorkingHours — the same read scheduling clips to). The owner
+    // dictated hours for ~20 colleagues in one thread; everyone written before
+    // the 20-message history window read back as "still unconfirmed", because
+    // this line had carried no profile field since v2.2.1 and get_person_memory
+    // didn't return hours either — chat history was the only place they existed.
+    // A default is marked so it can't pass for a stated fact; a stated window
+    // steers silently (same convention as tz above). The window's own zone
+    // renders only when it is fixed independently of `tz:` — otherwise `tz:`
+    // already says it. The free-text `working_hours` prose is deliberately NOT
+    // here (#135): it was the "Mon/Thu only" authority the corrected structured
+    // window had already superseded.
+    const hours = getEffectiveWorkingHours(p);
+    const hoursPart = hours
+      ? `, hours: ${formatWorkingHoursWindow(hours)}${hours.source === 'auto' ? ' (tz default, not stated)' : ''}`
+      : '';
+
     // v3.3.x / v3.5.x — surface the OUTBOUND language on the owner-path contact
     // line: the language to write in when Maelle INITIATES a message TO this
     // person (outreach / coord / reminder). v3.5.x DERIVES it from their most
@@ -2437,12 +2459,8 @@ export function formatPeopleMemoryForPrompt(
       ? `slack_id: ${p.slack_id}`
       : 'external — no Slack account, reach them by email';
     const parts: string[] = [
-      `${p.name} (${handle}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${genderField}${langPart}${socialPart})`,
+      `${p.name} (${handle}${p.name_he ? `, name_he: ${p.name_he}` : ''}${stateTag}${travelTag}${tzPart}${hoursPart}${p.email ? `, email: ${p.email}` : ''}, gender: ${genderField}${langPart}${socialPart})`,
     ];
-
-    // Profile dimensions moved to per-person markdown files (v2.2.1). Fields
-    // still persisted for code paths that read them deterministically.
-    void profile;
 
     // v2.3.4 kept booking snapshots out because a moved meeting made them lie;
     // readInteractionLog replaces that blanket strip with a freshness rule so

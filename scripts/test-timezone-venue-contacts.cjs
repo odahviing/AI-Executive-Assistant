@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'),{test}=require('node:test'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
 const {DateTime,Settings,IANAZone}=require('luxon');
 const root=path.resolve(__dirname,'..'),snapshot=process.env.LIBRARIAN_SNAPSHOT,compiled=new Map();
-const actual=new Set(['src/db/people.ts','src/utils/venueSearch.ts','src/skills/venue.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts']);
+const actual=new Set(['src/db/people.ts','src/utils/venueSearch.ts','src/skills/venue.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/workingHoursDefault.ts']);
 let now=Date.parse('2026-09-15T02:00:00Z');
 class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
 Settings.now=()=>now;
@@ -17,7 +17,7 @@ function harness(options={}){
  const mocks={
   'src/config.ts':{config:{}},
   'src/db/client.ts':{getDb:()=>({prepare:sql=>({all:()=>[person]})})},
-  'src/db/socialSubjects.ts':{},'src/db/engagementRank.ts':{},
+  'src/db/socialSubjects.ts':{},'src/db/engagementRank.ts':{},'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:()=>undefined},
   'src/db/venues.ts':{findVenuesByCriteria:()=>[],countHiddenVenues:()=>0},
   'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{compositions++;return {content:[{type:'text',text:JSON.stringify({candidates})}]};}}})},
   'src/llm/models.ts':{},'src/skills/general.ts':{tavilySearch:async()=>{searches++;return {answer:'Fixture source with explicitly supplied opening hours'};},TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS:1000},

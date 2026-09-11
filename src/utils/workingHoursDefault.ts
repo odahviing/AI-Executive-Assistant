@@ -167,3 +167,49 @@ export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | n
 
   return null;
 }
+
+/**
+ * One compact human line for a window — "Sun–Thu 09:00–18:00", "Mon/Thu
+ * 09:00–17:00 Asia/Jerusalem". Workdays contiguous in WEEK_ORDER collapse to a
+ * range; anything else lists them. THE renderer for hours in every model-facing
+ * read (the owner roster line in db/people.ts, get_person_memory and the write
+ * echo in core/assistant.ts), so one stored window never reads two ways.
+ */
+export function formatWorkingHoursWindow(wh: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd' | 'timezone'>): string {
+  const idx = wh.workdays.map(d => WEEK_ORDER.indexOf(d)).filter(i => i >= 0).sort((a, b) => a - b);
+  const contiguous = idx.length > 1 && idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
+  const days = contiguous
+    ? `${WEEK_ORDER[idx[0]].slice(0, 3)}–${WEEK_ORDER[idx[idx.length - 1]].slice(0, 3)}`
+    : idx.map(i => WEEK_ORDER[i].slice(0, 3)).join('/');
+  return `${days} ${wh.hoursStart}–${wh.hoursEnd}${wh.timezone ? ` ${wh.timezone}` : ''}`;
+}
+
+/**
+ * The model-facing view of a person's EFFECTIVE window: what scheduling clips
+ * to, which tier it came from (`source`: a stated structured window, else the
+ * timezone default), and the zone it is expressed in — the window's own fixed
+ * zone when stated, else the person's permanent zone. Returned by
+ * get_person_memory and echoed by update_person_profile after an hours write
+ * (core/assistant.ts) — one shape for the read and for the write echo. Null
+ * when nothing is known (no stated window and no timezone to derive from).
+ */
+export function describeEffectiveWorkingHours(person: PersonMemory): {
+  source: WorkingHours['source'];
+  workdays: WeekDay[];
+  hoursStart: string;
+  hoursEnd: string;
+  timezone: string | null;
+  window: string;
+} | null {
+  const eff = getEffectiveWorkingHours(person);
+  if (!eff) return null;
+  const timezone = eff.timezone ?? person.timezone ?? null;
+  return {
+    source:     eff.source,
+    workdays:   eff.workdays,
+    hoursStart: eff.hoursStart,
+    hoursEnd:   eff.hoursEnd,
+    timezone,
+    window:     formatWorkingHoursWindow({ ...eff, timezone: timezone ?? undefined }),
+  };
+}

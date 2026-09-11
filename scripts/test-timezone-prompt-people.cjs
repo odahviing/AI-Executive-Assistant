@@ -50,6 +50,7 @@ function load(rel) {
     'src/llm/client': { getAnthropicClient: () => { throw new Error('Unexpected model call'); } },
     'src/llm/models': {},
     'src/config': { config: {} },
+    'src/config/userProfile': { getTenantWorkdaysForTimezone: () => undefined },
   };
   function req(spec) {
     if (spec === 'luxon') return luxon;
@@ -64,7 +65,7 @@ function load(rel) {
     };
     if (Object.hasOwn(mocks, resolved)) return mocks[resolved];
     if (resolved === 'src/utils/timezoneConvert') return load('src/utils/timezoneConvert.ts');
-    if (resolved === 'src/utils/locationTz' || resolved === 'src/utils/timezoneValidator') return load(resolved + '.ts');
+    if (resolved === 'src/utils/locationTz' || resolved === 'src/utils/timezoneValidator' || resolved === 'src/utils/workingHoursDefault') return load(resolved + '.ts');
     throw new Error(`Unexpected dependency: ${resolved}`);
   }
   vm.runInNewContext(`(function(require,module,exports){${js}\n})`, { Date, console, Set, Map }, { filename: rel })(req, mod, mod.exports);

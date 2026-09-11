@@ -11,7 +11,7 @@ import {
 import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
 import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
-import { getEffectiveWorkingHours } from '../utils/workingHoursDefault';
+import { describeEffectiveWorkingHours } from '../utils/workingHoursDefault';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 
@@ -52,14 +52,16 @@ function describeCoreWrites(
  * as the record of what was said, but nothing acts on it: scheduling reads
  * `working_hours_structured` and then the timezone default
  * (getEffectiveWorkingHours, utils/workingHoursDefault.ts), the colleague
- * context block skips it on purpose (#135, db/people.ts), and get_person_memory
- * never returns profile_json. A prose-only write therefore leaves every slot
- * search exactly where it was — and a plain "noted" reads to the owner as "in
- * force" (Lori Sarsfield, 2026-09-09: "East Coast, Wed/Fri 7am–4pm" stored as
- * text, still clipped to the 09:00–17:00 default, owner told "Got it, noted").
- * So read the row back AFTER the write and report the window scheduling will
- * actually use, and whether the hours just received ARE that window. The
- * signal is which field landed, never the message text (W4).
+ * context block skips it on purpose (#135, db/people.ts), and the owner roster
+ * line and get_person_memory render the EFFECTIVE window in its place
+ * (describeEffectiveWorkingHours — the same shape echoed here). A prose-only
+ * write therefore leaves every slot search exactly where it was — and a plain
+ * "noted" reads to the owner as "in force" (Lori Sarsfield, 2026-09-09: "East
+ * Coast, Wed/Fri 7am–4pm" stored as text, still clipped to the 09:00–17:00
+ * default, owner told "Got it, noted"). So read the row back AFTER the write
+ * and report the window scheduling will actually use, and whether the hours
+ * just received ARE that window. The signal is which field landed, never the
+ * message text (W4).
  */
 function describeHoursWrite(
   personId: string,
@@ -73,25 +75,21 @@ function describeHoursWrite(
   const structured = args.working_hours_structured != null;
   if (!prose && !structured) return { notes: [] };
   const row = getPersonById(personId);
-  const eff = row ? getEffectiveWorkingHours(row) : null;
-  const tz = eff?.timezone ?? row?.timezone ?? null;
-  const window = eff
-    ? `${eff.workdays.map(d => d.slice(0, 3)).join('/')} ${eff.hoursStart}–${eff.hoursEnd}${tz ? ` ${tz}` : ''}`
-    : null;
+  const eff = row ? describeEffectiveWorkingHours(row) : null;
   if (structured && eff?.source === 'manual') {
     return {
-      scheduling_hours: { in_force: true, workdays: eff.workdays, hoursStart: eff.hoursStart, hoursEnd: eff.hoursEnd, timezone: tz },
-      notes: [`${name}'s stated hours are in force: slot searches now clip to ${window}.`],
+      scheduling_hours: { in_force: true, ...eff },
+      notes: [`${name}'s stated hours are in force: slot searches now clip to ${eff.window}.`],
     };
   }
   const still = eff
-    ? `${eff.source === 'auto' ? 'the timezone default' : 'the window stored earlier'}, ${window}`
+    ? `${eff.source === 'auto' ? 'the timezone default' : 'the window stored earlier'}, ${eff.window}`
     : 'no stored window (no timezone on file — a slot search assumes the requester\'s zone with standard hours)';
   return {
     scheduling_hours: {
       in_force: false,
       ...(prose ? { stored_as: 'note' } : {}),
-      scheduling_uses: eff ? { source: eff.source, workdays: eff.workdays, hoursStart: eff.hoursStart, hoursEnd: eff.hoursEnd, timezone: tz } : null,
+      scheduling_uses: eff,
     },
     notes: [
       structured
@@ -219,7 +217,7 @@ You don't need explicit statements. Infer from behavior:
 - language_preference: if they consistently reply in a different language from the one you used — save it here.
 - timezone: save as soon as you have a signal. If the person mentions a meeting in ET/PST/GMT/etc., or their email/calendar shows a US/EU/Asia location, save the IANA zone here (e.g. "America/New_York", "America/Los_Angeles", "Europe/London", "Australia/Sydney"). Don't overwrite a known timezone unless the new signal is clearly stronger.
 - email: ONLY when an address is explicitly stated in conversation — the owner ("Jim's email changed to jim@newco.com", "use dana@corp.io for Dana") or the person themselves. Saving it durably fixes the directory address calendar invites go to, so the correction keeps working in future conversations without being restated. Unlike timezone, NEVER infer or guess an address — a stated one only.
-- working_hours: infer from their timezone and when they actually respond. "Israel 9am–6pm" or "Responds in US Eastern mornings".
+- working_hours_structured: when the owner or the person states their hours ("Lori starts 7am ET", "Sun–Thu 9–18"), save the window here — it is what slot searches clip to and what the contacts list shows as their hours.
 - role_summary: piece together from calendar meetings you've seen, topics they mention, side context. "EMEA sales lead, focused on Q3 targets."
 - reports_to: if you learn who their manager is — save it.
 - response_speed: how long they typically take to reply. "immediate", "fast" (under an hour), "hours", "day", "slow", "unreliable".
@@ -260,11 +258,11 @@ Call this after interactions — not during them. It's a background update.`,
             },
             working_hours: {
               type: 'string',
-              description: 'Free-text legacy: when they typically work and respond. e.g. "Israel 9am–6pm" or "US Eastern mornings". Prefer working_hours_structured below for new writes — code paths that intersect availability read the structured shape, not this string.',
+              description: 'Free-text record of what was said about their hours, kept as said — a paper trail only. The window scheduling and the contacts list use is working_hours_structured below.',
             },
             working_hours_structured: {
               type: 'object',
-              description: 'Structured working window — populate alongside working_hours when you have confirmed values. Code paths that intersect attendee availability in slot search read this. Save ONLY when the colleague confirmed the values directly OR when they\'re obvious from a strong signal (explicit mention of their hours, calendar invite metadata). Don\'t guess.',
+              description: 'The working window in force: slot searches clip to it and the contacts list shows it as their hours (until it is set, a timezone default stands in, marked as such). Save it when the owner or the person states the hours, or a strong signal gives them (calendar invite metadata); the result echoes the window now in force.',
               properties: {
                 workdays: {
                   type: 'array',
@@ -405,7 +403,7 @@ Call this when:
 - You want to check what you already know before asking them something you might have asked before
 - Scheduling for them, messaging them, or answering a question about them benefits from the context
 
-The contacts list shows each person's name, timezone, gender, and email inline; their notes + conversation history load through this call. Keep calls narrow — one person at a time.
+The contacts list shows each person's name, timezone, working hours, gender, and email inline — answer those from the list; their notes + conversation history load through this call. Keep calls narrow — one person at a time.
 
 WHEN YOU PRESENT what you know (owner asks "what do you know about X" / "data on X" / "tell me about X"): the point is the PERSON, not a calendar dump. Lead with WHO THEY ARE — role, how you relate, durable facts and preferences (e.g. "Yael — VP Marketing, heads-down on the launch; prefers mornings"). SUMMARIZE meeting/booking history at a relationship level ("ran a few interviews with you lately") rather than reciting one meeting's logistics (exact date/time/venue/attendees) — give those specifics only if the owner asks about that particular meeting. Depth about the relationship is welcome; a verbatim recap of one booking is not.`,
         input_schema: {
@@ -914,6 +912,20 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const email = row?.email ?? null;
         const slackId = row?.slack_id ?? null;
 
+        // 2026-09-11 — the row's SCHEDULING facts. This tool returned notes,
+        // exchanges and social only, so a deliberate read could not see hours
+        // the owner had dictated minutes earlier (nor the zone / city they hang
+        // off), and the roster line didn't carry them either — chat history was
+        // the only place they existed, and it is capped at 20 messages.
+        // `working_hours` is the EFFECTIVE window (describeEffectiveWorkingHours:
+        // the stated structured window, else the timezone default — `source`
+        // says which), the same read scheduling clips to. Its note ranks it
+        // above any hours phrasing in `notes` / `content`: a stated window is
+        // owner/person authority (L2), the prose is an older capture (Isaac's
+        // 2026-05-26 note "Mon/Thu only" was still cited as authority after the
+        // structured hours had been corrected). Owner-only tool — no L6 concern.
+        const hours = row ? describeEffectiveWorkingHours(row) : null;
+
         // Item 2 (2026-08-16) — the coda system's social memory (subjects +
         // topic-beats, plus item 3's merged per-subject summary once that
         // column exists) was entirely invisible to this tool, so "what do
@@ -926,7 +938,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const hasSocial = social.live.length > 0 || social.dead.length > 0;
         const hasMemory = content !== null || notes.length > 0 || recentInteractions.length > 0 || recentBookings.length > 0 || hasSocial;
 
-        if (!hasMemory && !email && !slackId) {
+        // A row holding only scheduling facts (a name-only person the owner
+        // placed in a zone) is real memory too — not "no durable facts".
+        if (!hasMemory && !email && !slackId && !row?.timezone && !hours) {
           return {
             found: false,
             person: row?.name ?? query,
@@ -937,12 +951,25 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           person: row?.name ?? query, bytes: content?.length ?? 0, notes: notes.length,
           interactions: recentInteractions.length, hasEmail: !!email,
           socialLive: social.live.length, socialDead: social.dead.length,
+          hours: hours?.source ?? null,
         });
         return {
           found: true,
           person: row?.name ?? query,
           email,
           slack_id: slackId,
+          ...(row?.timezone ? { timezone: row.timezone, timezone_set_by: row.timezone_set_by ?? 'untagged' } : {}),
+          ...(row?.state ? { state: row.state } : {}),
+          ...(hours
+            ? {
+                working_hours: {
+                  ...hours,
+                  note: hours.source === 'manual'
+                    ? `Stated window — what slot searches clip to. It outranks any hours mentioned in notes or content (older prose); report THIS as ${row?.name ?? query}'s hours.`
+                    : `No hours stated for ${row?.name ?? query} yet — this is the default for their timezone, which slot searches use until hours are given.`,
+                },
+              }
+            : {}),
           content: content ?? '',
           notes: notes.map(n => ({ date: n.date, note: n.note })),
           recent_interactions: recentInteractions,
