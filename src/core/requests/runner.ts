@@ -19,14 +19,15 @@
 import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
-import { getDueRequests, updateRequest, createRequest, getRequestByIdempotencyKey, buildIdempotencyKey } from '../../db/requests';
-import { getOutreachJobByRequestId } from '../../db/jobs';
+import { getDueRequests, getRequest, updateRequest, createRequest, getRequestByIdempotencyKey, buildIdempotencyKey } from '../../db/requests';
+import { getOutreachJobByRequestId, updateOutreachJob } from '../../db/jobs';
 import { workTimeBaseFromNow, addWorkdays } from '../../utils/workHours';
 import { isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { closeRequest } from './closeRequest';
+import { withRequestLock, closeUnconfirmedExecution } from './resolver';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
-import { relayClosureToRequester } from './requesterRelay';
+import { relayClosureToRequester, retryRequesterRelay } from './requesterRelay';
 import { getConnection } from '../../connections/registry';
 import type { SendOptions, SendResult } from '../../connections/types';
 import { logActivity } from './logActivity';
@@ -107,17 +108,34 @@ export async function sweepDueRequests(opts: {
       });
       continue;
     }
+    await withRequestLock(row.id, async () => {
+    const current = getRequest(row.id);
+    if (!current || (!['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(current.state)
+        && !(current.next_check_handler === 'requester_relay_retry' && ['resolved', 'cancelled', 'expired'].includes(current.state)))
+        || !current.next_check_at || Date.parse(current.next_check_at) > Date.now()) return;
     try {
-      const action = await dispatchHandler(row, profile, opts.app);
+      const action = await dispatchHandler(current, profile, opts.app);
       if (action === 'closed') closed++;
       else if (action === 'rearmed') rearmed++;
     } catch (err) {
-      logger.warn('sweepDueRequests — handler threw, clearing timer to avoid loop', {
+      logger.warn('sweepDueRequests — handler threw, closing failed work and reporting outcome', {
         requestId: row.id, handler: row.next_check_handler, err: String(err).slice(0, 300),
       });
-      // Defensive: clear the timer so we don't infinite-loop on a broken handler.
-      updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+      const fresh = getRequest(row.id);
+      if (fresh && ['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(fresh.state)) {
+        closeRequest({ id: fresh.id, state: 'cancelled', closureReason: 'request_handler_failed', closedBy: 'system' });
+        const message = `I couldn't complete "${fresh.subject}" because a background step failed. I've closed that request; it needs a fresh check before trying again.`;
+        const conn = getConnection(fresh.owner_user_id, 'slack');
+        if (conn) await postOwnerDecision({ profile, conn, text: message, label: 'request failure outcome',
+          inThread: fresh.owner_dm_channel && fresh.owner_dm_thread_ts ? { channel: fresh.owner_dm_channel, threadTs: fresh.owner_dm_thread_ts } : null });
+        await relayClosureToRequester({ row: fresh, profile, label: 'request failure requester outcome',
+          compose: ({ lang, hi, subject }) => lang === 'he'
+            ? `${hi} — לא הצלחתי להשלים את הבקשה לגבי ${subject}. סגרתי אותה; צריך לבדוק אותה מחדש לפני ניסיון נוסף.`
+            : `${hi} — I couldn't complete the request about ${subject}. I've closed it; it needs a fresh check before trying again.` });
+        closed++;
+      }
     }
+    });
   }
 
   if (due.length > 0) {
@@ -133,6 +151,9 @@ async function dispatchHandler(
 ): Promise<'closed' | 'rearmed' | 'noop'> {
   const handler = row.next_check_handler as NextCheckHandler | null;
   switch (handler) {
+    case 'requester_relay_retry':
+      await retryRequesterRelay(row, profile);
+      return getRequest(row.id)?.next_check_at ? 'rearmed' : 'noop';
     case 'expiry':
       return runExpiry(row, profile);
 
@@ -165,11 +186,7 @@ async function dispatchHandler(
       return runFreeformFlagRetry(row, profile);
 
     default:
-      logger.warn('dispatchHandler — unknown handler, clearing timer', {
-        requestId: row.id, handler,
-      });
-      updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-      return 'noop';
+      throw new Error(`Unknown request handler: ${handler}`);
   }
 }
 
@@ -190,8 +207,14 @@ async function dispatchHandler(
  * wrong-outcome failure R3 names. One expiry path, two truthful stories.
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
+  const outcome = JSON.parse(row.outcome_json ?? '{}') as Record<string, unknown>;
+  if (outcome.verified === false && typeof outcome.replayed === 'string') {
+    await closeUnconfirmedExecution(row, { profile, wasAwaitingColleague: true }, outcome.replayed);
+    return 'closed';
+  }
   // Read the side BEFORE closing — closeRequest moves state to 'expired'.
   const waitingOnColleague = row.state === 'awaiting_colleague';
+  const repeatConfirmation = row.kind === 'approval' && waitingOnColleague && !!row.parent_request_id && !row.owner_dm_channel;
   const subject = row.subject && row.subject.toLowerCase().endsWith('needs your input')
     ? 'that ask'
     : (row.subject || 'that ask');
@@ -202,22 +225,17 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
     closedBy: 'expiry',
   });
   // Tombstone to the owner: what actually stalled, in his decision thread.
-  if (row.kind === 'approval' && row.owner_dm_channel) {
+  if (row.kind === 'approval' && !repeatConfirmation) {
     try {
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
         const who = row.requester_name?.split(' ')[0] ?? 'They';
         const what = waitingOnColleague
-          ? `${who} never came back on what you suggested for "${subject}". I've closed it — say the word if you want me to chase it again.`
+          ? `${who} never came back on what you suggested for "${subject}". I've closed it without agreement.`
           : `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
-        await sendTracked(
-          conn,
-          { channel: row.owner_dm_channel },
-          what,
-          { threadTs: row.owner_dm_thread_ts ?? undefined },
-          'runExpiry owner tombstone',
-          row.id,
-        );
+        await postOwnerDecision({ profile, conn, text: what, label: 'runExpiry owner tombstone',
+          inThread: row.owner_dm_channel && row.owner_dm_thread_ts
+            ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
       }
     } catch (err) {
       logger.warn('runExpiry — tombstone DM failed', { requestId: row.id, err: String(err).slice(0, 200) });
@@ -231,15 +249,18 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
   // stamp-only-on-confirmed-send idempotency all live in the ONE shared relay
   // (requesterRelay.ts) — this was an inline English-only copy that also
   // stamped requester_notified_at even when the send had failed.
-  if (row.kind === 'approval' && row.requester_slack_id && !row.requester_notified_at) {
+  if (row.requester_slack_id && !row.requester_notified_at) {
     await relayClosureToRequester({
       row,
       profile,
       label: 'runExpiry requester loop-close',
-      compose: ({ lang, hi, ownerFirst, subject: relaySubject }) => waitingOnColleague
+      compose: ({ lang, hi, ownerFirst, subject: relaySubject }) => repeatConfirmation
+        ? (lang === 'he' ? `${hi} — לא התקבל אישור לפנות שוב ל${ownerFirst} לגבי ${relaySubject}. סגרתי את הבקשה ולא העליתי אותה שוב.`
+          : `${hi} — I didn't get confirmation to ask ${ownerFirst} again about ${relaySubject}. I've closed this without raising it again.`)
+        : waitingOnColleague
         ? (lang === 'he'
-          ? `${hi} — לא קיבלתי תשובה על מה ש${ownerFirst} הציע לגבי ${relaySubject}, אז סגרתי את זה בינתיים. אפשר להרים את זה שוב מתי שמתאים.`
-          : `${hi} — I never heard back on what ${ownerFirst} suggested for ${relaySubject}, so I've closed this off for now. Ping me whenever you want to pick it up again.`)
+          ? `${hi} — לא קיבלתי תשובה על מה ש${ownerFirst} הציע לגבי ${relaySubject}, אז סגרתי את זה ללא הסכמה. כדי להמשיך, פנו ישירות ל${ownerFirst}.`
+          : `${hi} — I never heard back on what ${ownerFirst} suggested for ${relaySubject}, so I've closed this without agreement. Please contact ${ownerFirst} directly to continue.`)
         : (lang === 'he'
           ? `${hi} — לא הצלחתי לקבל תשובה מ${ownerFirst} לגבי ${relaySubject}. סוגרת את זה בינתיים — אפשר לנסות שוב מתי שתרצו.`
           : `${hi} — I couldn't get a read from ${ownerFirst} on ${relaySubject}. Closing this for now; ping me when you want to try again.`),
@@ -253,6 +274,23 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
  * his work hours. Then re-arm next_check_at = expires_at, handler = 'expiry'.
  */
 async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'closed'> {
+  // A missing owner anchor means the original alarm was never delivered.
+  // Retry its full ask immediately, outside the ordinary work-hours nag gate.
+  if (row.state === 'awaiting_owner' && !row.owner_dm_channel) {
+    if (row.expires_at && Date.parse(row.expires_at) <= Date.now()) return runExpiry(row, profile);
+    const conn = getConnection(profile.user.slack_user_id, 'slack');
+    if (conn) {
+      const text = await composeOwnerAskText({ askText: row.description ?? row.subject, details: parseDetails(row), profile, requestId: row.id });
+      const res = await postOwnerDecision({ profile, conn, text, label: 'undelivered approval ask' });
+      if (res.ok) {
+        updateRequest(row.id, { ownerDmChannel: res.channel, ownerDmThreadTs: res.threadTs, terminalDmMsgTs: res.ts,
+          nextCheckAt: row.expires_at, nextCheckHandler: 'expiry' });
+        return 'rearmed';
+      }
+    }
+    updateRequest(row.id, { nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(), nextCheckHandler: 'approval_reminder' });
+    return 'rearmed';
+  }
   // #42 — never nag the owner about a call that isn't his to make. Every
   // transition off awaiting_owner re-aims the clock (resolver timersForWaitingSide),
   // so this is the precondition made explicit rather than assumed: reaching here
@@ -413,8 +451,8 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
     // informed — getRequestsForBrief excludes anything resolved once narrated,
     // so a later "did you remind Yael about X" had nothing to recall from.
     // 'logged' is what getRecentActivityForOwner (52-U6) can still find, forever.
-    state: 'logged',
-    closureReason: 'reminder_fired',
+    state: delivered ? 'logged' : 'cancelled',
+    closureReason: delivered ? 'reminder_fired' : 'reminder_delivery_failed',
     closedBy: 'system',
   });
   // R1/R3 requester loop-close — create_task is colleague-reachable (o#219),
@@ -480,6 +518,7 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
   const ownerId = profile.user.slack_user_id;
   const channelId = row.origin_channel ?? '';
   let answer: string | undefined;
+  let delivered = false;
 
   try {
     // Dynamic import avoids a load-time cycle (orchestrator → skills → spine).
@@ -534,15 +573,16 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
         // survives regardless in outcome_json below, recallable via
         // get_my_tasks' recent_activity bucket.
         if (channelId) {
-          await sendTracked(conn, { channel: channelId }, result.reply, { threadTs: row.origin_thread_ts ?? undefined }, 'runResearchRun result post', row.id);
+          delivered = (await sendTracked(conn, { channel: channelId }, result.reply, { threadTs: row.origin_thread_ts ?? undefined }, 'runResearchRun result post', row.id)).ok;
         } else {
-          await sendTracked(conn, { dm: ownerId }, result.reply, undefined, 'runResearchRun result DM', row.id);
+          delivered = (await sendTracked(conn, { dm: ownerId }, result.reply, undefined, 'runResearchRun result DM', row.id)).ok;
         }
       }
     }
   } catch (err) {
     logger.warn('runResearchRun — orchestrator threw', { requestId: row.id, err: String(err).slice(0, 300) });
   }
+  if (!answer || !delivered) throw new Error('Research answer was not delivered');
   closeRequest({
     id: row.id,
     // gh#52 (52-U8) — 'logged', not 'resolved': a research run is exactly
@@ -579,12 +619,11 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   // awaiting_colleague AND cleared this timer. So reaching here in any other
   // state, or with no reschedule job, means nothing to re-ask → drop the timer.
   if (row.state !== 'awaiting_colleague' || !job || job.intent !== 'meeting_reschedule') {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-    return 'noop';
+    throw new Error('Reschedule follow-up no longer has valid pending outreach');
   }
   const conn = getConnection(profile.user.slack_user_id, 'slack');
   if (!conn) {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    updateRequest(row.id, { nextCheckAt: DateTime.now().plus({ hours: 48 }).toUTC().toISO(), nextCheckHandler: 'outreach_expiry' });
     return 'noop';
   }
   // registrar fix (colleague-outreach-not-gated-to-recipient-work-hours-or-week,
@@ -618,6 +657,7 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   updateRequest(row.id, {
     nextCheckAt: DateTime.now().plus({ hours: 48 }).toUTC().toISO(),
     nextCheckHandler: 'outreach_expiry',
+    phase: 'outreach:nudged',
   });
   logger.info('reschedule_reask — re-pinged colleague once, re-armed to outreach_expiry', {
     requestId: row.id, jobId: job!.id,
@@ -634,8 +674,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
   // If colleague meanwhile replied (state changed off awaiting_colleague),
   // this is a stale timer — just clear it.
   if (row.state !== 'awaiting_colleague') {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-    return 'closed';
+    throw new Error('Outreach expired before delivery was confirmed');
   }
   // outreach-expiry-tombstone-says-never-replied (2026-08-12) — `state` alone
   // can't tell "never replied" apart from "replied once, then went quiet
@@ -645,7 +684,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
   // is the marker those re-arms stamp; branch the closure copy on it, same
   // principle runExpiry already applies to approvals (#42: pick the copy from
   // the row's actual last-known state, not from kind/deadline alone).
-  const repliedThenWentQuiet = row.phase === 'outreach:re_engaged';
+  const repliedThenWentQuiet = row.phase === 'outreach:re_engaged' || row.phase === 'outreach:nudged';
   closeRequest({
     id: row.id,
     state: 'expired',
@@ -653,7 +692,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
     closedBy: 'expiry',
   });
   // Owner heads-up so the request appears in next brief with closure context.
-  if (row.owner_dm_channel) {
+  {
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (conn) {
       const targetName = row.target_name ?? 'them';
@@ -662,7 +701,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
         : `${targetName} never replied to the message I sent — I've closed that one out. Tell me if you want to try again.`;
       await sendTracked(
         conn,
-        { channel: row.owner_dm_channel },
+        row.owner_dm_channel ? { channel: row.owner_dm_channel } : { dm: profile.user.slack_user_id },
         what,
         { threadTs: row.owner_dm_thread_ts ?? undefined },
         'runOutreachExpiryOrDecision owner tombstone',
@@ -739,11 +778,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
   }
   try {
     const conn = getConnection(profile.user.slack_user_id, 'slack');
-    if (!conn) {
-      logger.warn('runSendScheduledOutreach — no Slack connection', { requestId: row.id });
-      closeRequest({ id: row.id, state: 'cancelled', closureReason: 'no_slack_connection', closedBy: 'system' });
-      return 'closed';
-    }
+    if (!conn) throw new Error('Scheduled outreach has no Slack connection');
 
     // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-
     // hours, wf_29a0d866-021 round 2) — replay the stored decision literally
@@ -792,6 +827,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       }
       // Channel posts ignore await_reply — same rule as outreach.ts's
       // immediate path (no DM thread to await a reply in).
+      if (job) updateOutreachJob(job.id, { sent_at: new Date().toISOString(), dm_channel_id: outcome.ref, dm_message_ts: outcome.ts });
       logActivity({
         ownerUserId: ownerId,
         kind: 'outreach',
@@ -844,6 +880,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       return 'rearmed';
     }
     const sentTs = res.ts ?? null;
+    const sentAt = new Date().toISOString();
+    if (job) updateOutreachJob(job.id, { sent_at: sentAt, dm_channel_id: res.ref, dm_message_ts: res.ts });
     // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
     // always true (0 !== false). Treat 0 as fire-and-forget; keep "missing = await".
     const awaitReply = details.await_reply !== false && details.await_reply !== 0;
@@ -853,7 +891,9 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       // made closeRequest see an already-terminal row and no-op → closed_at/
       // closed_by/closure_reason stayed NULL and no audit was written.
       state: awaitReply ? 'awaiting_colleague' : undefined,
-      details: { ...details, sent_at: DateTime.now().toISO(), dm_message_ts: sentTs },
+      details: { ...details, sent_at: sentAt, dm_message_ts: sentTs },
+      originChannel: res.ref ?? row.origin_channel ?? undefined,
+      originThreadTs: res.ts ?? row.origin_thread_ts ?? undefined,
       nextCheckAt: awaitReply
         ? DateTime.now().plus({ days: 5 }).toUTC().toISO()
         : null,

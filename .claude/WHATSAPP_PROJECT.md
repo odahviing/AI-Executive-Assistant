@@ -320,7 +320,7 @@ is one continuous conversation. The spine and the orchestrator assume a
 - `message.reply()` (quoted reply) MAY be used for the immediate answer, but
   continuity is by chat id, not by quote.
 - **`channel: 'whatsapp'`** — already a legal `ChannelId` value
-  (`skills/types.ts:179`). Replace the placeholder's `channel:'slack'` hack with
+  (`skills/types.ts:164`). Replace the placeholder's `channel:'slack'` hack with
   the real value and audit any code that branches on `channel === 'slack'`
   assuming Slack semantics (status indicator, markdown, thread behavior).
 
@@ -443,7 +443,7 @@ The placeholder is single-tenant. Fix all of it:
 - `src/core/orchestrator/index.ts:217,219,376-385` — orchestrator already takes
   `channel: ChannelId`, `senderRole`, and flips role for MPIM; feed it
   `channel:'whatsapp'` + group inputs. Audit `channel === 'slack'` assumptions.
-- `src/skills/types.ts:179` — `ChannelId` already includes `'whatsapp'`.
+- `src/skills/types.ts:164` — `ChannelId` already includes `'whatsapp'`.
 - `src/index.ts` — wire `startWhatsApp(profile)` into startup (gated on config);
   extend the transient-error survive list.
 - `src/config/index.ts:60` — `WHATSAPP_OWNER_PHONE` exists; add profile-YAML

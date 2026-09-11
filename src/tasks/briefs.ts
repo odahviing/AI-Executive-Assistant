@@ -9,8 +9,10 @@ import {
   getRequestsForBrief,
   markRequestSurfaced,
   todayStartUtcIso,
+  getRequest,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
+import { relayClosureToRequester } from '../core/requests/requesterRelay';
 import type { RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
@@ -711,16 +713,6 @@ export async function sendMorningBriefing(
   const { items, requestIdsToSurface, requestIdsToStale, peopleGender } =
     await collectBriefingData(ownerUserId, profile.user.timezone, profile);
 
-  // Log brief was sent.
-  const { logEvent } = require('../db');
-  logEvent({
-    ownerUserId,
-    type: 'task_update',
-    title: 'morning_briefing_sent',
-    detail: DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd'),
-  });
-  markEventsSeen(ownerUserId);
-
   // v3.2.6 — personalized news (gated + best-effort + fail-open). Gather BEFORE
   // compose (the brief is a single direct Sonnet pass with no tool loop) and
   // fold a grounded "Updates" section in. A slow/empty gather never delays or
@@ -886,6 +878,9 @@ export async function sendMorningBriefing(
       ...(threadTs ? { threadTs } : {}),
       ...(newsBundle ? { unfurl: false } : {}),
     });
+    // A composed brief is not a delivered brief. All three callers already
+    // handle thrown delivery failures; do not count unseen items or close them.
+    if (posted.ok !== true) throw new Error(`Morning briefing delivery failed: ${posted.reason ?? 'unconfirmed send'}`);
     // The brief is the other post Maelle makes on her OWN initiative, and the
     // owner answers it in-thread ("move the 3pm", "what's item 3?"). Nothing
     // recorded it in `conversations`, so that reply loaded an empty history and
@@ -901,80 +896,91 @@ export async function sendMorningBriefing(
     if (posted.ok) {
       const historyThread = threadTs ?? posted.ts;
       if (historyThread) {
-        appendToConversation(historyThread, ownerChannel, {
-          role: 'assistant',
-          content: `[Morning brief posted]\n${briefForHistory}`,
-        });
+        try {
+          appendToConversation(historyThread, ownerChannel, {
+            role: 'assistant',
+            content: `[Morning brief posted]\n${briefForHistory}`,
+          });
+        } catch (err) {
+          // Delivery succeeded; a memory failure must not report an unsent
+          // brief to callers that may retry it.
+          logger.warn('briefs — delivered but history append failed', { ownerUserId, err: String(err).slice(0, 200) });
+        }
       }
     }
   } else {
-    logger.warn('briefs — no Slack connection registered', { ownerUserId });
+    throw new Error('Morning briefing delivery failed: no Slack connection registered');
   }
 
-  // v3.2.6 — fire-and-forget the seen-log write so tomorrow's brief / an
-  // on-demand ask doesn't repeat today's stories (topic-level dedup). Non-fatal.
-  if (newsBundle) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { writeSeenLog } = require('../skills/news') as typeof import('../skills/news');
-    // v3.3.x — pass the posted brief so the seen-log records only the SHOWN
-    // (cited) items, not the whole gathered bundle. Unshown-but-recent articles
-    // then resurface on tomorrow's re-pull instead of being silently buried.
-    void writeSeenLog(profile, newsBundle, { briefText: textToSend }).catch(() => { /* non-fatal */ });
-  }
-
-  // POST-BRIEF: stamp surfaced + auto-park stale items.
-  // Stamp goes FIRST so surfaced_count is reflective; stale closures land
-  // after — those rows will surface ONE more time next brief with closure
-  // narration ("I stopped working on X"), then drop.
-  markRequestSurfaced(requestIdsToSurface);
-  for (const id of requestIdsToStale) {
-    // v3.1 (Path 2) — closing-strength guarantee #3: when the brief auto-parks
-    // a colleague-INITIATED request the owner ignored N times, the requester
-    // must hear back too — otherwise they're left hanging ("Maelle said she'd
-    // ask Idan, then silence"). Mirrors runExpiry's requester loop-close. Only
-    // fires for colleague-initiated rows (requester set, != owner); owner-self
-    // requests have no external party to notify. Fire-and-forget before close.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getRequest } = require('../db/requests') as typeof import('../db/requests');
-      const r = getRequest(id);
-      // v3.1 — honor the requester_notified_at dedup contract (same as the
-      // resolver + closeMeetingArtifacts paths) so we never double-DM a
-      // requester who was already told through another path.
-      if (conn && r && r.requester_slack_id && r.requester_slack_id !== ownerUserId && !r.requester_notified_at) {
-        const requesterFirst = r.requester_name?.split(' ')[0] ?? 'there';
-        const ownerFirst = profile.user.name.split(' ')[0];
-        const subjectText = r.subject && r.subject.toLowerCase().endsWith('needs your input')
-          ? 'that ask' : (r.subject || 'that ask');
-        const body = `Hey ${requesterFirst} — I couldn't get a read from ${ownerFirst} on ${subjectText}. Closing this for now; ping me when you want to try again.`;
-        if (r.origin_is_mpim && r.origin_channel) {
-          void conn.postToChannel(r.origin_channel, body, { threadTs: r.origin_thread_ts ?? undefined }).catch(() => {});
-        } else {
-          void conn.sendDirect(r.requester_slack_id, body).catch(() => {});
-        }
-        // v3.1.1 — no requester_notified_at stamp here: closeRequest below makes
-        // this row terminal, so nothing ever re-reads the stamp (it's moot). The
-        // `!r.requester_notified_at` guard above still prevents a double-DM if an
-        // earlier path already notified this request.
-        logger.info('briefs — requester loop-close on stale auto-park', { requestId: id, requesterSlackId: r.requester_slack_id });
-      }
-    } catch (err) {
-      logger.warn('briefs — stale requester loop-close threw, closing anyway', { requestId: id, err: String(err).slice(0, 200) });
-    }
-    closeRequest({
-      id,
-      state: 'cancelled',
-      closureReason: 'surfaced_threshold',
-      closedBy: 'brief',
+  // These bookkeeping writes follow confirmed delivery. Their failure cannot
+  // turn that send into an apparent delivery failure or invite a duplicate.
+  try {
+    const { logEvent } = require('../db');
+    logEvent({
+      ownerUserId,
+      type: 'task_update',
+      title: 'morning_briefing_sent',
+      detail: DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd'),
     });
-  }
+    markEventsSeen(ownerUserId);
 
-  logger.info('Morning briefing sent (AI-generated)', {
-    userId: ownerUserId,
-    items: items.length,
-    surfaced: requestIdsToSurface.length,
-    auto_parked: requestIdsToStale.length,
-  });
+    // v3.2.6 — fire-and-forget the seen-log write so tomorrow's brief / an
+    // on-demand ask doesn't repeat today's stories (topic-level dedup). Non-fatal.
+    if (newsBundle) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { writeSeenLog } = require('../skills/news') as typeof import('../skills/news');
+      // v3.3.x — pass the posted brief so the seen-log records only the SHOWN
+      // (cited) items, not the whole gathered bundle. Unshown-but-recent articles
+      // then resurface on tomorrow's re-pull instead of being silently buried.
+      void writeSeenLog(profile, newsBundle, { briefText: textToSend }).catch(() => { /* non-fatal */ });
+    }
+
+    // POST-BRIEF: stamp surfaced + auto-park stale items.
+    // Stamp goes FIRST so surfaced_count is reflective; stale closures land
+    // after — those rows will surface ONE more time next brief with closure
+    // narration ("I stopped working on X"), then drop.
+    markRequestSurfaced(requestIdsToSurface);
+    let autoParked = 0;
+    const { withRequestLock } = await import('../core/requests/resolver');
+    for (const id of requestIdsToStale) {
+      await withRequestLock(id, async () => {
+        // The state may still say awaiting_owner while its approved mutation is
+        // running. Wait on the resolver's FIFO, then revalidate inside the lock.
+        const r = getRequest(id);
+        if (!r || r.state !== 'awaiting_owner') return;
+        const closed = closeRequest({
+          id,
+          state: 'cancelled',
+          closureReason: 'surfaced_threshold',
+          closedBy: 'brief',
+        });
+        if (!closed.ok || closed.reason === 'already terminal') return;
+        autoParked++;
+        // Close first, then await the shared relay: language, safe subject, origin
+        // thread, fresh dedup and the confirmed-send stamp all belong to the spine.
+        // Explicit failed delivery recovery is owned by the shared relay.
+        if (r.requester_slack_id && r.requester_slack_id !== ownerUserId && !r.requester_notified_at) {
+          await relayClosureToRequester({
+            row: r,
+            profile,
+            label: 'briefs stale requester loop-close',
+            compose: ({ lang, hi, ownerFirst, subject }) => lang === 'he'
+              ? `${hi} — לא הצלחתי לקבל תשובה מ${ownerFirst} לגבי ${subject}. סוגרת את זה בינתיים — אפשר לנסות שוב מתי שתרצו.`
+              : `${hi} — I couldn't get a read from ${ownerFirst} on ${subject}. Closing this for now; ping me when you want to try again.`,
+          });
+        }
+      });
+    }
+
+    logger.info('Morning briefing sent (AI-generated)', {
+      userId: ownerUserId,
+      items: items.length,
+      surfaced: requestIdsToSurface.length,
+      auto_parked: autoParked,
+    });
+  } catch (err) {
+    logger.warn('briefs — delivered but post-brief bookkeeping failed', { ownerUserId, err: String(err).slice(0, 200) });
+  }
 }
 
 // ── Briefing schedule helpers ─────────────────────────────────────────────────

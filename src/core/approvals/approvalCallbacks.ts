@@ -30,7 +30,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { OwnerTravelContext } from '../../utils/workingElsewhere';
 import { renderWeDualClock } from '../../utils/weTimeResolver';
 import logger from '../../utils/logger';
-import { PROMOTE_TIMEZONE_TEMP_TOOL, REPLAYABLE_TOOLS } from '../requests/types';
+import { PROMOTE_TIMEZONE_TEMP_TOOL } from '../requests/types';
 
 export interface ToolCallback {
   tool: string;
@@ -284,6 +284,26 @@ export async function composeOwnerAskText(input: {
 }): Promise<string> {
   const { askText, details, profile, requestId, lead, reSurface } = input;
 
+  // Repeat context comes from the preserved decision chain on EVERY delivery,
+  // including timer retries after the first owner post failed.
+  const { getRequest } = await import('../../db/requests');
+  const current = getRequest(requestId);
+  const seen = new Set<string>([requestId]);
+  const refusals: string[] = [];
+  let parentId = current?.parent_request_id;
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = getRequest(parentId);
+    if (!parent || parent.kind !== 'approval') break;
+    if (parent.state === 'cancelled' && parent.closed_by === 'owner') {
+      refusals.push(parent.closure_reason ?? 'declined');
+    }
+    parentId = parent.parent_request_id;
+  }
+  const repeatHistory = refusals.length
+    ? `Repeated request after ${refusals.length} prior refusal${refusals.length === 1 ? '' : 's'}: ${refusals.join('; ')}. The requester confirmed they want you asked again.`
+    : undefined;
+
   // A stored counter is what a ✅ ACTUALLY replays: resolveRequest merges
   // `details.counter` into on_approve before running it (resolver.ts:459-470),
   // for any amend round, owner's or colleague's. So the preview verbalizes the
@@ -305,7 +325,7 @@ export async function composeOwnerAskText(input: {
   try {
     const callbacks = extractCallbacks(details);
     const mergedApprove = (countered && counter && callbacks.on_approve)
-      ? mergeAmendIntoApprove(callbacks.on_approve, counter)
+      ? mergeAmendIntoApprove(callbacks.on_approve, counter, profile.user.timezone)
       : callbacks.on_approve;
     if (countered) {
       const before = slotSignature(callbacks.on_approve);
@@ -335,7 +355,7 @@ export async function composeOwnerAskText(input: {
     hardReason = `Checked when I raised this${when}: ${honest}`;
   }
 
-  return [lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');
+  return [repeatHistory, lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -348,41 +368,42 @@ export async function composeOwnerAskText(input: {
 export function mergeAmendIntoApprove(
   approveCallback: ToolCallback,
   counter: Record<string, unknown>,
+  timezone = 'UTC',
 ): ToolCallback {
-  // Common slot-pick alias: counter.slot_iso → args.start. Specific to
-  // create_meeting / move_meeting whose start field carries the slot.
-  const args = { ...approveCallback.args };
-  if (typeof counter.slot_iso === 'string') {
-    if (approveCallback.tool === 'create_meeting' || approveCallback.tool === 'book_floating_block') {
-      args.start = counter.slot_iso;
-    } else if (approveCallback.tool === 'move_meeting') {
-      args.new_start = counter.slot_iso;
+  const args = { ...approveCallback.args, ...counter };
+  // R2: normalize the counter to fields the executor actually reads. A new
+  // start preserves duration; a duration change computes end in code.
+  if (approveCallback.tool === 'create_meeting' || approveCallback.tool === 'move_meeting') {
+    const moving = approveCallback.tool === 'move_meeting';
+    const startKey = moving ? 'new_start' : 'start';
+    const endKey = moving ? 'new_end' : 'end';
+    const start = counter[startKey] ?? counter.slot_iso ?? counter[moving ? 'start' : 'new_start'];
+    const end = counter[endKey] ?? counter[moving ? 'end' : 'new_end'];
+    const duration = counter.duration_minutes ?? counter.duration_min;
+    const beforeStart = DateTime.fromISO(String(approveCallback.args[startKey] ?? ''), { zone: timezone, setZone: true });
+    const beforeEnd = DateTime.fromISO(String(approveCallback.args[endKey] ?? ''), { zone: timezone, setZone: true });
+    if (typeof start === 'string') args[startKey] = start;
+    if (typeof end === 'string') args[endKey] = end;
+    if (duration !== undefined || (typeof start === 'string' && end === undefined)) {
+      const minutes = duration ?? (beforeStart.isValid && beforeEnd.isValid ? beforeEnd.diff(beforeStart, 'minutes').minutes : undefined);
+      if (duration !== undefined && (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0)) {
+        throw new Error('The counter duration must be a positive number of minutes.');
+      }
+      if (typeof minutes === 'number' && minutes > 0) {
+        const at = DateTime.fromISO(String(args[startKey] ?? ''), { zone: timezone, setZone: true });
+        if (!at.isValid) throw new Error('The counter needs a valid start time before its duration can be applied.');
+        args[endKey] = at.plus({ minutes }).toISO();
+      } else if (moving && end === undefined) {
+        // A time-less move uses the event's current duration at execution.
+        delete args[endKey];
+      }
     }
-  }
-  // Fall-through: spread the rest, allowing kind-specific keys to land.
-  for (const [k, v] of Object.entries(counter)) {
-    if (k === 'slot_iso') continue;  // already handled above
-    args[k] = v;
+    delete args.slot_iso;
+    delete args.duration_min;
+    delete args.duration_minutes;
+    delete args[moving ? 'start' : 'new_start'];
+    delete args[moving ? 'end' : 'new_end'];
   }
   return { tool: approveCallback.tool, args };
 }
 
-/**
- * Tools the resolver knows how to replay autonomously. The deferred-action
- * replay path (`runDeferredAction`) loads SchedulingSkill / CalendarHealthSkill
- * for the meeting tools below; `promote_timezone_temp` is the one exception —
- * a direct db/people.ts write, handled inline before that skill dispatch (see
- * its own comment there). Anything NOT in this set falls back to "close +
- * Sonnet next turn" behavior in runApproveCallback.
- *
- * Membership is DERIVED from `REPLAYABLE_TOOLS` (core/requests/types.ts), the
- * one declared list — not hand-kept in sync with deferredActionReplay.ts
- * anymore: that module's dispatch switches over the same `ReplayableTool`
- * union with a `never`-typed default, so a tool added here without a
- * matching dispatch branch there fails `npm run typecheck` instead of
- * silently hitting deferredActionReplay's old catch-all no-op. Typed `Set<
- * string>` (not `Set<ReplayableTool>`) so the existing untyped `.has(tool)`
- * call sites in resolver.ts — which check an arbitrary on_approve.tool, not
- * just replayable ones — keep compiling unchanged.
- */
-export const RESOLVER_REPLAY_TOOLS: Set<string> = new Set(REPLAYABLE_TOOLS);

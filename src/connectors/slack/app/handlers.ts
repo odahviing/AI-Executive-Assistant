@@ -879,11 +879,14 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
           });
           return;
         }
-        // Only the owner can resolve — defense in depth (approval DMs go to
-        // owner's private channel, but a workspace admin could in theory
-        // react too; ignore those).
-        if (reactor && reactor !== approval.owner_user_id) {
-          logger.info('reaction_added on approval from non-owner — ignoring', {
+        // A message timestamp alone is not an identity or a private surface.
+        // Bind the authenticated reactor, profile and recorded owner DM before
+        // resolving or exposing recovery details. Missing identity fails closed.
+        if (!reactor || reactor !== approval.owner_user_id
+            || reactor !== profile.user.slack_user_id
+            || !approval.owner_dm_channel?.startsWith('D')
+            || item.channel !== approval.owner_dm_channel) {
+          logger.info('reaction_added on approval outside authenticated owner DM — ignoring', {
             approvalId: approval.id, reactor, ownerUserId: approval.owner_user_id,
           });
           return;
@@ -892,10 +895,35 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
         const decision = verdict === 'approve'
           ? { verdict: 'approve' as const, data: {} }
           : { verdict: 'reject' as const, reason: `Owner reacted :${reaction}:` };
-        const result = await resolveRequest(approval.id, decision, { app, profile, resolvedByColleague: false });
+        const result = await resolveRequest(approval.id, decision, {
+          app, profile, resolvedByColleague: false, resolvingUserId: reactor,
+        }).catch(err => {
+          logger.warn('reaction_added approval resolution threw', { approvalId: approval.id, err: String(err).slice(0, 200) });
+          return { ok: false, reason: 'The outcome could not be confirmed.' };
+        });
         logger.info('reaction_added resolved approval via emoji', {
           approvalId: approval.id, verdict, reaction, ok: result.ok,
         });
+        if (!result.ok) {
+          // A reaction has no subsequent model turn to explain a failed replay.
+          // Return its recovery in the same private conversation through the
+          // established delivery/history path; never claim the action completed.
+          const { getConnection } = await import('../../../connections/registry');
+          const { postOwnerDecision } = await import('../../../utils/ownerDailyThread');
+          const conn = getConnection(approval.owner_user_id, 'slack');
+          if (!conn) {
+            logger.error('reaction_added approval recovery unavailable — no Slack connection', { approvalId: approval.id });
+            return;
+          }
+          const posted = await postOwnerDecision({
+            profile, conn,
+            text: `For "${approval.subject || 'the request'}" (${approval.id}): ${result.reason || 'No completion was confirmed.'}`,
+            inThread: { channel: approval.owner_dm_channel, threadTs: approval.owner_dm_thread_ts || item.ts },
+            label: 'reaction approval recovery',
+          });
+          if (!posted.ok) logger.error('reaction_added approval recovery delivery failed', { approvalId: approval.id, reason: posted.reason });
+          return;
+        }
         // v3.5.x — leave a MEMORY RECORD of this silent resolve in the owner's
         // approval-thread history. The emoji path runs NO Sonnet turn, so without
         // this a later owner turn in the thread has amnesia about what happened:

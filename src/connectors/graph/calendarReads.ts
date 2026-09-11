@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import { getClient } from './graphClient';
 import type { CalendarEvent, FreeBusySlot, VerifyResult } from './calendarTypes';
+import type { UserProfile } from '../../config/userProfile';
 
 /**
  * Single chokepoint for parsing Graph getSchedule's scheduleItems.
@@ -1454,4 +1455,151 @@ export async function verifyEventMoved(
   expectedTimezone: string,
 ): Promise<VerifyResult> {
   return verifyEventStartMatches(userEmail, meetingId, expectedStartIso, expectedTimezone);
+}
+
+/**
+ * Read-only recovery for an uncertain approved calendar write. An exact-id GET
+ * can establish the requested state NOW, never which attempt caused it. Do not
+ * reuse the legacy start-only verifiers here: they accept unreadable calendars
+ * and up to a minute of drift. No mutation, lookup by subject, or retry belongs
+ * in this function. The caller must retain the stored args before execution.
+ */
+export async function verifyApprovedCalendarAction(input: {
+  userEmail: string;
+  tool: string;
+  args: Record<string, unknown>;
+  eventId?: string;
+  profile: UserProfile;
+}): Promise<{
+  status: 'desired_state_observed' | 'different_state_observed' | 'unavailable';
+  reason: string;
+  result?: Record<string, unknown>;
+}> {
+  const { userEmail, tool, args, profile } = input;
+  const unavailable = (reason: string) => ({ status: 'unavailable' as const, reason });
+  const different = (reason: string) => ({ status: 'different_state_observed' as const, reason });
+  const supported = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'];
+  if (!supported.includes(tool)) return unavailable('unsupported_action');
+  if (!userEmail || userEmail.toLowerCase() !== profile.user.email.toLowerCase()) return unavailable('mailbox_mismatch');
+  const originalId = typeof args.meeting_id === 'string' ? args.meeting_id : undefined;
+  if (originalId && input.eventId && originalId !== input.eventId) return unavailable('event_id_mismatch');
+  const eventId = originalId ?? input.eventId;
+  if (!eventId?.trim()) return unavailable('missing_exact_event_id');
+  const observed = (deleted = false) => ({
+    status: 'desired_state_observed' as const,
+    reason: deleted ? 'event_absent' : 'approved_fields_match',
+    result: {
+      meetingId: eventId,
+      _calendar_verification: 'desired_state_observed',
+      action_summary: deleted
+        ? 'A read-only calendar check confirms the event is absent. This does not establish which attempt removed it.'
+        : 'A read-only calendar check confirms the requested calendar state. This does not establish which attempt produced it.',
+    },
+  });
+  let event: any;
+  try {
+    event = await getClient().api(`/users/${encodeURIComponent(userEmail)}/events/${encodeURIComponent(eventId)}`)
+      .header('Prefer', 'outlook.timezone="UTC"')
+      .select('id,subject,start,end,isCancelled,isAllDay,attendees,location,isOnlineMeeting,categories,sensitivity,body')
+      .get();
+  } catch (err: any) {
+    // An explicit HTTP failure outranks a contradictory service code. Invalid
+    // ids, permission errors, throttling and server failures are NOT absence.
+    const status = err?.statusCode ?? err?.status;
+    if (status === 404 || (status == null && err?.code === 'ErrorItemNotFound')) {
+      return tool === 'delete_meeting' ? observed(true) : different('event_absent');
+    }
+    return unavailable('calendar_read_failed');
+  }
+  if (!event || event.id !== eventId) return unavailable('invalid_event_response');
+  if (tool === 'delete_meeting') return different('event_still_present');
+  if (event.isCancelled !== false) return event.isCancelled === true ? different('event_cancelled') : unavailable('missing_event_state');
+
+  const checks: boolean[] = [];
+  const instant = (value: unknown, zone: string): number | undefined => {
+    if (typeof value !== 'string' || !value.includes('T')) return undefined;
+    const parsed = DateTime.fromISO(value, { zone, setZone: true });
+    return parsed.isValid ? parsed.toMillis() : undefined;
+  };
+  const compareTime = (expected: unknown, actual: any, zone: string): boolean => {
+    const want = instant(expected, zone);
+    // UTC is explicitly requested above; Graph still has to supply a valid
+    // datetime. Offset-bearing values identify the same exact instant.
+    const got = instant(actual?.dateTime, actual?.timeZone ?? 'UTC');
+    if (want === undefined || got === undefined) return false;
+    checks.push(want === got);
+    return true;
+  };
+  if (tool === 'create_meeting' || tool === 'move_meeting') {
+    const start = tool === 'create_meeting' ? args.start : args.new_start;
+    const end = tool === 'create_meeting' ? args.end : args.new_end;
+    // A preserved duration/anchor cannot be reconstructed from the post-write
+    // event without assuming the very outcome we are trying to establish.
+    if (typeof start !== 'string' || typeof end !== 'string' || args.start_at_event_end_id) return unavailable('missing_exact_approved_interval');
+    const { isoHasExplicitZone } = await import('../../utils/timezoneConvert');
+    const statedZone = args.stated_zone ?? args.start_timezone;
+    if ((!isoHasExplicitZone(start) || !isoHasExplicitZone(end)) && (!statedZone || statedZone === 'local')) {
+      return unavailable('approved_timezone_not_fixed');
+    }
+    const { resolveStatedInstant } = await import('../../utils/weTimeResolver');
+    const resolved = resolveStatedInstant({ startIso: start, endIso: end, statedZone: typeof statedZone === 'string' ? statedZone : undefined,
+      homeTz: profile.user.timezone, travel: { isAway: false, effectiveTz: profile.user.timezone, location: '' } });
+    if (!DateTime.fromMillis(0, { zone: resolved.sourceZone }).isValid) return unavailable('invalid_approved_timezone');
+    if (!compareTime(resolved.startIso, event.start, resolved.sourceZone) || !compareTime(resolved.endIso, event.end, resolved.sourceZone)) return unavailable('invalid_event_interval');
+  }
+  if (tool === 'book_floating_block') {
+    const { getFloatingBlocks } = await import('../../utils/floatingBlocks');
+    const block = getFloatingBlocks(profile).find(b => b.name === args.block_name);
+    if (!block || typeof args.date !== 'string') return unavailable('missing_approved_block');
+    const start = instant(event.start?.dateTime, event.start?.timeZone ?? 'UTC');
+    const end = instant(event.end?.dateTime, event.end?.timeZone ?? 'UTC');
+    if (start === undefined || end === undefined) return unavailable('invalid_event_interval');
+    checks.push(event.subject === (block.default_subject ?? (block.name.charAt(0).toUpperCase() + block.name.slice(1).replace(/_/g, ' '))),
+      end - start === block.duration_minutes * 60_000, event.isAllDay === false,
+      Array.isArray(event.attendees) && event.attendees.length === 0);
+    if (typeof args.start_time === 'string') {
+      if (!compareTime(`${args.date}T${args.start_time}`, event.start, profile.user.timezone)) return unavailable('invalid_approved_interval');
+    } else {
+      const earliest = instant(`${args.date}T${block.preferred_start}`, profile.user.timezone);
+      const latest = instant(`${args.date}T${block.preferred_end}`, profile.user.timezone);
+      if (earliest === undefined || latest === undefined) return unavailable('invalid_approved_window');
+      checks.push(start >= earliest && end <= latest);
+    }
+  }
+  const subject = tool === 'create_meeting' ? args.subject : args.new_subject;
+  if (tool === 'create_meeting' && typeof subject !== 'string') return unavailable('missing_approved_subject');
+  if (subject !== undefined) checks.push(typeof subject === 'string' && event.subject === subject);
+  if (args.location !== undefined) checks.push(typeof args.location === 'string' && event.location?.displayName === args.location.trim());
+  if (args.is_online !== undefined) checks.push(typeof args.is_online === 'boolean' && event.isOnlineMeeting === args.is_online);
+  if (args.is_all_day !== undefined) checks.push(typeof args.is_all_day === 'boolean' && event.isAllDay === args.is_all_day);
+  else if (tool === 'create_meeting') checks.push(event.isAllDay === false);
+  if (args.sensitivity !== undefined) checks.push(event.sensitivity === args.sensitivity);
+  if (args.category !== undefined && tool !== 'move_meeting') checks.push(Array.isArray(event.categories) && event.categories.includes(args.category));
+  if (args.body !== undefined) checks.push(typeof args.body === 'string' && event.body?.content === args.body);
+
+  const additions = tool === 'create_meeting' ? args.attendees : args.add_attendees;
+  const removals = args.remove_attendees;
+  if (tool === 'create_meeting' && !Array.isArray(additions)) return unavailable('missing_approved_attendees');
+  if (additions !== undefined || removals !== undefined) {
+    if (!Array.isArray(event.attendees)) return unavailable('missing_event_attendees');
+    const email = (value: unknown) => typeof value === 'string' && value.includes('@') ? value.trim().toLowerCase() : undefined;
+    if (additions !== undefined) {
+      if (!Array.isArray(additions)) return unavailable('invalid_approved_attendees');
+      for (const attendee of additions) {
+        const address = email(attendee?.email);
+        if (!address) return unavailable('unresolved_approved_attendee');
+        checks.push(event.attendees.some((a: any) => email(a.emailAddress?.address) === address && a.type === (attendee.optional ? 'optional' : 'required')));
+      }
+      // Full create intent includes absence of unapproved people. The owner and
+      // resource mailboxes may be inserted by the scheduling pipeline.
+      if (tool === 'create_meeting') checks.push(event.attendees.every((a: any) => a.type === 'resource' || email(a.emailAddress?.address) === email(userEmail)
+        || additions.some((wanted: any) => email(wanted.email) === email(a.emailAddress?.address))));
+    }
+    if (removals !== undefined) {
+      if (!Array.isArray(removals) || removals.some(a => !email(a))) return unavailable('unresolved_removed_attendee');
+      for (const address of removals) checks.push(!event.attendees.some((a: any) => email(a.emailAddress?.address) === email(address)));
+    }
+  }
+  if (!checks.length) return unavailable('no_comparable_approved_fields');
+  return checks.every(Boolean) ? observed() : different('approved_fields_differ');
 }

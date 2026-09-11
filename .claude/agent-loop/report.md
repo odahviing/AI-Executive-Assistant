@@ -1,10 +1,10 @@
-# Report — cumulative since the 4.9.2 wrap
+# Report — cumulative since the 4.9.3 wrap
 
 ```
 board: 6 open rows — 3 still-real · 2 need a re-read · 1 cite no file · 6 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 ```
 
-**6 rows await you** — v4.9.2 wrapped, 0 new from this wrap. Four are queued for the next build.
+**6 rows await you** — v4.9.3 release bookkeeping, 0 new from this wrap. Four are queued for the next build.
 
 ### pending owner (0)
 
@@ -14,7 +14,7 @@ board: 6 open rows — 3 still-real · 2 need a re-read · 1 cite no file · 6 r
 
 **Built and uncommitted — this is what a wrap ships (0):** none
 
-Release 4.9.2 bookkeeping is in the ledger. The standing backlog remains available through `node scripts/ledger-stats.cjs --open`.
+Release 4.9.3 dispositions are in the ledger. The standing backlog remains available through `node scripts/ledger-stats.cjs --open`.
 
-out: 0 bounced · 0/0 joint-traced.
-Golden30: 30 pass · 0 fail · 0 stale anchors. Final independent accumulated review: pass, 0 overturns and 0 discoveries.
+out: one consolidated repair bounce; all five reviewed repair groups passed their joint recheck.
+Golden30: 30 pass · 0 fail · 0 stale anchors. Independent review: pass; 10/10 tracked release items verified. Reused 775 passing scripted checks; model-dependent and residual R6/R11 scope remain explicit in the audit evidence.

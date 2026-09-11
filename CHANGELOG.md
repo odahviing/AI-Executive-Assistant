@@ -1,6 +1,30 @@
 # Changelog
 
 ---
+## 4.9.3 — Reliable approval decisions and recovery
+
+Maelle preserves the owner's exact approval decision through execution and reports the observed outcome. Shared request handling now coordinates replies, timers and brief cleanup, with recoverable delivery failures and honest reporting when an attempted action cannot be confirmed.
+
+### Fixed
+
+- Preserve changed action, start and duration across approval refreshes, counterproposals and retries; execute supported registered replacement actions with concrete completion results.
+- Prevent stale timers, scanners and brief cleanup from closing work that is already being resolved. Enforce the existing counterproposal and reminder limits.
+- Retain the exact terminal message after a definite delivery failure and retry delivery without repeating the action. Unknown delivery receipts remain unconfirmed.
+- Check uncertain calendar writes safely where the event and approved fields are known; otherwise report attempted/unconfirmed without promising another check or allowing blind replay.
+- Preserve prior refusals when an internal requester confirms asking again, including when the owner's first notification fails.
+- Bind approval reactions to the authenticated owner and recorded private decision thread; return actual failure feedback without inventing retry promises.
+- Keep outreach request/payload state consistent, prevent duplicate daily decision headers, and record brief delivery and profile partial writes truthfully.
+
+### Framework
+
+- Clarify existing Registrar R2 and R11 using the owner's rulings on uncertain execution and repeated declined requests; retain eleven charter rules.
+- Add approval and cross-module regression coverage and preserve independent implementation/review records. Refresh architecture notes and moved documentation anchors.
+
+### Remaining scope
+
+- Older paraphrased refusals can fall outside the existing semantic candidate search. Standalone read-only replacement callbacks remain unsupported; this release does not claim universal R6/R11 coverage.
+
+
 ## 4.9.2 — Say what happened, do what was approved
 
 Maelle now carries the active decision and source context into later replies instead of answering from a stale turn, and calendar changes preserve the exact approved instant across timezones. Approval replay, requester identity and proactive social accounting now have deterministic success and delivery boundaries, preventing false completion, authority drift and invisible interactions from changing future behavior.

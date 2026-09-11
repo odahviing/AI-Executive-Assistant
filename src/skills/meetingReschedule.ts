@@ -27,7 +27,7 @@ import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
 import { createOutreachJob, updateOutreachJob, getLinkedRequestIdForOutreach } from '../db/jobs';
-import { updateRequest } from '../db/requests';
+import { getRequest, updateRequest } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
@@ -181,7 +181,7 @@ export async function handleRescheduleReply(
 
   // v3.1.1 — reply arrived → kill the expiry timer. Path 2 moved it off the
   // deleted `outreach_expiry` TASK onto the linked request's next_check.
-  if (job.request_id) {
+  if (job.request_id && decision.status !== 'checking') {
     updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
   }
 
@@ -286,7 +286,8 @@ export async function handleRescheduleReply(
   // again and resolves normally — clearing this timer. No new state: reuses the
   // open outreach job + the linked request's next_check.
   if (decision.status === 'checking') {
-    const ownerMsg = `${job.colleague_name} is checking on "${ctx.meeting_subject}" and will come back to me — nothing decided yet, so I'm keeping the current time and will wait. If I don't hear back I'll nudge once tomorrow.`;
+    const alreadyNudged = job.request_id ? getRequest(job.request_id)?.phase === 'outreach:nudged' : false;
+    const ownerMsg = `${job.colleague_name} is checking on "${ctx.meeting_subject}" — nothing decided yet, so I'm keeping the current time. ${alreadyNudged ? 'The one reminder was already sent; this will close at the existing deadline if there is no answer.' : "If I don't hear back I'll nudge once tomorrow."}`;
     await conn.postToChannel(job.owner_channel, ownerMsg, { threadTs: job.owner_thread_ts ?? undefined });
     if (job.owner_thread_ts) {
       appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
@@ -295,7 +296,7 @@ export async function handleRescheduleReply(
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
     // Re-arm the request's spine timer: one re-ask at +24h (overrides the
     // reply-time timer clear above).
-    if (job.request_id) {
+    if (job.request_id && !alreadyNudged) {
       // outreach-expiry-tombstone-says-never-replied (2026-08-12) — this IS a
       // genuine reply ("checking"), so mark it same as coordinator.ts's continue
       // branch: `state` stays awaiting_colleague through this re-arm (and the

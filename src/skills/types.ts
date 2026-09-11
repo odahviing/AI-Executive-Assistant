@@ -109,28 +109,13 @@ export interface SkillContext {
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM
   /**
-   * v3.4.7 — the turn-scoped set of colleague slack_ids SUCCESSFULLY messaged
-   * (message_colleague returned ok) this turn, by reference. resolve_approval
-   * forwards it to the resolver so notifyRequesterOfDecision skips a relay to a
-   * requester Sonnet already told this turn (the reverse-order double-notify
-   * guard). Success-gated on purpose: a FAILED message_colleague is NOT in here,
-   * so the resolver relay still goes — never a silent drop. Orchestrator-
-   * populated; undefined on other call paths.
-   */
-  messagedColleaguesOkThisTurn?: Set<string>;
-  /**
    * bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
    * colleague slack_ids already sent the private "you have pending items"
    * cap notice THIS turn (`colleaguePendingCapRefusal`, tasks/skill.ts). A
    * model that tries create_approval then create_task in the same turn, or
    * retries either after the refusal, re-runs the cap check and must NOT
-   * re-send the identical DM. Deliberately a SEPARATE set from
-   * `messagedColleaguesOkThisTurn` — that one feeds the resolver's
-   * reverse-order double-notify guard (an "outcome already relayed" signal,
-   * stamped onto `requester_notified_at`); writing this unrelated cap notice
-   * into it would make the resolver wrongly skip — and mark as delivered — a
-   * real approval-outcome relay to the same colleague later in the same turn.
-   * Orchestrator-populated by reference (same pattern), undefined elsewhere.
+   * re-send the identical DM. This notice never proves delivery of an approval
+   * outcome. Orchestrator-populated by reference, undefined elsewhere.
    */
   capNoticeSentThisTurn?: Set<string>;
   /**

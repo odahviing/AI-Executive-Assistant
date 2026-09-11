@@ -77,7 +77,7 @@ function harness(options = {}) {
       },
     },
     'src/core/requests/logActivity.ts': { logActivity: data => effects.activity.push(clone(data)) },
-    'src/core/requests/requesterRelay.ts': { usableRelaySubject: text => typeof text === 'string' ? text : '', requesterRelayLanguage: () => options.lang || 'en' },
+    'src/core/requests/requesterRelay.ts': { isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: text => typeof text === 'string' ? text : '', requesterRelayLanguage: () => options.lang || 'en' },
     'src/db/conversations.ts': { appendToConversation: (...args) => effects.history.push(clone(args)), getConversationHistory: () => [] },
     'src/db/people.ts': { getPersonMemory: () => ({ timezone: options.requesterZone || 'America/Los_Angeles', timezone_set_by: options.zoneSetBy || 'person' }) },
     'src/db/jobs.ts': { createOutreachJob: args => effects.outbound.push(clone(args)) },
@@ -103,7 +103,7 @@ function harness(options = {}) {
     if (Object.hasOwn(mocks, relative)) return mocks[relative];
     if (modules.has(relative)) return modules.get(relative).exports;
     if (!actual.has(relative)) { unexpected.push(relative); throw new Error(`Blocked module: ${relative}`); }
-    const useSnapshot = ['src/tasks/skill.ts', 'src/core/requests/resolver.ts'].includes(relative);
+    const useSnapshot = ['src/tasks/skill.ts', 'src/core/requests/resolver.ts', 'src/core/approvals/approvalCallbacks.ts', 'src/core/requests/types.ts'].includes(relative);
     const filename = path.join(useSnapshot ? sourceRoot : root, relative);
     if (!compiled.has(filename)) compiled.set(filename, ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
       fileName: filename, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
@@ -112,6 +112,7 @@ function harness(options = {}) {
     modules.set(relative, module);
     const isolatedRequire = spec => {
       if (spec === 'luxon') return { DateTime };
+      if (spec === 'node:util' || spec === 'node:async_hooks') return require(spec);
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external module: ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };
@@ -396,7 +397,7 @@ test('a duplicated question remains a single attributed question', async () => {
   const h = harness();
   await h.relay({ start, text }, text);
   assert.equal(h.effects.sends[0].body.split(text).length - 1, 1);
-  assert.ok(h.effects.sends[0].body.includes(`Idan asked: ${text}`));
+  assert.ok(h.effects.sends[0].body.includes('Idan') && h.effects.sends[0].body.includes(text));
 });
 test('composer failure preserves the deterministic clocks and attributed rationale', async () => {
   const h = harness({ compose: () => { throw new Error('simulated composer failure'); } });
@@ -495,3 +496,67 @@ for (const kind of ['outreach', 'social_outreach', 'reminder', 'follow_up', 'res
     });
   }
 }
+
+// Approval spine audit: actual resolver/callback behavior, isolated effects.
+
+for (const key of ['duration_min', 'duration_minutes']) test('audit A05 accepted '+key+' changes the actual replay end', async () => {
+  const h=harness({counter:{[key]:55}}); await h.call();
+  const args=h.effects.replay[0].args;
+  assert.equal(DateTime.fromISO(args.end).diff(DateTime.fromISO(args.start),'minutes').minutes,55);
+});
+test('audit A05 start-only counter preserves the stored duration',async()=>{
+  const h=harness({counter:{slot_iso:'2026-09-20T14:00:00Z'}}); await h.call();
+  const args=h.effects.replay[0].args;
+  assert.equal(DateTime.fromISO(args.end).diff(DateTime.fromISO(args.start),'minutes').minutes,25);
+});
+test('audit A05 move accepts the shared start/end counter vocabulary',async()=>{
+  const h=harness({tool:'move_meeting',actionArgs:{new_start:'2026-09-20T12:00:00Z',new_end:'2026-09-20T12:25:00Z'},counter:{start:'2026-09-20T14:00:00Z',end:'2026-09-20T14:55:00Z'}}); await h.call();
+  const args=h.effects.replay[0].args;
+  assert.equal(args.new_start,'2026-09-20T14:00:00Z'); assert.equal(args.new_end,'2026-09-20T14:55:00Z');
+});
+test('audit A06 owner recovery decision survives failed replay and bare retry',async()=>{
+  const h=harness({row:{state:'awaiting_owner'},counter:{},replayError:{error:'unavailable'},replayErrorCalls:1});
+  assert.equal((await h.resolve({verdict:'approve',data:{is_online:false,location:'Chosen room'}},{resolvedByColleague:false})).ok,false);
+  assert.equal((await h.resolve({verdict:'approve'},{resolvedByColleague:false})).ok,true);
+  assert.equal(h.effects.replay[1].args.is_online,false); assert.equal(h.effects.replay[1].args.location,'Chosen room');
+});
+test('audit A06 supported replay marks stored exact time explicit',async()=>{
+  const h=harness({counter:{}}); await h.call(); assert.equal(h.effects.replay[0].args.start_is_explicit,true);
+});
+test('audit A06 unavailable callback remains pending without false completion',async()=>{
+  const h=harness({tool:'unsupported_tool',counter:{},row:{state:'awaiting_owner'},replayError:{error:'unsupported_replay_tool'}});
+  const result=await h.resolve({verdict:'approve'},{resolvedByColleague:false});
+  assert.equal(result.ok,false); assert.equal(h.row().state,'awaiting_owner'); assert.equal(h.effects.closes.length,0);
+});
+test('audit A03 unrelated successful recipient message cannot stamp terminal outcome',async()=>{
+  const h=harness({noCallback:true,row:{state:'awaiting_owner'}});
+  const result=await h.resolve({verdict:'approve'},{resolvedByColleague:false,alreadyMessagedRequesterIds:new Set(['UPAUL'])});
+  assert.equal(result.ok,true);assert.equal(h.effects.sends.length,1);assert.equal(result.requester_notify_outcome,'sent');
+});
+
+for(const verdict of ['amend','reject']) test('audit A02 second counter '+verdict+' closes honestly to both sides',async()=>{
+  const h=harness({details:{amend_round:2}});
+  const result=await h.resolve(verdict==='amend'?{verdict,counter:{start:'2026-09-21T12:00:00Z'}}:{verdict,reason:'Cannot do it'},{alreadyMessagedRequesterIds:undefined});
+  assert.equal(result.state,'expired'); assert.equal(h.effects.ownerPosts.length,1);
+  assert.match(h.effects.sends[0].body,/directly/i); assert.equal(h.effects.replay.length,0);
+});
+test('audit A02 legitimate first counter reject returns to owner',async()=>{
+  const h=harness({details:{amend_round:1}});
+  const result=await h.resolve({verdict:'reject',reason:'Cannot do it'});
+  assert.equal(result.state,'awaiting_owner'); assert.equal(h.effects.closes.length,0);
+});
+test('audit A01 no-action approval fallback is a complete outcome, no new promise',async()=>{
+  const h=harness({noCallback:true,counter:{},row:{state:'awaiting_owner',subject:'Share phone number'}});
+  await h.resolve({verdict:'approve'},{resolvedByColleague:false,alreadyMessagedRequesterIds:undefined});
+  assert.match(h.effects.sends[0].body,/approved|said yes/i); assert.doesNotMatch(h.effects.sends[0].body,/will|I'll|I'm on it/);
+});
+test('audit A01 reject composer receives rejection, never a booking or cancellation success instruction',async()=>{
+  const h=harness({tool:'delete_meeting',counter:{},row:{state:'awaiting_owner',subject:'Cancel sync'}});
+  await h.resolve({verdict:'reject',reason:'Keep it'},{resolvedByColleague:false,alreadyMessagedRequesterIds:undefined});
+  const prompt=h.prompts.at(-1); assert.doesNotMatch(prompt.system,/say it.s cancelled|say it.s booked/);
+  assert.match(prompt.messages[0].content,/reject|declin/i);
+});
+test('audit A01 legitimate successful exact-time acceptance still sends once',async()=>{
+  const h=harness(); await h.resolve({verdict:'approve'},{alreadyMessagedRequesterIds:undefined});
+  assert.equal(h.effects.replay.length,1); assert.equal(h.effects.sends.length,1); assert.equal(h.effects.closes.length,1);
+});

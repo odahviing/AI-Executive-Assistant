@@ -496,18 +496,23 @@ const OWNER_ROOM_ACTION_TOOLS = new Set<string>([
  * the Slack transport just to ask that question — and left the set editable
  * only from a Slack file even though not one entry is Slack-specific.
  *
- * Three consumers, all in core:
+ * Consumers:
  *   - abort-if-safe — an in-flight turn stops being abortable once one of these
  *     fires (orchestrator/index.ts → onWriteExecuted → the inbound queue).
  *   - proseOnly — the dateVerifier retry path strips every write so a reworded
  *     reply can't fire a fresh mutation (buildTurnContext.ts).
  *   - ack guard — "thanks" after a completed action can't re-mutate
  *     (buildTurnContext.ts; it excludes the two approval tools).
+ *   - approved-action execution below — only classified mutations with an
+ *     explicit outcome contract can confirm a stored owner action.
  */
 export const WRITE_TOOLS = new Set<string>([
   // Calendar mutations
   'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
   'book_floating_block', 'set_event_category',
+  // These existing tools also persist holds/overrides or run calendar fixes.
+  // Mixed read/write tools remain writes here (as manage_knowledge does).
+  'hold_slot', 'revert_last_auto_move', 'set_work_schedule_override', 'check_calendar_health',
   // Outreach (sends DMs externally — irreversible)
   'message_colleague',
   // Approvals (DM owner)
@@ -530,6 +535,176 @@ export const WRITE_TOOLS = new Set<string>([
   // Briefing
   'send_briefing_now',
 ]);
+
+export interface ApprovedSkillOutcome {
+  status: 'completed' | 'tracked' | 'failed';
+  /** Preserve partial effects and refusal details; failed never means nothing happened. */
+  result: Record<string, unknown>;
+}
+
+/** Execute a stored owner action through the same policy/skill dispatch as a live call.
+ * Result contracts belong to the tool, not to the approval's original subject.
+ * This does not grant authority, enable skills, or turn a scheduled send into delivery.
+ */
+export async function executeApprovedSkillTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  context: SkillContext,
+): Promise<ApprovedSkillOutcome> {
+  const refuse = (error: string): ApprovedSkillOutcome => ({ status: 'failed', result: { error } });
+  if (context.authority !== 'owner' || context.userId !== context.profile.user.slack_user_id) {
+    return refuse('approved_action_requires_authenticated_owner');
+  }
+  if (!WRITE_TOOLS.has(toolName)) return refuse('unsupported_approved_action');
+  // Calendar replay already preserves its origin for scoped domain narration.
+  // Generic results can contain private data: the caller must supply the real
+  // stored owner decision anchor, never relabel an origin room as owner-private.
+  const originScopedCalendar = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'];
+  if (!originScopedCalendar.includes(toolName) && (context.surface !== 'owner_dm' || !context.channelId || !context.threadTs)) {
+    return refuse('approved_action_requires_private_decision_context');
+  }
+  // The request lock rejects actual dependency cycles. Unrelated approval
+  // targets still use their normal domain authorization and lifecycle.
+  const value = await executeSkillTool(toolName, args, context);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return refuse('approved_action_unconfirmed');
+  }
+  const result = value as Record<string, unknown>;
+  const failed = (uncertain = false): ApprovedSkillOutcome => ({
+    status: 'failed', result: {
+      ...result,
+      ...(uncertain && result.error ? { execution_error: result.error } : {}),
+      error: uncertain ? 'approved_action_unconfirmed' : result.error || 'approved_action_unconfirmed',
+    },
+  });
+  // These two move results are emitted only AFTER PATCH and its readback.
+  // A rule refusal before PATCH is different: never label it attempted.
+  const postMoveUnconfirmed = toolName === 'move_meeting'
+    && (result.error === 'moved_but_missing' || result.error === 'move_did_not_land');
+  if (postMoveUnconfirmed || result.needs_verification === true || result.partial === true
+    || (result.not_saved && typeof result.not_saved === 'object' && Object.keys(result.not_saved).length > 0)) {
+    return failed(true);
+  }
+  if (result.error || result.ok === false || result.success === false) return failed();
+  const text = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+  const list = (v: unknown): v is unknown[] => Array.isArray(v);
+  const action = String(args.action ?? '').toLowerCase();
+  let complete = false;
+  switch (toolName) {
+    case 'create_meeting': case 'move_meeting': case 'update_meeting': case 'delete_meeting':
+      complete = result.success === true;
+      break;
+    case 'book_floating_block':
+      complete = result.ok === true;
+      break;
+    case 'hold_slot':
+      complete = result.success === true && (action === 'release'
+        ? Number.isInteger(result.released) && (result.released as number) >= 0
+        : text(result.hold_id) && text(result.expires_at));
+      break;
+    case 'revert_last_auto_move':
+      complete = result.success === true && result.reverted === true;
+      break;
+    case 'set_work_schedule_override':
+      complete = result.success === true && list(result.dates) && result.dates.length > 0
+        && result.dates[0] === args.date_from
+        && result.dates[result.dates.length - 1] === (args.date_to || args.date_from)
+        && (args.clear !== true || result.cleared === result.dates.length);
+      break;
+    case 'check_calendar_health':
+      complete = list(result.issues) && result.count === result.issues.length
+        && ['active', 'passive'].includes(String(result.mode)) && Number.isInteger(result.fixes_applied)
+        && text(result.summary)
+        && result.issues.every(issue => !!issue && typeof issue === 'object'
+          && !(issue as Record<string, unknown>).fix_failed && !(issue as Record<string, unknown>).fix_error);
+      break;
+    case 'set_event_category':
+      complete = result.updated === true && text(result.event_id) && result.event_id === args.event_id;
+      break;
+    case 'message_colleague':
+      if (result.scheduled === true && text(result.jobId) && text(result.scheduled_at)
+        && result._status === 'scheduled_not_sent') return { status: 'tracked', result };
+      complete = result.ok === true && text(result.jobId)
+        && (result.sent === true || text(result.posted_to_channel));
+      break;
+    case 'create_task':
+      complete = result.created === true && text(result.task_id);
+      break;
+    case 'create_approval':
+      if (result.ok === true && text(result.approval_id)
+        && (result.created === true || (result.created === false && result.reused_existing === true))) {
+        if (result.already_closed === true) {
+          return { status: 'failed', result: { ...result, error: 'approval_request_already_closed' } };
+        }
+        return { status: 'tracked', result };
+      }
+      break;
+    case 'resolve_approval':
+      if (result.ok === true && text(result.request_id)
+        && result.request_id === String(args.approval_id ?? '').replace(/^#/, '')) {
+        if (['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(String(result.state))
+          || result.requester_notify_outcome === 'failed') return { status: 'tracked', result };
+        complete = ['resolved', 'cancelled', 'expired'].includes(String(result.state));
+      }
+      break;
+    case 'update_task':
+      complete = action === 'edit' ? result.updated === true && result.task_id === args.task_id
+        : action === 'cancel' && (result.cancelled === true
+          || (result.ok === true && result.request_id === args.task_id && result.state === 'cancelled'));
+      if (complete && result.requester_notify_outcome === 'failed') return { status: 'tracked', result };
+      break;
+    case 'manage_routine':
+      complete = action === 'create' ? result.created === true && text(result.routine_id)
+        : action === 'update' ? result.updated === true && result.routine_id === args.routine_id
+        : action === 'delete' ? result.deleted === true
+        : action === 'list' && list(result.routines) && result.count === result.routines.length;
+      break;
+    case 'manage_calendar_issue':
+      if (action === 'start_resolve') {
+        return result.updated === true && result.status === 'in_progress' && text(result.request_id)
+          ? { status: 'tracked', result } : failed();
+      }
+      complete = action === 'list' ? list(result.issues) && result.count === result.issues.length
+        : action === 'approve' && !args.issue_id ? result.ok === true
+        : ['approve', 'owner_will_resolve', 'owner_done'].includes(action)
+          && result.updated === true && result.issue_id === args.issue_id
+          && result.status === ({ approve: 'approved', owner_will_resolve: 'owner_side', owner_done: 'resolved' } as Record<string, string>)[action];
+      break;
+    case 'share_summary':
+      complete = result.ok === true && list(args.recipients) && args.recipients.length > 0
+        && list(result.sent_to) && result.sent_to.length === args.recipients.length
+        && result.sent_to.every(entry => !!entry && typeof entry === 'object' && text((entry as Record<string, unknown>).id))
+        && list(result.refused) && result.refused.length === 0
+        && list(result.send_failures) && result.send_failures.length === 0;
+      break;
+    case 'manage_knowledge':
+      complete = result.ok === true && (action === 'ingest'
+        ? ['created', 'merged', 'sibling'].includes(String(result.kind)) && text(result.section_id)
+        : action === 'get' && (text(result.content) || list(result.sections)));
+      break;
+    case 'learn_summary_style':
+      complete = result.ok === true && result.saved === true;
+      break;
+    case 'update_summary_draft':
+      complete = result.ok === true && text(result.rendered);
+      break;
+    case 'manage_preference':
+      complete = action === 'set' ? result.saved === true
+        : action === 'forget' ? result.deleted === true
+        : action === 'recall' && list(result.preferences) && result.count === result.preferences.length;
+      break;
+    case 'note_about_person': case 'note_about_self':
+      complete = result.saved === true;
+      break;
+    case 'log_interaction': complete = result.logged === true; break;
+    case 'confirm_gender': complete = result.confirmed === true; break;
+    case 'update_person_profile': complete = result.updated === true; break;
+    case 'update_my_preferences': case 'update_person_memory': case 'send_briefing_now':
+      complete = result.ok === true;
+      break;
+  }
+  return complete ? { status: 'completed', result } : failed();
+}
 
 /**
  * Returns the list of skills that are:
@@ -764,7 +939,7 @@ export async function executeSkillTool(
         err: String(err),
         stack: err instanceof Error ? err.stack : undefined,
       });
-      return { error: `Tool "${toolName}" failed: ${String(err)}` };
+      return executionFailure(toolName, err);
     }
   }
 
@@ -780,7 +955,7 @@ export async function executeSkillTool(
         err: String(err),
         stack: err instanceof Error ? err.stack : undefined,
       });
-      return { error: `Tool "${toolName}" failed: ${String(err)}` };
+      return executionFailure(toolName, err);
     }
   }
 
@@ -799,10 +974,19 @@ export async function executeSkillTool(
       }
     } catch (err) {
       logger.error(`Connection "${conn.id}" threw during tool "${toolName}"`, { err: String(err) });
-      return { error: `Tool "${toolName}" failed: ${String(err)}` };
+      return executionFailure(toolName, err);
     }
   }
 
   logger.warn('No skill handled tool', { tool: toolName, user: context.profile.user.name });
   return { error: `No active skill handles tool: ${toolName}` };
+}
+
+function executionFailure(toolName: string, err: unknown): Record<string, unknown> {
+  // The lock raises this before entering the cyclic target's work; it proves
+  // refusal, unlike an arbitrary executor exception after a possible write.
+  if (err && typeof err === 'object' && (err as { code?: unknown }).code === 'request_lock_cycle') {
+    return { error: 'request_lock_cycle', reason: 'The requested action would wait on its own pending decision.' };
+  }
+  return { error: `Tool "${toolName}" failed: ${String(err)}`, needs_verification: true };
 }

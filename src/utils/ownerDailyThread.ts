@@ -47,6 +47,10 @@ export interface OwnerDailyThread {
   rootTs: string;
 }
 
+// One running process can receive simultaneous asks from different threads.
+// Coalesce header creation before its first network await, not after posting.
+const pendingDailyThreads = new Map<string, Promise<OwnerDailyThread | null>>();
+
 /** The day-key for the owner's effective today (honors day_boundary_hour). */
 export function ownerDailyThreadKey(profile: UserProfile): string {
   return getEffectiveToday(profile).toISODate() ?? DateTime.now().toISODate()!;
@@ -79,6 +83,19 @@ export async function getOrCreateOwnerDailyThread(opts: {
 
   const existing = readRow(ownerUserId, dayKey);
   if (existing) return existing;
+
+  const key = `${ownerUserId}:${dayKey}`;
+  const pending = pendingDailyThreads.get(key);
+  if (pending) return pending;
+  const create = createOwnerDailyThread(profile, conn, ownerUserId, dayKey);
+  pendingDailyThreads.set(key, create);
+  try { return await create; }
+  finally { if (pendingDailyThreads.get(key) === create) pendingDailyThreads.delete(key); }
+}
+
+async function createOwnerDailyThread(
+  profile: UserProfile, conn: Connection, ownerUserId: string, dayKey: string,
+): Promise<OwnerDailyThread | null> {
 
   // Lazily create: post the dated header to the owner's DM. sendDirect returns
   // ref=channel, ts=root.
@@ -202,15 +219,21 @@ export async function postOwnerDecision(opts: {
   }
   try {
     if (channel && threadTs) {
-      const res = await conn.postToChannel(channel, text, { threadTs });
-      if (res.ok) {
-        recordOwnerDecisionInHistory({ threadTs, channel, messageTs: res.ts, text, label });
-        logger.info(`postOwnerDecision — posted (${label})`, { ownerUserId, channel, threadTs });
-        return { ok: true, channel, threadTs, ts: res.ts };
+      try {
+        const res = await conn.postToChannel(channel, text, { threadTs });
+        if (res.ok) {
+          recordOwnerDecisionInHistory({ threadTs, channel, messageTs: res.ts, text, label });
+          logger.info(`postOwnerDecision — posted (${label})`, { ownerUserId, channel, threadTs });
+          return { ok: true, channel, threadTs, ts: res.ts };
+        }
+        logger.warn(`postOwnerDecision — thread post failed, falling back to plain DM (${label})`, {
+          ownerUserId, channel, reason: res.reason,
+        });
+      } catch (err) {
+        logger.warn(`postOwnerDecision — thread post threw, falling back to plain DM (${label})`, {
+          ownerUserId, channel, err: String(err).slice(0, 200),
+        });
       }
-      logger.warn(`postOwnerDecision — thread post failed, falling back to plain DM (${label})`, {
-        ownerUserId, channel, reason: res.reason,
-      });
     }
     const dm = await conn.sendDirect(ownerUserId, text);
     if (!dm.ok) {
@@ -220,7 +243,7 @@ export async function postOwnerDecision(opts: {
       return { ok: false, reason: dm.reason };
     }
     recordOwnerDecisionInHistory({ threadTs: dm.ts, channel: dm.ref, messageTs: dm.ts, text, label });
-    return { ok: true, channel: dm.ref, ts: dm.ts };
+    return { ok: true, channel: dm.ref, threadTs: dm.ts, ts: dm.ts };
   } catch (err) {
     logger.error(`postOwnerDecision — threw, owner never got this decision ask (${label})`, {
       ownerUserId, err: String(err).slice(0, 200),

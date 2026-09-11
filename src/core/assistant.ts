@@ -1175,6 +1175,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           const { setCoreFieldWithProvenanceById, updatePersonProfileById, setPersonEmail } = require('../db') as typeof import('../db');
           const coreWrites: Array<[string, CoreFieldWrite]> = [];
           const extraNotes: string[] = [];
+          let emailConflict = false;
           // v4.8.x — email FIRST: it is the identity-keyed write (setPersonEmail,
           // db/people.ts — provenance-gated, merge-safe). A stated address another
           // row already holds MERGES the two rows, so every write below must
@@ -1184,6 +1185,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             const w = setPersonEmail(personId, emailArg, { overwrite: true, by: setBy });
             if (w.personId) personId = w.personId;
             if (w.outcome === 'identity_conflict') {
+              emailConflict = true;
               extraNotes.push(`email NOT saved — ${emailArg} is already on file for a DIFFERENT person (a distinct identity, not a duplicate row). Tell ${context.profile.user.name.split(' ')[0]} about the clash instead of reporting a save.`);
             } else if (w.outcome !== 'kept_existing') {
               coreWrites.push(['email', w.outcome]);
@@ -1222,6 +1224,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           applyTravel(personId);
           logger.info('Person profile updated (external)', { personId, name: target.name });
           const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
+          // Keep partial writes, but expose the refused email to deterministic
+          // outcome consumers as well as the conversational explanation.
+          if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
           const hours = describeHoursWrite(personId, args, target.name);
           const allNotes = [...described.notes, ...hours.notes, ...extraNotes];
           return {
@@ -1404,9 +1409,10 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // held exactly the stated value is neither: nothing needed doing, which is
         // the honesty confirm_gender owes too.
         const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
+        if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
         if (described.not_saved) {
           base.not_saved = described.not_saved;
-          logger.info('update_person_profile — fields refused, a higher authority outranks the writer', {
+          logger.info('update_person_profile — fields refused by provenance or identity checks', {
             requesterId: context.userId, isOwner, refused: described.not_saved,
           });
         }

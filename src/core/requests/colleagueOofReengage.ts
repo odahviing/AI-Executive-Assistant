@@ -42,6 +42,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { getAnthropicClient } from '../../llm/client';
 import { MODEL_HAIKU } from '../../llm/models';
 import {
+  getRequest,
   createRequest,
   getRequestByIdempotencyKey,
   buildIdempotencyKey,
@@ -260,8 +261,7 @@ export async function runColleagueOofRecheck(row: RequestRow, profile: UserProfi
   const details = parseDetails<ColleagueOofDetails>(row);
   const colleagueSlackId = details?.colleague_slack_id ?? row.requester_slack_id ?? undefined;
   if (!details || !colleagueSlackId) {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-    return 'closed';
+    throw new Error('OOF follow-up has no valid requester payload');
   }
 
   const attempts = (details.recheck_attempts ?? 0) + 1;
@@ -367,8 +367,7 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
   const subjectLabel = details.subject && details.subject !== 'a meeting' ? `"${details.subject}"` : 'time with him';
 
   if (!conn) {
-    closeRequest({ id: row.id, state: 'expired', closureReason: 'no_slack_connection', closedBy: 'system' });
-    return 'closed';
+    throw new Error('OOF reengagement has no Slack connection');
   }
 
   const colleagueTz = details.colleague_tz ?? getPersonMemory(colleagueSlackId)?.timezone ?? profile.user.timezone;
@@ -402,7 +401,6 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
     message,
     await_reply: 1,
     status: 'sent',
-    sent_at: new Date().toISOString(),
     intent: 'oof_reengage',
     reply_deadline: calcResponseDeadline(colleagueTz),
     context_json: JSON.stringify({
@@ -418,10 +416,9 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
   const res = await conn.sendDirect(colleagueSlackId, message);
   if (!res.ok) {
     updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Reengagement not delivered: ${res.reason}` });
-    closeRequest({ id: row.id, state: 'expired', closureReason: 'oof_reengage_not_delivered', closedBy: 'system', skipChildren: true });
-    logger.warn('sendOofReengagement — DM not delivered', { requestId: row.id, jobId, reason: res.reason });
-    return 'closed';
+    throw new Error(`OOF reengagement was not delivered: ${res.reason}`);
   }
+  updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
   if (res.ts || res.ref) updateOutreachJob(jobId, { dm_message_ts: res.ts, dm_channel_id: res.ref });
 
   // Bouncer non-blocking finding (gh#201-d) — without this, the child
@@ -470,12 +467,11 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
 export async function runOofReengageReask(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'noop'> {
   const job = getOutreachJobByRequestId(row.id);
   if (row.state !== 'awaiting_colleague' || !job || job.intent !== 'oof_reengage') {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
-    return 'noop';
+    throw new Error('OOF re-ask no longer has valid pending outreach');
   }
   const conn = getConnection(profile.user.slack_user_id, 'slack');
   if (!conn) {
-    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    updateRequest(row.id, { nextCheckAt: DateTime.now().plus({ hours: 48 }).toUTC().toISO(), nextCheckHandler: 'outreach_expiry' });
     return 'noop';
   }
   // registrar fix (colleague-outreach-not-gated-to-recipient-work-hours-or-week,
@@ -505,6 +501,7 @@ export async function runOofReengageReask(row: RequestRow, profile: UserProfile)
   updateRequest(row.id, {
     nextCheckAt: DateTime.now().plus({ hours: 48 }).toUTC().toISO(),
     nextCheckHandler: 'outreach_expiry',
+    phase: 'outreach:nudged',
   });
   logger.info('runOofReengageReask — re-pinged colleague once, re-armed to outreach_expiry', {
     requestId: row.id, jobId: job.id,
@@ -598,7 +595,7 @@ export async function handleOofReengageReply(
   logger.info('oof_reengage reply classified', { jobId: job.id, status });
 
   // A reply of any kind kills the CURRENT expiry timer — re-armed below per branch.
-  if (job.request_id) {
+  if (job.request_id && status !== 'checking') {
     updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
   }
 
@@ -609,7 +606,7 @@ export async function handleOofReengageReply(
   // ── checking → not a decline (R4); keep open for exactly one re-ask ──────
   if (status === 'checking') {
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
-    if (job.request_id) {
+    if (job.request_id && getRequest(job.request_id)?.phase !== 'outreach:nudged') {
       // outreach-expiry-tombstone-says-never-replied (2026-08-12) — stamp
       // phase='outreach:re_engaged' so a second silence after this re-arm
       // reads correctly at final expiry (runner.ts's runOutreachExpiryOrDecision):

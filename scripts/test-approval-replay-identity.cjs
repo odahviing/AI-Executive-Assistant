@@ -11,18 +11,19 @@ const ts = require('typescript');
 const { DateTime } = require('luxon');
 const root = path.resolve(__dirname, '..');
 const sourceRoot = process.env.MAELLE_APPROVAL_SOURCE_ROOT || root;
-const changed = new Set(['src/tasks/skill.ts', 'src/core/requests/deferredActionReplay.ts', 'src/core/requests/resolver.ts']);
+const changed = new Set(['src/tasks/skill.ts', 'src/core/requests/deferredActionReplay.ts', 'src/core/requests/resolver.ts', 'src/core/requests/types.ts', 'src/core/approvals/approvalCallbacks.ts']);
 const actual = new Set([...changed, 'src/core/requests/types.ts', 'src/core/approvals/approvalCallbacks.ts', 'src/utils/textScrubber.ts']);
 const compiled = new Map(), harnesses = [];
 const clone = value => JSON.parse(JSON.stringify(value));
 const profile = { user: { name: 'Owner Example', slack_user_id: 'UOWNER', timezone: 'UTC' }, assistant: { name: 'Maelle' } };
 const meetingTools = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'];
 function harness(options = {}) {
-  const effects = { executes: [], creates: [], closes: [], sends: [], ownerPosts: [], keys: [], candidates: [], warnings: [], promotions: [] };
+  const effects = { executes: [], creates: [], closes: [], sends: [], ownerPosts: [], keys: [], candidates: [], judges: [], warnings: [], promotions: [] };
   const unexpected = [], pending = [], modules = new Map();
   const details = { deferred_action: { tool: options.tool || 'create_meeting', args: { subject: 'Approved sync', start: '2026-09-20T12:00:00Z', end: '2026-09-20T12:30:00Z', new_start: '2026-09-20T12:00:00Z', new_end: '2026-09-20T12:30:00Z', meeting_id: 'event-1', person_id: 'person-1', expected_value: 'UTC' } }, ...options.details };
   let row = { id: 'req_1234567890123_abcde', kind: 'approval', subkind: 'policy_exception', state: 'awaiting_owner', owner_user_id: 'UOWNER', initiated_by_role: 'colleague', requester_slack_id: 'UPAUL', requester_name: 'Paul', subject: 'Approved sync', origin_channel: 'DPAUL', origin_thread_ts: 'origin.1', details_json: JSON.stringify(details), ...options.row };
-  const update = (id, data) => { assert.equal(id, row.id); row = { ...row, ...data, ...(data.details ? { details_json: JSON.stringify(data.details) } : {}) }; };
+  let priorRow = options.prior;
+  const update = (id, data) => { assert.equal(id, row.id); row = { ...row, ...data, ...(data.details ? { details_json: JSON.stringify(data.details) } : {}) }; for(const [key,column] of Object.entries({ownerDmChannel:'owner_dm_channel',ownerDmThreadTs:'owner_dm_thread_ts',terminalDmMsgTs:'terminal_dm_msg_ts',nextCheckAt:'next_check_at',nextCheckHandler:'next_check_handler'}))if(Object.hasOwn(data,key))row[column]=data[key]; };
   const execute = async (tool, args, context) => {
     effects.executes.push(clone({ tool, args, context }));
     if (options.throwTool) throw new Error('isolated executor failure');
@@ -31,30 +32,39 @@ function harness(options = {}) {
   const connection = { sendDirect: async (id, body, opts) => { effects.sends.push({ id, body, opts }); return { ok: true }; }, postToChannel: async (id, body, opts) => { effects.sends.push({ id, body, opts }); return { ok: true }; } };
   const mocks = {
     'src/db/requests.ts': {
-      getRequest: () => row, updateRequest: update, getAwaitingOwnerRequests: () => [row], isKnownRequestThreadAnchor: () => false,
-      getRequestByIdempotencyKey: () => null, getRecentOutreachOwnerThread: () => null,
+      getRequest: id => priorRow?.id === id ? priorRow : row, updateRequest: update, getAwaitingOwnerRequests: () => [row], isKnownRequestThreadAnchor: () => false,
+      getRequestByIdempotencyKey: () => options.idempotent ? row : null, getRecentOutreachOwnerThread: () => null,
       buildIdempotencyKey: args => { effects.keys.push(clone(args)); return 'isolated-key'; },
-      createRequest: args => { effects.creates.push(clone(args)); row = { ...row, state: args.state, subkind: args.subkind, requester_slack_id: args.requesterSlackId ?? null, requester_name: args.requesterName ?? null, origin_channel: args.originChannel, origin_thread_ts: args.originThreadTs, origin_is_mpim: args.originIsMpim ? 1 : 0, details_json: JSON.stringify(args.details) }; return row; },
+      createRequest: args => { effects.creates.push(clone(args)); if(args.parentRequestId)priorRow=clone(row); row = { ...row, id:args.parentRequestId?'req_1234567890124_repeat':row.id,parent_request_id:args.parentRequestId, state: args.state, subkind: args.subkind, requester_slack_id: args.requesterSlackId ?? null, requester_name: args.requesterName ?? null, origin_channel: args.originChannel, origin_thread_ts: args.originThreadTs, origin_is_mpim: args.originIsMpim ? 1 : 0, details_json: JSON.stringify(args.details) }; return row; },
     },
     'src/core/requests/closeRequest.ts': { closeRequest: args => { effects.closes.push(clone(args)); row = { ...row, state: args.state }; } },
     'src/core/requests/logActivity.ts': { logActivity() {} },
-    'src/core/requests/requesterRelay.ts': { usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => 'en' },
+    'src/core/requests/requesterRelay.ts': { isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => options.lang || 'en' },
     'src/db/conversations.ts': { appendToConversation() {}, getConversationHistory: () => [] },
     'src/db/people.ts': { getPersonMemory: id => options.noPerson ? undefined : { name: id === 'UPAUL' ? 'Paul' : 'Other', timezone: 'UTC', timezone_set_by: 'person' }, promoteTimezoneTempById: (...args) => { effects.promotions.push(args); return options.promotion || 'applied'; } },
-    'src/db/client.ts': { getDb: () => ({ prepare: () => ({ all: (...args) => { effects.candidates.push(args); return []; } }) }) },
+    'src/db/client.ts': { getDb: () => ({ prepare: () => ({ all: (...args) => { effects.candidates.push(args); return options.semanticRepeat ? [row] : []; } }) }) },
     'src/db/jobs.ts': { createOutreachJob() {} },
     'src/connections/registry.ts': { getConnection: () => options.noConnection ? undefined : connection },
     'src/skills/meetings/ops.ts': { SchedulingSkill: class { constructor() { if (!options.noExecutor) this.executeToolCall = execute; } } },
     'src/skills/calendarHealth.ts': { CalendarHealthSkill: class { constructor() { if (!options.noExecutor) this.executeToolCall = execute; } } },
+    // Dispatcher admission/outcome matrix is tested independently against the real registry.
+    'src/skills/registry.ts': { executeApprovedSkillTool: async (tool,args,context) => {
+      if(options.noExecutor)return {status:'failed',result:{error:'replay_executor_unavailable'}};
+      if(![...meetingTools,'message_colleague','note_about_self'].includes(tool))return {status:'failed',result:{error:'unsupported_replay_tool'}};
+      const result=await execute(tool,args,context);
+      const positive=result&&typeof result==='object'&&!Array.isArray(result)&&!result.error&&result.ok!==false&&result.success!==false;
+      return {status:positive&&result.scheduled===true&&result.jobId?'tracked':positive&&(result.success===true||result.ok===true||result.saved===true)?'completed':'failed',result:result||{}};
+    } },
     'src/utils/shadowNotify.ts': { shadowNotify: async () => {} },
-    'src/utils/ownerDailyThread.ts': { postOwnerDecision: async args => { effects.ownerPosts.push(args.text); return { ok: true, channel: 'DOWNER', threadTs: 'owner.daily', ts: 'owner.1' }; } },
+    'src/connectors/graph/calendarReads.ts': { verifyApprovedCalendarAction:async()=>options.verification||{status:'unavailable',reason:'No authoritative read can establish this outcome.'} },
+    'src/utils/ownerDailyThread.ts': { postOwnerDecision: async args => { effects.ownerPosts.push(args.text); return { ok: !options.ownerPostFail, channel: 'DOWNER', threadTs: 'owner.daily', ts: 'owner.1' }; } },
     'src/utils/workHours.ts': { workTimeBaseFromNow: () => '2026-09-10T00:00:00Z', addWorkdays: () => '2026-09-14T00:00:00Z' },
     'src/utils/weTimeResolver.ts': {}, 'src/utils/workingElsewhere.ts': { getTravelContextForInstant: () => undefined },
     'src/utils/logger.ts': { __esModule: true, default: { info() {}, error() {}, warn: (...args) => effects.warnings.push(args) } },
     'src/utils/resolveSlackId.ts': { resolveSlackId: id => ({ slack_id: id, was_hallucinated: false }) },
     'src/llm/models.ts': { MODEL_HAIKU: 'isolated-model' },
     'src/llm/client.ts': { getAnthropicClient: () => ({ messages: { create: async () => ({ content: [{ type: 'text', text: '' }] }) } }) },
-    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {}, 'src/utils/closeLoopOnOwnerHandled.ts': {},
+    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {judgeRequestDedup:async args=>{effects.judges.push(args);return {match:'existing',existing_id:row.id};}}, 'src/utils/closeLoopOnOwnerHandled.ts': {},
     'src/db.ts': { getPendingRequestCountForColleague: () => 0 },
   };
   function load(relative) {
@@ -66,6 +76,7 @@ function harness(options = {}) {
     const module = { exports: {} }; modules.set(relative, module);
     const isolatedRequire = spec => {
       if (spec === 'luxon') return { DateTime };
+      if (spec === 'node:util' || spec === 'node:async_hooks') return require(spec);
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };
@@ -77,6 +88,8 @@ function harness(options = {}) {
   const skill = load('src/tasks/skill.ts');
   const context = extra => ({ profile, userId: 'UPAUL', authority: 'colleague', senderRole: 'colleague', surface: 'colleague_dm', channelId: 'DPAUL', threadTs: 'origin.1', ...extra });
   const h = { effects, unexpected, row: () => row, update,
+    lock: work => resolver.withRequestLock(row.id, work),
+    task: (action, args = {}) => new skill.TasksSkill().executeToolCall('update_task', { task_id: row.id, action, ...args }, context({ userId: 'UOWNER', authority: 'owner', senderRole: 'owner', surface: 'owner_dm' })),
     replay: (extra = {}) => replay.runDeferredAction({ ownerUserId: 'UOWNER', profile, tool: options.tool || 'create_meeting', args: details.deferred_action.args, requestId: row.id, originChannel: row.origin_channel, originThreadTs: row.origin_thread_ts, surface: 'colleague_dm', ...extra }),
     resolve: (verdict = { verdict: 'approve' }, ctx = {}) => resolver.resolveRequest(row.id, verdict, { profile, ...ctx }),
     create: (payload = {}, ctx = {}, args = {}) => new skill.TasksSkill().executeToolCall('create_approval', { kind: 'unknown_person', payload: typeof payload === 'string' ? payload : { missing_fields: ['email'], ...payload }, ask_text: 'Review a person request', expires_in_hours: 1, ...args }, context(ctx)),
@@ -87,6 +100,51 @@ function harness(options = {}) {
   harnesses.push(h); return h;
 }
 afterEach(() => { for (const h of harnesses.splice(0)) assert.deepEqual(h.unexpected, [], 'all dependencies explicitly isolated, including swallowed exceptions'); });
+for(const surface of ['colleague_dm','room'])test('audit R6 cancel to private message decision on '+surface,async()=>{
+  const h=harness({tool:'delete_meeting',row:{owner_dm_channel:'DOWNER',owner_dm_thread_ts:'owner.daily',origin_is_mpim:surface==='room'?1:0,origin_channel:surface==='room'?'CROOM':'DPAUL'},toolResult:{ok:true,private_raw:'PRIVATE_RESULT_SENTINEL'}});
+  const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{colleague_slack_id:'UTHIRD',message:'Owner chosen message'}}});
+  assert.equal(r.ok,true);assert.equal(h.effects.executes[0].tool,'message_colleague');assert.equal(h.effects.executes[0].context.channelId,'DOWNER');assert.equal(h.effects.executes[0].context.surface,'owner_dm');assert.equal(JSON.parse(h.row().details_json).deferred_action.tool,'message_colleague');assert.doesNotMatch(JSON.stringify(h.effects.sends),/PRIVATE_RESULT_SENTINEL|Owner chosen message/);
+});
+test('audit R6 unavailable private anchor does not execute generic owner action',async()=>{
+  const h=harness();const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{message:'Private'}}});assert.equal(r.ok,false);assert.equal(h.row().state,'awaiting_owner');assert.equal(h.effects.executes.length,0);assert.equal(h.effects.sends.length,0);
+});
+test('audit R6 tracked scheduled action never announces completion',async()=>{
+  const h=harness({row:{owner_dm_channel:'DOWNER',owner_dm_thread_ts:'owner.daily'},toolResult:{scheduled:true,jobId:'out_followup'}});
+  const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{message:'Later'}}});assert.equal(r.ok,true);assert.match(r.effect,/not completed/);assert.match(h.effects.sends[0].body,/has not completed/);
+});
+test('audit R6 malformed chosen action remains pending',async()=>{
+  const h=harness();const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:[]}});assert.equal(r.ok,false);assert.equal(h.effects.executes.length,0);
+});
+test('audit A07 failed correction delivery invalidates previous reaction anchor and retries',async()=>{
+  const h=harness({idempotent:true,ownerPostFail:true,row:{owner_dm_channel:'DOWNER',owner_dm_thread_ts:'owner.daily',terminal_dm_msg_ts:'old.ask'}});
+  const r=await h.create({subject:'Changed ask'});assert.equal(h.row().owner_dm_channel,null);assert.equal(h.row().terminal_dm_msg_ts,null);assert.equal(h.row().next_check_handler,'approval_reminder');assert.equal(r.owner_notified,false);
+});
+test('audit A03 lifecycle queue waits and rereads before resolving',async()=>{
+  const h=harness();let release;const gate=new Promise(r=>release=r);const holder=h.lock(async()=>gate);const deciding=h.resolve();h.update(h.row().id,{state:'expired'});release();await holder;const r=await deciding;assert.equal(r.ok,false);assert.equal(h.effects.executes.length,0);
+});
+for(const lang of ['en','he'])test('audit owner ruling declined repeat asks requester before owner '+lang,async()=>{
+  const h=harness({lang,idempotent:true,details:{deferred_action:undefined},row:{state:'cancelled',closed_by:'owner',description:'Review a person request'}});
+  const r=await h.create({subject:'Approved sync'});assert.equal(r.awaiting_requester_confirmation,true);assert.equal(h.row().state,'awaiting_colleague');assert.equal(h.effects.ownerPosts.length,0);assert.equal(h.effects.sends.length,1);assert.ok(h.row().parent_request_id);assert.match(h.effects.sends[0].body,lang==='he'?/האם לפנות אליו שוב/:/Should I go to him/);
+  const confirmed=await h.resolve({verdict:'approve'},{resolvedByColleague:true,resolvingUserId:'UPAUL'});assert.equal(confirmed.state,'awaiting_owner');assert.equal(h.effects.executes.length,0);assert.equal(h.effects.ownerPosts.length,1);assert.match(h.effects.ownerPosts[0],/prior refusal/);
+});
+test('audit owner ruling unconfirmed repeat never executes for another actor',async()=>{
+  const h=harness({details:{deferred_action:undefined},row:{state:'awaiting_colleague',parent_request_id:'req_prior'},prior:{id:'req_prior',kind:'approval',state:'cancelled',closed_by:'owner'}});
+  const r=await h.resolve({verdict:'approve'},{resolvedByColleague:true,resolvingUserId:'UOTHER'});assert.equal(r.ok,false);assert.equal(h.effects.executes.length,0);assert.equal(h.effects.ownerPosts.length,0);
+});
+test('audit owner ruling requester can decline to re-escalate',async()=>{
+  const h=harness({details:{deferred_action:undefined},row:{state:'awaiting_colleague',parent_request_id:'req_prior'},prior:{id:'req_prior',kind:'approval',state:'cancelled',closed_by:'owner'}});
+  const r=await h.resolve({verdict:'reject'},{resolvedByColleague:true,resolvingUserId:'UPAUL'});assert.equal(r.state,'cancelled');assert.equal(h.effects.ownerPosts.length,0);assert.equal(h.effects.executes.length,0);
+});
+test('audit owner ruling uncertainty safely checks calendar but never repeats mutation',async()=>{
+  const h=harness({toolResult:{error:'approved_action_unconfirmed'},verification:{status:'desired_state_observed',result:{meetingId:'event-1',_calendar_verification:'desired_state_observed',action_summary:'Requested state observed; provenance unknown.'}}});
+  const r=await h.resolve();assert.equal(r.ok,true);assert.equal(h.effects.executes.length,1);assert.match(r.action_summary,/provenance unknown/);
+});
+test('audit owner ruling unavailable verification reports uncertainty without check promise',async()=>{
+  const h=harness({toolResult:{error:'approved_action_unconfirmed'}});const r=await h.resolve();assert.equal(r.ok,false);assert.match(r.reason,/not sure it worked/);assert.match(r.reason,/no further automatic check/);assert.equal(h.effects.executes.length,1);assert.equal(h.effects.sends.length,1);assert.equal(r.state,'resolved');
+});
+test('audit owner ruling recorded uncertainty prevents blind replay',async()=>{
+  const h=harness({row:{outcome_json:JSON.stringify({approved:true,replayed:'create_meeting',verified:false})}});const r=await h.resolve();assert.equal(r.ok,false);assert.equal(h.effects.executes.length,0);assert.match(r.reason,/not repeated/);
+});
 
 for (const tool of meetingTools) {
   for (const [label, options] of [
@@ -95,11 +153,13 @@ for (const tool of meetingTools) {
     ['scalar result', { toolResult: true }], ['empty result', { toolResult: {} }], ['array result', { toolResult: [] }],
     ['structured error', { toolResult: { error: 'blocked' } }], ['success false', { toolResult: { success: false } }], ['ok false', { toolResult: { ok: false } }],
     ['contradictory result', { toolResult: { success: true, ok: false } }], ['thrown error', { throwTool: true }],
-  ]) test(`Z12 ${tool}: ${label} leaves approval open without success relay`, async () => {
+  ]) test(`Z12 ${tool}: ${label} reports honest unsuccessful outcome`, async () => {
     const h = harness({ tool, ...options });
     const result = await h.resolve();
-    assert.equal(result.ok, false); assert.equal(h.row().state, 'awaiting_owner');
-    assert.equal(h.effects.closes.length, 0); assert.equal(h.effects.sends.length, 0);
+    const unconfirmed = ['undefined result','null result','scalar result','empty result','array result'].includes(label);
+    assert.equal(result.ok, false); assert.equal(h.row().state, unconfirmed ? 'resolved' : 'awaiting_owner');
+    assert.equal(h.effects.closes.length, unconfirmed ? 1 : 0); assert.equal(h.effects.sends.length, unconfirmed ? 1 : 0);
+    if (unconfirmed) assert.match(result.reason, /not sure it worked/);
     assert.equal(result.booked, undefined);
   });
   for (const surface of ['owner_dm', 'colleague_dm', 'room']) test(`Z12 ${tool}: confirmed success on ${surface}`, async () => {
@@ -187,4 +247,29 @@ test('Z22 creation to counter acceptance rejects impostor and preserves original
   assert.equal((await h.accept('UPAUL', { force_new: true })).ok, false); assert.equal(h.effects.closes.length, 0);
   assert.equal((await h.accept('UPAUL')).ok, true); assert.equal(h.effects.closes.length, 1);
   assert.equal(h.effects.sends[0].id, 'UPAUL');
+});
+
+
+test('audit A07 changed callback alone reposts the current decision',async()=>{
+ const h=harness({idempotent:true,row:{subject:'Review person',description:'Review a person request'},details:{missing_fields:['email']}});
+ await h.create({subject:'Review person',callbacks:{on_approve:{tool:'delete_meeting',args:{meeting_id:'fresh-event'}}}});
+ assert.equal(h.effects.ownerPosts.length,1);
+});
+test('audit A07 correction replaces stale callback and old counter',async()=>{
+ const h=harness({idempotent:true,details:{callbacks:{on_approve:{tool:'move_meeting',args:{meeting_id:'old-event',new_start:'2026-09-20T12:00:00Z'}}},counter:{new_start:'2026-09-20T16:00:00Z'},amend_round:1}});
+ await h.create({subject:'Review person',deferred_action:{tool:'create_meeting',args:{subject:'Corrected',start:'2026-09-21T12:00:00Z',end:'2026-09-21T12:30:00Z'}}});
+ await h.resolve();
+ assert.equal(h.effects.executes[0].tool,'create_meeting');assert.equal(h.effects.executes[0].args.start,'2026-09-21T12:00:00Z');
+});
+test('audit A08 owner task cancel closes requester loop',async()=>{
+ const h=harness();await h.task('cancel');assert.equal(h.row().state,'cancelled');assert.equal(h.effects.sends.length,1);
+});
+test('audit A08 generic task edit cannot silently rewrite an approval',async()=>{
+ const h=harness();const result=await h.task('edit',{title:'Changed approval'});assert.equal(result.error,'approval_requires_decision_tool');assert.notEqual(h.row().subject,'Changed approval');
+});
+test('audit A10 initial unavailable approval delivery has a prompt retry',async()=>{
+ const h=harness({noConnection:true});const result=await h.create();assert.equal(result.ok,true);assert.equal(result.owner_notified,false);assert.equal(h.row().nextCheckHandler,'approval_reminder');assert.ok(Date.parse(h.row().nextCheckAt)<=Date.now()+301000);
+});
+test('audit A10 legitimate successful approval reports delivery',async()=>{
+ const h=harness();const result=await h.create();assert.equal(result.owner_notified,true);assert.equal(h.effects.ownerPosts.length,1);
 });

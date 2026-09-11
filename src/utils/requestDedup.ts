@@ -36,9 +36,9 @@ interface DedupResult {
   reasoning?: string;
 }
 
-const SYSTEM_PROMPT = `You judge whether a proposed new request is the SAME logical ask as an existing open one, or a genuinely new ask.
+const SYSTEM_PROMPT = `You judge whether a proposed new request is the SAME logical ask as an existing request, including an owner-declined request, or a genuinely new ask.
 
-Same = same colleague is asking the same thing (semantically), within the last 48h. Phrasing differs but the underlying request is one.
+Same = same colleague is asking the same thing (semantically), within the last 48h. Phrasing or language differs but the underlying request is one. A prior cancelled/declined request may match: the caller will ask the requester whether to raise it again, never silently reopen it.
 
 Different = different subject, different intent, or sufficient time has passed that owner reasonably re-asked.
 
@@ -74,8 +74,8 @@ export async function judgeRequestDedup(params: {
       `  subject: ${params.proposed.subject}`,
       params.proposed.description ? `  description: ${params.proposed.description.slice(0, 400)}` : '',
       ``,
-      `Existing open requests for this (owner, requester):`,
-      ...candidateRows.map(c => `  - id=${c.id} (${c.state}, ${c.kind}${c.subkind ? '/' + c.subkind : ''}, ${c.age_hours}h old): ${c.subject}`),
+      `Existing requests for this (owner, requester), including prior owner refusals:`,
+      ...candidateRows.map(c => `  - id=${c.id} (${c.state}, ${c.kind}${c.subkind ? '/' + c.subkind : ''}, ${c.age_hours}h old): ${c.subject}\n    ${(params.candidates.find(row => row.id === c.id)?.description ?? '').slice(0, 400)}`),
       ``,
       `JSON only.`,
     ].filter(Boolean).join('\n');

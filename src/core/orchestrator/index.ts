@@ -304,12 +304,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // message_colleague call this turn for the same colleague is a no-op
   // with an explicit signal.
   const messagedColleaguesThisTurn = new Set<string>();
-  // v3.4.7 — colleagues SUCCESSFULLY messaged this turn (message_colleague
-  // returned ok). Distinct from messagedColleaguesThisTurn (which is added
-  // unconditionally to block duplicate ATTEMPTS): this success-only set drives
-  // the reverse-order double-notify guard, so a FAILED message_colleague never
-  // suppresses the resolver's relay (no silent drop). Passed to the resolver.
-  const messagedColleaguesOkThisTurn = new Set<string>();
   // v3.4.7 — track requesters the resolver ALREADY relayed an approval outcome
   // to this turn, keyed on requester_slack_id. resolve_approval's canonical
   // close-loop (notifyRequesterOfDecision, or the coord/cascade equivalent)
@@ -331,10 +325,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const resolveApprovalTouchedIdsThisTurn = new Set<string>();
   // bouncer fix (pending-cap-blocks-unrelated-questions, 2026-08-10) —
   // colleagues already sent the private cap-notice DM this turn
-  // (colleaguePendingCapRefusal, tasks/skill.ts). Kept SEPARATE from
-  // messagedColleaguesOkThisTurn on purpose — see that field's comment in
-  // skills/types.ts for why folding it in would corrupt the resolver's
-  // double-notify guard.
+  // (colleaguePendingCapRefusal, tasks/skill.ts). A cap notice does not prove
+  // delivery of an approval outcome.
   const capNoticeSentThisTurn = new Set<string>();
   // v2.7.2 — capture the most recent rule_violation deferred_action_hint
   // from a meeting tool's result this turn. When create_approval(kind=
@@ -491,7 +483,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // already landed this turn → the resolver skips its relay (reverse-order
       // double-notify guard). skillContext is rebuilt per response round; the
       // Set persists across the whole turn.
-      messagedColleaguesOkThisTurn,
       // bouncer fix (pending-cap-blocks-unrelated-questions) — same by-
       // reference pattern, for colleaguePendingCapRefusal's own duplicate-DM
       // suppression (see skills/types.ts for why it's not folded into the set
@@ -956,11 +947,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           const colleagueSlackId = (toolUse.input as any)?.colleague_slack_id;
           if (typeof colleagueSlackId === 'string') {
             messagedColleaguesThisTurn.add(colleagueSlackId);
-            // v3.4.7 — only a CONFIRMED send claims the requester for the
-            // reverse-order guard, so a failed send leaves the resolver relay free.
-            if ((result as { ok?: boolean })?.ok === true) {
-              messagedColleaguesOkThisTurn.add(colleagueSlackId);
-            }
           }
         }
         // v3.4.7 — record requesters the resolver relayed a NON-reject approval
@@ -1526,12 +1512,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const r = await closeLoopOnOwnerHandled({
           profile,
           ownerMessage: userMessage,
-          // closeloop-silent-close-no-requester-relay (bounce fix) — reuse the
-          // SAME turn-scoped guards resolve_approval's own relay uses
-          // (tasks/skill.ts's alreadyMessagedRequesterIds), so this scanner's
-          // relay never double-notifies and never second-guesses a row a
-          // structured resolve_approval call already handled this turn.
-          alreadyMessagedRequesterIds: messagedColleaguesOkThisTurn,
+          // A structured decision takes precedence over this free-text scan.
+          // An unrelated message to the requester does not prove closure delivery.
           touchedByResolveApprovalThisTurn: resolveApprovalTouchedIdsThisTurn,
         });
         if (r.scanned && r.closedItems.length > 0) {

@@ -18,9 +18,11 @@ import {
   getRecentActivityForOwner,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
-import { resolveRequest, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
+import { resolveRequest, withRequestLock, notifyRequesterOfDecision, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
+import { requesterRelayLanguage } from '../core/requests/requesterRelay';
 import { logActivity } from '../core/requests/logActivity';
-import { composeOwnerAskText } from '../core/approvals/approvalCallbacks';
+import { composeOwnerAskText, extractCallbacks } from '../core/approvals/approvalCallbacks';
+import { isDeepStrictEqual } from 'node:util';
 import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
@@ -140,7 +142,6 @@ async function colleaguePendingCapRefusal(
       const conn = getConnection(ownerUserId, context.inboundConnectionId ?? 'slack');
       if (conn) {
         // bouncer fix (2026-08-10) — only a CONFIRMED send marks the
-        // colleague notified, matching orchestrator/index.ts:messagedColleaguesOkThisTurn's
         // `?.ok === true` gate. sendDirect never throws (transports catch
         // internally and resolve `{ok:false,...}` on failure), so marking
         // after any non-throwing call used to mark a cap notice as sent
@@ -1047,6 +1048,7 @@ export async function createApprovalRequest(
         // Check open requests for this (owner, requester) before inserting.
         // Same logical ask within 48h → return existing instead of fresh row.
         let existingId: string | null = null;
+        let priorDecline: RequestRow | null = null;
         if (requesterSlackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getDb } = require('../db/client') as typeof import('../db/client');
@@ -1054,7 +1056,7 @@ export async function createApprovalRequest(
             SELECT * FROM requests
             WHERE owner_user_id = ?
               AND requester_slack_id = ?
-              AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
+              AND (state IN ('awaiting_owner','awaiting_colleague','in_flight') OR (kind = 'approval' AND state = 'cancelled' AND closed_by = 'owner'))
               AND datetime(created_at) >= datetime('now', '-48 hours')
             ORDER BY created_at DESC
             LIMIT 8
@@ -1066,7 +1068,9 @@ export async function createApprovalRequest(
               requesterName,
             });
             if (judged.match === 'existing' && judged.existing_id) {
-              existingId = judged.existing_id;
+              const matched = candidates.find(candidate => candidate.id === judged.existing_id);
+              if (matched?.state === 'cancelled') priorDecline = matched;
+              else existingId = judged.existing_id;
               logger.info('create_approval — LLM dedup matched existing', {
                 existingId, reasoning: judged.reasoning,
               });
@@ -1201,10 +1205,21 @@ export async function createApprovalRequest(
           // "still waiting" nudge — it's a different ask he hasn't seen).
           const changed = row.subject !== subject
             || (row.description ?? '') !== askText
-            || JSON.stringify(priorDetails.deferred_action ?? null) !== JSON.stringify(payload.deferred_action ?? null);
+            || JSON.stringify(priorDetails.deferred_action ?? null) !== JSON.stringify(payload.deferred_action ?? null)
+            || JSON.stringify(priorDetails.callbacks ?? null) !== JSON.stringify(payload.callbacks ?? null);
 
           const mergedDetails: Record<string, unknown> = { ...priorDetails, ...payload };
           if (changed) {
+            // A corrected ask supersedes the prior alternative and its action.
+            // Preserve counter_history/amend_round as history and cap accounting;
+            // never merge a stale counter or higher-precedence callback into it.
+            delete mergedDetails.counter;
+            if (payload.deferred_action) {
+              if (payload.callbacks) mergedDetails.callbacks = payload.callbacks;
+              else delete mergedDetails.callbacks;
+            } else if ((payload.callbacks as { on_approve?: unknown } | undefined)?.on_approve) {
+              delete mergedDetails.deferred_action;
+            }
             // Problem B, narrowed by bouncer overturn (2026-08-10) —
             // `honest_hard_reason` is CODE-authored only (line 681 strips it,
             // the checkSlot re-derivation above is the ONLY place that
@@ -1227,7 +1242,9 @@ export async function createApprovalRequest(
             }
           }
 
-          updateRequest(row.id, { subject, description: askText, details: mergedDetails });
+          updateRequest(row.id, { subject, description: askText, details: mergedDetails,
+            ...(changed ? { ownerDmChannel: null, ownerDmThreadTs: null, terminalDmMsgTs: null,
+              nextCheckAt: new Date(Date.now() + 5 * 60000).toISOString(), nextCheckHandler: 'approval_reminder' as const } : {}) });
 
           // Trap noted by the bouncer, fixed as cheap/obvious: idempotency_key
           // is hash(owner, requester, kind, subject) — if a subject correction
@@ -1255,8 +1272,11 @@ export async function createApprovalRequest(
         };
 
         if (existingId) {
-          const { row: existing, changed } = refreshIfOpen(getRequest(existingId)!);
-          await maybeRevive(existing, { force: changed });
+          const existing = await withRequestLock(existingId, async () => {
+            const refreshed = refreshIfOpen(getRequest(existingId)!);
+            await maybeRevive(refreshed.row, { force: refreshed.changed });
+            return getRequest(existingId)!;
+          });
           return {
             ok: true,
             approval_id: existing.id,
@@ -1264,6 +1284,7 @@ export async function createApprovalRequest(
             expires_at: existing.expires_at,
             kind: subkind,
             reused_existing: true,
+            owner_notified: !!existing.owner_dm_channel,
           };
         }
 
@@ -1274,7 +1295,13 @@ export async function createApprovalRequest(
           kind: 'approval',
           subject,
         });
-        const idempotent = getRequestByIdempotencyKey(idempotencyKey);
+        let idempotent = priorDecline ?? getRequestByIdempotencyKey(idempotencyKey);
+        while (idempotent && ['resolved', 'cancelled', 'expired'].includes(idempotent.state)) {
+          const nextKey = `${idempotencyKey}:re:${idempotent.id}`;
+          const next = getRequestByIdempotencyKey(nextKey);
+          if (!next || next.id === idempotent.id) break;
+          idempotent = next;
+        }
         if (idempotent) {
           const priorTerminal = idempotent.state === 'resolved'
             || idempotent.state === 'cancelled'
@@ -1287,8 +1314,11 @@ export async function createApprovalRequest(
             logger.info('create_approval — reusing OPEN idempotency match', {
               existingId: idempotent.id, state: idempotent.state, subject, requesterSlackId,
             });
-            const { row: refreshedIdempotent, changed: idempotentChanged } = refreshIfOpen(idempotent);
-            await maybeRevive(refreshedIdempotent, { force: idempotentChanged });
+            const refreshedIdempotent = await withRequestLock(idempotent.id, async () => {
+              const refreshed = refreshIfOpen(getRequest(idempotent.id)!);
+              await maybeRevive(refreshed.row, { force: refreshed.changed });
+              return getRequest(idempotent.id)!;
+            });
             return {
               ok: true,
               approval_id: refreshedIdempotent.id,
@@ -1296,6 +1326,7 @@ export async function createApprovalRequest(
               expires_at: refreshedIdempotent.expires_at,
               kind: subkind,
               reused_existing: true,
+              owner_notified: !!refreshedIdempotent.owner_dm_channel,
             };
           }
           // Bug 2.2 (Maayan "Offensive GTM Q&A", 2026-07-15) — the match is
@@ -1314,11 +1345,17 @@ export async function createApprovalRequest(
           // earlier booking approval — same subject hashes to the same base key; the
           // fresh key lets it through. Bug 2.1's escalate wording + the invalid
           // `meeting_change` subkind live in ops.ts — routed to the meeting chat.)
+          const oldAction = extractCallbacks(parseDetails(idempotent) ?? {}).on_approve;
+          const newAction = extractCallbacks(payload).on_approve;
+          const sameAction = oldAction && newAction ? isDeepStrictEqual(oldAction, newAction)
+            : !oldAction && !newAction && (priorDecline?.id === idempotent.id || idempotent.description === askText);
+          priorDecline = requesterSlackId && idempotent.state === 'cancelled' && idempotent.closed_by === 'owner' && sameAction
+            ? idempotent : null;
           const reAskDay = DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
           logger.info('create_approval — prior idempotency match is TERMINAL; raising a fresh approval', {
             priorId: idempotent.id, priorState: idempotent.state, reAskDay, subject, requesterSlackId,
           });
-          idempotencyKey = `${idempotencyKey}:re:${reAskDay}`;
+          idempotencyKey = `${idempotencyKey}:re:${idempotent.id}`;
         }
 
         // gh#pending-cap-blocks-unrelated-questions — creation-time cap (see
@@ -1378,7 +1415,8 @@ export async function createApprovalRequest(
             subkind,
             subject,
             description: askText,
-            state: 'awaiting_owner',
+            state: priorDecline ? 'awaiting_colleague' : 'awaiting_owner',
+            parentRequestId: priorDecline?.id,
             requesterSlackId,
             requesterName,
             originChannel: channelId,
@@ -1386,11 +1424,11 @@ export async function createApprovalRequest(
             // #154 — any room surface (MPIM or real channel), not MPIM-only.
             // See create_task above for the same widening and why.
             originIsMpim: context.surface === 'room',
-            ownerDmChannel: relayOwner?.owner_dm_channel,
-            ownerDmThreadTs: relayOwner?.owner_dm_thread_ts,
+            ownerDmChannel: priorDecline ? undefined : relayOwner?.owner_dm_channel,
+            ownerDmThreadTs: priorDecline ? undefined : relayOwner?.owner_dm_thread_ts,
             expiresAt,
-            nextCheckAt,
-            nextCheckHandler,
+            nextCheckAt: priorDecline ? expiresAt : nextCheckAt,
+            nextCheckHandler: priorDecline ? 'expiry' : nextCheckHandler,
             idempotencyKey,
             details: {
               ...payload,
@@ -1465,10 +1503,21 @@ export async function createApprovalRequest(
         // rebuilt by, and the named double-book was always the part thrown away.
         // The revival is the same ask on the same terms, so it calls the same
         // composer; a second assembly site is how that class of drift returns.
+        if (priorDecline) {
+          const ownerFirst = profile.user.name.split(' ')[0];
+          const question = requesterRelayLanguage(requesterSlackId!) === 'he'
+            ? `אתם מבקשים שוב אחרי ש${ownerFirst} אמר לא. האם לפנות אליו שוב עם הבקשה?`
+            : `You're asking again after ${ownerFirst} said no. Should I go to him with it again?`;
+          const notified = await notifyRequesterOfDecision(row, 'amend', { question }, undefined, { profile });
+          return { ok: true, approval_id: row.id, created: true, state: 'awaiting_colleague', owner_notified: false,
+            requester_notify_outcome: notified, awaiting_requester_confirmation: true,
+            _note: 'The prior refusal remains recorded. Wait for the authenticated requester to confirm via resolve_approval verdict=approve before raising this to the owner again.' };
+        }
         const dmText = await composeOwnerAskText({
           askText, details: parseDetails(row), profile, requestId: row.id,
         });
 
+        let ownerNotified = false;
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getConnection } = require('../connections/registry') as typeof import('../connections/registry');
@@ -1505,6 +1554,7 @@ export async function createApprovalRequest(
                 ownerDmThreadTs: res.threadTs ?? undefined,
                 terminalDmMsgTs: res.ts ?? undefined,
               });
+              ownerNotified = true;
             } else {
               logger.error('create_approval — owner ask post failed', {
                 requestId: row.id, reason: res.reason,
@@ -1517,6 +1567,10 @@ export async function createApprovalRequest(
           logger.error('create_approval — DM to owner threw', { err: String(err), requestId: row.id });
         }
 
+        if (!ownerNotified) {
+          updateRequest(row.id, { nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(), nextCheckHandler: 'approval_reminder' });
+        }
+
         return {
           ok: true,
           approval_id: row.id,
@@ -1524,6 +1578,8 @@ export async function createApprovalRequest(
           expires_at: expiresAt,
           kind: subkind,
           reused_existing: false,
+          owner_notified: ownerNotified,
+          ...(!ownerNotified ? { _note: 'The request is tracked, but delivery to the owner was not confirmed. It will retry shortly; do not say the owner has received it.' } : {}),
         };
 }
 
@@ -1675,7 +1731,7 @@ Owner short-acks ("yes", "go", "no", "kill it") in a thread bound to a pending a
 - or you need to act on an approval from a different thread.
 
 Verdicts:
-- approve: owner said yes. \`data\` is meaningful when a move/booking approval ALSO asked online-vs-in-person (external attendee, unknown timezone, office day) — pass the owner's answer as \`{ is_online: true }\` for online/Teams or \`{ is_online: false }\` for in-person, or \`{ location: "<place>" }\` for a named place. This is folded into the move/create the approval will replay, so it lands instead of re-asking. For every OTHER approval kind, \`data\` is dropped silently. If the owner wants to change the time/attendees at approve-time, use verdict='amend' with \`counter\` — never approve+data for those.
+- approve: execute the stored decision. For an owner-chosen replacement action, pass \`data={"tool":"<existing tool>","args":{...exact decided arguments}}\`; this may change the action entirely (cancel → message, book → move). For an owner-authorized recovery, pass the returned recovery fields in \`data\` (for example is_online, location, fresh_meeting_id or confirmed_gone). A colleague accepts the stored counter with approve and no data; proposed changes use amend and need the owner's decision. Report the returned outcome: completed, tracked for later, refused before acting, or attempted/unconfirmed. An unconfirmed attempt is not permission to repeat it.
 - reject: owner said a genuine NO / cancel it. This CANCELS the request AND auto-DMs the requester a decline ("<owner> can't make that work"). Use ONLY for a real no. NEVER use reject to relay a question, defer, or pass a message to the requester — reject sends them a decline and kills the whole coordination (incl. any pending booking). If the owner is still negotiating, or wants to ask the requester something, that's amend.
 - amend: owner is countering, deferring, or wants to RELAY A QUESTION / MESSAGE to the requester and keep the ask alive — "no, but 13:30 would work", "tell him I'm on vacation, ask if it has to be him or someone else can cover next week", "come back to me once you check with them". Put the alternative / question / message in \`counter\`. This flips the request to awaiting_colleague, DMs the requester the counter (a question renders as "<owner> asked: …"), and keeps it OPEN + tracked so their reply reconnects. Use amend WHENEVER the instruction is relay-a-question / ask-them / defer — NOT reject.
   - OPEN calendar-conflict ask (create_approval's open_options shape — no time was chosen when raised): once the owner picks one, resolve with verdict='amend' and \`counter={"new_start":"<ISO>"}\` (add \`new_end\` only to change the duration). A bare approve has nothing to execute and is refused — the time must ride in the counter. If the owner wants the meeting left as-is, use reject instead.
@@ -1686,7 +1742,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           properties: {
             approval_id: { type: 'string' },
             verdict: { type: 'string', enum: ['approve', 'reject', 'amend'] },
-            data: { type: 'object' },
+            data: { type: 'object', description: 'Owner-only exact replacement {tool,args}, or recovery fields requested by a previous result. Colleague acceptance omits data.' },
             counter: { type: 'object' },
             reason: { type: 'string', description: 'Owner\'s own words, when relevant — relayed to the requester on reject/amend to explain the decision. Does NOT unlock resolving outside the approval\'s anchor thread; that\'s checked automatically against what the owner actually typed, not against this argument.' },
           },
@@ -1813,6 +1869,9 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const id = args.task_id as string;
         const row = getRequest(id);
         if (!row) return { error: 'Task not found' };
+        if (row.kind === 'approval') {
+          return { error: 'approval_requires_decision_tool', message: 'Correct the approval through create_approval, or record the owner decision through resolve_approval, so its stored action and visible ask stay together.' };
+        }
 
         const detailsCurrent = parseDetails(row) ?? {};
         const patch: Parameters<typeof updateRequest>[1] = {};
@@ -1950,6 +2009,9 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const id = args.task_id as string;
         const row = getRequest(id);
         if (!row) return { error: 'Task not found' };
+        if (row.kind === 'approval') {
+          return resolveRequest(id, { verdict: 'cancel', reason: 'The owner cancelled this request.' }, { profile, resolvedByColleague: false, resolvingUserId: context.userId });
+        }
         closeRequest({
           id,
           state: 'cancelled',
@@ -2303,7 +2365,6 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             // v3.4.7 — reverse-order double-notify guard: if Sonnet already
             // successfully message_colleague'd the requester this turn, the
             // resolver skips its own relay (they were already told).
-            alreadyMessagedRequesterIds: context.messagedColleaguesOkThisTurn,
           });
           // v3.4.7 — tell Sonnet the canonical close-loop already ran, so she
           // doesn't reach for message_colleague to tell the SAME requester the
@@ -2365,6 +2426,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           };
         } catch (err) {
           logger.error('resolve_approval threw', { err: String(err), requestId });
+          if ((err as { code?: string })?.code === 'request_lock_cycle') return { ok: false, error: 'request_lock_cycle', reason: String(err) };
           return { ok: false, reason: `resolver threw: ${err instanceof Error ? err.message : String(err)}` };
         }
       }

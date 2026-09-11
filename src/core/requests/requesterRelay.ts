@@ -124,16 +124,14 @@ export async function relayClosureToRequester(opts: {
   // reads. Fresh read: the row in hand may predate a stamp another path (the
   // resolver's relay, a prior cascade) just wrote.
   try {
-    if (getRequest(row.id)?.requester_notified_at) {
+    const fresh = getRequest(row.id);
+    if (fresh && (readOutcome(fresh).requester_relay as { delivery?: string } | undefined)?.delivery === 'unconfirmed') return false;
+    if (fresh?.requester_notified_at) {
       logger.info(`${label} — requester already notified, skipping`, { requestId: row.id });
       return false;
     }
   } catch { /* fall through — worst case is one extra DM attempt, still logged below */ }
   const conn = getConnection(row.owner_user_id, 'slack');
-  if (!conn) {
-    logger.warn(`${label} — no Slack connection`, { requestId: row.id });
-    return false;
-  }
   const lang = requesterRelayLanguage(requesterSlackId);
   const requesterFirst = row.requester_name?.split(/\s+/)[0] ?? '';
   const hi = requesterFirst
@@ -149,6 +147,11 @@ export async function relayClosureToRequester(opts: {
     lang, hi, requesterFirst, subject,
     ownerFirst: opts.profile?.user.name.split(' ')[0] ?? '',
   });
+  if (!conn) {
+    recordRequesterRelayFailure(row, body, false);
+    logger.warn(`${label} — no Slack connection; terminal delivery retained`, { requestId: row.id });
+    return false;
+  }
   // Requester's origin thread (MPIM channel or 1:1 DM) — same routing as
   // notifyRequesterOfDecision, so the close-loop never lands as a stray new
   // top-level DM with no history (v3.4.6).
@@ -160,17 +163,78 @@ export async function relayClosureToRequester(opts: {
       // Stamp ONLY on a confirmed send — a soft failure stays retryable and
       // never reads downstream (tasks/skill.ts's requester_notified nudge) as
       // "they were told" when they weren't.
-      try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch { /* non-fatal */ }
+      completeRequesterRelay(row);
       logger.info(`${label} — sent`, { requestId: row.id, requesterSlackId, lang });
       return true;
     }
     logger.warn(`${label} — send failed, requester_notified_at left unset`, {
       requestId: row.id, requesterSlackId, reason: res.reason,
     });
+    recordRequesterRelayFailure(row, body, isRequesterSendUnconfirmed(res));
   } catch (err) {
     logger.warn(`${label} — send threw, requester_notified_at left unset`, {
       requestId: row.id, err: String(err).slice(0, 200),
     });
+    recordRequesterRelayFailure(row, body, true);
   }
   return false;
+}
+
+/** Slack's generic error includes post timeouts; its receipt is unknown. */
+export function isRequesterSendUnconfirmed(result: { ok: boolean; reason?: string }): boolean {
+  return result.ok !== true && result.reason === 'error';
+}
+
+/** Exact terminal copy lives on its request; no second lifecycle or recomposition. */
+export function recordRequesterRelayFailure(row: RequestRow, body: string, unconfirmed: boolean): void {
+  const current = getRequest(row.id) ?? row;
+  if (!['resolved', 'cancelled', 'expired'].includes(current.state) || current.requester_notified_at) return;
+  const outcome = readOutcome(current);
+  updateRequest(row.id, {
+    outcomeJson: { ...outcome, requester_relay: { body, delivery: unconfirmed ? 'unconfirmed' : 'failed' } },
+    nextCheckAt: unconfirmed ? null : new Date(Date.now() + 5 * 60000).toISOString(),
+    nextCheckHandler: unconfirmed ? null : 'requester_relay_retry',
+  });
+}
+
+function readOutcome(row: RequestRow): Record<string, unknown> {
+  try { return JSON.parse(row.outcome_json ?? '{}') as Record<string, unknown>; } catch { return {}; }
+}
+
+export function completeRequesterRelay(row: RequestRow): void {
+  const current = getRequest(row.id) ?? row;
+  const outcome = readOutcome(current);
+  const hadRetry = !!outcome.requester_relay;
+  delete outcome.requester_relay;
+  updateRequest(row.id, {
+    requesterNotifiedAt: new Date().toISOString(),
+    ...(hadRetry ? { outcomeJson: outcome, nextCheckAt: null, nextCheckHandler: null } : {}),
+  });
+}
+
+/** Called under the same request lock as decisions and closure writers. */
+export async function retryRequesterRelay(row: RequestRow, profile: UserProfile): Promise<boolean> {
+  const stored = readOutcome(row).requester_relay as { body?: unknown; delivery?: unknown } | undefined;
+  if (row.requester_notified_at || stored?.delivery !== 'failed' || typeof stored.body !== 'string') {
+    updateRequest(row.id, { nextCheckAt: null, nextCheckHandler: null });
+    return false;
+  }
+  const body = stored.body;
+  const sent = await relayClosureToRequester({ row, profile, label: 'terminal requester delivery retry', compose: () => body });
+  if (!sent) return false;
+  // Match the ordinary resolver relay's history grounding after recovery.
+  try {
+    const { appendToConversation } = await import('../../db/conversations');
+    if (row.origin_thread_ts) appendToConversation(row.origin_thread_ts, row.origin_channel ?? '', { role: 'assistant', content: body });
+    if (!row.origin_is_mpim && row.requester_slack_id) {
+      const { createOutreachJob } = await import('../../db/jobs');
+      createOutreachJob({ owner_user_id: row.owner_user_id, owner_channel: row.origin_channel ?? '',
+        owner_thread_ts: row.origin_thread_ts ?? undefined, colleague_slack_id: row.requester_slack_id,
+        colleague_name: row.requester_name ?? row.requester_slack_id, message: body, await_reply: 0,
+        sent_at: new Date().toISOString(), skipRequestBridge: true });
+    }
+  } catch (err) {
+    logger.warn('terminal requester retry history failed after confirmed delivery', { requestId: row.id, err: String(err).slice(0, 200) });
+  }
+  return true;
 }

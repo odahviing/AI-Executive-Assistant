@@ -1,36 +1,15 @@
-/**
- * Deferred action replay.
- *
- * The "redirect URL token" pattern for approvals: when an approval is raised
- * because a tool call hit a rule, the caller stamps the original tool +
- * args on the request's details_json.deferred_action. When the owner
- * approves, the resolver re-invokes that tool with the override flag set
- * (relaxed=true for create/move_meeting, confirm_outside_window=true for
- * book_floating_block) so the action actually executes.
- *
- * This module is the replay engine. For the meeting tools it re-creates the
- * SkillContext the original tool handler expects, then calls executeToolCall
- * on the registered SchedulingSkill (the direct-ops home for create_meeting /
- * move_meeting) or CalendarHealthSkill (book_floating_block). One tool,
- * `promote_timezone_temp`, is not a skill call at all — it is a direct
- * db/people.ts write (see the branch below), handled before any SkillContext
- * is built.
- *
- * Errors PROPAGATE — they don't silently log+swallow. For approval execution,
- * the resolver keeps the request in `awaiting_owner` on failure so
- * the requester is never told "approved" for an action that never happened
- * (the phantom-confirmation class of bug). The replay also inspects the tool
- * result for `{ error: string }` / `{ success: false }` / `{ ok: false }`
- * shapes and requires an explicit success result — meeting tools return error
- * sentinels rather than throwing for rule violations, busy collisions, etc.
- * Optional rejection side effects remain best-effort: the resolver logs their
- * failures without changing the owner's rejection into an action confirmation.
+/** Replay an immutable approved action through the shared registered executor.
+ * Existing calendar actions retain original-surface narration; other actions run
+ * at the stored private owner decision anchor. The registry validates each tool's
+ * actual completion/tracking contract. Uncertain calendar outcomes get one safe
+ * authoritative read; errors propagate to the resolver without repeating writes.
  */
 
 import type { UserProfile } from '../../config/userProfile';
 import { getConnection } from '../../connections/registry';
 import logger from '../../utils/logger';
-import { PROMOTE_TIMEZONE_TEMP_TOOL, isReplayableTool } from './types';
+import { PROMOTE_TIMEZONE_TEMP_TOOL, ORIGIN_SURFACE_REPLAY_TOOLS } from './types';
+import type { SkillContext } from '../../skills/types';
 
 /**
  * Thrown when the replayed tool returned a structured `{ error }` / `{ success:
@@ -85,6 +64,9 @@ export interface RunDeferredActionInput {
    * have the tool handlers render its real subject as if to the owner alone.
    */
   surface: 'owner_dm' | 'colleague_dm' | 'room';
+  ownerDmChannel?: string | null;
+  ownerDmThreadTs?: string | null;
+  app?: SkillContext['app'];
 }
 
 /**
@@ -113,10 +95,8 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // rest of this function can narrow to `ReplayableTool` and the switch below
   // can be exhaustive. A stray/legacy tool string is a failure, never proof
   // that the stored action ran.
-  if (!isReplayableTool(rawTool)) {
-    throw new ReplayToolError(`Unsupported replay tool: ${rawTool}`, { error: 'unsupported_replay_tool' });
-  }
   const tool = rawTool;
+  const decidedArgs = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
 
   // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — NOT a
   // meeting-skill tool call: a direct write through the ONE door out of the
@@ -162,9 +142,14 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // them for shadow notifications + closeMeetingArtifacts' thread-fallback
   // match; SkillContext.threadTs is a required string, so an owner-internal
   // row with no origin thread still defaults to ''.
-  const channelId = originChannel ?? '';
-  const threadTs = originThreadTs ?? '';
-  const context = {
+  const retainOrigin = (ORIGIN_SURFACE_REPLAY_TOOLS as readonly string[]).includes(tool);
+  if (!retainOrigin && (!input.ownerDmChannel?.startsWith('D') || !input.ownerDmThreadTs)) {
+    throw new ReplayToolError('Owner decision has no private execution anchor', { error: 'replay_owner_surface_unavailable' });
+  }
+  const executionSurface = retainOrigin ? surface : 'owner_dm';
+  const channelId = (retainOrigin ? originChannel : input.ownerDmChannel) ?? '';
+  const threadTs = (retainOrigin ? originThreadTs : input.ownerDmThreadTs) ?? '';
+  const context: SkillContext = {
     userId: ownerUserId,
     senderRole: 'owner' as const,
     // v4.4.x (#154-replay-surface) — the ACTION always runs as the
@@ -172,7 +157,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     // question of where this narrates back to, and is never inferred from
     // authority.
     authority: 'owner' as const,
-    surface,
+    surface: executionSurface,
     channelId,
     threadTs,
     channel: 'slack' as const,
@@ -182,37 +167,25 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     // subjectViewerFor/viewerEmailFor keep clamping a room-originated replay
     // exactly as they would a live room turn, instead of the hardcoded
     // `false` that made every replay read as a private owner DM.
-    isMpim: surface === 'room',
+    isMpim: executionSurface === 'room',
+    app: input.app,
     isOwnerInGroup: false,
   };
 
-  let skill: { executeToolCall?: (name: string, args: Record<string, unknown>, ctx: typeof context) => Promise<unknown> } | undefined;
   try {
-    if (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'delete_meeting' || tool === 'update_meeting') {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const m = require('../../skills/meetings/ops') as typeof import('../../skills/meetings/ops');
-      // SchedulingSkill is the direct-ops home for create_meeting / move_meeting /
-      // delete_meeting / update_meeting. v2.9.1 added update_meeting as a
-      // replayable on_approve target (attendee changes via approval flow).
-      skill = new (m as unknown as { SchedulingSkill: new () => unknown }).SchedulingSkill() as typeof skill;
-    } else if (tool === 'book_floating_block') {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const m = require('../../skills/calendarHealth') as typeof import('../../skills/calendarHealth');
-      skill = new (m as unknown as { CalendarHealthSkill: new () => unknown }).CalendarHealthSkill() as typeof skill;
-    } else {
-      // Exhaustiveness tripwire, not a live path: PROMOTE_TIMEZONE_TEMP_TOOL
-      // returned above, and the branches before this `else` cover every other
-      // member of ReplayableTool — so `tool` can only type as `never` here.
-      // Add a member to REPLAYABLE_TOOLS (core/requests/types.ts) without
-      // adding a matching branch above, and this line fails to compile
-      // instead of reaching an unsupported tool at runtime.
-      const _exhaustive: never = tool;
-      throw new ReplayToolError(`Unsupported replay tool: ${_exhaustive}`, { error: 'unsupported_replay_tool' });
+    const { executeApprovedSkillTool } = await import('../../skills/registry');
+    const dispatched = await executeApprovedSkillTool(tool, args, context);
+    const result = dispatched.result;
+    if (dispatched.status === 'failed' && result.error === 'approved_action_unconfirmed'
+        && (ORIGIN_SURFACE_REPLAY_TOOLS as readonly string[]).includes(tool)) {
+      const { verifyApprovedCalendarAction } = await import('../../connectors/graph/calendarReads');
+      const candidateId = typeof result.meetingId === 'string' ? result.meetingId
+        : typeof result.event_id === 'string' ? result.event_id : undefined;
+      const verification = await verifyApprovedCalendarAction({ userEmail: profile.user.email, profile, tool, args: decidedArgs, eventId: candidateId });
+      if (verification.status === 'desired_state_observed') return { ...verification.result, _replay_status: 'completed' };
+      throw new ReplayToolError("The read-only check could not establish the requested result; the action was not repeated.",
+        { ...result, error: 'approved_action_unconfirmed' });
     }
-    if (!skill?.executeToolCall) {
-      throw new ReplayToolError('Replay unavailable: skill has no executor', { error: 'replay_executor_unavailable' });
-    }
-    const result = await skill.executeToolCall(tool, args, context);
 
     // Inspect the result for failure-sentinel shapes. Many meeting tools
     // return { error: string } / { success: false } / { ok: false } on
@@ -236,7 +209,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
     }
     // All replayable skill handlers confirm with success:true or ok:true.
     // Empty/malformed results cannot authorize closure or a success relay.
-    if (!r || typeof r !== 'object' || Array.isArray(r) || (r.success !== true && r.ok !== true)) {
+    if (dispatched.status === 'failed') {
       throw new ReplayToolError('Replay result did not confirm success; check the action before retrying', { error: 'replay_unconfirmed' });
     }
 
@@ -246,7 +219,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
         ? JSON.stringify(result).slice(0, 240)
         : String(result).slice(0, 240),
     });
-    return r;
+    return { ...r, _replay_status: dispatched.status };
   } catch (err) {
     // Surface to caller — the resolver's outer try/catch keeps the request
     // in awaiting_owner so the owner can retry. Log here for visibility.

@@ -239,6 +239,7 @@ export function createOutreachJob(
   },
 ): string {
   const db = getDb();
+  return db.transaction(() => {
   const id = `out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
   // v2.7.1 — bridge to requests spine. Every outreach_jobs row now has a
@@ -271,7 +272,11 @@ export function createOutreachJob(
     } else if (params.status === 'cancelled') {
       reqState = 'cancelled';
     } else if (params.await_reply === 0) {
-      reqState = 'resolved';
+      reqState = params.sent_at ? 'resolved' : 'in_flight';
+      if (!params.sent_at) {
+        nextCheckAt = params.reply_deadline ?? new Date(Date.now() + 5 * 86400000).toISOString();
+        nextCheckHandler = 'outreach_expiry';
+      }
     } else if (params.reply_deadline) {
       reqState = 'awaiting_colleague';
       nextCheckAt = params.reply_deadline;
@@ -333,18 +338,14 @@ export function createOutreachJob(
     });
     requestId = row.id;
   } catch (err) {
-    // Bridge failure is non-fatal. Legacy row still writes; brief will miss
-    // this one until next deploy. Log loudly so we catch the regression.
-    // The idempotency_key collision that used to land here routinely (two
-    // real sends whose templated message hashed to the same content-derived
-    // key) can't happen any more — the key above is per-job-id, not
-    // content-derived — so a throw here now means a genuine DB error, not a
-    // benign duplicate.
+    // R1/R9: without the request row there is no tracked promise or expiry.
+    // Abort before creating payload or allowing the caller to send anything.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const logger = require('../utils/logger').default;
-    logger.warn('createOutreachJob — requests bridge threw, legacy row only', {
+    logger.warn('createOutreachJob — request creation failed; outreach aborted', {
       err: String(err).slice(0, 200), colleague: params.colleague_name,
     });
+    throw err;
   }
 
   // There is no `status` column to insert — openness is read off the linked
@@ -382,6 +383,7 @@ export function createOutreachJob(
     request_id: requestId,
   });
   return id;
+  })();
 }
 
 export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { status?: OutreachTransition }): void {
@@ -397,6 +399,14 @@ export function updateOutreachJob(id: string, updates: Partial<OutreachJob> & { 
     const params: Record<string, unknown> = { id };
     for (const k of dataKeys) params[k] = (updates as Record<string, unknown>)[k] ?? null;
     db.prepare(`UPDATE outreach_jobs SET ${fields}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  }
+  // Immediate fire-and-forget work is terminal only after actual delivery.
+  if (updates.sent_at) {
+    const delivered = db.prepare('SELECT request_id, await_reply FROM outreach_jobs WHERE id = ?').get(id) as
+      { request_id: string | null; await_reply: number } | undefined;
+    if (delivered?.request_id && delivered.await_reply === 0) {
+      closeRequest({ id: delivered.request_id, state: 'resolved', closureReason: 'outreach_sent_fire_and_forget', closedBy: 'system', skipChildren: true });
+    }
   }
 
   // v2.6.1 — when the transition signal is terminal (via handleOutreachReply,

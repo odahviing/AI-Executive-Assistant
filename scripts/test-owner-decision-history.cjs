@@ -122,6 +122,23 @@ test('reused daily thread appends the supplied Tuesday ask after earlier Monday 
   assert.equal(f.calls.direct.length, 0);
   assert.equal(f.calls.writes.length, 0);
 });
+
+test('audit A04 concurrent first decisions create one daily header', async () => {
+  const f = fixture({ dailyRow: null });
+  const results = await Promise.all([f.post('First'), f.post('Second'), f.post('Third')]);
+  assert.equal(f.calls.direct.length, 1);
+  assert.equal(f.calls.posts.length, 3);
+  assert.equal(new Set(results.map(r => r.threadTs)).size, 1);
+});
+
+test('audit A04 thrown thread post falls back and returns the new DM root', async () => {
+  const f = fixture({ posts: [new Error('transient post failure')] });
+  const result = await f.post();
+  assert.equal(result.ok, true);
+  assert.equal(result.threadTs, result.ts);
+  assert.equal(f.calls.direct.length, 1);
+  assertAppend(f, { threadTs: result.ts, channel: result.channel, ts: result.ts });
+});
 test('explicit inThread stores under that thread and bypasses the daily-thread DB', async () => {
   const f = fixture();
   const result = await f.post(suppliedTuesdayAsk, { inThread: { channel: 'DOUTREACH', threadTs: 'outreach.root' } });
@@ -160,7 +177,7 @@ test('two supplied decisions retain append order and their distinct message time
 test('thread refusal followed by successful direct fallback stores under the sent message root', async () => {
   const f = fixture({ posts: [{ ok: false, reason: 'thread unavailable' }], direct: [{ ok: true, ref: 'DDELIVERED', ts: 'fallback.ask' }] });
   const result = await f.post();
-  assert.deepEqual(clone(result), { ok: true, channel: 'DDELIVERED', ts: 'fallback.ask' });
+  assert.deepEqual(clone(result), { ok: true, channel: 'DDELIVERED', threadTs: 'fallback.ask', ts: 'fallback.ask' });
   assertAppend(f, { threadTs: 'fallback.ask', channel: 'DDELIVERED', ts: 'fallback.ask' });
   assert.equal(f.history.has('daily.root'), false);
   assert.deepEqual(f.calls.order, ['post', 'direct', 'append']);
@@ -198,8 +215,8 @@ test('unavailable daily header and failed fallback append nothing', async () => 
   assert.equal(f.calls.appends.length, 0);
   assert.equal(f.calls.posts.length, 0);
 });
-test('thread transport exception is a delivery failure with no phantom history', async () => {
-  const f = fixture({ posts: [new Error('thread transport failed')] });
+test('thread and fallback transport exceptions leave no phantom history', async () => {
+  const f = fixture({ posts: [new Error('thread transport failed')], direct: [new Error('fallback transport failed')] });
   assert.equal((await f.post()).ok, false);
   assert.equal(f.calls.appends.length, 0);
 });

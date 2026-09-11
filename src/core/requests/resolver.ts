@@ -12,6 +12,7 @@
 
 import type { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { UserProfile } from '../../config/userProfile';
 import { getRequest, updateRequest } from '../../db/requests';
 import { appendToConversation } from '../../db/conversations';
@@ -22,11 +23,10 @@ import {
   composeOwnerAskText,
   extractCallbacks,
   mergeAmendIntoApprove,
-  RESOLVER_REPLAY_TOOLS,
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
-import { usableRelaySubject, requesterRelayLanguage } from './requesterRelay';
+import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed } from './requesterRelay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
@@ -131,17 +131,6 @@ export interface ResolveContext {
    * said yes").
    */
   wasAwaitingColleague?: boolean;
-  /**
-   * v3.4.7 — reverse-order double-notify guard. The set of colleague slack_ids
-   * Sonnet already messaged (message_colleague) THIS turn. When Sonnet messages
-   * the requester the outcome BEFORE calling resolve_approval in the same turn
-   * (owner said "tell her and approve it"), the resolver's own relay would be a
-   * SECOND DM. notifyRequesterOfDecision skips its relay for a requester in this
-   * set — they already heard it. Populated by the orchestrator from its
-   * turn-scoped messagedColleaguesThisTurn; absent on non-orchestrator paths
-   * (emoji, Module D), where there's no competing message_colleague.
-   */
-  alreadyMessagedRequesterIds?: Set<string>;
 }
 
 /**
@@ -211,7 +200,8 @@ export interface ResolveResult {
 // guard (closeRequest.ts:54) only catches the SECOND request-state write, not
 // the duplicated work that already happened before either call reached it.
 // Single fork process (ecosystem.config.js: exec_mode 'fork', never cluster),
-// so an in-process lock is a complete fix, not a partial one.
+// so this queue serializes concurrent lifecycle writers in that process.
+// It does not provide crash recovery or a distributed execution guarantee.
 //
 // A per-request FIFO queue, not just a single wait-then-retry: each call
 // chains onto whatever is CURRENTLY queued for this id (read + overwrite in
@@ -226,19 +216,48 @@ export interface ResolveResult {
 // closed the request lands on the pre-existing "request is in state …"
 // rejection below, rather than re-running the side effects.
 const resolveQueue = new Map<string, Promise<unknown>>();
+const heldRequests = new AsyncLocalStorage<string[]>();
+const waitingRequests = new Map<string, Map<string, number>>();
+function reachesRequest(from: string, target: string, seen = new Set<string>()): boolean {
+  if (from === target) return true;
+  if (seen.has(from)) return false;
+  seen.add(from);
+  return [...(waitingRequests.get(from)?.keys() ?? [])].some(next => reachesRequest(next, target, seen));
+}
 
 export async function resolveRequest(
   requestId: string,
   verdict: ResolveVerdict,
   ctx: ResolveContext,
 ): Promise<ResolveResult> {
+  return withRequestLock(requestId, () => resolveRequestInner(requestId, verdict, ctx));
+}
+
+/** Serialize lifecycle effects per request, including timers and close-loop relays. */
+export async function withRequestLock<T>(requestId: string, work: () => Promise<T>): Promise<T> {
+  const held = heldRequests.getStore() ?? [];
+  const parent = held.at(-1);
+  if (held.includes(requestId) || (parent && reachesRequest(requestId, parent))) {
+    throw Object.assign(new Error('This action would wait on its own request decision; no nested action was executed.'), { code: 'request_lock_cycle' });
+  }
+  if (parent) {
+    const targets = waitingRequests.get(parent) ?? new Map<string, number>();
+    targets.set(requestId, (targets.get(requestId) ?? 0) + 1);
+    waitingRequests.set(parent, targets);
+  }
   const tail = resolveQueue.get(requestId) ?? Promise.resolve();
-  const run = tail.catch(() => undefined).then(() => resolveRequestInner(requestId, verdict, ctx));
+  const run = tail.catch(() => undefined).then(() => heldRequests.run([...held, requestId], work));
   resolveQueue.set(requestId, run);
-  try {
-    return await run;
-  } finally {
+  try { return await run; }
+  finally {
     if (resolveQueue.get(requestId) === run) resolveQueue.delete(requestId);
+    if (parent) {
+      const targets = waitingRequests.get(parent);
+      const count = targets?.get(requestId) ?? 0;
+      if (count > 1) targets?.set(requestId, count - 1);
+      else targets?.delete(requestId);
+      if (!targets?.size) waitingRequests.delete(parent);
+    }
   }
 }
 
@@ -325,6 +344,33 @@ async function resolveRequestInner(
   // can branch relay phrasing on actor direction without each call site
   // threading an extra param.
   ctx.wasAwaitingColleague = wasAwaitingColleague;
+  const priorDecline = row.parent_request_id ? getRequest(row.parent_request_id) : null;
+  const reconfirming = row.kind === 'approval' && row.state === 'awaiting_colleague'
+    && !row.owner_dm_channel && !detailsAll.counter
+    && priorDecline?.kind === 'approval' && priorDecline.state === 'cancelled' && priorDecline.closed_by === 'owner';
+  if (reconfirming) {
+    if (!wasAwaitingColleague) return { ok: false, request_id: row.id, state: row.state, effect: 'requester_confirmation_required', reason: 'The requester must confirm whether to raise the declined ask again.' };
+    if (verdict.verdict !== 'approve') {
+      closeRequest({ id: row.id, state: 'cancelled', closureReason: 'requester_did_not_confirm_reescalation', closedBy: 'colleague_reply' });
+      return { ok: true, request_id: row.id, state: 'cancelled', effect: 'Not raised to the owner again; requester did not confirm.' };
+    }
+    updateRequest(row.id, { state: 'awaiting_owner', ...timersForWaitingSide(row, 'owner', ctx.profile) });
+    const { getConnection } = await import('../../connections/registry');
+    const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
+    const conn = getConnection(row.owner_user_id, 'slack');
+    let notified = false;
+    if (conn) {
+      const text = await composeOwnerAskText({ askText: row.description ?? row.subject, details: detailsAll, profile: ctx.profile, requestId: row.id,
+        lead: `${row.requester_name ?? 'The requester'} confirmed they want this raised again.` });
+      const posted = await postOwnerDecision({ profile: ctx.profile, conn, text, label: 'confirmed repeat approval' });
+      if (posted.ok) {
+        notified = true;
+        updateRequest(row.id, { ownerDmChannel: posted.channel, ownerDmThreadTs: posted.threadTs, terminalDmMsgTs: posted.ts });
+      }
+    }
+    if (!notified) updateRequest(row.id, { nextCheckAt: new Date(Date.now() + 5 * 60000).toISOString(), nextCheckHandler: 'approval_reminder' });
+    return { ok: true, request_id: row.id, state: 'awaiting_owner', effect: notified ? 'Requester confirmed; raised to owner again with prior refusal history.' : 'Requester confirmed; owner delivery is pending retry.' };
+  }
 
   // ── reject / cancel ────────────────────────────────────────────────────
   if (verdict.verdict === 'reject' || verdict.verdict === 'cancel') {
@@ -335,6 +381,9 @@ async function resolveRequestInner(
     // 14:00 — what now?". Owner can then amend again with a different time,
     // or reject which cascades to a real closure.
     if (wasAwaitingColleague) {
+      if (Number(detailsAll.amend_round ?? 0) >= MAX_COUNTER_ROUNDS) {
+        return closeCounterLimit(row, ctx);
+      }
       const detailsAfter = parseDetails<Record<string, unknown>>(row) ?? {};
       updateRequest(requestId, {
         state: 'awaiting_owner',
@@ -357,7 +406,7 @@ async function resolveRequestInner(
     // on_reject side-effect — fire-and-forget tool (e.g. release a hold,
     // notify a queue). Most rejects don't define this; the default path is
     // just close + notify requester.
-    if (callbacks.on_reject && RESOLVER_REPLAY_TOOLS.has(callbacks.on_reject.tool)) {
+    if (callbacks.on_reject) {
       const replayArgs: Record<string, unknown> = { ...callbacks.on_reject.args };
       logger.info('resolveRequest — on_reject side-effect firing', {
         id: requestId, tool: callbacks.on_reject.tool,
@@ -374,6 +423,7 @@ async function resolveRequestInner(
             originChannel: row.origin_channel,
             originThreadTs: row.origin_thread_ts,
             surface: deriveOriginSurface(row),
+            ownerDmChannel: row.owner_dm_channel, ownerDmThreadTs: row.owner_dm_thread_ts, app: ctx.app,
           });
         } catch (err) {
           logger.warn('on_reject replay threw — non-fatal', {
@@ -410,14 +460,7 @@ async function resolveRequestInner(
         logger.warn('resolveRequest — colleague-counter amend round cap hit', {
           id: requestId, round: amendRound, cap: MAX_COUNTER_ROUNDS,
         });
-        closeRequest({
-          id: requestId,
-          state: 'expired',
-          closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
-          closedBy: 'expiry',
-        });
-        const requesterNotified = await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
-        return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit', requester_notify_outcome: requesterNotified };
+        return closeCounterLimit(row, ctx);
       }
       // v2.9.1 — store latest counter in details.counter (regardless of who
       // sent it) so the eventual approve-merge picks up the most recent
@@ -454,7 +497,7 @@ async function resolveRequestInner(
     // instead of 13:00" on a meeting owner is hosting where attendees
     // don't decide times).
     if (amendMode === 'run_with_amend' && callbacks.on_approve) {
-      const merged = mergeAmendIntoApprove(callbacks.on_approve, verdict.counter);
+      const merged = mergeAmendIntoApprove(callbacks.on_approve, verdict.counter, ctx.profile.user.timezone);
       logger.info('resolveRequest — amend run_with_amend, firing on_approve with merged args', {
         id: requestId, tool: merged.tool, round: amendRound,
       });
@@ -473,14 +516,7 @@ async function resolveRequestInner(
       logger.warn('resolveRequest — amend round cap hit, closing as expired', {
         id: requestId, round: amendRound, cap: MAX_COUNTER_ROUNDS,
       });
-      closeRequest({
-        id: requestId,
-        state: 'expired',
-        closureReason: `amend ping-pong exceeded ${MAX_COUNTER_ROUNDS} rounds`,
-        closedBy: 'expiry',
-      });
-      const requesterNotified = await notifyRequesterOfDecision(row, 'reject', null, 'too many rounds — closing', ctx);
-      return { ok: true, request_id: requestId, state: 'expired', effect: 'amend cap hit', requester_notify_outcome: requesterNotified };
+      return closeCounterLimit(row, ctx);
     }
 
     // v2.9.1 — append to counter_history for audit; counter holds the latest.
@@ -532,7 +568,7 @@ async function resolveRequestInner(
   const latestCounter = (detailsAll.counter as Record<string, unknown> | undefined) ?? null;
   const hasCounter = latestCounter && Object.keys(latestCounter).length > 0;
   if (hasCounter && callbacks.on_approve) {
-    effectiveApprove = mergeAmendIntoApprove(callbacks.on_approve, latestCounter);
+    effectiveApprove = mergeAmendIntoApprove(callbacks.on_approve, latestCounter, ctx.profile.user.timezone);
     logger.info('resolveRequest — approve with prior counter, merging into on_approve', {
       id: requestId, tool: effectiveApprove.tool,
       counterPreview: JSON.stringify(latestCounter).slice(0, 120),
@@ -549,6 +585,15 @@ async function resolveRequestInner(
   // data:{is_online} / data:{location}; we merge it into the action args so the
   // replay resolves the location instead of re-asking. is_online flows to
   // move_meeting/create_meeting as isOnlineHint → resolveLocation resolves it.
+  if (approveData.tool !== undefined || approveData.args !== undefined) {
+    if (typeof approveData.tool !== 'string' || !approveData.tool.trim()
+        || !approveData.args || typeof approveData.args !== 'object' || Array.isArray(approveData.args)) {
+      return { ok: false, request_id: row.id, state: row.state, effect: 'approve_invalid_action',
+        reason: 'A changed owner decision requires the exact tool name and an args object.' };
+    }
+    effectiveApprove = { tool: approveData.tool, args: approveData.args as Record<string, unknown> };
+  }
+
   if (effectiveApprove
       && (typeof approveData.is_online === 'boolean'
           || (typeof approveData.location === 'string' && approveData.location.trim().length > 0))) {
@@ -712,27 +757,13 @@ async function runApproveCallback(
   meta: { mergedFromAmend: boolean; amendRound: number },
 ): Promise<ResolveResult> {
   const { tool, args } = approveCallback;
-
-  if (!RESOLVER_REPLAY_TOOLS.has(tool)) {
-    // Unknown tool — close as resolved but don't replay. Sonnet's next turn
-    // can pick up the resolution if needed.
-    logger.warn('resolveRequest — on_approve tool not replayable, closing without firing', {
-      id: row.id, tool,
-    });
-    // v3.4.6 (spine collapse) — close + notify now. The hold/timer bridge is
-    // gone; an unreplayable on_approve.tool means Sonnet's next turn does the
-    // work, and a booking that lands then reconnects via closeMeetingArtifacts'
-    // thread-ts match. The requester hears "owner said yes" here regardless.
-    closeRequest({
-      id: row.id,
-      state: 'resolved',
-      closureReason: `owner approved ${row.subkind ?? row.kind} (on_approve.tool=${tool} not replayable)`,
-      closedBy: 'owner',
-      outcomeJson: { approved: true, on_approve_tool: tool },
-    });
-    const requesterNotified = await notifyRequesterOfDecision(row, 'approve', {}, undefined, ctx);
-    return { ok: true, request_id: row.id, state: 'resolved', effect: 'approved (no replay)', requester_notify_outcome: requesterNotified };
+  let priorOutcome: Record<string, unknown> = {};
+  try { priorOutcome = JSON.parse(row.outcome_json ?? '{}'); } catch { /* no recorded result */ }
+  if (priorOutcome.verified === false && priorOutcome.replayed) {
+    return closeUnconfirmedExecution(row, ctx, String(priorOutcome.replayed));
   }
+
+
 
   // open-calendar-conflict (2026-08-30, Dina) — a move with NO new_start is the
   // OPEN ask's time-less anchor (skill.ts's create_approval stamp) and nothing
@@ -766,6 +797,10 @@ async function runApproveCallback(
   // write with no `relaxed`/override concept of its own; the old catch-all
   // would have silently stamped an unused field onto its args.
   const replayArgs: Record<string, unknown> = { ...args };
+  if (tool === 'create_meeting' || tool === 'move_meeting') {
+    replayArgs.start_is_explicit = true;
+    replayArgs.keep_requested_time = true;
+  }
   if (tool === 'book_floating_block') {
     replayArgs.confirm_outside_window = true;
   } else if (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'update_meeting') {
@@ -780,6 +815,29 @@ async function runApproveCallback(
   // fuzzy-subject + requester_notified_at refereeing. The id rides through
   // runDeferredAction → the tool handler → closeMeetingArtifacts.
   replayArgs._fulfilling_request_id = row.id;
+
+  // Store the complete decision before effects. Recovery data and immediate
+  // amendments must survive an unavailable executor and a later bare retry.
+  // Reuse the row's existing callback shape; counter_history retains the audit
+  // trail while the accepted counter is absorbed into the frozen action.
+  const decidedDetails = parseDetails<Record<string, unknown>>(row) ?? {};
+  const decidedAction = { tool, args: { ...args } };
+  let storedAction = extractCallbacks(decidedDetails).on_approve;
+  if (storedAction && decidedDetails.counter && typeof decidedDetails.counter === 'object') {
+    storedAction = mergeAmendIntoApprove(storedAction, decidedDetails.counter as Record<string, unknown>, ctx.profile.user.timezone);
+  }
+  if (JSON.stringify(storedAction) !== JSON.stringify(decidedAction)) {
+    const storedCallbacks = decidedDetails.callbacks as Record<string, unknown> | undefined;
+    if (storedCallbacks?.on_approve) {
+      decidedDetails.callbacks = { ...storedCallbacks, on_approve: decidedAction };
+      delete decidedDetails.deferred_action;
+    } else {
+      decidedDetails.deferred_action = decidedAction;
+    }
+    delete decidedDetails.counter;
+    if (meta.mergedFromAmend) delete decidedDetails.honest_hard_reason;
+    updateRequest(row.id, { details: decidedDetails });
+  }
 
   logger.info('resolveRequest — on_approve replay', {
     id: row.id, tool, kind: row.kind, subkind: row.subkind,
@@ -813,6 +871,7 @@ async function runApproveCallback(
       originChannel: row.origin_channel,
       originThreadTs: row.origin_thread_ts,
       surface: deriveOriginSurface(row),
+            ownerDmChannel: row.owner_dm_channel, ownerDmThreadTs: row.owner_dm_thread_ts, app: ctx.app,
     });
   } catch (err) {
     // A colleague accepted an already decided action; recovery is now the
@@ -888,6 +947,9 @@ async function runApproveCallback(
       return replayFailure('approve_replay_event_not_found',
         `The event id on file for "${subj}" is not on the calendar under that id — it was either already cancelled elsewhere, or the id is stale (the meeting may still be there). Call get_calendar to check whether a meeting matching "${subj}" is still on the calendar. If it's genuinely gone, call resolve_approval again with verdict="approve", data={"confirmed_gone":true} to close this out as cancelled. If it's still there under a different id, call resolve_approval again with verdict="approve", data={"fresh_meeting_id":"<id from get_calendar>"} to retry the cancellation with the correct id.`);
     }
+    if (err instanceof ReplayToolError && ['approved_action_unconfirmed', 'replay_unconfirmed'].includes(String(err.sentinel.error))) {
+      return closeUnconfirmedExecution(row, ctx, tool);
+    }
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {
       id: row.id, tool, err: String(err).slice(0, 300),
     });
@@ -918,14 +980,16 @@ async function runApproveCallback(
   // `booked_start` is the tool's own truth (it can snap/normalize the time),
   // falling back to the args we actually replayed. Same for subject — a counter
   // can rename the meeting too.
+  const calendarAction = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'].includes(tool);
   const executed = {
     tool,
-    start: typeof replayResult?.booked_start === 'string'
+    tracked: replayResult?._replay_status === 'tracked',
+    start: !calendarAction ? undefined : typeof replayResult?.booked_start === 'string'
       ? (replayResult.booked_start as string)
       : (typeof replayArgs.start === 'string'
           ? (replayArgs.start as string)
           : (typeof replayArgs.new_start === 'string' ? (replayArgs.new_start as string) : undefined)),
-    subject: typeof replayArgs.subject === 'string'
+    subject: !calendarAction ? undefined : typeof replayArgs.subject === 'string'
       ? (replayArgs.subject as string)
       : (typeof replayArgs.meeting_subject === 'string' ? (replayArgs.meeting_subject as string) : undefined),
   };
@@ -961,12 +1025,12 @@ async function runApproveCallback(
   const isBookingTool = tool === 'create_meeting' || tool === 'book_floating_block';
   const replayStart = executed.start;
   const replaySubject = executed.subject ?? row.subject ?? undefined;
-  const replaySummary = typeof replayResult?.action_summary === 'string'
+  const replaySummary = calendarAction && typeof replayResult?.action_summary === 'string'
     ? (replayResult.action_summary as string)
     : undefined;
   return {
     ok: true, request_id: row.id, state: 'resolved',
-    effect: 'approved — action replayed',
+    effect: executed.tracked ? 'approved — action scheduled and tracked; not completed yet' : 'approved — action replayed',
     ...(isBookingTool ? { booked: true } : {}),
     ...(replaySubject ? { subject: replaySubject } : {}),
     ...(replayStart ? { start: replayStart } : {}),
@@ -994,6 +1058,7 @@ async function runApproveCallback(
  */
 interface ExecutedOutcome {
   tool: string;
+  tracked?: boolean;
   /** ISO start the action actually landed on. */
   start?: string;
   /** Subject as executed — a counter can rename the meeting, not just move it. */
@@ -1019,7 +1084,7 @@ export async function notifyRequesterOfDecision(
   // say yes or no to a specific ask, he said the whole thing is already
   // handled/dropped. Templated + composed wording below reflects that
   // honestly instead of misreporting a decision that was never made.
-  verdict: 'approve' | 'reject' | 'amend' | 'closed_by_owner',
+  verdict: 'approve' | 'reject' | 'amend' | 'closed_by_owner' | 'expired',
   data: Record<string, unknown> | null,
   reason: string | undefined,
   ctx: ResolveContext,
@@ -1051,23 +1116,6 @@ export async function notifyRequesterOfDecision(
     });
     return 'no_requester';  // owner-internal request, nothing to close back
   }
-  // v3.4.7 — reverse-order double-notify guard. Sonnet already messaged this
-  // requester THIS turn (message_colleague ran before resolve_approval), so this
-  // relay would be the SECOND DM. Skip it; stamp requester_notified_at on a
-  // terminal verdict so state stays truthful (they WERE told) and downstream
-  // reads it. Symmetric to the orchestrator's forward guard; deterministic, no
-  // clock. (If the message_colleague send had failed it wouldn't be in the set,
-  // so the relay would still go — no silent drop.)
-  if (requesterSlackId && ctx.alreadyMessagedRequesterIds?.has(requesterSlackId)) {
-    logger.info('notifyRequesterOfDecision — skip: requester already messaged this turn (reverse-order double-notify guard)', {
-      id: row.id, requesterSlackId, verdict,
-    });
-    if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner') {
-      try { updateRequest(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) { /* non-fatal */ }
-    }
-    return 'sent';  // already told this turn via message_colleague — they know
-  }
-
   const details = parseDetails(row) ?? {};
   const requesterName = row.requester_name ?? (details.requester_name as string | undefined);
 
@@ -1144,10 +1192,6 @@ export async function notifyRequesterOfDecision(
 
   const { getConnection } = await import('../../connections/registry');
   const conn = getConnection(row.owner_user_id, 'slack');
-  if (!conn) {
-    logger.warn('notifyRequesterOfDecision — no Slack connection', { id: row.id });
-    return 'failed';
-  }
 
   const ownerFirst = ctx.profile.user.name.split(' ')[0];
   const requesterFirst = requesterName ? requesterName.split(' ')[0] : undefined;
@@ -1170,15 +1214,31 @@ export async function notifyRequesterOfDecision(
     // is the actor here. Use a neutral booking-confirmation phrasing
     // instead. The relay still goes to the requester as a confirmation
     // they can scroll back to.
-    if (ctx.wasAwaitingColleague) {
+    if (executed?.tracked) {
+      body = requesterLang === 'he'
+        ? `${hi} — הפעולה שאושרה לגבי ${subject} נקבעה להמשך והיא במעקב, אך עדיין לא הושלמה.`
+        : `${hi} — the approved action about ${subject} is scheduled and tracked, but has not completed yet.`;
+    } else if (!executed) {
+      body = requesterLang === 'he'
+        ? `${hi} — ${ownerFirst} אישר את הבקשה לגבי ${subject}.`
+        : `${hi} — ${ownerFirst} approved the request about ${subject}.`;
+    } else if (executed.tool === 'delete_meeting') {
+      body = requesterLang === 'he'
+        ? `${hi} — הפגישה "${subject}" בוטלה.`
+        : `${hi} — "${subject}" has been cancelled.`;
+    } else if (executed.tool === 'move_meeting' || executed.tool === 'update_meeting') {
+      body = requesterLang === 'he'
+        ? `${hi} — הפגישה "${subject}" עודכנה${startFormatted ? ` ל${startFormatted}` : ''}.`
+        : `${hi} — "${subject}" has been updated${startFormatted ? ` to ${startFormatted}` : ''}.`;
+    } else if (ctx.wasAwaitingColleague) {
       if (startFormatted) {
         body = requesterLang === 'he'
           ? `${hi} — סגרנו על "${subject}" ל${startFormatted}. הזימון בדרך.`
           : `${hi} — locked in "${subject}" for ${startFormatted}. Calendar invite incoming.`;
       } else {
         body = requesterLang === 'he'
-          ? `${hi} — סגרנו על ${subject}. אעדכן אותך כשהזימון יוצא.`
-          : `${hi} — locked in ${subject}. I'll let you know once the invite goes out.`;
+          ? `${hi} — הבקשה לגבי ${subject} הושלמה.`
+          : `${hi} — completed the request about ${subject}.`;
       }
     } else if (startFormatted) {
       // Owner-resolved: concrete-time form when we know the booked slot.
@@ -1192,14 +1252,18 @@ export async function notifyRequesterOfDecision(
       // "you mean approved to cancel?" bug). A neutral "got back to me, I'm on it"
       // is never wrong regardless of the underlying action.
       body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} חזר אליי בנושא. אני מטפלת בזה ואעדכן אותך.`
-        : `${hi} — ${ownerFirst} got back to me on this. I'm on it and will update you.`;
+        ? `${hi} — הבקשה לגבי ${subject} הושלמה.`
+        : `${hi} — completed the request about ${subject}.`;
     }
   } else if (verdict === 'reject') {
     const reasonTail = reason && reason.trim() ? ` (${reason.trim()})` : '';
     body = requesterLang === 'he'
-      ? `${hi} — ${ownerFirst} לא יכול לעשות את זה כרגע${reasonTail}. סליחה — אם תרצי שאחפש משהו אחר, רק תגידי.`
-      : `${hi} — ${ownerFirst} can't make that work right now${reasonTail}. Sorry about that — happy to find another path if you want.`;
+      ? `${hi} — ${ownerFirst} דחה את הבקשה לגבי ${subject}${reasonTail}. הפעולה המבוקשת לא בוצעה.`
+      : `${hi} — ${ownerFirst} declined the request about ${subject}${reasonTail}. The requested action was not carried out.`;
+  } else if (verdict === 'expired') {
+    body = requesterLang === 'he'
+      ? `${hi} — לא הגענו להסכמה לגבי ${subject} אחרי שתי הצעות, אז סגרתי את הבקשה. כדאי לפנות ישירות ל${ownerFirst} להמשך התיאום.`
+      : `${hi} — we did not reach agreement about ${subject} after two proposals, so I've closed the request. Please contact ${ownerFirst} directly to work out the next step.`;
   } else if (verdict === 'closed_by_owner') {
     // Scanner path — never "approved" (nothing was granted) and never "can't
     // make it work" (nothing was declined): just that it's closed, and why.
@@ -1208,19 +1272,10 @@ export async function notifyRequesterOfDecision(
       ? `${hi} — ${ownerFirst} סגר את זה בעצמו${reasonTail}. שום דבר נוסף לא נדרש ממך כרגע.`
       : `${hi} — ${ownerFirst} closed this out himself${reasonTail} — nothing more needed from you here.`;
   } else {
-    // v2.9.2 — question-shape counter: when counter.text is a clarifying
-    // question from the owner ("what time?", "where?", "who else?"), render
-    // it as a question relay instead of "suggested a different approach".
-    // Detection: counter.text ends in `?` (any language) or starts with a
-    // common question-word in EN/HE.
-    const counterText = typeof data?.text === 'string' ? data.text.trim() : '';
-    const isQuestion =
-      counterText.length > 0
-      && (
-        /[?؟]\s*$/.test(counterText)  // any-language question mark
-        || /^(what|when|where|who|why|how|which|can|could|would|should|do|does|did|is|are|was|were)\b/i.test(counterText)
-        || /^(מה|מתי|איפה|מי|למה|איך|איזה|האם)\b/.test(counterText)  // Hebrew question-words
-      );
+    // W4: a structured question key carries this intent in any language.
+    // Free prose is relayed as prose, never classified by English/Hebrew regex.
+    const counterText = typeof data?.question === 'string' ? data.question.trim() : '';
+    const isQuestion = counterText.length > 0;
     // Preserve the owner's rationale as a source-attributed quote outside the
     // language composer. Prose can name the requester's, owner's, or a third
     // clock; only the structured ISO values above have a known clock frame.
@@ -1241,7 +1296,7 @@ export async function notifyRequesterOfDecision(
       // Everything OTHER than the question still has to travel: a question bundled
       // with a concrete change must not lose the change.
       const rest = renderCounter(
-        Object.fromEntries(Object.entries(counterForRelay ?? {}).filter(([k]) => k !== 'text')),
+        Object.fromEntries(Object.entries(counterForRelay ?? {}).filter(([k]) => k !== 'question')),
         { audience: 'requester', formatInstant: formatStart },
       );
       amendWithheld = rest.withheld;
@@ -1355,14 +1410,15 @@ ${amendPinned.map(p => `- ${p.key.replace(/_/g, ' ')} = ${p.value}`).join('\n')}
 Write the message.`;
       } else {
         const outcome = verdict === 'approve'
-          ? `${ownerFirst} said yes`
+          ? (executed?.tracked ? 'The approved action is scheduled and tracked in an existing request, but has not completed yet.' : executed ? `The action was completed: ${actionHint ?? executed.tool}${startFormatted ? ` at ${startFormatted}` : ''}.`
+            : `${ownerFirst} approved the request. No action was executed here; this is the complete yes/no decision.`)
           : verdict === 'closed_by_owner'
             ? `${ownerFirst} closed this out himself${reason && reason.trim() ? ` (${reason.trim()})` : ''} — not an approval or a decline, just handled/no longer needed`
-            : `${ownerFirst} can't make it work${reason && reason.trim() ? ` (${reason.trim()})` : ''}`;
+            : `${ownerFirst} declined the request${reason && reason.trim() ? ` (${reason.trim()})` : ''}. The requested action was not executed.`;
         sys = `You are ${assistantName}, ${ownerFirst}'s executive assistant, sending ONE short, warm Slack message to ${requesterFirst ?? 'a colleague'} to close the loop on something they asked you to arrange with ${ownerFirst}.
 RULES:
 - Language: ${langRule}.
-- Name the ACTION clearly, zero ambiguity. If their request was to CANCEL something, say it's cancelled / being taken care of — NEVER phrase it as "${ownerFirst} approved {the meeting}", which reads like approving the meeting itself.${verdict === 'closed_by_owner' ? ` Never say anything was booked or executed — nothing ran here; ${ownerFirst} closed it out himself, out of band.` : ` If it was a booking, say it's booked${startFormatted ? ` for ${startFormatted}` : ''}.`}
+- Report only the OUTCOME supplied below. The original request is context, not evidence an action ran. A declined cancellation leaves the meeting unchanged; a declined booking books nothing. A pure approval reports the decision, with no promise of future work.
 - Do NOT mention approvals, "policy", internal tools, or that you "asked ${ownerFirst}" — just the human outcome, EA-voiced and natural.
 - ONE sentence. A light "Hi ${requesterFirst ?? ''}" is fine; no sign-off.${historyRule ? `\n${historyRule}` : ''}`;
         usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
@@ -1397,7 +1453,7 @@ RULES:
   // requester already got their DM — skip the duplicate, but STILL shadow the
   // owner so he can see the loop closed (he was blind to it before — issue #115).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getRequest: getReqFresh, updateRequest: stampReq } = require('../../db/requests') as typeof import('../../db/requests');
+  const { getRequest: getReqFresh } = require('../../db/requests') as typeof import('../../db/requests');
   const alreadyNotified = (() => {
     try { return !!getReqFresh(row.id)?.requester_notified_at; } catch { return false; }
   })();
@@ -1418,8 +1474,8 @@ RULES:
     // Stamp on approve/reject/closed_by_owner (terminal outcomes). NOT on
     // amend — the request stays open and the eventual booking must still
     // notify the requester.
-    if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner') {
-      try { stampReq(row.id, { requesterNotifiedAt: new Date().toISOString() }); } catch (_) {}
+    if (verdict !== 'amend') {
+      try { completeRequesterRelay(row); } catch (_) {}
     }
   };
 
@@ -1505,6 +1561,10 @@ RULES:
     }
   };
 
+  if (!conn) {
+    if (verdict !== 'amend') recordRequesterRelayFailure(row, body, false);
+    return 'failed';
+  }
   // MPIM origin → post back in MPIM thread; else 1:1 DM.
   try {
     if (row.origin_is_mpim && row.origin_channel) {
@@ -1519,6 +1579,10 @@ RULES:
       logger.warn('notifyRequesterOfDecision — MPIM post failed, falling back to 1:1 DM', {
         id: row.id, reason: res.reason,
       });
+      if (isRequesterSendUnconfirmed(res)) {
+        if (verdict !== 'amend') recordRequesterRelayFailure(row, body, true);
+        return 'failed';
+      }
     }
     // v2.9.4 (#107ef) — thread the relay DM into the ORIGINAL conversation
     // when known. Pre-fix sendDirect was called without opts, so the message
@@ -1538,7 +1602,7 @@ RULES:
       logger.warn('notifyRequesterOfDecision — direct DM failed', {
         id: row.id, requesterSlackId, reason: res.reason,
       });
-      await fireOwnerShadow();
+      if (verdict !== 'amend') recordRequesterRelayFailure(row, body, isRequesterSendUnconfirmed(res));
       return 'failed';
     }
     logger.info('notifyRequesterOfDecision — direct DM sent', {
@@ -1550,9 +1614,10 @@ RULES:
     await fireOwnerShadow();
     return 'sent';
   } catch (err) {
-    logger.warn('notifyRequesterOfDecision — threw, non-fatal', {
+    logger.warn('notifyRequesterOfDecision — threw, delivery unconfirmed', {
       id: row.id, err: String(err).slice(0, 200),
     });
+    if (verdict !== 'amend') recordRequesterRelayFailure(row, body, true);
     return 'failed';
   }
 }
@@ -1575,6 +1640,44 @@ RULES:
  * stored a new colleague counter. Failed acceptance keeps the owner's counter.
  * The lead and consequence use ONE source — the counter a ✅ will replay (R2).
  */
+/** A completed decision with an uncertain action is terminal, never an unanswered ask. */
+export async function closeUnconfirmedExecution(row: RequestRow, ctx: ResolveContext, tool: string): Promise<ResolveResult> {
+  const reason = "I tried to do it, but I'm not sure it worked. I couldn't confirm the result with an available read-only check. I have not repeated the action, and no further automatic check is pending.";
+  closeRequest({ id: row.id, state: 'resolved', closureReason: 'approved_action_attempted_unconfirmed', closedBy: 'owner',
+    outcomeJson: { approved: true, replayed: tool, verified: false } });
+  const sent = await relayClosureToRequester({ row, profile: ctx.profile, label: 'unconfirmed action requester outcome',
+    compose: ({ lang, hi, subject }) => lang === 'he'
+      ? `${hi} — נעשה ניסיון לבצע את הבקשה לגבי ${subject}, אבל לא ניתן לאשר שהוא הצליח. הפעולה לא בוצעה שוב ואין בדיקה אוטומטית נוספת בהמתנה.`
+      : `${hi} — I tried to carry out the request about ${subject}, but I couldn't confirm it worked. I have not repeated the action, and no further automatic check is pending.` });
+  if (ctx.wasAwaitingColleague || ctx.resolvedByColleague) {
+    const { getConnection } = await import('../../connections/registry');
+    const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
+    const conn = getConnection(row.owner_user_id, 'slack');
+    if (conn) await postOwnerDecision({ profile: ctx.profile, conn, text: reason, label: 'unconfirmed action owner outcome',
+      inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
+  }
+  return { ok: false, request_id: row.id, state: 'resolved', effect: 'approve_replay_unconfirmed', reason,
+    requester_notify_outcome: sent ? 'sent' : 'failed' };
+}
+
+async function closeCounterLimit(row: RequestRow, ctx: ResolveContext): Promise<ResolveResult> {
+  closeRequest({ id: row.id, state: 'expired', closureReason: 'counter_limit_without_agreement', closedBy: 'expiry' });
+  const requesterNotified = await notifyRequesterOfDecision(row, 'expired', null, undefined, ctx);
+  try {
+    const { getConnection } = await import('../../connections/registry');
+    const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
+    const conn = getConnection(row.owner_user_id, 'slack');
+    if (conn) await postOwnerDecision({ profile: ctx.profile, conn,
+      text: `No agreement after two proposals on "${row.subject}". I've closed the request${requesterNotified === 'sent' ? ' and asked the requester to contact you directly' : '; I could not confirm the requester was told'}.`,
+      label: 'counter limit outcome',
+      inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null,
+    });
+  } catch (err) {
+    logger.warn('counter limit owner outcome failed', { id: row.id, err: String(err).slice(0, 200) });
+  }
+  return { ok: true, request_id: row.id, state: 'expired', effect: 'counter limit reached without agreement', requester_notify_outcome: requesterNotified };
+}
+
 async function notifyOwnerOfColleaguePushback(
   row: RequestRow,
   verdict: 'reject' | 'amend' | 'approve_failed',

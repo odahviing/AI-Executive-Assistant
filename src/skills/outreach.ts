@@ -219,6 +219,8 @@ Only send messages the user explicitly asks for — never reach out to people on
         if (context.authority === 'owner') {
           const stuckApproval = getAwaitingOwnerRequests(userId).find(r =>
             r.kind === 'approval'
+            && r.id !== args._fulfilling_request_id
+            && r.id !== args._fulfilling_request_id
             && r.requester_slack_id === colleagueSlackId
             && (r.owner_dm_thread_ts === context.threadTs || r.terminal_dm_msg_ts === context.threadTs),
           );
@@ -356,7 +358,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           message: args.message as string,
           await_reply: awaitReplyEffective ? 1 : 0,
           status: isFuture ? 'pending_scheduled' : 'sent',
-          sent_at: isFuture ? undefined : new Date().toISOString(),
+          // Delivery is stamped only after Connection confirms the send.
           reply_deadline: deadline,
           // Only a DEFERRED send is "scheduled". Every other field here already
           // forks on isFuture; this one didn't, so a send_at already in the past
@@ -503,6 +505,7 @@ Only send messages the user explicitly asks for — never reach out to people on
               : `Channel post failed: ${outcome.detail ?? outcome.reason}`;
             return { ok: false, error: outcome.reason, detail: hint };
           }
+          updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
           if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
           // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
           // fires only after the post is confirmed sent.
@@ -562,7 +565,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         // below) — origin can't double as the owner return address once it's
         // pointed at the colleague side. Owner-initiated only; a colleague-
         // initiated outreach has no owner conversation thread to anchor.
-        if (linkedRequestId && context.senderRole === 'owner' && context.channelId && context.threadTs) {
+        if (linkedRequestId && context.authority === 'owner' && /^D/.test(context.channelId) && context.threadTs) {
           try {
             updateRequest(linkedRequestId, {
               ownerDmChannel: context.channelId,
@@ -617,6 +620,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
           return { ok: false, error: outcome.reason, detail: outcome.detail };
         }
+        updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
         // v2.1.5 — record the Slack ts + DM channel so follow-up sends
         // (post-approval confirmation, relay replies) can thread back
         // into this conversation instead of starting a fresh top-level
@@ -637,11 +641,11 @@ Only send messages the user explicitly asks for — never reach out to people on
           // the thread. Only do this on the FIRST send to anchor the
           // thread — the lookup above skips already-anchored requests
           // (origin_thread_ts already populated to a 'D...' channel).
-          if (linkedRequestId && outcome.ref && outcome.ts && !threadTsForSend) {
+          if (linkedRequestId && outcome.ref && outcome.ts) {
             try {
               updateRequest(linkedRequestId, {
                 originChannel: outcome.ref,
-                originThreadTs: outcome.ts,
+                originThreadTs: threadTsForSend ?? outcome.ts,
               });
               logger.info('message_colleague — anchored request origin to colleague-side thread', {
                 requestId: linkedRequestId, colleagueChannel: outcome.ref, threadTs: outcome.ts,

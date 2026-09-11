@@ -78,32 +78,8 @@ export const FREEFORM_OWNER_FLAG_SUBKIND = 'freeform_owner_flag';
  */
 export const PROMOTE_TIMEZONE_TEMP_TOOL = 'promote_timezone_temp' as const;
 
-/**
- * Every tool the resolver's replay engine (deferredActionReplay.ts) can fire
- * on an approved on_approve callback — the canonical membership for
- * approvalCallbacks.ts's `RESOLVER_REPLAY_TOOLS`. Declared as a `const`
- * tuple (not just the Set) so `ReplayableTool` and `isReplayableTool` can be
- * derived from the SAME list deferredActionReplay.ts switches over: its
- * dispatch narrows `tool` to this union and its final `default` branch
- * assigns it to a `never` — so a member added here without a matching
- * dispatch branch there fails to COMPILE, not just silently no-ops at
- * runtime (the drift the old "keep this set in sync with
- * deferredActionReplay.ts" comment could only ask a human to remember).
- */
-export const REPLAYABLE_TOOLS = [
-  'create_meeting',
-  'move_meeting',
-  'delete_meeting',
-  'update_meeting',
-  'book_floating_block',
-  PROMOTE_TIMEZONE_TEMP_TOOL,
-] as const;
-
-export type ReplayableTool = (typeof REPLAYABLE_TOOLS)[number];
-
-export function isReplayableTool(tool: string): tool is ReplayableTool {
-  return (REPLAYABLE_TOOLS as readonly string[]).includes(tool);
-}
+/** Legacy calendar narration retains the request's actual origin surface. Generic actions use the private owner decision anchor. */
+export const ORIGIN_SURFACE_REPLAY_TOOLS = ['create_meeting', 'move_meeting', 'delete_meeting', 'update_meeting', 'book_floating_block', PROMOTE_TIMEZONE_TEMP_TOOL] as const;
 
 export type RequestState =
   | 'awaiting_owner'      // owner action blocks progress (most approvals start here)
@@ -152,6 +128,7 @@ export type OutreachPhase =
 export type RequestPhase = OutreachPhase;
 
 export type NextCheckHandler =
+  | 'requester_relay_retry'
   | 'expiry'                 // generic expiry → close with state=expired
   | 'approval_reminder'      // midpoint nag DM, then re-arm for expiry
   | 'outreach_expiry'        // outreach awaiting_colleague past window → close as expired
@@ -375,4 +352,3 @@ export function toTimerInstant(raw: string, ownerTimezone: string): string | nul
   const dt = DateTime.fromISO(raw, { zone: ownerTimezone });
   return dt.isValid ? dt.toUTC().toISO() : null;
 }
-

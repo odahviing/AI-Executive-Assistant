@@ -217,7 +217,7 @@ export function getOpenRequestsForOwner(ownerUserId: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND parent_request_id IS NULL
+      AND (parent_request_id IS NULL OR kind = 'approval')
       AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
     ORDER BY state, created_at ASC
   `).all(ownerUserId) as RequestRow[];
@@ -334,7 +334,7 @@ export function getAwaitingOwnerRequests(ownerUserId: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND parent_request_id IS NULL
+      AND (parent_request_id IS NULL OR kind = 'approval')
       AND state = 'awaiting_owner'
     ORDER BY created_at ASC
   `).all(ownerUserId) as RequestRow[];
@@ -492,7 +492,8 @@ export function getDueRequests(): RequestRow[] {
     SELECT * FROM requests
     WHERE next_check_at IS NOT NULL
       AND datetime(next_check_at) <= datetime('now')
-      AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
+      AND (state IN ('awaiting_owner','awaiting_colleague','in_flight')
+        OR (state IN ('resolved','cancelled','expired') AND next_check_handler = 'requester_relay_retry'))
   `).all() as RequestRow[];
 }
 
@@ -515,7 +516,7 @@ export function getRequestsForBrief(ownerUserId: string, briefingDayStartIso: st
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND parent_request_id IS NULL
+      AND (parent_request_id IS NULL OR kind = 'approval')
       AND state != 'logged'
       AND (
         (state IN ('awaiting_owner','awaiting_colleague','in_flight')
@@ -760,7 +761,7 @@ export function getOpenScannerItems(ownerUserId: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND parent_request_id IS NULL
+      AND (parent_request_id IS NULL OR kind = 'approval')
       AND state IN ('awaiting_owner','awaiting_colleague','in_flight')
     ORDER BY updated_at DESC
     LIMIT 25
@@ -792,9 +793,9 @@ export interface UpdateRequestPatch {
   expiresAt?: string | null;
   nextCheckAt?: string | null;
   nextCheckHandler?: NextCheckHandler | null;
-  terminalDmMsgTs?: string;
-  ownerDmChannel?: string;
-  ownerDmThreadTs?: string;
+  terminalDmMsgTs?: string | null;
+  ownerDmChannel?: string | null;
+  ownerDmThreadTs?: string | null;
   // v3.0.8 — repurposed for outreach kind: anchor the request's origin to
   // the colleague-side DM thread after the first outbound send (option A
   // in the Dina-2-DMs thread-continuity fix). Other kinds keep origin
