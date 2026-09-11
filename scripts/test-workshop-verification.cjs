@@ -7,14 +7,16 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const beforeAt = process.argv.indexOf('--before-ref')
 const beforeRef = beforeAt >= 0 ? process.argv[beforeAt + 1] : null
+const runtimeAt = process.argv.indexOf('--runtime-ref')
+const runtimeRef = runtimeAt >= 0 ? process.argv[runtimeAt + 1] : null
 const baselineOnly = Boolean(beforeRef) || process.argv.includes('--baseline')
 const root = fs.mkdtempSync(path.join(__dirname, '..', '.workshop-verification-'))
 fs.mkdirSync(path.join(root, 'scripts'))
 fs.mkdirSync(path.join(root, '.claude/agent-loop'), { recursive: true })
 for (const file of ['ledger-stats.cjs', 'ledger-file.cjs', 'workshop-verification.cjs']) {
-  if (beforeRef) {
-    if (file === 'workshop-verification.cjs') continue
-    const old = spawnSync('git', ['show', `${beforeRef}:scripts/${file}`], { cwd: path.join(__dirname, '..'), encoding: 'utf8' })
+  if (beforeRef || runtimeRef) {
+    if (beforeRef && file === 'workshop-verification.cjs') continue
+    const old = spawnSync('git', ['show', `${beforeRef || runtimeRef}:scripts/${file}`], { cwd: path.join(__dirname, '..'), encoding: 'utf8' })
     assert.equal(old.status, 0, old.stderr)
     fs.writeFileSync(path.join(root, 'scripts', file), old.stdout)
     continue
@@ -75,7 +77,7 @@ test('new build cannot be written without executed evidence', () => {
 })
 
 if (!baselineOnly) {
-const contract = require('./workshop-verification.cjs')
+const contract = require(path.join(root, 'scripts/workshop-verification.cjs'))
 const product = path.join(root, 'fixture.cjs')
 fs.writeFileSync(product, 'module.exports = value => value !== null\n')
 const validEvidence = () => ({
@@ -161,6 +163,50 @@ const jsonFile = (name, value) => { const file = path.join(root, name); fs.write
 const writeBuild = (e = validEvidence()) => cli('ledger-file.cjs', '--ref', 'new', '--lane', 'architect', '--source', 'owner', '--finding', 'A concrete deterministic defect in the ledger', '--rootCause', 'scripts/fixture.cjs:1', '--verdict', 'built', '--invariant', 'none', '--runId', 'direct-real-dispatch', '--evidence-file', jsonFile('evidence.json', e))
 const writeReview = (r = validReview()) => cli('ledger-file.cjs', '--review', '--ref', 'new', '--review-file', jsonFile('review.json', r))
 const gate = (...args) => cli('ledger-stats.cjs', ...args)
+const partialSync = (ownerDecision = false) => cli('ledger-file.cjs', '--gh-sync', '--ref', 'gh#24', '--version', '99.0.0', '--ghstate', 'partial', '--note', 'Released repairs; the remaining ticket feature stays open.', ...(ownerDecision ? ['--verdict', 'needs-owner-decision'] : ['--recommend', 'build the remaining feature']))
+
+test('partial GitHub sync reopens legacy shipped ticket without inventing an implementation', () => {
+  for (const ownerDecision of [false, true]) {
+    setRows([row('gh#24', 'built', { date: '2026-07-28', state: 'built' }), row('gh#24', 'built', { date: '2026-07-29', state: 'wrapped' })])
+    assert.equal(partialSync(ownerDecision).status, 0)
+    assert.deepEqual(open().map(r => r.ref), ['gh#24'])
+    const checked = gate('--verification')
+    assert.equal(checked.status, 0, checked.stdout)
+    for (const args of [['--report'], ['--wrap', '99.0.0']]) assert.match(gate(...args).stdout, /VERIFICATION — 0 blocking ref/)
+  }
+})
+
+test('partial sync preserves current implementation and failed-review blockers', () => {
+  for (const verdict of ['built', 'implemented', 'verification-failed', 'verification-unproven']) {
+    setRows([row('gh#24', verdict, verdict === 'built' ? {} : { lifecycleVersion: 1, evidence: validEvidence() })])
+    assert.equal(partialSync().status, 0)
+    assert.equal(gate('--verification').status, 1, verdict)
+  }
+})
+
+test('partial sync cannot hide an explicit reopening after historical shipment', () => {
+  setRows([row('gh#24', 'built', { state: 'wrapped' }), row('gh#24', 'needs-dependency', { lifecycleVersion: 1 })])
+  assert.equal(partialSync().status, 0)
+  assert.equal(gate('--verification').status, 1)
+})
+
+test('partial sync preserves valid implementation evidence and still detects stale files', () => {
+  setRows([row('gh#24', 'verified', { lifecycleVersion: 1, evidence: validEvidence(), review: validReview(), snapshot: contract.snapshot([product], root) })])
+  assert.equal(partialSync().status, 0)
+  assert.deepEqual(open().map(r => r.ref), ['gh#24'])
+  assert.equal(gate('--verification').status, 0)
+  fs.appendFileSync(product, '// stale during partial ticket sync\n')
+  const checked = gate('--verification')
+  assert.equal(checked.status, 1)
+  assert.match(checked.stdout, /changed since reviewed/)
+})
+
+test('partial state on a lifecycle event is never treated as bookkeeping', () => {
+  for (const extra of [{ lifecycleVersion: 1 }, { evidence: validEvidence() }, { review: { verdict: 'fail' } }]) {
+    setRows([row('gh#24', 'built', { state: 'wrapped' }), { ref: 'gh#24', state: 'partial', runId: 'wrap-99.0.0', ...extra }])
+    assert.equal(gate('--verification').status, 1)
+  }
+})
 test('direct writer lifecycle: implementation → pass → fail → repair awaiting review → pass', () => {
   setRows([])
   assert.equal(writeBuild().status, 0)

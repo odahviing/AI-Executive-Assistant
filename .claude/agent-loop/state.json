@@ -2,8 +2,8 @@
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
     "id": "wrap-2026-09-11T16:08:05.051Z",
-    "status": "complete",
-    "note": "4.9.5 wrapped:14/14 refs independently verified; Golden30 passes. Release bookkeeping complete; final cloud boot check follows."
+    "status": "running",
+    "note": "4.9.5 product deployed; bounded partial-GitHub release-gate repair awaiting independent review and final commit."
   },
   "lastWrapIso": "2026-09-11T19:08:33+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",

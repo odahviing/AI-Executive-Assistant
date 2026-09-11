@@ -190,6 +190,10 @@ const snapshotErrors = (r, repo) => {
   })
 }
 function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
+  // GitHub partial sync records remaining ticket scope, not a new build or
+  // overturn. Keep it in backlog collapse, but verify the actual lifecycle it
+  // annotates; filtering the event must never discard earlier failed work.
+  rows = rows.filter(r => !(r.state === 'partial' && /^gh#\d+$/.test(r.ref || '') && /^wrap-/.test(r.runId || '') && !r.lifecycleVersion && !r.evidence && !r.review && (!r.verdict || r.verdict === 'needs-owner-decision')))
   const collapsed = collapseRows(rows)
   const closedKeys = new Set(collapsed.closed.map(r => normRef(r.ref)))
   const builtKeys = new Set(), eventDates = new Map()

@@ -27,6 +27,10 @@ Maelle resolves meeting times from the stated timezone and the travel dates that
 - Independent review passed after repairing three original blocking roots and one joined travel-context regression in the approved expansion. Fourteen tracked repair/policy references are covered; the combined Golden30 release checkpoint passes all thirty paths. Executed regressions cover three host timezones, with affected checks rerun after repairs.
 - Deterministic tests and prompt-input checks do not guarantee live model wording. Configured cross-midnight work-hour ranges remain outside this repair; this release preserves their existing product scope.
 
+### Framework
+
+- Keep partial GitHub status updates separate from implementation verification, so an old released ticket can remain open without inventing a new unverified build. Actual failed, stale and unreviewed implementations still block release.
+
 ---
 ## 4.9.4 — Reliable social codas and capture outcomes
 
