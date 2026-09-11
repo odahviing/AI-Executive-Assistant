@@ -1,11 +1,11 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "status": "running",
+    "status": "complete",
     "id": "wrap-2026-09-11T12:49:08.9835225Z",
-    "note": "Owner-authorized Coda 4.9.4 wrap; timezone audit paused before edits"
+    "note": "4.9.4 Coda and Workshop wrapped; independent review reused, Golden30 no failures; cloud boot confirmation pending final bookkeeping push."
   },
-  "lastWrapIso": "2026-09-11T11:58:55+03:00",
+  "lastWrapIso": "2026-09-11T15:57:48+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
   "nextReportId": 281,
   "verifiedClean": [
