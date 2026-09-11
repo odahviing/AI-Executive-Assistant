@@ -8,7 +8,7 @@ Maelle is an AI executive assistant platform built in Node.js/TypeScript. She li
 
 **Mission / filter for every decision:** "would a real human EA do this?" — outranks speed, completeness, elegance.
 
-**Current shipped version: 4.8.2.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
+**Current shipped version: 4.9.2.** `CHANGELOG.md` is the canonical, in-repo version-by-version history — it is not duplicated here or in `project_architecture.md`. Read it for what actually changed release to release; this file describes the durable shape, not the diff.
 
 ## Where she runs
 
@@ -28,7 +28,7 @@ Maelle's own codebase is maintained by a set of charter-bound agents, each ownin
 
 ## How a bug reaches production
 
-One run of the **Manager** (`/manager`, `.claude/skills/manager/SKILL.md`) does the whole pass: the Editor finds and routes the work → the owning lanes build in parallel (Instructor last, since it depends on what the others land) → the Bouncer runs one combined-diff verify → a cumulative report lands for the owner to read. Agents build within their charter without asking permission per item — that autonomy is the loop's whole point — but **no agent ever commits**. Only the owner wraps: reviews the report, and if he's satisfied, runs the `wrap` skill, which bundles the session's work into a version bump, a `CHANGELOG.md` entry, and a push. The owner triggers every run himself; there is no timer.
+One run of the **Manager** (`/manager`, `.claude/skills/manager/SKILL.md`) does the whole pass: the Editor finds and routes the work → the owning lanes build in parallel (Instructor last, since it depends on what the others land) → the Bouncer runs one combined-diff verify → a cumulative report lands for the owner to read. Agents build within their charter without asking permission per item — that autonomy is the loop's whole point — but **no agent ever commits**. Only the owner wraps: reviews the report, and if he's satisfied, runs the `wrap` skill, which bundles the session's work into a version bump, a `CHANGELOG.md` entry, and a push. Codex Manager sessions default to Astra Light; contained workers use Sol medium and sensitive work or independent review uses Astra high. The owner triggers every run himself; there is no timer.
 
 ## How a feature reaches production
 

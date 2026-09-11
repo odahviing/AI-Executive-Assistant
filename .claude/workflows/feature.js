@@ -1,3 +1,118 @@
+// BEGIN WORKSHOP CONTRACT
+const workshopContract = (() => {
+  const text = x => typeof x === 'string' && x.trim().length > 0
+  const array = x => Array.isArray(x) ? x : []
+  const strings = x => Array.isArray(x) && x.every(text)
+  const unique = x => new Set(x).size === x.length
+  const checkEvidence = e => {
+    const errors = []
+    if (!e || e.version !== 1) return ['missing evidence version 1']
+    for (const key of ['attemptId', 'builder']) if (!text(e[key])) errors.push(`missing ${key}`)
+    if (!strings(e.files) || !e.files.length || !unique(e.files)) errors.push('files must enumerate every changed file once')
+    if (!['deterministic', 'prompt-only', 'prose-only'].includes(e.changeKind)) errors.push('missing changeKind')
+    if (e.changeKind !== 'deterministic' && !text(e.exception)) errors.push('prompt/prose exception needs an explicit limitation')
+    const suites = array(e.regressions)
+    if (!Array.isArray(e.regressions) || !unique(suites.map(t => t.id))) errors.push('regressions must be an explicit array with unique ids')
+    if (e.changeKind === 'deterministic' && !suites.length) errors.push('deterministic change needs executed fail-before/pass-after regression')
+    const caseIds = []
+    for (const t of suites) {
+      if (!text(t.id) || !text(t.command) || !text(t.beforeRevision)) errors.push('regression needs id, command and beforeRevision')
+      for (const phase of ['before', 'after']) {
+        const r = t[phase] || {}
+        if (!Number.isInteger(r.exitCode) || !Number.isInteger(r.passed) || r.passed < 0 || !Number.isInteger(r.failed) || r.failed < 0 || !text(r.output)) errors.push(`${t.id}: ${phase} needs executed exit code, counts and output evidence`)
+      }
+      if (!t.before || t.before.exitCode === 0 || !(t.before.failed > 0)) errors.push(`${t.id}: no failing before execution`)
+      if (!t.after || t.after.exitCode !== 0 || t.after.failed !== 0 || !(t.after.passed > 0)) errors.push(`${t.id}: after execution did not pass`)
+      const cases = array(t.cases)
+      if (!cases.some(c => c.kind === 'regression' && c.before === 'fail' && c.after === 'pass')) errors.push(`${t.id}: missing failing regression case`)
+      if (!cases.some(c => c.kind === 'preserved' && c.before === 'pass' && c.after === 'pass')) errors.push(`${t.id}: missing legitimate preserved case`)
+      if (cases.length > (t.after || {}).passed) errors.push(`${t.id}: case count exceeds executed passes`)
+      if (cases.filter(c => c.kind === 'preserved').length > (t.before || {}).passed || cases.filter(c => c.kind === 'regression').length > (t.before || {}).failed) errors.push(`${t.id}: before counts cannot support the named cases`)
+      for (const c of cases) {
+        if (!text(c.id) || !text(c.evidence) || !['regression', 'preserved'].includes(c.kind) || c.after !== 'pass' || c.before !== (c.kind === 'regression' ? 'fail' : 'pass')) errors.push(`${t.id}: malformed case evidence`)
+        caseIds.push(c.id)
+      }
+    }
+    if (!unique(caseIds)) errors.push('case ids must be unique across suites')
+    const b = e.boundaries || {}
+    const paths = array(b.paths)
+    if (e.changeKind !== 'prose-only' && (!text(b.inventoryCommand) || !paths.length)) errors.push('missing producer/consumer inventory and boundary paths')
+    if (!Array.isArray(b.paths) || !unique(paths.map(p => p.id))) errors.push('boundary paths must be explicit and unique')
+    if (!strings(b.changedGuards) || !unique(b.changedGuards)) errors.push('changedGuards must be an explicit unique list, including zero')
+    for (const p of paths) {
+      for (const key of ['id', 'producer', 'state', 'consumer', 'evidence']) if (!text(p[key])) errors.push(`boundary ${p.id || '?'}: missing ${key}`)
+      if (p.status !== 'covered') errors.push(`boundary ${p.id}: ${p.status || 'missing'} path blocks completion`)
+      if (!strings(p.caseIds) || (e.changeKind === 'deterministic' && !p.caseIds.length) || array(p.caseIds).some(id => !caseIds.includes(id))) errors.push(`boundary ${p.id}: missing executed case coverage`)
+      if (p.guard && (!array(b.changedGuards).includes(p.guard) || !['accept', 'reject'].includes(p.direction))) errors.push(`boundary ${p.id}: unknown guard/direction`)
+    }
+    for (const guard of array(b.changedGuards)) for (const direction of ['accept', 'reject']) {
+      if (!paths.some(p => p.guard === guard && p.direction === direction && p.status === 'covered')) errors.push(`guard ${guard}: missing ${direction} direction`)
+    }
+    const surfaces = array(b.surfaces)
+    if (!unique(surfaces.map(s => s.id))) errors.push('duplicate surface declaration')
+    if (e.changeKind !== 'prose-only') for (const id of ['owner', 'colleague', 'dm', 'room', 'unavailable']) {
+      const s = surfaces.find(s => s.id === id)
+      if (!s || !['covered', 'not-applicable'].includes(s.status) || !text(s.reason) || (s.status === 'covered' && (!strings(s.pathIds) || !s.pathIds.length || s.pathIds.some(p => !paths.some(x => x.id === p))))) errors.push(`surface ${id}: missing coverage or explicit non-applicability reason`)
+    }
+    return errors
+  }
+  const checkReview = (e, r) => {
+    const errors = checkEvidence(e)
+    if (!r || !['pass', 'fail', 'unproven'].includes(r.verdict)) return [...errors, 'missing independent Bouncer verdict']
+    if (!text(r.reviewer) || r.reviewer === e?.builder) errors.push('review must identify an independent dispatch')
+    if (!text(r.trace)) errors.push('missing actual review dispatch/transcript trace')
+    if (r.attemptId !== e?.attemptId) errors.push('review belongs to a different build attempt')
+    if (!text(r.reason)) errors.push('missing review evidence/reason')
+    if (r.verdict !== 'pass') return [...errors, `Bouncer ${r.verdict}: ${r.reason || 'no reason'}`]
+    if (r.outcome !== 'traced') errors.push('outcome is untraced')
+    if (r.inventoryComplete !== true || r.guardsComplete !== true) errors.push('Bouncer has not confirmed complete producer/consumer and guard inventories')
+    if (!Array.isArray(r.findings) || r.findings.length) errors.push('Bouncer findings missing or unresolved')
+    const ids = array(e?.boundaries?.paths).map(p => p.id)
+    if (!strings(r.reviewedPaths) || !unique(r.reviewedPaths) || r.reviewedPaths.length !== ids.length || ids.some(id => !r.reviewedPaths.includes(id))) errors.push('independent boundary review is incomplete')
+    if (!Array.isArray(r.checks)) errors.push('missing executed review checks, including zero')
+    if (!unique(array(r.checks).map(c => c.id)) || array(r.checks).some(c => c.exitCode !== 0 || c.failed !== 0)) errors.push('duplicate or failed independent review execution')
+    for (const t of array(e?.regressions)) {
+      const c = array(r.checks).find(c => c.id === t.id)
+      if (!c || !text(c.command) || !text(c.output) || c.exitCode !== 0 || c.failed !== 0 || !Number.isInteger(c.passed) || c.passed < t.cases.length) errors.push(`${t.id}: independent regression execution missing/failed`)
+    }
+    if (e?.changeKind === 'prompt-only' && r.scope !== 'structural') errors.push('prompt-only review can establish structural inputs only')
+    return errors
+  }
+  const gateBuild = r => {
+    if (r.verdict !== 'built') return r
+    const errors = checkEvidence(r.evidence)
+    return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [evidence gate: ${errors.join('; ')}]` } : r
+  }
+  const gateFinal = r => {
+    if (r.verdict !== 'built') return r
+    const errors = checkReview(r.evidence, r.review)
+    return errors.length ? { ...r, verdict: 'implemented', verificationErrors: errors, notes: `${r.notes || ''} [awaiting independent verification: ${errors.join('; ')}]` } : r
+  }
+  const acceptReviews = (builds, check, reviews) => {
+    if (!check) return
+    check.results = array(check.results).map(r => {
+      const built = builds.find(b => b.id === r.id && b.verdict === 'built')
+      if (!built) return r
+      reviews.set(r.id, r.review)
+      if (r.verdict !== 'built') return r
+      const errors = checkReview(built.evidence, r.review)
+      return errors.length ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
+    })
+  }
+  // Schema lives beside validation; conditional requirements are enforced above.
+  const S = { type: 'string' }, N = { type: 'integer' }, B = { type: 'boolean' }
+  const list = items => ({ type: 'array', items })
+  const obj = properties => ({ type: 'object', properties, required: Object.keys(properties) })
+  const run = obj({ exitCode: N, passed: N, failed: N, output: S })
+  const evidenceSchema = obj({ version: { type: 'integer', enum: [1] }, attemptId: S, builder: S, changeKind: { type: 'string', enum: ['deterministic', 'prompt-only', 'prose-only'] }, files: list(S), exception: S,
+    regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
+    boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
+  const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
+  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema }
+})()
+// END WORKSHOP CONTRACT
+const workshopReviews = new Map()
+
 export const meta = {
   name: 'feature',
   description:
@@ -136,7 +251,8 @@ const DESCRIBED = Array.isArray(A.items) && A.items.length ? A.items : null
 // I'M SAYING more." Without this flag the engine plans at most one unnamed item.
 const SWEEP = A.sweep === true
 const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'slackmaster', 'diplomat', 'handyman']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+// Claude SDK selectors stay provider-native; Codex defaults live in WORKSHOP.md.
+const EFFORT = { matchmaker: 'high', instructor: 'medium', slackmaster: 'medium', diplomat: 'medium', registrar: 'high', handyman: 'medium', librarian: 'medium', gatekeeper: 'high', editor: 'medium', framer: 'high', bouncer: 'high' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -390,6 +506,8 @@ const VERDICTS = {
         type: 'object',
         properties: {
           id: { type: 'string' },
+          evidence: workshopContract.evidenceSchema,
+          review: workshopContract.reviewSchema,
           // X66 · `confirmed-other-lane` — the piece is DONE and you are not the
           // one who did it. Same verdict and same reasoning as bugger.js; a lane
           // resumed to close out a dependency must not claim another lane's change
@@ -781,9 +899,9 @@ if (MODE === 'plan') {
       `UNDERSTOOD:\n${JSON.stringify(live, null, 2)}`,
     // X126 · agentType framer — every bullet below is now one of its rules
     // (F5-F10), so the engine states the schema and the charter states the
-    // standing duty. Effort stays xhigh; no model pin, so the tier comes from
+    // standing duty. Effort uses the shared high default; no model pin, so the tier comes from
     // the charter, which is where spend.cjs:293 says it belongs.
-    { label: 'framer:decompose', phase: 'Decompose', agentType: 'framer', effort: 'xhigh', schema: PLAN },
+    { label: 'framer:decompose', phase: 'Decompose', agentType: 'framer', effort: EFFORT.framer, schema: PLAN },
   )
 
   let pieces = (plan && plan.pieces) || []
@@ -1350,6 +1468,7 @@ if (preVerifyOwnerGate.length)
 // right alone and wrong together. Feature waves are MORE exposed to this than bug
 // waves, because the pieces were deliberately split across lanes to serve one idea.
 // NEVER dispatched while `preVerifyOwnerGate` holds anything — see above.
+results = results.map(workshopContract.gateBuild)
 let verified = results
 let verifiedClean = []
 // `agent()` returns null when a subagent dies after its retries, and every read
@@ -1486,6 +1605,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
     // a hand dispatch can downgrade the one agent that must not be downgraded.
     { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
   )
+  workshopContract.acceptReviews(results, check, workshopReviews)
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []
   discoveries = (check && check.discoveries) || []
@@ -1574,7 +1694,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
     const bounceOut = await parallel(
       [...new Set(bounceItems.map((p) => p.lane))].map((lane) => () => buildLane(lane, bounceItems.filter((p) => p.lane === lane), '', true)),
     )
-    const rebuilt = bounceOut.flat().filter((r) => r && bouncedIds.includes(r.id))
+    const rebuilt = bounceOut.flat().filter((r) => r && bouncedIds.includes(r.id)).map(workshopContract.gateBuild)
     const rebuiltIds = new Set(rebuilt.map((r) => r.id))
     if (rebuiltIds.size) results = results.filter((r) => !rebuiltIds.has(r.id)).concat(rebuilt)
     const silent = bouncedIds.filter((id) => !rebuiltIds.has(id))
@@ -1607,9 +1727,10 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
 
     // ── THE RE-CHECK — the bounced pieces ONLY, never the whole wave again ──
     const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
-    const recheck = rebuilt.length
+    const recheckCandidates = rebuilt.filter(r => ['built', 'already-fixed'].includes(r.verdict))
+    const recheck = recheckCandidates.length
       ? await agent(
-          `**RE-CHECK — second and FINAL pass over ${rebuilt.length} piece(s) you already overturned once.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
+          `**RE-CHECK — second and FINAL pass over ${rebuilt.length} piece(s) you already overturned once.** Your charter holds the bar and the return contract; return the independent \`review\` evidence from WORKSHOP.md for each build attempt; this is the same job, narrowed.\n\n` +
             `**Scope is these pieces and nothing else.** Do not re-read the rest of the wave — you passed it moments ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
             `For each piece: **what you refused is quoted on it.** Answer the one question — is its own \`expectation\` met now? Trace from the seam, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
             `**THERE IS NO THIRD ATTEMPT.** A piece you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
@@ -1618,7 +1739,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
               ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by the wave check above and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.whatChanges}`).join('\n')}\n\n`
               : '') +
             `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
-              rebuilt.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
+              recheckCandidates.map((r) => ({ ...r, _youRefused: overturned.get(r.id) || '(no note)' })),
               null,
               2,
             )}`,
@@ -1626,6 +1747,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
         )
       : null
     bounceRecheckRan = !!recheck
+    workshopContract.acceptReviews(rebuilt, recheck, workshopReviews)
     const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
     // A discovery raised by the re-check is next run's intake like any other —
     // it NEVER bounces.
@@ -1679,6 +1801,10 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
   })
 }
 
+verified = verified.map(r => workshopContract.gateFinal({ ...r, review: workshopReviews.get(r.id) }))
+const verificationPending = verified.filter(r => r.verdict === 'implemented' || r.review?.verdict === 'fail' || r.review?.verdict === 'unproven')
+log(`Independent verification: ${verified.filter(r => r.verdict === 'built').length} passed, ${verificationPending.length} pending/failed`)
+
 // ── THE WAVE'S OWN SPEC MUST RESOLVE BEFORE THE WAVE IS DONE ─────────────────
 // Owner ruling, 2026-08-06: a feature wave must not end while its OWN spec is
 // unresolved, and his ruling on it must re-enter THIS wave — never bugger.js,
@@ -1731,7 +1857,7 @@ const resumePieces = [...approved.map((p) => stripInternal(needsOwnerRulingById.
 // for it either — resending just gives the dependency chain another 5 rounds.
 const stillBlockedIds = new Set(verified.filter((r) => r.verdict === 'needs-dependency' && !satisfiedIds.has(r.id)).map((r) => r.id))
 const ownSpecUnresolved = needsOwnerRuling.length + deferredDepAsks.length + remaining.length + stillBlockedIds.size
-const waveComplete = ownSpecUnresolved === 0
+const waveComplete = ownSpecUnresolved === 0 && verificationPending.length === 0
 log(
   `OwnerGate: ${ownSpecUnresolved} piece(s) stayed as THIS WAVE'S OWN BUSINESS (${needsOwnerRuling.length} need your ruling · ${deferredDepAsks.length} cross-lane ask(s) awaiting routing · ${remaining.length} never dispatched · ${stillBlockedIds.size} stuck on a dependency past the round cap) — these resume via feature.js, never bugger.js. ${discoveries.length} unrelated discovery(ies) left for bugger.js's next run.`,
 )
@@ -1763,8 +1889,10 @@ const onHisDesk =
 // `results`, so a piece the bounce round rebuilt with a real check clears
 // here too. `already-fixed` counts as a close exactly like `built`.
 const closedRows = verified.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed')
-const noObservable = closedRows.filter((r) => String(r.observable || '').trim().length < 10)
+const implementationClaims = verified.filter(r => ['built', 'implemented', 'already-fixed'].includes(r.verdict))
+const noObservable = implementationClaims.filter((r) => String(r.observable || '').trim().length < 10)
 const featureManifest = {
+  golden: { scope: 'release-checkpoint', ran: false, passed: 0, notRunReason: 'full battery is owned by the external release checkpoint; not a pass' },
   approved: approved.length,
   decisions: { onHisDesk, budget: DECISION_BUDGET, overBudget: Math.max(0, onHisDesk - DECISION_BUDGET) },
   reconThreaded: approved.filter((p) => p._where).length,
@@ -1819,7 +1947,8 @@ const featureManifest = {
   // re-read of the code that changed. Always present, zeros written.
   observable: {
     closed: closedRows.length,
-    checked: closedRows.length - noObservable.length,
+    implemented: implementationClaims.filter(r => r.verdict !== 'already-fixed').length,
+    checked: implementationClaims.length - noObservable.length,
     missing: noObservable.length,
     missingIds: noObservable.map((r) => r.id),
   },
@@ -1862,13 +1991,14 @@ if (workshopUnread.length)
 // THIS IS THE ONE THAT MATTERS MOST — first in the list, on purpose. A wave
 // reporting itself complete while its own spec is not is the exact defect
 // gh#154 cost four bugger runs finding out.
-if (!waveComplete)
+if (ownSpecUnresolved)
   featureWarnings.push(
     `THIS WAVE IS NOT DONE — ${ownSpecUnresolved} piece(s) of its OWN SPEC are unresolved: ${needsOwnerRuling.length} need your ruling, ${deferredDepAsks.length} cross-lane ask(s) await routing, ${remaining.length} never dispatched, ${stillBlockedIds.size} stuck past the dependency round cap. ` +
       `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Rule on \`needsOwnerRuling\`, then find the matching piece(s) inside \`resume.pieces\`, add \`_ownerRuled:{askedBecause, hisRuling}\` and drop \`awaitingOwner\` on each, and re-invoke ` +
       `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon}}). ` +
       `Untouched pieces replay from cache for free — only the ruled piece and the re-verify it forces run live.`,
   )
+if (verificationPending.length) featureWarnings.push(`INDEPENDENT VERIFICATION PENDING — ${verificationPending.map(r => r.id).join(', ')}. Persist the actual independent review before wrapping; no new owner ruling is implied.`)
 // ── X182-PARITY · QUESTION 1's GATE, and it compares against the DENOMINATOR ─
 // Never against `outcomeTraces` being non-empty — that invites one token line
 // per piece that proves nothing. The test is whether every piece the engine
@@ -1885,7 +2015,7 @@ if (verifyRan && outcomeUntraced.length)
 // the lane's own dispatch, not to the pass that reads its diff afterward.
 if (noObservable.length)
   featureWarnings.push(
-    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${closedRows.length} closed piece(s) name no real-data check: ${noObservable
+    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${implementationClaims.length} implementation/closure-claimed piece(s) name no real-data check: ${noObservable
       .map((r) => r.id)
       .join(', ')}. The code may be correct and the real-world effect unchecked — this is o#227/o#228/o#229 repeating, where each brief's mechanism was built and nobody queried the live data it was meant to fix. Do not wrap these as confirmed.`,
   )
@@ -1942,6 +2072,8 @@ if (bounceEligible !== bouncedIds.length + bounceAtLimit.length + bounceUnroutab
   )
 featureWarnings.forEach((w) => log(`! ${w}`))
 
+const packageReady = verificationPending.length === 0 && verified.every(r => ['built', 'already-fixed', 'confirmed-other-lane'].includes(r.verdict))
+
 return {
   mode: 'build',
   manifest: featureManifest,
@@ -1966,6 +2098,7 @@ return {
     neverDispatched: remaining.length,
   },
   results: verified,
+  verification: { passed: verified.filter(r => r.verdict === 'built').length, pending: verificationPending.map(r => r.id), packageReady, wrapReady: false },
   earnedRules,
   verifiedClean, // persist under "Verified clean" in report.md; pass back as `priorClean` next run
   priorCleanDropped, // X84 · `[{i, entry}]`. **DELETE BY `i`** — the index in the array you passed as `priorClean`; `entry` is the text as received, for reading only. Match on the text and a list you trimmed on the way in drops nothing. `state.verifiedClean` ends exactly this many entries shorter
@@ -1985,7 +2118,7 @@ return {
   // `resumeFromRunId` set to THIS run's own id — the engine cannot self-name it,
   // the Manager already captures it into `state.lastRun.id` the moment this
   // call returns. Untouched pieces then replay from cache for free.
-  resume: waveComplete ? null : { pieces: resumePieces, sharedPiece: SHARED_PIECE, answers, recon },
+  resume: ownSpecUnresolved === 0 ? null : { pieces: resumePieces, sharedPiece: SHARED_PIECE, answers, recon },
   ticketCoverage, // open issues this wave landed on unasked — `satisfied` closes at the wrap, `partial` can go back to the lane for the remainder, `contradicted` is a decision about to be made by accident
   note: 'Uncommitted in the working tree. The owner wraps.',
 }

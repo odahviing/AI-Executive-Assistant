@@ -336,16 +336,16 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         const assistantEmail = context.profile.assistant.email;
         const ownerEmail = context.profile.user.email;
 
-        // v3.x — grid-align an off-grid start (e.g. 14:40 from a raw calendar
-        // gap) to the :00/:15/:30/:45 grid the rest of the system assumes,
-        // UNLESS the owner named the exact time (start_is_explicit). The slot
-        // finder already returns aligned slots, so this is a no-op for
-        // tool-sourced times; it only catches off-grid times Sonnet proposes
-        // from raw calendar data. Replaces the SLOT START TIMES prompt rule
-        // (alignNearestQuarter was previously wired only to floating blocks).
+        // Grid-align an off-grid start from raw calendar prose unless the owner
+        // named it exactly OR it is an exact slot this conversation's scheduling
+        // tool already offered. Approval binds to the offer; silently changing
+        // 17:25 to 17:30 after "yes" breaks that decision.
         {
           const startStr = args.start, endStr = args.end;
-          if (!args.start_is_explicit && typeof startStr === 'string' && typeof endStr === 'string') {
+          const offeredStart = typeof startStr === 'string' && context.channelId
+            ? (await import('../../../../utils/offeredSlotsStash')).wasOfferedSlot(context.channelId, context.threadTs, startStr)
+            : false;
+          if (!args.start_is_explicit && !offeredStart && typeof startStr === 'string' && typeof endStr === 'string') {
             const tz = context.profile.user.timezone;
             const sDt = DateTime.fromISO(startStr, { zone: tz });
             if (sDt.isValid) {
@@ -2286,4 +2286,3 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           };
         });
 }
-

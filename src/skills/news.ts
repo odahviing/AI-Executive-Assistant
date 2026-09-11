@@ -287,13 +287,6 @@ function isEntityMentionGoal(goal: string, entity: string): boolean {
   return entity.length > 0 && goal.toLowerCase().includes(entity);
 }
 
-// URL segments that namespace an ACCOUNT on a third-party host — the segment
-// right after one of these is the account holder's own handle
-// (youtube.com/c/x, youtube.com/channel/x, youtube.com/user/x,
-// linkedin.com/company/x). Deliberately narrow: a directory / tag / article
-// segment that merely names the entity is a genuine external mention.
-const ACCOUNT_NAMESPACE_SEGMENTS = new Set(['c', 'channel', 'user', 'company']);
-
 // news-brief-admits-owner-own-published-sources — grounding alone isn't the
 // whole test. The owner's OWN blog posts and case studies trivially "mention"
 // his own company (they ARE about it), so the containment check above admits
@@ -302,38 +295,131 @@ const ACCOUNT_NAMESPACE_SEGMENTS = new Set(['c', 'channel', 'user', 'company']);
 // domain block on the tenant's own domain isn't enough either — the owner
 // named YouTube specifically, and a company's own channel is self-published
 // from a host it doesn't own. So the test is self-SOURCE, not self-domain.
-// A source is self-published if (a) its host IS the tenant's own domain
-// (derived from `profile.user.email`'s domain — never hardcoded, so this
-// holds for any tenant), or (b) its URL carries the entity as an ACCOUNT
-// HANDLE — an `@entity` segment (youtube.com/@reflectiz, medium.com/@reflectiz)
-// or `entity` directly under an account namespace (youtube.com/c/reflectiz).
+// A source is self-published if its host IS the tenant's own domain (derived
+// from `profile.user.email` — never hardcoded) or its URL carries the entity as
+// the publishing account. Conversely, a shared platform is only external when
+// its URL carries a different publisher identity. Opaque post URLs are UNKNOWN,
+// not external: instagram.com/p/<id> proves neither who published nor whether
+// a mention is independent. Ordinary publisher-owned news domains are external
+// because the hostname itself is the publisher identity.
 // A bare path segment naming the entity is NOT self-published: third-party
 // directory, tag and article URLs legitimately carry it
 // (cybernews.com/companies/reflectiz, crunchbase.com/organization/reflectiz,
 // g2.com/products/reflectiz/reviews, a news site's /tag/reflectiz hub) and
 // those are exactly the external mentions the topic wants.
-// `entity` must already be lowercased by the caller.
-function isSelfPublishedSource(url: string, entity: string, ownDomain: string): boolean {
-  let hostname = '';
-  let pathname = '';
-  try {
-    const parsed = new URL(url);
-    hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    pathname = parsed.pathname.toLowerCase();
-  } catch {
-    return false; // malformed URL — fail open (not excluded), matches the rest of this file's fail-open discipline
-  }
-  if (ownDomain && (hostname === ownDomain || hostname.endsWith(`.${ownDomain}`))) return true;
-  const entitySlug = entity.replace(/[^\p{L}\p{N}]/gu, '');
-  if (!entitySlug) return false;
-  const segments = pathname.split('/').filter(Boolean);
-  return segments.some((seg, i) => {
-    if (seg.replace(/^@/, '').replace(/[^\p{L}\p{N}]/gu, '') !== entitySlug) return false;
-    if (seg.startsWith('@')) return true;                                    // youtube.com/@x, medium.com/@x
-    return i > 0 && ACCOUNT_NAMESPACE_SEGMENTS.has(segments[i - 1]);         // youtube.com/c/x, linkedin.com/company/x
-  });
+type PublisherAttribution = 'self' | 'external' | 'unknown';
+
+const SHARED_PUBLISHING_DOMAINS = [
+  'facebook.com',
+  'instagram.com',
+  'linkedin.com',
+  'medium.com',
+  'reddit.com',
+  'substack.com',
+  'threads.net',
+  'tiktok.com',
+  'twitter.com',
+  'x.com',
+  'youtube.com',
+  'youtu.be',
+] as const;
+
+const SELF_ACCOUNT_NAMESPACE_SEGMENTS = new Set(['c', 'channel', 'user', 'company']);
+
+function normalizedPublisherId(raw: string): string {
+  return raw.replace(/^@/, '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
 }
 
+function sharedPublishingDomain(hostname: string): string | undefined {
+  return SHARED_PUBLISHING_DOMAINS.find(domain => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+/** Return only publisher identities encoded structurally in a shared-platform
+ * URL. Content IDs and title/snippet prose are deliberately never interpreted
+ * as authorship. */
+function sharedPlatformPublisher(
+  domain: string,
+  hostname: string,
+  segments: string[],
+): string | undefined {
+  const atHandle = segments.find(segment => segment.startsWith('@') && segment.length > 1);
+  if (atHandle) return atHandle;
+
+  if (domain === 'medium.com' || domain === 'substack.com') {
+    const subdomain = hostname.slice(0, -(domain.length + 1));
+    if (subdomain && subdomain !== 'www') return subdomain.split('.').pop();
+  }
+
+  if (domain === 'youtube.com') {
+    if ((segments[0] === 'c' || segments[0] === 'user') && segments[1]) return segments[1];
+    return undefined; // /watch, /shorts and /channel/<opaque-id> do not prove ownership
+  }
+  if (domain === 'linkedin.com') {
+    if ((segments[0] === 'company' || segments[0] === 'in') && segments[1]) return segments[1];
+    return undefined; // /posts/<slug> is not a publisher field
+  }
+  if (domain === 'instagram.com') {
+    if (segments[0] === 'stories' && segments[1]) return segments[1];
+    if (segments.length === 1 && !['p', 'reel', 'reels', 'tv'].includes(segments[0])) return segments[0];
+    return undefined;
+  }
+  if (domain === 'facebook.com') {
+    if (segments[0] && ['posts', 'videos'].includes(segments[1] ?? '')) return segments[0];
+    return undefined;
+  }
+  if (domain === 'x.com' || domain === 'twitter.com') {
+    const reserved = new Set(['explore', 'hashtag', 'home', 'i', 'search']);
+    if (segments[0] && !reserved.has(segments[0]) && (segments[1] === 'status' || segments.length === 1)) {
+      return segments[0];
+    }
+    return undefined;
+  }
+  if (domain === 'reddit.com') {
+    return segments[0] === 'user' && segments[1] ? segments[1] : undefined;
+  }
+  return undefined;
+}
+
+/** `entity` must already be lowercased by the caller. */
+function publisherAttribution(url: string, entity: string, ownDomain: string): PublisherAttribution {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'unknown';
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  if (ownDomain && (hostname === ownDomain || hostname.endsWith(`.${ownDomain}`))) return 'self';
+
+  const entitySlug = normalizedPublisherId(entity);
+  if (!entitySlug) return 'unknown';
+  const segments = parsed.pathname.toLowerCase().split('/').filter(Boolean);
+
+  // Preserve the existing generic self-account recognition before deciding
+  // whether this host is a known shared platform. A different opaque channel
+  // id is not evidence of an external owner, but an exact entity handle is
+  // evidence of self-publication.
+  const carriesSelfAccount = segments.some((segment, index) => {
+    if (normalizedPublisherId(segment) !== entitySlug) return false;
+    if (segment.startsWith('@')) return true;
+    return index > 0 && SELF_ACCOUNT_NAMESPACE_SEGMENTS.has(segments[index - 1]);
+  });
+  if (carriesSelfAccount) return 'self';
+
+  const sharedDomain = sharedPublishingDomain(hostname);
+  if (!sharedDomain) return 'external';
+  const publisher = sharedPlatformPublisher(sharedDomain, hostname, segments);
+  if (!publisher) return 'unknown';
+  return normalizedPublisherId(publisher) === entitySlug ? 'self' : 'external';
+}
+
+// o#278-brief-source-attribution — this gate establishes URL publisher
+// attribution, not independent authorship. An opaque shared-platform URL is
+// withheld even without a self-published sibling in the search results.
+// Snippet overlap cannot distinguish a quotation from a republished statement:
+// neither matching nor different wording proves who authored an article.
+// An identified external publisher remains eligible even with matching copy;
+// its title/snippet supports only the facts it actually contains.
 function filterUngroundedEntitySources(
   goal: string,
   sources: NewsSource[],
@@ -343,10 +429,20 @@ function filterUngroundedEntitySources(
   const entity = ownerCompany.trim().toLowerCase();
   if (!isEntityMentionGoal(goal, entity)) return sources; // not an "own company mention" goal — untouched
   const grounded = sources.filter(s => containsEntity(s.title, entity) || containsEntity(s.snippet, entity));
-  const external = grounded.filter(s => !isSelfPublishedSource(s.url, entity, ownDomain));
+  const attributed = grounded.map(source => ({
+    source,
+    publisher: publisherAttribution(source.url, entity, ownDomain),
+  }));
+  const selfPublished = attributed.filter(item => item.publisher === 'self').map(item => item.source);
+  const external = attributed.filter(item => item.publisher === 'external').map(item => item.source);
   if (external.length !== sources.length) {
-    logger.info('news — dropped ungrounded/self-published entity-mention source(s)', {
-      goal, before: sources.length, groundedButSelf: grounded.length - external.length, after: external.length,
+    logger.info('news — dropped ungrounded/self-published/unattributed entity-mention source(s)', {
+      goal,
+      before: sources.length,
+      ungrounded: sources.length - grounded.length,
+      selfPublished: selfPublished.length,
+      unknownPublisher: attributed.filter(item => item.publisher === 'unknown').length,
+      after: external.length,
     });
   }
   return external;

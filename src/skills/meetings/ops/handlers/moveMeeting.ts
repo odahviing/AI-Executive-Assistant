@@ -163,7 +163,6 @@ async function checkSameSubjectCollision(
       {
         id: args.meeting_id,
         startIso: chosenProbe.startDateTime,
-        startTz: chosenProbe.startTimeZone,
         attendeeEmails: (chosenProbe.attendees ?? [])
           .map(a => (a?.emailAddress?.address ?? '').toLowerCase())
           .filter(Boolean),
@@ -1396,7 +1395,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // colleague-path only, for the different failure mode of two live
         // events sharing one subject). (c) derives new_end from the existing
         // duration when the model omitted it (#135c) — one fetch instead of
-        // two. preMoveStartIso/preMoveEndIso/preMoveTz/preMoveSubject feed the
+        // two. preMoveStartIso/preMoveEndIso/preMoveSubject feed the
         // success narration and the audit/history rows further down.
         // preMoveSubject is already MASKED (see below) so that narration can
         // never render a private meeting's real title.
@@ -1412,7 +1411,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // silent; see the catch below.
         let preMoveStartIso: string | undefined;
         let preMoveEndIso: string | undefined;
-        let preMoveTz: string | undefined;
         let preMoveSubject: string | undefined;
         // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
         // the moving event's own roster, captured off the SEPARATE
@@ -1475,7 +1473,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
           preMoveStartIso = moveProbe?.startDateTime;
           preMoveEndIso = moveProbe?.endDateTime;
-          preMoveTz = moveProbe?.startTimeZone;
           preMoveSubject = maskedMoveProbeSubject;
         }
         // #135c — pure reschedule keeps the meeting's length. When the model
@@ -1875,18 +1872,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // report the VACATED slot (the time that just opened up). Lets a
         // follow-up "move X into the freed slot" resolve without Maelle
         // re-asking what time the moved meeting used to be at.
-        // #52 (M1) — pre-state for the audit row (original_start/original_end/
-        // original_tz below). `getEventType` sends no `Prefer: outlook.timezone`
-        // header, so Graph answers in UTC and `startTimeZone` says so — stored
-        // alongside the instants (mirrors the documented trap at
-        // calendarReads.ts's pre-delete capture) so a later reader converts
-        // with the right zone instead of assuming the owner's.
+        // #52 (M1) — pre-state for the audit row. getEventType normalizes
+        // Graph's separate wall-clock+zone pair into offset-bearing instants at
+        // the read boundary, so every consumer below shares one interpretation.
         // gh#wrong-event-moved-move-meeting (2026-08-12) — this used to be its
         // own probe + seriesMaster check, run AFTER the colleague-path gate and
         // ownership lookup above. It's now folded into the single unconditional
         // probe near the top of this function (before ANY of that business
         // logic runs on what might be the wrong event) — preMoveStartIso/
-        // preMoveEndIso/preMoveTz/preMoveSubject are already populated from it.
+        // preMoveEndIso/preMoveSubject are already populated from it.
 
         // v2.3.1 (#61) — deterministic floating-block alignment. When the
         // meeting being moved is a floating block (lunch, coffee, etc.), don't
@@ -1930,11 +1924,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // a human. Set when the destination search below only found a slot
         // against a WE block, read at the final success return.
         let moveUsedWorkingElsewhereFallback = false;
-        // v3.x — grid-align an off-grid move target to the :00/:15/:30/:45 grid
-        // unless the owner named the exact time. Floating blocks are realigned
-        // by findBlockDestination below, so this only affects the regular
-        // (non-floating) move fall-through.
-        if (!args.start_is_explicit && typeof effectiveStart === 'string') {
+        // Grid-align an off-grid move target unless the owner named it exactly
+        // OR this conversation's scheduling tool offered that exact instant.
+        // A later approval binds to structured offer state; it must not turn an
+        // approved 17:25 into 17:30. Floating blocks still use their own window
+        // placement below.
+        const offeredStart = context.channelId
+          ? (await import('../../../../utils/offeredSlotsStash')).wasOfferedSlot(context.channelId, context.threadTs, effectiveStart)
+          : false;
+        if (!args.start_is_explicit && !offeredStart && typeof effectiveStart === 'string') {
           const sDt = DateTime.fromISO(effectiveStart, { zone: timezone });
           if (sDt.isValid) {
             const alignedMs = alignNearestQuarter(sDt.toMillis(), timezone);
@@ -2663,18 +2661,13 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           target: args.meeting_id as string,
           // #52 (M1) — record where it WAS, not only where it went; the probe
           // is already in hand from the recurring-preflight above (zero extra
-          // Graph calls). `original_tz` is the zone `original_start`/
-          // `original_end` are actually expressed in (Graph's default UTC
-          // absent a Prefer header) — keep it alongside so a later reader
-          // doesn't assume the owner's zone. Forensic groundwork only; no
-          // undo tool reads this yet.
+          // Graph calls). Both ISO values are offset-bearing at their source.
           details: {
             subject: args.meeting_subject,
             new_start: args.new_start,
             new_end: args.new_end,
             original_start: preMoveStartIso,
             original_end: preMoveEndIso,
-            original_tz: preMoveTz,
           },
           outcome: 'success',
         });
@@ -2683,7 +2676,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // verifyEventMoved read-back above (verify.ok already confirmed the
         // write landed) — never recorded on a PATCH Graph accepted but didn't
         // apply. Reuses the SAME pre-state (preMoveStartIso/preMoveEndIso/
-        // preMoveTz) already captured for the auditLog just above — no second
+        // start/end) already captured for the auditLog just above — no second
         // probe. `new_start`/`new_end` are the EFFECTIVE (post-snap, verified)
         // instant, not the raw args.new_start hint, so a future revert targets
         // where the meeting actually landed. subkind is the literal tool name
@@ -2710,7 +2703,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             event_id: args.meeting_id,
             original_start: preMoveStartIso,
             original_end: preMoveEndIso,
-            original_tz: preMoveTz,
             new_start: effectiveStart,
             new_end: effectiveEnd,
           },
@@ -2829,13 +2821,18 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // the event's own attendees, unchanged by a move. No single zone → no key.
         // The floating-block owner-move return earlier in this handler carries no
         // field: a block has no attendees, so there is no zone to render.
+        if (context.channelId) {
+          try {
+            const { clearOfferedSlots } = await import('../../../../utils/offeredSlotsStash');
+            clearOfferedSlots(context.channelId, context.threadTs);
+          } catch { /* non-fatal */ }
+        }
         return {
           success: true,
           moved: movedSubject,
           ...presentationLocalFieldFor(preMoveAttendeeEmails, effectiveStart, userEmail, timezone),
-          // #1.5 — the ACTUAL booked time (after the grid-snap at :1376), not the
-          // pre-snap arg. So narration AND the orchestrator's mutationActions
-          // (→ dateVerifier + #135 honesty backstop) reflect where it truly landed.
+          // #1.5 — the ACTUAL booked time after exact-offer preservation or grid
+          // cleanup. Narration and mutationActions reflect where it truly landed.
           new_start: effectiveStart,
           new_end: effectiveEnd,
           booked_start: effectiveStart,
@@ -2862,4 +2859,3 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           ...(moveTripDisplay ? { _trip_note: 'Travel day — state the moved time from `action_summary` VERBATIM (both clocks, correctly labelled); do not recompute it.' } : {}),
         };
 }
-

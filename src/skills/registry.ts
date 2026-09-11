@@ -358,12 +358,13 @@ function logUnmappedToolOnce(toolName: string): void {
  *   - Look up workspace members
  *   - Check availability / free-busy
  *   - Request / coordinate a meeting with the owner
+ *   - Accept, reject, or counter the owner's amendment to their own approval
  *
  * Colleagues cannot:
  *   - Read or write owner preferences / memory
  *   - See task lists, briefings, or interaction history
  *   - Send messages on the owner's behalf
- *   - Cancel or modify existing coordinations
+ *   - Cancel or modify other existing coordinations
  *   - Create or delete calendar events
  */
 const COLLEAGUE_ALLOWED_TOOLS = new Set([
@@ -383,6 +384,13 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   // this allowlist so a colleague-path Sonnet can flag things up to the owner.
   'create_task',
   'create_approval',
+  // A colleague can answer the owner's counter on THEIR OWN approval. The
+  // resolve_approval handler independently requires kind='approval',
+  // state='awaiting_colleague', and requester_slack_id=context.userId before
+  // any resolver action runs; every owner-state and other-requester row stays
+  // blocked. Keeping the name in this ONE set makes both model shipping and
+  // the direct dispatch chokepoint agree.
+  'resolve_approval',
   // v3.4.x — the multi-party coordination subsystem (coordinate_meeting + the
   // DM-poll state machine) was fully removed. Scheduling with the owner goes
   // through the direct path: find_available_slots intersects every internal
@@ -460,9 +468,10 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
  * keeps his booking/moving/cancelling/approving power on every surface (his
  * ruling: "action only, as any data extracting tools is problem by privacy
  * nature") while a real colleague still gets only COLLEAGUE_ALLOWED_TOOLS.
- * Built as that SAME set plus the two owner-only writes a colleague may never
- * reach — cancelling an existing meeting, approving/declining a pending
- * request — never a parallel list to keep in sync. Owner data tools
+ * Built as that SAME set plus the owner-only cancellation write a colleague
+ * may never reach. resolve_approval is already in the shared set for a
+ * requester's guarded awaiting_colleague response; its handler uses authority
+ * to retain the owner's full approval power. Owner data tools
  * (get_person_memory, manage_preference, update_my_preferences,
  * update_person_memory — the merged learn/forget/recall_preferences) are
  * deliberately NOT added here: they stay unreachable in a room regardless of
@@ -472,7 +481,6 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
 const OWNER_ROOM_ACTION_TOOLS = new Set<string>([
   ...COLLEAGUE_ALLOWED_TOOLS,
   'delete_meeting',
-  'resolve_approval',
 ]);
 
 /**

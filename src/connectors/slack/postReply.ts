@@ -227,8 +227,8 @@ function pickCodaDelayMs(): number {
  * gate → post. Everything that can drop the coda for free runs before anything
  * that costs a model call, so the common "they started typing again" case spends
  * nothing. Composition is one call into the social lane (`composeSocialCoda`) —
- * we ask for a sentence and get a sentence or null; the payload is theirs, the
- * timing is ours.
+ * we get the wire sentence plus its evidence-bearing history rendering, or null;
+ * the payload is theirs, the timing is ours.
  *
  * Gate coverage: the coda does NOT run the reply gate stack — it runs the
  * guard-owned `runCodaGates` instead (utils/guards/runOutputGates), which owns
@@ -317,7 +317,8 @@ function scheduleSocialCoda(opts: {
         // job, and the vet needs the person's notes; splitting the two would have
         // meant assembling that snapshot out here, putting someone's private
         // memory in the pipes for no reason the pipes have. Only the finished
-        // sentence crosses. Total by contract — null means "nothing to post".
+        // sentence and its bounded history rendering cross. Total by contract —
+        // null means "nothing to post".
         const composed = await composeSocialCoda(coda, profile);
         if (!composed) {
           logger.info('Social coda not composed — nothing to post', {
@@ -325,7 +326,7 @@ function scheduleSocialCoda(opts: {
           });
           return;
         }
-        const text = formatForSlack(composed.trim());
+        const text = formatForSlack(composed.text);
         if (text.length === 0) return;
 
         // Guard-owned ship/drop verdict, LAST so it is never spent on a coda the
@@ -374,7 +375,15 @@ function scheduleSocialCoda(opts: {
         // Deliberately NOT recordMaelleMessage(): that names the message the
         // completeTask hook reacts ✅ on, and the tick belongs on the task
         // confirmation, not on a question about someone's weekend.
-        appendToConversation(threadTs, channelId, { role: 'assistant', content: text });
+        // `formatForSlack` can change the sentence (Slack markdown plus the
+        // cross-cutting scrubber). Keep history's first line byte-aligned with
+        // what was delivered while retaining the code-built provenance suffix.
+        // The fallback preserves both pieces if the upstream rendering ever
+        // stops using `text` as its prefix; it remains internal either way.
+        const historyContent = composed.historyContent.startsWith(composed.text)
+          ? `${text}${composed.historyContent.slice(composed.text.length)}`
+          : `${text}\n${composed.historyContent}`;
+        appendToConversation(threadTs, channelId, { role: 'assistant', content: historyContent });
         logger.info('Social coda posted as its own in-thread message', {
           threadTs, role, delayMs, codaPreview: text.slice(0, 80),
         });

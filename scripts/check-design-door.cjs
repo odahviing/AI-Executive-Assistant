@@ -38,7 +38,7 @@ const STATS = path.join(__dirname, 'ledger-stats.cjs')
 // re-implemented — `ledger-stats.cjs` stops before touching argv/the ledger
 // when `require.main !== module`, so this is the one live function, not a copy.
 // X214 · `fileTouchDates` required the same way, for section 35c below.
-const { citesReleaseFile, fileTouchDates } = require(STATS)
+const { citesReleaseFile, fileTouchDates, CLOSED } = require(STATS)
 
 let failed = 0
 let passed = 0
@@ -78,10 +78,32 @@ const makeRunner = (compiledFn) => async (args, canned) => {
   const calls = []
   const logs = []
   const phases = []
+  const attempts = new Map()
   const agent = async (prompt, opts) => {
     calls.push({ label: (opts && opts.label) || '(no label)', prompt, opts: opts || {} })
     const key = Object.keys(canned).find((k) => (opts && opts.label) === k) || Object.keys(canned).find((k) => String((opts && opts.label) || '').startsWith(k))
-    return key ? canned[key] : null
+    if (!key) return null
+    // These are simulated dispatch payloads for the engine control-flow tests,
+    // never evidence about Maelle or a payload the live ledger may consume.
+    // Evidence refusal itself is exercised by test-workshop-verification.cjs.
+    const result = structuredClone(canned[key])
+    for (const r of result?.results || []) {
+      if (r.verdict !== 'built') continue
+      if (opts?.agentType !== 'bouncer') {
+        r.evidence = r.evidence || {
+          version: 1, attemptId: `fixture-${calls.length}-${r.id}`, builder: `fixture-builder-${calls.length}`, changeKind: 'deterministic', files: r.filesTouched?.length ? r.filesTouched : ['fixture-only.ts'], exception: 'Synthetic dispatch response; tests only engine orchestration.',
+          regressions: [{ id: 'fixture-suite', command: 'fixture-command', beforeRevision: 'fixture-before', before: { exitCode: 1, passed: 1, failed: 1, output: 'synthetic fail/pass' }, after: { exitCode: 0, passed: 2, failed: 0, output: 'synthetic pass/pass' }, cases: [{ id: 'bad', kind: 'regression', before: 'fail', after: 'pass', evidence: 'synthetic rejected case' }, { id: 'good', kind: 'preserved', before: 'pass', after: 'pass', evidence: 'synthetic preserved case' }] }],
+          boundaries: { inventoryCommand: 'fixture inventory', changedGuards: ['fixture'], paths: [
+            { id: 'reject', producer: 'bad producer', state: 'bad state', consumer: 'guard', guard: 'fixture', direction: 'reject', caseIds: ['bad'], status: 'covered', evidence: 'fixture:1' },
+            { id: 'accept', producer: 'good producer', state: 'good state', consumer: 'guard', guard: 'fixture', direction: 'accept', caseIds: ['good'], status: 'covered', evidence: 'fixture:2' },
+          ], surfaces: ['owner', 'colleague', 'dm', 'room', 'unavailable'].map(id => ({ id, status: 'not-applicable', pathIds: [], reason: 'Synthetic engine control-flow fixture has no live transport.' })) },
+        }
+        attempts.set(r.id, r.evidence)
+      } else if (attempts.has(r.id)) {
+        r.review = r.review || { attemptId: attempts.get(r.id).attemptId, reviewer: `fixture-bouncer-${calls.length}`, trace: `fixture-dispatch-${calls.length}`, verdict: 'pass', reason: 'Synthetic independent result for orchestration only.', outcome: 'traced', inventoryComplete: true, guardsComplete: true, findings: [], reviewedPaths: ['reject', 'accept'], scope: 'behavioral', checks: [{ id: 'fixture-suite', command: 'fixture-command', exitCode: 0, passed: 2, failed: 0, output: 'synthetic pass/pass' }] }
+      }
+    }
+    return result
   }
   const parallel = (fns) => Promise.all(fns.map((f) => f()))
   try {
@@ -382,7 +404,7 @@ const main = async () => {
   ok(`the reader's own open count and its bracketed rows agree (${openRefs.size} of ${claimedOpen})`, openRefs.size === claimedOpen && claimedOpen > 0, { parsed: openRefs.size, claimed: claimedOpen })
   const leaked = CLUSTER_ARGS.cluster.refs.map((x) => x.ref).filter((ref) => openRefs.has(ref))
   ok(`none of the ${N} absorbed refs is an OPEN row`, leaked.length === 0, leaked)
-  ok('`converted` is in the reader\'s CLOSED set', /const CLOSED = new Set\(\[[^\]]*'converted'/.test(fs.readFileSync(STATS, 'utf8')))
+  ok('`converted` is in the reader\'s CLOSED set', CLOSED.has('converted'))
   console.log(`        (so a row appended with verdict \`converted\` stays hidden — both halves of the claim)`)
 
   // ── THE BOUNCE ROUND — build-mode Verify, stolen from bugger.js (X137/X143) ──
@@ -550,7 +572,7 @@ const main = async () => {
   ok('slackmaster dispatched twice in the SAME Build box', waveLabels.filter((l) => l.includes('slackmaster')).length === 2, waveLabels)
   ok('the FIRST dispatch carries its count, no prefix', waveLabels.includes('slackmaster(1)'), waveLabels)
   ok('the SECOND — same lane, this run — says WHY, as a PREFIX', waveLabels.includes('dep:slackmaster(1)'), waveLabels)
-  ok('both waves actually landed (the labels were matched, not guessed)', waveSplit.out && waveSplit.out.results.filter((r) => r.verdict === 'built').length === 2, waveSplit.out && waveSplit.out.results)
+  ok('both waves implemented and await review when verify is off', waveSplit.out && waveSplit.out.results.filter((r) => r.verdict === 'implemented').length === 2, waveSplit.out && waveSplit.out.results)
 
   // 16b — the ASK round: slackmaster asks gatekeeper for something, gatekeeper
   // builds it, slackmaster is RESUMED. gatekeeper's dispatch is its lane's
@@ -570,7 +592,7 @@ const main = async () => {
   const askLabels = calledPhase(askRound.calls, 'Build').map((c) => c.label)
   ok('the lane ASKED for the first time carries no prefix', askLabels.includes('gatekeeper(1)'), askLabels)
   ok('the originator RESUMED in a later round IS marked — same lane, second dispatch', askLabels.includes('dep:slackmaster(1)'), askLabels)
-  ok('the resume actually ran — final verdict is built, not still needs-dependency', askRound.out && askRound.out.results.some((r) => r.id === 'p1' && r.verdict === 'built'), askRound.out && askRound.out.results)
+  ok('the resume implemented the fix and awaits independent review', askRound.out && askRound.out.results.some((r) => r.id === 'p1' && r.verdict === 'implemented'), askRound.out && askRound.out.results)
 
   // ── BUILD 1 · THE WAVE'S OWN SPEC MUST RESOLVE BEFORE THE WAVE IS DONE ──────
   const GOOD_PIECE2 = { ...GOOD_PIECE, id: 'p2', lane: 'matchmaker' }
@@ -610,13 +632,13 @@ const main = async () => {
   )
   ok('`blocked-charter` gates the wave the SAME way `needs-owner-decision` does', gateCharter.out && gateCharter.out.manifest.ownSpec.complete === false && gateCharter.out.needsOwnerRuling.length === 1, gateCharter.out && gateCharter.out.manifest.ownSpec)
 
-  section('18 · A FULLY-RESOLVED WAVE REPORTS COMPLETE — no OwnerGate warning, no resume  (silent on the good input)')
+  section('18 · IMPLEMENTED WITH VERIFY OFF — awaits verification, no owner decision or rebuild resume')
   const clean2 = await run(
     { mode: 'build', pieces: [GOOD_PIECE, GOOD_PIECE2], sharedPiece: GOOD_PLAN.sharedPiece, verify: false },
     { 'slackmaster(1)': { results: [{ id: 'p1', verdict: 'built' }] }, 'matchmaker(1)': { results: [{ id: 'p2', verdict: 'built' }] } },
   )
   ok('no throw', !clean2.err, clean2.err && clean2.err.message)
-  ok('the wave reports itself complete', clean2.out && clean2.out.manifest.ownSpec.complete === true, clean2.out && clean2.out.manifest.ownSpec)
+  ok('the wave stays incomplete until independent verification', clean2.out && clean2.out.manifest.ownSpec.complete === false && clean2.out.verification.pending.length === 2, clean2.out && clean2.out.manifest.ownSpec)
   ok('needsOwnerRuling is empty', clean2.out && clean2.out.needsOwnerRuling.length === 0, clean2.out && clean2.out.needsOwnerRuling)
   ok('resume is null — nothing to re-enter', clean2.out && clean2.out.resume === null, clean2.out && clean2.out.resume)
   ok('NO OwnerGate warning on a clean wave', !clean2.out.warnings.some((w) => /THIS WAVE IS NOT DONE/.test(w)), clean2.out.warnings)
@@ -636,7 +658,7 @@ const main = async () => {
   ok('the question that was asked reaches the lane', /is the widened scope safe/.test(promptOf(resumed2.calls, 'owner:slackmaster')))
   ok('his actual ruling reaches the lane', /yes — ship it as designed/.test(promptOf(resumed2.calls, 'owner:slackmaster')))
   ok('a wave with no `_ownerRuled` pieces gets NONE of this text', !/owner has now ruled/.test(promptOf(d.calls, 'slackmaster')), promptOf(d.calls, 'slackmaster'))
-  ok('the resumed piece completes the wave', resumed2.out && resumed2.out.manifest.ownSpec.complete === true, resumed2.out && resumed2.out.manifest.ownSpec)
+  ok('the resumed piece awaits independent review with verify off', resumed2.out && resumed2.out.manifest.ownSpec.complete === false && resumed2.out.verification.pending.length === 1, resumed2.out && resumed2.out.manifest.ownSpec)
 
   section('20 · A CROSS-LANE ASK THE VERIFY RAISES ALSO KEEPS THE WAVE OPEN, AND STAYS OUT OF bugger.js')
   const askOut = await run(
@@ -679,7 +701,7 @@ const main = async () => {
   )
   ok('no throw', !unstuck.err, unstuck.err && unstuck.err.message)
   ok('ownSpec.stillBlocked is 0 once the dependency resolves', unstuck.out && unstuck.out.manifest.ownSpec.stillBlocked === 0, unstuck.out && unstuck.out.manifest.ownSpec)
-  ok('the wave completes', unstuck.out && unstuck.out.manifest.ownSpec.complete === true, unstuck.out && unstuck.out.manifest.ownSpec)
+  ok('the wave has no dependency left but still needs independent verification', unstuck.out && unstuck.out.manifest.ownSpec.complete === false && unstuck.out.verification.pending.length === 2, unstuck.out && unstuck.out.manifest.ownSpec)
 
   // ── X177 · THE OWNER GATE MOVES — BEFORE VERIFY, NEVER AFTER ────────────────
   section('23 · A PIECE NEEDING THE OWNER STOPS THE WAVE BEFORE VERIFY EVER DISPATCHES  (fires on the bad input)')
@@ -993,7 +1015,7 @@ const main = async () => {
     /BEFORE YOU RETURN `built`/.test(promptOf(noObsFeature.calls, 'slackmaster')),
     promptOf(noObsFeature.calls, 'slackmaster').slice(0, 400),
   )
-  ok("manifest.observable.closed is the ENGINE'S OWN count, 1", noObsFeature.out && noObsFeature.out.manifest.observable.closed === 1, noObsFeature.out && noObsFeature.out.manifest.observable)
+  ok('observable distinguishes one implementation from zero independent closures', noObsFeature.out && noObsFeature.out.manifest.observable.implemented === 1 && noObsFeature.out.manifest.observable.closed === 0, noObsFeature.out && noObsFeature.out.manifest.observable)
   ok('an OMITTED observable reads as missing:1, never a silent zero', noObsFeature.out && noObsFeature.out.manifest.observable.missing === 1, noObsFeature.out && noObsFeature.out.manifest.observable)
   ok(
     'MEASURED OBSERVABLE MISSING fires, naming the piece',
@@ -1026,7 +1048,7 @@ const main = async () => {
     /BEFORE YOU RETURN `built`/.test(promptOf(noObsBugger.calls, 'slackmaster')),
     promptOf(noObsBugger.calls, 'slackmaster').slice(0, 400),
   )
-  ok("manifest.observable.closed is the ENGINE'S OWN count, 1", noObsBugger.out && noObsBugger.out.manifest.observable.closed === 1, noObsBugger.out && noObsBugger.out.manifest.observable)
+  ok('observable distinguishes one implementation from zero independent closures', noObsBugger.out && noObsBugger.out.manifest.observable.implemented === 1 && noObsBugger.out.manifest.observable.closed === 0, noObsBugger.out && noObsBugger.out.manifest.observable)
   ok('an OMITTED observable reads as missing:1, never a silent zero', noObsBugger.out && noObsBugger.out.manifest.observable.missing === 1, noObsBugger.out && noObsBugger.out.manifest.observable)
   ok(
     'MEASURED OBSERVABLE MISSING fires, naming the row',
@@ -1162,7 +1184,7 @@ const main = async () => {
   // would again be, wrongly dropped.
   fs.writeFileSync(x217Tmp, JSON.stringify({ date: utcDate, runId: 'test', lane: 'matchmaker', ref: 'x217-fix', finding: 'built same UTC day as a real wrap, after it landed', rootCause: 'src/fake/x217.ts:1', invariant: 'inv-x217', verdict: 'built', state: 'built' }) + '\n')
   const x217Json = JSON.parse(execFileSync(process.execPath, [STATS, '--already-built', '--json', '--ledger', x217Tmp], { encoding: 'utf8' }))
-  ok('stays silent on the good one: survives against REAL git history, not just a mock', x217Json.some((r) => r.ref === 'x217-fix'), x217Json)
+  ok('real history keeps the same-day row only until a later wrap lands', x217Json.some((r) => r.ref === 'x217-fix') === (latestWrapDate <= utcDate), { rows: x217Json, latestWrapDate, utcDate })
   // Deliberately proven on the SAME kind of row `--already-built` sweeps away
   // (an old `built` ref with a real wrap since), on the SAME real git history,
   // so the two commands' disagreement on that one row is asserted directly —
@@ -1440,7 +1462,8 @@ const main = async () => {
   )
 }
 
-main().then(
+module.exports = { makeRunner, neutralise, GOOD_PIECE, GOOD_PLAN }
+if (require.main === module) main().then(
   () => {
     console.log(failed ? `\n${failed} FAILED, ${passed} passed.\n` : `\n${passed} assertions hold, in both directions — fires on the bad input, silent on the good one.\n`)
     process.exit(failed ? 1 : 0)

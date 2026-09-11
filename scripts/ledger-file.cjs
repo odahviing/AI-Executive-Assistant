@@ -84,6 +84,8 @@
  */
 const fs = require('fs')
 const path = require('path')
+const verification = require('./workshop-verification.cjs')
+const REPO = path.join(__dirname, '..')
 
 const LEDGER = path.join(__dirname, '..', '.claude', 'agent-loop', 'ledger.jsonl')
 
@@ -136,6 +138,8 @@ const KNOWN_FLAGS = new Set([
   '--run-manifest', '--runId', '--manifest',
   '--lane', '--source', '--finding', '--rootCause', '--invariant',
   '--state', '--bounces', '--confirm-new-invariant', '--severity',
+  '--evidence-file', '--review', '--review-file',
+  '--from-ref',
 ])
 for (const tok of argv) {
   if (tok.startsWith('--') && !KNOWN_FLAGS.has(tok))
@@ -155,6 +159,7 @@ const KNOWN_SOURCES = new Set(['github', 'logs', 'both', 'owner', 'audit', 'veri
 // this whole file exists against, so this set is closed, not a suggestion.
 const KNOWN_VERDICTS = new Set([
   'built',
+  'implemented',
   'already-fixed',
   'confirmed-other-lane',
   'needs-dependency',
@@ -193,6 +198,9 @@ const readRows = () => {
 
 const append = (obj) => {
   fs.appendFileSync(LEDGER, JSON.stringify(obj) + '\n')
+}
+const readLifecycleRows = () => {
+  try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
 }
 
 // ── the invariant vocabulary, harvested live, never hand-maintained ──────────
@@ -251,6 +259,10 @@ if (flag('--wrap-companion')) {
   if (!ref) die('no --ref.', 'Name the same ref the built row used.')
   if (!version) die('no --version.', 'The wrap this ships in, e.g. 4.4.8.')
   if (!sha) die('no --sha.', 'The commit this ref actually shipped in — `git log -1 --format=%h`.')
+  const current = verification.collapseRows(readLifecycleRows()).latest.find(r => verification.normRef(r.ref) === verification.normRef(ref))
+  if (!current || current.verdict !== 'verified') die('wrap requires an independently verified current ref.', ref)
+  const errors = [...verification.checkReview(current.evidence, current.review), ...verification.snapshotErrors(current, REPO)]
+  if (errors.length) die('wrap verification is missing or stale.', errors.join('\n'))
   const row = { date: stampDate(), runId: `wrap-${version}`, ref, verdict: 'wrapped', state: 'wrapped', note: `shipped in ${sha}` }
   append(row)
   console.log(`\nAppended — ${ref} now has a wrapped companion row (wrap-${version}, ${sha}).\n`)
@@ -273,6 +285,9 @@ if (flag('--gh-sync')) {
   // closed ticket is `wrapped`, never `built` — `built` means a fresh atomic fix and
   // a bare ticket ref carrying it wrongly demands a companion row nothing will mint.
   if (ghstate === 'closed') {
+    const blockers = verification.verificationBlockers(readRows(), REPO)
+      .filter(r => verification.normRef(r.ref) === verification.normRef(ref) || verification.normRef(r.ref).startsWith(verification.normRef(ref) + '-'))
+    if (blockers.length) die('cannot close a ticket with unverified or overturned work.', blockers.map(r => r.ref).join(', '))
     verdict = 'wrapped'
     if (recommend) die('a CLOSED ticket takes no --recommend.', 'It is done; nothing is left to route back to a lane.')
   } else {
@@ -307,10 +322,8 @@ if (flag('--recheck')) {
   const rows = readRows()
   const forRef = rows.filter((r) => r.ref === ref)
   if (!forRef.length) die(`"${ref}" is not a ref in this ledger.`, 'Check the spelling — `node scripts/ledger-stats.cjs --open` lists every open ref.')
-  const { CLOSED } = require('./ledger-stats.cjs')
-  const lastVerdictRow = [...forRef].reverse().find((r) => r.verdict)
-  if (lastVerdictRow && CLOSED.has(lastVerdictRow.verdict))
-    die(`"${ref}" is already ${lastVerdictRow.verdict} (${lastVerdictRow.date}).`, 'A closed row is not rechecked — there is nothing left for the phantom check to reflag. If the work has come undone, file it fresh instead.')
+  const current = verification.collapseRows(rows).open.find(r => verification.normRef(r.ref) === verification.normRef(ref))
+  if (!current) die(`"${ref}" is closed.`, 'A bare --recheck annotates an open phantom candidate. To overturn the same fix, use --review with fail/unproven; to implement a repair, append built with fresh --evidence-file. Keep the same ref.')
   if (!note || note.length < 20) die(note ? `--note is ${note.length} chars.` : 'no --note.', 'Say why this is genuinely distinct and still open, not a rubber stamp — this is what the NEXT re-read of this row sees, same bar as architect-file.cjs\'s own --checked.')
   if (!POINTS_SOMEWHERE.test(note)) die('that --note does not point at anything checkable.', 'Cite the file, the other ref, or the command that shows this is distinct.')
   const row = { date: stampDate(), ref, recheck: note }
@@ -356,6 +369,41 @@ if (flag('--run-manifest')) {
   append(row)
   console.log(`\nAppended — run-manifest row for ${runId}.\n`)
   console.log(`  finding : ${finding.slice(0, 120)}`)
+  process.exit(0)
+}
+
+// A Bouncer verdict is a separate append tied to the exact implementation.
+// Fail/unproven may reopen legacy history before evidence exists; a pass cannot.
+const readJson = file => {
+  if (!file) die('missing evidence/review JSON file.')
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch (e) { die(`cannot read ${file}: ${e.message}`) }
+}
+if (flag('--review')) {
+  const ref = argOf('--ref'), review = readJson(argOf('--review-file'))
+  const lifecycleRows = readLifecycleRows()
+  const latest = verification.collapseRows(lifecycleRows).latest
+  const current = latest.find(r => verification.normRef(r.ref) === verification.normRef(ref))
+  if (!current) die('review ref is absent from the ledger.', ref)
+  const fromRef = argOf('--from-ref')
+  const implementation = fromRef ? latest.find(r => verification.normRef(r.ref) === verification.normRef(fromRef)) : current
+  if (fromRef && (!implementation || implementation.verdict !== 'verified' || review.verdict !== 'pass' || !Array.isArray(review.coveredRefs) || !review.coveredRefs.includes(ref))) die('--from-ref needs a verified parent and an actual pass explicitly naming this child in coveredRefs.')
+  if (fromRef && implementation.verificationOf) die('--from-ref supports one parent level only; name the independently implemented root ref and review this child explicitly.')
+  if (fromRef) {
+    const lastEvent = id => lifecycleRows.findLastIndex(r => verification.normRef(r.ref) === verification.normRef(id) && (r.verdict || r.state === 'partial'))
+    if (lastEvent(ref) > lastEvent(fromRef) && current.verdict !== 'verified') die('child was reopened after the parent review; obtain a fresh independent review before linking it.')
+    if (current.evidence && current.evidence.attemptId !== implementation.evidence?.attemptId) die('child has a different implementation attempt; its own independent review is required.')
+  }
+  if (!['pass', 'fail', 'unproven'].includes(review.verdict) || !review.reviewer || !review.trace || !review.reason) die('review needs verdict, independent reviewer, actual trace and reason.')
+  if (implementation.evidence && (review.attemptId !== implementation.evidence.attemptId || review.reviewer === implementation.evidence.builder)) die('review must come from an independent dispatch and match the current attempt.')
+  if (review.verdict === 'pass') {
+    const errors = [...verification.checkReview(implementation.evidence, review), ...verification.snapshotErrors(implementation, REPO)]
+    if (errors.length) die('independent pass not established.', errors.join('\n'))
+  }
+  const row = { date: stampDate(), lifecycleVersion: 1, ref, source: 'verify', verdict: review.verdict === 'pass' ? 'verified' : `verification-${review.verdict === 'fail' ? 'failed' : 'unproven'}`, review, note: review.reason }
+  if (fromRef) { row.verificationOf = implementation.ref; row.evidence = implementation.evidence; row.snapshot = implementation.snapshot }
+  if (argOf('--runId')) row.runId = argOf('--runId')
+  append(row)
+  console.log(`Appended — ${ref} [${row.verdict}], attempt ${review.attemptId || 'legacy/untraced'}`)
   process.exit(0)
 }
 
@@ -429,7 +477,18 @@ if (bouncesRaw !== null) {
   bounces = n
 }
 
-const row = { date: stampDate(), ref, lane: lane || '', source, finding, verdict: verdictRaw }
+if (verdictRaw === 'wrapped' || ['wrapped', 'closed'].includes(state)) die('use --wrap-companion or --gh-sync; ordinary rows cannot bypass independent verification with a shipping state.')
+const row = { date: stampDate(), lifecycleVersion: 1, ref, lane: lane || '', source, finding, verdict: verdictRaw }
+if (argOf('--runId')) row.runId = argOf('--runId')
+if (['built', 'implemented'].includes(verdictRaw)) {
+  const evidence = readJson(argOf('--evidence-file'))
+  const errors = verification.checkEvidence(evidence)
+  if (errors.length) die('build evidence incomplete; not ready for Bouncer handoff.', errors.join('\n'))
+  if (rows.some(r => verification.normRef(r.ref) === verification.normRef(ref) && r.evidence?.attemptId === evidence.attemptId)) die('attemptId was already used for this ref; a repair needs a fresh attempt.')
+  row.verdict = 'implemented'
+  row.evidence = evidence
+  try { row.snapshot = verification.snapshot(evidence.files, REPO) } catch (e) { die(`cannot snapshot build files: ${e.message}`) }
+}
 if (rootCause) row.rootCause = rootCause
 if (invariant !== 'none') row.invariant = invariant
 if (state) row.state = state
@@ -439,7 +498,7 @@ if (note) row.note = note
 if (bounces) row.bounces = bounces
 
 append(row)
-console.log(`\nAppended — ${ref} [${verdictRaw}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}${bounces ? ' · BOUNCED' : ''}\n`)
+console.log(`\nAppended — ${ref} [${row.verdict}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}${bounces ? ' · BOUNCED' : ''}\n`)
 console.log(`  finding : ${finding.slice(0, 120)}`)
 if (rootCause) console.log(`  root    : ${rootCause}`)
 console.log(`\nCheck it landed: node scripts/ledger-stats.cjs --lane ${lane || '""'}\n`)

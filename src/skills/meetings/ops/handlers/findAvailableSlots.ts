@@ -1066,7 +1066,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // string (unlike `duration_minutes`, which is an enum and is
             // backstopped at :73). Two things were wrong with that. It was already
             // incoherent: the walker validates a `durationMin` meeting whatever
-            // `end` says, and the verdict below matches on the START (±60s), so a
+            // `end` says, and the verdict below matches the exact START, so a
             // caller `end` only ever moved the search bound — it could never change
             // what was actually checked. And when the model emitted a 1–5 minute
             // window, `getFreeBusy` derived an availabilityViewInterval ≥ the window
@@ -1092,7 +1092,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // An unparseable start yields end:'' — answered below as this
                 // candidate's own validation_error, with no Graph round-trip.
                 return {
-                  start: startConv,
+                  start: s.isValid ? s.toISO()! : startConv,
                   end: s.isValid ? s.plus({ minutes: durationMin }).toISO()! : '',
                 };
               });
@@ -1169,7 +1169,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   diagnosticsOut: diag,
                 });
                 const startMs = DateTime.fromISO(cand.start, { zone: timezone }).toMillis();
-                const matches = slots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+                const matches = slots.some(s => DateTime.fromISO(s.start, { zone: timezone }).toMillis() === startMs);
                 // v3.7.x (#143) — an away day is now walked normally (its stated
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
@@ -1248,6 +1248,23 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 attendeesNotChecked: [...new Set(perCandidateDiags.flatMap(d => d.attendeesNotChecked ?? []))],
                 logSuffix: ' (candidate validation)',
               });
+
+            // A positive point-check is an offer too. Record only validated
+            // instants; rejected/error candidates confer no offer binding. Omit
+            // the fingerprint so an interleaved check preserves the spread shape.
+            if (availableCount > 0 && context.channelId) {
+              try {
+                const { recordOfferedSlots } = await import('../../../../utils/offeredSlotsStash');
+                recordOfferedSlots({
+                  channelId: context.channelId,
+                  threadTs: context.threadTs,
+                  timezone,
+                  slots: results.filter(r => r.available),
+                });
+              } catch (err) {
+                logger.warn('offeredSlotsStash candidate record failed — continuing', { err: String(err).slice(0, 150) });
+              }
+            }
 
             return {
               mode: 'candidate_validation',
@@ -1704,8 +1721,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               ? [...(args.attendee_emails as unknown[])].map(e => String(e).trim().toLowerCase()).filter(Boolean).sort().join(',')
               : '';
             const offerFingerprint = `${args.duration_minutes ?? ''}|${args.search_from ?? ''}|${args.search_to ?? ''}|${attendeesFp}`;
-            // v3.4.2 — DROP slots already offered in this conversation so "give me
-            // another option" returns NEW times, not the same spread again. The
+            // v3.4.2 — on colleague/email searches, DROP slots already offered
+            // in this conversation so "give me another option" returns NEW
+            // times, not the same spread again. Owner offers are now recorded
+            // for exact-approval binding, but retain the owner's prior search
+            // behavior here. The
             // stash is the UNION of everything shown this conversation; on the
             // FIRST search it's empty → no-op. Verifying specific named slots runs
             // in the candidate_slots path above, not here, so it's unaffected. If
@@ -1721,7 +1741,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               const { getOfferedSlots, getOfferedSearchFingerprint } = await import('../../../../utils/offeredSlotsStash');
               const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
               const priorFingerprint = getOfferedSearchFingerprint(context.channelId, context.threadTs);
-              if (offered.length > 0 && priorFingerprint !== null && priorFingerprint === offerFingerprint) {
+              if ((!isOwnerInitiatedSearch || context.channel === 'email')
+                  && offered.length > 0 && priorFingerprint !== null && priorFingerprint === offerFingerprint) {
                 const offeredMs = new Set(offered.map(o => Date.parse(o.startIso)).filter(Number.isFinite));
                 const fresh = pickPool.filter(s => !offeredMs.has(Date.parse(s.start)));
                 if (fresh.length > 0) pickPool = fresh;
@@ -1751,9 +1772,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             const rawPreferredSlot = typeof args.preferred_slot === 'string' && args.preferred_slot.trim().length > 0
               ? args.preferred_slot.trim()
               : null;
-            const preferredSlot = rawPreferredSlot && searchWindowTz
-              ? reinterpretClockInZone(rawPreferredSlot, searchWindowTz, timezone)
-              : rawPreferredSlot;
+            const preferredSlot = rawPreferredSlot
+              ? DateTime.fromISO(searchWindowTz
+                  ? reinterpretClockInZone(rawPreferredSlot, searchWindowTz, timezone)
+                  : rawPreferredSlot, { zone: timezone }).toISO() ?? rawPreferredSlot
+              : null;
             // v4.1.x (M8/M9) — set when the named time is NOT offerable, so the
             // result can say WHY instead of letting the model infer "unavailable"
             // from absence. Never merged into `slots`: an excluded slot is still
@@ -1764,10 +1787,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             if (preferredSlot) {
               const matchingCandidate = candidateSet.find(s => {
                 try {
-                  // Match by absolute time, tolerate format drift (offset suffix, etc.)
-                  return Math.abs(
-                    DateTime.fromISO(s.start).toMillis() - DateTime.fromISO(preferredSlot).toMillis()
-                  ) <= 60_000;
+                  // Equal instants allow offset-format differences, never a
+                  // nearby time that the requester did not choose.
+                  return DateTime.fromISO(s.start, { zone: timezone }).toMillis()
+                    === DateTime.fromISO(preferredSlot, { zone: timezone }).toMillis();
                 } catch { return false; }
               });
               if (matchingCandidate && !chosenStarts.has(matchingCandidate.start)) {
@@ -1812,7 +1835,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     viewerEmail,
                     diagnosticsOut: prefDiag,
                   });
-                  const prefAvailable = prefSlots.length > 0;
+                  const prefAvailable = prefSlots.some(s =>
+                    DateTime.fromISO(s.start, { zone: timezone }).toMillis() === prefStartDt.toMillis());
                   const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts);
                   // Shared presentation-zone (presentTzForOutput, declared above) —
                   // this branch answers about the SAME preferred_slot instant the
@@ -1990,19 +2014,18 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 return display ? { ...s, presentation_local: display } : s;
               });
             }
-            // v3.3.8 — remember what's being OFFERED in this conversation so a
-            // later pick ("Tuesday 20:30") binds to the offered instant instead
-            // of re-deriving the date. The orchestrator injects these on
-            // subsequent turns. Colleague-path only — the owner-path has its own
-            // correction loop. v4.3.0 (#24) — ALSO the email channel: every
-            // email turn carries senderRole 'owner' (the email sender gate), but the
-            // actual picker is the external on the other end of a forwarded
-            // chain, so the email leg needs the exact same binding the
-            // colleague path gets. offeredSlotsStash itself gives the email key
-            // the longer, restart-surviving TTL (by key prefix) — this call site
-            // only needs to widen WHEN it records.
-            const isEmailLeg = context.channel === 'email';
-            if ((!isOwnerInitiatedSearch || isEmailLeg) && annotatedSlots.length > 0 && context.channelId) {
+            // Remember every slot the tool offered in this conversation. The
+            // colleague/email paths bind a later prose pick to its exact date;
+            // create_meeting/move_meeting also consult this before grid cleanup,
+            // so an owner's approval preserves the exact offered instant. An
+            // available preferred-time status explicitly offers that time too;
+            // unavailable statuses and owner-only approval candidates are not offers.
+            const offeredSlots = [
+              ...annotatedSlots,
+              ...(preferredSlotStatus?.available === true && typeof preferredSlotStatus.start === 'string'
+                ? [{ start: preferredSlotStatus.start }] : []),
+            ];
+            if (offeredSlots.length > 0 && context.channelId) {
               try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { recordOfferedSlots } = require('../../../../utils/offeredSlotsStash') as
@@ -2011,7 +2034,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   channelId: context.channelId,
                   threadTs: context.threadTs,
                   timezone,
-                  slots: annotatedSlots as Array<{ start: string }>,
+                  slots: offeredSlots as Array<{ start: string }>,
                   searchFingerprint: offerFingerprint,
                 });
               } catch (err) {
@@ -2359,4 +2382,3 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           }
         }
 }
-

@@ -1206,6 +1206,29 @@ export async function getEventEndInstant(
 }
 
 /**
+ * Turn Graph's `dateTime` + `timeZone` pair into one zone-qualified instant.
+ * Event-by-id reads send no Prefer header, so Graph normally returns a naive
+ * UTC wall clock plus `timeZone: UTC`. Keeping those as two independent fields
+ * lets a consumer accidentally parse the wall clock in the owner's zone. The
+ * instant carries its own offset instead, so every consumer gets the same time.
+ */
+function eventPartAsInstant(
+  part: { dateTime?: string; timeZone?: string } | undefined,
+  reader: string,
+  meetingId: string,
+): string | undefined {
+  if (!part?.dateTime) return undefined;
+  const dt = DateTime.fromISO(part.dateTime, { zone: part.timeZone ?? 'utc' });
+  if (!dt.isValid) {
+    logger.warn(`${reader} — unreadable event instant, returning undefined`, {
+      meetingId, dateTime: part.dateTime, timeZone: part.timeZone,
+    });
+    return undefined;
+  }
+  return dt.toISO()!;
+}
+
+/**
  * v2.9.1 — load just enough event detail for an attendee-update flow:
  * existing attendees (so the handler can compute the new list), start/end
  * (so location resolution can re-evaluate day-type), categories, location,
@@ -1257,25 +1280,10 @@ export async function getEventForAttendeeUpdate(
         email: String(a.emailAddress.address).toLowerCase(),
         optional: a.type === 'optional',
       }));
-    // See the header: the raw Graph pair is (naive local string, zone name).
-    // `?? 'utc'` matches this GET's actual behaviour (no Prefer header → UTC)
-    // and every other reader in this file; an unparseable zone name yields an
-    // invalid DateTime and we return undefined rather than a wrong instant.
-    const asInstant = (part: { dateTime?: string; timeZone?: string } | undefined): string | undefined => {
-      if (!part?.dateTime) return undefined;
-      const dt = DateTime.fromISO(part.dateTime, { zone: part.timeZone ?? 'utc' });
-      if (!dt.isValid) {
-        logger.warn('getEventForAttendeeUpdate — unreadable event instant, returning undefined', {
-          meetingId, dateTime: part.dateTime, timeZone: part.timeZone,
-        });
-        return undefined;
-      }
-      return dt.toISO()!;
-    };
     return {
       attendees,
-      startIso: asInstant(event.start),
-      endIso: asInstant(event.end),
+      startIso: eventPartAsInstant(event.start, 'getEventForAttendeeUpdate', meetingId),
+      endIso: eventPartAsInstant(event.end, 'getEventForAttendeeUpdate', meetingId),
       categories: (event.categories as string[]) ?? [],
       location: event.location?.displayName as string | undefined,
       isOnline: event.isOnlineMeeting as boolean | undefined,
@@ -1292,16 +1300,13 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   type?: 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster';
   subject?: string;
   seriesMasterId?: string;
-  // v2.8.5 — also surface start so callers (notably delete_meeting's audit
-  // log) can record WHICH DAY was affected, enabling active-mode to detect
-  // "owner just deleted this floating block — don't re-book it" later.
+  // Zone-qualified instants, normalized from Graph's dateTime+timeZone pair at
+  // this read chokepoint. Callers never carry or reinterpret a separate zone.
   startDateTime?: string;
-  startTimeZone?: string;
   // v3.4.x (#135c) — also surface end so a pure move (new_end omitted) can
   // preserve the meeting's existing duration without forcing the model to
   // supply (or re-ask for) a length it already knows.
   endDateTime?: string;
-  endTimeZone?: string;
   // o#216 — sensitivity/categories/organizer/attendees ride along so a caller
   // that surfaces THIS subject to someone other than the owner-in-his-own-DM
   // (the seriesMaster refusal messages in update_meeting/move_meeting/
@@ -1321,10 +1326,8 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     type: event?.type,
     subject: event?.subject,
     seriesMasterId: event?.seriesMasterId,
-    startDateTime: event?.start?.dateTime,
-    startTimeZone: event?.start?.timeZone,
-    endDateTime: event?.end?.dateTime,
-    endTimeZone: event?.end?.timeZone,
+    startDateTime: eventPartAsInstant(event?.start, 'getEventType', meetingId),
+    endDateTime: eventPartAsInstant(event?.end, 'getEventType', meetingId),
     sensitivity: event?.sensitivity,
     categories: event?.categories,
     organizer: event?.organizer,

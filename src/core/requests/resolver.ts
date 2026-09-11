@@ -122,6 +122,8 @@ export interface ResolveContext {
    * the Eli ghost: an owner reject silently turned into a bounce.
    */
   resolvedByColleague?: boolean;
+  /** Authenticated caller id, required on the colleague path; never taken from tool args. */
+  resolvingUserId?: string;
   /**
    * Derived inside resolveRequest = (row.state === 'awaiting_colleague' &&
    * resolvedByColleague). Used by notifyRequesterOfDecision to pick relay
@@ -274,6 +276,32 @@ async function resolveRequestInner(
       state: row.state,
       reason: `request is in state ${row.state}; only awaiting_owner / awaiting_colleague can be resolved`,
     };
+  }
+
+  // Revalidate after entering the per-request queue: the tool's earlier probe
+  // may predate another decision. Colleagues may accept the STORED owner
+  // counter, or send reject/amend back to him; they never supply owner recovery
+  // or override data. Gate the entire payload, including future fields and
+  // no-callback outcome data, before any replay, closure, or notification.
+  if (ctx.resolvedByColleague === true) {
+    if (row.kind !== 'approval' || row.state !== 'awaiting_colleague'
+        || !ctx.resolvingUserId?.trim() || !row.requester_slack_id?.trim()
+        || ctx.resolvingUserId !== row.requester_slack_id) {
+      return {
+        ok: false, request_id: requestId, state: row.state,
+        effect: 'not_permitted',
+        reason: 'Only the authenticated original requester can respond to an approval awaiting their answer.',
+      };
+    }
+    if (verdict.verdict === 'approve' && verdict.data != null
+        && (typeof verdict.data !== 'object' || Array.isArray(verdict.data)
+            || Object.keys(verdict.data).length > 0)) {
+      return {
+        ok: false, request_id: requestId, state: row.state,
+        effect: 'approve_data_not_permitted',
+        reason: 'Accept the stored owner counter with verdict="approve" and no data. To propose any change, use verdict="amend" with a counter; it must go back to the owner for a new decision.',
+      };
+    }
   }
 
   logger.info('resolveRequest', {
@@ -787,6 +815,31 @@ async function runApproveCallback(
       surface: deriveOriginSurface(row),
     });
   } catch (err) {
+    // A colleague accepted an already decided action; recovery is now the
+    // owner's job. Keep that exact counter and its round budget, and return
+    // less to the colleague: recovery details can name other owner events.
+    // This catch covers only the replay, never a post-success relay failure.
+    const replayFailure = async (effect: string, reason: string): Promise<ResolveResult> => {
+      if (!ctx.wasAwaitingColleague) {
+        return { ok: false, request_id: row.id, state: row.state, effect, reason };
+      }
+      const fresh = getRequest(row.id) ?? row;
+      if (fresh.state === 'awaiting_colleague') {
+        updateRequest(row.id, { state: 'awaiting_owner', ...timersForWaitingSide(fresh, 'owner', ctx.profile) });
+        await notifyOwnerOfColleaguePushback(row, 'approve_failed', reason, ctx);
+      } else if (fresh.state !== 'awaiting_owner') {
+        // A separate closure during the attempt must never be undone by a
+        // late error. Nor does that error prove the action did not commit.
+        return {
+          ok: false, request_id: row.id, state: fresh.state, effect: 'approve_replay_unconfirmed',
+          reason: 'The action could not be confirmed, and this request is already closed. Do not replay it from this response.',
+        };
+      }
+      return {
+        ok: false, request_id: row.id, state: 'awaiting_owner', effect: 'approve_needs_owner_recovery',
+        reason: 'Your acceptance is recorded, but the action could not be confirmed. It is now waiting for the owner to check and resolve; no new counter is needed from you.',
+      };
+    };
     // possible-reschedule-replay-failure-has-no-recovery-path (2026-08-14) —
     // pre-fix this fell straight to the generic branch below: the sentinel's
     // existing_meeting_id/subject/when never survived past `ReplayToolError`'s
@@ -804,15 +857,9 @@ async function runApproveCallback(
       logger.warn('on_approve replay hit possible_reschedule — returning a recovery path instead of a dead end', {
         id: row.id, existingId,
       });
-      return {
-        ok: false,
-        request_id: row.id,
-        state: row.state,
-        effect: 'approve_replay_possible_reschedule',
-        reason: existingId
+      return replayFailure('approve_replay_possible_reschedule', existingId
           ? `There's already "${existingSubj}" on ${existingWhen} with the same person (meeting_id ${existingId}). To MOVE that meeting to the approved time instead of creating a new one, call resolve_approval again with verdict="approve", data={"move_existing_meeting_id":"${existingId}"}. To book a separate NEW meeting anyway, call resolve_approval again with verdict="approve", data={"force_new":true}.`
-          : `A possible duplicate meeting was found, but no id came back with it — call resolve_approval again with verdict="approve", data={"force_new":true} to book anyway.`,
-      };
+          : `A possible duplicate meeting was found, but no id came back with it — call resolve_approval again with verdict="approve", data={"force_new":true} to book anyway.`);
     }
     // delete-meeting-replay-event-not-found-stuck (2026-08-26, revised after
     // bounce) — event_not_found is NOT the same fact as "the meeting is
@@ -838,24 +885,14 @@ async function runApproveCallback(
       logger.warn('on_approve replay hit event_not_found on delete_meeting — returning a verify-first recovery path instead of assuming cancelled', {
         id: row.id, subject: subj,
       });
-      return {
-        ok: false,
-        request_id: row.id,
-        state: row.state,
-        effect: 'approve_replay_event_not_found',
-        reason: `The event id on file for "${subj}" is not on the calendar under that id — it was either already cancelled elsewhere, or the id is stale (the meeting may still be there). Call get_calendar to check whether a meeting matching "${subj}" is still on the calendar. If it's genuinely gone, call resolve_approval again with verdict="approve", data={"confirmed_gone":true} to close this out as cancelled. If it's still there under a different id, call resolve_approval again with verdict="approve", data={"fresh_meeting_id":"<id from get_calendar>"} to retry the cancellation with the correct id.`,
-      };
+      return replayFailure('approve_replay_event_not_found',
+        `The event id on file for "${subj}" is not on the calendar under that id — it was either already cancelled elsewhere, or the id is stale (the meeting may still be there). Call get_calendar to check whether a meeting matching "${subj}" is still on the calendar. If it's genuinely gone, call resolve_approval again with verdict="approve", data={"confirmed_gone":true} to close this out as cancelled. If it's still there under a different id, call resolve_approval again with verdict="approve", data={"fresh_meeting_id":"<id from get_calendar>"} to retry the cancellation with the correct id.`);
     }
     logger.error('on_approve replay failed — leaving request awaiting_owner for retry', {
       id: row.id, tool, err: String(err).slice(0, 300),
     });
-    return {
-      ok: false,
-      request_id: row.id,
-      state: row.state,
-      effect: `approve_replay_failed:${tool}`,
-      reason: err instanceof Error ? err.message : String(err).slice(0, 300),
-    };
+    return replayFailure(`approve_replay_failed:${tool}`,
+      err instanceof Error ? err.message : String(err).slice(0, 300));
   }
 
   // #141 Change 5 — link the booked event id on the approval row when a
@@ -1073,6 +1110,9 @@ export async function notifyRequesterOfDecision(
   const requesterLang: 'he' | 'en' = requesterRelayLanguage(requesterSlackId);
 
   // Format start time in the requester's timezone if known, else owner's.
+  // Counter instants also retain their structured source-offset clock when it
+  // differs. Neither clock is inferred from the owner's prose. The complete
+  // rendered value is pinned by the existing amend composition guard below.
   const formatStart = (iso: string): string => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1086,9 +1126,14 @@ export async function notifyRequesterOfDecision(
       const tz = (personRow?.timezone && !tzIsGuess) ? personRow.timezone : ctx.profile.user.timezone;
       const dt = DateTime.fromISO(iso, { zone: tz });
       if (!dt.isValid) return '';
-      return requesterLang === 'he'
-        ? dt.setLocale('he').toFormat('cccc d MMMM, HH:mm')
-        : dt.toFormat('cccc d MMM, HH:mm');
+      const format = (value: DateTime): string => requesterLang === 'he'
+        ? value.setLocale('he').toFormat('cccc d MMMM, HH:mm ZZZZ')
+        : value.toFormat('cccc d MMM, HH:mm ZZZZ');
+      const local = format(dt);
+      const source = DateTime.fromISO(iso, { setZone: true, zone: tz });
+      return verdict === 'amend' && source.isValid && source.offset !== dt.offset
+        ? `${local} / ${format(source)}`
+        : local;
     } catch { return ''; }
   };
   // #11 — ONLY an executed action produces a time here. No executed action → no
@@ -1117,6 +1162,7 @@ export async function notifyRequesterOfDecision(
   let amendPinned: Array<{ key: string; value: string }> = [];
   let amendProse: string[] = [];
   let amendWithheld: string[] = [];
+  let amendRationale = '';
   let body: string;
   if (verdict === 'approve') {
     // wasAwaitingColleague=true → the COLLEAGUE (requester) just accepted
@@ -1175,37 +1221,41 @@ export async function notifyRequesterOfDecision(
         || /^(what|when|where|who|why|how|which|can|could|would|should|do|does|did|is|are|was|were)\b/i.test(counterText)
         || /^(מה|מתי|איפה|מי|למה|איך|איזה|האם)\b/.test(counterText)  // Hebrew question-words
       );
-    // #153 — the owner's own rationale travels too. `reason` is accepted by
-    // resolve_approval and relayed on reject, but was silently dropped on amend —
-    // so a counter whose only human phrasing lived in `reason` reached the
-    // requester as a bare "a different approach". Deduped against the rendered
-    // counter, since the model often puts the same sentence in both.
+    // Preserve the owner's rationale as a source-attributed quote outside the
+    // language composer. Prose can name the requester's, owner's, or a third
+    // clock; only the structured ISO values above have a known clock frame.
+    // The quote keeps explicit labels verbatim without guessing their meaning.
     const rationale = reason && reason.trim() ? reason.trim() : '';
+    amendRationale = rationale && rationale !== (isQuestion ? counterText : '')
+      ? (requesterLang === 'he'
+          ? `הניסוח המקורי של ${ownerFirst}: “${rationale}”`
+          : `${ownerFirst}'s original wording: “${rationale}”`)
+      : '';
+    // A verbatim duplicate in a prose field is already carried by the quote.
+    // Keep it out of the composer too; structured values are never removed.
+    const counterForRelay = rationale
+      ? Object.fromEntries(Object.entries(data ?? {}).filter(([key, value]) =>
+          !(COUNTER_PROSE_KEYS.has(key) && typeof value === 'string' && value.trim() === rationale)))
+      : data;
     if (isQuestion) {
       // Everything OTHER than the question still has to travel: a question bundled
       // with a concrete change must not lose the change.
       const rest = renderCounter(
-        Object.fromEntries(Object.entries(data ?? {}).filter(([k]) => k !== 'text')),
+        Object.fromEntries(Object.entries(counterForRelay ?? {}).filter(([k]) => k !== 'text')),
         { audience: 'requester', formatInstant: formatStart },
       );
       amendWithheld = rest.withheld;
-      const tail = [rest.text, rationale && !rest.text.includes(rationale) ? rationale : '']
-        .filter(Boolean).join(' — ');
+      const tail = rest.text;
       body = requesterLang === 'he'
         ? `${hi} — ${ownerFirst} שאל: ${counterText}${tail ? ` (${tail})` : ''}`
         : `${hi} — ${ownerFirst} asked: ${counterText}${tail ? ` (${tail})` : ''}`;
     } else {
-      const rendered = renderCounter(data, { audience: 'requester', formatInstant: formatStart });
+      const rendered = renderCounter(counterForRelay, { audience: 'requester', formatInstant: formatStart });
       amendWithheld = rendered.withheld;
       amendPinned = rendered.pinned;
       const counterSummary = rendered.text;
-      // The owner's rationale is prose for the composer too — deduped against the
-      // rendered counter exactly as the template line below dedupes it.
-      amendProse = rationale && !counterSummary.includes(rationale)
-        ? [...rendered.prose, rationale]
-        : rendered.prose;
-      const detail = [counterSummary, rationale && !counterSummary.includes(rationale) ? rationale : '']
-        .filter(Boolean).join(' — ');
+      amendProse = rendered.prose;
+      const detail = counterSummary;
       body = requesterLang === 'he'
         ? `${hi} — ${ownerFirst} הציע משהו אחר${detail ? ': ' + detail : ''}. זה עובד לך?`
         : `${hi} — ${ownerFirst} suggested a different approach${detail ? ': ' + detail : ''}. Does that work for you?`;
@@ -1338,6 +1388,8 @@ RULES:
       logger.warn('notifyRequesterOfDecision — LLM relay compose failed, using template', { id: row.id, err: String(err).slice(0, 150) });
     }
   }
+
+  if (amendRationale) body = `${body}\n${amendRationale}`;
 
   // v3.1 (115a/115b) — single-notification idempotency + owner shadow.
   // Re-read fresh: closeMeetingArtifacts may have stamped requester_notified_at
@@ -1506,8 +1558,8 @@ RULES:
 }
 
 /**
- * v2.9.1 — colleague responded to owner's counter (amending state). Hand the
- * decision back to the owner: the request is already back in awaiting_owner, and
+ * Colleague responded to the owner's counter, or accepted it but replay failed.
+ * Hand the decision back to the owner: the request is already awaiting_owner, and
  * this post re-stamps `terminal_dm_msg_ts`, so a ✅ HERE resolves the approval and
  * replays the stored action. That makes this a full owner-decision surface, not a
  * notification — so it composes through `composeOwnerAskText` like the other two
@@ -1516,17 +1568,16 @@ RULES:
  * consequence, which is how a colleague's SUBJECT-ONLY counter could hand him a
  * ✅ that booked over a meeting he already had without ever naming the clash: the
  * counter moved no time at all, yet the proven collision appeared nowhere on the
- * message he ticked. Both verdicts route here — a ✅ after a colleague's REJECT
- * books just as surely as one after a counter.
+ * message he ticked. Reject, amend, and failed acceptance route here — a ✅
+ * after any of them replays the current stored counter.
  *
- * Reads the row FRESH: resolveRequest has just written `details.counter` (the
- * colleague's) and re-aimed the timers, and the `row` captured at entry predates
- * that. Reading it back is also what keeps the lead and the consequence on ONE
- * source — the stored counter that a ✅ will actually replay (R2).
+ * Reads the row FRESH: resolveRequest has re-aimed the timers and may have
+ * stored a new colleague counter. Failed acceptance keeps the owner's counter.
+ * The lead and consequence use ONE source — the counter a ✅ will replay (R2).
  */
 async function notifyOwnerOfColleaguePushback(
   row: RequestRow,
-  verdict: 'reject' | 'amend',
+  verdict: 'reject' | 'amend' | 'approve_failed',
   reason: string | undefined,
   ctx: ResolveContext,
 ): Promise<void> {
@@ -1539,6 +1590,8 @@ async function notifyOwnerOfColleaguePushback(
     if (verdict === 'reject') {
       const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
       lead = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
+    } else if (verdict === 'approve_failed') {
+      lead = `${requesterName} accepted your counter on "${subject}", but I could not confirm the action completed. Check its current state before retrying; the accepted counter is unchanged.\n${reason ?? ''}`;
     } else {
       const stored = details.counter && typeof details.counter === 'object' && !Array.isArray(details.counter)
         ? details.counter as Record<string, unknown>

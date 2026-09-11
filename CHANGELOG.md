@@ -1,6 +1,30 @@
 # Changelog
 
 ---
+## 4.9.2 — Say what happened, do what was approved
+
+Maelle now carries the active decision and source context into later replies instead of answering from a stale turn, and calendar changes preserve the exact approved instant across timezones. Approval replay, requester identity and proactive social accounting now have deterministic success and delivery boundaries, preventing false completion, authority drift and invisible interactions from changing future behavior.
+
+### Fixed
+
+- Owner decision prompts are written into the conversation thread that receives them, so a reply such as “approve” or “that time” resolves against the current question rather than an older meeting.
+- Counter-proposals replay the stored action after the requester accepts, while any unavailable executor or unconfirmed tool result fails before the request can close or be narrated as completed.
+- Colleague requester identity is bound to the authenticated Slack speaker before approval deduplication and persistence; owner-authorized on-behalf-of requests remain supported.
+- Social codas receive the source title, URL and excerpt needed to introduce a topic truthfully, without inventing prior shared exposure or a relationship timeline.
+- Validator-rejected codas no longer count as unanswered raises. Only a coda that passes the delivery pipeline can advance subject engagement state.
+- News briefs exclude the company’s own social content and withhold opaque publisher claims, while independent coverage that quotes company material remains eligible.
+- Calendar readers normalize Graph datetime/timezone pairs into canonical instants, and accepted candidate, preferred and spread slots retain their exact approved time instead of snapping to the scheduling grid.
+- Owner counter-acceptance replays the immutable stored proposal without accepting model-supplied changes to privileged action fields.
+
+### Framework
+
+- Workshop completion now distinguishes implementation from independently persisted verification, requires executable before/after evidence and complete boundary inventories, and invalidates reviews when covered files change.
+- Ordinary repairs use targeted independent rechecks; the complete fixed Z1–Z30 Golden battery runs once at the release checkpoint and cannot report readiness from a partial or self-declared inventory.
+- Future Manager sessions use Astra Light for global context and conversation quality. Contained builders use Sol medium; sensitive work and independent Bouncer reviews use Astra high.
+- Generated Workshop evidence is ignored, while compressed before-state fixtures remain with the reusable regression tests.
+
+---
+
 ## 4.9.1 — The guard was the bug
 
 Sharon Duret asked for half an hour with Idan. Maelle searched, found real times, booked the right slot and said so correctly — and then a guard rewrote her correct message into a wrong one. Twice. She was corrected by a colleague, in public, for something she had got right, and apologised for a mistake she had not made.

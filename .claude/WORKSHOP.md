@@ -28,16 +28,47 @@ Read `SESSION_STARTER.md` **only when you need it** — another lane's territory
   2. **A new LLM call, or a change to a tier, needs his sign-off before it ships — never yours to assert.** Every model call costs money and adds delay, both compounding on any always-on path — nobody wants a slow assistant and nobody wants an expensive one, and which trade to make is his decision, not a lane's default. Report a proposed call with your measurement in front of him and wait for his word, exactly as a new agent or a charter rule does — never something he discovers in a bill. The same for tier: measure it, show where a call site is over- or under-provisioned, and **report it as a recommendation — never assert a tier change yourself.** (2026-08-03: `classifyOwnerAssertsDecision`, a new Haiku call added inside a `resolve_approval` bug fix beyond its own ticket's scope, was reverted the next night on his ruling — *"not agree, don't make a new haiku judge, its expensive and take them."*)
   3. **A fix that would introduce a new tool, skill, spine, persisted shape, or outward connection.** Today the bouncer catches this AFTER the diff exists (`bouncer.md` B7) — nothing tells a lane to stop BEFORE building one, so the first the owner hears of a new part of the system can be a finished diff instead of a choice. If the fix you're reaching for needs a new part of the system rather than a change to one that already exists, stop and ask before you write it — same as the two cases above.
 
+## Dispatch and cost policy
+
+This is the canonical policy for future Workshop dispatches. Choose the provider before choosing a model; these are Workshop settings, never Maelle runtime model settings.
+
+| Codex role or work | Model | Reasoning effort |
+| --- | --- | --- |
+| Manager (UI: Astra Light) | `gpt-6-astra` | `low` |
+| Contained builders, tests and documentation | `gpt-5.6-sol` | `medium` |
+| Approval, identity, calendar or architecture work | `gpt-6-astra` | `high` |
+| Independent Bouncer | `gpt-6-astra` | `high` |
+
+Use `xhigh` only for a named difficult problem, with the reason in its dispatch. Project `.codex/config.toml` sets the future Manager/default session to Astra low (Astra Light); explicitly select Sol medium for contained workers and Astra high for sensitive work and Bouncer. The owner changes an already-running Manager chat manually. A follow-up does not change an existing agent's runtime model or effort; report only settings actually applied.
+
+The `.claude/workflows/*.js` engines use the Claude SDK. Keep its valid native selectors (`sonnet`, `opus`, `fable`, and the existing `haiku` routing call); Codex model identifiers do not belong in those calls or Claude charter frontmatter. Their default efforts are medium for contained work and high for sensitive lanes, architecture and independent review. Existing native bounce selectors remain provider-specific; no automatic xhigh escalation.
+
+Keep the Manager's working context compact: current objective, constraints, refs/attempts, evidence paths, unresolved dependencies and next action. Read targeted excerpts; save detailed output to files and return counts, failures and paths. Batch independent reads and progress updates. Do not repeatedly reload old logs or completed agent histories.
+
+Use one builder and one independent reviewer per bounded package. Batch related work in its owning lane, reuse the builder for repairs, and add a specialist only for a real dependency. Lane ownership and independent review remain mandatory. The first handoff includes the executed tests and structured evidence below, not a promise to produce them later. Repair reviews cover the changed paths and affected dependencies; invalidate relevant prior checks after changes. Full Golden30 runs once at the release checkpoint under GOLDEN_PATHS.md, with targeted rechecks after repairs; skipped or invalidated checks are never passes.
+
+Account for product, audit and framework work separately in the handoff. After the first build/review pair, record an available usage checkpoint before optional expansion: actual limits or measured run usage, or explicitly unavailable. Do not invent a budget or savings, and do not stop already-authorized necessary work at this checkpoint.
+
 ## How you report back — the return contract
 
 One verdict PER bug (a list if batched), exactly one of:
 
-- **built** — root cause (`file:line`), the fix (files touched, +/− lines, plain English), typecheck green, trace 100%.
+- **built** — implemented, awaiting independent verification. Root cause (`file:line`), files touched, typecheck green, trace 100%, and the evidence contract below. A builder never marks its own work verified.
 - **needs-dependency** — your part is built (or ready) but needs another lane (name it) and the specific ask. The orchestrator routes it and resumes you.
 - **blocked-charter** — the only fix you can see would bend a rule in this charter (name the rule + what the fix would require). Surfaced to the owner.
 - **needs-owner-decision** — root proven, but the resolution is an owner-only product judgment (state it, with your recommendation). Surfaced to the owner.
 - **already-fixed** — the reappearance check says it doesn't reproduce; say why.
 - **confirmed-other-lane** — done, and **another lane did it**, so you edited nothing. Name the lane and where. Not `already-fixed` (that one predates the wave); it closes the item and counts as nobody's fix — returning `built` for someone else's work inflates every count downstream.
+
+### Evidence before handoff
+
+A deterministic behavior change carries an executed regression that fails against the preserved before revision and passes after, plus a legitimate case that passes both. Use actual module/branch behavior with isolated fixtures and honest mocks; source-string checks alone do not prove behavior. Record the command, revision, exit codes, pass/fail counts, named cases and output evidence. Failed, missing or unexecuted checks block Bouncer handoff. Prompt-only changes state the structural evidence and the remaining model-dependent outcome explicitly; prompt capture proves inputs, never obedience. Prose-only changes need a stated reason, with no invented tests. The golden battery is mandatory at the release checkpoint under its own header; targeted repair checks do not replace it.
+
+Enumerate producer → normalization/state → consumer paths from a recorded code search, every changed guard in accept and reject directions, and owner/colleague/DM/room/unavailable surfaces where applicable. Each path names its executed cases and citations; a non-applicable surface needs its concrete reason. An omitted path or direction blocks completion. Bouncer independently checks the inventory against the diff and callers; a builder's completeness claim is not a pass.
+
+Verification scope is bounded by the named checks. `review.scope: behavioral` means deterministic behavior exercised in that harness, never full live-chat correctness; `structural` means the inputs/connections established by code or prompt capture. A mixed deterministic/prompt repair may use either qualified scope with `evidence.exception` and `review.reason` naming the unexercised model-dependent steps. No live LLM call or production write is required.
+
+The machine-readable evidence and review shapes are `evidenceSchema` and `reviewSchema` in `scripts/workshop-verification.cjs`; both engines enforce the identical contract. `evidence` identifies the actual builder dispatch and a fresh `attemptId` per repair. Bouncer returns a separate `review`, tied to that attempt, naming its independent dispatch/transcript trace, reviewed paths, executed checks, outcome trace and unresolved findings (including zero). A pass missing any of these remains unverified. The Manager persists implementation and review as separate ledger appends; see its skill for the commands.
 
 **A `built` verdict can also carry `dependencyAgent`/`dependencyAsk`** — for something noticed in another lane's file that your own fix doesn't need to finish. Use those two fields, not `notes`: prose in `notes` is invisible to the routing that dispatches these the same run, so it sits until a human rereads the ledger by hand instead (observed 2026-08-03: a lane's own note named a one-line fix another lane's file needed and it never routed — someone had to catch it by hand the next day).
 

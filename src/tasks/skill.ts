@@ -643,8 +643,19 @@ export async function createApprovalRequest(
           // 'not_calendar' → a genuine non-calendar ask → allow; fall through.
         }
 
-        // Boundary-validate requester_slack_id via resolveSlackId helper.
-        {
+        // The requester owns the counter-acceptance permission and the relay.
+        // A colleague cannot nominate that identity through model-authored data.
+        // Owner-authorized asks may still name a colleague on whose behalf he asks.
+        if (context.userId !== ownerUserId || context.authority !== 'owner') {
+          if (!context.userId?.trim()) {
+            return { error: 'not_permitted', reason: 'An authenticated requester is required to raise an approval.' };
+          }
+          delete payload.requester_slack_id;
+          delete payload.requester_name;
+          if (context.userId !== ownerUserId) payload.requester_slack_id = context.userId;
+        } else {
+          // Resolve owner-nominated recipients; a model claim never substitutes
+          // for the authenticated colleague identity above.
           const rawId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
           const rawName = typeof payload.requester_name === 'string' ? payload.requester_name : undefined;
           if (rawId !== undefined) {
@@ -758,17 +769,9 @@ export async function createApprovalRequest(
           expiresAt = addWorkdays(base, n, profile);
         }
 
-        // gh#requester-id-mint-tests-senderrole-not-authenticated-identity —
-        // this derivation used to gate on `senderRole`, which reads
-        // 'colleague' both for a real colleague AND for the owner clamped
-        // into a room/MPIM (see the two siblings' own comments at :90 and
-        // :340, and processMessage.ts's `role` vs `authority`). That minted
-        // requester_slack_id = the OWNER'S OWN id whenever he raised an
-        // approval himself from a channel/MPIM, recording his own ask as if
-        // a colleague had raised it. Compare the authenticated identity
-        // directly, matching the two siblings exactly.
-        const requesterSlackId = (typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined)
-          ?? (context.authority === 'colleague' && context.userId !== ownerUserId ? context.userId : undefined);
+        // Already bound to the authenticated caller (or owner-nominated recipient)
+        // above, before dedup, persistence and requester-dependent lookups.
+        const requesterSlackId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
         // v2.9.4 (#107d) — when Sonnet doesn't pass requester_name, auto-populate
         // it from people_memory using requester_slack_id. Pre-fix the row stored
         // requester_name=null, and `notifyRequesterOfDecision` rendered "Hey"
@@ -2038,11 +2041,19 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             });
             return { error: 'not_permitted', reason: 'Only the owner can resolve approvals (except amending state).' };
           }
-          // Also verify the colleague IS the requester on this row — prevents a
-          // random colleague from approving someone else's amending approval.
-          if (probe.requester_slack_id && probe.requester_slack_id !== context.userId) {
-            logger.warn('Colleague attempted resolve_approval but is not the requester', {
-              userId: context.userId, requestId, requesterSlackId: probe.requester_slack_id,
+          // Also verify both identities are present and the authenticated
+          // colleague IS the stored requester. Fail closed on legacy/corrupt
+          // rows with no requester instead of treating a missing identity as a
+          // wildcard that can approve the owner's counter.
+          const authenticatedUserId = context.userId;
+          const storedRequesterId = probe.requester_slack_id;
+          if (
+            !authenticatedUserId?.trim()
+            || !storedRequesterId?.trim()
+            || storedRequesterId !== authenticatedUserId
+          ) {
+            logger.warn('Colleague attempted resolve_approval without an exact requester identity match', {
+              userId: authenticatedUserId, requestId, requesterSlackId: storedRequesterId,
             });
             return { error: 'not_permitted', reason: 'Only the original requester can respond to an amending approval.' };
           }
@@ -2288,6 +2299,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             // an awaiting_colleague row must close, not bounce back to
             // himself as if a real colleague had answered.
             resolvedByColleague: context.authority !== 'owner',
+            resolvingUserId: context.userId,
             // v3.4.7 — reverse-order double-notify guard: if Sonnet already
             // successfully message_colleague'd the requester this turn, the
             // resolver skips its own relay (they were already told).

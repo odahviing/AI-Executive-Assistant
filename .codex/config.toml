@@ -1,0 +1,3 @@
+# Workshop Manager default for future project sessions; worker and reviewer overrides live in .claude/WORKSHOP.md.
+model = "gpt-6-astra"
+model_reasoning_effort = "low"

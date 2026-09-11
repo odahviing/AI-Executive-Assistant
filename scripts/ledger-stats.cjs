@@ -207,9 +207,10 @@ const citesReleaseFile = (cited, releaseFiles) => {
 // shipped below so one change stays one fix in the count. `wrapped` closes a
 // bookkeeping row from WRAP_UP.md's GitHub-issues step (built -> shipped companion, or a
 // GitHub-sync-closed ticket) so it never misreads as a fresh open decision.
-const CLOSED = new Set(['built', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted']);
+const { CLOSED, normRef, refTokens, collapseRows, isClosed, verificationBlockers, readRows: readVerificationRows } = require('./workshop-verification.cjs');
+const collapseOpenRows = collapseRows;
 
-module.exports = { citesReleaseFile, CLOSED, fileTouchDates };
+module.exports = { citesReleaseFile, CLOSED, fileTouchDates, collapseOpenRows, verificationBlockers };
 // Required by the fixture for that function alone, and by `ledger-file.cjs`
 // for `CLOSED`. Everything below is the CLI and ends in `process.exit`, so a
 // plain `require` of this file from anywhere else would run the whole script.
@@ -233,6 +234,28 @@ const openOnly = argv.includes('--open');
 // the one collapse-by-ref pass, so a fix to that logic cannot drift between
 // what a person reads and what `--wrap` cross-references.
 const jsonOut = argv.includes('--json');
+let verificationFailed = false;
+
+// Completion is a code gate for direct dispatches and either engine. Reports
+// may describe blocked work, but cannot exit green while a pass is absent/stale.
+if (argv.includes('--verification') || argv.includes('--report') || argv.includes('--wrap')) {
+  try {
+    const all = readVerificationRows(LEDGER);
+    const statePath = path.join(REPO, '.claude', 'agent-loop', 'state.json');
+    const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : {};
+    const blockers = verificationBlockers(all, REPO, state);
+    if (argv.includes('--verification') && jsonOut) console.log(JSON.stringify(blockers));
+    else {
+      console.log(`VERIFICATION — ${blockers.length} blocking ref(s)`);
+      for (const r of blockers) console.log(`  ${r.ref} [${r.verdict}]: ${r.errors.join('; ')}`);
+    }
+    verificationFailed = blockers.length > 0;
+    if ((blockers.length && !argv.includes('--wrap')) || argv.includes('--verification')) process.exit(blockers.length ? 1 : 0);
+  } catch (e) {
+    console.error(`VERIFICATION NOT ESTABLISHED — ${e.message}`);
+    process.exit(1);
+  }
+}
 
 // --architect reads the OTHER ledger: `.claude/agent-loop/architect-ledger.jsonl`,
 // the framework's own backlog, filed by whichever chat hit the problem via
@@ -433,7 +456,8 @@ if (argv.includes('--already-built')) {
     if (!r.ref) continue; // unindexed rows can never collapse or be matched by ref — same limitation `--open` has
     latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r }); // ledger is chronological, so later fields win
   }
-  const candidates = [...latest.values()].filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
+  const current = collapseRows(all);
+  const candidates = current.closed.filter((r) => ['built', 'verified'].includes(r.verdict) && r.state !== 'wrapped');
 
   // Fact 2 — every date a wrap (a version-bump commit) landed, same source
   // `--wrap` already reads (`git log`, subject starting `<major>.<minor>.<patch>`).
@@ -567,7 +591,7 @@ if (argv.includes('--closed-refs')) {
     if (!r.ref) continue; // unindexed rows can never collapse or be matched by ref
     latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r });
   }
-  const refs = [...latest.values()].filter((r) => CLOSED.has(r.verdict)).map((r) => r.ref);
+  const refs = collapseRows(all).closed.map((r) => r.ref);
   if (jsonOut) {
     console.log(JSON.stringify(refs));
   } else {
@@ -603,7 +627,7 @@ if (argv.includes('--open-known')) {
     latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r });
   }
   const terse = argv.includes('--terse');
-  const rows = [...latest.values()]
+  const rows = collapseRows(all).closed
     .filter((r) => r.verdict === 'converted' || r.verdict === 'declined')
     .map((r) => ({
       ref: r.ref,
@@ -678,7 +702,7 @@ if (argOf('--wrap')) {
   for (const c of hits.slice().reverse()) console.log(`  ${c.sha.slice(0, 7)}  ${c.subject.slice(0, 88)}`);
   if (!added.length) {
     console.log(`\nNo ledger row was appended by those commits. Either the wrap's bookkeeping commit names a different version, or the rows were never written.\n`);
-    process.exit(0);
+    process.exit(verificationFailed ? 1 : 0);
   }
   // Two populations, and conflating them would rebuild the very wrong number this
   // exists to catch. EVERYTHING APPENDED includes the runs' work, the backlog
@@ -702,7 +726,7 @@ if (argOf('--wrap')) {
   for (const r of added) runs.set(r.runId || '(no runId)', (runs.get(r.runId || '(no runId)') || 0) + 1);
   console.log(`  by run: ${[...runs.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · ')}`);
   if (wrapRows.length) {
-    const verified = wrapRows.filter((r) => r.verdict === 'built').length;
+    const verified = new Set(added.filter((r) => r.verdict === 'verified' && !r.verificationOf).map(r => normRef(r.ref))).size;
     console.log(`\nTHE WRAP'S OWN ROWS — ${wrapRows.length}, stamped \`runId: wrap-${V}\`. This is the set the wrap summary counts.`);
     for (const [v, list] of split(wrapRows)) console.log(`  ${String(v).padEnd(22)} ${String(list.length).padStart(2)}  ${list.map((r) => r.ref || '(no ref)').join(', ').slice(0, 110)}`);
     console.log(`\n  "${wrapRows.length} shipped, ${verified} verified" — check the wrap summary against that pair.`);
@@ -739,8 +763,8 @@ if (argOf('--wrap')) {
     // companion is a SEPARATE row). Flagged explicitly below, not inferred from a
     // count. And it now EXITS 1 on a real finding, matching `--report`'s own
     // acceptance-test convention, instead of only printing and returning 0.
-    const SHIPPED_THIS_WRAP = new Set(['built', 'confirmed-other-lane', 'already-fixed']);
-    const builtRefs = [...new Set(wrapRows.filter((r) => r.verdict === 'built' && r.ref).map((r) => r.ref))];
+    const SHIPPED_THIS_WRAP = new Set(['built', 'verified', 'confirmed-other-lane', 'already-fixed']);
+    const builtRefs = [...new Set(wrapRows.filter((r) => ['built', 'verified'].includes(r.verdict) && !r.verificationOf && r.ref).map((r) => r.ref))];
     // `closed` counts too — a GitHub-sync row saying the ticket is CLOSED is
     // strictly stronger evidence of shipping than `wrapped` alone, and treating
     // only the exact word as proof is what let a correctly-shaped row (this wrap's
@@ -750,7 +774,7 @@ if (argOf('--wrap')) {
     console.log(`\nBUILT -> WRAPPED — ${builtRefs.length - missingWrapped.length} of ${builtRefs.length} built ref(s) have a \`state:"wrapped"\` companion row.`);
     if (missingWrapped.length) console.log(`  MISSING for: ${missingWrapped.join(', ')}`);
 
-    const mutatedRows = wrapRows.filter((r) => r.verdict === 'built' && r.state === 'wrapped');
+    const mutatedRows = wrapRows.filter((r) => ['built', 'verified'].includes(r.verdict) && r.state === 'wrapped');
     if (mutatedRows.length)
       console.log(
         `  ! MUTATION-SHAPED — ${mutatedRows.length} row(s) carry BOTH \`verdict:"built"\` and \`state:"wrapped"\` on the SAME line, which answers its own check: ${mutatedRows.map((r) => r.ref || '(no ref)').join(', ')}. Steps 9 and 12 both require a separate companion row, never a mutated original.`,
@@ -859,7 +883,7 @@ if (argOf('--wrap')) {
     console.log(`Stamp \`runId: "wrap-<version>"\` on each report row at the wrap and this command names them exactly.`);
   }
   console.log('');
-  process.exit(0);
+  process.exit(verificationFailed ? 1 : 0);
 }
 
 // ── X27 · DOES THE REPORT'S OWN ARITHMETIC ADD UP? ──────────────────────────
@@ -1060,7 +1084,9 @@ if (argv.includes('--report')) {
     // the same drift this whole file exists to catch, just one window later.
     return rs.slice(from).filter((r) => !r.kind);
   })();
-  const builtSinceWrap = sinceWrap.filter((r) => r.verdict === 'built' && r.state !== 'wrapped');
+  // Linked refs are useful duplicate-dispatch identities in --already-built,
+  // but their parent's implementation is counted once on the owner's report.
+  const builtSinceWrap = collapseRows(sinceWrap).closed.filter((r) => ['built', 'verified'].includes(r.verdict) && !r.verificationOf && r.state !== 'wrapped');
   if (builtAt < 0 && builtSinceWrap.length) {
     console.log(
       `\n  ! NO BUILT LIST, and the ledger holds ${builtSinceWrap.length} \`built\` row(s) since the last wrap stamp: ${builtSinceWrap
@@ -1074,6 +1100,9 @@ if (argv.includes('--report')) {
     const claimedBuilt = (String(lines[builtAt]).match(/\((\d+)\)/) || [])[1];
     // A backticked span that is not a file path is an item; `createMeeting.ts:128` is not.
     const namedBuilt = (String(lines[builtAt]).match(/`[^`]+`/g) || []).filter((s) => !/[.:]/.test(s.slice(1, -1))).length;
+    const readyRefs = new Set(builtSinceWrap.map(r => normRef(r.ref)));
+    const unsupported = (String(lines[builtAt]).match(/`[^`]+`/g) || []).map(s => s.slice(1, -1)).filter(ref => !/[.:]/.test(ref) && !readyRefs.has(normRef(ref)));
+    if (unsupported.length) { bad += 1; console.log(`  ! BUILT LIST names refs without current verified implementation: ${unsupported.join(', ')}`); }
     const okBuilt = claimedBuilt === undefined || Number(claimedBuilt) === namedBuilt;
     if (!okBuilt) bad += 1;
     console.log(
@@ -1521,7 +1550,7 @@ const PUSHBACK = new Set(['needs-dependency', 'blocked-charter', 'needs-owner-de
 const RETIRED = { 'flagged-for-owner': 'queued-next-run' };
 const verdictOf = (r) => RETIRED[r.verdict] || r.verdict || '';
 
-const FINDINGS_ONLY = new Set(['queued-next-run', 'confirmed-other-lane', 'audit', 'declined', 'converted']);
+const FINDINGS_ONLY = new Set(['queued-next-run', 'confirmed-other-lane', 'audit', 'declined', 'converted', 'verified', 'verification-failed', 'verification-unproven', 'wrapped']);
 const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter', 'needs-owner-decision', 'queued-next-run'];
 
 // `audit` is a record that a findings-only pass RAN — not something to decide.
@@ -1576,26 +1605,7 @@ const VERDICTS = ['built', 'already-fixed', 'needs-dependency', 'blocked-charter
 // A SPACE is deliberately NOT a suffix separator. `gh#52 O3` is one piece of a
 // multi-lane ticket, and minting `52` from it would let one piece close its
 // parent — measured on 2026-07-30 as 4 extra collapses, three of them wrong.
-const normRef = (t) => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '');
-const refTokens = (ref) => {
-  const out = new Set();
-  const raw = String(ref || '').trim();
-  if (!raw) return out;
-  out.add(normRef(raw));
-  for (const part of raw.split(/[+,/]| and /i).map((s) => s.trim()).filter(Boolean)) {
-    out.add(normRef(part));
-    // `gh#41-step1` / `P19-part2` / `A2-1` → also close the base item. X34 · the
-    // suffix may now be NON-numeric — his scheme is `156-a` for a complaint and
-    // `153-blockA` for a raised blocker, so a suffix that was previously
-    // unmatchable had to become linkable or a child could never close its parent.
-    // Gated on the BASE looking like a bare id (`156`, `gh#158`, `P14`, `A2`)
-    // rather than on the suffix, which is what keeps a long slug ref like
-    // `gh#158-exception-must-be-name-scoped` from minting a junk base token.
-    const m = part.match(/^(.+?)[-–_](?:step|part|phase)?\s*([a-z0-9]{1,6})$/i);
-    if (m && /^(?:gh#)?\d+$|^[a-z]\d+$/i.test(m[1])) out.add(normRef(m[1]));
-  }
-  return out;
-};
+// normRef/refTokens and the chronological merge are shared with the writer.
 // ── X85 · ONE BUG, SEVERAL REFS ────────────────────────────────────────────
 // A bug legitimately wears more than one ref: a complaint of a ticket (`gh#157-b`),
 // a slug minted when the same defect arrived through the logs
@@ -1639,42 +1649,8 @@ const bugOf = (r) => parentOf(r.ref) || normRef(r.ref) || '(no ref)';
 // `args.pendingOverflow` directly. One collapse means the two can never disagree
 // on what is open — the exact drift the hand-synced array used to have against
 // the ledger (a row could go stale in one direction, missing in the other).
-function collapseOpenRows(scopedRows) {
-  const closedBy = new Map(); // ref token -> the row that closed it
-  for (const r of scopedRows) {
-    if (!CLOSED.has(r.verdict)) continue;
-    for (const t of refTokens(r.ref)) if (!closedBy.has(t)) closedBy.set(t, r);
-  }
-  // Keep the LATEST state per ref, so a re-raised item shows once with its newest
-  // state. X47 · MERGED, not overwritten — the same fix `--architect` carries, for
-  // the same reason: append-only means a row is legitimately several lines, and a
-  // later line that carries only what CHANGED must not blank the `lane`, `finding`
-  // and `rootCause` the first one held. That is what lets a re-read append
-  // `{date, ref, recheck}` and nothing else. Measured across all 344 rows on
-  // 2026-07-30: 15 refs have more than one open line and merging changes no printed
-  // label on any of them.
-  const latest = new Map();
-  const refless = [];
-  for (const r of scopedRows) {
-    if (CLOSED.has(r.verdict)) continue;
-    if (!r.ref) { refless.push(r); continue; }
-    latest.set(r.ref, { ...(latest.get(r.ref) || {}), ...r }); // ledger is chronological, so later fields win
-  }
-  const collapsed = [];
-  const open = [];
-  for (const r of latest.values()) {
-    // The CLOSER's ref is the one that expands into tokens; the open row is looked
-    // up by its own normalised ref alone. Expanding both would let a closed `gh#41-step1`
-    // collapse an open `gh#41-step5` through the shared base — measured as no
-    // difference on today's ledger, and a false close waiting for tomorrow's.
-    const closer = closedBy.get(normRef(r.ref));
-    if (closer) collapsed.push({ r, closer });
-    else open.push(r);
-  }
-  // A row with no ref cannot be collapsed — that is exactly what `ref` is for.
-  open.push(...refless);
-  return { open, refless, collapsed };
-}
+// A later meaningful open event outranks a historical closer. Bare rechecks
+// merge metadata without reopening a legacy closure; siblings never close each other.
 
 // ── X88 DEFERRAL HELPERS — shared by `--open`'s OVERDUE line and `--queued`'s
 // hold-for-one-run screen (X216). Generic over verdict: a `deferred` marker on
@@ -1757,7 +1733,7 @@ if (openOnly) {
     process.exit(0);
   }
   if (!open.length) {
-    console.log('\nNothing open. Every ledger row is built or already-fixed.\n');
+    console.log('\nNothing open. Every ref has a current verified or legacy closing disposition.\n');
     process.exit(0);
   }
   // X38 · the same staleness check as `--architect`, on the same helper. A row
@@ -1965,6 +1941,10 @@ const pad = (s, n) => String(s).padEnd(n);
 const lpad = (s, n) => String(s).padStart(n);
 const COLS = [
   ['built', 'built'],
+  ['implemented', 'impl'],
+  ['verified', 'verified'],
+  ['verification-failed', 'v-fail'],
+  ['verification-unproven', 'v-open'],
   ['already-fixed', 'alrdy'],
   ['needs-dependency', 'dep'],
   ['blocked-charter', 'blockd'],
@@ -2106,6 +2086,7 @@ if (byRun) {
 //      as `--open` does, not a second, independently-typed copy of either.
 if (showIndex) {
   const parentRef = (ref) => String(ref || '').replace(/(>dep)+$/, '');
+  const currentOpen = new Set(collapseRows(scoped).open.map(r => normRef(parentRef(r.ref))));
   // `CITED` matches a bare `scheduleRules.ts` and a qualified `src/utils/scheduleRules.ts`
   // as two DIFFERENT strings for the same file, depending only on how a lane happened
   // to write the citation — a plain `Set` shows both. Keyed by basename instead,
@@ -2168,7 +2149,7 @@ if (showIndex) {
     e.dates.sort();
     e.first = e.dates[0] || '';
     e.last = e.dates[e.dates.length - 1] || '';
-    e.open = !CLOSED.has(e.verdict);
+    e.open = currentOpen.has(normRef(e.ref));
   }
 
   const idx = new Map();

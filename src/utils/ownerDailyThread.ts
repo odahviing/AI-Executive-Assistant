@@ -39,6 +39,7 @@ import type { Connection } from '../connections/types';
 import type { CreateRequestInput } from '../core/requests/types';
 import { getEffectiveToday } from './effectiveToday';
 import { getDb } from '../db/client';
+import { appendToConversation } from '../db/conversations';
 import logger from './logger';
 
 export interface OwnerDailyThread {
@@ -125,9 +126,37 @@ export interface OwnerDecisionPost {
   reason?: string;
 }
 
+/** Record a delivered decision message under the thread the owner will answer in. */
+function recordOwnerDecisionInHistory(opts: {
+  threadTs: string | undefined;
+  channel: string | undefined;
+  messageTs: string | undefined;
+  text: string;
+  label: string;
+}): void {
+  if (!opts.threadTs) return;
+  try {
+    appendToConversation(opts.threadTs, opts.channel ?? '', {
+      role: 'assistant',
+      content: opts.text,
+      ts: opts.messageTs,
+    });
+  } catch (err) {
+    // Delivery already succeeded. A history-write failure must not turn that
+    // success into a retry that posts the same decision twice.
+    logger.warn(`postOwnerDecision — history append failed (${opts.label})`, {
+      channel: opts.channel,
+      threadTs: opts.threadTs,
+      err: String(err).slice(0, 200),
+    });
+  }
+}
+
 /**
  * THE owner-facing post path for anything that needs his decision — the first
  * ask, a colleague's counter bouncing back, a stale ask being revived.
+ * A confirmed delivery is also appended to conversation history under the
+ * thread the owner will answer in, so the next turn sees the decision text.
  *
  * Why this exists (#45): the daily thread had exactly ONE call site
  * (`create_approval`), so every other decision-shaped message reached the owner
@@ -175,6 +204,7 @@ export async function postOwnerDecision(opts: {
     if (channel && threadTs) {
       const res = await conn.postToChannel(channel, text, { threadTs });
       if (res.ok) {
+        recordOwnerDecisionInHistory({ threadTs, channel, messageTs: res.ts, text, label });
         logger.info(`postOwnerDecision — posted (${label})`, { ownerUserId, channel, threadTs });
         return { ok: true, channel, threadTs, ts: res.ts };
       }
@@ -189,6 +219,7 @@ export async function postOwnerDecision(opts: {
       });
       return { ok: false, reason: dm.reason };
     }
+    recordOwnerDecisionInHistory({ threadTs: dm.ts, channel: dm.ref, messageTs: dm.ts, text, label });
     return { ok: true, channel: dm.ref, ts: dm.ts };
   } catch (err) {
     logger.error(`postOwnerDecision — threw, owner never got this decision ask (${label})`, {

@@ -6,6 +6,8 @@ Until now each hand-copied its own version of this into its own "Bars" footer �
 
 **Do not paste this text into a charter.** A charter states only what is specific to it — its expertise, its scope, its own return contract — and points here for the rest, the same pattern `WORKSHOP.md` already set. This file is reconciled, not merged: where the four originals said the same thing four ways, this says it once, in the clearest of the four; it is not their union.
 
+Dispatch/model defaults and the compact-context, first-handoff evidence, review and usage-checkpoint policy live in WORKSHOP.md, “Dispatch and cost policy”; apply them to these roles too.
+
 ## Who this is for, and what it does not cover
 
 The non-builders find the work (`editor`), shape a product ask into a plan (`framer`), gate a finished wave before it ships (`bouncer`), and sweep the codebase for hygiene (`cleaner`). Each charter carries the expertise that makes it that agent — what it knows a model gets wrong by default. **This file carries none of that.** It is only what all of them owe regardless of their expertise: how to report, how not to waste a turn, where the line on shipping sits. A rule specific to one agent's subject (routing logic, trace method, a hygiene proof) stays in that agent's own charter.
@@ -18,7 +20,7 @@ The non-builders find the work (`editor`), shape a product ask into a plan (`fra
 
 - **Counts are data, not prose — report your own numbers, including zero.** Every silent failure this loop has had was a step that did nothing and looked like success: a watermark that never filtered, a check that never fired, a match that never ran. None was caught for weeks because no number was ever printed next to it. So report what you actually did, always, even when the answer is zero: **an omitted count is indistinguishable from a check that never ran, and is treated as one.** An empty array is an answer; a missing field is not. This bar outranks "answer first" above — a count is never cut to keep an answer short.
 
-- **Fewer, bigger turns.** Batch independent reads and greps into one turn rather than trickling them. Read the region a citation names, not the whole file. Turn count, not reasoning, is what a dispatch costs — every turn re-reads your entire accumulated context.
+- **Fewer, bigger turns.** Batch independent reads and greps into one turn rather than trickling them. Read the region a citation names, not the whole file. Extra turns and large contexts add repeated input; measure actual usage rather than claiming a savings.
 
 - **Shell hygiene** (`CLAUDE.md`): no `cd` prefix, no `;`/`&&` chaining, no `node -e`/`-p`. Each one triggers a permission prompt that stalls an unattended run.
 

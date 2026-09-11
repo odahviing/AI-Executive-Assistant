@@ -1,7 +1,7 @@
 /**
  * offeredSlotsStash (v3.3.8) — per-conversation memory of the slots Maelle
- * OFFERED a colleague, so a pick binds to the offered instant instead of
- * being re-derived from prose.
+ * offered, so a later decision binds to the offered instant instead of being
+ * re-derived from prose or changed by booking-time grid cleanup.
  *
  * Why: the coord state machine stored its offers on the job row
  * (`proposed_slots`) and parsed picks against them — deterministic. The
@@ -13,10 +13,9 @@
  * incident). Quiet variant of the same class: the wrong day is FREE and the
  * meeting books a week late, silently.
  *
- * This module is the missing state; the orchestrator injects it as a
- * binding block on later turns in the same conversation (same rail as the
- * availability pre-check verdicts). Sonnet stays the only decider — it just
- * receives the exact instants it offered.
+ * This module is the missing state. The orchestrator injects it for colleague
+ * and email picks; create/move handlers read it directly for every caller before
+ * grid cleanup. Sonnet stays the decider while code preserves the chosen instant.
  *
  * Keying mirrors inboundQueue.keyFor: a 1:1 DM is ONE conversation (every
  * top-level DM message gets its own threadTs, so thread-keying would never
@@ -202,6 +201,18 @@ function getLiveEntry(channelId: string, threadTs?: string): Entry | null {
 /** The offer currently on the table for this conversation, or null. */
 export function getOfferedSlots(channelId: string, threadTs?: string): OfferedSlot[] | null {
   return getLiveEntry(channelId, threadTs)?.slots ?? null;
+}
+
+/**
+ * Whether this exact instant is still on the conversation's offered list.
+ * Booking handlers use this before their normal quarter-grid cleanup: once a
+ * human approves a tool-produced offer, that offer is binding even off-grid.
+ */
+export function wasOfferedSlot(channelId: string, threadTs: string | undefined, startIso: string): boolean {
+  const startMs = Date.parse(startIso);
+  if (!Number.isFinite(startMs)) return false;
+  return (getLiveEntry(channelId, threadTs)?.slots ?? [])
+    .some(slot => Date.parse(slot.startIso) === startMs);
 }
 
 /**

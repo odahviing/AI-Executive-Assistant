@@ -1,3 +1,118 @@
+// BEGIN WORKSHOP CONTRACT
+const workshopContract = (() => {
+  const text = x => typeof x === 'string' && x.trim().length > 0
+  const array = x => Array.isArray(x) ? x : []
+  const strings = x => Array.isArray(x) && x.every(text)
+  const unique = x => new Set(x).size === x.length
+  const checkEvidence = e => {
+    const errors = []
+    if (!e || e.version !== 1) return ['missing evidence version 1']
+    for (const key of ['attemptId', 'builder']) if (!text(e[key])) errors.push(`missing ${key}`)
+    if (!strings(e.files) || !e.files.length || !unique(e.files)) errors.push('files must enumerate every changed file once')
+    if (!['deterministic', 'prompt-only', 'prose-only'].includes(e.changeKind)) errors.push('missing changeKind')
+    if (e.changeKind !== 'deterministic' && !text(e.exception)) errors.push('prompt/prose exception needs an explicit limitation')
+    const suites = array(e.regressions)
+    if (!Array.isArray(e.regressions) || !unique(suites.map(t => t.id))) errors.push('regressions must be an explicit array with unique ids')
+    if (e.changeKind === 'deterministic' && !suites.length) errors.push('deterministic change needs executed fail-before/pass-after regression')
+    const caseIds = []
+    for (const t of suites) {
+      if (!text(t.id) || !text(t.command) || !text(t.beforeRevision)) errors.push('regression needs id, command and beforeRevision')
+      for (const phase of ['before', 'after']) {
+        const r = t[phase] || {}
+        if (!Number.isInteger(r.exitCode) || !Number.isInteger(r.passed) || r.passed < 0 || !Number.isInteger(r.failed) || r.failed < 0 || !text(r.output)) errors.push(`${t.id}: ${phase} needs executed exit code, counts and output evidence`)
+      }
+      if (!t.before || t.before.exitCode === 0 || !(t.before.failed > 0)) errors.push(`${t.id}: no failing before execution`)
+      if (!t.after || t.after.exitCode !== 0 || t.after.failed !== 0 || !(t.after.passed > 0)) errors.push(`${t.id}: after execution did not pass`)
+      const cases = array(t.cases)
+      if (!cases.some(c => c.kind === 'regression' && c.before === 'fail' && c.after === 'pass')) errors.push(`${t.id}: missing failing regression case`)
+      if (!cases.some(c => c.kind === 'preserved' && c.before === 'pass' && c.after === 'pass')) errors.push(`${t.id}: missing legitimate preserved case`)
+      if (cases.length > (t.after || {}).passed) errors.push(`${t.id}: case count exceeds executed passes`)
+      if (cases.filter(c => c.kind === 'preserved').length > (t.before || {}).passed || cases.filter(c => c.kind === 'regression').length > (t.before || {}).failed) errors.push(`${t.id}: before counts cannot support the named cases`)
+      for (const c of cases) {
+        if (!text(c.id) || !text(c.evidence) || !['regression', 'preserved'].includes(c.kind) || c.after !== 'pass' || c.before !== (c.kind === 'regression' ? 'fail' : 'pass')) errors.push(`${t.id}: malformed case evidence`)
+        caseIds.push(c.id)
+      }
+    }
+    if (!unique(caseIds)) errors.push('case ids must be unique across suites')
+    const b = e.boundaries || {}
+    const paths = array(b.paths)
+    if (e.changeKind !== 'prose-only' && (!text(b.inventoryCommand) || !paths.length)) errors.push('missing producer/consumer inventory and boundary paths')
+    if (!Array.isArray(b.paths) || !unique(paths.map(p => p.id))) errors.push('boundary paths must be explicit and unique')
+    if (!strings(b.changedGuards) || !unique(b.changedGuards)) errors.push('changedGuards must be an explicit unique list, including zero')
+    for (const p of paths) {
+      for (const key of ['id', 'producer', 'state', 'consumer', 'evidence']) if (!text(p[key])) errors.push(`boundary ${p.id || '?'}: missing ${key}`)
+      if (p.status !== 'covered') errors.push(`boundary ${p.id}: ${p.status || 'missing'} path blocks completion`)
+      if (!strings(p.caseIds) || (e.changeKind === 'deterministic' && !p.caseIds.length) || array(p.caseIds).some(id => !caseIds.includes(id))) errors.push(`boundary ${p.id}: missing executed case coverage`)
+      if (p.guard && (!array(b.changedGuards).includes(p.guard) || !['accept', 'reject'].includes(p.direction))) errors.push(`boundary ${p.id}: unknown guard/direction`)
+    }
+    for (const guard of array(b.changedGuards)) for (const direction of ['accept', 'reject']) {
+      if (!paths.some(p => p.guard === guard && p.direction === direction && p.status === 'covered')) errors.push(`guard ${guard}: missing ${direction} direction`)
+    }
+    const surfaces = array(b.surfaces)
+    if (!unique(surfaces.map(s => s.id))) errors.push('duplicate surface declaration')
+    if (e.changeKind !== 'prose-only') for (const id of ['owner', 'colleague', 'dm', 'room', 'unavailable']) {
+      const s = surfaces.find(s => s.id === id)
+      if (!s || !['covered', 'not-applicable'].includes(s.status) || !text(s.reason) || (s.status === 'covered' && (!strings(s.pathIds) || !s.pathIds.length || s.pathIds.some(p => !paths.some(x => x.id === p))))) errors.push(`surface ${id}: missing coverage or explicit non-applicability reason`)
+    }
+    return errors
+  }
+  const checkReview = (e, r) => {
+    const errors = checkEvidence(e)
+    if (!r || !['pass', 'fail', 'unproven'].includes(r.verdict)) return [...errors, 'missing independent Bouncer verdict']
+    if (!text(r.reviewer) || r.reviewer === e?.builder) errors.push('review must identify an independent dispatch')
+    if (!text(r.trace)) errors.push('missing actual review dispatch/transcript trace')
+    if (r.attemptId !== e?.attemptId) errors.push('review belongs to a different build attempt')
+    if (!text(r.reason)) errors.push('missing review evidence/reason')
+    if (r.verdict !== 'pass') return [...errors, `Bouncer ${r.verdict}: ${r.reason || 'no reason'}`]
+    if (r.outcome !== 'traced') errors.push('outcome is untraced')
+    if (r.inventoryComplete !== true || r.guardsComplete !== true) errors.push('Bouncer has not confirmed complete producer/consumer and guard inventories')
+    if (!Array.isArray(r.findings) || r.findings.length) errors.push('Bouncer findings missing or unresolved')
+    const ids = array(e?.boundaries?.paths).map(p => p.id)
+    if (!strings(r.reviewedPaths) || !unique(r.reviewedPaths) || r.reviewedPaths.length !== ids.length || ids.some(id => !r.reviewedPaths.includes(id))) errors.push('independent boundary review is incomplete')
+    if (!Array.isArray(r.checks)) errors.push('missing executed review checks, including zero')
+    if (!unique(array(r.checks).map(c => c.id)) || array(r.checks).some(c => c.exitCode !== 0 || c.failed !== 0)) errors.push('duplicate or failed independent review execution')
+    for (const t of array(e?.regressions)) {
+      const c = array(r.checks).find(c => c.id === t.id)
+      if (!c || !text(c.command) || !text(c.output) || c.exitCode !== 0 || c.failed !== 0 || !Number.isInteger(c.passed) || c.passed < t.cases.length) errors.push(`${t.id}: independent regression execution missing/failed`)
+    }
+    if (e?.changeKind === 'prompt-only' && r.scope !== 'structural') errors.push('prompt-only review can establish structural inputs only')
+    return errors
+  }
+  const gateBuild = r => {
+    if (r.verdict !== 'built') return r
+    const errors = checkEvidence(r.evidence)
+    return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [evidence gate: ${errors.join('; ')}]` } : r
+  }
+  const gateFinal = r => {
+    if (r.verdict !== 'built') return r
+    const errors = checkReview(r.evidence, r.review)
+    return errors.length ? { ...r, verdict: 'implemented', verificationErrors: errors, notes: `${r.notes || ''} [awaiting independent verification: ${errors.join('; ')}]` } : r
+  }
+  const acceptReviews = (builds, check, reviews) => {
+    if (!check) return
+    check.results = array(check.results).map(r => {
+      const built = builds.find(b => b.id === r.id && b.verdict === 'built')
+      if (!built) return r
+      reviews.set(r.id, r.review)
+      if (r.verdict !== 'built') return r
+      const errors = checkReview(built.evidence, r.review)
+      return errors.length ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
+    })
+  }
+  // Schema lives beside validation; conditional requirements are enforced above.
+  const S = { type: 'string' }, N = { type: 'integer' }, B = { type: 'boolean' }
+  const list = items => ({ type: 'array', items })
+  const obj = properties => ({ type: 'object', properties, required: Object.keys(properties) })
+  const run = obj({ exitCode: N, passed: N, failed: N, output: S })
+  const evidenceSchema = obj({ version: { type: 'integer', enum: [1] }, attemptId: S, builder: S, changeKind: { type: 'string', enum: ['deterministic', 'prompt-only', 'prose-only'] }, files: list(S), exception: S,
+    regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
+    boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
+  const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
+  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema }
+})()
+// END WORKSHOP CONTRACT
+const workshopReviews = new Map()
+
 export const meta = {
   name: 'bugger',
   description:
@@ -507,13 +622,17 @@ const describeOpenBacklog = (o) =>
 // to-do list. Never select it from a timer or a staleness heuristic. Use it
 // only when the owner asks for findings without work.
 const MODE = A.mode === 'collect' ? 'collect' : 'full'
+// Fixed catalog; test-workshop-release-readiness.cjs checks this against GOLDEN_PATHS.md.
+const GOLDEN_IDS = Array.from({ length: 30 }, (_, i) => 'Z' + (i + 1))
+const GOLDEN = A.releaseCheckpoint === true // ordinary packages defer full Golden30 to release
 const VERIFY = A.verify !== false // one combined bouncer pass over the wave, unless explicitly off
 const CODE_LANES = ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'slackmaster', 'diplomat', 'handyman'] // run in parallel; context runs LAST, separately
 // Reasoning effort per agent (owner-set). Keys are agent names, renamed 2026-07-28.
 // The non-lane agents live here too, so every dispatch in this engine reads its
 // effort from ONE table — a hardcoded effort at the call site is invisible to
 // anyone tuning the run, which is how the editor sat at `medium` unnoticed.
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh', golden: 'medium' }
+// Claude SDK selectors stay provider-native; Codex defaults live in WORKSHOP.md.
+const EFFORT = { matchmaker: 'high', instructor: 'medium', slackmaster: 'medium', diplomat: 'medium', registrar: 'high', handyman: 'medium', librarian: 'medium', gatekeeper: 'high', editor: 'medium', framer: 'high', bouncer: 'high', golden: 'medium' }
 // X124 · Fail at LOAD, not mid-run. A half-finished rename — a lane changed in
 // CODE_LANES and missed here — otherwise dispatches with `effort: undefined` to
 // an agentType that does not exist, and reads as a perfectly normal run.
@@ -789,6 +908,8 @@ const VERDICTS = {
         type: 'object',
         properties: {
           id: { type: 'string' },
+          evidence: workshopContract.evidenceSchema,
+          review: workshopContract.reviewSchema,
           // X66 · `confirmed-other-lane` — the row is DONE, and you are not the
           // one who did it. A lane resumed to close out a dependency returned
           // `built` for a change gatekeeper had made (wf_0cebe938-c81, registrar
@@ -1830,6 +1951,7 @@ if (queue.length) {
 // `opus` is PINNED below rather than inherited — and why it matters more now
 // that the lanes themselves run on Sonnet.
 phase('Verify')
+results = results.map(workshopContract.gateBuild)
 let verified = results
 let verifiedClean = []
 let verifyDepAsks = []
@@ -2038,44 +2160,17 @@ if (VERIFY) {
       else log(`Joint-fix candidates: 0 — no \`>dep\` chain, no \`confirmed-other-lane\`, and no file cited by two lanes. Question 1b has nothing to trace this wave.`)
     }
 
-    // ── 2026-08-30 · THE GOLDEN BATTERY — launched BEFORE the bouncer, awaited
-    // after, so the two read-only passes run in parallel (same concurrency the
-    // bounce rounds already use via `parallel`). Deliberately a SEPARATE cheap
-    // dispatch rather than +25-40% reading folded into the Fable-tier bouncer:
-    // measured 2026-08-30 (spend.cjs), a Sonnet read-only pass runs $1.50-3
-    // against the bouncer's $12+ average, and the battery deliberately reads
-    // FIXED anchors independent of this wave's diff, so it loses nothing by
-    // not sharing the bouncer's context. The rules live in the battery file's
-    // own header — this brief carries only the pointer and the return shape.
-    // `agentType: 'general-purpose'` is the built-in read-only type (no
-    // charter of its own — the battery file IS its whole law). If this
-    // runtime ever refuses a built-in type, `agent()` returns null after its
-    // retries and the GOLDEN warning below names it loudly (X124's class:
-    // never let a bad type read as a quiet clean run); the fallback then is
-    // `agentType: 'bouncer', model: 'sonnet'`, which is verified to work.
-    //
-    // 2026-08-31 · PARALLEL IS THE DECISION, not an accident of insertion.
-    // The owner asked whether this should gate cheap-first — battery, then
-    // the bouncer only on a clean battery. HERE it should not: a golden
-    // `fail` enters the bounce ladder below as one more overturn, and each
-    // round's re-check is scoped to the bounced rows only ("never the whole
-    // diff again"), so the bouncer's full pass is never re-run and nothing
-    // it spent is wasted by a battery fail. Gating would serialize two
-    // independent read-only passes on every wave to save a dispatch no path
-    // ever re-spends — and would need a second, pre-bouncer repair loop for
-    // golden fails that the shared ladder already provides. The WRAP is the
-    // opposite case and DOES gate (WRAP_UP.md's pre-wrap verify step):
-    // no ladder there, a fail means fix-and-re-run the whole pass, so the
-    // battery runs first and the Fable pass waits for it.
-    const goldenPromise = agent(
-      `GOLDEN-PATH BATTERY — the fixed unit-test floor, run in FULL on every verify pass.\n\n` +
+    // Full Golden30 is explicit release-checkpoint work. Ordinary package
+    // review stays independent and reports the deferred battery honestly.
+    const goldenPromise = GOLDEN ? agent(
+      `GOLDEN-PATH BATTERY — the full release-checkpoint run; record its snapshot so wrap can reuse it unchanged.\n\n` +
         `Read \`.claude/GOLDEN_PATHS.md\` and run EVERY item in it exactly per that file's own "How to run" header — verdict vocabulary, evidence bar, paper-only rule all live THERE, nowhere else. No sampling, no skipping items whose files look untouched.\n\n` +
         `Return \`itemsInFile\` (your own count of Z items in the file) and ONE \`goldenTraces\` entry per item. On a \`fail\`, copy the item's own \`lane:\` field into \`lane\` — the engine routes the repair with it.\n\n` +
         (waveFiles.length
           ? `THIS WAVE TOUCHED THESE FILES — any battery item whose anchors hit one of them needs its anchor's current load-bearing line quoted in \`evidence\`, per the battery header's pass rule:\n${waveFiles.map((f) => `  • ${f}`).join('\n')}`
           : `No wave file list was available — apply the battery header's lighter one-line pass rule to every item.`),
       { label: 'traces', phase: 'Verify', agentType: 'general-purpose', model: 'sonnet', effort: EFFORT.golden, schema: GOLDEN_OUT },
-    )
+    ) : null
 
     const check = await agent(
       // The bar, the standard, the seams-first scope, the trace sampling, the
@@ -2131,7 +2226,8 @@ if (VERIFY) {
       // hand dispatch can downgrade the one agent that must not be downgraded.
       { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
     )
-    verifyRan = !!check
+    workshopContract.acceptReviews(results, check, workshopReviews)
+  verifyRan = !!check
 
     // ── 2026-08-30 · collect the golden battery's return, launched above ─────
     const golden = await goldenPromise
@@ -2146,7 +2242,7 @@ if (VERIFY) {
       )
       goldenFails.forEach((f) => log(`  ! GOLDEN PATH BROKEN — ${f.id} (${f.lane || 'no lane returned'}): ${String(f.evidence || '(no evidence)').slice(0, 140)}`))
       goldenStale.forEach((s) => log(`  golden stale-anchor (re-pin, non-blocking) — ${s.id}: ${String(s.evidence || '').slice(0, 120)}`))
-    } else log('! THE GOLDEN BATTERY DID NOT RUN — its dispatch returned nothing. See the warning below; do not read this wave as battery-clean.')
+    } else if (GOLDEN) log('! THE GOLDEN BATTERY DID NOT RUN — its dispatch returned nothing. See the warning below; do not read this wave as battery-clean.')
 
     verifiedClean = (check && check.verifiedClean) || []
     discoveries = (check && check.discoveries) || []
@@ -2345,7 +2441,7 @@ if (VERIFY) {
       const bounceOut = await parallel(
         [...new Set(bounceItems.map((i) => i.lane))].map((lane) => () => dispatch(lane, bounceItems.filter((i) => i.lane === lane), true, round, model).then((r) => (r && r.results) || [])),
       )
-      const rebuilt = bounceOut.filter(Boolean).flat().filter((r) => r && roundIds.includes(r.id))
+      const rebuilt = bounceOut.filter(Boolean).flat().filter((r) => r && roundIds.includes(r.id)).map(workshopContract.gateBuild)
       // The new attempt REPLACES the last one — one row per item, same id, so
       // the manifest cannot count one bug as two fixes.
       const rebuiltIds = new Set(rebuilt.map((r) => r.id))
@@ -2388,9 +2484,10 @@ if (VERIFY) {
 
       // ── THE RE-CHECK — this round's bounced rows ONLY, never the whole diff again ──
       const rebuiltClaim = new Map(rebuilt.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed').map((r) => [r.id, r.verdict]))
-      const recheck = rebuilt.length
+      const recheckCandidates = rebuilt.filter(r => ['built', 'already-fixed'].includes(r.verdict))
+    const recheck = recheckCandidates.length
         ? await agent(
-            `**RE-CHECK — pass ${round + 1} of up to ${BOUNCE_LIMIT + 1} over ${rebuilt.length} row(s) you already overturned before.** Your charter holds the bar and the return contract; this is the same job, narrowed.\n\n` +
+            `**RE-CHECK — pass ${round + 1} of up to ${BOUNCE_LIMIT + 1} over ${rebuilt.length} row(s) you already overturned before.** Your charter holds the bar and the return contract; return the independent \`review\` evidence from WORKSHOP.md for each build attempt; this is the same job, narrowed.\n\n` +
               `**Scope is these rows and nothing else.** Do not re-read the rest of the wave — you passed it an hour ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
               `For each row: **what you refused is quoted on it.** Answer the one question — is the reported problem fixed now? Trace from the symptom, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
               (isLastRound
@@ -2401,7 +2498,7 @@ if (VERIFY) {
                 ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by an earlier pass and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.symptom}`).join('\n')}\n\n`
                 : '') +
               `WHAT YOU REFUSED, AND WHAT CAME BACK:\n${JSON.stringify(
-                rebuilt.map((r) => ({ ...r, _youRefused: finalOverturn.get(r.id) || '(no note)' })),
+                recheckCandidates.map((r) => ({ ...r, _youRefused: finalOverturn.get(r.id) || '(no note)' })),
                 null,
                 2,
               )}`,
@@ -2410,7 +2507,8 @@ if (VERIFY) {
         : null
       const thisRecheckRan = !!recheck
       if (rebuilt.length) bounceRecheckRan = bounceRecheckRan && thisRecheckRan
-      const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
+      workshopContract.acceptReviews(rebuilt, recheck, workshopReviews)
+    const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
       // A discovery raised by the re-check is next run's intake like any other.
       // It NEVER bounces — that is the loop with no exit.
       discoveries = discoveries.concat((recheck && recheck.discoveries) || [])
@@ -2477,6 +2575,10 @@ if (VERIFY) {
   }
 }
 
+verified = verified.map(r => workshopContract.gateFinal({ ...r, review: workshopReviews.get(r.id) }))
+const verificationPending = verified.filter(r => r.verdict === 'implemented' || r.review?.verdict === 'fail' || r.review?.verdict === 'unproven')
+log(`Independent verification: ${verified.filter(r => r.verdict === 'built').length} passed, ${verificationPending.length} pending/failed`)
+
 // ---- RUN MANIFEST — what each mechanism ACTUALLY did ---------------------
 // Not decoration. Every silent failure this engine has had was a step that did
 // nothing while the run reported success, and each one survived for weeks
@@ -2533,7 +2635,8 @@ const onHisDesk =
 // too. `already-fixed` counts as a close exactly like `built` — either way the
 // row is leaving the report on a claim nobody but the lane has checked.
 const closedRows = verified.filter((r) => r.verdict === 'built' || r.verdict === 'already-fixed')
-const noObservable = closedRows.filter((r) => String(r.observable || '').trim().length < 10)
+const implementationClaims = verified.filter(r => ['built', 'implemented', 'already-fixed'].includes(r.verdict))
+const noObservable = implementationClaims.filter((r) => String(r.observable || '').trim().length < 10)
 const manifest = {
   mode: MODE,
   preset: !!PRESET,
@@ -2753,6 +2856,9 @@ const manifest = {
   // fires on any shortfall. `fails` are also visible as `golden:Z<n>` refs
   // inside `bounce` above — they ride the same ladder as any overturn.
   golden: {
+    scope: 'release-checkpoint',
+    required: GOLDEN,
+    notRunReason: goldenRan ? '' : GOLDEN ? 'release checkpoint requested but battery did not return' : 'deferred to release checkpoint; not a pass',
     ran: goldenRan,
     itemsInFile: goldenItemsInFile,
     answered: goldenTraces.length,
@@ -2768,7 +2874,8 @@ const manifest = {
   // and `joint` above.
   observable: {
     closed: closedRows.length,
-    checked: closedRows.length - noObservable.length,
+    implemented: implementationClaims.filter(r => r.verdict !== 'already-fixed').length,
+    checked: implementationClaims.length - noObservable.length,
     missing: noObservable.length,
     missingIds: noObservable.map((r) => r.id),
   },
@@ -2854,7 +2961,7 @@ if (VERIFY && verifyRan && outcomeUntraced.length)
 // reads its diff afterward.
 if (noObservable.length)
   warnings.push(
-    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${closedRows.length} closed row(s) name no real-data check: ${noObservable
+    `MEASURED OBSERVABLE MISSING — ${noObservable.length} of ${implementationClaims.length} implementation/closure-claimed row(s) name no real-data check: ${noObservable
       .map((r) => r.id)
       .join(', ')}. The code may be correct and the real-world effect unchecked — this is o#227/o#228/o#229 repeating, where each brief's mechanism was built and nobody queried the live data it was meant to fix. Do not wrap these as confirmed.`,
   )
@@ -2901,7 +3008,7 @@ if (VERIFY && verifyAttempted > 0 && !verifyRan)
 // ── 2026-08-30 · THE GOLDEN BATTERY'S OWN GATES — same class as the verify's ──
 // A battery that silently did not run is the exact CLASS 2 blindness this
 // mechanism was built to close, so its absence is as loud as its findings.
-if (VERIFY && (verifyRan || verifyAttempted > 0) && !goldenRan)
+if (GOLDEN && !goldenRan)
   warnings.push(
     `THE GOLDEN BATTERY DID NOT RUN — its dispatch returned nothing (a dead subagent, or this runtime refusing agentType 'general-purpose'; if the latter, switch the call to agentType 'bouncer' + model 'sonnet'). The wave's golden paths are UNCHECKED. Run \`/golden\` by hand before wrapping.`,
   )
@@ -3081,7 +3188,7 @@ log(
     ` outcome:${outcomeCandidates.length - outcomeUntraced.length}/${outcomeCandidates.length}${outcomeUntraced.length ? ` UNTRACED:${outcomeUntraced.length}` : ''}` +
     // 2026-08-06 · printed on EVERY run, zeros included. `observed:0/0` says
     // nothing closed this wave; the field missing says a stale engine.
-    ` observed:${closedRows.length - noObservable.length}/${closedRows.length}${noObservable.length ? ` MISSING:${noObservable.length}` : ''}` +
+    ` observed:${implementationClaims.length - noObservable.length}/${closedRows.length}${noObservable.length ? ` MISSING:${noObservable.length}` : ''}` +
     // X144 · printed on EVERY run, zeros included. `joint:0/0` says there was no
     // multi-lane pair to trace; the field missing says a stale engine.
     ` joint:${jointCandidates.length - jointUntraced.length}/${jointCandidates.length}${manifest.joint.disagrees ? ` DISAGREE:${manifest.joint.disagrees}` : ''}${jointUntraced.length ? ` UNTRACED:${jointUntraced.length}` : ''}` +
@@ -3213,6 +3320,8 @@ const persist = {
 }
 
 // ---- return the structured report; the Manager persists it (workflow scripts have no filesystem) ----
+const packageReady = verificationPending.length === 0 && verified.every(r => ['built', 'already-fixed', 'confirmed-other-lane'].includes(r.verdict))
+
 return {
   manifest,
   warnings,
@@ -3251,6 +3360,7 @@ return {
     pending: pending.length,
   },
   results: verified,
+  verification: { passed: verified.filter(r => r.verdict === 'built').length, pending: verificationPending.map(r => r.id), packageReady, wrapReady: packageReady && GOLDEN && goldenRan && goldenItemsInFile === GOLDEN_IDS.length && goldenTraces.length === GOLDEN_IDS.length && new Set(goldenTraces.map(t => t.id)).size === GOLDEN_IDS.length && GOLDEN_IDS.every(id => goldenTraces.some(t => t.id === id && ['pass', 'stale-anchor'].includes(t.verdict))) },
   flagged,
   // Deliberately NOT built — the owner rules on the shape first. Render these in
   // the report as `pending owner` with the shapingQuestion, and dispatch whatever

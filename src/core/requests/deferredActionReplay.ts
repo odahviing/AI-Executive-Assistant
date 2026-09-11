@@ -16,13 +16,15 @@
  * db/people.ts write (see the branch below), handled before any SkillContext
  * is built.
  *
- * Errors PROPAGATE — they don't silently log+swallow. The resolver wraps each
- * call in try/catch and keeps the request in `awaiting_owner` on failure so
+ * Errors PROPAGATE — they don't silently log+swallow. For approval execution,
+ * the resolver keeps the request in `awaiting_owner` on failure so
  * the requester is never told "approved" for an action that never happened
  * (the phantom-confirmation class of bug). The replay also inspects the tool
  * result for `{ error: string }` / `{ success: false }` / `{ ok: false }`
- * shapes and throws on those — meeting tools return error sentinels rather
- * than throwing for rule violations, busy collisions, etc.
+ * shapes and requires an explicit success result — meeting tools return error
+ * sentinels rather than throwing for rule violations, busy collisions, etc.
+ * Optional rejection side effects remain best-effort: the resolver logs their
+ * failures without changing the owner's rejection into an action confirmation.
  */
 
 import type { UserProfile } from '../../config/userProfile';
@@ -97,10 +99,10 @@ export interface RunDeferredActionInput {
  * surface the concrete outcome — `booked_start`, `action_summary`, etc. —
  * instead of a bare "replayed create_meeting". Without it the resolver returned
  * no booking signal, so Sonnet hedged ("confirming that's what you mean?") AND
- * announced completion ("booking went through") in the same breath. Returns
- * undefined on the no-op paths (no connection / unsupported tool).
+ * announced completion ("booking went through") in the same breath. An unavailable
+ * executor or an unconfirmed result throws too; neither proves an action ran.
  */
-export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown> | undefined> {
+export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown>> {
   const { ownerUserId, profile, tool: rawTool, args, requestId, originChannel, originThreadTs, surface } = input;
 
   // Every caller (resolver.ts) only reaches this function after checking
@@ -109,12 +111,10 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // of the six replayable tools at the type level. Re-check the same
   // canonical list here (isReplayableTool, core/requests/types.ts) so the
   // rest of this function can narrow to `ReplayableTool` and the switch below
-  // can be exhaustive — a stray/legacy tool string is the same no-op as
-  // before, just decided in one place instead of falling through the old
-  // per-branch "else, unsupported" at the bottom.
+  // can be exhaustive. A stray/legacy tool string is a failure, never proof
+  // that the stored action ran.
   if (!isReplayableTool(rawTool)) {
-    logger.warn('runDeferredAction — tool is not in REPLAYABLE_TOOLS, skipping replay', { requestId, tool: rawTool });
-    return undefined;
+    throw new ReplayToolError(`Unsupported replay tool: ${rawTool}`, { error: 'unsupported_replay_tool' });
   }
   const tool = rawTool;
 
@@ -151,10 +151,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
   // Resolve the Slack connection so meeting handlers can shadow-DM the owner.
   const slackConn = getConnection(ownerUserId, 'slack');
   if (!slackConn) {
-    logger.warn('runDeferredAction — no Slack connection registered, skipping replay', {
-      requestId, tool,
-    });
-    return undefined;
+    throw new ReplayToolError('Replay unavailable: no Slack connection registered', { error: 'replay_connection_unavailable' });
   }
 
   // Build a minimal SkillContext that the tool handlers will accept. The
@@ -208,15 +205,12 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
       // member of ReplayableTool — so `tool` can only type as `never` here.
       // Add a member to REPLAYABLE_TOOLS (core/requests/types.ts) without
       // adding a matching branch above, and this line fails to compile
-      // instead of silently reaching this "unsupported tool" no-op at
-      // runtime the way an untyped `else` used to.
+      // instead of reaching an unsupported tool at runtime.
       const _exhaustive: never = tool;
-      logger.warn('runDeferredAction — unsupported tool, skipping replay', { requestId, tool: _exhaustive });
-      return undefined;
+      throw new ReplayToolError(`Unsupported replay tool: ${_exhaustive}`, { error: 'unsupported_replay_tool' });
     }
     if (!skill?.executeToolCall) {
-      logger.warn('runDeferredAction — skill has no executeToolCall, skipping replay', { requestId, tool });
-      return undefined;
+      throw new ReplayToolError('Replay unavailable: skill has no executor', { error: 'replay_executor_unavailable' });
     }
     const result = await skill.executeToolCall(tool, args, context);
 
@@ -240,6 +234,11 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
         throw new ReplayToolError(`tool returned ok:false (${reason})`, r);
       }
     }
+    // All replayable skill handlers confirm with success:true or ok:true.
+    // Empty/malformed results cannot authorize closure or a success relay.
+    if (!r || typeof r !== 'object' || Array.isArray(r) || (r.success !== true && r.ok !== true)) {
+      throw new ReplayToolError('Replay result did not confirm success; check the action before retrying', { error: 'replay_unconfirmed' });
+    }
 
     logger.info('runDeferredAction — replay completed', {
       requestId, tool,
@@ -247,7 +246,7 @@ export async function runDeferredAction(input: RunDeferredActionInput): Promise<
         ? JSON.stringify(result).slice(0, 240)
         : String(result).slice(0, 240),
     });
-    return (r && typeof r === 'object') ? r : undefined;
+    return r;
   } catch (err) {
     // Surface to caller — the resolver's outer try/catch keeps the request
     // in awaiting_owner so the owner can retry. Log here for visibility.

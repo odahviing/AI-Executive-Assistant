@@ -397,7 +397,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             add_room_email: { type: 'boolean' },
             start_is_explicit: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid time ("book at 14:40", "9:05"). Otherwise the handler snaps the start to the :00/:15/:30/:45 grid. Slots from find_available_slots are already aligned — leave unset for those.',
+              description: 'OPTIONAL (default false). Set TRUE only when the owner directly named an EXACT off-grid time ("book at 14:40", "9:05"). For an exact slot returned earlier in this conversation by find_available_slots, pass its start/end verbatim and leave this unset — the handler recognizes and preserves that offered instant. Other off-grid starts snap to the :00/:15/:30/:45 grid.',
             },
             must_be_after_event_id: {
               type: 'string',

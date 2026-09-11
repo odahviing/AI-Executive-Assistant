@@ -22,7 +22,7 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 ## Two gates that still belong to him — do not assume these
 
 - **The ship word itself.** Do not wrap because work has accumulated. Wait for "wrap" / "ship" / "commit" / "cut a version" / "bundle".
-- **A verify overturn blocks the wrap.** WRAP_UP.md's pre-wrap verify step is the ONE place this is spelled out — the golden battery first, then one adversarial pass forced to Fable over the full accumulated diff, and it runs BEFORE the version bump or CHANGELOG exist. Overturning a fix means do NOT wrap it in: report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **A verify overturn blocks the wrap.** WRAP_UP.md's pre-wrap verify step is the ONE place this is spelled out — one full release-checkpoint golden battery and one independent accumulated-diff review with WORKSHOP.md’s provider settings, and it runs BEFORE the version bump or CHANGELOG exist. Overturning a fix means do NOT wrap it in: report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
 
 ## Other standing rules
 
@@ -44,4 +44,4 @@ Four of them exist because they were once missed. Confirm each actually happened
 
 Issue closing, the boot stamp and the summary are that file's last three steps, and the CHANGELOG's one-question test closes it. All four stood in full in both files until 2026-08-01; **one copy, and it is that one.**
 
-**A fifth, newer than the rest and never duplicated in the first place: pre-wrap adversarial verify — the golden battery, then one pass forced to Fable over the full accumulated diff (WRAP_UP.md's pre-wrap verify step, run early, before the bump is decided).** An overturn or a battery `fail` blocks the wrap; confirm it ran before you call the wrap done.
+**A fifth, newer than the rest and never duplicated in the first place: pre-wrap adversarial verify — one full release-checkpoint golden battery and one independent accumulated-diff review with WORKSHOP.md’s provider settings (WRAP_UP.md's pre-wrap verify step, run early, before the bump is decided).** An overturn or a battery `fail` blocks the wrap; confirm it ran before you call the wrap done.

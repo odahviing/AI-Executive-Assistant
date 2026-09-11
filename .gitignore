@@ -46,3 +46,15 @@ Thumbs.db
 # cron run transcripts — quote live production logs (real names/message text),
 # generated each run, never source
 .claude/agent-loop/cron-logs/
+
+# Local Codex usage analysis — session/account metadata and generated reports.
+# Keep the current report on disk for review, but out of version control.
+/artifacts/usage-analysis/
+
+# Workshop run output — regenerated logs, evidence and review material.
+# Durable regression fixtures live under scripts/fixtures instead.
+/artifacts/workshop-verification/
+
+# Ephemeral isolated workspaces created by Workshop regression tests.
+/.workshop-before-linked-*/
+/.workshop-verification-*/

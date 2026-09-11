@@ -491,12 +491,10 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
     // Don't clobber a later change: if the meeting is no longer where this
     // move put it, someone already moved it again — nothing to revert.
     if (priorNewStart && probe?.startDateTime) {
-      const curMs = DateTime.fromISO(probe.startDateTime, { zone: probe.startTimeZone || 'UTC' }).toUTC().toMillis();
-      // priorNewStart is move_meeting's own outcome_json `new_start` — an
-      // offsetless OWNER-LOCAL clock string per the tool schema
-      // (meetings.ts:454), not UTC. Parsing with no zone parsed it in the
-      // PROCESS zone (UTC on the VM), an offset-sized mismatch against the
-      // correctly-zoned `curMs` that produced a false "already_changed".
+      const curMs = DateTime.fromISO(probe.startDateTime).toUTC().toMillis();
+      // priorNewStart is move_meeting's verified, offset-bearing effective
+      // start. Historical rows can still carry an offsetless owner-local value,
+      // so the owner zone remains the fallback for those rows.
       const expectedMs = DateTime.fromISO(priorNewStart, { zone: timezone }).toUTC().toMillis();
       if (Number.isFinite(curMs) && Number.isFinite(expectedMs) && Math.abs(curMs - expectedMs) > 5 * 60_000) {
         return {
@@ -901,7 +899,6 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
         // missing_floating_block branch reads this) and so the reply can name
         // the occurrence from the calendar rather than from chat memory.
         let preDeleteStartIso: string | undefined;
-        let preDeleteStartTz: string | undefined;
         let preDeleteSubject: string | undefined;
         // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) — the
         // event's own roster, captured once off this SAME probe (no extra
@@ -947,7 +944,6 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
             };
           }
           preDeleteStartIso = probe?.startDateTime;
-          preDeleteStartTz = probe?.startTimeZone;
           preDeleteSubject = probe?.subject;
           preDeleteAttendeeEmails = (probe?.attendees ?? [])
             .map(a => a?.emailAddress?.address ?? undefined)
@@ -1191,14 +1187,11 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           bookingThreadTs: context.threadTs,
           fulfillingRequestId: args._fulfilling_request_id as string | undefined,
         });
-        // #147.2 / M11-M13 — resolve the cancelled occurrence's instant ONCE, in
-        // code, and reuse it for every consumer below (the floating-block day, the
-        // narration label). `getEventType` sends no `Prefer: outlook.timezone`
-        // header, so Graph answers in UTC and says so in `startTimeZone` — bind to
-        // THAT zone, then convert to the owner's. Never re-derive the clock and
-        // never let the server's zone decide it.
+        // #147.2 / M11-M13 — getEventType already resolves Graph's separate
+        // wall-clock+zone pair into one offset-bearing instant. Convert that ONE
+        // value for every consumer below; never let the server's zone decide it.
         const preDeleteStart = preDeleteStartIso
-          ? DateTime.fromISO(preDeleteStartIso, { zone: preDeleteStartTz ?? 'UTC' }).setZone(timezone)
+          ? DateTime.fromISO(preDeleteStartIso).setZone(timezone)
           : null;
         const preDeleteLocalDate = preDeleteStart?.isValid ? preDeleteStart.toFormat('yyyy-MM-dd') : undefined;
 
@@ -1312,7 +1305,6 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           outcomeJson: {
             event_id: meetingId,
             event_start_iso: preDeleteStartIso,
-            original_tz: preDeleteStartTz,
             notified_via: notifiedVia,
           },
           initiatedBy: context.userId,

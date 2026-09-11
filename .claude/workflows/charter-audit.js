@@ -12,7 +12,8 @@ const A = args || {}
 // this engine has never been able to audit the catch-all lane. Same class as
 // triage emitting lane `general` on 2026-07-25: a name nobody checked.
 const LANES = A.lanes || ['matchmaker', 'registrar', 'gatekeeper', 'librarian', 'instructor', 'slackmaster', 'diplomat', 'handyman']
-const EFFORT = { matchmaker: 'xhigh', instructor: 'xhigh', slackmaster: 'high', diplomat: 'high', registrar: 'xhigh', handyman: 'high', librarian: 'high', gatekeeper: 'high', editor: 'xhigh', framer: 'xhigh', bouncer: 'xhigh' }
+// Claude SDK selectors stay provider-native; Codex defaults live in WORKSHOP.md.
+const EFFORT = { matchmaker: 'high', instructor: 'medium', slackmaster: 'medium', diplomat: 'medium', registrar: 'high', handyman: 'medium', librarian: 'medium', gatekeeper: 'high', editor: 'medium', framer: 'high', bouncer: 'high' }
 const UNKNOWN = LANES.filter((l) => !EFFORT[l])
 if (UNKNOWN.length) throw new Error(`Unknown lane(s): ${UNKNOWN.join(', ')} — they have no effort setting and no agent, so they would dispatch to nothing.`)
 
