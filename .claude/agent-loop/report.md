@@ -27,4 +27,4 @@ your 9 rows await you: 1 from tonight · 8 re-surfaced · 0 found by the loop
 
 ### declined (0)
 
-**Built and uncommitted — this is what a wrap ships (1):** `person-hours-write-only-for-the-model` — independently verified (bouncer pass, review persisted), Golden30 30/30 at this checkpoint.
+**Built and uncommitted — this is what a wrap ships (0):** none. The hours read-surface fix shipped in fc8f159 under 4.9.5 (no version bump, owner ruling); independently verified, Golden30 30/30.
