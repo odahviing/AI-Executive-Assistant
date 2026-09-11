@@ -94,17 +94,17 @@ function checkCompliance(
   // chat override (custom hours / day off) drives the "outside work hours" flag,
   // not raw weekday yaml.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getEffectiveWorkDay, slotDayMinutes } = require('./workHours') as typeof import('./workHours');
-  const windows = getEffectiveWorkDay(eStart.toFormat('yyyy-MM-dd'), profile).windows;
-  if (windows.length === 0) {
-    issues.push(`booked on ${dayName} (${eStart.toFormat('d MMM')}) — not a work day`);
+  const { getEffectiveWorkDayForInstant, ownerWorkSegmentsBetween } = require('./workHours') as typeof import('./workHours');
+  const effectiveDay = getEffectiveWorkDayForInstant(eStart.toISO()!, profile);
+  const segments = ownerWorkSegmentsBetween(eStart, eEnd, profile);
+  const off = segments.find(s => !s.effectiveDay.isWorkday || s.effectiveDay.windows.length === 0);
+  const outside = segments.find(s => !s.fitsWorkHours);
+  if (off) {
+    const local = off.start.setZone(off.effectiveDay.timezone);
+    issues.push(`booked on ${local.toFormat('EEEE')} (${local.toFormat('d MMM')}) — not a work day`);
   } else {
-    // start + duration — a booking ending past midnight must not wrap and look
-    // like it fits a daytime window (the checkSlot night-booking bug's twin).
-    const { startMin, endMin } = slotDayMinutes(eStart, eEnd);
-    const fits = windows.some(w => startMin >= w.startMin && endMin <= w.endMin);
-    if (!fits) {
-      const summary = windows
+    if (outside || segments.length === 0) {
+      const summary = (outside?.effectiveDay.windows ?? effectiveDay.windows)
         .map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`)
         .join(', ');
       issues.push(`outside your work hours (${summary})`);
@@ -113,7 +113,7 @@ function checkCompliance(
 
   // 2. Floating-block feasibility — any block for this day-of-week that
   //    overlaps the event window must still have a valid aligned slot.
-  const blocks = getFloatingBlocks(profile);
+  const blocks = effectiveDay.hasOverride ? [] : getFloatingBlocks(profile);
   const dayStr = eStart.toFormat('yyyy-MM-dd');
   // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
   for (const block of blocks) {
@@ -167,7 +167,7 @@ export function verifyScheduledOutcome(
   const proposedDates = new Set<string>();
   const proposedByDate = new Map<string, string>(); // date → representative ISO
   for (const iso of input.proposedSlots) {
-    const dt = DateTime.fromISO(iso).setZone(tz);
+    const dt = DateTime.fromISO(iso, { zone: tz });
     if (!dt.isValid) continue;
     const d = dt.toFormat('yyyy-MM-dd');
     proposedDates.add(d);

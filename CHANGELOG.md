@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.9.5 — Consistent meeting clocks and travel boundaries
+
+Maelle resolves meeting times from the stated timezone and the travel dates that apply to the meeting. Search, booking, approval previews and outcome checks now share interval rules, while recipient contact hours are evaluated for the intended delivery date.
+
+### Fixed
+
+- Preserve explicit instants through Graph timed-event writes, keeping all-day dates separate and refusing unsupported series-master time changes or writes with unknown event metadata.
+- Apply owner work-hour and off-day rules across the whole meeting interval, including travel and return boundaries; retain existing owner exception permissions with truthful warnings.
+- Keep a person's physical travel timezone separate from explicitly fixed working-hour windows. General busy-calendar overrides no longer erase attendee working hours.
+- Preserve the stated source zone and positive duration through approval counterproposals, previews and deferred execution.
+- Honor hard search-time bands, use the meeting date for local-clock labels and prechecks, and remove server-timezone assumptions from venue, room and calendar-history parsing.
+- Retain dated travel records on reads, validate travel locations before writes, and resolve recipient deadlines, scheduled outreach and summary followups using current person data.
+- Bind held slots to the exact offered instant and report the original vacated interval when a moved meeting changes duration.
+- Ask for clarification only when a requested bare local time is nonexistent or ambiguous, or a named timezone remains ambiguous after relevant person context. Explicit instants remain exact; broad search windows and historical display do not trigger incidental DST questions.
+- Use destination-local dates for contact trips across meeting search, approval labels, prechecks, email capture and contact timing. Preserve exact repeated-hour instants through the offered-slot store.
+- Apply configured working hours consistently to meetings and contact timers: include both repeated clock occurrences and skip nonexistent minutes.
+
+### Data and charter updates
+
+- Store authenticated owner/person/automatic provenance in the existing contact-trip JSON and enforce the existing authority order. Old untagged trip data is replaceable under the owner's ruling; no legacy confirmation flow or new table is introduced. Owner schedule overrides remain the owner-travel authority.
+- Record the approved timezone and provenance decisions in the existing Matchmaker, Registrar and Librarian rules.
+
+### Verification and limits
+
+- Independent review passed after repairing three original blocking roots and one joined travel-context regression in the approved expansion. Fourteen tracked repair/policy references are covered; the combined Golden30 release checkpoint passes all thirty paths. Executed regressions cover three host timezones, with affected checks rerun after repairs.
+- Deterministic tests and prompt-input checks do not guarantee live model wording. Configured cross-midnight work-hour ranges remain outside this repair; this release preserves their existing product scope.
+
 ---
 ## 4.9.4 — Reliable social codas and capture outcomes
 

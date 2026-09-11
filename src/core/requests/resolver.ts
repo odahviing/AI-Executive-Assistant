@@ -30,6 +30,8 @@ import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, re
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
+import { attendeeTzForDay, attendeeTravelTimezoneForDay, loadAttendeeAvailabilityForPerson } from '../../utils/attendeeAvailability';
+import { resolveStatedInstant, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../utils/weTimeResolver';
 
 /**
  * How many counter-offers a single request may carry before it is brought to a
@@ -157,6 +159,7 @@ export interface ResolveResult {
   state: RequestRow['state'];
   effect?: string;
   reason?: string;
+  time_clarification?: ReturnType<StatedTimeClarificationError['toToolResult']>;
   subject?: string;
   slot?: string;
   // 138c (GH #140) — concrete replay outcome so Sonnet narrates the booking
@@ -230,7 +233,32 @@ export async function resolveRequest(
   verdict: ResolveVerdict,
   ctx: ResolveContext,
 ): Promise<ResolveResult> {
-  return withRequestLock(requestId, () => resolveRequestInner(requestId, verdict, ctx));
+  return withRequestLock(requestId, async () => {
+    try { return await resolveRequestInner(requestId, verdict, ctx); }
+    catch (err) {
+      if (!(err instanceof StatedTimeClarificationError)) throw err;
+      const row = getRequest(requestId);
+      if (!row) throw err;
+      return unresolvedApprovalTime(row, ctx, err.toToolResult());
+    }
+  });
+}
+
+/** A clock needing clarification is a pre-execution refusal, never an uncertain
+ * write or permission to retry. Preserve the exact stored decision and route
+ * an accepting colleague back to the owner through the existing waiting state. */
+async function unresolvedApprovalTime(
+  row: RequestRow, ctx: ResolveContext,
+  clarification: ReturnType<StatedTimeClarificationError['toToolResult']>,
+): Promise<ResolveResult> {
+  if (ctx.resolvedByColleague && row.state === 'awaiting_colleague') {
+    updateRequest(row.id, { state: 'awaiting_owner', ...timersForWaitingSide(row, 'owner', ctx.profile) });
+    await notifyOwnerOfColleaguePushback(row, 'time_clarification', clarification.message, ctx);
+    return { ok: false, request_id: row.id, state: 'awaiting_owner', effect: 'approve_needs_time_clarification',
+      reason: 'Your acceptance is recorded. The time needs clarification from the owner before anything can be executed.' };
+  }
+  return { ok: false, request_id: row.id, state: row.state, effect: 'approve_needs_time_clarification',
+    reason: `${clarification.message} No action was executed. Clarify the time before approving again.`, time_clarification: clarification };
 }
 
 /** Serialize lifecycle effects per request, including timers and close-loop relays. */
@@ -497,7 +525,7 @@ async function resolveRequestInner(
     // instead of 13:00" on a meeting owner is hosting where attendees
     // don't decide times).
     if (amendMode === 'run_with_amend' && callbacks.on_approve) {
-      const merged = mergeAmendIntoApprove(callbacks.on_approve, verdict.counter, ctx.profile.user.timezone);
+      const merged = mergeAmendIntoApprove(callbacks.on_approve, verdict.counter, ctx.profile);
       logger.info('resolveRequest — amend run_with_amend, firing on_approve with merged args', {
         id: requestId, tool: merged.tool, round: amendRound,
       });
@@ -520,6 +548,9 @@ async function resolveRequestInner(
     }
 
     // v2.9.1 — append to counter_history for audit; counter holds the latest.
+    // Clarify an unresolved calendar clock before handing it to the colleague
+    // as an actionable offer. The same merge validates the eventual replay.
+    if (callbacks.on_approve) mergeAmendIntoApprove(callbacks.on_approve, verdict.counter, ctx.profile);
     const counterHistoryOwnerSide = Array.isArray(detailsAll.counter_history)
       ? (detailsAll.counter_history as Array<Record<string, unknown>>)
       : [];
@@ -568,7 +599,7 @@ async function resolveRequestInner(
   const latestCounter = (detailsAll.counter as Record<string, unknown> | undefined) ?? null;
   const hasCounter = latestCounter && Object.keys(latestCounter).length > 0;
   if (hasCounter && callbacks.on_approve) {
-    effectiveApprove = mergeAmendIntoApprove(callbacks.on_approve, latestCounter, ctx.profile.user.timezone);
+    effectiveApprove = mergeAmendIntoApprove(callbacks.on_approve, latestCounter, ctx.profile);
     logger.info('resolveRequest — approve with prior counter, merging into on_approve', {
       id: requestId, tool: effectiveApprove.tool,
       counterPreview: JSON.stringify(latestCounter).slice(0, 120),
@@ -824,7 +855,7 @@ async function runApproveCallback(
   const decidedAction = { tool, args: { ...args } };
   let storedAction = extractCallbacks(decidedDetails).on_approve;
   if (storedAction && decidedDetails.counter && typeof decidedDetails.counter === 'object') {
-    storedAction = mergeAmendIntoApprove(storedAction, decidedDetails.counter as Record<string, unknown>, ctx.profile.user.timezone);
+    storedAction = mergeAmendIntoApprove(storedAction, decidedDetails.counter as Record<string, unknown>, ctx.profile);
   }
   if (JSON.stringify(storedAction) !== JSON.stringify(decidedAction)) {
     const storedCallbacks = decidedDetails.callbacks as Record<string, unknown> | undefined;
@@ -874,6 +905,11 @@ async function runApproveCallback(
             ownerDmChannel: row.owner_dm_channel, ownerDmThreadTs: row.owner_dm_thread_ts, app: ctx.app,
     });
   } catch (err) {
+    if (err instanceof StatedTimeClarificationError) return unresolvedApprovalTime(getRequest(row.id) ?? row, ctx, err.toToolResult());
+    if (err instanceof ReplayToolError && err.sentinel.error === 'stated_time_clarification') {
+      return unresolvedApprovalTime(getRequest(row.id) ?? row, ctx,
+        err.sentinel as ReturnType<StatedTimeClarificationError['toToolResult']>);
+    }
     // A colleague accepted an already decided action; recovery is now the
     // owner's job. Keep that exact counter and its round budget, and return
     // less to the colleague: recovery details can name other owner events.
@@ -1170,15 +1206,24 @@ export async function notifyRequesterOfDecision(
       // time (the Gidon bug: auto Amsterdam, he's in Israel). Only an EXPLICIT
       // auto guess falls back to the owner's tz; owner/person-set AND legacy
       // (NULL set_by) values keep their prior behavior (use the person's tz).
+      // A stated dated trip outranks that fallback during its own window.
       const tzIsGuess = personRow?.timezone_set_by === 'auto';
-      const tz = (personRow?.timezone && !tzIsGuess) ? personRow.timezone : ctx.profile.user.timezone;
-      const dt = DateTime.fromISO(iso, { zone: tz });
+      const ownerTz = ctx.profile.user.timezone;
+      const clockArgs = { ...extractCallbacks(details).on_approve?.args, ...(data ?? {}) };
+      const normalized = resolveStatedInstant({ startIso: iso, statedZone: statedZoneFromArgs(clockArgs),
+        personTimezone: statedClockPersonContext(clockArgs, ctx.profile, iso), homeTz: ownerTz, profile: ctx.profile }).startIso;
+      const instant = DateTime.fromISO(normalized, { zone: ownerTz });
+      const recipient = loadAttendeeAvailabilityForPerson(personRow ?? undefined, ownerTz);
+      const physicalTz = recipient ? attendeeTzForDay(recipient, normalized) : ownerTz;
+      const onTrip = recipient && attendeeTravelTimezoneForDay(recipient, normalized) !== undefined;
+      const tz = recipient && (!tzIsGuess || onTrip) ? physicalTz : ownerTz;
+      const dt = instant.setZone(tz);
       if (!dt.isValid) return '';
       const format = (value: DateTime): string => requesterLang === 'he'
         ? value.setLocale('he').toFormat('cccc d MMMM, HH:mm ZZZZ')
         : value.toFormat('cccc d MMM, HH:mm ZZZZ');
       const local = format(dt);
-      const source = DateTime.fromISO(iso, { setZone: true, zone: tz });
+      const source = DateTime.fromISO(normalized, { setZone: true, zone: ownerTz });
       return verdict === 'amend' && source.isValid && source.offset !== dt.offset
         ? `${local} / ${format(source)}`
         : local;
@@ -1680,7 +1725,7 @@ async function closeCounterLimit(row: RequestRow, ctx: ResolveContext): Promise<
 
 async function notifyOwnerOfColleaguePushback(
   row: RequestRow,
-  verdict: 'reject' | 'amend' | 'approve_failed',
+  verdict: 'reject' | 'amend' | 'approve_failed' | 'time_clarification',
   reason: string | undefined,
   ctx: ResolveContext,
 ): Promise<void> {
@@ -1693,6 +1738,8 @@ async function notifyOwnerOfColleaguePushback(
     if (verdict === 'reject') {
       const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
       lead = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
+    } else if (verdict === 'time_clarification') {
+      lead = `${requesterName} accepted your counter on "${subject}". No action was executed because the time needs clarification; the accepted counter is unchanged.\n${reason ?? ''}`;
     } else if (verdict === 'approve_failed') {
       lead = `${requesterName} accepted your counter on "${subject}", but I could not confirm the action completed. Check its current state before retrying; the accepted counter is unchanged.\n${reason ?? ''}`;
     } else {
@@ -1707,8 +1754,16 @@ async function notifyOwnerOfColleaguePushback(
         // DECIDER is the one failure worse than showing him a `req_…`.
         audience: 'owner',
         formatInstant: iso => {
-          const dt = DateTime.fromISO(iso, { zone: ownerTz });
-          return dt.isValid ? dt.toFormat("cccc d MMM, HH:mm") : '';
+          const clockArgs = { ...extractCallbacks(details).on_approve?.args, ...(stored ?? {}) };
+          try {
+            const normalized = resolveStatedInstant({ startIso: iso, statedZone: statedZoneFromArgs(clockArgs),
+              personTimezone: statedClockPersonContext(clockArgs, ctx.profile, iso), homeTz: ownerTz, profile: ctx.profile });
+            const dt = DateTime.fromISO(normalized.startIso, { zone: ownerTz });
+            return dt.isValid ? dt.toFormat("cccc d MMM, HH:mm") : '';
+          } catch (err) {
+            if (err instanceof StatedTimeClarificationError) return iso;
+            throw err;
+          }
         },
       }).text;
       lead = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;

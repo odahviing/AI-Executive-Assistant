@@ -766,21 +766,22 @@ export async function buildTurnContext(input: OrchestratorInput) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { precheckAvailability } = require('../../utils/availabilityPreCheck') as
         typeof import('../../utils/availabilityPreCheck');
-      // v4.2.x — the zone the ASKER writes from. A clock time he states with no
-      // zone belongs to his zone, not the owner's: on 2026-07-27 a Brussels
-      // colleague's "16:00" was point-checked as 16:00 Asia/Jerusalem — an hour
-      // off both what he meant and what `find_available_slots` resolved for the
-      // same phrase, which is how one requested time produced two opposite
-      // availability verdicts and a false collision claim. Same row the search
-      // path already reads the attendee frame from (attendeeAvailability.ts's
-      // getEffectiveTimezoneById read); no stored timezone → undefined → the pre-check keeps the owner's zone.
+      // Carry the asker's permanent zone and dated travel together, so the
+      // precheck can resolve each proposed date through the same attendee
+      // helper as slot search. A raw current/home zone loses future travel.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getPersonMemory } = require('../../db') as typeof import('../../db');
-      const askerTimezone = input.userId ? (getPersonMemory(input.userId)?.timezone ?? undefined) : undefined;
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { loadAttendeeAvailabilityForPerson } = require('../../utils/attendeeAvailability') as
+        typeof import('../../utils/attendeeAvailability');
+      const asker = input.userId ? getPersonMemory(input.userId) ?? undefined : undefined;
+      const requesterAvailability = loadAttendeeAvailabilityForPerson(asker, profile.user.timezone);
       const result = await precheckAvailability({
         message: userMessage,
         profile,
-        requesterTimezone: askerTimezone,
+        requesterAvailability,
+        // Compatibility fallback only when no structured entry is available.
+        requesterTimezone: requesterAvailability ? undefined : asker?.timezone ?? undefined,
         // v3.3.7 (#125b) — the day a bare time refers to often lives a
         // message earlier ("מחר... 17:00" → "13:00/13:30?").
         recentThread: conversationHistory.slice(-4),
@@ -820,7 +821,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
         const bookableStarts = result.verdicts
           .filter(v => v.bookable)
           .map(v => {
-            const dt = DateTime.fromISO(`${v.date}T${v.time}`, { zone: profile.user.timezone });
+            // Keep the exact checked occurrence when the owner's clock repeats.
+            const dt = DateTime.fromISO(v.instantIso ?? `${v.date}T${v.time}`, { zone: profile.user.timezone });
             return dt.isValid ? { start: dt.toISO()! } : null;
           })
           .filter((s): s is { start: string } => s !== null);

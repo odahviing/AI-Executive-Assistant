@@ -25,7 +25,7 @@ import {
   createOutreachJob,
   getPersonMemory,
 } from '../../db';
-import { calcResponseDeadline } from '../../utils/responseDeadline';
+import { calcResponseDeadline, isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { getConnection } from '../../connections/registry';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
@@ -110,6 +110,16 @@ export const dispatchSummaryActionFollowup: TaskDispatcher = async (_app, task, 
 
   // Pull target's language preference from people_memory if available
   const person = getPersonMemory(ctx.target_slack_id);
+  // These are automatic action-item nudges, not an owner's explicit send time.
+  // Re-resolve current person/travel hours when the stored task actually fires.
+  const sendGate = isColleagueSendDeferred(person?.timezone ?? profile.user.timezone, {
+    slackId: ctx.target_slack_id,
+    ownerTimezone: profile.user.timezone,
+  });
+  if (sendGate.deferred) {
+    updateTask(task.id, { status: 'new', due_at: sendGate.deferredTo });
+    return;
+  }
   let targetLanguage: string | undefined = ctx.target_language;
   let targetTz: string | undefined;
   try {
@@ -152,7 +162,10 @@ export const dispatchSummaryActionFollowup: TaskDispatcher = async (_app, task, 
   // Create the outreach_jobs row so the colleague's REPLY routes back through
   // handleOutreachReply → owner DM. Without this, the reply would look like
   // an unsolicited inbound message and not be linked to the action item.
-  const deadline = calcResponseDeadline(targetTz ?? profile.user.timezone);
+  const deadline = calcResponseDeadline(targetTz ?? profile.user.timezone, {
+    slackId: ctx.target_slack_id,
+    ownerTimezone: profile.user.timezone,
+  });
   const outreachJobId = createOutreachJob({
     owner_user_id: task.owner_user_id,
     owner_channel: task.owner_channel,

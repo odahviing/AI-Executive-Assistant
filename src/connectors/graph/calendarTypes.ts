@@ -98,6 +98,8 @@ export interface UpdateMeetingParams {
   userEmail: string;
   meetingId: string;
   timezone: string;
+  isAllDay?: boolean; // existing Graph fact; unknown is read before a time PATCH
+  eventType?: string; // existing Graph type; series-master time changes are forbidden
   subject?: string;
   start?: string;
   end?: string;

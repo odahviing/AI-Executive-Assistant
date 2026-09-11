@@ -31,6 +31,7 @@ import { getLinkedRequestIdForOutreach } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
 import { updateRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
 import { toTimerInstant } from '../core/requests/types';
+import { resolveStatedInstant, StatedTimeClarificationError } from '../utils/weTimeResolver';
 import { logActivity } from '../core/requests/logActivity';
 import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
@@ -243,9 +244,15 @@ Only send messages the user explicitly asks for — never reach out to people on
         // against SQLite's UTC `now` — so a scheduled DM went out one owner-offset
         // late. Anchor once, here, where the owner's zone is known.
         const sendAtRaw = args.send_at as string | undefined;
-        const sendAt = sendAtRaw
-          ? (toTimerInstant(sendAtRaw, context.profile.user.timezone) ?? undefined)
-          : undefined;
+        let sendAt: string | undefined;
+        try {
+          sendAt = sendAtRaw ? (toTimerInstant(resolveStatedInstant({
+            startIso: sendAtRaw, statedZone: 'home', homeTz: context.profile.user.timezone,
+          }).startIso, context.profile.user.timezone) ?? undefined) : undefined;
+        } catch (err) {
+          if (err instanceof StatedTimeClarificationError) return err.toToolResult();
+          throw err;
+        }
         if (sendAtRaw && !sendAt) {
           return {
             ok: false,
@@ -255,6 +262,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         }
 
         const colleagueTzForDeadline = (args.colleague_tz as string | undefined) ?? context.profile.user.timezone;
+        const recipientTime = { slackId: colleagueSlackId, ownerTimezone: context.profile.user.timezone };
 
         // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-hours,
         // wf_29a0d866-021, round 2 after bouncer overturn) — o#245/o#246 gated
@@ -279,20 +287,12 @@ Only send messages the user explicitly asks for — never reach out to people on
         // unchanged, so the "I've scheduled it for Saturday" told to the
         // owner would silently NOT be what actually fires (runner.ts
         // re-floors at send time and would push it again).
-        // registrar fix (colleague-work-hours-gate-duplicated-across-five-
-        // call-sites) — colleagueBase is always >= anchorMs >= sendAt
-        // (nextWorkingHourStart never returns earlier than the instant it
-        // was asked to start searching from), so it's also always the
-        // correct effectiveSendAt: the old `colleagueBase > sendAt ? … :
-        // sendAt` ternary below it could only ever take the colleagueBase
-        // branch or land on a value equal to it — a second, redundant copy
-        // of the same comparison this spine's other 4 colleague-hours gates
-        // hand-rolled (now unified in responseDeadline.ts's
-        // `isColleagueSendDeferred`).
+        // The shared business-time walk returns an instant >= anchorMs,
+        // resolving this recipient's stored zone and travel on each date.
         let effectiveSendAt = sendAt;
         if (sendAt) {
           const anchorMs = Math.max(Date.parse(sendAt), Date.now());
-          effectiveSendAt = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs);
+          effectiveSendAt = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs, recipientTime);
         }
         const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
         // channelIdArg is resolved here (before deadline) so awaitReplyEffective
@@ -306,7 +306,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         const awaitReplyEffective = channelIdArg ? false : !!args.await_reply;
 
         const deadline = awaitReplyEffective && !isFuture
-          ? calcResponseDeadline(colleagueTzForDeadline)
+          ? calcResponseDeadline(colleagueTzForDeadline, recipientTime)
           : undefined;
 
         // v1.8.4 — intent + context for intent-routed reply dispatch
@@ -438,8 +438,8 @@ Only send messages the user explicitly asks for — never reach out to people on
         // upserts `m.tz` straight off the Slack API — so this second, weaker-
         // provenance write was redundant when the model relayed it faithfully
         // and actively wrong when it didn't. Dropped; `args.colleague_tz` still
-        // feeds the reply-deadline calc + job payload below (payload use, not
-        // a provenance-bearing memory write).
+        // supplies fallback timezone data for the deadline and job payload;
+        // stored permanent data and dated travel take precedence.
         const existingColleague = getPersonMemory(colleagueSlackId);
         upsertPersonMemory({
           slackId:  colleagueSlackId,

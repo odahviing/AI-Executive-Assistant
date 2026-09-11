@@ -28,7 +28,7 @@ import {
 import { getPersonMemory } from '../../../../db';
 import { resolveSlackId } from '../../../../utils/resolveSlackId';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
-import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
+import { resolveStatedInstant, renderWeDualClock, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../../../utils/weTimeResolver';
 import { presentationLocalFieldFor } from '../../../../utils/attendeeAvailability';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { alignUpQuarter, alignNearestQuarter } from '../../../../utils/calendarDensity';
@@ -138,16 +138,17 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         if (typeof args.start === 'string') {
           try {
             const { getTravelContextForInstant } = await import('../../../../utils/workingElsewhere');
-            const travel = getTravelContextForInstant(args.start, context.profile);
-            if (travel.isAway) tripDisplay = { tz: travel.effectiveTz, location: travel.location };
-            const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
-              ? args.stated_zone.trim()
-              : (typeof args.start_timezone === 'string' && args.start_timezone.trim() ? args.start_timezone.trim() : undefined);
+            let travel = getTravelContextForInstant(args.start, context.profile);
+            const statedZone = statedZoneFromArgs(args);
             const resolved = resolveStatedInstant({
               startIso: args.start,
               endIso: typeof args.end === 'string' ? args.end : undefined,
-              statedZone, travel, homeTz: timezone,
+              statedZone, travel, homeTz: timezone, profile: context.profile,
+              emailRoute: context.channel === 'email',
+              ...(['CST', 'IST'].includes(statedZone?.toUpperCase() ?? '') ? { personTimezone: statedClockPersonContext(args, context.profile, args.start) } : {}),
             });
+            travel = getTravelContextForInstant(resolved.startIso, context.profile);
+            if (travel.isAway) tripDisplay = { tz: travel.effectiveTz, location: travel.location };
             if (resolved.reinterpreted) {
               logger.info('create_meeting — stated time resolved to canonical instant', {
                 statedZone: statedZone ?? '(none)', sourceZone: resolved.sourceZone,
@@ -157,6 +158,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             args.start = resolved.startIso;
             if (resolved.endIso) args.end = resolved.endIso;
           } catch (err) {
+            if (err instanceof StatedTimeClarificationError) return err.toToolResult();
             logger.warn('create_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
@@ -622,7 +624,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // Same attendee-local field as the booked return at the bottom of
                 // this handler — this `OK` line is read by the same output checker.
                 ...presentationLocalFieldFor(attendees.map(a => a.email), args.start as string, userEmail, timezone),
-                action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string)}. Already booked, no action needed.`,
+                action_summary: `'${requestedSubject}' is already on ${ownerFirst}'s calendar for ${formatIsoTime(args.start as string, timezone)}. Already booked, no action needed.`,
                 _note: 'A meeting with this exact subject and start was already booked earlier in this thread. Do NOT call create_meeting again. Do NOT escalate to create_approval. Tell the colleague briefly that it is booked and move on.',
               };
             }
@@ -822,6 +824,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // slot comes back carrying everyone it doesn't work for, so
                     // a missing slot means an OWNER rule and nothing else.
                     tagAttendeeConflicts: true,
+                    allowAttendeeOffHours: true, // exact requested booking, not a general offer
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
@@ -1684,7 +1687,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   error: 'slot_on_hold',
                   hold_id: conflictHold.id,
                   holder_name: conflictHold.holder_name,
-                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(args.start as string)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Book over it anyway? On your yes I'll book it and let ${conflictHold.holder_name} know the hold was released.`,
+                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(args.start as string, timezone)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Book over it anyway? On your yes I'll book it and let ${conflictHold.holder_name} know the hold was released.`,
                   _deferred_action_hint: { tool: 'create_meeting', args: { ...args, override_hold: true } },
                   _note: 'Surface this to the owner. If he says book it anyway, retry create_meeting with override_hold:true — that books it, releases the hold, and DMs the holder.',
                 };
@@ -2008,7 +2011,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 if (conn) {
                   await conn.sendDirect(
                     h.holder_slack_id,
-                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(args.start as string)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
+                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(args.start as string, timezone)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
                     h.origin_thread_ts ? { threadTs: h.origin_thread_ts } : undefined,
                   );
                 }
@@ -2038,7 +2041,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               const whenLocal = DateTime.fromISO(args.start as string, { zone: timezone });
               const whenLabel = whenLocal.isValid
                 ? whenLocal.toFormat('EEE d MMM HH:mm')
-                : formatIsoTime(args.start as string);
+                : formatIsoTime(args.start as string, timezone);
               await shadowNotify(context.profile, {
                 channel: context.channelId,
                 threadTs: context.threadTs,
@@ -2071,7 +2074,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 const whenLocal = DateTime.fromISO(args.start as string, { zone: timezone });
                 const whenLabel = whenLocal.isValid
                   ? whenLocal.toFormat('EEEE d MMM \'at\' HH:mm')
-                  : formatIsoTime(args.start as string);
+                  : formatIsoTime(args.start as string, timezone);
                 for (const att of attendees) {
                   const e = (att.email ?? '').toLowerCase();
                   if (!e) continue;

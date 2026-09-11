@@ -22,7 +22,10 @@ import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, getRequest, updateRequest, createRequest, getRequestByIdempotencyKey, buildIdempotencyKey } from '../../db/requests';
 import { getOutreachJobByRequestId, updateOutreachJob } from '../../db/jobs';
 import { workTimeBaseFromNow, addWorkdays } from '../../utils/workHours';
-import { isColleagueSendDeferred } from '../../utils/responseDeadline';
+import { calcResponseDeadline, isColleagueSendDeferred } from '../../utils/responseDeadline';
+import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../../utils/attendeeAvailability';
+import { renderClockInZone } from '../../utils/timezoneConvert';
+import { resolveStatedInstant } from '../../utils/weTimeResolver';
 import { closeRequest } from './closeRequest';
 import { withRequestLock, closeUnconfirmedExecution } from './resolver';
 import type { NextCheckHandler, RequestRow } from './types';
@@ -36,6 +39,7 @@ import { postOwnerDecision } from '../../utils/ownerDailyThread';
 import { composeOwnerAskText } from '../approvals/approvalCallbacks';
 import {
   findPersistentUnaskedTimezoneDivergences,
+  getPersonMemory,
   markTimezoneTempAskedById,
   type TimezonePersistenceCandidate,
 } from '../../db/people';
@@ -630,7 +634,7 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   // o#245/o#246) — defer this re-ask to the colleague's own next work-time
   // start rather than firing on the raw +24h timer regardless of their clock.
   const colleagueTz = job!.colleague_tz || profile.user.timezone;
-  const gate = isColleagueSendDeferred(colleagueTz);
+  const gate = isColleagueSendDeferred(colleagueTz, { slackId: job.colleague_slack_id, ownerTimezone: profile.user.timezone });
   if (gate.deferred) {
     updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'reschedule_reask' });
     logger.info('runRescheduleReask — outside colleague work hours, deferring re-ask', {
@@ -641,8 +645,12 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   let ctx: { meeting_subject?: string; proposed_start?: string } = {};
   try { ctx = job!.context_json ? JSON.parse(job!.context_json) : {}; } catch { /* fall back to generic */ }
   const tz = profile.user.timezone;
-  const whenLocal = ctx.proposed_start
-    ? DateTime.fromISO(ctx.proposed_start, { zone: tz }).toFormat("EEEE d MMM 'at' HH:mm")
+  const recipient = loadAttendeeAvailabilityForPerson(getPersonMemory(job.colleague_slack_id) ?? undefined, colleagueTz);
+  const proposedInstant = ctx.proposed_start
+    ? resolveStatedInstant({ startIso: ctx.proposed_start, homeTz: tz, profile }).startIso : undefined;
+  const whenLocal = proposedInstant
+    ? renderClockInZone(proposedInstant, tz, recipient
+      ? attendeeTzForDay(recipient, proposedInstant) : tz)
     : 'the new time';
   const subj = ctx.meeting_subject ?? 'the meeting';
   const first = (job!.colleague_name ?? '').split(/\s+/)[0] || 'there';
@@ -768,7 +776,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
   // other colleague-facing send on this spine.
   const job = getOutreachJobByRequestId(row.id);
   const colleagueTz = job?.colleague_tz || profile.user.timezone;
-  const gate = isColleagueSendDeferred(colleagueTz);
+  const recipientTime = { slackId: targetSlackId, ownerTimezone: profile.user.timezone };
+  const gate = isColleagueSendDeferred(colleagueTz, recipientTime);
   if (gate.deferred) {
     updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'send_scheduled_outreach' });
     logger.info('runSendScheduledOutreach — outside colleague work hours, deferring send', {
@@ -895,7 +904,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       originChannel: res.ref ?? row.origin_channel ?? undefined,
       originThreadTs: res.ts ?? row.origin_thread_ts ?? undefined,
       nextCheckAt: awaitReply
-        ? DateTime.now().plus({ days: 5 }).toUTC().toISO()
+        ? calcResponseDeadline(colleagueTz, recipientTime)
         : null,
       nextCheckHandler: awaitReply ? 'outreach_expiry' : null,
     });

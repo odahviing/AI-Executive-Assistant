@@ -380,7 +380,8 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
   // instead; re-arming back through `colleague_oof_recheck` re-verifies owner
   // coverage too, which is correct — an extended trip can still change the
   // answer by the time the colleague's window opens.
-  const gate = isColleagueSendDeferred(colleagueTz);
+  const recipientTime = { slackId: colleagueSlackId, ownerTimezone: profile.user.timezone };
+  const gate = isColleagueSendDeferred(colleagueTz, recipientTime);
   if (gate.deferred) {
     updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'colleague_oof_recheck' });
     logger.info('sendOofReengagement — outside colleague work hours, deferring reengagement', {
@@ -402,7 +403,7 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
     await_reply: 1,
     status: 'sent',
     intent: 'oof_reengage',
-    reply_deadline: calcResponseDeadline(colleagueTz),
+    reply_deadline: calcResponseDeadline(colleagueTz, recipientTime),
     context_json: JSON.stringify({
       subject: details.subject,
       duration_minutes: details.duration_minutes,
@@ -478,7 +479,7 @@ export async function runOofReengageReask(row: RequestRow, profile: UserProfile)
   // o#245/o#246) — defer this re-ask to the colleague's own next work-time
   // start rather than firing on the raw +24h timer regardless of their clock.
   const colleagueTz = job.colleague_tz || profile.user.timezone;
-  const gate = isColleagueSendDeferred(colleagueTz);
+  const gate = isColleagueSendDeferred(colleagueTz, { slackId: job.colleague_slack_id, ownerTimezone: profile.user.timezone });
   if (gate.deferred) {
     updateRequest(row.id, { nextCheckAt: gate.deferredTo, nextCheckHandler: 'oof_reengage_reask' });
     logger.info('runOofReengageReask — outside colleague work hours, deferring re-ask', {

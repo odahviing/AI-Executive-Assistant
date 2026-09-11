@@ -96,10 +96,8 @@ export async function handleHoldSlot(args: Record<string, unknown>, ctx: OpCtx):
 
         // Colleague path — validate the slot was offered here, enforce the cap.
         const holderSlackId = context.userId;
-        const { getOfferedSlots } = await import('../../../../utils/offeredSlotsStash');
-        const offered = getOfferedSlots(context.channelId, context.threadTs) ?? [];
-        const startMs = Date.parse(startIso);
-        const wasOffered = offered.some(o => Math.abs(Date.parse(o.startIso) - startMs) <= 60_000);
+        const { wasOfferedSlot } = await import('../../../../utils/offeredSlotsStash');
+        const wasOffered = wasOfferedSlot(context.channelId, context.threadTs, startIso);
         if (!wasOffered) {
           return { success: false, error: 'slot_not_offered', message: 'You can only hold a time I actually offered you in this conversation.' };
         }
@@ -222,14 +220,14 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
             const audits = recentAuditEntries({ ownerUserId, action: 'delete_meeting', windowDays: 7 });
             const auditsCreate = recentAuditEntries({ ownerUserId, action: 'create_meeting', windowDays: 7 });
             // Filter to entries whose event_start_iso falls inside the queried window.
-            const windowStartMs = Date.parse(args.start_date as string);
-            const windowEndMs = Date.parse(args.end_date as string);
+            const windowStartMs = DateTime.fromISO(args.start_date as string, { zone: timezone }).startOf('day').toMillis();
+            const windowEndMs = DateTime.fromISO(args.end_date as string, { zone: timezone }).startOf('day').plus({ days: 1 }).toMillis();
             const inWindow = (e: { details: Record<string, unknown> | null }): boolean => {
               const start = e.details?.event_start_iso;
               if (typeof start !== 'string') return false;
-              const ms = Date.parse(start);
+              const ms = DateTime.fromISO(start, { zone: timezone }).toMillis();
               if (!Number.isFinite(ms)) return false;
-              return ms >= windowStartMs && ms <= windowEndMs + 24 * 60 * 60 * 1000;
+              return ms >= windowStartMs && ms < windowEndMs;
             };
             const relevantDeletes = audits.filter(inWindow);
             const relevantCreates = auditsCreate.filter(inWindow);
@@ -237,7 +235,8 @@ export async function handleGetCalendar(args: Record<string, unknown>, ctx: OpCt
               const fmt = (action: 'cancelled' | 'created', e: { timestamp: string; details: Record<string, unknown> | null }) => {
                 const subj = (e.details?.subject as string | undefined) ?? '(no subject)';
                 const start = (e.details?.event_start_iso as string | undefined) ?? '';
-                return `- ${action} "${subj}" (was on ${start.slice(0, 16) || 'unknown date'}) at ${e.timestamp}`;
+                const when = DateTime.fromISO(start, { zone: timezone });
+                return `- ${action} "${subj}" (was on ${when.isValid ? when.toFormat('EEE d MMM HH:mm ZZZZ') : 'unknown date'}) at ${e.timestamp}`;
               };
               const lines = [
                 ...relevantCreates.map(e => fmt('created', e)),
@@ -503,7 +502,7 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
         };
       }
     }
-    await updateMeeting({ userEmail, timezone, meetingId: eventId, start: originalStart, end: originalEnd });
+    await updateMeeting({ userEmail, timezone, meetingId: eventId, start: originalStart, end: originalEnd, isAllDay: probe?.isAllDay, eventType: probe?.type });
     // gh#180-c standard, generalized: verify the PATCH actually landed before
     // claiming "put back" — don't just assert it the way the old auto-move-
     // only handler did.

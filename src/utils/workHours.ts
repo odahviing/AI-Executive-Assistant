@@ -175,7 +175,9 @@ export function getEffectiveWorkDayForInstant(instantIso: string, profile: UserP
   // a far-EAST one into the PREVIOUS — an away override owns the instant iff, in
   // ITS OWN zone, the instant falls on ITS date. Check both neighbours so the fix
   // is symmetric (US trips west of home AND Asia/Pacific trips east of home).
-  for (const delta of [-1, 1]) {
+  // IANA zones span UTC-12 through UTC+14: opposite date-line zones can
+  // differ by TWO calendar dates, despite representing the same instant.
+  for (const delta of [-1, 1, -2, 2]) {
     const neighbour = dt.setZone(homeTz).plus({ days: delta }).toFormat('yyyy-MM-dd');
     let nRow: ReturnType<typeof getScheduleOverride> = null;
     try { nRow = getScheduleOverride(profile.user.slack_user_id, neighbour); } catch { nRow = null; }
@@ -188,22 +190,110 @@ export function getEffectiveWorkDayForInstant(instantIso: string, profile: UserP
 }
 
 /**
- * A slot's [startMin, endMin] as minutes-from-midnight of the START day, with
- * the end computed as start + DURATION so it NEVER wraps past midnight.
- *
- * The bug this fixes: computing endMin as `slotEnd.hour*60 + slotEnd.minute`
- * wraps for a slot ending after midnight — 23:30–00:10 gave endMin=10, so
- * `endMin <= window.endMin` (10 <= 19:00) was trivially true and a late meeting
- * "fit" EVERY day's hours, booking the owner at night on a non-night-shift day.
- * Owner/attendee windows never cross midnight (parseRange caps them at 1440), so
- * a slot ending past midnight (endMin > 1440) is always outside working hours.
- * Duration-based end is DST/TZ-safe and matches the slot finder's own
- * `startMin + durationMinutes`.
+ * The wall-clock minute bounds visited by the explicit interval [start,end),
+ * relative to its start date. Date rollover stays above 1440; elapsed duration
+ * is NOT a wall-clock end on a DST day. Across a backward transition include
+ * both sides of the repeated hour, so a slot cannot hide an off-hours portion
+ * between endpoints. This never chooses an occurrence for a bare clock or
+ * interprets a configured work-window boundary as an instant.
  */
 export function slotDayMinutes(slotStart: DateTime, slotEnd: DateTime): { startMin: number; endMin: number } {
-  const startMin = slotStart.hour * 60 + slotStart.minute;
-  const durationMin = Math.max(0, Math.round(slotEnd.diff(slotStart, 'minutes').minutes));
-  return { startMin, endMin: startMin + durationMin };
+  const dateBase = DateTime.utc(slotStart.year, slotStart.month, slotStart.day);
+  const wallMinute = (dt: DateTime): number =>
+    DateTime.utc(dt.year, dt.month, dt.day).diff(dateBase, 'days').days * 1440
+    + dt.hour * 60 + dt.minute + dt.second / 60 + dt.millisecond / 60000;
+  let startMin = wallMinute(slotStart);
+  if (slotEnd <= slotStart) return { startMin, endMin: startMin };
+  const last = slotEnd.minus({ milliseconds: 1 });
+  let endMin = wallMinute(last) + 1 / 60000;
+  // Same-date intervals can cross one zone transition. Longer intervals already
+  // overrun day-bounded hours; their date-aware end is sufficient to reject.
+  if (slotStart.hasSame(last, 'day') && slotStart.offset !== last.offset) {
+    let low = slotStart.toMillis();
+    let high = last.toMillis();
+    while (high - low > 1) {
+      const mid = Math.floor((low + high) / 2);
+      if (DateTime.fromMillis(mid, { zone: slotStart.zone }).offset === slotStart.offset) low = mid;
+      else high = mid;
+    }
+    const before = DateTime.fromMillis(low, { zone: slotStart.zone });
+    const after = DateTime.fromMillis(high, { zone: slotStart.zone });
+    startMin = Math.min(startMin, wallMinute(after));
+    endMin = Math.max(endMin, wallMinute(before) + 1 / 60000);
+  }
+  // Millisecond-precision input, without floating-point boundary noise.
+  return { startMin: Math.round(startMin * 60000) / 60000, endMin: Math.round(endMin * 60000) / 60000 };
+}
+
+export interface OwnerWorkSegment {
+  start: DateTime;
+  end: DateTime;
+  effectiveDay: EffectiveWorkDay;
+  fitsWorkHours: boolean;
+}
+
+/** Materialize configured wall-clock membership, not a chosen clock occurrence.
+ * Both fall-back occurrences count; spring-forward minutes simply do not exist.
+ * Ordinary days use one constant-offset range. Only transition days need a
+ * binary search for the offset boundary (the same one-change/day assumption
+ * used by slotDayMinutes), never a minute-by-minute scan of the timer horizon. */
+export function configuredWorkIntervalsBetween(
+  from: DateTime, until: DateTime, timezone: string, windows: WorkHourRange[],
+): Array<{ start: DateTime; end: DateTime }> {
+  const intervals: Array<{ start: DateTime; end: DateTime }> = [];
+  if (!from.isValid || !until.isValid || until <= from) return intervals;
+  for (let day = from.setZone(timezone).startOf('day'); day < until; day = day.plus({ days: 1 }).startOf('day')) {
+    const next = day.plus({ days: 1 }).startOf('day');
+    const cuts = [day.toMillis(), next.toMillis()];
+    if (day.offset !== next.minus({ milliseconds: 1 }).offset) {
+      let low = cuts[0], high = cuts[1] - 1;
+      while (high - low > 1) {
+        const mid = Math.floor((low + high) / 2);
+        if (DateTime.fromMillis(mid, { zone: timezone }).offset === day.offset) low = mid;
+        else high = mid;
+      }
+      cuts.splice(1, 0, high);
+    }
+    const wallMidnight = DateTime.utc(day.year, day.month, day.day).toMillis();
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const offsetMs = DateTime.fromMillis(cuts[i], { zone: timezone }).offset * 60000;
+      for (const window of windows) {
+        const start = Math.max(from.toMillis(), cuts[i], wallMidnight + window.startMin * 60000 - offsetMs);
+        const end = Math.min(until.toMillis(), cuts[i + 1], wallMidnight + window.endMin * 60000 - offsetMs);
+        if (end > start) intervals.push({ start: DateTime.fromMillis(start, { zone: timezone }), end: DateTime.fromMillis(end, { zone: timezone }) });
+      }
+    }
+  }
+  return intervals.sort((a, b) => a.start.toMillis() - b.start.toMillis());
+}
+
+/** Partition an explicit interval wherever a dated schedule can change authority.
+ * Home-date overrides and every candidate trip-date midnight are boundaries;
+ * checking just the endpoints misses an intervening off day. Window membership
+ * uses visited wall clocks, so this does not choose a bare DST clock occurrence.
+ */
+export function ownerWorkSegmentsBetween(from: DateTime, until: DateTime, profile: UserProfile): OwnerWorkSegment[] {
+  if (!from.isValid || !until.isValid || until <= from) return [];
+  const homeTz = profile.user.timezone;
+  const boundaries = new Set<number>([from.toMillis(), until.toMillis()]);
+  const lastDate = until.setZone(homeTz).startOf('day').plus({ days: 2 });
+  for (let date = from.setZone(homeTz).startOf('day').minus({ days: 2 }); date <= lastDate; date = date.plus({ days: 1 })) {
+    const eff = getEffectiveWorkDay(date.toISODate()!, profile);
+    const localDay = DateTime.fromISO(date.toISODate()!, { zone: eff.timezone });
+    for (const boundary of [date, localDay, localDay.plus({ days: 1 })]) {
+      if (boundary > from && boundary < until) boundaries.add(boundary.toMillis());
+    }
+  }
+  const cuts = [...boundaries].sort((a, b) => a - b);
+  return cuts.slice(0, -1).map((ms, i) => {
+    const start = DateTime.fromMillis(ms, { zone: homeTz });
+    const end = DateTime.fromMillis(cuts[i + 1], { zone: homeTz });
+    const effectiveDay = getEffectiveWorkDayForInstant(start.toISO()!, profile);
+    const { startMin, endMin } = slotDayMinutes(start.setZone(effectiveDay.timezone), end.setZone(effectiveDay.timezone));
+    const fitsWorkHours = effectiveDay.isWorkday
+      && effectiveDay.windows.some(w => startMin >= w.startMin && endMin <= w.endMin);
+    return { start, end, effectiveDay, fitsWorkHours };
+  });
 }
 
 /**
@@ -220,13 +310,9 @@ export function totalWorkMinutes(windows: WorkHourRange[]): number {
  * evening windows is honored if yaml defines it).
  */
 export function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boolean {
-  // v3.7.x (#143) — date-aware: a per-date override (day off, custom hours, or an
-  // away/tz day) reshapes "is he working now." Resolve the effective day for the
-  // instant's home-tz date, then evaluate the moment in that day's effective tz
-  // (an away override shifts it). No override → home tz + yaml windows → identical
-  // to the old weekday lookup. This is the #141 "is he working now" tail.
-  const homeTz = profile.user.timezone;
-  const eff = getEffectiveWorkDay(now.setZone(homeTz).toFormat('yyyy-MM-dd'), profile);
+  // Contact timing and booking resolve the SAME trip day, including a trip
+  // afternoon that has already crossed midnight in the owner's home zone.
+  const eff = getEffectiveWorkDayForInstant(now.toISO()!, profile);
   if (!eff.isWorkday || eff.windows.length === 0) return false;
   const local = now.setZone(eff.timezone);
   const minutes = local.hour * 60 + local.minute;
@@ -234,6 +320,23 @@ export function isWithinOwnerWorkHours(profile: UserProfile, now: DateTime): boo
     if (minutes >= w.startMin && minutes < w.endMin) return true;
   }
   return false;
+}
+
+/** Actual work intervals in an instant range. Window clocks belong to their
+ * effective trip date, while explicit home-date overrides retain the same
+ * precedence as booking's getEffectiveWorkDayForInstant. */
+export function ownerWorkIntervalsBetween(
+  from: DateTime,
+  until: DateTime,
+  profile: UserProfile,
+): Array<{ start: DateTime; end: DateTime }> {
+  const intervals: Array<{ start: DateTime; end: DateTime }> = [];
+  for (const segment of ownerWorkSegmentsBetween(from, until, profile)) {
+    const eff = segment.effectiveDay;
+    if (!eff.isWorkday) continue;
+    intervals.push(...configuredWorkIntervalsBetween(segment.start, segment.end, eff.timezone, eff.windows));
+  }
+  return intervals.sort((a, b) => a.start.toMillis() - b.start.toMillis());
 }
 
 /**
@@ -255,7 +358,7 @@ export function addWorkdays(fromIso: string, n: number, profile: UserProfile): s
   const homeDays = profile.schedule.home_days.days as string[];
   const workDays = new Set([...officeDays, ...homeDays]);
 
-  let cursor = DateTime.fromISO(fromIso).setZone(profile.user.timezone);
+  let cursor = DateTime.fromISO(fromIso, { zone: profile.user.timezone });
   let remaining = n;
 
   // If fromIso falls on a non-work day, advance to next work day without
@@ -331,34 +434,13 @@ export function workTimeBaseFromNow(profile: UserProfile): string {
 
 /**
  * Returns ISO of the next moment the owner is in work hours.
- * Walks forward day-by-day; picks the earliest still-future window start
- * across the day's multi-window work_hours (split-shift aware). Caps at
- * 14 days lookahead (defensive — should never hit).
+ * Selects the earliest future window INSTANT across adjacent trip dates and
+ * the next 14 home dates. Date order is not instant order across timezones.
  */
 export function nextOwnerWorkdayStart(profile: UserProfile): string {
   const homeTz = profile.user.timezone;
   const cursor = DateTime.now().setZone(homeTz);
-
-  for (let i = 0; i < 14; i++) {
-    const candidate = cursor.plus({ days: i });
-    // v3.7.x (#143) — per-date effective day: an override day off is skipped, an
-    // override work day (or away day) is honored with its own windows + tz. No
-    // override → identical to the old weekday work_hours lookup.
-    const eff = getEffectiveWorkDay(candidate.toFormat('yyyy-MM-dd'), profile);
-    if (!eff.isWorkday || eff.windows.length === 0) continue;
-    // Find the earliest window start that's still in the future (or first
-    // window of a future day). Multi-window: a slot at 21:30 after the current
-    // 17:30 cutoff is still "next work-time start" for the same day. Window
-    // starts are minute-of-day in the day's EFFECTIVE tz.
-    for (const w of eff.windows) {
-      const dt = DateTime.fromISO(candidate.toFormat('yyyy-MM-dd'), { zone: eff.timezone }).set({
-        hour: Math.floor(w.startMin / 60),
-        minute: w.startMin % 60,
-        second: 0,
-        millisecond: 0,
-      });
-      if (dt >= cursor) return dt.toUTC().toISO()!;
-    }
-  }
+  const intervals = ownerWorkIntervalsBetween(cursor, cursor.startOf('day').plus({ days: 14 }), profile);
+  if (intervals.length > 0) return intervals[0].start.toUTC().toISO()!;
   return cursor.plus({ hours: 8 }).toUTC().toISO()!;
 }

@@ -38,6 +38,8 @@ import { logLlmUsage } from './usageLog';
 import logger from './logger';
 import { extractTimes, extractDates, type DateMatch } from './dateTimeExtract';
 import { getOfferedSlots, type OfferedSlot } from './offeredSlotsStash';
+import { attendeeTzForDay, attendeeKnownTimezoneForDay, type AttendeeAvailabilityEntry } from './attendeeAvailability';
+import { resolveStatedInstant, resolveStatedSourceZone, StatedTimeClarificationError } from './weTimeResolver';
 
 // ── Detection regex ────────────────────────────────────────────────────────
 // Date/time extraction regex + helpers moved to dateTimeExtract.ts (o#260, G9)
@@ -87,11 +89,9 @@ function stripTransportEnvelope(text: string): string {
 
 interface NormalizedSlot {
   /**
-   * The clock time EXACTLY as the colleague wrote it — `YYYY-MM-DDTHH:mm`, no
-   * offset, no `Z`. Deliberately NOT an instant: see the M13 note on
-   * `normalizeAvailabilitySlotsWithHaiku` below. `wallClockOnly` strips anything
-   * past the minutes, so a model that emits an offset anyway cannot smuggle its
-   * own arithmetic back in.
+   * The clock time copied from the colleague. Bare clocks stay `YYYY-MM-DDTHH:mm`;
+   * an explicit ISO offset is accepted only when present verbatim in the message.
+   * Model-added offsets are stripped, so the extractor cannot do arithmetic.
    */
   wall_clock: string;
   /**
@@ -198,9 +198,9 @@ The colleague is proposing specific meeting times. They may state each slot in t
 
 RULES:
 - One entry per slot the colleague actually proposed (not one per number in the message).
-- NEVER convert a time between timezones and NEVER compute an offset. Copy the stated clock into \`wall_clock\` as "YYYY-MM-DDTHH:MM" — no offset, no "Z", no shifting. If you find yourself doing arithmetic, you are doing the wrong job.
-- \`stated_timezone\` = the IANA zone the stated clock belongs to. Map the abbreviation or place the colleague used to its IANA zone ("CET"/"CEST" → Europe/Brussels, "ET"/"EST"/"EDT" → America/New_York, "Boston" → America/New_York, "London"/"BST" → Europe/London, "IST"/"IDT"/"Israel" → Asia/Jerusalem). When they stated the time in ${ownerFirst}'s own frame ("your 19:00", "his time"), use ${tz}.
-- OMIT \`stated_timezone\` entirely when the current message names no timezone and no place for that slot — even if an EARLIER message did. Do NOT guess one and do NOT copy one over from the thread: code reads a zone-less clock in the colleague's own zone, which is what they meant.
+- NEVER convert a time between timezones and NEVER compute an offset. Copy the stated clock into \`wall_clock\` as "YYYY-MM-DDTHH:MM" — no shifting. If the message itself contains a complete ISO datetime with an explicit offset or Z, copy that exact ISO string instead. If you find yourself doing arithmetic, you are doing the wrong job.
+- \`stated_timezone\` = the IANA zone the stated clock belongs to. Map the abbreviation or place the colleague used to its IANA zone ("CET"/"CEST" → Europe/Brussels, "ET"/"EST"/"EDT" → America/New_York, "Boston" → America/New_York, "London"/"BST" → Europe/London, "IDT"/"Israel" → Asia/Jerusalem; copy ambiguous "IST"/"CST" literally, without choosing a country). When they stated the time in ${ownerFirst}'s own frame ("your 19:00", "his time"), use ${tz}.
+- OMIT \`stated_timezone\` entirely when the current message names no timezone and no place for that slot — even if an EARLIER message did. Do NOT guess one and do NOT copy one over from the thread: code checks both owner and colleague frames when they differ.
 - When the message gives both a foreign time AND an explicit ${ownerFirst}-local pair for the SAME slot ("12:00 Boston (your 19:00)"), output the ${ownerFirst}-local clock with stated_timezone=${tz} — it's the most reliable anchor.
 - When the colleague named a meeting LENGTH — a range ("11:00-11:15" → start 11:00, duration_minutes 15) or an explicit duration ("for 20 min", "חצי שעה" → 30) — include duration_minutes. Omit it when only a start time was given.
 - When the colleague is asking HOW MUCH time is free — the SIZE of a gap ("how much is free there?", "how long do we have then?", "how big is that window?") — rather than whether a specific slot works, set gap_query=true and use the START of the window/slot they mean (resolve "there"/"then" from the RECENT THREAD). Omit gap_query for a normal "does X work?" ask.
@@ -227,8 +227,8 @@ Output EXACTLY ONE call to normalize_slots.`;
               items: {
                 type: 'object',
                 properties: {
-                  wall_clock: { type: 'string', description: 'The stated clock time, copied verbatim, as "YYYY-MM-DDTHH:MM". NO offset, NO "Z", never shifted.' },
-                  stated_timezone: { type: 'string', description: 'IANA zone the stated clock belongs to, e.g. "Europe/Brussels" for "16:00 CET". OMIT when the message names no timezone and no place for this slot.' },
+                  wall_clock: { type: 'string', description: 'The stated clock as "YYYY-MM-DDTHH:MM", never shifted. Copy a complete explicit-offset ISO verbatim only when the message contains it; never compute an offset.' },
+                  stated_timezone: { type: 'string', description: 'IANA zone of the stated clock; copy ambiguous CST or IST literally for code to resolve from person context. OMIT when no timezone or place was named.' },
                   duration_minutes: { type: 'number', description: 'Meeting length in minutes, ONLY when the colleague named one (a range like 11:00-11:15, or "for 20 min"). Omit otherwise.' },
                   gap_query: { type: 'boolean', description: 'true when the colleague asks HOW MUCH time is free at/from this start ("how much is free there?"), not whether a specific slot works. Omit/false otherwise.' },
                 },
@@ -249,17 +249,18 @@ Output EXACTLY ONE call to normalize_slots.`;
     const out: NormalizedSlot[] = [];
     for (const entry of raw?.slots ?? []) {
       if (typeof entry?.wall_clock !== 'string') continue;
-      const wall = wallClockOnly(entry.wall_clock);
+      // Only an explicit ISO copied verbatim from this message is an instant.
+      // An offset invented by the extractor still cannot do arithmetic for us.
+      const explicit = /(?:Z|[+-]\d{2}:\d{2})$/i.test(entry.wall_clock)
+        && message.includes(entry.wall_clock) && DateTime.fromISO(entry.wall_clock, { setZone: true }).isValid;
+      const wall = explicit ? entry.wall_clock : wallClockOnly(entry.wall_clock);
       if (!wall) continue;
       const dur = typeof entry.duration_minutes === 'number' && entry.duration_minutes >= 5 && entry.duration_minutes <= 480
         ? entry.duration_minutes
         : undefined;
-      // A zone name is only carried through when `canonicalZone` recognises it. A
-      // hallucinated one ("Europe/Bruxelles", "PST") is dropped, which falls the
-      // slot back to the requester's own zone — usually the very zone he was
-      // abbreviating — rather than to a wrong frame.
+      // Keep raw ambiguous abbreviations for the shared person-context resolver.
       const zone = typeof entry.stated_timezone === 'string'
-        ? canonicalZone(entry.stated_timezone)
+        ? (canonicalZone(entry.stated_timezone) ?? entry.stated_timezone.trim())
         : undefined;
       out.push({
         wall_clock: wall,
@@ -383,16 +384,18 @@ function resolveFrame(
 }
 
 /** A stated wall clock, read in one zone, expressed in the owner's. */
-function readClockIn(wall: string, zone: string, ownerTz: string): { date: string; time: string } | null {
-  const dt = DateTime.fromISO(wall, { zone }).setZone(ownerTz);
+function readClockIn(wall: string, zone: string, ownerTz: string): { date: string; time: string; instantIso: string } | null {
+  const resolved = resolveStatedInstant({ startIso: wall, statedZone: zone, homeTz: ownerTz });
+  const dt = DateTime.fromISO(resolved.startIso, { zone }).setZone(ownerTz);
   if (!dt.isValid) return null;
-  return { date: dt.toFormat('yyyy-MM-dd'), time: dt.toFormat('HH:mm') };
+  return { date: dt.toFormat('yyyy-MM-dd'), time: dt.toFormat('HH:mm'), instantIso: dt.toISO()! };
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /** One rule-aware answer for ONE exact instant, expressed owner-local. */
 interface SlotOutcome {
+  instantIso?: string;
   date: string;        // YYYY-MM-DD
   time: string;        // HH:MM
   bookable: boolean;
@@ -464,7 +467,7 @@ interface SlotVerdict extends SlotOutcome {
 }
 
 export interface AvailabilityPreCheckResult {
-  /** True when at least one slot was tested. */
+  /** True when a requested slot was tested or needs source-time clarification. */
   ran: boolean;
   /** Per-slot verdicts for the system prompt block. Empty when ran=false. */
   verdicts: SlotVerdict[];
@@ -508,7 +511,7 @@ export async function precheckAvailability(params: {
   // resolve WHICH DAY a bare time refers to ("מחר" said a message earlier).
   recentThread?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /**
-   * v4.2.x — the IANA zone the ASKER writes from (his people-store `timezone`).
+   * Missing-entry fallback for callers without structured requester availability.
    * Its only job is to tell this pre-check whether a bare clock is AMBIGUOUS at
    * all: when the asker shares the owner's zone (or has no stored zone) there is
    * exactly one reading and everything below is byte-identical to before, and when
@@ -518,6 +521,8 @@ export async function precheckAvailability(params: {
    * Optional and validated: unknown / not a real IANA zone → the owner's zone.
    */
   requesterTimezone?: string;
+  /** Physical zone and dated travel; workingHoursTimezone is not a clock-source frame. */
+  requesterAvailability?: AttendeeAvailabilityEntry;
   // v4.2.x — thread identity, for the alternatives block's offered-slots binding
   // (nearbyAlternatives → recordProposedAlternatives) and, since 2026-09-09, for
   // READING that same stash before the verdicts (`bindPairsToStandingOffers`) so a
@@ -549,6 +554,14 @@ export async function precheckAvailability(params: {
   namedAttendeeEmails?: string[];
 }): Promise<AvailabilityPreCheckResult> {
   const empty: AvailabilityPreCheckResult = { ran: false, verdicts: [], promptBlock: '', toolSummaryLines: [] };
+  // Bare source dates are destination-local; displays pass the actual instant. An undecided second reading retains its source zone
+  // in `other.zone`, including when conversion crosses midnight or the travel edge.
+  const requesterTzForDate = (date: string): string => {
+    const zone = params.requesterAvailability
+      ? attendeeTzForDay(params.requesterAvailability, date)
+      : params.requesterTimezone;
+    return zone && IANAZone.isValidZone(zone.trim()) ? zone.trim() : params.profile.user.timezone;
+  };
 
   if (!params.message || params.message.trim().length === 0) return empty;
   if (params.namedAttendeeEmails && params.namedAttendeeEmails.length > 0) {
@@ -573,7 +586,7 @@ export async function precheckAvailability(params: {
     // never a re-check or a mutation. If a LATER turn really is about the owner at
     // this same instant, its own checkSlot call re-arms the ledger fresh, exactly
     // like every other invalidation rule on it (availabilityGate.ts's ledger doc).
-    forgetNamedInstantsFromHardBlockLedger(params.message, params.profile, params.requesterTimezone);
+    forgetNamedInstantsFromHardBlockLedger(params.message, params.profile, requesterTzForDate);
     return empty;
   }
 
@@ -590,12 +603,6 @@ export async function precheckAvailability(params: {
   if (!hasSchedulableSignal) return empty;
 
   const tz = params.profile.user.timezone;
-  // The zone a zone-less clock in this message belongs to. Resolved ONCE here and
-  // threaded through both extraction paths and the renderer, so the frame that
-  // decided the verdict is the same frame the verdict is stated in.
-  const requesterTz = params.requesterTimezone && IANAZone.isValidZone(params.requesterTimezone.trim())
-    ? params.requesterTimezone.trim()
-    : tz;
   const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
   const durationMinutes = params.durationMinutes ?? params.profile.meetings.allowed_durations[1] ?? 25;
 
@@ -617,7 +624,7 @@ export async function precheckAvailability(params: {
   // v3.7.x — category the normalizer inferred, threaded into checkSlot so the
   // verdict enforces per-day/day-type category caps (matches the search).
   let detectedCategory: string | null = null;
-  {
+  try {
     // The gate above already confirmed a schedulable signal (incl. a bare "?"
     // gap question with no time), so always let the language-agnostic Haiku
     // normalizer read it — it returns empty for non-availability messages.
@@ -631,7 +638,15 @@ export async function precheckAvailability(params: {
       // this class of bug needs to see.
       const frames: string[] = [];
       for (const slot of slots) {
-        const frame = resolveFrame(slot.stated_timezone, requesterTz, tz);
+        const personZone = params.requesterAvailability
+          ? attendeeKnownTimezoneForDay(params.requesterAvailability, slot.wall_clock)
+          : params.requesterTimezone ?? null;
+        const explicit = /(?:Z|[+-]\d{2}:\d{2})$/i.test(slot.wall_clock);
+        const stated = slot.stated_timezone && !explicit ? resolveStatedSourceZone({
+          startIso: slot.wall_clock, statedZone: slot.stated_timezone,
+          homeTz: tz, personTimezone: personZone,
+        }) : undefined;
+        const frame = explicit ? { zone: tz } : resolveFrame(stated, requesterTzForDate(slot.wall_clock), tz);
         const primary = readClockIn(slot.wall_clock, frame.zone, tz);
         if (!primary) continue;
         // The second reading exists only when the frame is undecided AND the two
@@ -640,22 +655,22 @@ export async function precheckAvailability(params: {
         // nothing ambiguous to report and the slot renders as a settled one.
         const otherRead = frame.otherZone ? readClockIn(slot.wall_clock, frame.otherZone, tz) : null;
         const other = otherRead && frame.otherZone
-          && (otherRead.date !== primary.date || otherRead.time !== primary.time)
+          && (otherRead.instantIso !== primary.instantIso)
           ? { ...otherRead, zone: frame.otherZone }
           : null;
-        // `wall_clock` is `YYYY-MM-DDTHH:MM` by construction (wallClockOnly), so
-        // this is a structured slice, not a locale-dependent format.
+        // Structured ISO clock, never a locale-dependent format.
         const statedClock = slot.wall_clock.slice(11);
         frames.push(
           `"${statedClock}" ${slot.stated_timezone ? `${frame.zone} (stated)` : 'frame NOT stated'}`
           + ` → ${primary.date}T${primary.time} ${tz}`
           + (other ? ` OR ${other.date}T${other.time} ${tz} (read as ${other.zone})` : ''),
         );
-        const key = `${primary.date}T${primary.time}|${other ? `${other.date}T${other.time}` : ''}`;
+        const key = `${primary.instantIso}|${other?.instantIso ?? ''}`;
         if (seen.has(key)) continue;
         seen.add(key);
         pairs.push({
-          date: primary.date, time: primary.time,
+          date: primary.date, time: primary.time, instantIso: primary.instantIso,
+          ...(explicit ? { fixedInstant: true } : {}),
           ...(slot.duration_minutes ? { durationMin: slot.duration_minutes } : {}),
           ...(slot.gap_query ? { gapQuery: true } : {}),
           ...(other ? { other, statedClock } : {}),
@@ -663,42 +678,53 @@ export async function precheckAvailability(params: {
       }
       logger.info('availabilityPreCheck — Haiku normalized instants', {
         instant_count: slots.length, pair_count: pairs.length,
-        requesterTz, ownerTz: tz, frames,
+        ownerTz: tz, frames,
       });
     }
-  }
 
-  // Regex fallback path. Runs when Haiku errored or returned nothing usable.
-  if (pairs.length === 0) {
-    // Owner locale order for ambiguous DD/MM vs MM/DD (Americas → month-first,
-    // everywhere else → day-first) lives inside extractRawPairs — shared with the
-    // named-attendee bail's ledger-forget above so the two extractions cannot
-    // drift. Heuristic (fails open — the real slot search re-interprets on
-    // Sonnet's reading anyway), no new profile field needed.
-    pairs = extractRawPairs(params.message, tz, today);
-    if (pairs.length === 0) return empty;
-    // v4.2.2 — every clock this path can extract is a BARE one (it has no zone
-    // signal at all), so the frame is undecided in exactly the sense resolveFrame
-    // describes, and it forks the same way. Both earlier versions asserted a single
-    // reading and each was wrong for one of the two colleagues on the tape: pre-4.2
-    // read owner-local (the Dirk hour-off), 4.2.1 read requester-local (which
-    // re-frames a clock Maelle herself offered in the owner's frame — the Luke
-    // echo). A colleague in the owner's own zone still gets one reading, so this
-    // whole block is a no-op for him.
-    const fallbackFrame = resolveFrame(undefined, requesterTz, tz);
-    const fallbackOtherZone = fallbackFrame.otherZone;
-    if (fallbackOtherZone) {
+    // Regex fallback path. Runs when Haiku errored or returned nothing usable.
+    if (pairs.length === 0) {
+      // Owner locale order for ambiguous DD/MM vs MM/DD (Americas → month-first,
+      // everywhere else → day-first) lives inside extractRawPairs — shared with the
+      // named-attendee bail's ledger-forget above so the two extractions cannot
+      // drift. Heuristic (fails open — the real slot search re-interprets on
+      // Sonnet's reading anyway), no new profile field needed.
+      pairs = extractRawPairs(params.message, tz, today);
+      if (pairs.length === 0) return empty;
+      // v4.2.2 — every clock this path can extract is a BARE one (it has no zone
+      // signal at all), so the frame is undecided in exactly the sense resolveFrame
+      // describes, and it forks the same way. Both earlier versions asserted a single
+      // reading and each was wrong for one of the two colleagues on the tape: pre-4.2
+      // read owner-local (the Dirk hour-off), 4.2.1 read requester-local (which
+      // re-frames a clock Maelle herself offered in the owner's frame — the Luke
+      // echo). A colleague in the owner's own zone still gets one reading, so this
+      // whole block is a no-op for him.
       pairs = pairs.map(p => {
+        const primary = readClockIn(`${p.date}T${p.time}`, tz, tz);
+        const base = { ...p, ...(primary ? { instantIso: primary.instantIso } : {}) };
+        const fallbackOtherZone = resolveFrame(undefined, requesterTzForDate(p.date), tz).otherZone;
+        if (!fallbackOtherZone) return base;
         const otherRead = readClockIn(`${p.date}T${p.time}`, fallbackOtherZone, tz);
         return otherRead && (otherRead.date !== p.date || otherRead.time !== p.time)
-          ? { ...p, other: { ...otherRead, zone: fallbackOtherZone }, statedClock: p.time }
-          : p;
+          ? { ...base, other: { ...otherRead, zone: fallbackOtherZone }, statedClock: p.time }
+          : base;
       });
-      logger.info('availabilityPreCheck — regex fallback: bare clocks, frame undecided; checking both readings', {
-        requesterTz, ownerTz: tz,
-        pairs: pairs.map(p => `${p.date}T${p.time}${p.other ? ` OR ${p.other.date}T${p.other.time}` : ''}`),
-      });
+      if (pairs.some(p => p.other)) {
+        logger.info('availabilityPreCheck — regex fallback: bare clocks, frame undecided; checking both readings', {
+          ownerTz: tz,
+          pairs: pairs.map(p => `${p.date}T${p.time}${p.other ? ` OR ${p.other.date}T${p.other.time}` : ''}`),
+        });
+      }
     }
+
+  } catch (error) {
+    if (!(error instanceof StatedTimeClarificationError)) throw error;
+    // No candidate has been checked or recorded yet. Carry the actual unresolved
+    // request through existing grounding; never retry it as a home-frame clock.
+    return { ran: true, verdicts: [],
+      promptBlock: `## AVAILABILITY TIME CLARIFICATION\n${error.message}\nAsk only for this requested time. No availability verdict is established.`,
+      toolSummaryLines: [`[availability_precheck clarification ${JSON.stringify(error.toToolResult())}]`],
+    };
   }
 
   // 2026-09-09 (Sharon Duret, 2026-09-08T18:45Z and T20:27Z) — bind a pair to
@@ -801,9 +827,9 @@ export async function precheckAvailability(params: {
    * two surfaces drifted apart in the first place (M1).
    */
   const evaluateInstant = async (
-    date: string, time: string, gapQuery: boolean, snappedMin: number,
+    date: string, time: string, gapQuery: boolean, snappedMin: number, instantIso?: string,
   ): Promise<SlotOutcome | null> => {
-    const startDt = DateTime.fromISO(`${date}T${time}`, { zone: tz });
+    const startDt = DateTime.fromISO(instantIso ?? `${date}T${time}`, { zone: tz });
     if (!startDt.isValid) return null;
     const events = await eventsForWeek(startDt);
 
@@ -855,7 +881,7 @@ export async function precheckAvailability(params: {
         blockedByOooUntilDisplay = probe.overCommitment?.allDayOutOfOfficeUntilDisplay;
       }
       return {
-        date, time,
+        date, time, instantIso: startDt.toISO()!,
         bookable: maxFit !== null,
         maxFreeMinutes: maxFit,
         ...(maxFit === null && blockedBy ? { rejection_reason: blockedBy } : {}),
@@ -871,9 +897,9 @@ export async function precheckAvailability(params: {
     }
 
     const check = checkAt(snappedMin);
-    if (check.passes) return { date, time, bookable: true };
+    if (check.passes) return { date, time, instantIso: startDt.toISO()!, bookable: true };
     return {
-      date, time,
+      date, time, instantIso: startDt.toISO()!,
       bookable: false,
       rejection_reason: check.violation_kind,
       ...(check.overCommitment?.allDayOutOfOffice ? { outOfOfficeAllDay: true as const } : {}),
@@ -896,14 +922,14 @@ export async function precheckAvailability(params: {
     );
     try {
       const gapQuery = pair.gapQuery === true;
-      const primary = await evaluateInstant(pair.date, pair.time, gapQuery, snappedMin);
+      const primary = await evaluateInstant(pair.date, pair.time, gapQuery, snappedMin, pair.instantIso);
       if (!primary) continue;
       // Both readings or neither. A throw on the SECOND one propagates to the catch
       // below and drops the whole pair, which is the honest outcome: half of an
       // undecided frame is not an answer, and shipping the primary alone would be
       // the silent single-frame assertion this change exists to remove.
       const other = pair.other
-        ? await evaluateInstant(pair.other.date, pair.other.time, gapQuery, snappedMin)
+        ? await evaluateInstant(pair.other.date, pair.other.time, gapQuery, snappedMin, pair.other.instantIso)
         : null;
       if (!gapQuery) testedDurations.push(snappedMin);
       verdicts.push({
@@ -1006,7 +1032,7 @@ export async function precheckAvailability(params: {
     const readings: SlotOutcome[] = [v, ...(v.other ? [v.other] : [])];
     const everyReadingArmsTheFloor = readings.every(r => armsHardFloor(r.rejection_reason));
     for (const r of readings) {
-      const startDt = DateTime.fromISO(`${r.date}T${r.time}`, { zone: tz });
+      const startDt = DateTime.fromISO(r.instantIso ?? `${r.date}T${r.time}`, { zone: tz });
       if (!startDt.isValid) continue;
       const instantIso = startDt.toISO()!;
       if (!everyReadingArmsTheFloor) {
@@ -1024,7 +1050,7 @@ export async function precheckAvailability(params: {
         // colleague's clock presented to the next one as a fact to preserve. The
         // floor adds the current reader's clock itself, per turn, from `instantIso`
         // (availabilityGate.displayForAsker).
-        display: formatSlotDisplay(r.date, r.time, tz),
+        display: formatSlotDisplay(r.date, r.time, tz, undefined, r.instantIso),
         kind: r.rejection_reason,
         allDayOutOfOffice: r.outOfOfficeAllDay === true,
         // gh#200 — bake the span's real end into the ledger's own phrase at
@@ -1073,12 +1099,12 @@ export async function precheckAvailability(params: {
     channelId: params.channelId,
     threadTs: params.threadTs,
   });
-  const promptBlock = renderPromptBlock(verdicts, params.profile, requesterTz)
+  const promptBlock = renderPromptBlock(verdicts, params.profile, requesterTzForDate)
     + (alternativesResult.block ? `\n\n${alternativesResult.block}` : '');
   // Same facts, second surface: the synthetic tool-summary lines (see the
   // AvailabilityPreCheckResult field doc). Rendered here so the prompt block and
   // the checker-visible lines come from the same verdicts and can never disagree.
-  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, requesterTz, durationMinutes);
+  const toolSummaryLines = renderToolSummaryLines(verdicts, alternativesResult.alternatives, tz, requesterTzForDate, durationMinutes);
   // v4.2.2 — log the TIER split, not just the count. `notBookable` sums the HARD
   // tier and the owner-overridable NOT CLEAN tier, and that ambiguity cost a day of
   // diagnosis: `bookable:0, notBookable:3` on 2026-07-27 (:187) was read as three
@@ -1130,12 +1156,12 @@ export async function precheckAvailability(params: {
  * `frames` log line at :648 renders the same pair.
  *
  * 2026-09-09 — every instant (verdict and alternative) ALSO carries the asker's
- * own clock as ` [local: <renderClockInZone>]`, byte-identical to the suffix the
- * orchestrator's summary renderer appends from a slot's `presentation_local`
- * (turnHelpers.ts, find_available_slots case), so the checker reads ONE format
- * whichever surface produced the line. Same renderer as the prompt block's "(= …
+ * own clock in the same `[local: …]` format as tool presentations, explicitly
+ * labelled with requester provenance and its IANA zone. A tool presentation may
+ * instead belong to a different attendee or an explicitly requested frame.
+ * Same renderer as the prompt block's "(= …
  * where they are)" (`requesterClock`), so the two surfaces cannot disagree.
- * Absent when the asker shares the owner's zone or has none stored — then no
+ * Absent when the asker's resolved zone for that date is the owner's — then no
  * suffix at all, never the owner's clock labelled as theirs. It had no zone but
  * the owner's until now, and a correct "3:45pm Boston" restatement of a
  * `2026-09-15T22:45 Asia/Jerusalem` line could only be guessed at, not verified.
@@ -1144,17 +1170,17 @@ function renderToolSummaryLines(
   verdicts: SlotVerdict[],
   alternatives: NearbyAlternative[],
   tz: string,
-  requesterTz: string,
+  requesterTzForDate: (date: string) => string,
   fallbackDurationMin: number,
 ): string[] {
   // `tz` is closed over rather than passed: every instant reaching here is
   // already owner-local, so there is no call site that may stamp another zone.
-  const localPart = (date: string, time: string): string => {
-    const theirs = requesterClock(date, time, tz, requesterTz);
-    return theirs ? ` [local: ${theirs}]` : '';
+  const localPart = (date: string, time: string, instantIso: string, zone = requesterTzForDate(instantIso)): string => {
+    const theirs = requesterClock(date, time, tz, zone, instantIso);
+    return theirs ? ` [local: ${theirs}; requester ${zone}]` : '';
   };
-  const clause = (o: SlotOutcome): string => {
-    const head = `${o.date}T${o.time} ${tz}${localPart(o.date, o.time)} dur=${o.durationMin ?? fallbackDurationMin}m`;
+  const clause = (o: SlotOutcome, zone?: string): string => {
+    const head = `${o.instantIso ?? `${o.date}T${o.time}`} ${tz}${localPart(o.date, o.time, o.instantIso ?? DateTime.fromISO(`${o.date}T${o.time}`, { zone: tz }).toISO()!, zone)} dur=${o.durationMin ?? fallbackDurationMin}m`;
     if (o.bookable) {
       return typeof o.maxFreeMinutes === 'number'
         ? `${head}: bookable maxFree=${o.maxFreeMinutes}m`
@@ -1164,13 +1190,13 @@ function renderToolSummaryLines(
     return `${head}: not bookable (${reason}${o.outOfOfficeAllDay ? ', all-day out-of-office' : ''})`;
   };
   const lines = verdicts.map(v => (v.other
-    ? `[availability_precheck ${clause(v)} | same clock read in ${v.other.zone}: ${clause(v.other)}]`
+    ? `[availability_precheck ${clause(v)} | same clock read in ${v.other.zone}: ${clause(v.other, v.other.zone)}]`
     : `[availability_precheck ${clause(v)}]`));
   if (alternatives.length > 0) {
     const starts = alternatives
       .map(a => DateTime.fromISO(a.start, { zone: tz }))
       .filter(dt => dt.isValid)
-      .map(dt => `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'))}`);
+      .map(dt => `${dt.toFormat("yyyy-MM-dd'T'HH:mm")}${localPart(dt.toFormat('yyyy-MM-dd'), dt.toFormat('HH:mm'), dt.toISO()!)}`);
     if (starts.length > 0) {
       lines.push(`[availability_precheck alternatives (bookable, ${tz}): ${starts.join(', ')}]`);
     }
@@ -1191,7 +1217,7 @@ function bindPairsToStandingOffers(pairs: Pair[], offered: OfferedSlot[], ownerT
   const offers = offered
     .map(o => DateTime.fromISO(o.startIso, { setZone: true }).setZone(ownerTz))
     .filter(dt => dt.isValid)
-    .map(dt => ({ date: dt.toFormat('yyyy-MM-dd'), time: dt.toFormat('HH:mm'), weekday: dt.weekday }));
+    .map(dt => ({ date: dt.toFormat('yyyy-MM-dd'), time: dt.toFormat('HH:mm'), weekday: dt.weekday, instantIso: dt.toISO()! }));
   const offerFor = (r: { date: string; time: string }) => {
     const dt = DateTime.fromISO(`${r.date}T${r.time}`, { zone: ownerTz });
     if (!dt.isValid) return null;
@@ -1199,6 +1225,7 @@ function bindPairsToStandingOffers(pairs: Pair[], offered: OfferedSlot[], ownerT
     return hits.length === 1 ? hits[0] : null;
   };
   return pairs.map(pair => {
+    if (pair.fixedInstant) return pair;
     const readings = [{ date: pair.date, time: pair.time }, ...(pair.other ? [pair.other] : [])];
     const bound = readings.map(offerFor).filter((o): o is NonNullable<typeof o> => o !== null);
     if (bound.length !== 1) return pair;
@@ -1208,6 +1235,7 @@ function bindPairsToStandingOffers(pairs: Pair[], offered: OfferedSlot[], ownerT
       ownerTz,
     });
     return {
+      instantIso: bound[0].instantIso,
       date: bound[0].date,
       time: bound[0].time,
       ...(pair.durationMin ? { durationMin: pair.durationMin } : {}),
@@ -1217,13 +1245,15 @@ function bindPairsToStandingOffers(pairs: Pair[], offered: OfferedSlot[], ownerT
 }
 
 interface Pair {
+  instantIso?: string;
+  fixedInstant?: boolean;
   date: string;
   time: string;
   durationMin?: number;
   gapQuery?: boolean;
   /** v4.2.2 — the second reading of an undecided frame (see resolveFrame), already
    *  expressed owner-local, plus the zone it was read in for the narration. */
-  other?: { date: string; time: string; zone: string };
+  other?: { date: string; time: string; zone: string; instantIso?: string };
   /** The clock as the asker wrote it (`HH:MM`); set with `other` only. */
   statedClock?: string;
 }
@@ -1301,27 +1331,23 @@ function extractRawPairs(message: string, tz: string, today: string): Pair[] {
 function forgetNamedInstantsFromHardBlockLedger(
   message: string,
   profile: UserProfile,
-  requesterTimezone?: string,
+  requesterTzForDate: (date: string) => string,
 ): void {
   const tz = profile.user.timezone;
   const today = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd');
   const pairs = extractRawPairs(message, tz, today);
   if (pairs.length === 0) return;
-  const requesterTz = requesterTimezone && IANAZone.isValidZone(requesterTimezone.trim())
-    ? requesterTimezone.trim()
-    : tz;
-  const frame = resolveFrame(undefined, requesterTz, tz);
   for (const p of pairs) {
-    const primary = readClockIn(`${p.date}T${p.time}`, frame.zone, tz);
-    if (primary) {
-      const iso = DateTime.fromISO(`${primary.date}T${primary.time}`, { zone: tz }).toISO();
-      if (iso) forgetHardBlockedSlot(profile.user.email, iso);
-    }
-    if (frame.otherZone) {
-      const other = readClockIn(`${p.date}T${p.time}`, frame.otherZone, tz);
-      if (other) {
-        const iso = DateTime.fromISO(`${other.date}T${other.time}`, { zone: tz }).toISO();
-        if (iso) forgetHardBlockedSlot(profile.user.email, iso);
+    const frame = resolveFrame(undefined, requesterTzForDate(p.date), tz);
+    for (const zone of [frame.zone, ...(frame.otherZone ? [frame.otherZone] : [])]) {
+      try {
+        const reading = readClockIn(`${p.date}T${p.time}`, zone, tz);
+        if (reading) forgetHardBlockedSlot(profile.user.email, reading.instantIso);
+      } catch (error) {
+        if (!(error instanceof StatedTimeClarificationError)) throw error;
+        // This is removal for a different calendar subject, not a requested owner
+        // time. Forget both fold occurrences without creating a question.
+        for (const iso of error.choices) forgetHardBlockedSlot(profile.user.email, iso);
       }
     }
   }
@@ -1338,10 +1364,10 @@ function forgetNamedInstantsFromHardBlockLedger(
  *  askers, so it stores the owner's clock and the floor re-adds the current reader's
  *  own from the stored instant (availabilityGate.displayForAsker). Either way the
  *  reply never converts by hand, which is what produced three different "16:00"s. */
-function formatSlotDisplay(date: string, time: string, tz: string, requesterTz?: string): string {
-  const dt = DateTime.fromISO(`${date}T${time}`, { zone: tz });
+function formatSlotDisplay(date: string, time: string, tz: string, requesterTz?: string, instantIso?: string): string {
+  const dt = DateTime.fromISO(instantIso ?? `${date}T${time}`, { zone: tz });
   if (!dt.isValid) return `${date} ${time}`;
-  const theirs = requesterTz ? requesterClock(date, time, tz, requesterTz) : '';
+  const theirs = requesterTz ? requesterClock(date, time, tz, requesterTz, instantIso) : '';
   return dt.toFormat("EEEE d MMM 'at' HH:mm") + (theirs ? ` (= ${theirs} where they are)` : '');
 }
 
@@ -1352,9 +1378,9 @@ function formatSlotDisplay(date: string, time: string, tz: string, requesterTz?:
  * '' when the asker is in the owner's zone or the render fails, and callers then
  * emit no parenthetical at all rather than an empty one.
  */
-function requesterClock(date: string, time: string, ownerTz: string, requesterTz: string): string {
+function requesterClock(date: string, time: string, ownerTz: string, requesterTz: string, instantIso?: string): string {
   if (!requesterTz || requesterTz === ownerTz) return '';
-  const iso = DateTime.fromISO(`${date}T${time}`, { zone: ownerTz }).toISO();
+  const iso = instantIso ?? DateTime.fromISO(`${date}T${time}`, { zone: ownerTz }).toISO();
   return iso ? renderClockInZone(iso, ownerTz, requesterTz) : '';
 }
 
@@ -1392,10 +1418,10 @@ function requesterClock(date: string, time: string, ownerTz: string, requesterTz
 // colleague-facing surface and was a flat refusal on the other.
 const ESCALATABLE: ReadonlySet<string> = OWNER_OVERRIDABLE_KINDS;
 
-function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, requesterTz: string): string {
+function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, requesterTzForDate: (date: string) => string): string {
   const tz = profile.user.timezone;
   const ownerFirst = profile.user.name.split(' ')[0];
-  const anyRequesterClock = verdicts.some(v => requesterClock(v.date, v.time, tz, requesterTz) !== '');
+  const anyRequesterClock = verdicts.some(v => requesterClock(v.date, v.time, tz, requesterTzForDate(v.instantIso ?? `${v.date}T${v.time}`), v.instantIso) !== '' || !!v.other);
   const anyUndecidedFrame = verdicts.some(v => !!v.other);
 
   /**
@@ -1483,14 +1509,14 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
   };
 
   const lines = verdicts.map(v => {
-    const when = formatSlotDisplay(v.date, v.time, tz, requesterTz);
+    const when = formatSlotDisplay(v.date, v.time, tz, requesterTzForDate(v.instantIso ?? `${v.date}T${v.time}`), v.instantIso);
     if (!v.other) return `  - ${when}: ${outcomeClause(v, v.gapQuery)}`;
     // v4.2.2 — UNDECIDED FRAME. They wrote a clock and named no timezone, and they
     // are not in ${ownerFirst}'s zone, so the words they typed name two different
     // moments and nothing in the message says which (see resolveFrame — the tape has
     // one colleague of each convention). Both are checked and both are printed; the
     // one thing the reply may not do is answer as though there were one.
-    const otherWhen = formatSlotDisplay(v.other.date, v.other.time, tz, requesterTz);
+    const otherWhen = formatSlotDisplay(v.other.date, v.other.time, tz, v.other.zone, v.other.instantIso);
     return `  - They wrote "${v.statedClock}" and named NO timezone, and they are not in ${ownerFirst}'s zone — so that is one of TWO moments and I cannot tell which they meant. Answer ONE of them and SAY WHICH CLOCK you used, in the reply itself:\n`
       + `      • as ${ownerFirst}'s clock → ${when}: ${outcomeClause(v, v.gapQuery)}\n`
       + `      • as THEIR clock (${v.other.zone}) → ${otherWhen}: ${outcomeClause(v.other, v.gapQuery)}`;
@@ -1504,7 +1530,7 @@ I pre-checked the times in this colleague's question against ${profile.user.name
 
 ${lines.join('\n')}
 ${anyRequesterClock ? `
-Each line carries TWO clocks for one moment: ${ownerFirst}'s local time first, then "(= … where they are)" — the SAME instant in the asker's own timezone, computed by code. On a line with ONE reading: when you name that time to them, quote the "where they are" clock VERBATIM and never re-derive it; when you name it to ${ownerFirst} or pass it to a tool, use his. Both refer to one instant, so never present them as two options. This rule does NOT apply to a two-reading line — that line has its own rule below, and it wins.
+A line with "(= … where they are)" carries TWO clocks for one moment: ${ownerFirst}'s local time first, then the SAME instant in the asker's timezone for that date, computed by code. On a line with ONE reading and that second clock: when you name that time to them, quote the "where they are" clock VERBATIM and never re-derive it; when you name it to ${ownerFirst} or pass it to a tool, use his. Both refer to one instant, so never present them as two options. This rule does NOT apply to a two-reading line — that line has its own rule below, and it wins.
 ` : ''}${anyUndecidedFrame ? `
 One of the times above has TWO readings because they gave a clock with no timezone and they do not share ${ownerFirst}'s. I do not know which they meant, so you must not answer as if I did. Pick the reading you are answering, use ITS verdict, and NAME THE CLOCK in your own words to them — "16:00 your time" / "16:00 ${ownerFirst}'s time" — so that if you picked wrong they can correct it in one message instead of a wrong meeting appearing. To them, the NUMBER you give is the clock THEY WROTE, labelled with whose clock you read it as; do NOT also quote the "(= … where they are)" parenthetical off those two lines. Either reading IS that same stated clock seen from one of two zones, so that parenthetical adds a THIRD number to a thread that already has two, and for the reading you did not pick it is a time nobody has mentioned. Never state a time from one of those lines without saying whose clock it is, and never offer the two readings as two options to choose between: only one of them is the time they asked about.
 ` : ''}

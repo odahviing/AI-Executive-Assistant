@@ -1263,6 +1263,7 @@ export async function getEventForAttendeeUpdate(
   attendees: Array<{ name?: string; email: string; optional?: boolean }>;
   startIso?: string;
   endIso?: string;
+  isAllDay?: boolean;
   categories: string[];
   location?: string;
   isOnline?: boolean;
@@ -1271,7 +1272,7 @@ export async function getEventForAttendeeUpdate(
     const client = getClient();
     const event: any = await client
       .api(`/users/${userEmail}/events/${meetingId}`)
-      .select('id,start,end,attendees,categories,location,isOnlineMeeting')
+      .select('id,start,end,isAllDay,attendees,categories,location,isOnlineMeeting')
       .get();
     if (!event) return null;
     const attendees = ((event.attendees as any[]) ?? [])
@@ -1285,6 +1286,7 @@ export async function getEventForAttendeeUpdate(
       attendees,
       startIso: eventPartAsInstant(event.start, 'getEventForAttendeeUpdate', meetingId),
       endIso: eventPartAsInstant(event.end, 'getEventForAttendeeUpdate', meetingId),
+      isAllDay: event.isAllDay,
       categories: (event.categories as string[]) ?? [],
       location: event.location?.displayName as string | undefined,
       isOnline: event.isOnlineMeeting as boolean | undefined,
@@ -1308,6 +1310,7 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   // preserve the meeting's existing duration without forcing the model to
   // supply (or re-ask for) a length it already knows.
   endDateTime?: string;
+  isAllDay?: boolean;
   // o#216 — sensitivity/categories/organizer/attendees ride along so a caller
   // that surfaces THIS subject to someone other than the owner-in-his-own-DM
   // (the seriesMaster refusal messages in update_meeting/move_meeting/
@@ -1321,7 +1324,7 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
   const client = getClient();
   const event = await client
     .api(`/users/${userEmail}/events/${meetingId}`)
-    .select('id,type,subject,seriesMasterId,start,end,sensitivity,categories,organizer,attendees')
+    .select('id,type,subject,seriesMasterId,start,end,isAllDay,sensitivity,categories,organizer,attendees')
     .get();
   return {
     type: event?.type,
@@ -1329,6 +1332,7 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     seriesMasterId: event?.seriesMasterId,
     startDateTime: eventPartAsInstant(event?.start, 'getEventType', meetingId),
     endDateTime: eventPartAsInstant(event?.end, 'getEventType', meetingId),
+    isAllDay: event?.isAllDay,
     sensitivity: event?.sensitivity,
     categories: event?.categories,
     organizer: event?.organizer,
@@ -1541,9 +1545,15 @@ export async function verifyApprovedCalendarAction(input: {
     if ((!isoHasExplicitZone(start) || !isoHasExplicitZone(end)) && (!statedZone || statedZone === 'local')) {
       return unavailable('approved_timezone_not_fixed');
     }
-    const { resolveStatedInstant } = await import('../../utils/weTimeResolver');
-    const resolved = resolveStatedInstant({ startIso: start, endIso: end, statedZone: typeof statedZone === 'string' ? statedZone : undefined,
-      homeTz: profile.user.timezone, travel: { isAway: false, effectiveTz: profile.user.timezone, location: '' } });
+    const { resolveStatedInstant, StatedTimeClarificationError } = await import('../../utils/weTimeResolver');
+    let resolved: ReturnType<typeof resolveStatedInstant>;
+    try {
+      resolved = resolveStatedInstant({ startIso: start, endIso: end, statedZone: typeof statedZone === 'string' ? statedZone : undefined,
+        homeTz: profile.user.timezone, travel: { isAway: false, effectiveTz: profile.user.timezone, location: '' } });
+    } catch (err) {
+      if (err instanceof StatedTimeClarificationError) return unavailable('approved_timezone_not_fixed');
+      throw err;
+    }
     if (!DateTime.fromMillis(0, { zone: resolved.sourceZone }).isValid) return unavailable('invalid_approved_timezone');
     if (!compareTime(resolved.startIso, event.start, resolved.sourceZone) || !compareTime(resolved.endIso, event.end, resolved.sourceZone)) return unavailable('invalid_event_interval');
   }

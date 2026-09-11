@@ -67,8 +67,8 @@ export async function checkMeetingRoomAvailability(params: {
       return { kind: 'skip', reason: 'room availability could not be read' };
     }
     const slots = fb[roomEmail] ?? [];
-    const slotStart = DateTime.fromISO(startIso);
-    const slotEnd = DateTime.fromISO(endIso);
+    const slotStart = DateTime.fromISO(startIso, { zone: profile.user.timezone });
+    const slotEnd = DateTime.fromISO(endIso, { zone: profile.user.timezone });
     isBusy = slots.some(s => {
       if (s.status === 'free') return false;
       const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
@@ -89,7 +89,7 @@ export async function checkMeetingRoomAvailability(params: {
     const smallLabel = profile.meetings.office_location?.small_meeting_room_label || 'Office';
     return { kind: 'room_busy_small_fits', smallLabel };
   }
-  const whenLabel = DateTime.fromISO(startIso)
+  const whenLabel = DateTime.fromISO(startIso, { zone: profile.user.timezone })
     .setZone(profile.user.timezone)
     .toFormat("EEEE 'at' HH:mm");
   const suggestedAskText = `The meeting room is taken at ${whenLabel} and ${participantCount} people don't fit a small space. Push the time, trim the list, or pick a different day?`;

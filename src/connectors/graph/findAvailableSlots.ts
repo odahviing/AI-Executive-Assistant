@@ -13,7 +13,7 @@ import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
 // combined `SearchRejectReason`, scheduleRules.ts for the checkSlot-facing
 // `RuleViolationKind` side — without needing both import paths.
 export type { SearchRejectLabel };
-import { attendeeTzForDay, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
+import { attendeeWorkSegmentsBetween, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
 
 /**
@@ -249,6 +249,7 @@ export async function findAvailableSlots(params: {
     workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
     hoursStart: string;        // 'HH:MM'
     hoursEnd: string;
+    workingHoursTimezone?: string;
     // v3.3.8 — per-day travel resolution (see utils/attendeeAvailability.ts).
     // The clip resolves the attendee's TZ for the candidate's DAY: inside
     // travelWindow [from, until] → its timezone; outside → homeTimezone.
@@ -266,7 +267,7 @@ export async function findAvailableSlots(params: {
     tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
   }>;
   // Rule 6 — attendee free/busy is a HELPER, never a blocker. When true, a slot
-  // where an attendee is busy / off-hours / short of travel padding is KEPT and
+  // where an attendee is busy / short of travel padding is KEPT and
   // TAGGED (attendee_conflicts) instead of dropped — WITHOUT relaxing any of
   // the OWNER's own rules (his work-hours, own busy, focus floor, floating
   // blocks all still apply via
@@ -280,7 +281,7 @@ export async function findAvailableSlots(params: {
   // THE INVARIANT this mode guarantees, and that the two colleague-path booking
   // Guards (createMeeting.ts / moveMeeting.ts) depend on — WITH `relaxed` OFF
   // (true for both Guards, which never set it; owner override is a separate,
-  // owner-only path): with it on, NO attendee-side check can drop a slot —
+  // owner-only path), AND `allowAttendeeOffHours` ON: no attendee check drops a slot —
   // busy, off-hours and travel-padding all tag. So a slot missing from the
   // result is an OWNER-rule verdict and nothing else, and a returned slot's
   // `attendee_conflicts` is the COMPLETE list of who it doesn't work for.
@@ -296,6 +297,13 @@ export async function findAvailableSlots(params: {
   // (neither sets `relaxed`), but any future caller that sets both flags
   // together must not rely on this invariant.
   tagAttendeeConflicts?: boolean;
+  // Only exact requested-slot validation may annotate through off-hours.
+  // General offerings keep working hours even when busy conflicts are soft.
+  allowAttendeeOffHours?: boolean;
+  // A stated daily band retains its source zone across DST and date rollover.
+  // null means the public tool's soft/full-day search; undefined preserves
+  // the implicit narrow-window behavior of internal exact-slot callers.
+  requestedTimeWindow?: { from: string; to: string; timezone: string } | null;
   // Owner-override "show me everything" mode. It bends the owner's SOFT rules
   // only — it can never surface a slot a real commitment already holds. See the
   // proposal guard below the checkSlot call: `allowRelaxed` waives rule 8 for the
@@ -304,9 +312,8 @@ export async function findAvailableSlots(params: {
   //   - skips focus-time protection (free_time_per_office/home_day_hours)
   //   - skips floating-block feasibility check (lunch/coffee/etc. windows)
   //   - on owner-path with attendees: drops the attendee busy filter
-  //   - on owner-path with attendees: drops the attendee work-hours clip
-  //     (caller controls both via `attendeeBusyEmails`/`attendeeAvailability`
-  //     — owner override lands by passing `undefined` for both)
+  //   - attendee work-hours remain hard for general offerings (M17);
+  //     exact named-slot validation can opt in via allowAttendeeOffHours
   //
   // Does NOT inherently widen the owner's own hours. The 07:00–22:00
   // widening comes from the CALLER passing `workHoursStart/End='07:00'/'22:00'`
@@ -1015,24 +1022,18 @@ export async function findAvailableSlots(params: {
       ? [...officeDayNames, ...homeDayNames]
       : workDays;
 
-    // Per-day requested-time clamp (organizer / no-attendee case). The walker
-    // honors search_from's time only as the cursor START — so a multi-day
-    // "16:00-19:00" search returned LATER days at their morning. When NO
-    // attendee is driving the work-hours clip (e.g. an organizer collecting
-    // options with the requester dropped — the Yael case), the requested time
-    // window is the only signal, so clamp EVERY day to its time-of-day band.
-    // SKIPPED when attendees are present: their own work-hours already clip,
-    // and a loose search-time band would over-constrain them (Alex's slots come
-    // from his ET hours, not the literal Israel search times — clamping would
-    // wrongly drop them). Full-day / inverted bands are no-ops.
+    // Explicit hard bands apply on every date, including attendee searches,
+    // in the source timezone. A soft public search has no daily band. Internal
+    // callers without either choice retain their existing no-attendee clamp.
     let bandFromMin = -1;
     let bandToMin = -1;
     let bandWraps = false;
     {
       const hasAttendeeClip = !!(params.attendeeAvailability && params.attendeeAvailability.length > 0);
-      if (!hasAttendeeClip) {
-        const bf = DateTime.fromISO(params.searchFrom, { zone: params.timezone });
-        const bt = DateTime.fromISO(params.searchTo, { zone: params.timezone });
+      if (params.requestedTimeWindow || (params.requestedTimeWindow === undefined && !hasAttendeeClip)) {
+        const bandTz = params.requestedTimeWindow?.timezone ?? params.timezone;
+        const bf = DateTime.fromISO(params.requestedTimeWindow?.from ?? params.searchFrom, { zone: bandTz });
+        const bt = DateTime.fromISO(params.requestedTimeWindow?.to ?? params.searchTo, { zone: bandTz });
         if (bf.isValid && bt.isValid) {
           const fm = bf.hour * 60 + bf.minute;
           const tm = bt.hour * 60 + bt.minute;
@@ -1176,15 +1177,18 @@ export async function findAvailableSlots(params: {
       const slotEndMin = slotTotalMin + params.durationMinutes;
 
       // ── Search-only filters (not part of the owner-rule verdict) ──
-      // Per-day requested-time clamp (organizer / no-attendee case) — honors the
-      // requested window on EVERY day, not just the cursor's first.
+      // Honor the daily band in its stated frame, including DST transitions
+      // and intervals that cross midnight, rather than adding elapsed minutes.
       if (bandFromMin >= 0) {
         // #C — non-wrap: the slot must sit fully inside [from,to]. Wrap (from>to,
         // crosses midnight): in-band if it's in the evening part (start ≥ from) OR
         // the early-morning part (end ≤ to).
+        const bandTz = params.requestedTimeWindow?.timezone ?? params.timezone;
+        const span = slotDayMinutes(cursorDt.setZone(bandTz), slotEndLocal.setZone(bandTz));
         const outOfBand = bandWraps
-          ? (slotTotalMin < bandFromMin && slotEndMin > bandToMin)
-          : (slotTotalMin < bandFromMin || slotEndMin > bandToMin);
+          ? !((span.startMin >= bandFromMin && span.endMin <= 1440 + bandToMin)
+            || (span.startMin >= 0 && span.endMin <= bandToMin))
+          : (span.startMin < bandFromMin || span.endMin > bandToMin);
         if (outOfBand) {
           return { kind: 'reject', reason: 'outside_requested_window', iso: cursorDt.toISO()! };
         }
@@ -1255,9 +1259,9 @@ export async function findAvailableSlots(params: {
       // REJECT conflicted slots so the owner is offered clean options. When the
       // caller opts into keeping them (`relaxed` = total owner override, rule 11;
       // or `tagAttendeeConflicts` = owner rules stay strict, attendee busy is a
-      // helper only): KEEP the slot but TAG who's busy / off-hours / short of
-      // travel padding — ALL THREE, for EVERY attendee — so whoever is deciding
-      // is TOLD (rule 7) — never silently dropped. The OWNER's busy is owned by
+      // helper only): keep and tag busy/travel conflicts. Off-hours only tags
+      // for exact requested-slot checks with allowAttendeeOffHours; general
+      // proposals keep that hard boundary (M17). The OWNER's busy is owned by
       // checkSlot below, off his CalendarEvents. ──
       const keepAttendeeConflicts = params.relaxed || params.tagAttendeeConflicts;
       const attendeeConflicts: AttendeeConflictTag[] = [];
@@ -1324,30 +1328,18 @@ export async function findAvailableSlots(params: {
         // #43 / #124 / Daniel — per-attendee work-window clip, own TZ with
         // per-day travel-window resolution.
         if (params.attendeeAvailability && params.attendeeAvailability.length > 0) {
-          const candidateDayIso = cursorDt.toFormat('yyyy-MM-dd');
+          const candidateDayIso = cursorDt.toISO()!;
           const attendeeOutsideHours = (att: NonNullable<typeof params.attendeeAvailability>[number]): boolean => {
             try {
-              const effTz = attendeeTzForDay(att, candidateDayIso);
-              const attStart = DateTime.fromJSDate(cursor).setZone(effTz);
-              const attEnd = DateTime.fromJSDate(slotEnd).setZone(effTz);
-              if (!attStart.isValid || !attEnd.isValid) return false;
-              const attDay = attStart.toFormat('EEEE') as 'Sunday'|'Monday'|'Tuesday'|'Wednesday'|'Thursday'|'Friday'|'Saturday';
-              if (!att.workdays.includes(attDay)) return true;
-              const [shH, shM] = att.hoursStart.split(':').map(Number);
-              const [ehH, ehM] = att.hoursEnd.split(':').map(Number);
-              // start + duration — a slot crossing the attendee's midnight must
-              // not wrap and look in-hours (same bug as owner-side checkSlot).
-              const { startMin, endMin } = slotDayMinutes(attStart, attEnd);
-              const winStart = shH * 60 + shM;
-              const winEnd = ehH * 60 + ehM;
-              return startMin < winStart || endMin > winEnd;
+              return attendeeWorkSegmentsBetween(att, cursorDt, DateTime.fromJSDate(slotEnd))
+                .some(segment => !segment.fitsWorkHours);
             } catch {
               return false;
             }
           };
           // v3.7.x (1.1/1.2) — TAG mode collects ALL off-hours attendees so a
           // second one isn't masked by the first; DROP mode stops at the first.
-          if (keepAttendeeConflicts) {
+          if (keepAttendeeConflicts && params.allowAttendeeOffHours) {
             for (const att of params.attendeeAvailability) {
               if (!attendeeOutsideHours(att)) continue;
               if (attendeeConflicts.some(c => c.email === att.email)) continue;
@@ -1360,7 +1352,7 @@ export async function findAvailableSlots(params: {
               attendeeConflicts.push({
                 email: att.email,
                 reason: 'off_hours',
-                ...(att.assumed ? { assumed: true } : {}),
+                ...(att.assumed && !att.workingHoursTimezone ? { assumed: true } : {}),
                 ...(tzTemp ? { tzTempDiffering: tzTemp } : {}),
               });
             }
@@ -1403,9 +1395,6 @@ export async function findAvailableSlots(params: {
           viewer: params.viewer,
           // v4.4.9 (#154) — the attendee-aware half of that same mask.
           viewerEmail: params.viewerEmail,
-          // v3.7.x (#143) — the SAME effective day the walker gated on, so search
-          // and book evaluate work-hours / floor in the same windows + timezone.
-          effectiveDay: effectiveDay ?? undefined,
         };
         const verdict = checkSlot({ ...slotCheckInput, allowRelaxed: params.relaxed });
         verdictOverOptional = verdict.overOptional;

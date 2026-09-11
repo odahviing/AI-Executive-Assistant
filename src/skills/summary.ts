@@ -57,6 +57,8 @@ import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calen
 import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
+import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
+import { colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
 
 const anthropic = getAnthropicClient();
 
@@ -716,7 +718,7 @@ Recipients are explicit and named — never inferred. The owner says "send to Br
 
 External attendees are excluded from the default-allowed set in v1.7.2 (they're not in Slack). To include an external in distribution, the owner must explicitly name them — and they'd need a Slack account to receive it (rare). For external sharing via email, the email Connection (planned) will handle it.
 
-Action items WITH deadlines and a resolvable internal Slack ID → create a summary_action_followup task firing 2pm in the assignee's timezone on the deadline date.
+Action items WITH deadlines and a resolvable internal Slack ID → create a summary_action_followup task starting at 2pm in the assignee's dated timezone on the deadline date, deferred to their next working time if needed.
 Action items WITHOUT deadlines or with external/unmatched assignees → stay as text in the shared summary; no task.`,
         input_schema: {
           type: 'object',
@@ -1125,6 +1127,10 @@ Output the full updated draft JSON.`;
             targetSlackId: targetPersonRaw,
             ownerTimezone: profile.user.timezone,
           });
+          if (!dueAtForFire) {
+            followupSkipped.push({ description: item.description, reason: 'invalid_deadline' });
+            continue;
+          }
 
           const taskId = createTask({
             owner_user_id: ownerUserId,
@@ -1235,28 +1241,25 @@ function computeFireTime(params: {
   deadlineIso: string;
   targetSlackId: string;
   ownerTimezone: string;
-}): { iso: string; usedTimezone: string } {
-  // Pull target's timezone from people_memory
-  let targetTz: string | undefined;
-  try {
-    // Lazy import to avoid circular deps at module load
-    const { getPersonMemory } = require('../db');
-    const person = getPersonMemory(params.targetSlackId);
-    targetTz = person?.timezone ?? undefined;
-  } catch (_) { /* fall back below */ }
-
-  const tz = targetTz ?? params.ownerTimezone;
-
-  // Take the deadline's DATE in the chosen timezone, fire at 2pm local
-  let datePart: string;
-  try {
-    datePart = DateTime.fromISO(params.deadlineIso).setZone(tz).toFormat('yyyy-MM-dd');
-  } catch {
-    // If parse fails, use the date portion of the input verbatim
-    datePart = params.deadlineIso.slice(0, 10);
-  }
+}): { iso: string; usedTimezone: string } | null {
+  const { getPersonMemory } = require('../db') as typeof import('../db');
+  const ownerDate = DateTime.fromISO(params.deadlineIso, { zone: params.ownerTimezone });
+  if (!ownerDate.isValid) return null;
+  const person = getPersonMemory(params.targetSlackId);
+  const entry = loadAttendeeAvailabilityForPerson(person ?? undefined, params.ownerTimezone);
+  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(params.deadlineIso);
+  const tz = entry ? attendeeTzForDay(entry, hasOffset ? ownerDate.toISO()! : params.deadlineIso.slice(0, 10)) : params.ownerTimezone;
+  // A bare deadline is a calendar date in the assignee's frame; an explicit
+  // offset is an instant whose date is rendered there. Neither uses host TZ.
+  const datePart = DateTime.fromISO(params.deadlineIso, { zone: tz }).toISODate();
   const fireAtLocal = DateTime.fromISO(`${datePart}T14:00:00`, { zone: tz });
-  return { iso: fireAtLocal.toUTC().toISO()!, usedTimezone: tz };
+  if (!fireAtLocal.isValid) return null;
+  return {
+    iso: colleagueWorkTimeBaseFromNow(tz, fireAtLocal.toMillis(), {
+      slackId: params.targetSlackId, ownerTimezone: params.ownerTimezone,
+    }),
+    usedTimezone: tz,
+  };
 }
 
 // ── Public helpers used by the Slack file_share branch ──────────────────────

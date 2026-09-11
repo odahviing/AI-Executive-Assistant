@@ -66,7 +66,9 @@ export function evaluateVenueHours(params: {
   if (!params.openingHoursByDay || !params.meetingTimeIso) return 'unknown';
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { DateTime } = require('luxon') as typeof import('luxon');
-  const dt = DateTime.fromISO(params.meetingTimeIso).setZone(params.timezone);
+  // Bare clocks belong to the supplied frame; explicit offsets still identify
+  // the same instant, rendered in that frame for weekday/opening-hours checks.
+  const dt = DateTime.fromISO(params.meetingTimeIso, { zone: params.timezone });
   if (!dt.isValid) return 'unknown';
   const minutes = dt.hour * 60 + dt.minute;
   const day = dt.toFormat('EEEE') as Weekday;

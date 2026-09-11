@@ -169,7 +169,7 @@ Next week: ${nextWeekStart.toFormat('EEE d MMM')} – ${nextWeekEnd.toFormat('EE
   // Read fresh per call.
   const socialActiveForPrompt = (profile.skills as any)?.social === true;
   const peopleSection = isOwner
-    ? formatPeopleMemoryForPrompt(user.slack_user_id, focusSlackIds, socialActiveForPrompt)
+    ? formatPeopleMemoryForPrompt(user.slack_user_id, user.timezone, focusSlackIds, socialActiveForPrompt)
     : null;
 
   // v2.2.1 — per-person markdown memory catalog (operational facts: residence,

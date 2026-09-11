@@ -61,6 +61,19 @@ const density = compile(namedFunction('src/utils/calendarDensity.ts', 'alignNear
 const tz = compile(source('src/utils/timezoneConvert.ts').text, {}, name => {
   assert.equal(name, 'luxon'); return { DateTime };
 });
+const workHours = compile(source('src/utils/workHours.ts').text, {}, name => {
+  if (name === 'luxon') return { DateTime };
+  if (name === '../db/scheduleOverrides') return { getScheduleOverride: () => null };
+  throw Error(`FORBIDDEN work-hours dependency: ${name}`);
+});
+const stated = compile(source('src/utils/weTimeResolver.ts').text, {}, name => {
+  if (name === 'luxon') return { DateTime };
+  if (name === './timezoneConvert') return tz;
+  if (name === './workHours') return workHours;
+  throw Error(`FORBIDDEN stated-clock dependency: ${name}`);
+});
+const requestedClock = one(collect(source(handlerDir + 'findAvailableSlots.ts'), n =>
+  ts.isVariableStatement(n) && variableNames(n).includes('resolveRequestedClock')), 'actual requested-clock helper');
 
 function harness() {
   let now = Date.now();
@@ -86,11 +99,12 @@ function harness() {
   function execute(nodes, env, tail = '') {
     const body = nodes.map(n => n.getText()).join('\n');
     return compile(`export async function run() { ${body}\n${tail}\n }`,
-      { DateTime, logger, ...density, ...tz, ...env }, requireSafe).run();
+      { DateTime, logger, ...density, ...tz, ...stated, ...env }, requireSafe).run();
   }
   function context(actor = 'owner', channelId = 'D-offer', threadTs = 't1') {
     return { channelId, threadTs, channel: 'slack', senderRole: actor, userId: actor,
-      profile: { user: { timezone: zone, name: 'Owner Example', email: 'owner@example.test' } } };
+      profile: { user: { timezone: zone, name: 'Owner Example', email: 'owner@example.test' },
+        schedule: { work_hours: {}, office_days: { days: [] }, home_days: { days: [] } } } };
   }
   const record = (ctx, slots = [{ start: instant }], extra = {}) => stash.recordOfferedSlots({
     channelId: ctx.channelId, threadTs: ctx.threadTs, timezone: zone, slots, ...extra,
@@ -143,7 +157,7 @@ function harness() {
     const args = { candidate_slots: [{ start: instant }], duration_minutes: 40, ...options.args };
     const callsMade = [];
     const env = {
-      args, context: ctx, timezone: zone, userEmail: 'owner@example.test', searchWindowTz: '', autoPresentTz: '',
+      args, context: ctx, timezone: zone, userEmail: 'owner@example.test', searchWindowTz: '', autoPresentTz: '', presentTzForOutput: () => '',
       candidateAttendeeBusyEmails: ['person@example.test'], attendeeAvailability: [], mode: 'online',
       relaxedGranted: false, excludeEventIdsForSearch: ['source-event'], leadHours: 1,
       viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', movingEventIdMismatchWarning: undefined,
@@ -159,7 +173,7 @@ function harness() {
         return [{ start: options.returnedStart ?? params.searchFrom, end: params.searchTo }];
       }, ...options.env,
     };
-    const result = await execute([node], env);
+    const result = await execute([requestedClock, node], env);
     return { result, callsMade };
   }
   async function preferred(ctx, options = {}) {
@@ -170,12 +184,12 @@ function harness() {
       && ts.isIdentifier(n.expression) && n.expression.text === 'preferredSlot'), 'preferred branch');
     const siblings = first.parent.statements;
     assert.equal(last.parent, first.parent, 'preferred anchors share a block');
-    return execute(Array.from(siblings).slice(siblings.indexOf(first), siblings.indexOf(last) + 1), {
+    return execute([requestedClock, ...Array.from(siblings).slice(siblings.indexOf(first), siblings.indexOf(last) + 1)], {
       args: { preferred_slot: options.start ?? instant, duration_minutes: 40 }, context: ctx,
       timezone: zone, searchWindowTz: '', candidateSet: options.candidateSet ?? [], chosenStarts: new Set(),
       userEmail: 'owner@example.test', attendeeBusyEmails: ['person@example.test'], attendeeAvailability: [],
       mode: 'online', relaxedGranted: false, excludeEventIdsForSearch: ['source-event'], leadHours: 1,
-      viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', presentTzForOutput: '',
+      viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', presentTzForOutput: () => '',
       findAvailableSlots: async params => options.returnedSlots ?? [{ start: params.searchFrom, end: params.searchTo }],
       firstRejectReason: () => 'owner_busy', humanizeViolationLabel: reason => `fixture label: ${reason}`,
     }, 'return { status: preferredSlotStatus, chosen: [...chosenStarts], preferredSlot };');
@@ -354,7 +368,9 @@ test('Graph readers normalize UTC / explicit offset / named zone and reject bad 
     assert.equal(DateTime.fromISO(detail.startDateTime, { zone }).toFormat('HH:mm'), '14:00');
     assert.equal(millis(detail.endDateTime) - millis(detail.startDateTime), 40 * 60000);
     assert.equal(millis(attendee.startIso), millis(detail.startDateTime));
-    const vacated = vacatedHelper.computeVacatedSlot(detail.startDateTime, instant, end, zone);
+    const vacated = vacatedHelper.computeVacatedSlot.length === 3
+      ? vacatedHelper.computeVacatedSlot(detail.startDateTime, detail.endDateTime, zone)
+      : vacatedHelper.computeVacatedSlot(detail.startDateTime, instant, end, zone);
     assert.equal(millis(vacated.start), millis('2026-09-16T14:00:00+03:00'));
     assert.match(vacated.label, /14:00.*14:40/);
     event.start = { dateTime: '2026-09-16T11:00:00', timeZone: 'Invalid/Zone' };

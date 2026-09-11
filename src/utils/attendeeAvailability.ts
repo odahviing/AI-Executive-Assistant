@@ -12,15 +12,16 @@
  * helper's data; busy time is intentionally not a hard filter — Sonnet
  * sees busy slots with annotation and decides whether to propose them.
  *
- * Returns undefined when no attendee in the list has structured availability
- * data — back-compat with the no-clip path that existed before v2.3.3.
+ * Missing stored hours use the existing defaults in the known or fallback
+ * zone; a missing derived cache does not remove a person from the clip.
  */
 
 import { DateTime } from 'luxon';
 import logger from './logger';
 import { renderClockInZone } from './timezoneConvert';
+import { slotDayMinutes, configuredWorkIntervalsBetween } from './workHours';
 import type { WeekDay } from './floatingBlocks';
-import type { TimezoneTempSource } from '../db/people';
+import type { TimezoneTempSource, PersonMemory } from '../db/people';
 
 export interface AttendeeAvailabilityEntry {
   email: string;
@@ -28,6 +29,7 @@ export interface AttendeeAvailabilityEntry {
   workdays: WeekDay[];
   hoursStart: string;
   hoursEnd: string;
+  workingHoursTimezone?: string; // explicitly stated window frame, independent of physical/travel zone
   // v2.5.2 — when active travel overrode the stored profile timezone for this
   // entry, this carries the original stored timezone + travel location so the
   // caller can render dual-TZ ("15:00 Boston / 22:00 Idan") on slot proposals
@@ -91,17 +93,87 @@ export interface AttendeeAvailabilityEntry {
 }
 
 /**
- * v3.3.8 — the attendee's effective IANA timezone on a specific calendar day.
- * `isoDate` is yyyy-MM-dd (the slot walker's owner-TZ day — travel dates are
- * calendar-level facts, sub-day boundary effects are noise).
+ * The attendee's physical zone on a requested destination-local calendar date
+ * or at an explicit instant. Trip dates include both endpoints in the
+ * destination calendar; callers with an instant must not truncate its date.
  */
 export function attendeeTzForDay(
   entry: Pick<AttendeeAvailabilityEntry, 'timezone' | 'homeTimezone' | 'travelWindow'>,
   isoDate: string,
 ): string {
+  return attendeeTravelTimezoneForDay(entry, isoDate) ?? entry.homeTimezone ?? entry.timezone;
+}
+
+export function attendeeTravelTimezoneForDay(
+  entry: Pick<AttendeeAvailabilityEntry, 'travelWindow'>, isoDate: string,
+): string | undefined {
   const tw = entry.travelWindow;
-  if (tw && isoDate >= tw.from && isoDate <= tw.until) return tw.timezone;
-  return entry.homeTimezone ?? entry.timezone;
+  const date = tw && isoDate.includes('T')
+    ? DateTime.fromISO(isoDate, { zone: tw.timezone }).toISODate() ?? '' : isoDate;
+  if (tw && date >= tw.from && date <= tw.until) return tw.timezone;
+  return undefined;
+}
+
+/** Physical-zone authority for the requested date, independently of a fixed
+ * work-hours frame. A dated trip is known on its own days even when the base
+ * zone is only a fallback; that fallback remains unknown outside the trip. */
+export function attendeeKnownTimezoneForDay(
+  entry: Pick<AttendeeAvailabilityEntry, 'timezone' | 'homeTimezone' | 'travelWindow' | 'assumed'>,
+  isoDate: string,
+): string | null {
+  return attendeeTravelTimezoneForDay(entry, isoDate)
+    ?? (entry.assumed ? null : entry.homeTimezone ?? entry.timezone);
+}
+
+export interface AttendeeWorkSegment {
+  start: DateTime;
+  end: DateTime;
+  timezone: string;
+  fitsWorkHours: boolean;
+}
+
+/** Partition a meeting at every local midnight and trip boundary. Fixed
+ * workingHoursTimezone continues to own the work window while physical travel
+ * owns presentation only. A slot must fit every visited wall clock (DST too). */
+export function attendeeWorkSegmentsBetween(
+  entry: AttendeeAvailabilityEntry, from: DateTime, until: DateTime,
+): AttendeeWorkSegment[] {
+  if (!from.isValid || !until.isValid || until <= from) return [];
+  const cuts = new Set([from.toMillis(), until.toMillis()]);
+  const zones = entry.workingHoursTimezone ? [entry.workingHoursTimezone]
+    : [entry.homeTimezone ?? entry.timezone, entry.travelWindow?.timezone].filter((z): z is string => !!z);
+  for (const zone of new Set(zones)) {
+    for (let day = from.setZone(zone).startOf('day').plus({ days: 1 }); day < until; day = day.plus({ days: 1 })) cuts.add(day.toMillis());
+  }
+  const points = [...cuts].sort((a, b) => a - b);
+  const [sh, sm] = entry.hoursStart.split(':').map(Number);
+  const [eh, em] = entry.hoursEnd.split(':').map(Number);
+  return points.slice(0, -1).map((ms, i) => {
+    const instant = DateTime.fromMillis(ms, { zone: 'UTC' });
+    const timezone = entry.workingHoursTimezone ?? attendeeTzForDay(entry, instant.toISO()!);
+    const start = instant.setZone(timezone), end = DateTime.fromMillis(points[i + 1], { zone: timezone });
+    const { startMin, endMin } = slotDayMinutes(start, end);
+    const fitsWorkHours = entry.workdays.includes(start.toFormat('EEEE') as WeekDay)
+      && startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
+    return { start, end, timezone, fitsWorkHours };
+  });
+}
+
+/** Actual recipient work intervals, using the same dated zone authority as
+ * complete-slot validation. Timers can consume these without reimplementing
+ * the trip/return boundary. Configured window clocks keep existing semantics. */
+export function attendeeWorkIntervalsBetween(
+  entry: AttendeeAvailabilityEntry, from: DateTime, until: DateTime,
+): Array<{ start: DateTime; end: DateTime }> {
+  const result: Array<{ start: DateTime; end: DateTime }> = [];
+  const [sh, sm] = entry.hoursStart.split(':').map(Number);
+  const [eh, em] = entry.hoursEnd.split(':').map(Number);
+  for (const segment of attendeeWorkSegmentsBetween(entry, from, until)) {
+    if (!entry.workdays.includes(segment.start.toFormat('EEEE') as WeekDay)) continue;
+    result.push(...configuredWorkIntervalsBetween(segment.start, segment.end, segment.timezone,
+      [{ startMin: sh * 60 + sm, endMin: eh * 60 + em }]));
+  }
+  return result;
 }
 
 /**
@@ -124,25 +196,27 @@ export function attendeeTzForDay(
  * signal and outranks the passive reading (M12), so those days need no hedge
  * at all.
  *
- * A travel record that did NOT swap the zone (destination unresolvable in the
- * static map, or same zone as home) never becomes a `travelWindow` in the first
- * place — `loadAttendeeAvailabilityForEmails` only writes one when
- * `travelTz && travelTz !== resolvedTz` — so those days keep the hedge, exactly
- * like a non-traveller. Same gate as `planMeeting.ts`'s
- * `travelActuallySwappedZone`, on the entry that already encodes it.
+ * An unresolvable destination cannot establish a travel window. A resolvable
+ * trip matching the base/fallback zone is retained: it still establishes a
+ * dated physical-zone statement, even when it does not change the clock.
  */
 export function tzTempDifferingForDay(
-  entry: Pick<AttendeeAvailabilityEntry, 'travelWindow' | 'tzTempDiffering'>,
+  entry: Pick<AttendeeAvailabilityEntry, 'travelWindow' | 'tzTempDiffering' | 'workingHoursTimezone'>,
   isoDate: string,
 ): AttendeeAvailabilityEntry['tzTempDiffering'] | undefined {
   if (!entry.tzTempDiffering) return undefined;
+  if (entry.workingHoursTimezone) return undefined; // window frame was explicitly stated
   const tw = entry.travelWindow;
-  if (tw && isoDate >= tw.from && isoDate <= tw.until) return undefined;
+  const date = tw && isoDate.includes('T')
+    ? DateTime.fromISO(isoDate, { zone: tw.timezone }).toISODate() ?? '' : isoDate;
+  if (tw && date >= tw.from && date <= tw.until) return undefined;
   return entry.tzTempDiffering;
 }
 
 /**
- * Build an AttendeeAvailability list from people_memory for the given emails.
+ * Build one availability entry from an already-resolved person. Scheduling
+ * and contact timers share the same permanent zone, manual hours and dated
+ * travel record, including people who have only a Slack identity.
  *
  * v2.5.2 — when an attendee has an active travel record (person_id-keyed
  * `getTravelRecordById`), the entry's `timezone` becomes the travel location's
@@ -153,145 +227,156 @@ export function tzTempDifferingForDay(
  * If the location can't be resolved statically, we fall back to the stored
  * timezone (no travel override) and log so it surfaces in diagnostics.
  *
- * @param emails       Attendee email addresses to look up. The owner's own
- *                     email (if present) is filtered out — owner availability
- *                     comes from the profile, not from people_memory.
- * @param ownerEmail   Owner email — used to filter the owner out of the list.
- * @returns            List of work-hour entries (one per attendee with known
- *                     timezone), or undefined if none. Use the result as the
- *                     `attendeeAvailability` arg to `findAvailableSlots`.
+ * `email` is only the scheduling entry's label. A Slack-only contact leaves it
+ * empty; person_id remains the key for zone and travel reads.
  */
-export function loadAttendeeAvailabilityForEmails(
-  emails: string[],
-  ownerEmail: string,
-  fallbackTimezone?: string,   // #M3 — no-TZ attendee is assumed in this zone (owner/requester frame)
-): AttendeeAvailabilityEntry[] | undefined {
-  if (!emails || emails.length === 0) return undefined;
+export function loadAttendeeAvailabilityForPerson(
+  person: PersonMemory | undefined,
+  fallbackTimezone?: string,
+  email: string = person?.email ?? '',
+): AttendeeAvailabilityEntry | undefined {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { searchPeopleMemory, getTravelRecordById, getEffectiveTimezoneById } = require('../db') as typeof import('../db');
+    const { getTravelRecordById, getEffectiveTimezoneById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getEffectiveWorkingHours, defaultWorkingHoursForTz } = require('./workingHoursDefault') as
-      typeof import('./workingHoursDefault');
+    typeof import('./workingHoursDefault');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { inferTimezoneFromStateStatic } = require('./locationTz') as
-      typeof import('./locationTz');
+    typeof import('./locationTz');
 
-    const ownerLower = ownerEmail.toLowerCase();
+    // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — read the PERMANENT
+    // stored zone via getEffectiveTimezoneById, never the raw column: a
+    // later differing Slack-auto reading lands in a TTL'd sibling value
+    // (`tzTempDiffering` below) instead of silently overwriting the
+    // established zone, so working-hours math is never computed against a
+    // stale/transient reading (o#265 — Maayan stored/read as ET drove a
+    // whole search's "outside working hours" verdicts wrong).
+    const effectiveTz = person ? getEffectiveTimezoneById(person.person_id) : undefined;
+    // #M3 (2026-07-23 owner direction) — an attendee with no stored timezone is
+    // ASSUMED to be in the requester's frame (fallbackTimezone = owner's TZ) with
+    // standard hours, instead of being SKIPPED (which left them unclipped so the
+    // search could offer owner-morning to a would-be-remote person). A human-stated
+    // TZ/time still overrides via search_window_timezone. `fallbackTimezone` being
+    // optional is a call-signature convenience, not a supported second mode: every
+    // caller of `loadAttendeeAvailabilityForEmails` / `attendeeCheckParams` now
+    // passes it (last five fixed 2026-09-07 — planMeeting.ts, createMeeting.ts's
+    // dense-packing counter-offer, autoMove.ts x2, checkHealth.ts). A caller that
+    // omits it silently reintroduces the pre-ruling skip below (`if (!resolvedTz)
+    // continue`) — that is a bug to fix at the call site, not current behaviour.
+    const resolvedTz = effectiveTz?.timezone ?? fallbackTimezone;
+    if (!resolvedTz) return undefined;
+    // A legacy person can have a valid zone without the derived hours cache.
+    // Keep that known zone and use its existing default; missing cache data
+    // must not remove the attendee from scheduling or change their clock.
+    const wh = (person ? getEffectiveWorkingHours(person) : null)
+      ?? defaultWorkingHoursForTz(resolvedTz);
+
+    let timezone = resolvedTz;
+    let travelMeta: AttendeeAvailabilityEntry['travel'];
+    let travelWindow: AttendeeAvailabilityEntry['travelWindow'];
+    // v3.3.8 — raw record includes FUTURE trips; the dated window drives
+    // per-day resolution. v4.8.x — keyed by person_id, not slack_id: an
+    // email-only external (no slack_id) can carry a travel record too (the
+    // email-inbound stated-zone path writes one), and the slack_id-keyed
+    // lookup silently returned null for every such row — write succeeded,
+    // read never happened (same class as getTravelRecordById's doc,
+    // db/people.ts). Also no longer gated on a stored base timezone: a
+    // fallback-assumed attendee (#M3) with a travel record has a STATED
+    // zone for the trip's days — inside the window that record outranks the
+    // owner-frame guess (M12: stated-in-chain > assume-owner-zone); outside
+    // it they fall back to homeTimezone = resolvedTz, unchanged.
+    if (person) {
+      const travel = getTravelRecordById(person.person_id, null);
+      if (travel) {
+        const travelTz = inferTimezoneFromStateStatic(travel.location);
+        if (travelTz) {
+          travelWindow = {
+            from: travel.from,
+            until: travel.until,
+            timezone: travelTz,
+            location: travel.location,
+          };
+          const today = DateTime.now().setZone(travelTz).toISODate()!;
+          const activeToday = travel.from <= today && travel.until >= today;
+          if (activeToday && travelTz !== resolvedTz) {
+            travelMeta = {
+              location: travel.location,
+              homeTimezone: resolvedTz,  // = person.timezone when stored; the #M3 fallback frame otherwise
+              until: travel.until,
+            };
+            timezone = travelTz;
+          }
+        } else if (!travelTz) {
+          logger.info('attendeeAvailability — travel location not in static TZ map, using stored', {
+            email, location: travel.location,
+          });
+        }
+      }
+    }
+
+    return {
+      email,
+      timezone,
+      workdays: wh.workdays,
+      hoursStart: wh.hoursStart,
+      hoursEnd: wh.hoursEnd,
+      ...('timezone' in wh && typeof wh.timezone === 'string' ? { workingHoursTimezone: wh.timezone } : {}),
+      homeTimezone: resolvedTz,
+      ...(travelMeta ? { travel: travelMeta } : {}),
+      ...(travelWindow ? { travelWindow } : {}),
+      // #M3 — no stored permanent timezone means resolvedTz came from the
+      // fallback (requester's frame). Mark that physical-zone assumption;
+      // an explicitly framed manual window remains independently authoritative.
+      ...(effectiveTz?.timezone ? {} : { assumed: true }),
+      // v4.8.x (o#262/o#265) — permanent zone is known and used for the math
+      // above, but a later auto-tier reading currently differs (TTL'd) —
+      // surface-only, never substituted into the computation itself. `source`
+      // rides along so a surfacing caller attributes it correctly.
+      ...(effectiveTz?.tempDiffering
+        ? { tzTempDiffering: {
+            tempZone: effectiveTz.tempDiffering.value,
+            expiresAt: effectiveTz.tempDiffering.expiresAt,
+            source: effectiveTz.tempDiffering.source,
+          } }
+        : {}),
+    };
+  } catch (err) {
+    logger.warn('attendeeAvailability auto-load threw, proceeding without', {
+    err: String(err).slice(0, 200),
+    });
+    return undefined;
+  }
+}
+
+/** Email-keyed scheduling adapter over the same person/date availability data
+ * used by contact timers. Slack-only people can use the person helper directly. */
+export function loadAttendeeAvailabilityForEmails(
+  emails: string[],
+  ownerEmail: string,
+  fallbackTimezone?: string,
+): AttendeeAvailabilityEntry[] | undefined {
+  if (!emails || emails.length === 0) return undefined;
+  try {
+    const { searchPeopleMemory } = require('../db') as typeof import('../db');
     const built: AttendeeAvailabilityEntry[] = [];
     for (const email of emails) {
       const lower = email.toLowerCase();
-      if (lower === ownerLower) continue;
-      const matches = searchPeopleMemory(email);
-      const person = matches.find(m => (m.email ?? '').toLowerCase() === lower);
-      // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — read the PERMANENT
-      // stored zone via getEffectiveTimezoneById, never the raw column: a
-      // later differing Slack-auto reading lands in a TTL'd sibling value
-      // (`tzTempDiffering` below) instead of silently overwriting the
-      // established zone, so working-hours math is never computed against a
-      // stale/transient reading (o#265 — Maayan stored/read as ET drove a
-      // whole search's "outside working hours" verdicts wrong).
-      const effectiveTz = person ? getEffectiveTimezoneById(person.person_id) : undefined;
-      // #M3 (2026-07-23 owner direction) — an attendee with no stored timezone is
-      // ASSUMED to be in the requester's frame (fallbackTimezone = owner's TZ) with
-      // standard hours, instead of being SKIPPED (which left them unclipped so the
-      // search could offer owner-morning to a would-be-remote person). A human-stated
-      // TZ/time still overrides via search_window_timezone. `fallbackTimezone` being
-      // optional is a call-signature convenience, not a supported second mode: every
-      // caller of `loadAttendeeAvailabilityForEmails` / `attendeeCheckParams` now
-      // passes it (last five fixed 2026-09-07 — planMeeting.ts, createMeeting.ts's
-      // dense-packing counter-offer, autoMove.ts x2, checkHealth.ts). A caller that
-      // omits it silently reintroduces the pre-ruling skip below (`if (!resolvedTz)
-      // continue`) — that is a bug to fix at the call site, not current behaviour.
-      const resolvedTz = effectiveTz?.timezone ?? fallbackTimezone;
-      if (!resolvedTz) continue;
-      const wh = effectiveTz?.timezone ? getEffectiveWorkingHours(person!) : defaultWorkingHoursForTz(resolvedTz);
-      if (!wh) continue;
-
-      let timezone = resolvedTz;
-      let travelMeta: AttendeeAvailabilityEntry['travel'];
-      let travelWindow: AttendeeAvailabilityEntry['travelWindow'];
-      // v3.3.8 — raw record includes FUTURE trips; the dated window drives
-      // per-day resolution. v4.8.x — keyed by person_id, not slack_id: an
-      // email-only external (no slack_id) can carry a travel record too (the
-      // email-inbound stated-zone path writes one), and the slack_id-keyed
-      // lookup silently returned null for every such row — write succeeded,
-      // read never happened (same class as getTravelRecordById's doc,
-      // db/people.ts). Also no longer gated on a stored base timezone: a
-      // fallback-assumed attendee (#M3) with a travel record has a STATED
-      // zone for the trip's days — inside the window that record outranks the
-      // owner-frame guess (M12: stated-in-chain > assume-owner-zone); outside
-      // it they fall back to homeTimezone = resolvedTz, unchanged.
-      if (person) {
-        const travel = getTravelRecordById(person.person_id);
-        if (travel) {
-          const travelTz = inferTimezoneFromStateStatic(travel.location);
-          if (travelTz && travelTz !== resolvedTz) {
-            travelWindow = {
-              from: travel.from,
-              until: travel.until,
-              timezone: travelTz,
-              location: travel.location,
-            };
-            const today = new Date().toISOString().slice(0, 10);
-            const activeToday = travel.from <= today;  // until >= today guaranteed by getTravelRecordById
-            if (activeToday) {
-              travelMeta = {
-                location: travel.location,
-                homeTimezone: resolvedTz,  // = person.timezone when stored; the #M3 fallback frame otherwise
-                until: travel.until,
-              };
-              timezone = travelTz;
-            }
-          } else if (!travelTz) {
-            logger.info('attendeeAvailability — travel location not in static TZ map, using stored', {
-              email, location: travel.location,
-            });
-          }
-        }
-      }
-
-      built.push({
-        email,
-        timezone,
-        workdays: wh.workdays,
-        hoursStart: wh.hoursStart,
-        hoursEnd: wh.hoursEnd,
-        homeTimezone: resolvedTz,
-        ...(travelMeta ? { travel: travelMeta } : {}),
-        ...(travelWindow ? { travelWindow } : {}),
-        // #M3 — no stored permanent timezone means resolvedTz came from the
-        // fallback (requester's frame) and wh came from the generic zone
-        // default, not this attendee's own profile. A GUESS, flag it.
-        ...(effectiveTz?.timezone ? {} : { assumed: true }),
-        // v4.8.x (o#262/o#265) — permanent zone is known and used for the math
-        // above, but a later auto-tier reading currently differs (TTL'd) —
-        // surface-only, never substituted into the computation itself. `source`
-        // rides along so a surfacing caller attributes it correctly.
-        ...(effectiveTz?.tempDiffering
-          ? { tzTempDiffering: {
-              tempZone: effectiveTz.tempDiffering.value,
-              expiresAt: effectiveTz.tempDiffering.expiresAt,
-              source: effectiveTz.tempDiffering.source,
-            } }
-          : {}),
-      });
+      if (lower === ownerEmail.toLowerCase()) continue;
+      const person = searchPeopleMemory(email).find(m => (m.email ?? '').toLowerCase() === lower);
+      const entry = loadAttendeeAvailabilityForPerson(person, fallbackTimezone, email);
+      if (entry) built.push(entry);
     }
-
     if (built.length === 0) return undefined;
     logger.info('attendeeAvailability — auto-loaded', {
-      attendees: built.map(b => {
-        const tag = b.travel ? `${b.email}(${b.timezone} via ${b.travel.location} until ${b.travel.until}, was ${b.travel.homeTimezone}, ${b.hoursStart}-${b.hoursEnd})` :
-                                `${b.email}(${b.timezone}, ${b.hoursStart}-${b.hoursEnd})`;
-        return tag;
-      }),
+      attendees: built.map(b => b.travel
+        ? `${b.email}(${b.timezone} via ${b.travel.location} until ${b.travel.until}, was ${b.travel.homeTimezone}, ${b.hoursStart}-${b.hoursEnd})`
+        : `${b.email}(${b.timezone}, ${b.hoursStart}-${b.hoursEnd})`),
     });
     return built;
   } catch (err) {
-    logger.warn('attendeeAvailability auto-load threw, proceeding without', {
-      err: String(err).slice(0, 200),
-    });
+    logger.warn('attendeeAvailability auto-load threw, proceeding without', { err: String(err).slice(0, 200) });
     return undefined;
   }
 }
@@ -354,11 +439,9 @@ export function attendeeCheckParams(
  * Boston", five hours instead of seven) and rewrote a CORRECT "10:00am Boston"
  * booked-confirmation into a wrong one (Sharon Duret, 2026-09-08T20:28Z).
  *
- * `isoDate` (yyyy-MM-dd, owner-local) resolves each attendee's zone for THAT
- * day via `attendeeTzForDay` — a dated travel window swaps the trip zone in —
- * and is what a single booked instant passes. Omitted → the entry's current
- * effective `timezone`, the only honest choice for a multi-day search that has
- * no single day to resolve against.
+ * `isoDate` accepts a destination calendar date or explicit instant through
+ * `attendeeTzForDay`; offered and booked slots pass the instant. Omitted → the entry's
+ * current effective timezone, for callers explicitly describing the present.
  */
 export function singleAttendeePresentationZone(
   entries: ReadonlyArray<Pick<AttendeeAvailabilityEntry, 'timezone' | 'homeTimezone' | 'travelWindow'>> | undefined,
@@ -380,7 +463,7 @@ export function singleAttendeePresentationZone(
  * short-circuits included: a colleague following up on their own booking
  * re-triggers create_meeting and lands there, and the output checker reads that
  * `OK` line exactly like the first. Zone = singleAttendeePresentationZone on the
- * instant's owner-local day; no single attendee zone → `{}`, nothing attached,
+ * instant; no single attendee zone → `{}`, nothing attached,
  * never the owner's clock labelled as theirs (the reader degrades to owner-local).
  * `attendeeEmails` may carry gaps (a name-only attendee) — dropped here.
  */
@@ -394,7 +477,7 @@ export function presentationLocalFieldFor(
   const tz = singleAttendeePresentationZone(
     loadAttendeeAvailabilityForEmails(emails, ownerEmail, ownerTz),
     ownerTz,
-    DateTime.fromISO(startIso, { zone: ownerTz }).toFormat('yyyy-MM-dd'),
+    DateTime.fromISO(startIso, { zone: ownerTz }).toISO()!,
   );
   const rendered = tz ? renderClockInZone(startIso, ownerTz, tz) : '';
   return rendered ? { presentation_local: rendered } : {};

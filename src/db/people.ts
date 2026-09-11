@@ -46,7 +46,7 @@ export interface PersonProfile {
   // still reads the free-text for natural narration.
   working_hours_structured?: {
     workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
-    hoursStart: string;   // 'HH:MM' in `timezone` (or owner's TZ if absent)
+    hoursStart: string;   // 'HH:MM' in `timezone`, otherwise the person's dated timezone
     hoursEnd: string;     // 'HH:MM'
     timezone?: string;    // IANA — overrides people_memory.timezone for this window when set
   };
@@ -131,9 +131,8 @@ export interface PersonMemory {
   working_hours_auto?: string;  // JSON: { workdays, hoursStart, hoursEnd } — derived from timezone defaults
   // v2.2.4 — travel awareness. JSON: { location, from, until } where location
   // is free text ("Boston", "NYC", "London"), from/until are ISO yyyy-MM-dd.
-  // When set and `until` is in the future, this overrides `state` + `timezone`
-  // + working_hours_auto for slot search and time-of-day display. Cleared
-  // (set to NULL) once `until` is in the past. Read via getTravelRecordById().
+  // Overrides the default location/timezone for slot search and time-of-day
+  // display only for dates inside its window. Read via getTravelRecordById().
   currently_traveling?: string;
   // v4.8.x — timezone permanent/temp split (owner ruling 2026-08-31). JSON:
   // TimezoneTemp ({ value, expiresAt, source }). Sibling to
@@ -250,36 +249,52 @@ export function readInteractionLog(
 // when they're elsewhere, that should win for slot search and time-of-day
 // reasoning during the window.
 //
-// `currently_traveling` column holds JSON: { location, from, until }. The
-// reader (`getTravelRecordById`) returns null when the window is already over
-// — callers don't need to filter. Cleanup happens lazily on read; we don't run
-// a sweep.
+// `currently_traveling` holds contact travel, with optional authenticated source.
+// The owner's schedule remains in owner_schedule_overrides. The
+// reader (`getTravelRecordById`) can filter against the caller's reference day.
+// Reads never erase a dated fact: another consumer can still need that date.
 
 export interface CurrentTravel {
   location: string;
-  from:   string;  // ISO yyyy-MM-dd
-  until:  string;  // ISO yyyy-MM-dd
+  from:   string;  // Inclusive yyyy-MM-dd in the destination timezone
+  until:  string;  // Inclusive yyyy-MM-dd in the destination timezone
+  source?: CoreFieldSetBy; // Absent on legacy facts: unknown, never inferred.
 }
 
-/**
- * v4.4.x (#170) — person_id-keyed (works for externals too). This is now the
- * ONLY writer of the column — `update_person_profile` (core/assistant.ts)
- * applies travel by person_id for both internal and external targets, so
- * there is no remaining slack_id-only caller to keep a thin wrapper for.
- */
-export function setCurrentTravelById(personId: string, travel: CurrentTravel): void {
+export type TravelWrite = 'applied' | 'already_set' | 'refused_lower_authority' | 'no_person';
+
+/** All live travel mutations pass here. Source comes from the authenticated
+ * caller, never the JSON supplied by a model. Untagged legacy trips may be
+ * replaced or cleared (owner ruling: old trip data is disposable). */
+function writeCurrentTravelById(personId: string, travel: CurrentTravel | null, source: CoreFieldSetBy): TravelWrite {
   const db = getDb();
-  db.prepare(
-    `UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE person_id = ?`
-  ).run(JSON.stringify(travel), personId);
+  const row = db.prepare('SELECT currently_traveling FROM people_memory WHERE person_id = ?').get(personId) as { currently_traveling: string | null } | undefined;
+  if (!row) return 'no_person';
+  let previous: CurrentTravel | null = null;
+  try { previous = row.currently_traveling ? JSON.parse(row.currently_traveling) : null; } catch { /* unknown legacy fact */ }
+  const same = travel && previous && travel.location === previous.location && travel.from === previous.from && travel.until === previous.until;
+  const knownSource = previous?.source === 'owner' || previous?.source === 'person' || previous?.source === 'auto' ? previous.source : undefined;
+  const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+  const previousZone = previous?.location ? inferTimezoneFromStateStatic(previous.location) : null;
+  const expired = previousZone && typeof previous?.until === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(previous.until)
+    && DateTime.fromISO(previous.until, { zone: previousZone }).isValid
+    && previous.until < DateTime.now().setZone(previousZone).toISODate()!;
+  if (!travel && !row.currently_traveling) return 'already_set';
+  if (same && (!knownSource || SET_BY_RANK[source] <= SET_BY_RANK[knownSource])) return 'already_set';
+  if (knownSource && !expired && SET_BY_RANK[source] < SET_BY_RANK[knownSource]) return same ? 'already_set' : 'refused_lower_authority';
+  if (same && source === knownSource) return 'already_set';
+  const stored = travel ? JSON.stringify({ location: travel.location, from: travel.from, until: travel.until, source }) : null;
+  db.prepare(`UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE person_id = ?`).run(stored, personId);
+  return 'applied';
 }
 
-/** v4.4.x (#170) — person_id-keyed (works for externals too); see setCurrentTravelById. */
-export function clearCurrentTravelById(personId: string): void {
-  const db = getDb();
-  db.prepare(
-    `UPDATE people_memory SET currently_traveling = NULL, updated_at = datetime('now') WHERE person_id = ?`
-  ).run(personId);
+export function setCurrentTravelById(personId: string, travel: CurrentTravel, source: CoreFieldSetBy): TravelWrite {
+  return writeCurrentTravelById(personId, travel, source);
+}
+
+export function clearCurrentTravelById(personId: string, source: CoreFieldSetBy): TravelWrite {
+  return writeCurrentTravelById(personId, null, source);
 }
 
 /**
@@ -287,11 +302,14 @@ export function clearCurrentTravelById(personId: string): void {
  * One raw read exists besides it: `formatPeopleMemoryForPrompt` below parses
  * the column straight off its own SELECT row to render the ", currently in X
  * until Y" / ", upcoming travel to X from F until Y" contact line — different
- * semantics (no lazy clear here; a `from` gate there tells an already-started
+ * semantics (a `from` gate there tells an already-started
  * trip apart from one that's merely on file for later). Returns the trip
- * record when it is not already over (until >= today), INCLUDING one that
- * hasn't started yet, or null. Lazy cleanup: a window entirely in the past
- * returns null AND clears the column, so the next reader sees a clean slate.
+ * record when it is not over relative to referenceDate, INCLUDING one that
+ * hasn't started yet, or null. The default reference is destination-local today for callers
+ * asking whether any active/future record exists. Dated consumers pass their
+ * destination-local calendar date, or null to load the full window and scope it downstream.
+ * No read clears the record: UTC midnight cannot destroy a trip still active
+ * in an owner's calendar, or a fact needed for historical dated rendering.
  *
  * v3.3.8 — the gate is deliberately "not already over", never "active right
  * now". Every consumer asks "what timezone are they in on the day I care
@@ -303,8 +321,8 @@ export function clearCurrentTravelById(personId: string): void {
  * Every SCHEDULING caller date-scopes the record itself:
  * `loadAttendeeAvailabilityForEmails` (utils/attendeeAvailability.ts) builds a
  * dated `travelWindow` per attendee (`attendeeTzForDay` consumes it
- * downstream), and `planMeeting`'s `travelForMeetingDay` scopes the owner's
- * own trip to the meeting date. One caller deliberately does NOT scope: the
+ * downstream). Owner travel uses schedule overrides, not this field.
+ * One caller deliberately does NOT scope: the
  * email-inbound stomp guard (connectors/email/inbound.ts) asks "does ANY
  * active-or-future record exist" before writing a new one — adding scoping
  * there would break the guard.
@@ -314,7 +332,10 @@ export function clearCurrentTravelById(personId: string): void {
  * returned null for every email-only person — not because they weren't
  * traveling, but because the query couldn't reach their row at all.
  */
-export function getTravelRecordById(personId: string): CurrentTravel | null {
+export function getTravelRecordById(
+  personId: string,
+  referenceDate?: string | null,
+): CurrentTravel | null {
   const db = getDb();
   const row = db.prepare(
     `SELECT currently_traveling FROM people_memory WHERE person_id = ?`
@@ -323,11 +344,10 @@ export function getTravelRecordById(personId: string): CurrentTravel | null {
   try {
     const t = JSON.parse(row.currently_traveling) as CurrentTravel;
     if (!t.location || !t.from || !t.until) return null;
-    const today = new Date().toISOString().slice(0, 10);
-    if (t.until < today) {
-      clearCurrentTravelById(personId);
-      return null;
-    }
+    const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+    const zone = inferTimezoneFromStateStatic(t.location);
+    const day = referenceDate === undefined ? (zone ? DateTime.now().setZone(zone).toISODate() : null) : referenceDate;
+    if (day !== null && t.until < day) return null;
     return t;
   } catch (_) {
     return null;
@@ -356,7 +376,7 @@ export function getTravelRecordById(personId: string): CurrentTravel | null {
 // TEMP = that later differing auto reading. It does not overwrite `timezone`
 // — it lands in the sibling `timezone_temp` column instead, TTL'd (default 1
 // week, the owner's tentative number), modeled exactly like
-// `currently_traveling` above: self-clearing on read, never swept.
+// unlike `currently_traveling`, this temporary reading self-clears on read.
 //
 // Consumers (e.g. Matchmaker's scheduling code) call `getEffectiveTimezoneById`
 // for BOTH halves at once: the permanent value for real computation, and the
@@ -492,7 +512,7 @@ function clearTimezoneTempById(personId: string): void {
 
 /**
  * Returns the active temp/differing timezone reading, or null if none /
- * expired. Lazy cleanup on read, same pattern as `getTravelRecordById`.
+ * expired. Unlike dated travel facts, a transient observation is cleared on expiry.
  */
 function getTimezoneTempById(personId: string): TimezoneTemp | null {
   const db = getDb();
@@ -1756,6 +1776,20 @@ export function planPersonMerge(survivorId: string, loserId: string) {
     { value: loser.email, setBy: loser.email_set_by },
   );
 
+  let travel = survivor.currently_traveling ?? loser.currently_traveling ?? null;
+  if (survivor.currently_traveling && loser.currently_traveling && survivor.currently_traveling !== loser.currently_traveling) {
+    const a = getTravelRecordById(survivorId);
+    const b = getTravelRecordById(loserId);
+    if (!a && b) travel = loser.currently_traveling;
+    else if (a && b) {
+      // Missing source remains unknown; the owner authorized discarding old
+      // untagged trip data, so it cannot displace a known ranked fact.
+      const ar = a.source ? SET_BY_RANK[a.source] ?? 0 : 0;
+      const br = b.source ? SET_BY_RANK[b.source] ?? 0 : 0;
+      if (br > ar) travel = loser.currently_traveling;
+    }
+  }
+
   const merged = {
     person_id:            survivorId,
     slack_id:             slackIdMerged,
@@ -1785,7 +1819,7 @@ export function planPersonMerge(survivorId: string, loserId: string) {
     engagement_rank:      engagementRank,
     proactive_pending:    Math.max(survivor.proactive_pending ?? 0, loser.proactive_pending ?? 0),
     working_hours_auto:   survivor.working_hours_auto ?? loser.working_hours_auto ?? null,
-    currently_traveling:  survivor.currently_traveling ?? loser.currently_traveling ?? null,
+    currently_traveling:  travel,
     timezone_temp:        survivor.timezone_temp ?? loser.timezone_temp ?? null,
     notes:                unionDated<PersonNote>(
                             survivor.notes, loser.notes,
@@ -2284,6 +2318,7 @@ ${lines.join('\n')}`;
  */
 export function formatPeopleMemoryForPrompt(
   ownerSlackId: string,
+  ownerTimezone: string,
   focusSlackIds?: Set<string>,
   // v2.2.3 (#3) — when persona skill is OFF, render a slim contact line:
   // identity + tz + state + email + gender, no social fields, no notes,
@@ -2314,6 +2349,8 @@ export function formatPeopleMemoryForPrompt(
   if (people.length === 0) return '';
 
   const today = new Date().toISOString().split('T')[0];
+  // Social bookkeeping keeps its existing UTC-day convention. Each trip below
+  // is assessed in its destination's calendar, independent of the owner.
   const lines = people.map(p => {
     const notes: PersonNote[] = JSON.parse(p.notes || '[]');
     const profile: PersonProfile = (() => {
@@ -2334,9 +2371,14 @@ export function formatPeopleMemoryForPrompt(
     let travelTag = '';
     if (p.currently_traveling) {
       try {
-        const t = JSON.parse(p.currently_traveling) as { location: string; from: string; until: string };
-        if (t.location && t.until && t.until >= today) {
-          travelTag = (t.from && t.from > today)
+        const t = JSON.parse(p.currently_traveling) as CurrentTravel;
+        const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+        const zone = inferTimezoneFromStateStatic(t.location);
+        const travelToday = zone ? DateTime.now().setZone(zone).toISODate()! : null;
+        if (!travelToday && t.location && t.from && t.until) {
+          travelTag = `, travel recorded to ${t.location} from ${t.from} until ${t.until} (destination timezone unresolved)`;
+        } else if (travelToday && t.location && t.until && t.until >= travelToday) {
+          travelTag = (t.from && t.from > travelToday)
             ? `, upcoming travel to ${t.location} from ${t.from} until ${t.until}`
             : `, currently in ${t.location} until ${t.until}`;
         }

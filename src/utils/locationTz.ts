@@ -14,6 +14,7 @@ import { getAnthropicClient } from '../llm/client';
 import { SONNET } from '../llm/models';
 import { config } from '../config';
 import logger from './logger';
+import { isStrictIana } from './timezoneValidator';
 
 const STATIC_MAP: Record<string, string> = {
   // Israel
@@ -99,6 +100,7 @@ const STATIC_MAP: Record<string, string> = {
 /** Static-only lookup. Returns null on miss. Sync, no API. */
 export function inferTimezoneFromStateStatic(state: string): string | null {
   if (!state) return null;
+  if (isStrictIana(state.trim())) return state.trim();
   const key = state.trim().toLowerCase();
   return STATIC_MAP[key] ?? null;
 }

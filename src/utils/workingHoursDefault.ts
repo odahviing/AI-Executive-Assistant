@@ -24,6 +24,7 @@ import { getDb } from '../db/client';
 import type { PersonMemory } from '../db/people';
 import { getTenantWorkdaysForTimezone } from '../config/userProfile';
 import logger from './logger';
+import { isStrictIana } from './timezoneValidator';
 
 export type WeekDay =
   | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday';
@@ -32,6 +33,7 @@ export interface WorkingHours {
   workdays: WeekDay[];
   hoursStart: string;   // "HH:MM"
   hoursEnd:   string;
+  timezone?: string; // Explicit fixed timezone for this window, independent of travel.
   source: 'manual' | 'auto';
 }
 
@@ -137,11 +139,18 @@ export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | n
     const profile = JSON.parse(person.profile_json || '{}') as { working_hours_structured?: WorkingHours };
     if (profile.working_hours_structured?.workdays?.length) {
       const m = profile.working_hours_structured;
+      const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+      if (!Array.isArray(m.workdays) || !m.workdays.every(d => WEEK_ORDER.includes(d))
+        || !clock.test(m.hoursStart) || !clock.test(m.hoursEnd)
+        || (m.timezone !== undefined && !isStrictIana(m.timezone))) {
+        throw new Error('Invalid structured working-hours window');
+      }
       return {
         workdays:   m.workdays as WeekDay[],
         hoursStart: m.hoursStart,
         hoursEnd:   m.hoursEnd,
         source:     'manual',
+        ...(m.timezone ? { timezone: m.timezone.trim() } : {}),
       };
     }
   } catch { /* ignore */ }

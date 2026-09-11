@@ -315,7 +315,7 @@ export async function handleOutreachReply(
   // turn, closeOutreachReplyIfResolvedThisTurn supersedes this re-arm with a
   // real closure. Never a silent drop either way (R3/R4).
   if (job.request_id) {
-    const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone);
+    const freshDeadline = calcResponseDeadline(job.colleague_tz || params.profile.user.timezone, { slackId: job.colleague_slack_id, ownerTimezone: params.profile.user.timezone });
     updateRequest(job.request_id, {
       nextCheckAt: freshDeadline,
       nextCheckHandler: 'outreach_expiry',

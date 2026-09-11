@@ -21,14 +21,11 @@ function resolveOwnerUserId(userEmail: string): string {
 }
 
 /**
- * v2.2.7 — Normalize an ISO datetime for Graph's `dateTime` field. Graph honors
- * any offset/Z in `dateTime` over the sibling `timeZone` field, so an ISO with
- * `Z` lands the event in UTC even when we also send timeZone='Asia/Jerusalem'.
- * Strip the offset, convert to the target timezone's wall-clock, emit zoneless.
- * Fix-once-here so every Graph mutation is consistent regardless of what
- * shape Sonnet (or any caller) handed us.
+ * One Graph dateTime/timeZone pair. Timed events carry UTC so two explicitly
+ * different occurrences of a repeated local hour remain different instants.
+ * All-day events retain local calendar dates and midnight boundaries.
  */
-function normalizeForGraph(iso: string, tz: string): string {
+function normalizeForGraph(iso: string, tz: string, isAllDay: boolean): { dateTime: string; timeZone: string } {
   // CRITICAL: anchor a ZONELESS datetime in the INTENDED tz, not the process's
   // local tz. `setZone:true` only adopts an offset the string ALREADY carries;
   // a naive "2026-07-07T10:00:00" has none, so without `zone: tz` Luxon parses
@@ -38,18 +35,43 @@ function normalizeForGraph(iso: string, tz: string): string {
   // only ever appeared on trips (at home server-tz == home-tz, so it was a
   // no-op). `zone: tz` makes the binding canonical regardless of where we run.
   const dt = DateTime.fromISO(iso, { zone: tz, setZone: true });
-  if (!dt.isValid) return iso;  // fail open — let Graph reject if truly malformed
-  return dt.setZone(tz).toISO({ includeOffset: false, suppressMilliseconds: true })!;
+  if (!dt.isValid) throw new Error('Cannot serialize an invalid calendar datetime');
+  const timeZone = isAllDay ? tz : 'UTC';
+  return { dateTime: dt.setZone(timeZone).toISO({ includeOffset: false, suppressMilliseconds: true })!, timeZone };
 }
 
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {
   const client = getClient();
   const ownerUserId = resolveOwnerUserId(params.userEmail);
+  let isAllDay = params.isAllDay;
+  let eventType = params.eventType;
+  if (params.start || params.end) {
+    // Legacy callers may have no event metadata. Read actual event facts;
+    // never guess from midnight timestamps or bypass the existing prohibition
+    // on series-master time changes when an earlier preflight failed.
+    try {
+      if (typeof isAllDay !== 'boolean' || !eventType) {
+        const event = await client.api(`/users/${params.userEmail}/events/${params.meetingId}`).select('isAllDay,type').get();
+        if (typeof event?.isAllDay !== 'boolean') throw new Error('Cannot determine whether the calendar event is all-day');
+        isAllDay = event.isAllDay;
+        eventType = event.type;
+      }
+      if (eventType === 'seriesMaster') throw new Error('Cannot change the time of a recurring series master; use a single occurrence');
+      if (!['singleInstance', 'occurrence', 'exception'].includes(eventType ?? '')) {
+        throw new Error('Cannot determine the calendar event type');
+      }
+    } catch (err) {
+      auditLog({ ownerUserId, action: 'update_meeting', source: 'graph_api', actor: 'assistant',
+        target: params.meetingId, details: { stage: 'validate_event_time_kind', error: String(err) }, outcome: 'failure' });
+      logger.error('Meeting update withheld — event time kind cannot be changed', { meetingId: params.meetingId, err });
+      throw err;
+    }
+  }
 
   const patch: Record<string, unknown> = {};
   if (params.subject)    patch.subject    = params.subject;
-  if (params.start)      patch.start      = { dateTime: normalizeForGraph(params.start, params.timezone), timeZone: params.timezone };
-  if (params.end)        patch.end        = { dateTime: normalizeForGraph(params.end,   params.timezone), timeZone: params.timezone };
+  if (params.start)      patch.start      = normalizeForGraph(params.start, params.timezone, isAllDay!);
+  if (params.end)        patch.end        = normalizeForGraph(params.end, params.timezone, isAllDay!);
   if (params.body)       patch.body       = { contentType: 'HTML', content: params.body };
   if (params.categories) patch.categories = params.categories;
   // v2.7.0 — location + isOnline pass-through.
@@ -291,8 +313,8 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
       contentType: 'HTML',
       content: composedBody,
     },
-    start: { dateTime: normalizeForGraph(startIso, params.timezone), timeZone: params.timezone },
-    end:   { dateTime: normalizeForGraph(endIso,   params.timezone), timeZone: params.timezone },
+    start: normalizeForGraph(startIso, params.timezone, !!params.isAllDay),
+    end:   normalizeForGraph(endIso,   params.timezone, !!params.isAllDay),
     attendees: params.attendees.map(a => ({
       emailAddress: { address: a.email, name: a.name },
       type: a.optional ? 'optional' : 'required',

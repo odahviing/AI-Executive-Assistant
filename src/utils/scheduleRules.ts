@@ -117,7 +117,7 @@ import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
 import { displaySubject, PRIVATE_MASK, type SubjectViewer } from './displaySubject';
 import { blockAppliesOnDay, busyForBlockWindow, getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
-import { getEffectiveWorkDayForInstant, slotDayMinutes, type EffectiveWorkDay } from './workHours';
+import { getEffectiveWorkDayForInstant, ownerWorkSegmentsBetween } from './workHours';
 
 export type RuleViolationKind =
   | 'in_the_past'
@@ -394,16 +394,6 @@ export interface RuleCheckInput {
    * events from the result and offer to move them).
    */
   isFloatingBlock?: boolean;
-  /**
-   * v3.7.x (#143) — the slot date's effective work context (yaml base + per-date
-   * override, resolved by getEffectiveWorkDay). When present, rules 1/5/9 read the
-   * day's workday-ness, windows, LOCATION, and TIMEZONE from it — so an away
-   * override day validates against its stated hours in its own zone. When ABSENT,
-   * checkSlot resolves it itself from the slot's date, so a caller that doesn't
-   * thread it still gets override-correct rules. find_available_slots passes the
-   * SAME effectiveDay it walked with, so search and book can never disagree.
-   */
-  effectiveDay?: EffectiveWorkDay;
   /**
    * v4.1.x (M10) — WHO the produced `violation_label` is for. The label embeds
    * the colliding meeting's subject, and on a COLLEAGUE-initiated create_meeting
@@ -857,10 +847,12 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: tz, setZone: true }).setZone(tz);
   const excludeSet = new Set(input.excludeEventIds ?? []);
   const dayName = slotStart.toFormat('EEEE');
-  // v3.7.x (#143) — the slot date's effective work context: threaded by the
-  // search (so search + book agree) or self-resolved from the slot's home-tz
-  // date. Rules 1/5/9 read workday-ness, windows, location + timezone from it.
-  const effectiveDay = input.effectiveDay ?? getEffectiveWorkDayForInstant(input.slotStartIso, profile);
+  // A caller's starting-day context cannot authorize the rest of an interval.
+  // Resolve all date boundaries here for search, book/move and revalidation.
+  const workSegments = ownerWorkSegmentsBetween(slotStart, slotEnd, profile);
+  const effectiveDay = workSegments[0]?.effectiveDay ?? getEffectiveWorkDayForInstant(input.slotStartIso, profile);
+  const offSegment = workSegments.find(s => !s.effectiveDay.isWorkday);
+  const outsideSegment = workSegments.find(s => !s.fitsWorkHours);
   const viewer: SubjectViewer = input.viewer ?? 'other';
   // v4.4.9 (#154) — see the field doc on RuleCheckInput.viewerEmail.
   const viewerEmail = input.viewerEmail;
@@ -885,13 +877,13 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // timezone: for an away override ("Boston 9-5 EST") the windows are stated in
   // that zone, so the instant is converted there before the fit check. No
   // override → effectiveTz is the home tz → identical to reading the home clock.
-  // start + duration so a slot ending past midnight does NOT wrap to a small
-  // minute-of-day and spuriously fit a daytime window.
-  const workWindows = effectiveDay.windows;
-  const slotStartEff = slotStart.setZone(effectiveDay.timezone);
-  const slotEndEff = slotEnd.setZone(effectiveDay.timezone);
-  const { startMin: slotStartMin, endMin: slotEndMin } = slotDayMinutes(slotStartEff, slotEndEff);
-  const fitsWorkWindow = workWindows.some(w => slotStartMin >= w.startMin && slotEndMin <= w.endMin);
+  // Wall-clock interval bounds preserve midnight rollover and both sides of
+  // a DST transition; elapsed duration alone is not a local clock endpoint.
+  const hoursDay = outsideSegment?.effectiveDay ?? effectiveDay;
+  const workWindows = hoursDay.windows;
+  const slotStartEff = (outsideSegment?.start ?? slotStart).setZone(hoursDay.timezone);
+  const slotEndEff = (outsideSegment?.end ?? slotEnd).setZone(hoursDay.timezone);
+  const fitsWorkWindow = workSegments.length > 0 && !outsideSegment;
 
   // ── OCCUPANCY SCAN (rule 8's data) — unconditional, BEFORE the ladder ────
   // ONE scan answers two questions that used to be answered in two places:
@@ -1062,13 +1054,15 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // v3.7.x (#143) — via the effective day, so a per-date "off" override and a
   // normally-off yaml day read the same. No override → identical to the old
   // office/home name check.
-  if (!effectiveDay.isWorkday && reports('vacation_or_off_day')) {
+  if ((offSegment || !effectiveDay.isWorkday) && reports('vacation_or_off_day')) {
+    const offDay = offSegment?.effectiveDay ?? effectiveDay;
+    const offStart = (offSegment?.start ?? slotStart).setZone(offDay.timezone);
     return {
       passes: false,
       violation_kind: 'vacation_or_off_day',
-      violation_label: effectiveDay.hasOverride
-        ? `${who} ha${ownerReads ? 've' : 's'} ${slotStart.toFormat('EEEE d MMM')} off`
-        : `${dayName} isn't one of ${whose} working days`,
+      violation_label: offDay.hasOverride
+        ? `${who} ha${ownerReads ? 've' : 's'} ${offStart.toFormat('EEEE d MMM')} off`
+        : `${offStart.toFormat('EEEE')} isn't one of ${whose} working days`,
       ...slotFacts,
     };
   }
@@ -1124,7 +1118,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     const windowsLabel = workWindows.length === 0
       ? '(no work hours configured for this day)'
       : workWindows.map(w => `${String(Math.floor(w.startMin/60)).padStart(2,'0')}:${String(w.startMin%60).padStart(2,'0')}–${String(Math.floor(w.endMin/60)).padStart(2,'0')}:${String(w.endMin%60).padStart(2,'0')}`).join(', ');
-    const zoneNote = effectiveDay.isAway ? ` (${effectiveDay.timezone})` : '';
+    const zoneNote = hoursDay.isAway ? ` (${hoursDay.timezone})` : '';
     return {
       passes: false,
       violation_kind: 'outside_working_hours',

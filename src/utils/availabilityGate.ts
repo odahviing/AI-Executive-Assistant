@@ -409,7 +409,7 @@ export function freshHardBlockedSlots(ownerEmail: string): HardBlockedSlot[] {
  *   - availabilityPreCheck.ts:983 — a fresh verdict for that exact instant is NOT
  *     a hard block (invalidation rules 1 and 4 both resolve through this one line:
  *     "not every reading arms" is true whether there was one reading or two).
- *   - availabilityPreCheck.ts:1301 / :1240 — `forgetNamedInstantsFromHardBlockLedger`,
+ *   - availabilityPreCheck.ts:1330 / :589 — `forgetNamedInstantsFromHardBlockLedger`,
  *     the named-attendee bail's text-matched forget (invalidation rule 5) — a
  *     DIFFERENT mechanism from the two lines above: no `checkSlot` call, a scope
  *     safeguard rather than a calendar fact. Previously mis-cited here as rule 4;

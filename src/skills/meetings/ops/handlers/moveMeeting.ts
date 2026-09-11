@@ -27,7 +27,7 @@ import {
 import { checkSlot, type RuleViolationKind } from '../../../../utils/scheduleRules';
 import { grantRelaxed, emailStatedByHuman } from '../../bookingRequest';
 import { closeMeetingArtifacts } from '../../../../utils/closeMeetingArtifacts';
-import { resolveStatedInstant, renderWeDualClock } from '../../../../utils/weTimeResolver';
+import { resolveStatedInstant, renderWeDualClock, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../../../utils/weTimeResolver';
 import { presentationLocalFieldFor } from '../../../../utils/attendeeAvailability';
 import { checkIntendedWeekday } from '../../../../utils/weekdayGuard';
 import { alignNearestQuarter } from '../../../../utils/calendarDensity';
@@ -1355,16 +1355,17 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         if (typeof args.new_start === 'string') {
           try {
             const { getTravelContextForInstant } = await import('../../../../utils/workingElsewhere');
-            const travel = getTravelContextForInstant(args.new_start, context.profile);
-            if (travel.isAway) moveTripDisplay = { tz: travel.effectiveTz, location: travel.location };
-            const statedZone = (typeof args.stated_zone === 'string' && args.stated_zone.trim())
-              ? args.stated_zone.trim()
-              : (typeof args.start_timezone === 'string' && args.start_timezone.trim() ? args.start_timezone.trim() : undefined);
+            let travel = getTravelContextForInstant(args.new_start, context.profile);
+            const statedZone = statedZoneFromArgs(args);
             const resolved = resolveStatedInstant({
               startIso: args.new_start,
               endIso: typeof args.new_end === 'string' ? args.new_end : undefined,
-              statedZone, travel, homeTz: timezone,
+              statedZone, travel, homeTz: timezone, profile: context.profile,
+              emailRoute: context.channel === 'email',
+              ...(['CST', 'IST'].includes(statedZone?.toUpperCase() ?? '') ? { personTimezone: statedClockPersonContext(args, context.profile, args.new_start) } : {}),
             });
+            travel = getTravelContextForInstant(resolved.startIso, context.profile);
+            if (travel.isAway) moveTripDisplay = { tz: travel.effectiveTz, location: travel.location };
             if (resolved.reinterpreted) {
               logger.info('move_meeting — stated time resolved to canonical instant', {
                 statedZone: statedZone ?? '(none)', sourceZone: resolved.sourceZone,
@@ -1374,6 +1375,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             args.new_start = resolved.startIso;
             if (resolved.endIso) args.new_end = resolved.endIso;
           } catch (err) {
+            if (err instanceof StatedTimeClarificationError) return err.toToolResult();
             logger.warn('move_meeting — WE time resolve threw, using time as-is', { err: String(err).slice(0, 160) });
           }
         }
@@ -1411,6 +1413,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // silent; see the catch below.
         let preMoveStartIso: string | undefined;
         let preMoveEndIso: string | undefined;
+        let preMoveIsAllDay: boolean | undefined;
+        let preMoveEventType: string | undefined;
         let preMoveSubject: string | undefined;
         // revert-intent-and-single-step-undo-scope, piece 4 (2026-08-12) —
         // the moving event's own roster, captured off the SEPARATE
@@ -1473,6 +1477,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
           preMoveStartIso = moveProbe?.startDateTime;
           preMoveEndIso = moveProbe?.endDateTime;
+          preMoveIsAllDay = moveProbe?.isAllDay;
+          preMoveEventType = moveProbe?.type;
           preMoveSubject = maskedMoveProbeSubject;
         }
         // #135c — pure reschedule keeps the meeting's length. When the model
@@ -1711,6 +1717,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     // slot comes back carrying everyone it doesn't work for, so
                     // a missing slot means an OWNER rule and nothing else.
                     tagAttendeeConflicts: true,
+                    allowAttendeeOffHours: true, // exact requested move, not a general offer
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
@@ -2037,6 +2044,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   userEmail, timezone,
                   meetingId: args.meeting_id as string,
                   start: effectiveStart, end: effectiveEnd,
+                  isAllDay: preMoveIsAllDay,
+                  eventType: preMoveEventType,
                 }).then(async () => {
                   await closeMeetingArtifacts({
                     ownerUserId: context.profile.user.slack_user_id,
@@ -2064,10 +2073,10 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // floating-block move (e.g. lunch) is exactly the case where
                   // the owner moves a block to FREE its slot for another meeting;
                   // without this the freed-slot info was dropped.
-                  const vacated = computeVacatedSlot(preMoveStartIso, effectiveStart, effectiveEnd, timezone);
+                  const vacated = computeVacatedSlot(preMoveStartIso, preMoveEndIso, timezone);
                   return {
                     success: true,
-                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart)}.${windowNote}`,
+                    action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart, timezone)}.${windowNote}`,
                     // #1.5 — surface the POST-snap booked instant on the floating-block
                     // owner-move path too (lunch is the canonical case). Without it
                     // mutationActions falls back to the pre-snap input arg and the reply
@@ -2458,7 +2467,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   meeting_subject: args.meeting_subject,
                   hold_id: conflictHold.id,
                   holder_name: conflictHold.holder_name,
-                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(effectiveStart)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Move "${args.meeting_subject}" over it anyway? On your yes I'll move it and let ${conflictHold.holder_name} know the hold was released.`,
+                  message: `${conflictHold.holder_name} asked to reserve ${formatIsoTime(effectiveStart, timezone)}${conflictHold.reason ? ` (${conflictHold.reason})` : ''}. Move "${args.meeting_subject}" over it anyway? On your yes I'll move it and let ${conflictHold.holder_name} know the hold was released.`,
                   _deferred_action_hint: { tool: 'move_meeting', args: { ...args, override_hold: true } },
                   _note: 'Surface to the owner. If he says move it anyway, retry move_meeting with override_hold:true — that moves it, releases the hold, and DMs the holder.',
                 };
@@ -2497,6 +2506,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           meetingId: args.meeting_id as string,
           start: effectiveStart,
           end: effectiveEnd,
+          isAllDay: preMoveIsAllDay,
+          eventType: preMoveEventType,
           // v2.7.0 — pass-through location/isOnline/categories from the
           // planMeeting verdict. Undefined values leave the existing fields
           // untouched on Graph's side. v2.8.2 — preserveExisting keeps both
@@ -2641,7 +2652,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 if (conn) {
                   await conn.sendDirect(
                     overlapHold.holder_slack_id,
-                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(effectiveStart)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
+                    `Quick heads up — ${context.profile.user.name.split(' ')[0]} ended up taking ${formatIsoTime(effectiveStart, timezone)}, so I've released the hold I had for you there. Happy to find you another time whenever.`,
                     overlapHold.origin_thread_ts ? { threadTs: overlapHold.origin_thread_ts } : undefined,
                   );
                 }
@@ -2729,7 +2740,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             const whenLocal = DateTime.fromISO(args.new_start as string, { zone: timezone });
             const whenLabel = whenLocal.isValid
               ? whenLocal.toFormat('EEE d MMM HH:mm')
-              : formatIsoTime(args.new_start as string);
+              : formatIsoTime(args.new_start as string, timezone);
             await shadowNotify(context.profile, {
               channel: context.channelId,
               threadTs: context.threadTs,
@@ -2755,7 +2766,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // floating-block early return uses the same one. Computed BEFORE the
         // rebalance so it can gate reclaim detection to the slot this move
         // actually freed.
-        const vacated = computeVacatedSlot(preMoveStartIso, args.new_start as string, args.new_end as string, timezone);
+        const vacated = computeVacatedSlot(preMoveStartIso, preMoveEndIso, timezone);
         // 1.4 (diagnostic) — the freed-slot narration once said 11:00 when the moved
         // occurrence was at 14:00. Log the pre-move start (from getEventType) and the
         // computed vacated so a recurrence shows whether getEventType returned the

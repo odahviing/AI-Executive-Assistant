@@ -22,6 +22,7 @@ import {
 import { getPersonMemory } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
+import { resolveStatedInstant, resolveStatedSourceZone, statedClockPersonContext, StatedTimeClarificationError } from '../../../../utils/weTimeResolver';
 import { bookingLeadTimeHours, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
@@ -110,24 +111,25 @@ function attendeeHoursGroundingNotes(
 ): string[] | undefined {
   if (!blockedBy || blockedBy.length === 0 || !attendeeAvailability || attendeeAvailability.length === 0) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { attendeeTzForDay, tzTempDifferingForDay } = require('../../../../utils/attendeeAvailability') as
+  const { attendeeWorkIntervalsBetween, tzTempDifferingForDay } = require('../../../../utils/attendeeAvailability') as
     typeof import('../../../../utils/attendeeAvailability');
   const notes: string[] = [];
   for (const b of blockedBy) {
     const entry = attendeeAvailability.find(a => a.email.toLowerCase() === b.email.toLowerCase());
     if (!entry || !entry.hoursStart || !entry.hoursEnd) continue;
-    const attendeeTz = attendeeTzForDay(entry, date);
     try {
-      const startOwnerIso = reinterpretClockInZone(`${date}T${entry.hoursStart}:00`, attendeeTz, ownerTz);
-      const endOwnerIso = reinterpretClockInZone(`${date}T${entry.hoursEnd}:00`, attendeeTz, ownerTz);
-      const startOwner = DateTime.fromISO(startOwnerIso, { zone: ownerTz });
-      const endOwner = DateTime.fromISO(endOwnerIso, { zone: ownerTz });
-      if (!startOwner.isValid || !endOwner.isValid) continue;
+      const ownerDay = DateTime.fromISO(date, { zone: ownerTz }).startOf('day');
+      const intervals = attendeeWorkIntervalsBetween(entry, ownerDay, ownerDay.plus({ days: 1 }));
+      for (const interval of intervals) {
+      const attendeeTz = interval.start.zoneName!;
+      const startOwner = interval.start.setZone(ownerTz);
+      const endOwner = interval.end.setZone(ownerTz);
       // #M3 / v4.4.x — an attendee with no stored profile timezone gets a
       // GUESS (requester's zone + standard hours), not a fact. Saying
       // "stated hours" unconditionally told Sonnet to present a guess as
       // something the attendee actually said.
-      const hoursLabel = entry.assumed
+      const hoursAssumed = entry.assumed && !entry.workingHoursTimezone;
+      const hoursLabel = hoursAssumed
         ? 'assumed hours (no profile on file for this attendee — a default, not confirmed)'
         : 'stated hours';
       // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a real stored profile
@@ -145,7 +147,7 @@ function attendeeHoursGroundingNotes(
       // America/New_York") whenever the passive reading came from a client in
       // the destination.
       let tzTempHedge = '';
-      const tzTempForDate = tzTempDifferingForDay(entry, date);
+      const tzTempForDate = tzTempDifferingForDay(entry, interval.start.toISO()!);
       if (tzTempForDate) {
         const t = tzTempForDate;
         const readingClause = t.source === 'chat'
@@ -154,8 +156,9 @@ function attendeeHoursGroundingNotes(
         tzTempHedge = ` Heads up: their timezone on file is ${attendeeTz}, but ${readingClause} (through ${t.expiresAt}) — say this is an assumption and ask if that's changed, don't assert the exclusion as settled fact.`;
       }
       notes.push(
-        `${b.email}'s ${hoursLabel} ${entry.hoursStart}-${entry.hoursEnd} (${attendeeTz}) on ${date} convert to ${startOwner.toFormat('HH:mm')}-${endOwner.toFormat('HH:mm')} in ${ownerTz} (${ownerFirstName}'s zone) — quote these numbers verbatim if asked why that day is excluded${entry.assumed ? ', but say plainly these are ASSUMED, not confirmed, if asked' : ''}; do NOT recompute the conversion yourself.${tzTempHedge}`,
+        `${b.email}'s ${hoursLabel} within ${date} (${ownerFirstName}'s calendar): ${interval.start.toFormat('EEE d MMM HH:mm')}–${interval.end.toFormat('EEE d MMM HH:mm')} (${attendeeTz}) = ${startOwner.toFormat('EEE d MMM HH:mm')}–${endOwner.toFormat('EEE d MMM HH:mm')} in ${ownerTz} — quote these numbers verbatim${hoursAssumed ? ', but say plainly these are ASSUMED, not confirmed' : ''}; do NOT recompute the conversion yourself.${tzTempHedge}`,
       );
+      }
     } catch {
       // best-effort grounding note — day_summary still has top_reasons/blocked_by without it
     }
@@ -209,6 +212,7 @@ function renderAttendeeStatusLine(
 
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, userEmail, timezone } = ctx;
+  try {
   // v4.1.x — resolved ONCE per call from the authenticated sender.
   //   leadHours: owner 1h vs colleague 4h, previously a literal at four sites
   //     and enforced only inside the slot walker (M1).
@@ -342,9 +346,22 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // ISRAEL for a 9:45-ET ask → before the 10:30 start →
           // outside_owner_work_hours → then mis-explained it as "Wednesday ends
           // before 16:45." Symmetric to present_in_timezone (output side).
-          const searchWindowTz = typeof args.search_window_timezone === 'string'
+          let searchWindowTz = typeof args.search_window_timezone === 'string'
             ? args.search_window_timezone.trim()
             : '';
+          if (['CST', 'IST'].includes(searchWindowTz.toUpperCase())) {
+            searchWindowTz = resolveStatedSourceZone({ startIso: effectiveSearchFrom, statedZone: searchWindowTz,
+              homeTz: timezone, profile: context.profile, emailRoute: context.channel === 'email',
+              personTimezone: statedClockPersonContext(args, context.profile, effectiveSearchFrom) });
+          }
+          const resolveRequestedClock = (iso: string): string => {
+            const resolved = resolveStatedInstant({ startIso: iso, statedZone: searchWindowTz || 'home',
+              homeTz: timezone, profile: context.profile, emailRoute: context.channel === 'email',
+              ...(['CST', 'IST'].includes(searchWindowTz.toUpperCase())
+                ? { personTimezone: statedClockPersonContext(args, context.profile, iso) } : {}) });
+            if (searchWindowTz) searchWindowTz = resolved.sourceZone;
+            return resolved.startIso;
+          };
           // #148 — grounded strings the tool hands back so Sonnet QUOTES the conversion
           // instead of doing it in her head (the recurring "8am ET = 22:00 / = 15:00" thrash).
           let requestedTimeLocal = '';   // (A) e.g. "Mon 21 Jul 08:00 EDT = 15:00 Idan's time"
@@ -362,8 +379,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             } else {
               // v3.4.2 (A2) — shared helper, identical to create/move's conversion.
               const fromRequested = effectiveSearchFrom;
-              effectiveSearchFrom = reinterpretClockInZone(effectiveSearchFrom, searchWindowTz, timezone);
-              effectiveSearchTo = reinterpretClockInZone(effectiveSearchTo, searchWindowTz, timezone);
+              effectiveSearchFrom = args.time_window_is_hard === true ? resolveRequestedClock(effectiveSearchFrom)
+                : reinterpretClockInZone(effectiveSearchFrom, searchWindowTz, timezone);
+              effectiveSearchTo = args.time_window_is_hard === true ? resolveRequestedClock(effectiveSearchTo)
+                : reinterpretClockInZone(effectiveSearchTo, searchWindowTz, timezone);
               // (A) — hand back the grounded owner-local value of the STATED foreign time,
               // the mirror of present_in_timezone's presentation_local for the owner side.
               const foreignDisp = renderClockInZone(effectiveSearchFrom, timezone, searchWindowTz);
@@ -376,11 +395,28 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               });
             }
           }
+          if (!searchWindowTz && args.time_window_is_hard === true) {
+            if (typeof args.search_from === 'string' && args.search_from.includes('T')) effectiveSearchFrom = resolveRequestedClock(effectiveSearchFrom);
+            if (typeof args.search_to === 'string' && args.search_to.includes('T')) effectiveSearchTo = resolveRequestedClock(effectiveSearchTo);
+          }
           // #148 — grounded fields spread into EVERY search-path return (main + the
           // 0-slots/attendee-warning early exit) so Sonnet always has the string to quote.
           const tzGroundingFields: Record<string, string> = {};
           if (requestedTimeLocal) tzGroundingFields._requested_time_local = `The stated foreign time converts to: ${requestedTimeLocal}. Quote THIS ${context.profile.user.name.split(' ')[0]}-zone value; do NOT recompute the cross-timezone conversion yourself.`;
           if (timezoneHint) tzGroundingFields._timezone_hint = timezoneHint;
+          // The public tool's existing contract: only a stated HARD time
+          // constraint clips the daily clock. Keep that band in its source
+          // zone; freezing converted owner clocks changes it across DST.
+          const requestedTimeWindow = args.time_window_is_hard === true
+            ? { from: args.search_from as string,
+                to: /^\d{4}-\d{2}-\d{2}$/.test(args.search_to as string)
+                  ? `${args.search_to}T23:59:59` : args.search_to as string,
+                timezone: searchWindowTz || timezone }
+            : null;
+          if (!requestedTimeWindow) {
+            effectiveSearchFrom = DateTime.fromISO(effectiveSearchFrom, { zone: timezone }).startOf('day').toISO()!;
+            effectiveSearchTo = DateTime.fromISO(effectiveSearchTo, { zone: timezone }).endOf('day').toISO()!;
+          }
           const mustBeAfterId = args.must_be_after_event_id as string | undefined;
           if (mustBeAfterId) {
             try {
@@ -393,7 +429,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (predecessor) {
                 const predEnd = DateTime.fromISO(predecessor.end.dateTime, { zone: predecessor.end.timeZone ?? 'utc' })
                   .setZone(timezone);
-                const requestedFrom = DateTime.fromISO(args.search_from as string, { zone: timezone });
+                const requestedFrom = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
                 if (predEnd.toMillis() > requestedFrom.toMillis()) {
                   effectiveSearchFrom = predEnd.toISO()!;
                   logger.info('find_available_slots — clipped searchFrom to after predecessor', {
@@ -838,18 +874,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               recordThreadAttendees(context.threadTs, attendeeEmails);
             } catch (_) { /* best-effort */ }
           }
-          // Owner can opt out of attendee BUSY filtering (their other meetings)
-          // when forcing a slot regardless of their existing calendar — but
-          // their TIMEZONE / work-hours window is ALWAYS honored, no flag
-          // Owner direction: when the owner triggers the full override
-          // (relaxed=true on owner-path, OR explicit
-          // ignore_attendee_availability=true), the override is TOTAL — drop
-          // BOTH the busy filter AND the attendee work-hours clip. The attendee
-          // work-hours data is owner-curated in people_memory, can go stale, and
-          // would otherwise silently filter owner-valid slots. So: surface the
-          // work-hours rejection once (via day_summary.blocked_by attribution
-          // emitted by calendar.ts), and on owner override the tool drops the
-          // clip too. "If I decide, it's on me."
+          // Busy overrides can soften calendar conflicts. M17 keeps attendee
+          // hours hard in general offerings; a specifically named slot is
+          // checked separately below with the existing owner approval grant.
           // REQUESTER ≠ ATTENDEE — but DEFAULT-SAFE for the common case. When a
           // colleague asks to book a meeting they're
           // ATTENDING, they ARE an attendee: their TZ drives per_attendee_local
@@ -887,25 +914,17 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { loadAttendeeAvailabilityForEmails } = require('../../../../utils/attendeeAvailability') as
             typeof import('../../../../utils/attendeeAvailability');
-          // Drop the work-hours clip entirely when override is active. The
-          // first call (no override) loads availability and lets calendar.ts
-          // surface `outside_attendee_work_hours:<email>` per blocked attendee
-          // so Sonnet narrates the conflict. Owner's retry with override
-          // gets unfiltered slots.
-          const attendeeAvailability = ignoreAttendeeBusy
-            ? undefined
-            // #M3 — pass the owner's TZ as the fallback: an attendee with no stored
-            // timezone is assumed to be in the requester's frame (+ standard hours)
-            // rather than left unclipped. A human-stated TZ/time still overrides.
-            : loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail, timezone);
+          // Busy overrides do not erase someone's working hours (M17). Exact
+          // named-slot checks below can separately annotate an off-hours time.
+          const attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail, timezone);
 
           // v3.7.x (Bug 1.5) — conversational per-attendee hours override. When the
           // owner states an attendee's REAL hours ("Lori starts 7am ET"), thread it
           // INTO the entry the walker already clips against (calendar.ts per-attendee
           // work-window clip) — NO parallel hours route, so the clip can't drift (the
           // annotation path tags busy/free only, never hours). Partial: only the
-          // bound(s) given override; tz (when given) makes the clip use it (home tz +
-          // clear any stale travel window). Without this the stored default
+          // bound(s) given override; tz fixes this window's frame independently
+          // of the person's physical location or trip. Without this the stored default
           // (getEffectiveWorkingHours) kept rejecting 07:00 ET as
           // outside_attendee_work_hours even after the owner said 7am works (2026-07-15).
           const attendeeHoursOverride = Array.isArray(args.attendee_hours)
@@ -921,9 +940,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (typeof ov.start === 'string' && hhmm.test(ov.start.trim())) entry.hoursStart = ov.start.trim();
               if (typeof ov.end === 'string' && hhmm.test(ov.end.trim())) entry.hoursEnd = ov.end.trim();
               if (typeof ov.tz === 'string' && ov.tz.trim()) {
-                entry.timezone = ov.tz.trim();
-                entry.homeTimezone = ov.tz.trim();
-                entry.travelWindow = undefined;
+                entry.workingHoursTimezone = ov.tz.trim();
                 // Same rule as `tzTempDifferingForDay`, third path: the hedge
                 // is a discrepancy against the PERMANENT stored zone, and this
                 // override just replaced the zone every clip below now runs
@@ -961,16 +978,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // clock identically. An explicit present_in_timezone from the caller
           // always wins (each use site below checks it FIRST via `||`) — this only
           // fills a gap, never overrides a stated value.
-          const autoPresentTz = singleAttendeePresentationZone(attendeeAvailability, timezone);
-          // The requester's explicit present_in_timezone always wins; autoPresentTz
-          // only fills the gap when they didn't name one. Computed ONCE here —
-          // the preferred_slot branch and the main slots list below both render
-          // the SAME conversation's zone choice, so a requester who asked "in ET"
-          // must get every offered instant (including preferred_slot) in ET, not
-          // just the ones each branch happened to recompute consistently.
-          const presentTzForOutput = (typeof args.present_in_timezone === 'string'
+          // A stated presentation zone is stable. An inferred person's zone
+          // resolves for each slot's date, including trips that end mid-search.
+          const explicitPresentTz = (typeof args.present_in_timezone === 'string'
             ? args.present_in_timezone.trim()
-            : '') || autoPresentTz;
+            : '');
+          const presentTzForOutput = (startIso: string): string => explicitPresentTz
+            || singleAttendeePresentationZone(attendeeAvailability, timezone,
+              DateTime.fromISO(startIso, { zone: timezone }).toISO() ?? undefined);
 
           // #77 — owner-initiated path with attendees: auto-pass
           // attendeeBusyEmails so Graph free/busy filters the candidate pool,
@@ -1035,7 +1050,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           const userNamedNarrowWindow = (() => {
             try {
               const from = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
-              const to = DateTime.fromISO(args.search_to as string, { zone: timezone });
+              const to = DateTime.fromISO(effectiveSearchTo, { zone: timezone });
               if (!from.isValid || !to.isValid) return false;
               const spanDays = to.diff(from, 'days').days;
               return spanDays <= 7;
@@ -1085,9 +1100,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // was searched as 10:00 owner-local (the Ayala July-8 bug: tested
                 // 10:00 IL instead of 17:00 IL → a false outside_attendee_work_hours
                 // that masked the real owner_busy reason).
-                const startConv = searchWindowTz
-                  ? reinterpretClockInZone(c.start, searchWindowTz, timezone)
-                  : c.start;
+                const startConv = resolveRequestedClock(c.start);
                 const s = DateTime.fromISO(startConv, { zone: timezone });
                 // An unparseable start yields end:'' — answered below as this
                 // candidate's own validation_error, with no Graph round-trip.
@@ -1112,10 +1125,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // neither was given; an explicit value here still wins outright.
             const explicitGroundTz = searchWindowTz
               || (typeof args.present_in_timezone === 'string' ? args.present_in_timezone.trim() : '');
-            const groundTz = explicitGroundTz || autoPresentTz;
+            const groundTz = (startIso: string): string => explicitGroundTz || presentTzForOutput(startIso);
             // report row 145 (2026-07-29) — provenance: only the explicit branch above
             // was actually STATED (search_window_timezone / present_in_timezone are
-            // both set because a person named that zone). The autoPresentTz fallback
+            // both set because a person named that zone). The dated fallback
             // is a SYSTEM inference from the attendees' stored zones — nobody said it.
             // A tool result must not claim a human said something they didn't (a lie
             // the model will faithfully repeat), so the label below must say which.
@@ -1161,6 +1174,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   profile: context.profile,
                   category: args.category as string | undefined,
                   relaxed: relaxedGranted,
+                  allowAttendeeOffHours: relaxedGranted,
                   excludeEventIds: excludeEventIdsForSearch,
                   autoExpand: false,
                   minBufferHours: leadHours,
@@ -1188,7 +1202,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // candidate was STATED in, so Sonnet quotes "08:00 ET (15:00 his time)"
                 // instead of head-converting the owner-local time back to the foreign zone.
                 // Guard the empty-string parse-fail exactly like the present_in_timezone path.
-                const presentLocal = groundTz ? renderClockInZone(cand.start, timezone, groundTz) : '';
+                const candidateZone = groundTz(cand.start);
+                const presentLocal = candidateZone ? renderClockInZone(cand.start, timezone, candidateZone) : '';
                 // gh#169 — same grounding gh#168-a computes for the bulk day_summary
                 // path (attendeeHoursGroundingNotes), applied to the sibling
                 // candidate_validation branch: a candidate rejected on
@@ -1274,7 +1289,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               ...(attendeeEmailWarningCand ?? {}),
               ...(attendeeNotCheckedWarningCand ?? {}),
               ...(movingEventIdMismatchWarning ?? {}),
-              ...(groundTz ? { _requested_time_local: `Each result carries presentation_local — the slot in ${groundTz}, ${groundTzStated ? 'the zone the times were given in' : 'a zone Maelle inferred from the attendees (nobody actually stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time ("08:00 ET = 15:00 his time"); NEVER recompute the cross-timezone conversion yourself.` } : {}),
+              ...(results.some(r => 'presentation_local' in r) ? { _requested_time_local: `Each result carries presentation_local — ${groundTzStated ? `the slot in ${explicitGroundTz}, the zone the times were given in` : 'the attendee-local clock computed for that meeting date (nobody stated this zone — do not say the requester asked for it)'}. Quote that alongside the owner-local time; NEVER recompute the cross-timezone conversion yourself.` } : {}),
             };
           }
 
@@ -1286,6 +1301,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               attendeeBusyEmails,
               searchFrom: effectiveSearchFrom,
               searchTo: effectiveSearchTo,
+              requestedTimeWindow,
               preferMorning: args.prefer_morning as boolean | undefined,
               meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
@@ -1437,29 +1453,24 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               && (isOwnerInitiatedSearch || mustBe)
               && userNamedNarrowWindow
               && !isAlreadyRelaxed;
-            // ── Rule 6 backstop (shared) — attendee free/busy is a HELPER,
-            // never a blocker. When the STRICT pass returned 0 ONLY because
-            // attendee(s) are busy/off-hours, don't dead-end. Re-run the SAME
-            // window recovering the owner's real openings, presented per
+            // ── Rule 6 backstop (shared) — attendee calendar conflicts are a
+            // scheduling input, not a reason to hide the owner's real openings.
+            // When the strict pass returns 0, re-run the SAME window with the
+            // owner's rules and attendee working hours still hard, presented per
             // audience. ONE function, two callers (rule 2 — no parallel copies):
             //   'owner_tagged'         — owner rules stay STRICT (his day / focus
-            //       / own busy all enforced via checkSlot); attendee conflicts
-            //       come back TAGGED (attendee_conflicts[]) so he sees his open
+            //       / own busy all enforced via checkSlot); attendee busy/travel
+            //       conflicts come back TAGGED (attendee_conflicts[]) so he sees his open
             //       times + who can't make each and books whom he likes (rules
             //       6/7/11). This is what stops the "0 clean → Sonnet flips
             //       ignore_attendee_availability → offered-then-bounced" loop
             //       (Maayan+Lori, 2026-07-08): the tool hands back the annotated
             //       truth in ONE call, so Sonnet never guesses a blind 2nd search.
-            //   'colleague_owner_only' — owner-only for real calendar BUSY detail
-            //       (attendeeBusyEmails stays owner-only, rule 7: a colleague never
-            //       sees another attendee's actual calendar). But the per-attendee
-            //       WORK-HOURS clip (attendeeAvailability) is real, non-calendar
-            //       data (just stored/assumed hours) and is exactly what the
-            //       strict pass just rejected these slots for — nulling it here
-            //       used to check the recovered slots against ONLY the owner's own
-            //       calendar, so a slot outside every other attendee's hours came
-            //       back looking clean. Keep it live and TAGGED (attendee_conflicts)
-            //       so the truth survives into the result instead of vanishing.
+            //   'colleague_owner_only' — attendeeBusyEmails stays owner-only
+            //       (rule 7: a colleague never gets another attendee's calendar
+            //       through the search). Per-attendee WORK-HOURS remain a hard
+            //       clip. A later per-slot annotation may attach real Graph status
+            //       for an internal attendee; missing/unknown status stays unconfirmed.
             //       If the owner is himself busy, owner-only also returns 0 →
             //       honest "he's booked then."
             const recoverAttendeeBlockedSlots = (audience: 'owner_tagged' | 'colleague_owner_only') => {
@@ -1470,9 +1481,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 durationMinutes: args.duration_minutes as number,
                 attendeeBusyEmails: ownerAudience ? attendeeEmails : undefined,
                 attendeeAvailability,   // both audiences — the work-hours clip is not calendar detail
-                tagAttendeeConflicts: true,   // both audiences: keep the day strict, TAG conflicts (never silently drop)
+                tagAttendeeConflicts: true,   // annotate busy conflicts; general offers still honor hours
                 searchFrom: effectiveSearchFrom,
                 searchTo: effectiveSearchTo,
+                requestedTimeWindow,
                 preferMorning: args.prefer_morning as boolean | undefined,
                 meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                 travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
@@ -1562,6 +1574,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   attendeeBusyEmails,
                   searchFrom: effectiveSearchFrom,
                   searchTo: effectiveSearchTo,
+                  requestedTimeWindow,
                   preferMorning: args.prefer_morning as boolean | undefined,
                   meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                   travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
@@ -1673,8 +1686,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             //   1) owner-tagged backstop — his open times, attendee-conflicted
             //      (best: his day untouched; carries attendee_conflicts tags).
             //   2) relaxed recovery — times that break his soft rules.
-            //   3) colleague owner-only — his open times, attendee HOURS tagged
-            //      (off_hours), attendee real calendar busy stays uncheckable.
+            //   3) colleague owner-only — his open times inside attendee hours;
+            //      attached per-slot attendee status is the only calendar evidence.
             //   4) rawSlots (the clean strict result).
             // (1) and (2) are mutually exclusive by construction — the relaxed
             // recovery is gated off when the owner-tagged backstop found slots.
@@ -1773,9 +1786,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               ? args.preferred_slot.trim()
               : null;
             const preferredSlot = rawPreferredSlot
-              ? DateTime.fromISO(searchWindowTz
-                  ? reinterpretClockInZone(rawPreferredSlot, searchWindowTz, timezone)
-                  : rawPreferredSlot, { zone: timezone }).toISO() ?? rawPreferredSlot
+              ? resolveRequestedClock(rawPreferredSlot)
               : null;
             // v4.1.x (M8/M9) — set when the named time is NOT offerable, so the
             // result can say WHY instead of letting the model infer "unavailable"
@@ -1828,6 +1839,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                     profile: context.profile,
                     category: args.category as string | undefined,
                     relaxed: relaxedGranted,
+                    allowAttendeeOffHours: relaxedGranted,
                     excludeEventIds: excludeEventIdsForSearch,
                     autoExpand: false,
                     minBufferHours: leadHours,
@@ -1843,8 +1855,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // main `slots` list renders below, and must use the same zone, or
                   // a requester who asked "in ET" gets every offered slot in ET
                   // except the one they specifically named.
-                  const preferredPresentationLocal = presentTzForOutput
-                    ? renderClockInZone(preferredSlot, timezone, presentTzForOutput)
+                  const preferredPresentationZone = presentTzForOutput(preferredSlot);
+                  const preferredPresentationLocal = preferredPresentationZone
+                    ? renderClockInZone(preferredSlot, timezone, preferredPresentationZone)
                     : '';
                   preferredSlotStatus = {
                     start: preferredSlot,
@@ -1976,7 +1989,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               annotatedSlots = annotatedSlots.map((s: any) => {
                 const slotDt = DateTime.fromISO(s.start, { zone: timezone });
                 if (!slotDt.isValid) return s;
-                const slotDayIso = slotDt.toFormat('yyyy-MM-dd');
+                const slotDayIso = slotDt.toISO()!;
                 const per_attendee_local = tzCandidates.map(a => {
                   const effTz = attendeeTzForDay(a, slotDayIso);
                   if (effTz === timezone) return null;  // same wall-clock — no parenthetical
@@ -2004,13 +2017,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // each slot in the requested zone deterministically. Ship only the
             // formatted string (with the short offset name, e.g. "EDT") — never
             // the raw IANA, to avoid the "America/New_York → New York" paste.
-            // #24 — presentTzForOutput (declared above) falls back to autoPresentTz
-            // when the caller left this unset but exactly one loaded attendee zone
-            // differs from the owner's; an explicit value here still wins.
-            if (presentTzForOutput) {
+            // #24 — when unstated, resolve the single distinct attendee zone
+            // for each slot's date; an explicit value still wins.
+            if (explicitPresentTz || attendeeAvailability?.length) {
               // v3.4.2 (A2) — shared renderer, same string create/move echo back.
               annotatedSlots = annotatedSlots.map((s: any) => {
-                const display = renderClockInZone(s.start, timezone, presentTzForOutput);
+                const presentationZone = presentTzForOutput(s.start);
+                const display = presentationZone ? renderClockInZone(s.start, timezone, presentationZone) : '';
                 return display ? { ...s, presentation_local: display } : s;
               });
             }
@@ -2205,13 +2218,11 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (attendeeNotCheckedWarning) Object.assign(result, attendeeNotCheckedWarning);
               if (colleagueSoftBlockHint) Object.assign(result, colleagueSoftBlockHint);
               if (hasAttendeeConflicts && !usedOwnerAttendeeTagged && !usedColleagueOwnerOnly) {
-                // o#213 sibling — same hedge-when-assumed treatment as
-                // `_attendee_unverified_note` below: an `off_hours` entry can
-                // come from a GUESSED default (#M3, no stored profile) rather
-                // than real stored hours, tagged `assumed: true` on the
-                // conflict entry in connectors/graph/findAvailableSlots.ts.
+                // Describe only the conflicts attached to each returned slot.
+                // General searches keep attendee hours hard; an off_hours tag
+                // can appear only on an exact requested-slot path that opted in.
                 result._attendee_conflicts_note =
-                  `You searched with override on, so these include slots where an attendee is busy or outside their working hours — each such slot has \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Present them, and next to each conflicted slot quote that entry's \`line\` VERBATIM (e.g. "Tue 10:00 — <line>") — it is already in the right grammatical person for whoever you're replying to, and already hedged when the hours were a guessed default (\`assumed: true\`, no profile on file) rather than real stored data. Don't re-derive the sentence, and never restate someone's status in first person. Never present a conflicted slot as clean. The owner can still book any of them.`;
+                  `Some returned slots carry \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Next to each tagged slot, quote every conflict entry's \`line\` VERBATIM (e.g. "Tue 10:00 — <line>") — it is already in the right grammatical person and already hedged when any hours were assumed rather than confirmed. Describe only the attached conflicts: do not infer that another slot is off-hours or that a blanket override occurred. Never present a tagged slot as clean.`;
               }
               if (hasAttendeeStatus) {
                 // scanner-relay-first-person-attendee-status (2026-08-30) — NOT
@@ -2250,16 +2261,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   result._attendee_busy_colleague_note =
                     `No time here is free for everyone — every slot works for ${ownerFirst}, but a REQUIRED ATTENDEE is busy then (each slot's \`attendee_conflicts: [{email, reason, line}]\` names who). This is THEIR call, not ${ownerFirst}'s — do NOT route it to him and do NOT say there's no time. Present the slots plainly so they can pick one, but do NOT yourself ask "still want it?" or narrate who's busy as a decision point — once they pick a slot, call create_meeting there directly with NO confirm_attendee_conflict set. It independently re-verifies and its OWN refusal already asks "book it anyway?" naming everyone blocked (attendee_conflict error) — relay exactly THAT one question, don't ask your own version first. Once they answer yes to it, re-call create_meeting with the SAME args plus confirm_attendee_conflict:true to book. Never make them answer this twice.`;
                 } else {
-                  // Owner-tagged backstop: no slot was clean for everyone, so these are his
-                  // genuinely open times with each attendee conflict tagged. Honest framing:
-                  // "nothing works for all, here's who can't + widen?".
-                  // o#213 sibling — same hedge-when-assumed treatment as
-                  // `_attendee_unverified_note` below: an `off_hours` entry can
-                  // come from a GUESSED default (#M3, no stored profile) rather
-                  // than real stored hours, tagged `assumed: true` on the
-                  // conflict entry in connectors/graph/findAvailableSlots.ts.
+                  // Owner-tagged backstop: the strict pass found no suitable slot;
+                  // these are his genuinely open times inside attendee working
+                  // hours, with real busy/travel conflicts tagged per slot.
+                  // A sampled day_summary explains rejected candidates, not every
+                  // instant in that day or window.
                   result._no_all_attendee_free_note =
-                    `No time in this window is free for EVERYONE, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee conflict tagged in \`attendee_conflicts: [{email, reason, assumed?, line}]\`. Present them and say plainly, per slot, who can't make it by quoting each conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both) — it is already in the right grammatical person, and already hedged when an \`off_hours\` entry's hours were a guessed default (\`assumed: true\`, no profile on file, never confirmed) rather than real stored data. #M1 — BUT first read \`day_summary\`: for any day whose \`accepted:0\` with an attendee-busy reason (\`attendee_busy_collision\` / \`outside_attendee_work_hours\`), that attendee is unavailable the ENTIRE day — say "<attendee>'s busy all day <that day>", do NOT cherry-pick these 1-2 surfaced slots as if they were the only conflicts. NEVER present a conflicted slot as clean. ${ownerFirst} can book any of them — it's his call. ALSO offer to look at a different timeframe or widen the window, since nothing here works for all.`;
+                    `No suitable slot in this search met every participant constraint, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee busy/travel conflict tagged in \`attendee_conflicts: [{email, reason, line}]\`. Present them and say plainly, per slot, who can't make it by quoting every conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both). A \`day_summary\` row with \`accepted:0\` establishes only that no sampled candidate survived this search and its constraints; describe that scoped result, and describe broader availability only when an explicit calendar finding establishes it. Never present a tagged slot as clean. ${ownerFirst} can choose one, or you can offer to search a different timeframe or wider window.`;
                 }
               }
               if (hasOverOptional) {
@@ -2299,70 +2307,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
               if (usedColleagueOwnerOnly) {
                 const ownerFirstUnverified = context.profile.user.name.split(' ')[0];
-                // v4.4.7 — the strict pass rejected these slots because SOME
-                // attendee's stored/assumed working hours ruled them out, and
-                // this recovery re-checks that SAME real data (never nulled now
-                // — see recoverAttendeeBlockedSlots above), so a returned slot
-                // normally carries `attendee_conflicts: [{email, reason:'off_hours'}]`
-                // naming exactly who. That part is no longer a guess.
-                // v4.4.8 (bouncer overturn) — the colleague-path annotation
-                // above runs on every search that reaches this branch (it fires
-                // whenever !isOwnerInitiatedSearch, which usedColleagueOwnerOnly
-                // implies), and ships a REAL per-slot Graph free/busy read for
-                // every INTERNAL attendee as `attendee_status`. "No calendar
-                // access in this fallback" was false whenever an attendee is
-                // internal — the real data sits right next to the note denying
-                // it. Only an EXTERNAL attendee (or one whose status came back
-                // 'unknown') is genuinely unchecked here (rule 7 — a colleague
-                // never gets another attendee's real calendar; the annotation
-                // itself skips externals). Also: `usedColleagueOwnerOnly` always
-                // implies `hasAttendeeConflicts` — the recovery differs from the
-                // strict pass ONLY by tagging off-hours conflicts instead of
-                // dropping them, so every slot that newly surfaces here carries
-                // at least one — there is no "no conflicts at all" case on this
-                // path, so no second wording for it.
-                // v4.4.x — the `attendee_status` clause used to ship
-                // unconditionally, telling Sonnet to look for a field that
-                // isn't there on a search whose slots carry no
-                // `attendee_status` at all (all-external attendees). Gated
-                // on `hasAttendeeStatus` now, matching the sibling flag
-                // above. The concrete per-value mapping that used to live in
-                // this clause ('busy'/'tentative'/'oof' means..., e.g.
-                // "Lori's busy then") is now pre-rendered in code as each
-                // entry's `line` (renderAttendeeStatusLine —
-                // scanner-relay-first-person-attendee-status, 2026-08-30),
-                // so the clause only teaches quote-the-line: free-writing
-                // the sentence from raw values is how a colleague got her
-                // own status back as "I show tentative then".
-                // o#213 — the "external/unknown attendee can't be checked
-                // here" sentence used to live INSIDE the `hasAttendeeStatus`
-                // ternary, so it vanished whenever no slot carried a
-                // non-empty `attendee_status` (e.g. the colleague-path
-                // annotation above threw, or — in the all-external,
-                // no-internal-attendee case this closes — attendee_status
-                // simply never got attached). The fact it states is true
-                // EITHER WAY: an external or still-'unknown' attendee is
-                // uncheckable here regardless of whether `attendee_status`
-                // shipped at all. Ships unconditionally now; only the
-                // INTERNAL 'busy'/'tentative'/'oof'/'free' teaching sentence
-                // stays gated on `hasAttendeeStatus`.
-                // o#213 — the off-hours sentence also used to assert every
-                // `attendee_conflicts[].reason:'off_hours'` as real data
-                // unconditionally, but `loadAttendeeAvailabilityForEmails`
-                // (utils/attendeeAvailability.ts) can build an entry from a
-                // GUESSED default (#M3, no stored profile) tagged
-                // `assumed: true` — carried straight onto the conflict entry
-                // in connectors/graph/findAvailableSlots.ts. That's the other
-                // still-open half of `assumed-attendee-hours-narrated-as-fact`
-                // (the day_summary grounding note already hedged; this one
-                // didn't). Hedges per-entry now when `assumed` is true — the
-                // hedge is pre-rendered inside each entry's `line`.
+                // The fallback keeps owner rules and attendee hours hard. A
+                // returned slot is inside the stored/assumed hours, but that does
+                // not prove calendar availability. Only attached attendee_status
+                // is a real Graph finding; missing/unknown stays unconfirmed.
                 result._attendee_unverified_note =
-                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict). Some carry \`attendee_conflicts: [{email, reason:'off_hours', assumed?, line}]\` — quote each entry's \`line\` verbatim next to that slot (e.g. "Tue 10:00 — <line>"); it is already in the right grammatical person for whoever you're replying to, and already hedged when the hours were a guessed default (\`assumed: true\`, no profile on file, never confirmed) rather than real stored data. Never present a tagged slot as clean for everyone.`
+                  `These are ${ownerFirstUnverified}'s OWN open times (his rules stay strict), screened inside each attendee's stored or assumed working hours. That hours check does not confirm calendar availability.`
                   + (hasAttendeeStatus
                     ? ` Slots also carry \`attendee_status\` per INTERNAL attendee — a REAL calendar read, not a guess: quote each entry's \`line\` verbatim; never re-derive it, and never state an attendee's status in first person ("I show tentative") — "I" is you, Maelle, and it's never your calendar.`
                     : '')
-                  + ` Only an EXTERNAL attendee (or one still 'unknown') can't be checked here — say you could not confirm THAT one yet.`
+                  + ` For an EXTERNAL attendee or any missing/unknown status, say only that you could not confirm that person's calendar yet; do not infer busy or off-hours.`
                   + ` Do NOT demand an attendee's email to proceed. The pick routes to ${ownerFirstUnverified}'s approval as usual.`;
               }
               return result;
@@ -2381,4 +2335,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             throw err;
           }
         }
+  } catch (err) {
+    if (err instanceof StatedTimeClarificationError) return err.toToolResult();
+    throw err;
+  }
 }

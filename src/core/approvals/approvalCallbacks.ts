@@ -28,7 +28,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
 import type { OwnerTravelContext } from '../../utils/workingElsewhere';
-import { renderWeDualClock } from '../../utils/weTimeResolver';
+import { renderWeDualClock, resolveStatedInstant, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../utils/weTimeResolver';
 import logger from '../../utils/logger';
 import { PROMOTE_TIMEZONE_TEMP_TOOL } from '../requests/types';
 
@@ -116,7 +116,8 @@ export function buildConsequenceText(
   const fmtTime = (iso: string | undefined): string => {
     if (!iso) return '';
     try {
-      const dt = new Date(iso);
+      const normalized = resolveStatedInstant({ startIso: iso, statedZone: statedZoneFromArgs(args), personTimezone: statedClockPersonContext(args, profile, iso), homeTz: profile.user.timezone, profile }).startIso;
+      const dt = DateTime.fromISO(normalized, { zone: profile.user.timezone }).toJSDate();
       if (Number.isNaN(dt.getTime())) return iso;
       const opts: Intl.DateTimeFormatOptions = {
         weekday: 'short', day: 'numeric', month: 'short',
@@ -131,7 +132,8 @@ export function buildConsequenceText(
   // travel is resolved, else the home-zone fallback.
   const fmtStart = (iso: string | undefined, endIso?: string): string => {
     if (!iso) return '';
-    return travel ? renderWeDualClock(iso, travel, profile.user.timezone, { endIso }) : fmtTime(iso);
+    const normalized = resolveStatedInstant({ startIso: iso, endIso, statedZone: statedZoneFromArgs(args), personTimezone: statedClockPersonContext(args, profile, iso), homeTz: profile.user.timezone, profile });
+    return travel ? renderWeDualClock(normalized.startIso, travel, profile.user.timezone, { endIso: normalized.endIso }) : fmtTime(normalized.startIso);
   };
   switch (tool) {
     case 'create_meeting': {
@@ -199,7 +201,8 @@ export async function resolveConsequenceTravel(
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getTravelContextForInstant } = require('../../utils/workingElsewhere') as
       typeof import('../../utils/workingElsewhere');
-    return getTravelContextForInstant(start, profile);
+    const normalized = resolveStatedInstant({ startIso: start, statedZone: statedZoneFromArgs(args!), personTimezone: statedClockPersonContext(args!, profile, start), homeTz: profile.user.timezone, profile }).startIso;
+    return getTravelContextForInstant(normalized, profile);
   } catch {
     return undefined;  // fail-open → home-zone render, never block the approval DM
   }
@@ -325,7 +328,7 @@ export async function composeOwnerAskText(input: {
   try {
     const callbacks = extractCallbacks(details);
     const mergedApprove = (countered && counter && callbacks.on_approve)
-      ? mergeAmendIntoApprove(callbacks.on_approve, counter, profile.user.timezone)
+      ? mergeAmendIntoApprove(callbacks.on_approve, counter, profile)
       : callbacks.on_approve;
     if (countered) {
       const before = slotSignature(callbacks.on_approve);
@@ -337,9 +340,13 @@ export async function composeOwnerAskText(input: {
     const travel = await resolveConsequenceTravel(effective, profile);
     consequence = buildConsequenceText(effective, profile, travel);
   } catch (err) {
+    if (err instanceof StatedTimeClarificationError) {
+      consequence = `Before this can run: ${err.message}`;
+    } else {
     logger.warn('composeOwnerAskText — consequence build threw; sending the ask without the "if yes" line', {
       requestId, err: String(err).slice(0, 200),
     });
+    }
   }
 
   const stored = slotHeld ? details?.honest_hard_reason : undefined;
@@ -361,14 +368,14 @@ export async function composeOwnerAskText(input: {
 /**
  * Merge owner's amend counter into on_approve.args. The counter shape is
  * approval-kind-specific (freeform: arbitrary keys, etc.). We do a shallow
- * spread: counter wins on key conflict. Caller is
- * responsible for ensuring the counter keys correspond to on_approve.args
- * keys — that's a tool-description responsibility, not a code invariant.
+ * spread: counter wins on key conflict. Meeting interval aliases are normalized
+ * to executor fields below. The full owner profile is required so preserved
+ * duration and explicit duration amendments use execution's dated clock source.
  */
 export function mergeAmendIntoApprove(
   approveCallback: ToolCallback,
   counter: Record<string, unknown>,
-  timezone = 'UTC',
+  profile: UserProfile,
 ): ToolCallback {
   const args = { ...approveCallback.args, ...counter };
   // R2: normalize the counter to fields the executor actually reads. A new
@@ -380,18 +387,37 @@ export function mergeAmendIntoApprove(
     const start = counter[startKey] ?? counter.slot_iso ?? counter[moving ? 'start' : 'new_start'];
     const end = counter[endKey] ?? counter[moving ? 'end' : 'new_end'];
     const duration = counter.duration_minutes ?? counter.duration_min;
-    const beforeStart = DateTime.fromISO(String(approveCallback.args[startKey] ?? ''), { zone: timezone, setZone: true });
-    const beforeEnd = DateTime.fromISO(String(approveCallback.args[endKey] ?? ''), { zone: timezone, setZone: true });
     if (typeof start === 'string') args[startKey] = start;
     if (typeof end === 'string') args[endKey] = end;
     if (duration !== undefined || (typeof start === 'string' && end === undefined)) {
-      const minutes = duration ?? (beforeStart.isValid && beforeEnd.isValid ? beforeEnd.diff(beforeStart, 'minutes').minutes : undefined);
+      let minutes = duration;
+      if (minutes === undefined) {
+        const originalStart = String(approveCallback.args[startKey] ?? '');
+        const before = resolveStatedInstant({
+          startIso: originalStart,
+          endIso: typeof approveCallback.args[endKey] === 'string' ? approveCallback.args[endKey] as string : undefined,
+          statedZone: statedZoneFromArgs(approveCallback.args), personTimezone: statedClockPersonContext(approveCallback.args, profile, originalStart),
+          homeTz: profile.user.timezone, profile,
+        });
+        const beforeStart = DateTime.fromISO(before.startIso, { setZone: true });
+        const beforeEnd = DateTime.fromISO(before.endIso ?? '', { setZone: true });
+        minutes = beforeStart.isValid && beforeEnd.isValid ? beforeEnd.diff(beforeStart, 'minutes').minutes : undefined;
+      }
       if (duration !== undefined && (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0)) {
         throw new Error('The counter duration must be a positive number of minutes.');
       }
       if (typeof minutes === 'number' && minutes > 0) {
-        const at = DateTime.fromISO(String(args[startKey] ?? ''), { zone: timezone, setZone: true });
+        // Resolve the amended start exactly as execution does BEFORE deriving
+        // an end. Otherwise a bare travel start and a home-offset end describe
+        // different source clocks and can form a negative interval.
+        const resolved = resolveStatedInstant({
+          startIso: String(args[startKey] ?? ''), statedZone: statedZoneFromArgs(args),
+          personTimezone: statedClockPersonContext(args, profile, String(args[startKey] ?? '')),
+          homeTz: profile.user.timezone, profile,
+        });
+        const at = DateTime.fromISO(resolved.startIso, { setZone: true });
         if (!at.isValid) throw new Error('The counter needs a valid start time before its duration can be applied.');
+        args[startKey] = resolved.startIso;
         args[endKey] = at.plus({ minutes }).toISO();
       } else if (moving && end === undefined) {
         // A time-less move uses the event's current duration at execution.
@@ -403,7 +429,13 @@ export function mergeAmendIntoApprove(
     delete args.duration_minutes;
     delete args[moving ? 'start' : 'new_start'];
     delete args[moving ? 'end' : 'new_end'];
+    // Validate the complete amended interval before it can be relayed or
+    // approved. An explicit end can itself land in a DST gap or fold.
+    if (typeof args[startKey] === 'string') resolveStatedInstant({
+      startIso: args[startKey] as string, endIso: typeof args[endKey] === 'string' ? args[endKey] as string : undefined,
+      statedZone: statedZoneFromArgs(args), personTimezone: statedClockPersonContext(args, profile, args[startKey] as string),
+      homeTz: profile.user.timezone, profile,
+    });
   }
   return { tool: approveCallback.tool, args };
 }
-

@@ -1,10 +1,10 @@
-# Report — cumulative since the 4.9.4 wrap
+# Report — cumulative since the 4.9.5 wrap
 
 ```
-board: 7 open rows — 3 still-real · 2 need a re-read · 2 cite no file · 7 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+board: 4 open rows — 1 still-real · 1 need a re-read · 2 cite no file · 4 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 ```
 
-**7 rows await you** — v4.9.4 wrapped; the standing backlog is unchanged.
+**4 rows await you** — v4.9.5 release prepared; 0 new from this wrap. The standing backlog remains recorded in the ledger.
 
 ### pending owner (0)
 
@@ -12,9 +12,6 @@ board: 7 open rows — 3 still-real · 2 need a re-read · 2 cite no file · 7 r
 
 ### declined (0)
 
-**Built and uncommitted — this is what a wrap ships (0):** none. Eight verified Coda release items and the Workshop changes are committed; cloud boot confirmation follows the final push.
+**Built and uncommitted — this is what a wrap ships (14):** fourteen independently verified timezone repair/policy references; tracked references overlap and are not fourteen distinct root causes.
 
-out: 0 bounced · 0/0 joint-traced since the release-report reset. The Coda audit had one repair cycle and three verified joint paths, preserved in its independent evidence.
-Golden30: 27 pass · 0 fail · 3 stale anchors (references refreshed, behavior intact). Independent review: pass; 8/8 tracked Coda release items verified. Scripted coverage: 129 cases plus eight independent scenarios; prompt-input checks do not certify live model behavior.
-
-
+Golden30: 30 pass · 0 fail · 0 stale anchors. Full checkpoint plus18 affected rechecks;12 inherited by verified hashes. Independent review: pass,14/14 references covered. Three original blocking roots and one joined expansion regression repaired; no unresolved blocker. Deterministic and prompt-input evidence does not certify live model behavior. Production boot confirmation follows the final push.

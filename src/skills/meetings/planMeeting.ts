@@ -344,9 +344,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toISODate()
     : null;
   const travelForMeetingDay = (personId: string): CurrentTravel | null => {
-    const t = getTravelRecordById(personId);
+    const t = getTravelRecordById(personId, null);
     if (!t) return null;
-    const day = meetingIsoDate ?? new Date().toISOString().slice(0, 10);
+    const destination = inferTimezoneFromStateStatic(t.location);
+    // A resolved destination owns its inclusive trip dates. An unresolvable
+    // location retains the existing conservative remote flag; no local clock
+    // is asserted from that fallback.
+    const at = input.slotStartIso ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }) : DateTime.now();
+    const day = destination ? at.setZone(destination).toISODate()!
+      : meetingIsoDate ?? at.setZone(profile.user.timezone).toISODate()!;
     return (day >= t.from && day <= t.until) ? t : null;
   };
   const ownerPersonId = personIdForSlackId(profile.user.slack_user_id);

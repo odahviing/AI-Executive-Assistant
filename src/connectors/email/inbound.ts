@@ -328,25 +328,31 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
       });
       continue;
     }
-    // Never stomp an existing travel record: `currently_traveling` has no
-    // provenance ranks (unlike core fields), and the record already there may
-    // be owner-stated via update_person_profile — an outside-claimed signature
-    // guess must not silently replace it (same overwrite class this branch
-    // exists to kill). `getTravelRecordById` covers active AND future trips;
-    // an email-derived record self-heals anyway — it expires within 14 days,
-    // after which the next hint applies.
+    // Preserve every active/future trip with a known source. The owner
+    // authorized replacement of old untagged travel; reads do not invent one.
+    // The shared reader assesses expiry in that trip's destination timezone;
+    // the new inferred window uses the hinted destination's own date.
+    // The store also enforces source rank on the eventual write. A refusal
+    // stays internal: this leg does not open a question or a shadow message.
+    const destinationNow = DateTime.now().setZone(iana);
+    const from = destinationNow.toFormat('yyyy-MM-dd');
     const existingTravel = getTravelRecordById(person.person_id);
-    if (existingTravel) {
+    if (existingTravel && (existingTravel.source === 'owner' || existingTravel.source === 'person' || existingTravel.source === 'auto')) {
       logger.info('Email inbound — stated timezone hint skipped, an active/future travel record already exists', {
         email: hint.email, stated: hint.statedTimezone, existingLocation: existingTravel.location, existingUntil: existingTravel.until,
       });
       continue;
     }
-    const from = DateTime.now().toFormat('yyyy-MM-dd');
-    const until = DateTime.now().plus({ days: 14 }).toFormat('yyyy-MM-dd');
-    setCurrentTravelById(person.person_id, { location: hint.statedTimezone, from, until });
+    const until = destinationNow.plus({ days: 14 }).toFormat('yyyy-MM-dd');
+    const outcome = setCurrentTravelById(person.person_id, { location: hint.statedTimezone, from, until }, 'auto');
+    if (outcome !== 'applied' && outcome !== 'already_set') {
+      logger.info('Email inbound — stated timezone hint not saved', {
+        email: hint.email, stated: hint.statedTimezone, outcome,
+      });
+      continue;
+    }
     logger.info('Email inbound — stated timezone resolved as a bounded travel override (auto-tier, expires)', {
-      email: hint.email, stated: hint.statedTimezone, iana, from, until,
+      email: hint.email, stated: hint.statedTimezone, iana, from, until, outcome,
     });
   }
 

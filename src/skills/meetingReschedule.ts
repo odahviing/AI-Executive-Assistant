@@ -29,6 +29,10 @@ import type { OutreachJob } from '../db/jobs';
 import { createOutreachJob, updateOutreachJob, getLinkedRequestIdForOutreach } from '../db/jobs';
 import { getRequest, updateRequest } from '../db/requests';
 import { calcResponseDeadline } from '../utils/responseDeadline';
+import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
+import { renderClockInZone } from '../utils/timezoneConvert';
+import { resolveStatedInstant } from '../utils/weTimeResolver';
+import { getPersonMemory } from '../db/people';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { getConnection } from '../connections/registry';
@@ -557,12 +561,18 @@ export async function notifyColleagueOfMove(params: {
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (!conn) return false;
     const tz = profile.user.timezone;
-    const newLocal = DateTime.fromISO(params.newStartIso, { zone: tz }).toFormat('EEEE d MMM \'at\' HH:mm');
+    const recipient = loadAttendeeAvailabilityForPerson(getPersonMemory(params.colleagueSlackId) ?? undefined, params.colleagueTz ?? tz);
+    const localTime = (iso: string): string => {
+      const instant = resolveStatedInstant({ startIso: iso, homeTz: tz, profile }).startIso;
+      return renderClockInZone(instant, tz,
+        recipient ? attendeeTzForDay(recipient, instant) : tz);
+    };
+    const newLocal = localTime(params.newStartIso);
     const ownerFirst = profile.user.name.split(' ')[0];
     const colleagueFirst = params.colleagueName.split(' ')[0];
     const because = params.conflictReason ? ` — it clashed with ${params.conflictReason}` : '';
     const toldLocal = params.correctsToldStartIso
-      ? DateTime.fromISO(params.correctsToldStartIso, { zone: tz }).toFormat('EEEE d MMM \'at\' HH:mm')
+      ? localTime(params.correctsToldStartIso)
       : null;
     const message = toldLocal
       ? `Hi ${colleagueFirst}, quick correction on "${params.meetingSubject}" — I told you ${toldLocal}, and that's changed: it's now ${newLocal}. Sorry for the back-and-forth. If the new time doesn't work for you, say the word and I'll sort it out with ${ownerFirst}.`
@@ -601,7 +611,7 @@ export async function notifyColleagueOfMove(params: {
       // hours in THEIR zone, skills/outreach.ts → calcResponseDeadline), so
       // silence resolves the way it does for every other await_reply
       // outreach: expire, close, tell both sides.
-      reply_deadline: calcResponseDeadline(params.colleagueTz ?? tz),
+      reply_deadline: calcResponseDeadline(params.colleagueTz ?? tz, { slackId: params.colleagueSlackId, ownerTimezone: profile.user.timezone }),
       context_json: JSON.stringify(ctx),
     });
 

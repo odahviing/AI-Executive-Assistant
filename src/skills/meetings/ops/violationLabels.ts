@@ -202,7 +202,8 @@ function joinClauses(items: string[]): string {
  * work for, because a first blocked attendee masking a second is the failure
  * the ruling names, with a true sentence in front of it (overturn, 2026-09-06).
  * Completeness is guaranteed upstream, not here: both Guards walk the slot in
- * `tagAttendeeConflicts` mode, where no attendee-side check can drop a slot and
+ * `tagAttendeeConflicts` + `allowAttendeeOffHours` mode for the exact request,
+ * where no attendee-side check can drop a slot and
  * `attendee_conflicts` is therefore the whole list (findAvailableSlots.ts).
  *
  * WHICH of the two properties this is. The overturn allowed either "the FYI

@@ -74,7 +74,7 @@ function describeHoursWrite(
   if (!prose && !structured) return { notes: [] };
   const row = getPersonById(personId);
   const eff = row ? getEffectiveWorkingHours(row) : null;
-  const tz = row?.timezone ?? null;
+  const tz = eff?.timezone ?? row?.timezone ?? null;
   const window = eff
     ? `${eff.workdays.map(d => d.slice(0, 3)).join('/')} ${eff.hoursStart}–${eff.hoursEnd}${tz ? ` ${tz}` : ''}`
     : null;
@@ -308,7 +308,7 @@ Call this after interactions — not during them. It's a background update.`,
             },
             currently_traveling: {
               type: 'object',
-              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. Either pass concrete `from`+`until` dates, OR pass `from` + one of `for_days`/`for_weeks` and the system derives `until`. The system auto-clears the field once `until` passes.',
+              description: 'Travel window for the person. Stored profile timezone/state are defaults — when the colleague is travelling somewhere else for a stretch, set this so slot search and time-of-day display use the travel location instead. Set when (a) the colleague volunteers it ("I\'m in Boston next week", "Boston time"), or (b) the owner tells you ("[Person] is in NYC for a week"). Pass `clear: true` to wipe a known-stale travel window. Either pass concrete `from`+`until` dates, OR pass `from` + one of `for_days`/`for_weeks` and the system derives `until`. The window stops applying after `until`; its dated record remains available.',
               properties: {
                 location: { type: 'string', description: 'Free text: "Boston", "NYC", "London". Use a city when known.' },
                 from:     { type: 'string', description: 'ISO yyyy-MM-dd — first day at the location. If they fly mid-day, use the day they land.' },
@@ -1089,35 +1089,41 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const travelArg = args.currently_traveling as
           | { location?: string; from?: string; until?: string; for_days?: number; for_weeks?: number; clear?: boolean }
           | undefined;
+        let travelWindow: import('../db').CurrentTravel | undefined;
+        const travelNotes: string[] = [];
+        if (travelArg != null && travelArg.clear !== true) {
+          const validDay = (v: unknown): v is string => typeof v === 'string'
+            && /^\d{4}-\d{2}-\d{2}$/.test(v) && DateTime.fromISO(v, { zone: 'UTC' }).isValid;
+          let until = travelArg.until;
+          if (!until && validDay(travelArg.from)) {
+            const days = (travelArg.for_days ?? 0) + (travelArg.for_weeks ?? 0) * 7;
+            if (Number.isInteger(days) && days > 0) {
+              until = DateTime.fromISO(travelArg.from, { zone: 'UTC' }).plus({ days: days - 1 }).toISODate() ?? undefined;
+            }
+          }
+          if (typeof travelArg.location !== 'string' || !travelArg.location.trim()
+            || !validDay(travelArg.from) || !validDay(until) || until < travelArg.from) {
+            return { updated: false, error: 'invalid_travel_window', not_saved: ['currently_traveling'],
+              message: 'Travel needs a location and real YYYY-MM-DD dates with until on or after from, or a positive whole-day duration. Nothing was saved.' };
+          }
+          travelWindow = { location: travelArg.location.trim(), from: travelArg.from, until };
+          const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+          if (!inferTimezoneFromStateStatic(travelWindow.location)) {
+            travelNotes.push('Travel dates and location are recorded, but the travel timezone is unresolved. Scheduling still uses the usual timezone. Ask for a city or an IANA timezone and update the travel location before claiming its clock is in force.');
+          }
+        }
+        let travelWrite: import('../db').TravelWrite | undefined;
         const applyTravel = (personId: string): void => {
           if (!travelArg || typeof travelArg !== 'object') return;
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setCurrentTravelById, clearCurrentTravelById } = require('../db') as typeof import('../db');
           if (travelArg.clear === true) {
-            clearCurrentTravelById(personId);
-            return;
+            travelWrite = clearCurrentTravelById(personId, setBy);
+          } else if (travelWindow) {
+            travelWrite = setCurrentTravelById(personId, travelWindow, setBy);
           }
-          if (!travelArg.location || !travelArg.from) return;
-          // v2.5.2 — derive `until` from for_days / for_weeks when explicit
-          // `until` not provided. Either form is accepted; explicit `until`
-          // wins when both are passed.
-          let untilIso = travelArg.until;
-          if (!untilIso && (typeof travelArg.for_days === 'number' || typeof travelArg.for_weeks === 'number')) {
-            const days = (typeof travelArg.for_days === 'number' && travelArg.for_days > 0) ? travelArg.for_days : 0;
-            const weeks = (typeof travelArg.for_weeks === 'number' && travelArg.for_weeks > 0) ? travelArg.for_weeks : 0;
-            const totalDays = days + (weeks * 7);
-            if (totalDays > 0) {
-              // Inclusive last day: from + totalDays - 1.
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { DateTime } = require('luxon') as typeof import('luxon');
-              const fromDt = DateTime.fromISO(travelArg.from);
-              if (fromDt.isValid) {
-                untilIso = fromDt.plus({ days: totalDays - 1 }).toFormat('yyyy-MM-dd');
-              }
-            }
-          }
-          if (untilIso) {
-            setCurrentTravelById(personId, { location: travelArg.location, from: travelArg.from, until: untilIso });
+          if (travelWrite === 'refused_lower_authority') {
+            travelNotes.push('Travel was not changed: a higher-authority source supplied the existing trip. Do not report this travel change as saved.');
           }
         };
         // L2 — provenance is derived from the AUTHENTICATED sender, never
@@ -1203,7 +1209,21 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
               typeof import('../utils/workingHoursDefault');
             refreshAutoWorkingHoursById(personId);
           }
-          if (state && state.trim()) coreWrites.push(['state', setCoreFieldWithProvenanceById(personId, 'state', state.trim(), setBy)]);
+          if (state && state.trim()) {
+            const stateWrite = setCoreFieldWithProvenanceById(personId, 'state', state.trim(), setBy);
+            coreWrites.push(['state', stateWrite]);
+            if (!timezone && (stateWrite === 'applied' || stateWrite === 'already_set')) {
+              const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
+              const derivedTz = inferTimezoneFromStateStatic(state.trim());
+              if (derivedTz) {
+                coreWrites.push(['timezone', setCoreFieldWithProvenanceById(personId, 'timezone', derivedTz, setBy)]);
+                const { refreshAutoWorkingHoursById } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+                refreshAutoWorkingHoursById(personId);
+              } else if (!getPersonById(personId)?.timezone) {
+                extraNotes.push('Location saved; timezone is still unknown. Ask this person for their timezone before relying on a local clock.');
+              }
+            }
+          }
           if (nameHe && nameHe.trim()) coreWrites.push(['name_he', setCoreFieldWithProvenanceById(personId, 'name_he', nameHe.trim(), setBy)]);
           updatePersonProfileById(personId, {
             communication_style: args.communication_style as string | undefined,
@@ -1227,10 +1247,12 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           // Keep partial writes, but expose the refused email to deterministic
           // outcome consumers as well as the conversational explanation.
           if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
+          if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
           const hours = describeHoursWrite(personId, args, target.name);
-          const allNotes = [...described.notes, ...hours.notes, ...extraNotes];
+          const allNotes = [...described.notes, ...hours.notes, ...extraNotes, ...travelNotes];
           return {
             updated: true, name: target.name, external: true,
+            ...(travelWrite ? { travel_write: travelWrite } : {}),
             ...(described.not_saved ? { not_saved: described.not_saved } : {}),
             ...(described.already_set ? { already_set: described.already_set } : {}),
             ...(hours.scheduling_hours ? { scheduling_hours: hours.scheduling_hours } : {}),
@@ -1279,8 +1301,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // a zone inferred from a stated city has that same statement as its source.
         if (state && state.trim()) {
           const { setCoreFieldWithProvenance } = require('../db') as typeof import('../db');
-          coreWrites.push(['state', setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy)]);
-          if (!timezone) {
+          const stateWrite = setCoreFieldWithProvenance(slackId, 'state', state.trim(), setBy);
+          coreWrites.push(['state', stateWrite]);
+          if (!timezone && (stateWrite === 'applied' || stateWrite === 'already_set')) {
             // Static-first lookup; Sonnet fallback if needed. Fire-and-forget.
             void (async () => {
               try {
@@ -1363,7 +1386,8 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // the external branch above; see applyTravel near the top of this case.
         applyTravel(target.personId);
 
-        const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name');
+        const fieldsWritten = Object.keys(args).filter(k => k !== 'colleague_slack_id' && k !== 'colleague_name'
+          && (k !== 'currently_traveling' || travelWrite === 'applied'));
         // Log the STORED name — the row actually written — not the model's label
         // for it (this line once read "Paul Kammerzelt" against Sharon's slack_id).
         logger.info('Person profile updated', { slackId, name: target.name, fields: fieldsWritten });
@@ -1389,6 +1413,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const slotRelevant = fieldsWritten.some(f => SLOT_RELEVANT_FIELDS.has(f));
 
         const base = { updated: true, name } as Record<string, unknown>;
+        if (travelWrite) base.travel_write = travelWrite;
         const notes: string[] = [];
 
         if (slotRelevant) {
@@ -1410,6 +1435,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // the honesty confirm_gender owes too.
         const described = describeCoreWrites(coreWrites, context.profile.user.name.split(' ')[0]);
         if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
+        if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
         if (described.not_saved) {
           base.not_saved = described.not_saved;
           logger.info('update_person_profile — fields refused by provenance or identity checks', {
@@ -1418,6 +1444,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         }
         if (described.already_set) base.already_set = described.already_set;
         notes.push(...described.notes);
+        notes.push(...travelNotes);
 
         const hours = describeHoursWrite(target.personId, args, target.name);
         if (hours.scheduling_hours) base.scheduling_hours = hours.scheduling_hours;

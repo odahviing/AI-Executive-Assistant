@@ -124,9 +124,9 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * it is a conditional one.
  * Current producers: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
  * skills/meetingReschedule.ts:591, core/requests/colleagueOofReengage.ts:404,
- * skills/outreach.ts:358 — the isFuture ternary there also produces
+ * skills/outreach.ts:290 — the isFuture ternary there also produces
  * 'pending_scheduled', so it belongs in both lists),
- * 'pending_scheduled' (skills/outreach.ts:358), 'replied' (several sites in
+ * 'pending_scheduled' (skills/outreach.ts:290), 'replied' (several sites in
  * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:647, and
  * coordinator.ts:390 above), 'cancelled' (skills/outreach.ts:479,500,617,
  * skills/meetingReschedule.ts:615, core/requests/colleagueOofReengage.ts:420,637).
