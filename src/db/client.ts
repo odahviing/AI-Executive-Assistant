@@ -47,6 +47,12 @@ export function getDb(): Database.Database {
     // person-store rebuild (which carries a fixed column list) so it lands on the
     // final table shape in one boot; idempotent via try/catch.
     try { db.exec(`ALTER TABLE people_memory ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+    // Owner ruling 2026-09-11: failed social capture is unknown, never silence.
+    // Add after the fixed-column person-store rebuild. Existing rows stay NULL;
+    // capture records the watermark only when it observes a failure.
+    if (!(db.pragma('table_info(people_memory)') as Array<{ name: string }>).some(c => c.name === 'last_social_capture_unknown_at')) {
+      db.exec(`ALTER TABLE people_memory ADD COLUMN last_social_capture_unknown_at TEXT`);
+    }
     // v4.0.4 — one human, one row. Collapse any people_memory rows that share an
     // email (the pre-4.0.4 upsertPersonMemory could mint a second row for someone
     // already on file from the calendar). Runs LAST so the merge writes against

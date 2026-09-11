@@ -171,12 +171,17 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'maelle';
 
         appendPersonNoteById(target.personId, note);
-        const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
-        appendPersonInteractionById(target.personId, {
-          type: 'social_chat',
-          summary: `${timelineTag} ${note}`,
-        });
-        if (target.slackId) recordSocialMoment(target.slackId, initiatedBy);  // social engine = internal-only
+        // An owner note ABOUT somebody is private memory, not an exchange
+        // WITH them. Only the authenticated speaker's own note may enter
+        // their interaction timeline or consume their social cadence.
+        if (target.slackId === context.userId) {
+          const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
+          appendPersonInteractionById(target.personId, {
+            type: 'social_chat',
+            summary: `${timelineTag} ${note}`,
+          });
+          recordSocialMoment(target.slackId, initiatedBy);
+        }
 
         logger.info('Social note saved', { personId: target.personId, name: target.name, topic, subject, initiatedBy });
         return { saved: true, name: target.name, topic, subject };

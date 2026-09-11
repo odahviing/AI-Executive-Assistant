@@ -188,7 +188,11 @@ npm run typecheck
 
 Must pass. If it doesn't, stop and fix — don't ship broken. A fix here lands AFTER step 4's verify and step 6's CHANGELOG: if it changes behavior, invalidate affected checks and apply step 4's targeted recheck rule; if it changes what shipped, reopen step 6's entry — then come back. This step runs BEFORE the bookkeeping on purpose: the books close at step 10, and a gate that can force more work runs before the step that closes them.
 
-### 10. Bookkeeping — the ledger BEFORE the report
+### 10. Bookkeeping — preflight, then the ledger BEFORE the report
+
+**Before the first commit, preflight the release bookkeeping.** Draft the report counts and dispositions from the actual ledger, the writer command arguments (refs, version, run/review IDs and evidence files), and GitHub closing/partial-comment bodies. Check refs and coverage against the independent review, derive counts with `ledger-stats --open`, inspect the writer's accepted arguments, and run step 12's closing-claims check on each body. Keep SHA-dependent fields visibly unresolved in drafts; never execute a wrapped/gh-sync append or claim a release timestamp before its real commit exists. Save the checked drafts for steps 11–12.
+
+Run `node scripts/check-dispatch-coverage.cjs --since <last-wrap-date>` and `node scripts/check-stale-citations.cjs` before this first commit; resolve failures while the tree is still open. Preflight complements every mandatory postcommit `--report`, `--wrap` and boot-stamp check below. Final SHA substitution or changed evidence requires rechecking the affected draft before publication.
 
 **This is the only moment the day's history can be lost, and it has been lost exactly this way.** The append once named only the *wrapped* rows while the reset took everything, so a row he had already RULED ON died with the file: `slot-hold-release-dm-role-gate` was recorded on `report.md` as *"deferred — owner: not important for now"*, the report was emptied at the 4.3.1 wrap, and `ledger.jsonl:253` still carries it as `needs-owner-decision` — so `--open` lists a decision he has already made as one he has never seen. Do these three in this order:
 
@@ -240,15 +244,13 @@ node scripts/ledger-stats.cjs --report
 
 It exits 1 naming any release commit that neither marker stands behind, and it checks the report's own headline counts against the ledger at the same time. **A green `--report` is the acceptance test for this step — do not finish the wrap on a red one.**
 
-**gh#197 — a second check, same moment: did every builder dispatch actually leave a row?** SlackMaster was hand-dispatched three times on 2026-08-10 (real turns, real cost, real shipped code) and left zero ledger rows — the only trace of its work survived as a sentence inside a different lane's row. `node scripts/check-dispatch-coverage.cjs --since <last-wrap-date>` compares `spend.cjs`'s own record of what ran against `ledger.jsonl`'s record of what was reported, per builder lane per day, and exits 1 naming any lane-day with real turns and no row at all. **Run it before this step's commit** — a missing row found after the push is a backfill; found before, it is one line.
-
-**A third check, same moment: did tonight's own comment edits break a line-number citation?** `wave-comment-edits-broke-stale-line-citations` was the 2nd occurrence of the identity — a code comment cites `file.ts:NNN` for where a behaviour lives, an edit to that file shifts its lines, the citation goes stale — inside a 31x `stale-mechanism-comment` pattern, caught until now only by a bouncer noticing during an unrelated pass. `node scripts/check-stale-citations.cjs` scans every comment/doc in the repo for a `file.ts:NNN`-shaped citation and reports only the ones whose TARGET is a file this session touched (working tree vs HEAD, plus untracked adds) — cheap and precise, because the only way a citation goes stale here is a line shift in the file it's pointed at. It exits 1 naming each one: a symbol named nearby whose own declaration has drifted more than 25 lines from the cited anchor, or (weaker, stated as such) a citation reaching past the target's own EOF. **Run it before this step's commit**, same reasoning as gh#197 — `--all` runs the identical check with no target filter, for an occasional full sweep outside a wrap.
+Step 10 already checked dispatch coverage and stale citations before the first commit. If subsequent edits invalidate either check, rerun the affected check before the bookkeeping commit.
 
 ### 12. GitHub issues — close the resolved, COMMENT the rest
 
 Close only when all three hold: the current ref is independently `verified`, the commit exists (close *after* the push, so the sha is real), and he said wrap.
 
-**gh#196 — check the comment BEFORE it ships, not after.** gh#194's closing comment claimed *"the three live rows already corrupted by this bug were cleaned up directly"* — the fix's own ledger row said the opposite, and the false claim then got copied into the ledger's own gh-sync row too. Draft the comment body to a temp file first, then:
+**gh#196 — publish the checked body.** Reuse step 10's draft file, substitute the real release SHA, and check the final body before it ships:
 
 ```bash
 node scripts/check-closing-claims.cjs --issue <n> --body-file <tmp>.md --refs "<every ledger ref this comment is actually about>"
@@ -257,7 +259,8 @@ node scripts/check-closing-claims.cjs --issue <n> --body-file <tmp>.md --refs "<
 Pass `--refs` explicitly whenever a row's own `ref` was not tagged `gh#<n>` at filing time (it will not always be — that link then lives only in your own head while drafting) — the check cannot find a row it has no name for. It exits 1 naming any sentence that asserts something a ledger row's `note` explicitly denies; it is a heuristic (word-overlap, not a proof), so a flag is a prompt to re-read both, not an automatic rewrite. **Green, then close:**
 
 ```bash
-gh issue close <n> --comment "Fixed in <sha> (v<version>). <one line on what changed>"
+gh issue comment <n> --body-file <tmp>.md
+gh issue close <n>
 ```
 
 **The half that used to get skipped:** a ticket whose complaints are not all resolved does not close — it gets a comment naming what landed, what is still open, and why. Use `gh issue comment <n> --body-file <tmp>.md`; never inline a markdown body. A ticket is partial when the verify's `ticketCoverage` says so, or when its numbered complaints outnumber the issues emitted for it. **Never close a row the verify overturned**, or one he has not decided.

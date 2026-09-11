@@ -18,8 +18,8 @@
  *   4  Ack-class emoji replacement, then the colleague shadow-notify.
  *   5  Audio vs text branch based on the input modality + TTS availability.
  *   6  Social coda, if the turn produced one — its OWN in-thread message a beat
- *      after the reply lands, never a last line glued onto it. On a confirmed
- *      post it closes the social cadence gate and mirrors to the owner's shadow.
+ *      after the reply lands, never a last line glued onto it. A send attempt
+ *      closes the social cadence gate; confirmed posts mirror to the owner's shadow.
  */
 
 import type { App } from '@slack/bolt';
@@ -31,10 +31,11 @@ import { config } from '../../config';
 import { textToSpeech, sendAudioMessage, shouldRespondWithAudio } from '../../voice';
 import logger from '../../utils/logger';
 import { runDeliberationGuard, runOutputGates, runCodaGates } from '../../utils/guards/runOutputGates';
-import { isThreadActive } from './inboundQueue';
+import { getThreadInboundRevision, isThreadActive } from './inboundQueue';
 import { getLastMaelleMessage } from '../../utils/threadActivity';
 import { recordCodaDelivered } from '../../core/social/logEngagement';
 import { composeSocialCoda } from '../../core/social/generateCoda';
+import { isSocialInitiationDue } from '../../core/social/stateMachine';
 
 export type SenderRole = 'owner' | 'colleague' | 'unknown';
 
@@ -180,8 +181,8 @@ function shadowPreview(s: string | undefined): string {
  *
  * A slow compose (the Sonnet call inside `composeSocialCoda`, plus the
  * claim-check) does NOT get raced against this window — nothing here ever
- * drops the coda for taking too long; the two lull checks (fire-time +
- * post-compose) are the only things that drop it. Widening the range only
+ * drops the coda for taking too long; lull and social eligibility are checked
+ * at fire time, after composition and immediately before sending. Widening the range only
  * widens when the timer FIRES, never turns a slow compose into a silent
  * discard.
  */
@@ -211,20 +212,19 @@ function pickCodaDelayMs(): number {
  *   the person has to play.
  * - Scheduled only from a delivery-SUCCESS point, so a reply that failed to send
  *   can never be followed by a cheerful aside about someone's weekend.
- * - Dropped if the person has typed again by the time it fires — the coda's
- *   premise is a lull, and a lull broken inside the beat (5-15s, see
- *   CODA_DELAY_MIN_MS/MAX_MS) wasn't one.
+ * - Dropped if another inbound arrives before the send begins, including while
+ *   composing or gating. A completed ack/audio/failed turn also breaks the lull.
  * - 1:1 DM only (S3/S5). The orchestrator already restricts it; asserted again
  *   here so no future caller can put personal small-talk in a shared surface.
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
  *   path is ever awaited by the person's reply — composition included, which is
  *   the whole reason it moved in here.
- * - A confirmed post is what closes the social gate (`recordCodaDelivered`) and
- *   what the owner's shadow mirror reflects. Nothing is charged, and nothing is
- *   reported to the owner, for a coda that never went out.
+ * - The send attempt closes the social gate (`recordCodaDelivered`) before the
+ *   network call because a timeout can hide an accepted post. Only confirmed
+ *   posts enter history and the owner's shadow mirror.
  *
- * Order inside the beat, and why it is that order: lull checks → compose →
- * gate → post. Everything that can drop the coda for free runs before anything
+ * Order inside the beat: lull/cadence → compose → recheck → gate → recheck →
+ * account → post. Cheap checks run before anything
  * that costs a model call, so the common "they started typing again" case spends
  * nothing. Composition is one call into the social lane (`composeSocialCoda`) —
  * we get the wire sentence plus its evidence-bearing history rendering, or null;
@@ -268,15 +268,14 @@ function scheduleSocialCoda(opts: {
   // here: it is the BASELINE the fire-time check compares against, so reading it
   // a beat later would compare the thread to itself and never detect a new turn.
   let replyTsAtSchedule: string | null;
+  let inboundRevisionAtSchedule: number;
   try {
-    // The reply we are trailing. Two cheap lookups at fire time decide whether
-    // the lull survived the beat: the inbound queue answers "is a turn running or
-    // queued RIGHT NOW" (the person typed and we are already answering), and
-    // this snapshot answers "did a whole turn come and go" — a fast follow-up
-    // (the deterministic approval auto-resolve returns in ~300ms) can start and
-    // finish inside the window, leaving the queue idle again. Together they
-    // mean: nothing happened in this thread since the reply landed.
+    // Preserve both the reply being trailed and inbound arrival revision. The
+    // queue's current activity catches running turns; its revision also catches
+    // completed ack/audio/failed turns and other threads in the same 1:1 DM.
+    // The reply snapshot additionally catches automated replies outside the queue.
     replyTsAtSchedule = getLastMaelleMessage(threadTs)?.messageTs ?? null;
+    inboundRevisionAtSchedule = getThreadInboundRevision(channelId, threadTs, isOneOnOneDm);
   } catch (err) {
     logger.warn('Social coda prep threw — dropping the coda (fail closed)', {
       threadTs, err: String(err).slice(0, 200),
@@ -284,25 +283,23 @@ function scheduleSocialCoda(opts: {
     return;
   }
 
+  const stillEligible = (): boolean => {
+    if (isThreadActive(channelId, threadTs, isOneOnOneDm)
+      || getThreadInboundRevision(channelId, threadTs, isOneOnOneDm) !== inboundRevisionAtSchedule
+      || (getLastMaelleMessage(threadTs)?.messageTs ?? null) !== replyTsAtSchedule) {
+      logger.info('Social coda dropped — the lull ended before send', { threadTs, personSlackId: coda.personSlackId });
+      return false;
+    }
+    return isSocialInitiationDue({ personSlackId: coda.personSlackId, ownerTimezone: profile.user.timezone });
+  };
+
   const delayMs = pickCodaDelayMs();
   setTimeout(() => {
     void (async () => {
       try {
-        if (isThreadActive(channelId, threadTs, isOneOnOneDm)) {
-          logger.info('Social coda dropped — the person is talking again, the lull is gone', {
-            threadTs, personSlackId: coda.personSlackId,
-          });
-          return;
-        }
-        const replyTsNow = getLastMaelleMessage(threadTs)?.messageTs ?? null;
-        if (replyTsNow !== replyTsAtSchedule) {
-          logger.info('Social coda dropped — another turn already answered in this thread', {
-            threadTs, replyTsAtSchedule, replyTsNow,
-          });
-          return;
-        }
+        if (!stillEligible()) return;
         // WRITE the coda — here, and not a moment earlier. This is the first
-        // point at which the line is certainly going to be offered: both lull
+        // point at which the line may be offered: the initial lull/cadence
         // checks are behind us, so a coda the lull already killed now costs
         // nothing at all — no Sonnet call, no claim-check, no burnt topic beat.
         //
@@ -326,6 +323,7 @@ function scheduleSocialCoda(opts: {
           });
           return;
         }
+        if (!stillEligible()) return;
         const text = formatForSlack(composed.text);
         if (text.length === 0) return;
 
@@ -340,6 +338,11 @@ function scheduleSocialCoda(opts: {
           });
           return;
         }
+        // Both model awaits can outlive the lull, and another pending timer can
+        // spend today's cadence while we wait. Recheck at the send boundary;
+        // keep this check, synchronous accounting and say invocation in one
+        // event-loop turn so two local timers cannot both claim an open day.
+        if (!stillEligible()) return;
         // Social bookkeeping — the once-per-day cadence gate + the raise
         // marker (subject for `continue`, category for `raise_new`) — goes in
         // on the line BEFORE the post, not after.
@@ -353,11 +356,9 @@ function scheduleSocialCoda(opts: {
         // land (an accepted post whose response times out throws here), so
         // stamping only on success would leave the gate open on a coda the person
         // is looking at. Stamping first is correct, not merely cheaper. Every
-        // drop path — both lull checks, the prep guard, an empty compose,
-        // runCodaGates — already sits above this line, so the original bug
-        // (charging a ping for a coda nobody saw) stays fixed either way. Never
-        // throws by contract.
-        recordCodaDelivered({
+        // drop path — lull/cadence checks, prep, composition and gates — sits
+        // above this line. A failed cadence stamp must also prevent sending.
+        const accounted = recordCodaDelivered({
           personSlackId: coda.personSlackId,
           subjectId: coda.subjectId,
           ownerUserId: profile.user.slack_user_id,
@@ -365,12 +366,12 @@ function scheduleSocialCoda(opts: {
             ? coda.directive.categoryLabel ?? undefined
             : undefined,
         });
+        if (!accounted) return;
         await say({ text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
         // History, so the NEXT turn knows she asked — otherwise she re-asks, or
         // misreads the answer ("yeah, Berlin", with no memory of the question).
-        // Written only after a confirmed post, and only on the quiet-thread path,
-        // so history can never claim a coda the person never saw or interleave
-        // one behind a message that arrived first.
+        // Written only after a confirmed post. The lull was current when send
+        // began; an inbound arriving during the network call cannot retract it.
         //
         // Deliberately NOT recordMaelleMessage(): that names the message the
         // completeTask hook reacts ✅ on, and the tick belongs on the task

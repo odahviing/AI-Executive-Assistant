@@ -77,6 +77,8 @@ interface PendingMessage {
 }
 
 interface ThreadState {
+  /** Arrival revision survives completed/failed turns, including ack-only replies. */
+  inboundRevision: number;
   /** Messages waiting to be merged into the next turn. */
   pending: PendingMessage[];
   /** Active debounce timer; null when no messages waiting. */
@@ -116,7 +118,7 @@ function keyFor(channelId: string, threadTs: string | undefined, isOneOnOneDm: b
 function getOrCreate(key: string): ThreadState {
   let s = threadStates.get(key);
   if (!s) {
-    s = { pending: [], debounceTimer: null, inFlight: null, hasWriteFired: false };
+    s = { inboundRevision: 0, pending: [], debounceTimer: null, inFlight: null, hasWriteFired: false };
     threadStates.set(key, s);
   }
   return s;
@@ -206,6 +208,7 @@ export function enqueueMessage(params: {
 }): void {
   const key = keyFor(params.channelId, params.threadTs, params.isOneOnOneDm);
   const state = getOrCreate(key);
+  state.inboundRevision++;
 
   // v2.6.1 — diagnostic to investigate duplicate orchestrator turns
   // from the same Slack event. Logs the queue state at every enqueue so we
@@ -406,6 +409,15 @@ export function isThreadActive(
   const state = threadStates.get(keyFor(channelId, threadTs, isOneOnOneDm));
   if (!state) return false;
   return state.inFlight !== null || state.pending.length > 0 || state.debounceTimer !== null;
+}
+
+/** Snapshot arrivals using the same scope as the queue, including all threads in a DM. */
+export function getThreadInboundRevision(
+  channelId: string,
+  threadTs: string | undefined,
+  isOneOnOneDm: boolean,
+): number {
+  return threadStates.get(keyFor(channelId, threadTs, isOneOnOneDm))?.inboundRevision ?? 0;
 }
 
 /**

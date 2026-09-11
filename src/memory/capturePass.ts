@@ -47,6 +47,7 @@ import {
   applyAutoTimezone,
   appendPersonNote,
   appendPersonInteraction,
+  recordSocialCaptureUnknown,
   type PersonProfile,
 } from '../db';
 import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
@@ -79,6 +80,25 @@ import {
 const SILENCE_MINUTES = 30;
 const MAX_THREADS_PER_TICK = 20;
 const HAIKU_MODEL = MODEL_HAIKU;
+
+/** Failure is unknown, not a silent answer. Use inbound timestamps already
+ * stored by Slack so a failure on the coda's own first capture cannot turn a
+ * genuinely unanswered raise into UNKNOWN. Legacy unstamped human messages
+ * are conservatively unknown as of the failure; no new model call or retry. */
+function recordUnknownCapture(threadTs: string, personSlackId: string): void {
+  try {
+    const humans = getConversationHistory(threadTs).filter(m => m.role === 'user');
+    if (humans.length === 0) return;
+    const stamps = humans.map(m => m.ts && /^\d+(?:\.\d+)?$/.test(m.ts)
+      ? Number(m.ts) * 1000 : NaN);
+    const at = stamps.some(s => !Number.isFinite(s)) ? Date.now() : Math.max(...stamps);
+    recordSocialCaptureUnknown(personSlackId, new Date(at).toISOString());
+  } catch (err) {
+    logger.error('capturePass: failed to persist unknown social outcome', {
+      threadTs, personSlackId, err: String(err).slice(0, 200),
+    });
+  }
+}
 
 /**
  * Haiku-extracted delta. Each field is optional — Haiku only emits keys
@@ -408,6 +428,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
   const ownerName = profile.user.name.split(' ')[0];
 
   for (const row of ready) {
+    let capturePersonSlackId: string | null = null;
     try {
       // 1. Whose DM is this? The Connection answers for 1:1 DMs ONLY and
       //    returns null for anything multi-party — which is exactly the answer
@@ -416,6 +437,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       //    onto another person's record. Null on failure too; either way we skip
       //    the thread. (Owner DMs resolve to the owner's id — handled below.)
       const colleagueId = await resolveCounterpart(row.channel_id);
+      capturePersonSlackId = colleagueId;
       if (!colleagueId) {
         // Couldn't resolve — mark captured to avoid retrying every tick.
         markThreadCaptured(row.thread_ts);
@@ -522,13 +544,13 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       // 7. Stamp captured_at.
       markThreadCaptured(row.thread_ts);
     } catch (err) {
+      if (capturePersonSlackId) recordUnknownCapture(row.thread_ts, capturePersonSlackId);
       logger.warn('capturePass: per-thread error, marking captured to avoid retry storm', {
         threadTs: row.thread_ts,
         err: String(err).slice(0, 200),
       });
-      // Defensive: mark captured even on error so we don't retry the
-      // same failing thread every 5 min forever. Loss is acceptable —
-      // the next chat will trigger again.
+      // Owner ruling: no extra capture calls. Mark the attempt even on error;
+      // its human-message watermark preserves UNKNOWN for pending raises.
       try { markThreadCaptured(row.thread_ts); } catch { /* ignore */ }
     }
   }
@@ -851,7 +873,7 @@ Some subjects are inherently CALENDAR-BOUND: a trip, a visit, an event, a confer
 Two, and only two, situations use action: "reject":
 
   1. **The person explicitly waves something off.** They say (in any words) that an existing subject isn't relevant any more, ask Maelle to stop bringing it up, or otherwise clearly signal "not this." Set subject_id to the existing row being rejected — this KILLS that subject; Maelle won't raise it again.
-  2. **The chat's content is work**, not personal life (see above) — something that might otherwise look like it belongs to a category but is actually the job. Leave subject_id empty.
+  2. **The chat's content is work**, not personal life (see above) — something that might otherwise look like it belongs to a category but is actually the job. Omit subject_id.
 
 A "reject" never carries topic_beats — there's nothing to file them under.
 
@@ -909,7 +931,7 @@ This is a MERGE, not a replacement with just this chat's news:
 For each subject this chat touched:
   - category: REQUIRED for action="match"/"create" (one of the 30) — echo the matched row's category, or pick the right one of the 30 to create under. Omit for a work "reject" (there's no category to name); for a "reject" of an existing subject, echo its category.
   - action: "match", "create", or "reject"
-  - subject_id: when action="match" — must be EXACTLY one of the IDs shown in the active list (no inventing, no modifying). Also set when action="reject" targets an existing subject (situation 1 above); leave empty for a work reject (situation 2).
+  - subject_id: when action="match" — must be EXACTLY one of the IDs shown in the active list (no inventing, no modifying). Also set when action="reject" targets an existing subject (situation 1 above); omit the field for a work reject (situation 2).
   - subject_label: ONLY when action="create" — short umbrella label (2-6 words ideally)
   - sentiment: "positive" | "negative" | "neutral" — how the person feels about THIS subject in this chat (irrelevant for "reject"; default "neutral")
   - topic_beats: short labels (2-5 words each) for the beats THIS subject was touched in this chat — always empty for "reject"
@@ -951,14 +973,19 @@ function parseReconcileOutput(raw: string): ReconcileOutput | null {
     if (!Array.isArray(parsed.decisions)) return null;
     const decisions: SubjectDecision[] = [];
     for (const raw of parsed.decisions) {
-      if (!raw || typeof raw !== 'object') continue;
+      if (!raw || typeof raw !== 'object') return null;
       const r = raw as Record<string, unknown>;
       const action = r.action;
-      if (action !== 'match' && action !== 'create' && action !== 'reject') continue;
+      if (action !== 'match' && action !== 'create' && action !== 'reject') return null;
+      // Absence means an intentional id-less work rejection. Never erase a
+      // supplied unusable identity into that valid outcome while parsing.
+      if ((action === 'match' || action === 'reject') &&
+          Object.prototype.hasOwnProperty.call(r, 'subject_id') &&
+          (typeof r.subject_id !== 'string' || !r.subject_id.trim())) return null;
       const category = typeof r.category === 'string' ? r.category.toLowerCase().trim() : '';
       // category is structurally required for match/create; a "reject" of
       // work content has none to give (gh#198 — work is never a category).
-      if (!category && action !== 'reject') continue;
+      if (!category && action !== 'reject') return null;
       const sentimentRaw = typeof r.sentiment === 'string' ? r.sentiment.toLowerCase().trim() : 'neutral';
       const sentiment: 'positive' | 'negative' | 'neutral' =
         sentimentRaw === 'positive' || sentimentRaw === 'negative' ? sentimentRaw : 'neutral';
@@ -1105,6 +1132,10 @@ async function runSubjectReconciliation(
       .join('')
       .trim();
     const output = parseReconcileOutput(text);
+    if (!output) {
+      recordUnknownCapture(threadTs, personSlackId);
+      return;
+    }
     const decisions = output?.decisions ?? [];
     if (decisions.length === 0) {
       // gh#198 (answer 20) — a zero-decision chat is NOT resolved here. An
@@ -1140,6 +1171,18 @@ async function runSubjectReconciliation(
     for (const d of decisions) {
       let subjectId: string | null = null;
 
+      // Both observed engagement and explicit rejection must identify a row
+      // actually shown to the model. Invalid IDs are UNKNOWN, never silence
+      // or an id-less work rejection. Keep other usable decisions in the batch.
+      if ((d.action === 'match' || (d.action === 'reject' && d.subject_id !== undefined)) &&
+          (!d.subject_id || !subjectCategoryById.has(d.subject_id))) {
+        recordUnknownCapture(threadTs, personSlackId);
+        logger.warn('runSubjectReconciliation: invalid subject_id, skipping', {
+          threadTs, action: d.action, claimed: d.subject_id, shownCount: subjectCategoryById.size,
+        });
+        continue;
+      }
+
       if (d.action === 'reject') {
         // gh#198 (answer 7+8) — ONE mechanism for both an explicit "not
         // relevant/stop" and work content wrongly routed here. With a
@@ -1147,10 +1190,11 @@ async function runSubjectReconciliation(
         // counter — immediate). Without one (work content, no row to
         // begin with), there's nothing to do but skip it — the point of
         // this branch is that match/create below never sees it.
-        if (d.subject_id && subjectCategoryById.has(d.subject_id)) {
+        if (d.subject_id) {
           try {
             markSubjectDead(d.subject_id);
           } catch (err) {
+            recordUnknownCapture(threadTs, personSlackId);
             logger.warn('runSubjectReconciliation: markSubjectDead threw', {
               threadTs, subjectId: d.subject_id, err: String(err).slice(0, 200),
             });
@@ -1168,22 +1212,15 @@ async function runSubjectReconciliation(
       }
 
       if (d.action === 'match') {
-        // ID-based safety: Haiku must return an ID from the shown list.
-        // Hallucinated IDs get logged + skipped (don't silently create as
-        // fallback — that would re-introduce the drift-creates-duplicates
-        // pattern this whole pass exists to prevent).
-        if (!d.subject_id || !subjectCategoryById.has(d.subject_id)) {
-          logger.warn('runSubjectReconciliation: hallucinated subject_id, skipping', {
-            threadTs, claimed: d.subject_id, activeCount: subjects.length,
-          });
-          continue;
-        }
+        // Presence and shown-row membership were checked for both ID outcomes.
+        if (!d.subject_id) continue;
         // Category-pairing integrity: the category Haiku declared must
         // match the category of the matched subject. If they disagree,
         // Haiku scrambled the pairing — drop the decision (the beats
         // belong to a different category than this subject row).
         const actualCategory = subjectCategoryById.get(d.subject_id)!;
         if (d.category !== actualCategory) {
+          recordUnknownCapture(threadTs, personSlackId);
           logger.warn('runSubjectReconciliation: category/subject mismatch — dropping decision', {
             threadTs, claimedCategory: d.category, actualCategory, subject_id: d.subject_id,
           });
@@ -1200,6 +1237,7 @@ async function runSubjectReconciliation(
           try {
             reviveSubject(d.subject_id, toucher);
           } catch (err) {
+            recordUnknownCapture(threadTs, personSlackId);
             logger.warn('runSubjectReconciliation: reviveSubject threw — treating as plain match', {
               threadTs, subjectId: d.subject_id, err: String(err).slice(0, 200),
             });
@@ -1210,6 +1248,7 @@ async function runSubjectReconciliation(
         matchedSubjectIds.push({ id: subjectId, sentiment: d.sentiment });
       } else if (d.action === 'create') {
         if (!d.subject_label) {
+          recordUnknownCapture(threadTs, personSlackId);
           logger.warn('runSubjectReconciliation: create missing subject_label, skipping', {
             threadTs, decision: d,
           });
@@ -1217,6 +1256,7 @@ async function runSubjectReconciliation(
         }
         const category = getCategoryByLabel(d.category);
         if (!category) {
+          recordUnknownCapture(threadTs, personSlackId);
           logger.warn('runSubjectReconciliation: category not in fixed set, skipping', {
             threadTs, claimed: d.category,
           });
@@ -1277,6 +1317,7 @@ async function runSubjectReconciliation(
         try {
           updateSubjectSummary(subjectId, d.summary);
         } catch (err) {
+          recordUnknownCapture(threadTs, personSlackId);
           logger.warn('runSubjectReconciliation: updateSubjectSummary threw', {
             subjectId, err: String(err).slice(0, 200),
           });
@@ -1292,6 +1333,7 @@ async function runSubjectReconciliation(
         try {
           updateSubjectRelevantUntil(subjectId, d.relevant_until);
         } catch (err) {
+          recordUnknownCapture(threadTs, personSlackId);
           logger.warn('runSubjectReconciliation: updateSubjectRelevantUntil threw', {
             subjectId, err: String(err).slice(0, 200),
           });
@@ -1312,6 +1354,7 @@ async function runSubjectReconciliation(
             });
             beatsRecorded++;
           } catch (err) {
+            recordUnknownCapture(threadTs, personSlackId);
             logger.warn('runSubjectReconciliation: recordTopicBeat threw', {
               subjectId, beat, err: String(err).slice(0, 200),
             });
@@ -1370,6 +1413,7 @@ async function runSubjectReconciliation(
         });
       }
     } catch (err) {
+      recordUnknownCapture(threadTs, personSlackId);
       logger.warn('runSubjectReconciliation: engagement signals threw — non-fatal', {
         threadTs, err: String(err).slice(0, 200),
       });
@@ -1379,6 +1423,7 @@ async function runSubjectReconciliation(
       threadTs, personSlackId, matchedCount, createdCount, rejectedCount, beatsRecorded,
     });
   } catch (err) {
+    recordUnknownCapture(threadTs, personSlackId);
     logger.warn('runSubjectReconciliation: threw — non-fatal', {
       threadTs, err: String(err).slice(0, 200),
     });

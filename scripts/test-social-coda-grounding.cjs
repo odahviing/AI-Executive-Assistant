@@ -38,7 +38,7 @@ const wireText = 'An interesting report about burnout.';
 const source = { title: 'Clinicians discuss burnout', url: 'https://news.example/reports/clinicians', content: 'A physician couple discussed their decision to move abroad.' };
 const profile = { user: { name: 'Owner Test', slack_user_id: 'U_OWNER' }, assistant: { name: 'Maelle' } };
 
-function harness({ results = [source], messages = [], searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText } = {}) {
+function harness({ results = [source], messages = [], subjects = [], category = null, searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText } = {}) {
   const unexpected = [];
   const warnings = [];
   const searches = [];
@@ -68,9 +68,9 @@ function harness({ results = [source], messages = [], searchThrows = false, hist
       },
     },
     '../../db/socialSubjects': {
-      getCategoryByLabel: () => null,
-      getActiveSubjectsForPersonCategory: () => [],
-      recordCategoryRaiseTried: forbidden('recordCategoryRaiseTried'),
+      getCategoryByLabel: () => category,
+      getActiveSubjectsForPersonCategory: () => subjects,
+      recordCategoryRaiseTried: category ? () => {} : forbidden('recordCategoryRaiseTried'),
       recordSubjectUnanswered: subjectId => unansweredCalls.push(subjectId),
     },
     '../../utils/claimChecker': { checkReplyClaims: async args => { validatorCalls.push(args); return verdict; } },
@@ -92,6 +92,24 @@ function harness({ results = [source], messages = [], searchThrows = false, hist
     searches, historyReads, composerCalls, validatorCalls, unansweredCalls,
   };
 }
+
+test('colleague coda composition excludes private owner-authored sibling subjects', async () => {
+  const h=harness({subjects:[{id:'private',label:'PRIVATE owner assessment',created_by:'owner'},{id:'safe',label:'Recipient shared game',created_by:'colleague'}]});
+  await h.compose({senderRole:'colleague',directive:{mode:'continue',subjectLabel:'burnout',subject:{id:'current',category_id:'gaming',created_by:'colleague'}}});
+  assert.ok(!composerPrompt(h).includes('PRIVATE owner assessment'));
+  assert.ok(composerPrompt(h).includes('Recipient shared game'));
+});
+test('owner coda composition preserves owner-authored sibling subjects', async () => {
+  const h=harness({subjects:[{id:'private',label:'Owner shared game',created_by:'owner'}]});
+  await h.compose({senderRole:'owner',directive:{mode:'continue',subjectLabel:'burnout',subject:{id:'current',category_id:'gaming',created_by:'owner'}}});
+  assert.ok(composerPrompt(h).includes('Owner shared game'));
+});
+test('raise_new colleague composer excludes private owner-authored subjects', async () => {
+  const h=harness({category:{id:'burnout'},subjects:[{id:'private',label:'PRIVATE owner assessment',created_by:'owner'},{id:'safe',label:'Recipient shared topic',created_by:'colleague'}]});
+  await h.compose({senderRole:'colleague'});
+  assert.ok(!composerPrompt(h).includes('PRIVATE owner assessment'));
+  assert.ok(composerPrompt(h).includes('Recipient shared topic'));
+});
 
 function context(result) {
   assert.equal(result.text, wireText, 'evidence must not change wire text');

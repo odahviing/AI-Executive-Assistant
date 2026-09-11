@@ -34,6 +34,7 @@ import {
 } from '../../db/socialSubjects';
 import { adjustEngagementRank } from '../../db/engagementRank';
 import logger from '../../utils/logger';
+import { hasUnknownSocialCaptureAfter } from '../../db/people';
 
 const RANK_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -79,6 +80,10 @@ export function applyRaiseFeedbackForMatches(params: {
 
   const raisedMatch = matchedSubjects.find(m => m.id === raised.id);
   if (!raisedMatch) {
+    if (raised.last_assistant_initiated_at
+        && hasUnknownSocialCaptureAfter(personSlackId, raised.last_assistant_initiated_at)) {
+      return { subject: raised, delta: 0, reason: 'raised_capture_unknown' };
+    }
     if (!allowPivotDetection) {
       // This reconciliation pass is the coda's own first capture cycle —
       // leave the raise marker standing. The next reconciliation cycle (a
@@ -146,19 +151,20 @@ export function applyOrganicMatchSignal(params: {
 }
 
 /**
- * Stamp the social bookkeeping for a coda that has actually been DELIVERED.
+ * Reserve the social bookkeeping immediately before a coda send attempt.
  *
- * Called by the transport from its fire-and-forget timer once the post is
- * confirmed; the ids come over on `OrchestratorOutput.socialCoda`.
+ * Called by the transport after all final gates, immediately before posting.
+ * A network rejection may follow an accepted post, so the existing policy
+ * reserves cadence before sending. False means the cadence write failed and
+ * the transport must drop the candidate; it must not send with an open gate.
  *
  * This used to run at GENERATION time in the orchestrator's coda block, which was
  * exact while the coda was concatenated onto the reply — stamping meant sending.
  * Once the coda became its own message posted a beat later, generation stopped
  * implying delivery: the transport drops it on a leak hit, a prep throw, the
  * person speaking again inside the beat, another turn answering first, or a failed
- * post. Every drop still burned that person's one ping for the day AND left the
- * subject marked as raised for a line nobody ever saw. Delivery is the only
- * event that should move either field.
+ * post. Pre-send drops must not consume a ping or raise. The final send attempt
+ * reserves both: an ambiguous network failure may still mean delivery.
  *
  * Three writes, guarded SEPARATELY and in this order on purpose:
  *   1. `recordSocialMoment` → `people_memory.last_initiated_at`. This is the
@@ -190,7 +196,7 @@ export function recordCodaDelivered(params: {
   /** Category a `raise_new` coda targeted — with `ownerUserId`, drives write 3. */
   raisedCategoryLabel?: string;
   ownerUserId?: string;
-}): void {
+}): boolean {
   const { personSlackId, subjectId, raisedCategoryLabel, ownerUserId } = params;
 
   let gateStamped = false;
@@ -201,17 +207,15 @@ export function recordCodaDelivered(params: {
     // NOTHING was written — a silent no-op before the return value existed.
     gateStamped = recordSocialMoment(personSlackId, 'maelle');
   } catch (err) {
-    logger.error('Coda cadence gate write THREW after delivery', {
+    logger.error('Coda cadence reservation THREW before send', {
       personSlackId, subjectId: subjectId ?? null, err: String(err).slice(0, 200),
     });
   }
   if (!gateStamped) {
-    logger.error('Coda posted but the 24h gate did NOT close — this person can be pinged again today', {
+    logger.error('Coda cadence reservation failed — transport must drop without sending', {
       personSlackId, subjectId: subjectId ?? null,
-      // `continue` codas are still gated by the raise marker below (the picker
-      // reads social_subjects too); a raise_new coda has nothing else holding it.
-      secondGate: subjectId ? 'raise_marker' : 'none',
     });
+    return false;
   }
 
   if (subjectId) {
@@ -247,6 +251,7 @@ export function recordCodaDelivered(params: {
     personSlackId, subjectId: subjectId ?? null,
     raisedCategoryLabel: raisedCategoryLabel ?? null, gateStamped,
   });
+  return gateStamped;
 }
 
 /**
@@ -261,13 +266,13 @@ export function recordCodaDelivered(params: {
  * engagement; down-ranking is owner-directive / revival-aging only, never here.
  *
  * Window anchor is `people_memory.last_initiated_at`, stamped by
- * `recordCodaDelivered` above on every coda that was actually DELIVERED —
+ * `recordCodaDelivered` above on every coda reaching its final SEND ATTEMPT —
  * continue AND raise_new. The old anchor read the most-recent RAISED SUBJECT,
  * which is NULL for raise_new (discovery) codas — so a warm reply to "any good
  * music lately?" never scored. Anchoring on last_initiated_at fixes that. Because
- * the stamp now follows delivery rather than generation, a reply can no longer be
- * credited as engagement with a coda the transport dropped and the person never
- * saw. There is no longer a 48h coda rank-check (ignoring is free, and engagement
+ * the stamp now follows final send eligibility rather than generation, a reply cannot be
+ * credited for a pre-send drop. An ambiguous network failure may still have
+ * delivered. There is no longer a 48h coda rank-check (ignoring is free, and engagement
  * is credited here, live, for both coda modes).
  */
 export function adjustRankFromColleagueResponse(params: {

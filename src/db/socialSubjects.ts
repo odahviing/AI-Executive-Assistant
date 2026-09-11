@@ -509,6 +509,23 @@ export function createSubject(params: {
   createdBy: SubjectToucher;
 }): SocialSubject {
   const db = getDb();
+  // The reconciler sees a bounded retired list and may request create for
+  // a subject outside it. Exact identity still belongs to the store: reuse
+  // the same person/category/label before cap eviction or allocating a row.
+  // Semantic aliases remain the reconciler's judgment, never a string guess.
+  const existing = db.prepare(`
+    SELECT * FROM social_subjects
+    WHERE owner_user_id = ? AND person_slack_id = ? AND category_id = ? AND label = ?
+    ORDER BY created_at ASC, id ASC LIMIT 1
+  `).get(params.ownerUserId, params.personSlackId, params.categoryId, params.label) as SocialSubject | undefined;
+  if (existing) {
+    const updated = existing.status === 'live'
+      ? recordSubjectTouch(existing.id, params.createdBy)!
+      : reviveSubject(existing.id, params.createdBy)!;
+    adjustCategoryScore({ ...params, delta: 1 });
+    resetCategoryRaiseState(params.ownerUserId, params.personSlackId, params.categoryId);
+    return updated;
+  }
   const id = `subj_${params.personSlackId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
   evictLruLiveSubjectIfAtCap(params.ownerUserId, params.personSlackId, params.categoryId);

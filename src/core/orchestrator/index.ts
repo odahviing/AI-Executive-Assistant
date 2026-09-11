@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { isDeepStrictEqual } from 'node:util';
 import type { PendingSocialCoda } from '../social/generateCoda';
 import { executeSkillTool, WRITE_TOOLS } from '../../skills/registry';
 import type { UserProfile } from '../../config/userProfile';
@@ -225,6 +226,54 @@ function localizedFallback(userMessage: string, lines: { en: string; he: string;
   return lines.en;
 }
 
+type PendingTurnWork = { tool: string; args: Record<string, unknown>; result: unknown };
+
+// These flags confirm the SAME operation; all other arguments must still match.
+// In particular, never clear another meeting merely because its tool name matches.
+function sameRetriedWork(pending: PendingTurnWork, tool: string, args: Record<string, unknown>): boolean {
+  if (pending.tool !== tool || Object.keys(args).length === 0) return false;
+  const request = (value: Record<string, unknown>) => {
+    const copy = { ...value };
+    for (const flag of ['keep_requested_time', 'confirm_attendee_conflict', 'confirm_outside_window', 'relaxed', 'override_hold', 'confirm_override']) delete copy[flag];
+    return copy;
+  };
+  return isDeepStrictEqual(request(pending.args), request(args));
+}
+
+function bookedOfferedWork(pending: PendingTurnWork, tool: string, args: Record<string, unknown>, result: Record<string, unknown>): boolean {
+  if (pending.tool !== 'find_available_slots' || (tool !== 'create_meeting' && tool !== 'move_meeting')) return false;
+  // Link moves by event ID and new bookings by attendee identities, always at
+  // an explicit offered instant. Unknown new-booking names remain unresolved.
+  const instant = (value: unknown): number | null => {
+    if (typeof value !== 'string' || !/(Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+    const parsed = DateTime.fromISO(value, { setZone: true });
+    return parsed.isValid ? parsed.toMillis() : null;
+  };
+  const movingIds = pending.args.moving_event_ids;
+  if (movingIds != null && !Array.isArray(movingIds)) return false;
+  // Multi-event searches are retained as one pending item per event below.
+  // A create cannot finish a move; each identified event needs its own move.
+  if (Array.isArray(movingIds) && movingIds.length > 0) {
+    if (tool !== 'move_meeting' || movingIds.length !== 1 || movingIds[0] !== args.meeting_id) return false;
+  } else if (tool === 'move_meeting') return false;
+  const emails = (values: unknown): string[] | null => {
+    if (!Array.isArray(values)) return null;
+    const found = values.map(v => typeof v === 'string' ? v : v?.email);
+    return found.every(v => typeof v === 'string' && v.includes('@'))
+      ? [...new Set(found.map(v => v.trim().toLowerCase()))].sort() : null;
+  };
+  // A move's event ID already identifies its roster; the search handler can
+  // auto-fill attendees from that event when attendee_emails is omitted.
+  if (tool === 'create_meeting') {
+    const searched = emails(pending.args.attendee_emails), booked = emails(args.attendees);
+    if (!searched || !booked || !isDeepStrictEqual(searched, booked)) return false;
+  }
+  const start = instant(result.booked_start), end = instant(result.booked_end);
+  if (start === null || end === null) return false;
+  const offered = Array.isArray(pending.result) ? pending.result : (pending.result as { slots?: unknown })?.slots;
+  return Array.isArray(offered) && offered.some(slot => instant(slot?.start) === start && instant(slot?.end) === end);
+}
+
 /**
  * The main agent loop.
  * Tools come from active skills — determined by the user's profile YAML.
@@ -269,11 +318,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // approval / await-reply outreach — a natural lull). It must NOT fire when
   // the turn is still mid-exchange: Maelle returned a question/decision to the
   // current interlocutor (confirm-override, pick-a-slot, rule exception) or a
-  // tool failed. Any such tool result this turn flips this true and the coda
-  // is suppressed — that's the "not in the middle" guard. Handoff tools
+  // tool failed. Keep each unresolved result until the same operation succeeds
+  // or its offered slot is demonstrably booked. Unrelated work cannot clear it.
+  // Handoff tools
   // (create_approval / message_colleague) deliberately do
   // NOT set this (they're the lull case the coda is allowed to ride).
-  let turnLeftWorkPending = false;
+  let pendingTurnWork: PendingTurnWork[] = [];
   // v2.8.3+ — rich per-mutation record used by the claim-checker retry path
   // (postReply.ts). Carries FULL event ids so a retry can build a hint that
   // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
@@ -1126,12 +1176,23 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // shape) is never mistaken for a pending slot slate.
           || (toolUse.name === 'find_available_slots' && Array.isArray(result));
         // A mutating meeting op that didn't close, or any tool that errored.
-        const mutators = new Set(['create_meeting', 'move_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
+        const mutators = new Set(['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
         const failedMutation = mutators.has(toolUse.name)
-          && r.success !== true && r.deleted !== true;
-        const errored = r.ok === false || typeof r.error === 'string';
+          && !mutationOutcome(result).ok && r.deleted !== true;
+        const errored = r.ok === false || r.success === false || typeof r.error === 'string';
         if (awaitingDecision || failedMutation || errored) {
-          turnLeftWorkPending = true;
+          const movingIds = toolUse.name === 'find_available_slots' ? toolInputForCall.moving_event_ids : undefined;
+          // The real search contract accepts multiple moves. Keep each event
+          // pending independently so completing one cannot clear the others.
+          const workArgs = Array.isArray(movingIds) && movingIds.length > 0
+            && movingIds.every(id => typeof id === 'string' && id.length > 0)
+            ? [...new Set(movingIds)].map(id => ({ ...toolInputForCall, moving_event_ids: [id] }))
+            : [toolInputForCall];
+          pendingTurnWork.push(...workArgs.map(args => ({ tool: toolUse.name, args: structuredClone(args), result })));
+        } else {
+          pendingTurnWork = pendingTurnWork.filter(pending =>
+            !sameRetriedWork(pending, toolUse.name, toolInputForCall)
+            && !(mutators.has(toolUse.name) && bookedOfferedWork(pending, toolUse.name, toolInputForCall, r)));
         }
       }
 
@@ -1581,7 +1642,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // suspenders the explicit check too.
   if (
     socialActive
-    && socialClassification?.kind === 'task'
+    // A short acknowledgement can complete real work despite the cheap intent
+    // classifier returning 'other'. Preserve social continuations and no-work acks.
+    && (socialClassification?.kind === 'task'
+      || (socialClassification?.kind === 'other' && mutationActions.some(action => action.ok)))
     && finalReply
     && finalReply.trim().length > 0
     && toolCallSummaries.length > 0
@@ -1606,13 +1670,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // It is SUPPRESSED when the turn is still mid-exchange — Maelle returned a
     // question/decision to the current interlocutor (confirm-override,
     // pick-a-slot, rule exception) or a tool failed — which
-    // `turnLeftWorkPending` captures during the tool loop.
+    // `pendingTurnWork` captures during the tool loop.
     //
     // History: the original piggyback (v2.2.1) fired on parking turns but the
     // picker was context-blind → mid-booking non-sequitur ("btw that Samuel L.
     // Jackson movie...", 2026-05-11). It was hard-disabled. Two things changed
     // since: (1) the claimChecker coda-validator (now inside composeSocialCoda)
-    // drops invented-fact / off-base codas, and (2) the `turnLeftWorkPending`
+    // drops invented-fact / off-base codas, and (2) the `pendingTurnWork`
     // guard keeps the coda off genuinely mid-process turns. The cold-open
     // socialOutreachTick is gone (v3.2.5) — this in-conversation coda is now the
     // ONLY proactive-social surface.
@@ -1678,9 +1742,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     // closed statement), which this repo does only via an LLM classifier
     // (W4 — no regex on natural language, multilingual) — a new judgment
     // point on this path is an owner call (W12.2), not a lane default.
-    // Left as the punctuation-only check pending that decision.
+    // Owner declined widening this on 2026-09-01: "Leave it." The ledger ref
+    // coda-open-item-guard-only-catches-a-literal-question-mark records that
+    // ruling; keep the punctuation-only check and its known limitation.
     const replyEndsInOpenQuestion = finalReply.trim().endsWith('?');
-    const codaEligible = !turnLeftWorkPending && !replyEndsInOpenQuestion;
+    const codaEligible = pendingTurnWork.length === 0 && !replyEndsInOpenQuestion;
     if (codaEligible) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports

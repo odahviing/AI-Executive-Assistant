@@ -77,6 +77,7 @@ import {
   type SocialSubject,
 } from '../../db/socialSubjects';
 import logger from '../../utils/logger';
+import { hasUnknownSocialCaptureAfter } from '../../db/people';
 
 export type SocialMode =
   | 'celebrate'
@@ -215,6 +216,54 @@ function pickDormantCategory(
   return FIXED_CATEGORIES[offset];
 }
 
+/** Read the existing daily/rank gates without choosing or resolving a topic.
+ * The transport rechecks this immediately before reserving a send, because
+ * another coda may have consumed the cadence while composition was pending. */
+export function isSocialInitiationDue(params: {
+  personSlackId: string;
+  ownerTimezone?: string;
+}): boolean {
+  const { personSlackId, ownerTimezone } = params;
+  // Rank-0 = "do not engage" opt-out. Maelle never INITIATES with rank-0
+  // people. Inbound replies / response handling go through other paths
+  // (orchestrator's normal flow), so a rank-0 person who reaches out
+  // first still gets a normal reply and the engagement signal can lift
+  // their rank back up. This gate only blocks proactive initiation.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getEngagementRank } = require('../../db/engagementRank') as
+    typeof import('../../db/engagementRank');
+  if (getEngagementRank(personSlackId) === 0) {
+    return false;
+  }
+
+  // One-per-day-per-person gate (owner-local "today")
+  if (countAssistantInitiationsTodayForPerson(personSlackId, ownerTimezone) >= 1) {
+    return false;
+  }
+  const lastInit = lastAssistantInitiatedAt(personSlackId);
+  if (lastInit) {
+    const sinceMs = Date.now() - new Date(lastInit).getTime();
+    if (sinceMs < ONE_DAY_MS) return false;
+  }
+  // Per-person gate. The two checks above read social_subjects, which a
+  // `raise_new` coda never stamps (it has no subject row) — so a raise_new coda
+  // left the daily gate un-armed and fired on EVERY turn (owner got 3 codas in
+  // 8 min, 2026-07-13). people_memory.last_initiated_at is stamped for BOTH modes
+  // — it is literally the per-person 24h gate field — so read it here to make
+  // once-per-day hold regardless of mode. Written by `recordCodaDelivered`
+  // (core/social/logEngagement.ts) immediately before the transport send
+  // attempt, NOT at composition; for a raise_new coda it is the only gate.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getPersonMemory } = require('../../db') as typeof import('../../db');
+  const personLastInit = getPersonMemory(personSlackId)?.last_initiated_at;
+  if (personLastInit) {
+    const sinceMs = Date.now() - new Date(personLastInit).getTime();
+    if (sinceMs < ONE_DAY_MS) return false;
+  }
+
+  return true;
+}
+
 export function directiveForProactiveSlot(params: {
   personSlackId: string;
   /**
@@ -240,42 +289,7 @@ export function directiveForProactiveSlot(params: {
 }): SocialDirective {
   const { personSlackId, ownerUserId, ownerTimezone, allowRaiseNew = true } = params;
 
-  // Rank-0 = "do not engage" opt-out. Maelle never INITIATES with rank-0
-  // people. Inbound replies / response handling go through other paths
-  // (orchestrator's normal flow), so a rank-0 person who reaches out
-  // first still gets a normal reply and the engagement signal can lift
-  // their rank back up. This gate only blocks proactive initiation.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getEngagementRank } = require('../../db/engagementRank') as
-    typeof import('../../db/engagementRank');
-  if (getEngagementRank(personSlackId) === 0) {
-    return noDirective();
-  }
-
-  // One-per-day-per-person gate (owner-local "today")
-  if (countAssistantInitiationsTodayForPerson(personSlackId, ownerTimezone) >= 1) {
-    return noDirective();
-  }
-  const lastInit = lastAssistantInitiatedAt(personSlackId);
-  if (lastInit) {
-    const sinceMs = Date.now() - new Date(lastInit).getTime();
-    if (sinceMs < ONE_DAY_MS) return noDirective();
-  }
-  // Per-person gate. The two checks above read social_subjects, which a
-  // `raise_new` coda never stamps (it has no subject row) — so a raise_new coda
-  // left the daily gate un-armed and fired on EVERY turn (owner got 3 codas in
-  // 8 min, 2026-07-13). people_memory.last_initiated_at is stamped for BOTH modes
-  // — it is literally the per-person 24h gate field — so read it here to make
-  // once-per-day hold regardless of mode. Written by `recordCodaDelivered`
-  // (core/social/logEngagement.ts) when the transport confirms the coda actually
-  // posted, NOT when it was composed; for a raise_new coda it is the only gate.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getPersonMemory } = require('../../db') as typeof import('../../db');
-  const personLastInit = getPersonMemory(personSlackId)?.last_initiated_at;
-  if (personLastInit) {
-    const sinceMs = Date.now() - new Date(personLastInit).getTime();
-    if (sinceMs < ONE_DAY_MS) return noDirective();
-  }
+  if (!isSocialInitiationDue({ personSlackId, ownerTimezone })) return noDirective();
 
   // gh#198 (answer 20/21) — RESOLVE-ON-READ, before search and topic
   // selection. Reaching this point means the 24h gate just opened (every
@@ -317,6 +331,7 @@ export function directiveForProactiveSlot(params: {
   // from re-offering it.
   for (const s of getActiveSubjectsForPerson(personSlackId)) {
     if (!s.last_assistant_initiated_at) continue;
+    if (hasUnknownSocialCaptureAfter(personSlackId, s.last_assistant_initiated_at)) continue;
     const raisedAgoMs = Date.now() - new Date(s.last_assistant_initiated_at).getTime();
     if (raisedAgoMs < ONE_DAY_MS) continue;
     try {
@@ -333,7 +348,7 @@ export function directiveForProactiveSlot(params: {
   // category that already had standing (score > 0) leaves no subject row
   // behind, so the subject loop above can never judge its silence; the
   // category row carries the marker instead (`last_raise_attempt_at`,
-  // stamped only on CONFIRMED delivery — recordCodaDelivered →
+  // reserved immediately before the send attempt — recordCodaDelivered →
   // markCategoryRaised, so a validator- or gate-dropped raise the person
   // never saw can never be judged here). Judged per category:
   //   - a live subject exists now → the raise was answered or mooted
@@ -352,8 +367,11 @@ export function directiveForProactiveSlot(params: {
   // is judged post-expiry).
   const subjectsByCategory = new Map<string, SocialSubject[]>();
   for (const cat of getActiveCategoriesForPerson(personSlackId)) {
+    // Owner-authored subjects are private assessments on a colleague's row,
+    // just as in buildSocialContextBlockById; only the owner may read them.
     const subs = getActiveSubjectsForPersonCategory(personSlackId, cat.category_id);
-    subjectsByCategory.set(cat.category_id, subs);
+    subjectsByCategory.set(cat.category_id,
+      subs.filter(s => personSlackId === ownerUserId || s.created_by !== 'owner'));
     try {
       if (subs.length > 0) {
         if (cat.last_raise_attempt_at || cat.unanswered_raises > 0) {
@@ -362,6 +380,7 @@ export function directiveForProactiveSlot(params: {
         continue;
       }
       if (!cat.last_raise_attempt_at) continue;
+      if (hasUnknownSocialCaptureAfter(personSlackId, cat.last_raise_attempt_at)) continue;
       const raisedAgoMs = Date.now() - new Date(cat.last_raise_attempt_at).getTime();
       if (raisedAgoMs < ONE_DAY_MS) continue;
       recordCategoryRaiseUnanswered({ ownerUserId, personSlackId, categoryId: cat.category_id });

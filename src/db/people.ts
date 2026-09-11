@@ -152,6 +152,7 @@ export interface PersonMemory {
   last_seen?: string;
   last_social_at?: string;      // ISO datetime of last ANY social exchange (Maelle or person)
   last_initiated_at?: string;   // ISO datetime of last time MAELLE started social chat (24h gate)
+  last_social_capture_unknown_at?: string; // latest human message whose social capture failed; never inferred silence
   created_at: string;
   updated_at: string;
 }
@@ -1454,6 +1455,30 @@ export function recordSocialMoment(
   return pid ? recordSocialMomentById(pid, initiatedBy) : false;
 }
 
+/** Owner ruling 2026-09-11: "Record unknown; no extra capture calls".
+ * Preserve a failed human-message capture as a monotonic watermark. A later
+ * successful but unrelated capture cannot erase an unresolved older outcome. */
+export function recordSocialCaptureUnknown(slackId: string, humanMessageAt: string): void {
+  const db = getDb();
+  db.prepare(`
+    UPDATE people_memory SET last_social_capture_unknown_at =
+      CASE WHEN last_social_capture_unknown_at IS NULL OR last_social_capture_unknown_at < @at
+        THEN @at ELSE last_social_capture_unknown_at END,
+      updated_at = datetime('now')
+    WHERE slack_id = @slackId
+  `).run({ slackId, at: humanMessageAt });
+}
+
+/** A failed capture after a raise is UNKNOWN, never evidence of silence.
+ * Real matches/rejections resolve their own markers; newer raises remain
+ * eligible for normal outcome accounting. SQL timestamps are explicitly UTC. */
+export function hasUnknownSocialCaptureAfter(slackId: string, raisedAt: string): boolean {
+  const unknownAt = getPersonMemory(slackId)?.last_social_capture_unknown_at;
+  if (!unknownAt) return false;
+  const raised = new Date(raisedAt.includes('T') ? raisedAt : `${raisedAt.replace(' ', 'T')}Z`).getTime();
+  return new Date(unknownAt).getTime() >= raised;
+}
+
 export function getPersonMemory(slackId: string): PersonMemory | null {
   const db = getDb();
   return db.prepare('SELECT * FROM people_memory WHERE slack_id = ?').get(slackId) as PersonMemory | null;
@@ -1772,6 +1797,7 @@ export function planPersonMerge(survivorId: string, loserId: string) {
     last_seen:            laterOf(survivor.last_seen, loser.last_seen),
     last_social_at:       laterOf(survivor.last_social_at, loser.last_social_at),
     last_initiated_at:    laterOf(survivor.last_initiated_at, loser.last_initiated_at),
+    last_social_capture_unknown_at: laterOf(survivor.last_social_capture_unknown_at, loser.last_social_capture_unknown_at),
     last_inbound_lang:    lastInboundLang,
     last_inbound_lang_at: laterOf(survivor.last_inbound_lang_at, loser.last_inbound_lang_at),
     created_at:           earlierOf(survivor.created_at, loser.created_at),
@@ -1815,6 +1841,7 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
         timezone_temp = @timezone_temp,
         notes = @notes, interaction_log = @interaction_log, profile_json = @profile_json,
         last_seen = @last_seen, last_social_at = @last_social_at, last_initiated_at = @last_initiated_at,
+        last_social_capture_unknown_at = @last_social_capture_unknown_at,
         last_inbound_lang = @last_inbound_lang, last_inbound_lang_at = @last_inbound_lang_at,
         created_at = @created_at, updated_at = datetime('now')
       WHERE person_id = @person_id
@@ -2520,7 +2547,7 @@ export function buildPersonWorkContextBlock(slackId: string): string {
 /**
  * The SOCIAL half of the per-person block, injected on COLLEAGUE turns only when
  * `skills.social` is on (owner turns use the Social Engine directive instead).
- * The engagement-rank tone line, recent social moments, and the subjects/topics
+ * The engagement-rank tone line and the subjects/topics
  * Maelle built up from talking WITH this person directly — the parts that
  * genuinely belong to the optional friend-of-the-team layer.
  *
@@ -2588,12 +2615,10 @@ export function buildSocialContextBlockById(personId: string): string {
     }
   }
 
-  const { relational } = readInteractionLog(person.interaction_log);
-  const socialMoments = relational.filter(i => SOCIAL_INTERACTION_TYPES.has(i.type)).slice(-10);
-  if (socialMoments.length > 0) {
-    lines.push(`Recent social moments:\n${socialMoments.map(i => `  [${i.date.split('T')[0]}] ${i.summary}`).join('\n')}`);
-  }
-
+  // Raw social timeline entries are withheld for the same reason as notes:
+  // they have no author, and older note_about_person writes copied owner
+  // assessments into both fields. Keep the stored history for owner reads;
+  // only provenance-bearing subjects/beats may reach this colleague prompt.
   // v4.5.x (#154) — raw personal notes (PersonNote[]) are EXCLUDED entirely,
   // replacing the old "Personal notes: ..." rendering below. PersonNote is
   // {date, note} with NO author field (see the interface above), so a note

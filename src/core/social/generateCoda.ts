@@ -496,7 +496,8 @@ export async function composeSocialCoda(
         otherCategorySubjectLabels = getActiveSubjectsForPersonCategory(
           pending.personSlackId, pending.directive.subject.category_id,
         )
-          .filter(s => s.id !== pending.directive.subject!.id)
+          .filter(s => s.id !== pending.directive.subject!.id
+            && (pending.senderRole === 'owner' || s.created_by !== 'owner'))
           .map(s => s.label);
       } catch (err) {
         logger.warn('Coda other-subjects lookup threw — proceeding without it', { err: String(err).slice(0, 200) });
@@ -512,6 +513,7 @@ export async function composeSocialCoda(
         const category = getCategoryByLabel(pending.directive.categoryLabel);
         if (category) {
           const labels = getActiveSubjectsForPersonCategory(pending.personSlackId, category.id)
+            .filter(s => pending.senderRole === 'owner' || s.created_by !== 'owner')
             .map(s => s.label);
           if (labels.length > 0) otherCategorySubjectLabels = labels;
         }
@@ -542,10 +544,11 @@ export async function composeSocialCoda(
     // (`last_raise_attempt_at`, which the picker's resolve pass counts toward
     // category death via recordCategoryRaiseUnanswered — two ignored in-place
     // raises kill the category) is deliberately NOT written here: it is
-    // charged at confirmed delivery only (recordCodaDelivered →
+    // charged at the final send attempt only (recordCodaDelivered →
     // markCategoryRaised, logEngagement.ts), so a raise the validator dropped
-    // or the transport never posted — one the person never saw — can never
-    // move a category toward death. Never fires for `continue` — that mode's
+    // or the transport dropped before sending can never move a category
+    // toward death. A send timeout remains ambiguous under the existing
+    // pre-send accounting policy. Never fires for `continue` — that mode's
     // silence is judged on its subject row.
     if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
       try {

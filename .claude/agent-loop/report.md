@@ -1,10 +1,10 @@
-# Report — cumulative since the 4.9.3 wrap
+# Report — 4.9.4 release preparation
 
 ```
 board: 7 open rows — 3 still-real · 2 need a re-read · 2 cite no file · 7 rulable · 0 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 ```
 
-**7 rows await you** — v4.9.3 wrapped. Four are queued for the next build; the existing GitHub task-system roadmap remains partial.
+**7 rows await you** — 4.9.4 release prepared; the standing backlog is unchanged.
 
 ### pending owner (0)
 
@@ -12,9 +12,8 @@ board: 7 open rows — 3 still-real · 2 need a re-read · 2 cite no file · 7 r
 
 ### declined (0)
 
-**Built and uncommitted — this is what a wrap ships (0):** none
+**Built and uncommitted — this is what a wrap ships (0):** release dispositions are already recorded under wrap-4.9.4; commit and deployment are pending.
 
-Release 4.9.3 dispositions are in the ledger. The standing backlog remains available through `node scripts/ledger-stats.cjs --open`.
+out: 0 bounced · 0/0 joint-traced since the release-report reset. The Coda audit had one repair cycle and three verified joint paths, preserved in its independent evidence.
+Golden30: 27 pass · 0 fail · 3 stale anchors (references refreshed, behavior intact). Independent review: pass; 8/8 tracked Coda release items verified. Scripted coverage: 129 cases plus eight independent scenarios; prompt-input checks do not certify live model behavior.
 
-out: 0 bounced · 0/0 joint-traced since this wrap reset. The shipped audit's one repair bounce and five reviewed groups remain recorded in its independent evidence.
-Golden30: 30 pass · 0 fail · 0 stale anchors. Independent review: pass; 10/10 tracked release items verified. Reused 775 passing scripted checks; model-dependent and residual R6/R11 scope remain explicit in the audit evidence.

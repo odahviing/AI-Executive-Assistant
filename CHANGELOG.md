@@ -1,6 +1,28 @@
 # Changelog
 
 ---
+## 4.9.4 — Reliable social codas and capture outcomes
+
+Maelle keeps private social context scoped to the right person and sends codas only after work is resolved and the conversation is still quiet. Failed memory capture remains unknown instead of being counted as silence, without adding capture calls or retries.
+
+### Fixed
+
+- Keep owner-authored notes and topics out of colleague-facing social prompts; notes about an absent person no longer consume that person's daily social allowance.
+- Recheck conversation activity and daily eligibility at the delivery boundary, preventing stale or duplicate codas while retaining the existing handling of uncertain delivery.
+- Recognize completed bookings, moves and successful retries as resolved work, including short acknowledgments; unrelated pending work still suppresses a coda.
+- Reuse exact topic identities, including retired topics, instead of creating duplicates.
+- Preserve uncertainty after failed or unusable capture so a real reply cannot be misread as silence or cause a topic to retire.
+
+### Migration
+
+- Add a nullable social-capture uncertainty timestamp to the person store. Existing rows remain unset; later unrelated successful captures cannot erase an uncertain outcome. No additional model calls or retry policy.
+
+### Framework
+
+- Record the owner's unknown/no-extra-call decision in the existing Librarian L12 rule.
+- Apply compact audit handoffs, shared evidence, earlier integrated checks, scoped rechecks and measured usage checkpoints; preserve independent review authority and release gates.
+- Preflight release bookkeeping before committing, and refresh social architecture notes and moved Golden30 anchors.
+
 ## 4.9.3 — Reliable approval decisions and recovery
 
 Maelle preserves the owner's exact approval decision through execution and reports the observed outcome. Shared request handling now coordinates replies, timers and brief cleanup, with recoverable delivery failures and honest reporting when an attempted action cannot be confirmed.
