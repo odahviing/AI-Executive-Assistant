@@ -3,7 +3,7 @@
 ```
 Run hours-visibility-20260912 — in: 0 tickets · 0 day(s) of logs · 0 backlog re-reads
 out: 1 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 1/1 outcome-traced · 1/1 joint-traced · 0 converted · 4 queued
-board: net +5 → 17 open rows — 1 still-real · 13 need a re-read · 3 cite no file · 13 rulable · 4 waiting on a verb   (node scripts/ledger-stats.cjs --open)
+board: net +5 → 17 open rows — 12 still-real · 2 need a re-read · 3 cite no file · 13 rulable · 4 waiting on a verb   (node scripts/ledger-stats.cjs --open)
 your 9 rows await you: 1 from tonight · 8 re-surfaced · 0 found by the loop
 ```
 
