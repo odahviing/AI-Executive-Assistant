@@ -4,7 +4,9 @@ description: Deep architecture reference — directory layout, orchestrator loop
 type: project
 ---
 
-Deep architecture reference for Maelle, rewritten 2026-08-03 against the code on disk (current shipped version: the `version` field in `package.json`; `CHANGELOG.md` is the canonical version-by-version history, not duplicated here). `src/` is 199 files, ~73.5k lines (measured directly, not carried over).
+**Canonical architecture memory:** maintain architecture facts here; other memory locations link here. Historical copies belong in archives, never a second current authority. Verify relevant code before using dated facts.
+
+Deep architecture reference for Maelle, rewritten 2026-08-03 against the code on disk (current shipped version: the `version` field in `package.json`; `CHANGELOG.md` is the canonical version-by-version history, not duplicated here). The directory/file counts below are historical observations from that rewrite, not current inventory measurements.
 
 **Where this sits relative to the other two references:** `.claude/SESSION_STARTER.md` is the day-to-day orientation — the agent framework, the lane roster, open bugs, operational rules. `.claude/ARCHITECTURE_MAP.md` is a one-page diagram-level map with a mermaid flowchart. This file is the deep layer underneath both: real file paths, real function/table names, all grep/Read-verified against the current tree rather than assumed from an earlier version. It does not repeat any lane charter's rules (`.claude/agents/*.md` are authoritative for those) — it describes what the code does, not which agent owns fixing it.
 
@@ -174,7 +176,7 @@ One deployment can host several executives. Each tenant is a YAML file at `confi
 
 ## Person store / social engine
 
-- **`db/people.ts`** — one `people_memory` table for everyone (internal/external/self), keyed by `slack_id` (schema `db/client.ts:353-363`, extended with ~25 `ALTER TABLE` migrations through the file for gender, travel, VIP, core-field provenance, language). `resolvePerson()` (line 1408) is the identity chokepoint: slack_id → email → fuzzy-name, find-or-create-or-merge.
+- **`db/people.ts`** — one `people_memory` table for everyone (internal/external/self), keyed by `slack_id` (schema `db/client.ts:353-363`, extended with ~25 `ALTER TABLE` migrations through the file for gender, travel, VIP, core-field provenance, language). `resolvePerson()` binds stable IDs and email; `lookupPersonByName()` separates a unique whole-name match, genuine ambiguity and suggestions. Accepted fields and notes retain writer provenance; operational markdown projections are serialized from current store state.
 - **`memory/capturePass.ts`** — the end-of-chat capture pass (5-min tick): for DM threads gone quiet, existing Haiku profile extraction and social reconciliation update stored state (profile fields + `.md` file mirrors); failed/unusable capture records unknown outcomes without extra calls or retries — the deterministic backstop for a colleague-volunteered fact the live turn's prompt didn't prompt Sonnet to save.
 - **`core/social/{classifyTurn,stateMachine,generateCoda,logEngagement}.ts`** — the social engine, gated behind `skills.social` (off by default). `stateMachine.ts`'s `chooseSocialDirective` uses deterministic selection and lazily resolves stored topic/category outcomes, picking ONE mode (`celebrate | engage | continue | raise_new | none`) per turn from the active-subjects picker; `generateCoda.ts` composes the actual line; the coda ships as its own message a beat after the real reply, gated by `runCodaGates` (see Security posture), never inline with the answer.
 

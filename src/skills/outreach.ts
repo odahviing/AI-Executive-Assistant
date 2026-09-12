@@ -35,6 +35,7 @@ import { resolveStatedInstant, StatedTimeClarificationError } from '../utils/weT
 import { logActivity } from '../core/requests/logActivity';
 import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
+import type { CoreInfoFromTransport } from '../connections/types';
 import logger from '../utils/logger';
 
 export class OutreachCoreSkill implements Skill {
@@ -261,6 +262,35 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
 
+        // An authorized outreach engages the recipient; directory search does
+        // not. Collect transport core info before responseDeadline's shared
+        // availability path reads the store for send floors and reply timers.
+        // The auto-tier store write preserves person/owner corrections to the
+        // name and timezone. A missing tz in a successful read clears a stale
+        // Slack temp reading; an unavailable read must not clear it. Null means
+        // a confirmed missing recipient and must not mint a person. Model args
+        // supply only a fallback name and an unpersisted fallback timer zone.
+        const connection = getConnection(userId, 'slack');
+        let coreInfo: CoreInfoFromTransport | null | undefined;
+        try {
+          coreInfo = await connection?.collectCoreInfo?.(colleagueSlackId);
+        } catch (err) {
+          logger.warn('message_colleague — recipient profile read failed; zone unknown for this send', {
+            colleagueSlackId, err: String(err).slice(0, 200),
+          });
+        }
+        if (coreInfo !== null) {
+          const existingColleague = getPersonMemory(colleagueSlackId);
+          upsertPersonMemory({
+            slackId:  colleagueSlackId,
+            name:     coreInfo?.displayName || existingColleague?.name?.trim() || (args.colleague_name as string),
+            email:    coreInfo?.email,
+            timezone: coreInfo?.timezone,
+            // A real users.info read that succeeded and carried no `tz`.
+            timezoneReadingAbsent: !!coreInfo && !coreInfo.timezone,
+          });
+        }
+
         const colleagueTzForDeadline = (args.colleague_tz as string | undefined) ?? context.profile.user.timezone;
         const recipientTime = { slackId: colleagueSlackId, ownerTimezone: context.profile.user.timezone };
 
@@ -418,33 +448,8 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
 
-        // Not scheduled — send path. Track the person. `args.colleague_name`
-        // is a model-supplied tool arg, not a Slack signal — an existing row
-        // keeps its stored name (same stomp class fixed in
-        // resolvePersonTarget.ts: a partial/omitted arg must not overwrite a
-        // real name).
-        //
-        // registrar fix (outreach-model-supplied-tz-written-as-a-slack-
-        // reading) — `timezone: args.colleague_tz` used to ride this same
-        // call into `upsertPersonMemory`'s default 'auto' tier, which hardcodes
-        // source:'slack' (people.ts:1104). `args.colleague_tz` is a model tool
-        // arg (the schema only ASKS the model to copy it from a prior
-        // find_slack_user call — nothing verifies it did), not a genuine Slack
-        // API read; tagging it 'slack' let a model-asserted zone retire a real
-        // live temp-timezone divergence and let the persistence hedge
-        // ("Slack has...") attribute a model guess to Slack. The real Slack
-        // signal for this person is already persisted at its true source —
-        // find_slack_user's own match loop (connections/slack/index.ts:312-317)
-        // upserts `m.tz` straight off the Slack API — so this second, weaker-
-        // provenance write was redundant when the model relayed it faithfully
-        // and actively wrong when it didn't. Dropped; `args.colleague_tz` still
-        // supplies fallback timezone data for the deadline and job payload;
-        // stored permanent data and dated travel take precedence.
-        const existingColleague = getPersonMemory(colleagueSlackId);
-        upsertPersonMemory({
-          slackId:  colleagueSlackId,
-          name:     existingColleague?.name?.trim() || (args.colleague_name as string),
-        });
+        // Not scheduled — send path. The person's row was already written by
+        // the engagement-time pull above, before the timer math.
         // v1.6.8 — DON'T write to interaction_log here. The outreach_jobs row and
         // its paired request already track this message end-to-end (state, reply,
         // follow-up). Writing "Sent message: '...'" into people_memory makes
@@ -471,11 +476,10 @@ Only send messages the user explicitly asks for — never reach out to people on
         // core/requests/runner.ts:runOutreachExpiryOrDecision). No separate
         // outreach_expiry task.
 
-        // v1.8.11 — resolve the Connection and send synchronously here, no
-        // more _requires_slack_client dispatch to app.ts. Uses the owner's
+        // v1.8.11 — send synchronously here through the Connection resolved
+        // above (no _requires_slack_client dispatch to app.ts). Uses the owner's
         // Slack Connection for now; router-based resolution will kick in
         // per-recipient when EmailConnection / WhatsAppConnection land.
-        const connection = getConnection(userId, 'slack');
         if (!connection) {
           logger.error('message_colleague — Slack Connection not registered for profile', { userId });
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Connection not registered' });

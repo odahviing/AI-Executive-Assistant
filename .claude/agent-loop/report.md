@@ -1,30 +1,11 @@
-# Report — cumulative since the 4.9.5 wrap
+# Report — 4.9.6 release preparation
 
-```
-Run hours-visibility-20260912 — in: 0 tickets · 0 day(s) of logs · 0 backlog re-reads
-out: 1 built · 0 already-fixed · 0 built-with-gap · 0 bounced · 1/1 outcome-traced · 1/1 joint-traced · 0 converted · 4 queued
-board: net +5 → 17 open rows — 12 still-real · 2 need a re-read · 3 cite no file · 13 rulable · 4 waiting on a verb   (node scripts/ledger-stats.cjs --open)
-your 9 rows await you: 1 from tonight · 8 re-surfaced · 0 found by the loop
-```
+**26 rows await you** — 4.9.6 is ready to commit; parked decisions remain in the ledger.
 
-**9 rows await you** — 1 from tonight's hours-visibility wave (the Sharon Duret duplicate row) plus the 8 rows filed 2026-09-12 from the 4.9.3–4.9.5 diff review and the one still-real standing row. The board's other 8 open rows are 4 queued bouncer discoveries that drain into the next build and 4 standing rows that cite no file (gh#24 · gh#169-a · gh#184) or are queued (email-leg-still-carries-owner-scheduling-mechanics-prose).
+31 open rows — 10 still-real · 18 need a re-read · 3 cite no file · 26 rulable · 5 waiting on a verb.
 
-### pending owner (9)
-
-| Lane · ref | What happened | Your options | Risk |
-|---|---|---|---|
-| librarian · sharon-duret-duplicate-person-row | tonight (found while fixing the hours bug). Sharon Duret has two rows in the person store: one empty from 2026-08-10 and one full with her Boston hours. A name-only note created the first; her Slack arrival minted a second because the sync deliberately withholds the name when matching, and the boot merge only heals rows that share an email. | Recommend: build — let the Slack sync bind an email-less, slack-less row by exact full name, then merge the empty Sharon row on the VM after a read confirms which one is empty | Residual: an owner-noted external sharing a colleague's exact full name would bind to the wrong row. No database was written tonight. |
-| matchmaker · auto-tier-travel-window-drives-slot-math-unhedged | re-surfaced (filed 2026-09-12 from the 4.9.5 diff review). A trip guessed from an email signature is treated as fact: for up to two weeks it clips that attendee's search windows and relabels clocks, with no hedge and no source check. Same pattern 4.8.4 removed for stored timezones. | Recommend: build — an automatically captured trip may inform but never silently decide an attendee's hours | Email leg only. Wrong search windows for a real attendee if a signature hint is wrong. |
-| matchmaker · owner-travel-row-still-forces-remote-in-planmeeting | re-surfaced (filed 2026-09-12 from the 4.9.5 diff review). The release notes and a code comment say your travel comes only from schedule overrides, but planning still reads your own travel row and forces the meeting remote when the date falls inside it. | Recommend: build — either your travel comes from schedule overrides only, or the claim that it does is retracted | Very low: nothing normal writes your own travel row. If it fires, a meeting is forced remote. |
-| registrar · requester-relay-retry-uncapped | re-surfaced (filed 2026-09-12 from the 4.9.3 diff review). When a closed request's final message to the requester fails for a permanent Slack reason, it retries every 5 minutes forever, and you are never told the requester did not hear the outcome. | Recommend: build — stop retrying after a few attempts and tell you the requester could not be reached | Low likelihood (a colleague DM permanently unreachable). One failed call and a warn line every 5 minutes; nobody is spammed. |
-| registrar · unconfirmed-closure-owner-post-gated-to-colleague-path | re-surfaced (filed 2026-09-12 from the 4.9.3 diff review). When an approved action was attempted but could not be confirmed, the requester is told and the request closes, but you get a deterministic note only if a colleague resolved it. On an approval you typed yourself, only the model's narration tells you. | Recommend: build — you hear every unconfirmed closure in code, whoever resolved the request | Rare: needs a Graph error mid-replay. The closure policy itself is your 2026-09-11 ruling and is not in question. |
-| librarian · social-capture-unknown-watermark-never-clears | re-surfaced (filed 2026-09-12 from the 4.9.4 diff review). The new "capture failed, outcome unknown" marker on a person only ever moves forward and nothing clears it, so one failed capture after a raise can park that social topic permanently. Mirror image of the bug it fixed. | Recommend: build — give an unknown outcome a way to resolve once a real interaction is observed | Low harm (social is a bonus), but unknowns are common: any hallucinated id or missing label stamps one. |
-| registrar · approval-spine-test-harnesses-red-on-shipped-tree | re-surfaced (filed 2026-09-12 by running every shipped test script). 4 of the 41 test scripts fail on the tree: three cannot load a module 4.9.5 added, one stubs an old function shape. The 4.9.5 wrap edited that very test and shipped with it red; nothing runs the scripts together, so the release checkpoint did not see it. | Recommend: build — make the shipped suite green on the shipped tree and keep it green | Zero production impact. Masks regressions in the next wave until fixed. |
-| matchmaker · checkslot-resolves-owner-work-segments-per-candidate | re-surfaced (filed 2026-09-12 from the 4.9.5 diff review). Slot validation lost its per-day cache and now re-reads your schedule overrides several times for every candidate slot; a search over hundreds of candidates multiplies database reads. | Recommend: build — measure one real search first, then remove the repeated per-slot reads if it shows | Correctness unaffected. No latency was measured; the read count is from code. |
-| handyman · stale-citation-checker-false-positives-on-body-anchored-citations | re-surfaced (first raised before the 4.9.5 wrap; re-read 2026-09-07 and 2026-09-11, still-real). The wrap-time stale-citation checker can flag a correct comment citation that deliberately points inside a function body rather than at its declaration. | Recommend: decline — keep the documented heuristic; narrowing it would miss genuine citation drift | A false flag costs one re-read at wrap time; a missed drift costs a lane a wrong premise. |
+### pending owner (0)
 
 ### deferred (0)
 
 ### declined (0)
-
-**Built and uncommitted — this is what a wrap ships (0):** none. The hours read-surface fix shipped in fc8f159 under 4.9.5 (no version bump, owner ruling); independently verified, Golden30 30/30.

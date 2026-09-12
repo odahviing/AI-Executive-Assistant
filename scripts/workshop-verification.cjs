@@ -132,6 +132,7 @@ const refTokens = ref => {
 }
 const isClosed = r => (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
 function collapseRows(rows) {
+  rows = rows.map(r => hydrateRow(r))
   const latest = new Map(), eventAt = new Map(), refless = []
   rows.forEach((r, i) => {
     if (r.kind && r.kind !== 'invariant-backfill') return
@@ -175,7 +176,7 @@ function collapseRows(rows) {
   return { open, closed, collapsed, refless, latest: [...latest.values()] }
 }
 const readRows = file => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(l => l.trim()).map((l, i) => {
-  try { return JSON.parse(l) } catch { throw new Error(`Malformed ledger row ${i + 1}; verification cannot be established`) }
+  try { return hydrateRow(JSON.parse(l), path.resolve(path.dirname(file), '../..')) } catch (e) { throw new Error(`Unreadable ledger row ${i + 1}; verification cannot be established: ${e.message}`) }
 })
 const hashFile = file => {
   try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') }
@@ -190,6 +191,7 @@ const snapshotErrors = (r, repo) => {
   })
 }
 function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
+  rows = rows.map(r => hydrateRow(r, repo))
   // GitHub partial sync records remaining ticket scope, not a new build or
   // overturn. Keep it in backlog collapse, but verify the actual lifecycle it
   // annotates; filtering the event must never discard earlier failed work.
@@ -217,4 +219,53 @@ function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
   }
   return blockers
 }
-module.exports = { ...workshopContract, CLOSED, normRef, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers }
+// Content-addressed append-only attachments keep the lifecycle row small. Legacy
+// inline rows remain readable; missing/tampered attachments fail closed.
+const evidenceDirectory = '.claude/agent-loop/evidence'
+function storeAttachment(value, repo) {
+  const body = JSON.stringify(value) + '\n'
+  const sha256 = crypto.createHash('sha256').update(body).digest('hex')
+  const file = `${evidenceDirectory}/${sha256}.json`, target = path.join(repo, file)
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  try { fs.writeFileSync(target, body, { flag: 'wx' }) }
+  catch (e) { if (e.code !== 'EEXIST' || fs.readFileSync(target, 'utf8') !== body) throw e }
+  return { file, sha256 }
+}
+function loadAttachment(ref, repo) {
+  if (!ref || !/^[a-f0-9]{64}$/.test(ref.sha256) || ref.file !== `${evidenceDirectory}/${ref.sha256}.json`) throw new Error('invalid evidence reference')
+  const body = fs.readFileSync(path.join(repo, ref.file))
+  if (crypto.createHash('sha256').update(body).digest('hex') !== ref.sha256) throw new Error(`evidence hash mismatch: ${ref.file}`)
+  return JSON.parse(body)
+}
+function compactRow(row, repo) {
+  const r = { ...row }
+  if (r.evidence) { r.evidenceRef = storeAttachment({ evidence: r.evidence, snapshot: r.snapshot }, repo); delete r.evidence; delete r.snapshot }
+  if (r.review) { r.reviewRef = storeAttachment(r.review, repo); delete r.review }
+  return r
+}
+function hydrateRow(row, repo = path.join(__dirname, '..')) {
+  const r = { ...row }
+  if (r.evidenceRef) {
+    const value = loadAttachment(r.evidenceRef, repo)
+    if (r.evidence && JSON.stringify(r.evidence) !== JSON.stringify(value.evidence) || r.snapshot && JSON.stringify(r.snapshot) !== JSON.stringify(value.snapshot)) throw new Error('inline evidence conflicts with referenced package')
+    r.evidence = value.evidence; r.snapshot = value.snapshot
+    delete r.evidenceRef
+  }
+  if (r.reviewRef) {
+    const value = loadAttachment(r.reviewRef, repo)
+    if (r.review && JSON.stringify(r.review) !== JSON.stringify(value)) throw new Error('inline review conflicts with referenced review')
+    r.review = value; delete r.reviewRef
+  }
+  return r
+}
+function wrapCounts(rows, history = rows) {
+  const refs = predicate => new Set(rows.filter(predicate).filter(r => r.ref).map(r => normRef(r.ref)))
+  const covered = refs(r => r.verdict === 'wrapped' && r.state === 'wrapped')
+  // Use the release's complete historical ledger snapshot, not only rows stamped
+  // by wrap: parent linkage may have been recorded by an earlier review run.
+  // collapseRows also clears inherited linkage when a child gets its own repair.
+  const linked = new Set(collapseRows(history).latest.filter(r => r.verificationOf).map(r => normRef(r.ref)))
+  return { events: rows.length, coveredRefs: covered.size, implementationRefs: [...covered].filter(ref => !linked.has(ref)).length,
+    verifiedImplementationRefs: refs(r => r.verdict === 'verified' && !linked.has(normRef(r.ref))).size }
+}
+module.exports = { ...workshopContract, CLOSED, normRef, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers, compactRow, hydrateRow, wrapCounts }

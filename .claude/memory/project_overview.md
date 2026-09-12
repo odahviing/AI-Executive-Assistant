@@ -36,6 +36,10 @@ The same Manager, via a different invocation (`.claude/workflows/feature.js`), b
 
 ## Related references
 
+**Workshop record correction (2026-09-12):** the Manager's checked release record distinguishes 4.9.5's bounded independent reviews and paper Golden30 from a full executable-suite pass; deployment/startup alone did not establish that pass. Overlapping audit findings and the fourteen timezone repair/policy refs do not establish a count of unique atomic bugs fixed. Preserve the original evidence with those limits.
+
+The same dated Manager inspection found both `Maelle-Manager-Nightly` and `Maelle-Cleaner-Weekly` disabled. Continuous intake watermark: `2026-09-07T23:05:31.811Z`; subsequent scoped cloud audits do not prove continuous coverage. These are dated observations, not permanent schedule policy. Current rules and status-check commands live in `.claude/WORKSHOP.md` and `.claude/skills/manager/OPERATIONS.md`; recheck actual state before making a current claim.
+
 - `project_architecture.md` — the deep technical layer: directory structure, the orchestrator loop, the requests-spine state machine, the output-gate security stack, the transport layer, the DB schema. Read it for "how does X actually work in code."
 - `.claude/SESSION_STARTER.md` — the living operational front door: current lane roster, rule-tag assignments, open bugs, the framework's own recent history.
 - `.claude/ARCHITECTURE_MAP.md` — a one-page diagram-level map (mermaid flowchart of the hot path) for a fast mental refresh.

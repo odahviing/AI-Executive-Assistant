@@ -50,7 +50,7 @@ import {
   recordSocialCaptureUnknown,
   type PersonProfile,
 } from '../db';
-import { readPersonMemory, writePersonSection, slugifyName } from './peopleMemory';
+import { readPersonMemory, writePersonSection, slugifyName, syncPersonOperationalSections } from './peopleMemory';
 import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -201,13 +201,20 @@ function chatToTranscript(messages: Array<{ role: string; content: string }>, hu
 
 /**
  * Parse Haiku's strict-JSON output. Returns null on any parse failure —
- * caller treats null as "no deltas, skip apply but still mark captured".
+ * caller logs malformed capture separately from an empty valid delta.
  */
 function parseDelta(raw: string): CaptureDelta | null {
   try {
     const match = extractFirstJsonObject(raw);
     if (!match) return null;
-    return JSON.parse(match) as CaptureDelta;
+    const value = JSON.parse(match);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const allowed = new Set(['timezone', 'state', 'name_he', 'working_hours', 'communication_style', 'response_speed', 'role_summary', 'reports_to', 'collaboration_notes', 'interaction_summary', 'durable_note']);
+    for (const [key, field] of Object.entries(value)) {
+      if (!allowed.has(key) || typeof field !== 'string') return null;
+      if (key === 'response_speed' && !['immediate', 'fast', 'hours', 'day', 'slow', 'unreliable'].includes(field)) return null;
+    }
+    return value as CaptureDelta;
   } catch {
     return null;
   }
@@ -279,12 +286,12 @@ async function applyDelta(
   if (delta.reports_to) profileUpdates.reports_to = delta.reports_to;
   if (delta.collaboration_notes) profileUpdates.collaboration_notes = delta.collaboration_notes;
   if (Object.keys(profileUpdates).length > 0) {
-    updatePersonProfile(slackId, profileUpdates);
+    updatePersonProfile(slackId, profileUpdates, 'auto');
   }
 
-  // Durable note (free-form, appended to notes[] capped at 50).
+  // Durable note (free-form, retained in notes[] with writer provenance).
   if (delta.durable_note) {
-    appendPersonNote(slackId, delta.durable_note);
+    appendPersonNote(slackId, delta.durable_note, 'auto');
   }
 
   // Interaction history — appended to interaction_log AND mirrored to
@@ -297,8 +304,8 @@ async function applyDelta(
   }
 
   // ── 2. MD file mirroring ──────────────────────────────────────────────
-  // Per owner direction: the .md is the source of truth for prompt
-  // context, so every DB write also reflects into the matching section.
+  // The .md is a narrative mirror used as prompt
+  // context; operational sections reflect accepted structured facts.
   // Section body REPLACES the prior content (latest signal wins) for
   // structural state; the discussed-history section APPENDS.
   // v3.2.0 — md files are keyed by person_id now. A known colleague always has
@@ -307,85 +314,18 @@ async function applyDelta(
   const stored = getPersonMemory(slackId);
   const personId = stored?.person_id ?? slugifyName(colleagueName);
 
-  const residenceLines: string[] = [];
-  // Mirror what's actually STORED after the write above (line 248), never the
-  // raw Haiku delta — same rule as the timezone fix directly below, applied to
-  // its sibling field. setCoreFieldWithProvenance can return
-  // 'refused_lower_authority' (an owner/person-stated residence beats an
-  // 'auto' chat reading) and a line built from the delta would then assert a
-  // fact the DB just refused, contradicting the very column that guards it.
-  if (delta.state && stored?.state) residenceLines.push(`Lives in ${stored.state}.`);
-  // v4.8.x (2026-09-01) — mirror the zone that is actually STORED after the
-  // write above, never the raw Haiku delta. The .md is prompt context (injected
-  // as "MEMORY ON <person>" by orchestrator/systemPrompt.ts, and returned by the
-  // person-lookup tool), so a line written from the delta is read back as fact:
-  // when the delta was diverted to `timezone_temp`, refused as lower-authority,
-  // or dropped as non-IANA, the column did not move and the .md would stand as a
-  // false record contradicting the very column the divert protects. A temp
-  // reading is surfaced on the booking path (the assumption note), never here —
-  // the .md carries only the permanent zone.
-  if (delta.timezone && stored?.timezone) residenceLines.push(`Timezone: ${stored.timezone}.`);
-  if (residenceLines.length > 0) {
-    await writePersonSection({
-      profile, personId, displayName: colleagueName,
-      section: 'Residence',
-      text: residenceLines.join(' '),
-    });
-  }
-
-  const workplaceLines: string[] = [];
-  if (delta.role_summary) workplaceLines.push(delta.role_summary);
-  if (delta.reports_to) workplaceLines.push(`Reports to ${delta.reports_to}.`);
-  if (delta.collaboration_notes) workplaceLines.push(delta.collaboration_notes);
-  if (workplaceLines.length > 0) {
-    await writePersonSection({
-      profile, personId, displayName: colleagueName,
-      section: 'Workplace',
-      text: workplaceLines.join(' '),
-    });
-  }
-
-  const hoursLines: string[] = [];
-  if (delta.working_hours) hoursLines.push(delta.working_hours);
-  if (delta.response_speed) hoursLines.push(`Typical response speed: ${delta.response_speed}.`);
-  if (hoursLines.length > 0) {
-    await writePersonSection({
-      profile, personId, displayName: colleagueName,
-      section: 'Working hours',
-      text: hoursLines.join(' '),
-    });
-  }
-
-  const commLines: string[] = [];
-  if (delta.communication_style) commLines.push(delta.communication_style);
-  if (delta.name_he) commLines.push(`Native-script spelling: ${delta.name_he}.`);
-  if (commLines.length > 0) {
-    await writePersonSection({
-      profile, personId, displayName: colleagueName,
-      section: 'Communication style',
-      text: commLines.join(' '),
-    });
-  }
-
+  // Refresh complete operational sections from accepted facts, including
+  // siblings absent from this partial delta. Assessment visibility is unchanged.
+  await syncPersonOperationalSections(profile, personId, Object.keys(delta), true);
   // History section — APPEND-style. We read the current section, append
-  // a new dated bullet, write the whole block back.
+  // a dated bullet through the serialized full-file writer.
   if (delta.interaction_summary) {
     const today = new Date().toISOString().split('T')[0];
     const newLine = `- [${today}] ${delta.interaction_summary}`;
-    const currentMd = await readPersonMemory(profile, personId, colleagueName);
-    let existingDiscussedBody = '';
-    if (currentMd) {
-      // Extract the "What we've discussed" section body if it exists.
-      const match = currentMd.match(/##\s+What we've discussed\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
-      if (match) existingDiscussedBody = match[1].trim();
-    }
-    const newBody = existingDiscussedBody
-      ? `${existingDiscussedBody}\n${newLine}`
-      : newLine;
     await writePersonSection({
       profile, personId, displayName: colleagueName,
       section: "What we've discussed",
-      text: newBody,
+      text: newLine, append: true,
     });
   }
 }
@@ -518,7 +458,8 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         // `applyOrganicMatchSignal`) have no caller outside this file's
         // reconciliation pass. So it must run regardless of this branch's
         // outcome — log and fall through instead of bailing.
-        logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
+        if (delta === null) logger.warn('capturePass: malformed profile capture; no facts applied', { threadTs: row.thread_ts, colleague: personRow.name });
+        else logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
       } else {
         // 5. Apply deltas to DB + md mirror.
         await applyDelta(profile, colleagueId, personRow.name, delta);
@@ -789,7 +730,7 @@ async function runSelfCapture(
     if (accepted.length === 0) return;
 
     for (const { note } of accepted) {
-      appendPersonNote(selfId, note);
+      appendPersonNote(selfId, note, 'auto');
     }
     // Logged with the text: this row is small, durable and prompt-visible on
     // every turn, so what lands on it is worth being able to audit from the log.

@@ -198,8 +198,20 @@ export interface Connection {
    * v2.6.4 — Handle a tool call for a tool this Connection owns. Return null
    * if this Connection doesn't recognize the tool name (registry falls
    * through to next handler). Return a result object on success.
+   *
+   * `scope.surface` is the turn's surface — `SkillContext.surface`
+   * (src/skills/types.ts), the #154 field resolved once at the transport's
+   * front door and handed through by `executeSkillTool` (src/skills/
+   * registry.ts); never re-derived. A tool that returns stored data about a
+   * person scopes its payload by it IN CODE (W9): what a room may see is
+   * decided before the payload exists, not by asking the model to hold back.
+   * SlackConnection's find_slack_user hands a room identity only.
    */
-  executeToolCall?(toolName: string, args: Record<string, unknown>): Promise<unknown | null>;
+  executeToolCall?(
+    toolName: string,
+    args: Record<string, unknown>,
+    scope: { surface: 'owner_dm' | 'colleague_dm' | 'room' },
+  ): Promise<unknown | null>;
 
   /**
    * v2.6.5 — react to a previously-sent message. Used for activity-completion

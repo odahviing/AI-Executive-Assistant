@@ -18,7 +18,8 @@
  *     we've discussed) — LLM context.
  *   - people_memory rows still hold gender, timezone, engagement_rank,
  *     interaction_log, last_seen, email — fields that CODE paths read
- *     deterministically. Not context, state.
+ *     deterministically. These accepted facts also feed prompt reads; their
+ *     provenance and dated travel windows outrank an older narrative mirror.
  */
 
 import type { UserProfile } from '../config/userProfile';
@@ -26,8 +27,9 @@ import { promises as fs, existsSync, readdirSync, readFileSync, renameSync, stat
 import path from 'path';
 import logger from '../utils/logger';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
+import { nameGenuinelyMatches } from './resolveAttendeeEmails';
 
-const MAX_FILE_BYTES = 32 * 1024; // 32 KB per person — plenty, still bounded
+const MAX_FILE_BYTES = 32 * 1024; // Bounded prompt read, never a disk-write limit.
 
 const SECTION_TEMPLATE = [
   '## Residence',
@@ -263,7 +265,12 @@ export async function listPersonFiles(profile: UserProfile): Promise<PersonFile[
       });
     } catch { /* skip unreadable */ }
   }
-  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+  return omitLegacyTwins(out).sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+function omitLegacyTwins(files: PersonFile[]): PersonFile[] {
+  const canonicalNames = new Set(files.filter(f => f.slug.startsWith('p_')).map(f => f.displayName.trim().toLowerCase()));
+  return files.filter(f => f.slug.startsWith('p_') || !canonicalNames.has(f.displayName.trim().toLowerCase()));
 }
 
 /**
@@ -286,8 +293,8 @@ function safeResolve(root: string, slug: string): string | null {
 
 /**
  * Resolve a user-supplied person string ("Amazia", "amazia-cohen", slack id,
- * first name) to an existing file slug. Best-effort — returns null if nothing
- * matches. Owner can always fall back to listing the catalog.
+ * first name) to an existing file slug. Names must identify one person;
+ * unresolved or ambiguous queries return null. Explicit file keys remain valid.
  */
 export async function resolvePersonSlug(profile: UserProfile, query: string): Promise<string | null> {
   if (!query) return null;
@@ -303,25 +310,21 @@ export async function resolvePersonSlug(profile: UserProfile, query: string): Pr
     const db = require('../db') as typeof import('../db');
     let row = SLACK_ID_RE.test(query) ? db.getPersonMemory(query) : null;
     if (!row) {
-      const matches = db.searchPeopleMemory(query);
-      const exact = matches.filter(m => m.name.toLowerCase() === query.trim().toLowerCase());
-      row = exact[0] ?? (matches.length === 1 ? matches[0] : null);
+      const lookup = db.findPersonByName(query);
+      row = lookup.match;
+      if (lookup.status === 'ambiguous') return null;
     }
     if (row?.person_id) return row.person_id;
-  } catch { /* fall through to file-name resolution */ }
+  } catch { return null; /* unavailable identity state cannot authorize a name fallback */ }
 
   // 3. Legacy fallback — match an existing file by name-slug / display name.
   const files = await listPersonFiles(profile);
   if (files.length === 0) return null;
-  const q = query.trim().toLowerCase();
   const qSlug = slugifyName(query);
-  const f = files.find(f =>
-    f.slug === qSlug
-    || f.displayName.toLowerCase() === q
-    || f.slug.startsWith(qSlug)
-    || f.displayName.toLowerCase().split(/\s+/)[0] === q,
+  const matches = files.filter(f => !f.slug.startsWith('p_') && (
+    f.slug === qSlug || nameGenuinelyMatches(f.displayName, undefined, query)),
   );
-  return f ? f.slug : null;
+  return matches.length === 1 ? matches[0].slug : null;
 }
 
 /**
@@ -341,7 +344,7 @@ export async function readPersonMemory(profile: UserProfile, personId: string, l
         logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
       }
       const content = await fs.readFile(full, 'utf-8');
-      return content.slice(0, MAX_FILE_BYTES);
+      return projectMemoryRead(personId, content);
     } catch (err: any) {
       if (err?.code === 'ENOENT') continue;
       throw err;
@@ -366,7 +369,7 @@ export function readPersonMemorySync(profile: UserProfile, personId: string, leg
       if (stat.size > MAX_FILE_BYTES) {
         logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
       }
-      return readFileSync(full, 'utf-8').slice(0, MAX_FILE_BYTES);
+      return projectMemoryRead(personId, readFileSync(full, 'utf-8'));
     } catch { /* try next candidate */ }
   }
   return null;
@@ -388,6 +391,78 @@ export async function writePersonSection(params: {
   displayName: string;
   section: string;
   text: string;
+  append?: boolean;
+}): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
+  // Serialize each file's complete read/modify/write. Both automatic history
+  // producers append here, so neither can rebuild from a truncated prompt read
+  // or overwrite a concurrent append in this process.
+  return queuePersonWrite(params.profile, params.personId, () => writePersonSectionUnlocked(params));
+}
+
+async function queuePersonWrite<T>(profile: UserProfile, personId: string, operation: () => Promise<T>): Promise<T> {
+  const key = `${rootForProfile(profile)}/${personId}`;
+  const previous = pendingWrites.get(key) ?? Promise.resolve();
+  const write = previous.catch(() => undefined).then(operation);
+  pendingWrites.set(key, write);
+  try { return await write; }
+  finally { if (pendingWrites.get(key) === write) pendingWrites.delete(key); }
+}
+
+const pendingWrites = new Map<string, Promise<unknown>>();
+
+/** Read-time freshness applies only to the dated travel section. History is
+ * retained on disk; prompt reads include its newest tail when bounded. */
+function projectMemoryRead(personId: string, content: string): string {
+  const { getTravelRecordById } = require('../db') as typeof import('../db');
+  if (/^##\s+Travel\s*$/im.test(content)) {
+    const travel = getTravelRecordById(personId);
+    content = upsertSection(content, 'Travel', travel
+      ? `Travel recorded: ${travel.location}, ${travel.from} through ${travel.until} (inclusive).`
+      : 'No active or upcoming structured trip is on file.');
+  }
+  if (content.length <= MAX_FILE_BYTES) return content;
+  return `${content.slice(0, MAX_FILE_BYTES / 2)}\n[Older middle content omitted from this bounded read; retained on disk.]\n${content.slice(-MAX_FILE_BYTES / 2)}`;
+}
+
+/** Refresh operational sections from all stored sibling facts after a write.
+ * Owner assessments are intentionally excluded: their visibility is a separate
+ * owner decision, and a mirror repair cannot grant new access to them. */
+export async function syncPersonOperationalSections(profile: UserProfile, personId: string, fields: string[], includeWorkplace = false): Promise<boolean> {
+  return queuePersonWrite(profile, personId, async () => {
+    // Snapshot inside the same queue as the complete multi-section projection,
+    // so a later refresh cannot be followed by an older queued sibling snapshot.
+    const { getPersonById } = require('../db') as typeof import('../db');
+    const row = getPersonById(personId);
+    if (!row) return false;
+    const prof = JSON.parse(row.profile_json || '{}') as import('../db').PersonProfile;
+    const sections: Array<[string[], string, string[]]> = [
+      [['state', 'timezone'], 'Residence', [row.state ? `Lives in ${row.state}.` : '', row.timezone ? `Timezone: ${row.timezone}.` : '']],
+      [['working_hours', 'working_hours_structured', 'response_speed'], 'Working hours', [prof.working_hours ?? '', prof.working_hours_structured ? `Stated scheduling window: ${JSON.stringify(prof.working_hours_structured)}` : '', prof.response_speed && prof._set_by?.response_speed !== 'owner' ? `Typical response speed: ${prof.response_speed}.` : '']],
+      [['language_preference', 'name_he', 'name', 'communication_style'], 'Communication style', [prof.communication_style && prof._set_by?.communication_style !== 'owner' ? prof.communication_style : '', prof.language_preference ? `Language preference: ${prof.language_preference}.` : '', row.name_he ? `Native-script spelling: ${row.name_he}.` : '', row.name ? `Name: ${row.name}.` : '']],
+    ];
+    // Workplace remains capture-only, with the existing assessment exclusion.
+    if (includeWorkplace) {
+      const owned = ['role_summary', 'reports_to', 'collaboration_notes'] as const;
+      sections.push([[...owned], 'Workplace', owned.filter(field => prof._set_by?.[field] !== 'owner')
+        .map(field => prof[field] ? (field === 'reports_to' ? `Reports to ${prof[field]}.` : prof[field]!) : '')]);
+    }
+    try {
+      for (const [owned, section, lines] of sections) {
+        if (!owned.some(field => fields.includes(field))) continue;
+        const text = lines.filter(Boolean).join('\n');
+        if (text && !(await writePersonSectionUnlocked({ profile, personId, displayName: row.name, section, text })).ok) return false;
+      }
+      return true;
+    } catch (err) {
+      logger.warn('person memory operational mirror failed; structured facts retained', { personId, err: String(err) });
+      return false;
+    }
+  });
+}
+
+async function writePersonSectionUnlocked(params: {
+  profile: UserProfile; personId: string; displayName: string;
+  section: string; text: string; append?: boolean;
 }): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
   const { profile, personId, displayName, section, text } = params;
   if (!personId) return { ok: false, error: 'empty_person_id' };
@@ -413,13 +488,13 @@ export async function writePersonSection(params: {
     ? `# ${displayName}\n\n${SECTION_TEMPLATE}`
     : existing!;
 
-  const updated = upsertSection(base, section.trim(), text.trimEnd());
+  const updated = upsertSection(base, section.trim(), text.trimEnd(), params.append);
   await fs.writeFile(full, updated, 'utf-8');
   logger.info('Person memory section written', { personId, section, created });
   return { ok: true, created };
 }
 
-function upsertSection(md: string, section: string, text: string): string {
+function upsertSection(md: string, section: string, text: string, append = false): string {
   const lines = md.split(/\r?\n/);
   const headerPattern = new RegExp(`^##\\s+${escapeRegex(section)}\\s*$`, 'i');
 
@@ -445,6 +520,11 @@ function upsertSection(md: string, section: string, text: string): string {
   // Replace body between startIdx+1 and endIdx
   const before = lines.slice(0, startIdx + 1);
   const after = lines.slice(endIdx);
+  if (append) {
+    const existing = lines.slice(startIdx + 1, endIdx).join('\n').trim();
+    if (existing.split('\n').includes(text)) return md;
+    text = existing ? `${existing}\n${text}` : text;
+  }
   const body = text ? ['', text, ''] : [''];
   return [...before, ...body, ...after].join('\n');
 }
@@ -466,7 +546,7 @@ export function formatPeopleCatalogSync(profile: UserProfile): string {
   } catch {
     return '';
   }
-  const files: PersonFile[] = [];
+  let files: PersonFile[] = [];
   for (const name of names) {
     if (!name.endsWith('.md') || name === 'README.md') continue;
     const full = path.join(root, name);
@@ -483,6 +563,7 @@ export function formatPeopleCatalogSync(profile: UserProfile): string {
       });
     } catch { /* skip */ }
   }
+  files = omitLegacyTwins(files);
   if (files.length === 0) return '';
   files.sort((a, b) => a.displayName.localeCompare(b.displayName));
 

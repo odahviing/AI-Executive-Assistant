@@ -51,26 +51,24 @@ export class SocialSkill implements Skill {
     return [
       {
         name: 'note_about_person',
-        description: `Record something you just learned about a person through natural conversation.
+        description: `Record personal, relationship-building context learned through natural conversation.
 
 Call this when:
-- A colleague or the owner shares something personal (hobby, family, upcoming event, feelings, language preference, how they like to be addressed, etc.)
+- A colleague or the owner shares something personal (hobby, family, upcoming event, feelings)
 - You asked something social and they answered
-- You noticed a language preference (e.g. they always reply in Hebrew even when you write English)
-- You learned how they prefer to be addressed (nickname, formal name, etc.)
 - You noticed something worth remembering that will make future conversations more personal
 
 Examples of good notes:
 - "Mentioned she's training for a half marathon in May"
 - "Has two kids, eldest just started university"
 - "Big football fan — supports Real Madrid"
-- "Always replies in Hebrew — prefers to communicate in Hebrew"
-- "Goes by a nickname, not the legal first name"
 - "Said the board meeting last week was intense — seemed relieved it went well"
 - "Has a cat named Mochi"
 - "Studying for an MBA part-time"
 
-Do NOT call this for purely work-related facts (those go in manage_preference(action='set')). This is for human, personal, relationship-building context.
+Work facts use update_person_profile: language_preference for communication language, name for a stated name/addressing correction. These remain operational when social is off.
+
+The authenticated owner can write about people; colleague calls save on the caller's own row. Owner only: an explicit configured SELF key selects her existing row; her exact configured name does so only without supplied identity handles or a matching person-name collision; human handles follow ordinary person resolution. created reports database-person creation, not a markdown file.
 
 If they asked or said something that needs a reply, answer it FIRST in your text — the save is bookkeeping that rides WITH your reply, never INSTEAD of it. A turn that calls this tool and says nothing else is a bug.`,
         input_schema: {
@@ -110,7 +108,7 @@ Examples (owner says → you react in text + save):
 - "Your style should be warm but direct, not chatty" → text reply: "Got it — I'll keep it warm and direct, not chatty." + save: note="Preferred tone: warm but direct, not chatty."
 - "You don't need to apologize so much" → text reply: "Fair — I'll cut the over-apologizing." + save: note="Avoid over-apologizing in replies."
 
-Owner-path saves to Maelle's SELF row (becomes visible in every conversation via the ABOUT YOU block). Colleague-path saves to the colleague's own row — colleagues cannot teach Maelle facts about herself, but they can volunteer facts about themselves. For owner sharing facts about HIMSELF (his hobbies, weekend, family), use note_about_person with colleague_name="${profile.user.name.split(' ')[0]}" — his own row.`,
+The authenticated owner's call saves to the assistant's SELF row, visible via ABOUT YOU. A colleague's call saves to their own row. For the owner's own hobbies, weekend or family, use note_about_person with colleague_name="${profile.user.name}" and colleague_slack_id="${profile.user.slack_user_id}". created reports database-person creation.`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -122,7 +120,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
             },
             subject: {
               type: 'string',
-              description: 'REQUIRED specific subject string — Maelle-identity ONLY. What facet of YOU is being taught here? Examples: "name origin", "warm direct tone", "narration style", "hebrew gender", "deflection rule", "owner override pattern", "no over-apologizing". Use 2–5 lowercased words. ❌ Do NOT use owner-personal subjects here (his hobbies, family, trips, work) — those belong on his row via note_about_person(colleague_name=<owner first name>), never on this tool.',
+              description: 'REQUIRED specific subject, 2–5 lowercased words, e.g. "name origin", "warm direct tone", "narration style", "hebrew gender". Owner calls teach assistant identity; the owner\'s personal life belongs on their own row via note_about_person using their configured Slack ID.',
             },
             initiated_by: {
               type: 'string',
@@ -154,23 +152,23 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const { resolvePersonTarget } = require('../utils/resolvePersonTarget') as typeof import('../utils/resolvePersonTarget');
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { appendPersonNoteById, appendPersonInteractionById } = require('../db') as typeof import('../db');
-        const isOwnerCaller = context.userId === context.profile.user.slack_user_id;
+        const isOwnerCaller = context.authority === 'owner';
         const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
-        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner: isOwnerCaller, ownerDomain });
+        const target = resolvePersonTarget({ rawSlackId: args.colleague_slack_id as string | undefined, name, isOwner: isOwnerCaller, ownerDomain, assistantSelf: { slackId: `SELF:${context.profile.user.slack_user_id}`, name: context.profile.assistant.name } });
         if (target?.hallucinated) {
           logger.warn('note_about_person — colleague_slack_id hallucinated', {
             rejected: (args.colleague_slack_id as string | undefined) ?? null, colleagueName: name, resolvedTo: target?.slackId ?? null,
           });
         }
         if (!target) {
-          return { error: 'unknown_colleague', message: `No person resolved for "${name}". Call find_slack_user first, or include an email for an external contact.` };
+          return { error: 'unknown_colleague', created: false, message: `No person resolved for "${name}". Call find_slack_user first, or include an email for an external contact.` };
         }
         const note        = args.note as string;
         const topic       = args.topic as string;
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'maelle';
 
-        appendPersonNoteById(target.personId, note);
+        appendPersonNoteById(target.personId, note, isOwnerCaller ? 'owner' : 'person');
         // An owner note ABOUT somebody is private memory, not an exchange
         // WITH them. Only the authenticated speaker's own note may enter
         // their interaction timeline or consume their social cadence.
@@ -184,7 +182,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         }
 
         logger.info('Social note saved', { personId: target.personId, name: target.name, topic, subject, initiatedBy });
-        return { saved: true, name: target.name, topic, subject };
+        return { saved: true, name: target.name, created: target.created, topic, subject };
       }
 
       case 'note_about_self': {
@@ -204,7 +202,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         //
         // For the OWNER's own hobbies / weekend / family / etc. (what the
         // v2.5.2 owner-path used to capture here), use note_about_person
-        // with colleague_name="<owner first name>" — his own row resolves
+        // with his configured full name or real Slack ID — his own row resolves
         // via people_memory name search.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { getPersonMemory } = require('../db') as typeof import('../db');
@@ -212,7 +210,7 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const { selfSlackId } = require('../core/assistantSelf') as typeof import('../core/assistantSelf');
         let slackId: string;
         let name: string;
-        if (context.senderRole === 'owner') {
+        if (context.authority === 'owner') {
           slackId = selfSlackId(context.profile.user.slack_user_id);
           name    = context.profile.assistant.name;
         } else {
@@ -225,35 +223,38 @@ Owner-path saves to Maelle's SELF row (becomes visible in every conversation via
         const subject     = (args.subject as string | undefined)?.trim() || undefined;
         const initiatedBy = (args.initiated_by as 'maelle' | 'person' | undefined) ?? 'person';
 
+        const created = !getPersonMemory(slackId);
         // Seed identity fields when creating the SELF row for the first
         // time. For colleague-self path: don't clobber an existing row
         // with bare seed.
-        if (context.senderRole === 'owner') {
+        if (context.authority === 'owner') {
           upsertPersonMemory({
             slackId,
             name,
             email:    context.profile.assistant.email,
             timezone: context.profile.user.timezone,
+            by: 'owner',
           });
         } else {
           upsertPersonMemory({ slackId, name });
         }
-        appendPersonNote(slackId, note);
+        appendPersonNote(slackId, note, context.authority === 'owner' ? 'owner' : 'person');
         const timelineTag = subject ? `[${topic}:${subject}]` : `[${topic}]`;
         appendPersonInteraction(slackId, {
           type: 'social_chat',
           summary: `${timelineTag} ${note}`,
         });
-        recordSocialMoment(slackId, initiatedBy);
+        if (context.authority !== 'owner') recordSocialMoment(slackId, initiatedBy);
 
         logger.info('Self-note saved', {
           slackId,
-          scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
+          scope: context.authority === 'owner' ? 'assistant-self' : 'colleague-self',
           topic, subject, initiatedBy,
         });
         return {
           saved: true,
-          scope: context.senderRole === 'owner' ? 'assistant-self' : 'colleague-self',
+          created,
+          scope: context.authority === 'owner' ? 'assistant-self' : 'colleague-self',
           topic, subject,
         };
       }
@@ -273,7 +274,7 @@ PERSONA — friend-of-the-team layer (this skill is on)
 
 Beyond the EA work, you're a teammate. ${ownerFirst} and the people he works with should feel comfortable talking about life with you — what someone's playing on the weekend, how the kids are, how a vacation went. The Social Engine tracks topics across conversations so you can revisit them naturally instead of asking the same thing twice.
 
-When ${ownerFirst} shares something personal — his weekend, his kids, a trip, how he's feeling: react in text like a colleague would AND save it on HIS row via note_about_person(colleague_name="${ownerFirst}"). Same for colleagues: react in text, save via note_about_person on theirs. note_about_self is a different tool for a different row — facts about YOU (your name, your story, your tone), and only ${ownerFirst} can teach those. His own life never goes there. The save is bookkeeping — it never replaces your reply.
+When ${ownerFirst} shares something personal — his weekend, his kids, a trip, how he's feeling: react in text like a colleague would AND save it on HIS row via note_about_person(colleague_name="${profile.user.name}", colleague_slack_id="${profile.user.slack_user_id}"). Same for colleagues: react in text, save via note_about_person on theirs. note_about_self is a different tool for a different row — facts about YOU (your name, your story, your tone), and only ${ownerFirst} can teach those. His own life never goes there. The save is bookkeeping — it never replaces your reply.
 
 You don't have to FORCE social on every turn — task always wins. But when there's room, take it. The Social Engine's directive (injected separately when relevant) tells you the mode for the current turn (celebrate / engage / continue) — follow it; don't pivot to "anything work-related" if the directive says continue.
 `.trim();

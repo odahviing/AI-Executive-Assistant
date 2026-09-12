@@ -182,22 +182,11 @@ const RETIRED_VERDICTS = { 'flagged-for-owner': 'queued-next-run' }
  * earlier line (that it did not write) is bad. */
 const readRows = () => {
   if (!fs.existsSync(LEDGER)) return []
-  return fs
-    .readFileSync(LEDGER, 'utf8')
-    .split(/\r?\n/)
-    .filter((l) => l.trim())
-    .map((l) => {
-      try {
-        return JSON.parse(l)
-      } catch {
-        return null
-      }
-    })
-    .filter(Boolean)
+  try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
 }
 
 const append = (obj) => {
-  fs.appendFileSync(LEDGER, JSON.stringify(obj) + '\n')
+  fs.appendFileSync(LEDGER, JSON.stringify(verification.compactRow(obj, REPO)) + '\n')
 }
 const readLifecycleRows = () => {
   try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
@@ -435,6 +424,10 @@ if (!KNOWN_VERDICTS.has(verdictRaw)) die(`--verdict "${verdictRaw}" is not known
 if (!invariant) die('no --invariant.', 'Pass an existing slug, a new one (see the suggestion this refusal would otherwise have to give you — run with `--targets` to list all known slugs), or the literal word `none` for a genuinely local bug that fits no wider principle. Silence here is what produced 23% coverage on 415 refs.')
 
 const rows = readRows()
+// Syntax can identify a list of known numbered refs, not semantic atomicity.
+// Cleaner path refs and ordinary slugs may contain separators legitimately.
+const numberedRefs = ref.split(/\s*(?:[+,/]| and )\s*/i)
+if (numberedRefs.length > 1 && numberedRefs.every(part => /^(?:gh#|o#|[a-z])\d+(?:-[a-z0-9-]+)?$/i.test(part)) && !rows.some(r => verification.normRef(r.ref) === verification.normRef(ref))) die('new finding refs must name one atomic root/correction.', 'Use separate stable finding refs with shared evidence. Existing bundled refs remain readable legacy packages; do not invent historical decomposition.')
 const vocab = invariantVocab(rows)
 if (invariant !== 'none' && !vocab.includes(invariant)) {
   const near = nearestInvariants(invariant, vocab)

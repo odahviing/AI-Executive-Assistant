@@ -73,9 +73,8 @@ export function resolveSlackId(
     return { slack_id: rawId, was_hallucinated: false };
   }
 
-  // Invalid format. Try people_memory lookup by name. Returns at most 10
-  // matches (LIMIT in searchPeopleMemory), pick the first with a valid
-  // slack_id — there's usually at most one match for a given full name.
+  // Invalid format: use the whole-name gate below and bind only one distinct
+  // Slack identity. A substring or ambiguous name stays unresolved.
   //
   // v2.6.5 — when no `name` was passed but `rawId` itself looks like a name
   // (Sonnet sometimes packs the colleague's name into the slack_id slot and

@@ -17,6 +17,7 @@ function harness(o={}){
  const conn={sendDirect:send,postToChannel:send};
  const db={getRequest:id=>id===row.id?row:o.parents?.[id]||null,getChildRequests:()=>[],getDueRequests:()=>[clone(row)],updateRequest:update,getAwaitingOwnerRequests:()=>[row],isKnownRequestThreadAnchor:()=>true,getRequestByIdempotencyKey:()=>null,buildIdempotencyKey:()=> 'fixture',createRequest:()=>row};
  const mocks={
+  'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForPerson:(person,fallback)=>({timezone:person?.timezone||fallback}),attendeeTzForDay:entry=>entry.timezone},
   'src/db/requests.ts':db,'src/db/client.ts':{getDb:()=>({prepare:()=>({run(){},all:()=>[]})})},
   'src/db/conversations.ts':{appendToConversation:(...a)=>effects.history.push(a),getConversationHistory:()=>[]},
   'src/db/jobs.ts':{createOutreachJob:p=>effects.outbound.push(p),getOutreachJobByRequestId:()=>null},
@@ -24,7 +25,7 @@ function harness(o={}){
   'src/connections/registry.ts':{getConnection:()=>delivery==='absent'?undefined:conn},
   'src/utils/ownerDailyThread.ts':{postOwnerDecision:async({text})=>{effects.owner.push(text);return {ok:!o.ownerPostFail,channel:'DOWNER',threadTs:'owner.root',ts:'owner.msg'};}},
   'src/utils/workHours.ts':{workTimeBaseFromNow:()=>DateTime.now().toISO(),addWorkdays:()=>DateTime.now().plus({days:2}).toISO()},
-  'src/utils/responseDeadline.ts':{},'src/utils/weTimeResolver.ts':{},'src/utils/workingElsewhere.ts':{getTravelContextForInstant:()=>undefined},
+  'src/utils/responseDeadline.ts':{},'src/utils/workingElsewhere.ts':{getTravelContextForInstant:()=>undefined},
   'src/core/requests/logActivity.ts':{logActivity(){}},'src/core/requests/colleagueOofReengage.ts':{},
   'src/utils/shadowNotify.ts':{shadowNotify:async()=>{}},
   'src/skills/registry.ts':{executeApprovedSkillTool:async(tool,args,context)=>{effects.executes.push({tool,args,context});return o.execution||{status:'completed',result:{success:true,meetingId:'event'}};}},
@@ -32,7 +33,7 @@ function harness(o={}){
   'src/utils/logger.ts':{__esModule:true,default:{warn(){},info(){},error(){},debug(){}}},
   'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>({content:[{type:'text',text:''}]})}})},'src/llm/models.ts':{MODEL_HAIKU:'fixture'},'src/utils/usageLog.ts':{},'src/tasks/briefs.ts':{},'src/utils/requestDedup.ts':{},'src/utils/closeLoopOnOwnerHandled.ts':{},'src/db.ts':{},
  };
- const actual=new Set(['src/core/requests/resolver.ts','src/core/requests/deferredActionReplay.ts','src/core/requests/requesterRelay.ts','src/core/requests/closeRequest.ts','src/core/requests/runner.ts','src/core/requests/types.ts','src/core/approvals/approvalCallbacks.ts','src/tasks/skill.ts','src/utils/textScrubber.ts']);
+ const actual=new Set(['src/utils/timezoneConvert.ts','src/utils/weTimeResolver.ts','src/core/requests/resolver.ts','src/core/requests/deferredActionReplay.ts','src/core/requests/requesterRelay.ts','src/core/requests/closeRequest.ts','src/core/requests/runner.ts','src/core/requests/types.ts','src/core/approvals/approvalCallbacks.ts','src/tasks/skill.ts','src/utils/textScrubber.ts']);
  function load(file){if(Object.hasOwn(mocks,file))return mocks[file];if(mods.has(file))return mods.get(file).exports;if(!actual.has(file)){effects.unexpected.push(file);throw Error('Unmocked '+file);}const selected=path.join(source,file),name=fs.existsSync(selected)?selected:path.join(root,file);if(!cache.has(name))cache.set(name,ts.transpileModule(fs.readFileSync(name,'utf8'),{fileName:name,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);const m={exports:{}};mods.set(file,m);const req=spec=>{if(spec==='luxon')return {DateTime};if(['node:async_hooks','node:util'].includes(spec))return require(spec);if(!spec.startsWith('.')){effects.unexpected.push(spec);throw Error('Unmocked '+spec);}return load(path.posix.normalize(path.posix.join(path.posix.dirname(file),spec))+'.ts');};vm.runInNewContext('(function(require,module,exports){'+cache.get(name)+'\n})',{Date,Set,Map,setImmediate})(req,m,m.exports);return m.exports;}
  const resolver=load('src/core/requests/resolver.ts'),relay=load('src/core/requests/requesterRelay.ts'),runner=load('src/core/requests/runner.ts');
  return {effects,row:()=>row,update,setDelivery:x=>delivery=x,check:()=>assert.deepEqual(effects.unexpected,[]),lock:resolver.withRequestLock,

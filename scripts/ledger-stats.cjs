@@ -726,10 +726,13 @@ if (argOf('--wrap')) {
   for (const r of added) runs.set(r.runId || '(no runId)', (runs.get(r.runId || '(no runId)') || 0) + 1);
   console.log(`  by run: ${[...runs.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(' · ')}`);
   if (wrapRows.length) {
-    const verified = new Set(added.filter((r) => r.verdict === 'verified' && !r.verificationOf).map(r => normRef(r.ref))).size;
-    console.log(`\nTHE WRAP'S OWN ROWS — ${wrapRows.length}, stamped \`runId: wrap-${V}\`. This is the set the wrap summary counts.`);
+    let releaseHistory;
+    try { releaseHistory = git(['show', `${newest.sha}:${path.relative(REPO, LEDGER).replace(/\\/g, '/')}`]).split(/\r?\n/).filter(l => l.trim()).map(l => JSON.parse(l)); }
+    catch { console.error('Cannot read the release ledger snapshot; implementation counts are unavailable.'); process.exit(1); }
+    const counts = require('./workshop-verification.cjs').wrapCounts(wrapRows, releaseHistory);
+    console.log(`\nTHE WRAP'S OWN EVENTS — ${wrapRows.length}, stamped \`runId: wrap-${V}\`.`);
     for (const [v, list] of split(wrapRows)) console.log(`  ${String(v).padEnd(22)} ${String(list.length).padStart(2)}  ${list.map((r) => r.ref || '(no ref)').join(', ').slice(0, 110)}`);
-    console.log(`\n  "${wrapRows.length} shipped, ${verified} verified" — check the wrap summary against that pair.`);
+    console.log(`\n  ${counts.events} ledger events; ${counts.coveredRefs} wrapped refs covering ${counts.implementationRefs} implementation refs; ${counts.verifiedImplementationRefs} implementation refs had review records stamped wrap-${V}. Commit bookkeeping does not establish deployment.`);
     console.log(`\nRows:`);
     for (const r of wrapRows) console.log(`  [${String(r.verdict || '?').padEnd(20)}] ${String(r.ref || '(no ref)').padEnd(46)} ${String(r.finding || '').slice(0, 70)}`);
     // X158 · the two appends in WRAP_UP.md's GitHub-issues step (a `built` ref's `state:"wrapped"`

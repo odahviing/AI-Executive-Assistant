@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.9.6 — Reliable person identity and memory writes
+
+Person-memory writes now preserve who supplied a fact, bind to the intended person and report the actual saved outcome. Memory history survives long files and concurrent updates, while Slack directory searches no longer create contacts merely because they appeared in search results.
+
+### Fixed
+
+- Distinguish unique whole-name matches, genuine ambiguity and suggestions; preserve explicit person IDs and refuse conflicting identity bindings.
+- Carry authenticated writer authority through room, capture, SELF and contact updates; preserve accepted names, pronouns, fields and notes against lower-authority overwrites.
+- Report refused, unchanged and partial writes accurately. Keep profile capture failures distinct from empty extraction.
+- Serialize history appends and operational mirror updates, retaining dated work history and preventing stale sibling fields from returning after concurrent writes.
+- Stamp actual engagement without resetting accepted owner identity; keep room directory results identity-only and avoid persisting unengaged search matches.
+- Preserve forwarded-email display names, transport surface context and recipient timezone data at first outreach engagement.
+
+### Framework
+
+- Add an executable release command that runs every discovered regression suite and typecheck, rejects incomplete or stale results, and verifies retained output hashes before reuse.
+- Separate Manager entry instructions from dispatch mechanics, retain one canonical model/cost policy and restore specific Architect checks.
+- Store immutable verification evidence outside repeated ledger rows and correct release lineage accounting. Describe disabled scheduled tasks and log-review coverage honestly.
+
+### Verification and limits
+
+- The final executable checkpoint passed 74 suite/zone executions with 2,312 cases, no failures or skips, and a passing typecheck. The person-memory package contains 34 independently reviewed repair/dependency references; these are not a count of distinct bugs.
+- The independent accumulated-release review passed. All 30 paper traces were completed: 24 pass and six stale anchors, with no blocking failure. Eighteen entries retain explicit structural/model limitations; existing Coda send-attempt accounting uncertainty is queued separately.
+- Twelve person-memory product decisions remain parked. No new capture calls, production data cleanup or unapproved product policy changes are included. Live conversation outcomes require observation after deployment.
+
+---
+
+
 ## 4.9.5 — Consistent meeting clocks and travel boundaries
 
 Maelle resolves meeting times from the stated timezone and the travel dates that apply to the meeting. Search, booking, approval previews and outcome checks now share interval rules, while recipient contact hours are evaluated for the intended delivery date.

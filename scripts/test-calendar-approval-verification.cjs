@@ -110,7 +110,7 @@ async function test(id, expected, input = {}, event = base, error, verify) {
     assert.equal(h.calls[0][1], '/users/owner%40example.com/events/exact%2Fid%2B%3D');
   });
   const output = { before, source, passed: results.filter(r => r.status === 'pass').length, failed: results.filter(r => r.status === 'fail').length, results };
-  fs.writeFileSync(path.join(dir, `calendar-verification-${before ? 'before' : 'after'}.json`), JSON.stringify(output, null, 2));
+  if (process.env.WORKSHOP_TEST_OUTPUT_DIR) fs.writeFileSync(path.join(process.env.WORKSHOP_TEST_OUTPUT_DIR, `calendar-verification-${before ? 'before' : 'after'}.json`), JSON.stringify(output, null, 2), { flag: 'wx' });
   console.log(JSON.stringify(output, null, 2));
   process.exitCode = output.failed ? 1 : 0;
 })();

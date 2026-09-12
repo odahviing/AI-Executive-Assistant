@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'),{test}=require('node:test'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
 const {DateTime,Settings,IANAZone}=require('luxon');
 const root=path.resolve(__dirname,'..'),snapshot=process.env.LIBRARIAN_SNAPSHOT,compiled=new Map();
-const actual=new Set(['src/db/people.ts','src/utils/venueSearch.ts','src/skills/venue.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/workingHoursDefault.ts']);
+const actual=new Set(['src/memory/resolveAttendeeEmails.ts','src/db/people.ts','src/utils/venueSearch.ts','src/skills/venue.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/workingHoursDefault.ts']);
 let now=Date.parse('2026-09-15T02:00:00Z');
 class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
 Settings.now=()=>now;

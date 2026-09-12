@@ -33,17 +33,24 @@ function loader(mocks, actual) {
 afterEach(() => { for (const unexpected of pending.splice(0)) assert.deepEqual(unexpected, [], 'no unexpected dependency hidden by production catches'); });
 const logger = { __esModule: true, default: { info() {}, warn() {}, error() {}, debug() {} } };
 function person(options = {}) {
-  const effects = { email: [], core: [], profile: [] };
+  const effects = { email: [], core: [], profile: [], mutations: [] };
   const target = { personId: 'person-1', slackId: options.external ? null : 'UPERSON', name: 'Person Example' };
-  const core = (...args) => { effects.core.push(args); return options.refuseTimezone ? 'refused_lower_authority' : 'applied'; };
+  const core = (...args) => { effects.core.push(args); if (!options.refuseTimezone) effects.mutations.push(['core', ...args]); return options.refuseTimezone ? 'refused_lower_authority' : 'applied'; };
+  const profileWrite = (...args) => {
+    effects.profile.push(args);
+    const fields = Object.entries(args[1]).filter(([,value]) => value !== undefined && value !== null && value !== '');
+    for (const [field,value] of fields) effects.mutations.push(['profile', field, value]);
+    return Object.fromEntries(fields.map(([field]) => [field, 'applied']));
+  };
   const db = {
-    upsertPersonMemory() {}, updatePersonProfile: (...args) => effects.profile.push(args), updatePersonProfileById: (...args) => effects.profile.push(args),
-    setPersonEmail: (...args) => { effects.email.push(args); return { personId: options.conflict ? null : options.survivor || target.personId, outcome: options.conflict ? 'identity_conflict' : options.emailOutcome || 'applied' }; },
+    upsertPersonMemory() {}, updatePersonProfile: profileWrite, updatePersonProfileById: profileWrite,
+    setPersonEmail: (...args) => { effects.email.push(args); const outcome = options.conflict ? 'identity_conflict' : options.emailOutcome || 'applied'; if (outcome === 'applied') effects.mutations.push(['email', ...args]); return { personId: options.conflict ? null : options.survivor || target.personId, outcome }; },
     setCoreFieldWithProvenance: core, setCoreFieldWithProvenanceById: core,
     getPersonMemory: () => ({ name: target.name, email: 'person@example.test' }),
+    getPersonById: () => ({ name: target.name, kind: options.external ? 'external' : 'internal' }),
   };
   const load = loader({
-    'src/db.ts': db, 'src/connections/registry.ts': {}, 'src/memory/peopleMemory.ts': {},
+    'src/db.ts': db, 'src/connections/registry.ts': {}, 'src/memory/peopleMemory.ts': { syncPersonOperationalSections: async () => true },
     'src/utils/skillPreferences.ts': {}, 'src/utils/resolveSlackId.ts': { SLACK_ID_RE: /^U[A-Z0-9]+$/ },
     'src/memory/resolveAttendeeEmails.ts': { nameGenuinelyMatches: () => false },
     'src/utils/workingHoursDefault.ts': { refreshAutoWorkingHours() {}, refreshAutoWorkingHoursById() {} },
@@ -58,7 +65,8 @@ function person(options = {}) {
 for (const external of [false, true]) for (const mixed of [false, true]) test(`LA-profile-${external ? 'external' : 'internal'}-${mixed ? 'partial' : 'email'}: conflict is structured without erasing other writes`, async () => {
   const h = person({ external, conflict: true });
   const result = await h.run(mixed ? { timezone: 'Europe/London', language_preference: 'he' } : {});
-  assert.equal(result.updated, true); assert.ok(result.not_saved?.includes('email'));
+  assert.equal(result.updated, mixed); assert.ok(result.not_saved?.includes('email'));
+  assert.equal(h.effects.mutations.length > 0, mixed);
   assert.match(result._note, /email NOT saved/);
   if (mixed) { assert.equal(h.effects.core.length, 1); assert.equal(h.effects.profile[0][1].language_preference, 'he'); }
 });
@@ -72,7 +80,8 @@ for (const surface of ['colleague_dm', 'room']) test(`LA-profile-${surface}: sel
 });
 for (const external of [false, true]) for (const emailOutcome of ['applied', 'already_set', 'refused_lower_authority']) test(`LA-profile-${external ? 'external' : 'internal'}-${emailOutcome}: existing structured result preserved`, async () => {
   const h = person({ external, emailOutcome }); const result = await h.run();
-  assert.equal(result.updated, true);
+  assert.equal(result.updated, emailOutcome === 'applied');
+  assert.equal(h.effects.mutations.length, emailOutcome === 'applied' ? 1 : 0);
   assert.equal(result.not_saved?.includes('email') || false, emailOutcome === 'refused_lower_authority');
   assert.equal(result.already_set?.includes('email') || false, emailOutcome === 'already_set');
 });
@@ -81,7 +90,7 @@ test('LA-profile-survivor: merged external identity retains survivor for other w
   assert.equal(h.effects.core[0][0], 'survivor-1'); assert.equal(h.effects.profile[0][0], 'survivor-1');
 });
 test('LA-profile-other-person: colleague refusal still makes no writes', async () => {
-  const h = person(); const result = await h.run({}, { senderRole: 'colleague', userId: 'UOTHER' });
+  const h = person(); const result = await h.run({}, { senderRole: 'colleague', authority: 'colleague', surface: 'colleague_dm', userId: 'UOTHER' });
   assert.equal(result.updated, false); assert.equal(h.effects.email.length + h.effects.core.length + h.effects.profile.length, 0);
 });
 function brief(options = {}) {

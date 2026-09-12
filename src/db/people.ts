@@ -3,14 +3,19 @@ import { DateTime } from 'luxon';
 import logger from '../utils/logger';
 import { getActiveSubjectsForPerson, getRecentTopicBeats } from './socialSubjects';
 import { isCurrentRankOwnerAuthored } from './engagementRank';
+import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
 
 // ── People Memory ─────────────────────────────────────────────────────────────
-// Persistent contact directory — auto-populated when people are mentioned or
-// found via find_slack_user. Gives the agent cross-conversation relationship context.
+// Persistent people engaged with Maelle. Directory search alone never persists
+// a contact; engagement resolves the identity before adding durable context.
 
 export interface PersonNote {
   date: string;   // YYYY-MM-DD
   note: string;
+  // Who recorded it — owner / person / auto (capture pass), derived from the
+  // AUTHENTICATED writer by appendPersonNoteById, never from a model claim.
+  // Absent on notes written before provenance existed: UNKNOWN, never inferred.
+  set_by?: CoreFieldSetBy;
 }
 
 export type PersonGender = 'male' | 'female' | 'unknown';
@@ -71,19 +76,34 @@ export interface PersonProfile {
 
   // When this profile was last meaningfully updated
   updated_at?: string;
+
+  // Per-field provenance (owner > person > auto) — the same authority chain the
+  // core columns carry in `<field>_set_by`, held INSIDE the blob beside the
+  // values it ranks (L14.2: one addressable chunk, structured fields next to
+  // their content). Written only by updatePersonProfileById, from the
+  // authenticated writer. A field with no tag is legacy data of UNKNOWN
+  // authority (rank 0) — never re-labelled, never invented on read.
+  _set_by?: Partial<Record<ProfileProvenanceField, CoreFieldSetBy>>;
 }
 
-// profile_json fields the OWNER curates about a person: an assessment SHE
-// forms of them, not something the person stated about themselves
-// (engagement_level, communication_style, role_summary, reports_to,
-// response_speed, collaboration_notes). Mirrors, from the WRITE side,
+/** The profile_json fields that carry provenance — every value key except the bookkeeping ones. */
+export type ProfileProvenanceField = Exclude<keyof PersonProfile, 'updated_at' | '_set_by'>;
+
+/** Per-field outcome of a profile write — the core chokepoint's vocabulary (`CoreFieldWrite`). */
+export type ProfileWriteOutcomes = Partial<Record<ProfileProvenanceField, CoreFieldWrite>>;
+
+// profile_json fields the OWNER curates about a person — his assessment of
+// them, not something they stated about themselves (engagement_level,
+// communication_style, role_summary, reports_to, response_speed,
+// collaboration_notes). Mirrors, from the WRITE side,
 // `COLLEAGUE_SELF_WRITABLE_FIELDS` in `core/assistant.ts` — a colleague may
-// only self-write timezone / state / working_hours / language_preference /
-// name_he / currently_traveling; these owner-curated fields are dropped there
-// so the colleague cannot overwrite the owner's own assessment of them. (They
-// ARE rendered back to that same person's own DM by `buildPersonWorkContextBlock`
-// below — OWNER RULING 2026-08-06 — this comment is about write-authority
-// only.) Keep the two lists in sync.
+// only self-write name / name_he / email / timezone / state / working_hours /
+// working_hours_structured / language_preference / currently_traveling; the
+// owner-curated fields are dropped there AND reported back as `not_saved`, so
+// the colleague can neither overwrite the owner's assessment nor be told it
+// was saved. (They ARE rendered back to that same person's own DM by
+// `buildPersonWorkContextBlock` below — OWNER RULING 2026-08-06 — this comment
+// is about write-authority only.) Keep the two lists in sync.
 
 /**
  * A single entry in the interaction timeline for a person.
@@ -185,6 +205,35 @@ function genderRank(setBy?: CoreFieldSetBy | null, confirmed?: number | null): n
   return Math.max(setBy ? SET_BY_RANK[setBy] : 0, confirmed ? SET_BY_RANK.person : 0);
 }
 
+/**
+ * The gender a READER may steer on: the stored value only when a human stands
+ * behind it — a person/owner tag, or a legacy `gender_confirmed` flag
+ * (genderRank folds both). An `auto` photo guess and a pre-provenance NULL tag
+ * are equally unowned and read as 'unknown'. The old reader test was
+ * `gender_set_by !== 'auto'`, which took every untagged legacy guess (live:
+ * 70 NULL-tagged rows against 31 'auto') for a confirmation and let it drive
+ * gendered Hebrew. Every model-facing gender read goes through here: both
+ * prompt renderers, the brief's pronoun map, and the detector's lock.
+ */
+export function authoritativeGender(p: { gender?: string | null; gender_set_by?: CoreFieldSetBy | null; gender_confirmed?: number | null }): PersonGender {
+  const g = p.gender;
+  if (g !== 'male' && g !== 'female') return 'unknown';
+  return genderRank(p.gender_set_by, p.gender_confirmed) >= SET_BY_RANK.person ? g : 'unknown';
+}
+
+/**
+ * One log line for every provenance refusal, written by the chokepoint that
+ * decided it — so an auto-tier caller that never reads the outcome (the
+ * capture pass, the Slack sync) still leaves the "visible why" L2 asks for.
+ * `holder` is the tier that kept the field.
+ */
+function logRefusedLowerAuthority(personId: string, field: string, candidate: unknown, holder: string, by: CoreFieldSetBy): void {
+  logger.info('person store — write refused, a higher authority holds a different value', {
+    personId, field, by, holder,
+    candidate: typeof candidate === 'string' ? candidate.slice(0, 120) : candidate,
+  });
+}
+
 // ── Reading the interaction timeline ─────────────────────────────────────────
 //
 // Two kinds of entry live in one log and they need different treatment:
@@ -267,9 +316,22 @@ export interface CurrentTravel {
 
 export type TravelWrite = 'applied' | 'already_set' | 'refused_lower_authority' | 'no_person';
 
+/**
+ * The zone a dated trip is judged against when its destination resolves to no
+ * IANA zone ("Narnia", a typo, a place the static map lacks): UTC-12, the last
+ * place on Earth a calendar date ends. A trip's `until` has passed there only
+ * once it has passed everywhere — the conservative reading — and it DOES pass,
+ * so an unresolvable location can no longer hold a person "travelling" forever
+ * and refuse every later trip (L2: expired facts do not permanently block later
+ * trips). Shared by the writer, the scheduling reader and the roster's contact
+ * line below, so the three agree on when such a trip is over.
+ */
+const LAST_CALENDAR_DAY_ZONE = 'Etc/GMT+12';
+
 /** All live travel mutations pass here. Source comes from the authenticated
  * caller, never the JSON supplied by a model. Untagged legacy trips may be
- * replaced or cleared (owner ruling: old trip data is disposable). */
+ * replaced or cleared (owner ruling: old trip data is disposable), and so may
+ * an EXPIRED trip whatever its source. */
 function writeCurrentTravelById(personId: string, travel: CurrentTravel | null, source: CoreFieldSetBy): TravelWrite {
   const db = getDb();
   const row = db.prepare('SELECT currently_traveling FROM people_memory WHERE person_id = ?').get(personId) as { currently_traveling: string | null } | undefined;
@@ -279,15 +341,20 @@ function writeCurrentTravelById(personId: string, travel: CurrentTravel | null, 
   const same = travel && previous && travel.location === previous.location && travel.from === previous.from && travel.until === previous.until;
   const knownSource = previous?.source === 'owner' || previous?.source === 'person' || previous?.source === 'auto' ? previous.source : undefined;
   const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
-  const previousZone = previous?.location ? inferTimezoneFromStateStatic(previous.location) : null;
-  const expired = previousZone && typeof previous?.until === 'string'
+  const expiryZone = (previous?.location ? inferTimezoneFromStateStatic(previous.location) : null) ?? LAST_CALENDAR_DAY_ZONE;
+  const expired = typeof previous?.until === 'string'
     && /^\d{4}-\d{2}-\d{2}$/.test(previous.until)
-    && DateTime.fromISO(previous.until, { zone: previousZone }).isValid
-    && previous.until < DateTime.now().setZone(previousZone).toISODate()!;
+    && DateTime.fromISO(previous.until, { zone: expiryZone }).isValid
+    && previous.until < DateTime.now().setZone(expiryZone).toISODate()!;
   if (!travel && !row.currently_traveling) return 'already_set';
+  // The same trip at the same or a lower tier is nothing to do. (At a HIGHER
+  // tier it falls through and is re-stored under the raised source — the core
+  // chokepoint's "same value, raised authority" case.)
   if (same && (!knownSource || SET_BY_RANK[source] <= SET_BY_RANK[knownSource])) return 'already_set';
-  if (knownSource && !expired && SET_BY_RANK[source] < SET_BY_RANK[knownSource]) return same ? 'already_set' : 'refused_lower_authority';
-  if (same && source === knownSource) return 'already_set';
+  if (knownSource && !expired && SET_BY_RANK[source] < SET_BY_RANK[knownSource]) {
+    logRefusedLowerAuthority(personId, 'currently_traveling', travel ? `${travel.location} ${travel.from}..${travel.until}` : 'clear', knownSource, source);
+    return 'refused_lower_authority';
+  }
   const stored = travel ? JSON.stringify({ location: travel.location, from: travel.from, until: travel.until, source }) : null;
   db.prepare(`UPDATE people_memory SET currently_traveling = ?, updated_at = datetime('now') WHERE person_id = ?`).run(stored, personId);
   return 'applied';
@@ -310,7 +377,9 @@ export function clearCurrentTravelById(personId: string, source: CoreFieldSetBy)
  * trip apart from one that's merely on file for later). Returns the trip
  * record when it is not over relative to referenceDate, INCLUDING one that
  * hasn't started yet, or null. The default reference is destination-local today for callers
- * asking whether any active/future record exists. Dated consumers pass their
+ * asking whether any active/future record exists (UTC-12's date when the
+ * destination zone is unresolvable — LAST_CALENDAR_DAY_ZONE — so such a trip
+ * still ends instead of reading as active forever). Dated consumers pass their
  * destination-local calendar date, or null to load the full window and scope it downstream.
  * No read clears the record: UTC midnight cannot destroy a trip still active
  * in an owner's calendar, or a fact needed for historical dated rendering.
@@ -349,8 +418,8 @@ export function getTravelRecordById(
     const t = JSON.parse(row.currently_traveling) as CurrentTravel;
     if (!t.location || !t.from || !t.until) return null;
     const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
-    const zone = inferTimezoneFromStateStatic(t.location);
-    const day = referenceDate === undefined ? (zone ? DateTime.now().setZone(zone).toISODate() : null) : referenceDate;
+    const zone = inferTimezoneFromStateStatic(t.location) ?? LAST_CALENDAR_DAY_ZONE;
+    const day = referenceDate === undefined ? DateTime.now().setZone(zone).toISODate() : referenceDate;
     if (day !== null && t.until < day) return null;
     return t;
   } catch (_) {
@@ -976,6 +1045,7 @@ export function setCoreFieldWithProvenanceById(
     // provenance tag happens to be present: an untagged rank stays 0, so this
     // never fires for an untagged row (the lowest incoming rank is auto=1) while
     // a confirmed gender still defends itself.
+    logRefusedLowerAuthority(personId, field, next, currentSetBy ?? (field === 'gender' && row.confirmed ? 'person (legacy confirmation)' : 'untagged'), by);
     return 'refused_lower_authority';
   }
 
@@ -1015,6 +1085,20 @@ export function personIdForSlackId(slackId: string): string | null {
 }
 
 /**
+ * `last_seen` = the last time this person was ENGAGED (L1) — booked, messaged,
+ * written about, heard from — not the last time a sync touched the row. It
+ * gates the owner roster (25 most recent within 90 days) and orders name
+ * search. Stamped by resolvePerson (every find-or-create is an engagement; no
+ * reader calls it) and by appendPersonInteractionById (every logged exchange).
+ * Until 2026-09-12 only the Slack sync and the INSERT wrote it, so an
+ * external's last_seen equalled created_at forever: a person booked yesterday
+ * dropped off the roster 90 days after first contact.
+ */
+export function touchPersonSeenById(personId: string): void {
+  getDb().prepare(`UPDATE people_memory SET last_seen = datetime('now'), updated_at = datetime('now') WHERE person_id = ?`).run(personId);
+}
+
+/**
  * The native-script spelling of a name (`name_he` — Hebrew/Cyrillic/Arabic) is a
  * core field like any other: provenance-aware (owner > person > auto), so an owner
  * correction ("עידן not אידן") sticks and an auto guess (capture pass /
@@ -1031,7 +1115,6 @@ export function personIdForSlackId(slackId: string): string | null {
  * Create or update a contact in people_memory from a SLACK signal (users.info
  * pull, @mention resolve, colleague message, self-seed).
  * Safe to call repeatedly — only overwrites non-null fields.
- * Gender is only updated when a real value (not 'unknown') is supplied.
  *
  * v4.0.4 — identity resolution goes through `resolvePerson`, THE chokepoint.
  * Pre-fix this function ran its OWN `INSERT … ON CONFLICT(slack_id)`, which
@@ -1080,7 +1163,6 @@ export function upsertPersonMemory(params: {
    * read).
    */
   timezoneReadingAbsent?: boolean;
-  gender?: PersonGender;
   /**
    * Provenance tier for `name`/`timezone` in THIS call. Defaults to 'auto' —
    * every remaining caller (Slack users.info/profile pull, @mention resolve,
@@ -1117,33 +1199,17 @@ export function upsertPersonMemory(params: {
   });
   if (!resolved) return;
   const personId = resolved.person_id;
+  // `last_seen` was stamped by resolvePerson (hit or create). Gender is NOT
+  // written here: the old CASE UPDATE wrote the column raw — no
+  // `gender_set_by`, gated on the `gender_confirmed` mirror the charter says is
+  // not the check. Every gender write goes through setCoreFieldWithProvenanceById
+  // (the self-seed in core/assistantSelf.ts was this path's only supplier).
 
-  // NOTE: gender is only written when explicitly supplied AND not 'unknown'.
-  // Respect gender_confirmed: never overwrite a confirmed gender here. A
-  // confirmed update must go through confirmPersonGenderById().
-  db.prepare(`
-    UPDATE people_memory SET
-      gender           = CASE
-                           WHEN gender_confirmed = 1 THEN gender
-                           WHEN @gender != 'unknown' THEN @gender
-                           ELSE gender
-                         END,
-      last_seen        = datetime('now'),
-      updated_at       = datetime('now')
-    WHERE person_id = @person_id
-  `).run({
-    person_id: personId,
-    gender:    params.gender   ?? 'unknown',
-  });
-
-  // v4.7.5 — `name` rides the same provenance chokepoint as timezone/name_he
-  // (owner > person > auto), always stamped 'auto' here: this function is the
-  // Slack sync path (users.info / profile pull), never a stated correction.
-  // No tool currently writes `name` at 'person'/'owner' rank — a stated name
-  // correction still has nowhere to land (update_person_profile allowlists
-  // name_he, not name) — so this closes the SYNC half of the gap (a sync can
-  // no longer stomp a higher-authority value) ahead of the correction flow
-  // existing. The moment one is built, it is already protected.
+  // `name` rides the same provenance chokepoint as timezone/name_he (owner >
+  // person > auto): 'auto' from the Slack sync (users.info / profile pull),
+  // 'owner' from the config self-seeds. A stated correction ("call me Yoni")
+  // lands through update_person_profile's `name` field at the stater's rank,
+  // so a later sync can no longer stomp it.
   if (params.name) setCoreFieldWithProvenanceById(personId, 'name', params.name, params.by ?? 'auto');
 
   // Timezone rides the provenance chokepoint (owner > person > auto). It used to
@@ -1308,43 +1374,73 @@ export function resolveOutboundLanguageForPerson(person: PersonMemory | null | u
 
 /**
  * Update the structured profile for a person — merges supplied fields into
- * the existing profile, leaving unspecified fields untouched.
+ * the existing profile, leaving unspecified fields untouched, under the same
+ * authority chain as the core columns (owner > person > auto), tagged per
+ * field in `profile_json._set_by`. Empty / null / undefined values are skipped.
+ * Returns each attempted field's outcome so the caller can report what landed,
+ * what was already on file and what a higher authority refused — until
+ * 2026-09-12 this was last-writer-wins, so the capture pass's 'auto'
+ * role_summary overwrote an owner-stated one, and a colleague's self-written
+ * working window replaced the one the owner dictated, with no trace.
  */
-export function updatePersonProfile(slackId: string, updates: Partial<PersonProfile>): void {
+export function updatePersonProfile(slackId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
   const pid = personIdForSlackId(slackId);
-  if (pid) updatePersonProfileById(pid, updates);
+  return pid ? updatePersonProfileById(pid, updates, by) : {};
 }
 
 /** v3.2.0 — person_id-keyed worker. */
-export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>): void {
+export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
   const db = getDb();
-  const row = db.prepare('SELECT profile_json FROM people_memory WHERE person_id = ?').get(personId) as any;
-  if (!row) return;
+  const row = db.prepare('SELECT profile_json FROM people_memory WHERE person_id = ?').get(personId) as { profile_json: string | null } | undefined;
+  const outcomes: ProfileWriteOutcomes = {};
+  if (!row) return outcomes;
 
   const existing: PersonProfile = (() => {
     try { return JSON.parse(row.profile_json || '{}'); } catch { return {}; }
   })();
+  const tags: NonNullable<PersonProfile['_set_by']> = { ...(existing._set_by ?? {}) };
+  const newRank = SET_BY_RANK[by];
+  const present = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+  let changed = false;
+  for (const [key, value] of Object.entries(updates)) {
+    if (key === '_set_by' || key === 'updated_at' || !present(value)) continue;
+    const field = key as ProfileProvenanceField;
+    const current = existing[field];
+    const holder = tags[field];
+    const currentRank = holder ? SET_BY_RANK[holder] : 0;   // untagged legacy = unknown authority
+    if (present(current) && JSON.stringify(current) === JSON.stringify(value)) {
+      // Already what was asked — the only work left is raising the tag.
+      if (newRank <= currentRank) { outcomes[field] = 'already_set'; continue; }
+    } else if (present(current) && newRank < currentRank) {
+      logRefusedLowerAuthority(personId, field, value, holder!, by);
+      outcomes[field] = 'refused_lower_authority';
+      continue;
+    }
+    (existing as Record<string, unknown>)[field] = value;
+    tags[field] = by;
+    outcomes[field] = 'applied';
+    changed = true;
+  }
+  if (!changed) return outcomes;
 
-  const merged: PersonProfile = {
-    ...existing,
-    ...Object.fromEntries(Object.entries(updates).filter(([, v]) => v !== undefined && v !== null && v !== '')),
-    updated_at: new Date().toISOString().split('T')[0],
-  };
-
+  const merged: PersonProfile = { ...existing, _set_by: tags, updated_at: new Date().toISOString().split('T')[0] };
   db.prepare(`
     UPDATE people_memory SET profile_json = ?, updated_at = datetime('now') WHERE person_id = ?
   `).run(JSON.stringify(merged), personId);
+  return outcomes;
 }
 
 /**
  * Append a personal/relationship note about a contact.
  * For things like "has two kids", "loves Real Madrid", "goes by Ike".
  * Keep it to human context — work activity goes in appendPersonInteraction.
- * Keeps last 50 notes.
+ * Retains durable notes; readers bound their own context. `by` is the AUTHENTICATED writer's tier, stored on the
+ * note (PersonNote.set_by) so a reader can tell an owner assessment from a
+ * person's own word from a capture-pass guess.
  */
-export function appendPersonNote(slackId: string, note: string): void {
+export function appendPersonNote(slackId: string, note: string, by: CoreFieldSetBy): void {
   const pid = personIdForSlackId(slackId);
-  if (pid) appendPersonNoteById(pid, note);
+  if (pid) appendPersonNoteById(pid, note, by);
 }
 
 /**
@@ -1359,7 +1455,7 @@ export function appendPersonNote(slackId: string, note: string): void {
  * (which better-sqlite3 surfaces as an exception — caller's existing
  * try/catch handles non-fatal logging).
  */
-export function appendPersonNoteById(personId: string, note: string): void {
+export function appendPersonNoteById(personId: string, note: string, by: CoreFieldSetBy): void {
   const db = getDb();
   const txn = db.transaction((id: string, newNote: string) => {
     const row = db.prepare('SELECT notes FROM people_memory WHERE person_id = ?').get(id) as
@@ -1368,8 +1464,10 @@ export function appendPersonNoteById(personId: string, note: string): void {
     if (!row) return;
     const notes: PersonNote[] = JSON.parse(row.notes || '[]');
     const today = new Date().toISOString().split('T')[0];
-    notes.push({ date: today, note: newNote });
-    const trimmed = notes.slice(-50);   // keep last 50 — rich context, not expensive
+    notes.push({ date: today, note: newNote, set_by: by });
+    // Legacy notes have no work/social kind. Do not erase a durable fact on
+    // an invented classification; readers independently bound their context.
+    const trimmed = notes;
     db.prepare(`
       UPDATE people_memory
       SET notes = ?, updated_at = datetime('now')
@@ -1383,7 +1481,7 @@ export function appendPersonNoteById(personId: string, note: string): void {
  * Append an interaction to the chronological activity timeline for a contact.
  * For things like "booked meeting", "sent message", "had a conversation about X".
  * This is the activity log — separate from personal notes.
- * Keeps last 200 interactions (headlines are short, memory is cheap).
+ * Retains work history and the last 200 routine interactions.
  *
  * RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize. Same race
  * shape as appendPersonNote: capture-pass writes a "social_chat" summary in
@@ -1408,7 +1506,8 @@ export function appendPersonInteraction(slackId: string, interaction: Omit<Perso
  * owner books them, the last-N-interactions recall has the history.
  *
  * RMW guarded by BEGIN IMMEDIATE so concurrent writers serialize (same race
- * shape as appendPersonNote). Keeps the last 200 interactions.
+ * shape as appendPersonNote). Keeps work history and 200 routine interactions. Every logged
+ * exchange is an engagement, so it also stamps `last_seen` (touchPersonSeenById).
  */
 export function appendPersonInteractionById(personId: string, interaction: Omit<PersonInteraction, 'date'>): void {
   const db = getDb();
@@ -1423,11 +1522,13 @@ export function appendPersonInteractionById(personId: string, interaction: Omit<
     })();
 
     log.push({ date: new Date().toISOString(), ...entry });
-    const trimmed = log.slice(-200);
+    // Work history survives routine conversation churn. Keep every booking /
+    // coordination record and only bound the non-work tail.
+    const trimmed = retainInteractions(log);
 
     db.prepare(`
       UPDATE people_memory
-      SET interaction_log = ?, updated_at = datetime('now')
+      SET interaction_log = ?, last_seen = datetime('now'), updated_at = datetime('now')
       WHERE person_id = ?
     `).run(JSON.stringify(trimmed), id);
   });
@@ -1576,6 +1677,53 @@ export function searchPeopleMemoryEitherDirection(query: string): PersonMemory[]
   `).all({ q, paddedQuery }) as PersonMemory[];
 }
 
+export interface PersonNameLookup {
+  /** Genuine identity outcome; suggested near names never make a miss ambiguous. */
+  status: 'matched' | 'ambiguous' | 'not_found';
+  /** The one person this name genuinely identifies (whole-name match, one distinct identity), else null. */
+  match: PersonMemory | null;
+  /** Never bound — offered back so the caller can ask instead of guessing: the
+   *  distinct people who ALL genuinely carry the name (ambiguous), or, on a
+   *  miss, the people sharing a whole token with it ("Chris Ray" → "Christian Ray"). */
+  candidates: PersonMemory[];
+}
+
+/**
+ * THE name→person pick. One rule for every binder that starts from a display
+ * name (resolvePerson's name step, the person-write tools' owner path, the
+ * md-file slug resolver): `nameGenuinelyMatches` — a whole-name / whole-token
+ * match, never SQL LIKE's substring ("Dan" ≠ "Idan Cohen", "Simone" ≠
+ * "Simon") — then a DISTINCT-PERSON count (slack_id, else email, else row id,
+ * so two rows for one human never read as two people — L11), and a bind only
+ * when exactly one person is left. Anything else comes back as candidates, so
+ * a miss can say "Christian Ray?" instead of minting "Chris Ray" (which is
+ * what the old "exact else single LIKE hit" pick did on 2026-09-12). SELF
+ * rows are excluded before matching. Identity uniqueness is evaluated over the
+ * complete store, independently of the display search's result limit.
+ */
+export function findPersonByName(name: string): PersonNameLookup {
+  const q = (name ?? '').trim();
+  if (!q) return { status: 'not_found', match: null, candidates: [] };
+  const distinct = (rows: PersonMemory[]): PersonMemory[] => {
+    const seen = new Set<string>();
+    return rows.filter(r => {
+      const key = r.slack_id ?? (r.email ? r.email.toLowerCase() : r.person_id);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const rows = getDb().prepare("SELECT * FROM people_memory WHERE kind != 'self' ORDER BY last_seen DESC").all() as PersonMemory[];
+  const genuine = distinct(rows.filter(r => nameGenuinelyMatches(r.name, r.email, q)));
+  if (genuine.length === 1) return { status: 'matched', match: genuine[0], candidates: genuine };
+  if (genuine.length > 1) return { status: 'ambiguous', match: null, candidates: genuine };
+  // Miss: suggest people who share a whole token with the query — the same
+  // tokenizer nameGenuinelyMatches uses (whitespace / punctuation, any script).
+  const tokens = q.split(/[\s.\-_,]+/).filter(Boolean);
+  const near = tokens.flatMap(t => rows.filter(r => nameGenuinelyMatches(r.name, r.email, t)));
+  return { status: 'not_found', match: null, candidates: distinct(near).slice(0, 5) };
+}
+
 /** v3.2.0 — fresh surrogate id for a runtime-created person (no slack_id to
  *  derive from — e.g. a pure-email external first seen at booking time). */
 export function newPersonId(): string {
@@ -1595,12 +1743,11 @@ export function getPersonByEmail(email: string): PersonMemory | null {
   const e = (email ?? '').trim();
   if (!e) return null;
   const db = getDb();
-  return (db.prepare(`
+  const rows = db.prepare(`
     SELECT * FROM people_memory
     WHERE lower(email) = lower(?) AND kind != 'self'
-    ORDER BY (slack_id IS NOT NULL) DESC, last_seen DESC
-    LIMIT 1
-  `).get(e) as PersonMemory | null) ?? null;
+  `).all(e) as PersonMemory[];
+  return rows.length ? rows.reduce(canonicalSurvivor) : null;
 }
 
 // ── v4.0.4 — one human, one row ──────────────────────────────────────────────
@@ -1654,7 +1801,12 @@ function pickByProvenance(
 }
 
 /** Union two JSON arrays of dated records, dedup by `keyOf`, oldest→newest, capped. */
-function unionDated<T>(aJson: string, bJson: string, keyOf: (x: T) => string, dateOf: (x: T) => string, cap: number): string {
+function retainInteractions(log: PersonInteraction[]): PersonInteraction[] {
+  const routine = new Set(log.filter(i => !isBookingSnapshot(i)).slice(-200));
+  return log.filter(i => isBookingSnapshot(i) || routine.has(i));
+}
+
+function unionDated<T>(aJson: string, bJson: string, keyOf: (x: T) => string, dateOf: (x: T) => string, cap: number, retain?: (items: T[]) => T[]): string {
   const parse = (s: string): T[] => {
     try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? (v as T[]) : []; } catch { return []; }
   };
@@ -1668,20 +1820,46 @@ function unionDated<T>(aJson: string, bJson: string, keyOf: (x: T) => string, da
     out.push(item);
   }
   out.sort((x, y) => tsKey(dateOf(x)).localeCompare(tsKey(dateOf(y))));
-  return JSON.stringify(out.slice(-cap));
+  return JSON.stringify(retain ? retain(out) : out.slice(-cap));
 }
 
-/** Shallow-merge two PersonProfile blobs; non-empty keys from `a` win. */
+/** Merge two PersonProfile blobs field by field under the provenance chain:
+ *  the higher-tagged value wins (untagged = rank 0), a tie keeps `a`'s, and
+ *  the winning value's tag travels with it into the merged `_set_by`. */
 function mergeProfileJson(aJson: string, bJson: string): string {
   const parse = (s: string): Record<string, unknown> => {
     try { const v = JSON.parse(s || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}; }
     catch { return {}; }
   };
-  const merged = parse(bJson);
-  for (const [k, v] of Object.entries(parse(aJson))) {
-    if (v !== undefined && v !== null && v !== '') merged[k] = v;
+  const tagsOf = (p: Record<string, unknown>): Record<string, CoreFieldSetBy> =>
+    p._set_by && typeof p._set_by === 'object' ? (p._set_by as Record<string, CoreFieldSetBy>) : {};
+  const rankOf = (tag?: CoreFieldSetBy): number => (tag && SET_BY_RANK[tag]) || 0;
+  const present = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+  const a = parse(aJson); const b = parse(bJson);
+  const aTags = tagsOf(a); const bTags = tagsOf(b);
+  const merged: Record<string, unknown> = {};
+  const tags: Record<string, CoreFieldSetBy> = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (k === '_set_by') continue;
+    const fromA = present(a[k]) && (!present(b[k]) || rankOf(aTags[k]) >= rankOf(bTags[k]));
+    if (!fromA && !present(b[k])) continue;
+    merged[k] = fromA ? a[k] : b[k];
+    const tag = fromA ? aTags[k] : bTags[k];
+    if (tag) tags[k] = tag;
   }
+  if (Object.keys(tags).length > 0) merged._set_by = tags;
   return JSON.stringify(merged);
+}
+
+/**
+ * The canonical survivor shared by getPersonByEmail and email merges: a slack_id-bearing
+ * row wins, then the most recently seen; a tie keeps `a`. Automatic email
+ * lookup and assignment pick here, so a caller's own row cannot win merely by being the
+ * caller (setPersonEmail used to keep it whenever neither side had a slack_id).
+ */
+function canonicalSurvivor(a: PersonMemory, b: PersonMemory): PersonMemory {
+  if (!!a.slack_id !== !!b.slack_id) return a.slack_id ? a : b;
+  return tsKey(b.last_seen) > tsKey(a.last_seen) ? b : a;
 }
 
 /** Columns not on the PersonMemory interface but present on the row. */
@@ -1699,7 +1877,7 @@ type PersonRow = PersonMemory & { engagement_rank?: number; proactive_pending?: 
  * a slack_id-bearing row wins, then most-recently-seen) — the plan only
  * guarantees nothing is lost: handles are COALESCEd, provenance-tagged fields
  * keep the higher authority, notes / interaction_log are unioned + deduped,
- * profile_json is shallow-merged, `created_at` keeps the EARLIER date (we've
+ * profile fields keep the higher provenance (survivor wins ties), `created_at` keeps the EARLIER date (we've
  * known the person since then), and the recency stamps keep the LATER value.
  *
  * Two refusals here, both because merging would DESTROY identity rather than
@@ -1827,10 +2005,10 @@ export function planPersonMerge(survivorId: string, loserId: string) {
     timezone_temp:        survivor.timezone_temp ?? loser.timezone_temp ?? null,
     notes:                unionDated<PersonNote>(
                             survivor.notes, loser.notes,
-                            n => `${n.date ?? ''}|${n.note ?? ''}`, n => n.date ?? '', 50),
+                            n => `${n.date ?? ''}|${n.note ?? ''}`, n => n.date ?? '', Infinity),
     interaction_log:      unionDated<PersonInteraction>(
                             survivor.interaction_log, loser.interaction_log,
-                            i => `${i.date ?? ''}|${i.type ?? ''}|${i.summary ?? ''}`, i => i.date ?? '', 200),
+                            i => `${i.date ?? ''}|${i.type ?? ''}|${i.summary ?? ''}`, i => i.date ?? '', 200, retainInteractions),
     profile_json:         mergeProfileJson(survivor.profile_json, loser.profile_json),
     last_seen:            laterOf(survivor.last_seen, loser.last_seen),
     last_social_at:       laterOf(survivor.last_social_at, loser.last_social_at),
@@ -1993,14 +2171,15 @@ export function setPersonEmail(
     // A different address, and a higher authority owns the field — the auto
     // Slack sync cannot stomp a stated correction (untagged rows rank 0, so
     // this never fires for legacy data).
+    logRefusedLowerAuthority(personId, 'email', e, row.email_set_by!, by);
     return { personId, outcome: 'refused_lower_authority' };
   }
 
   const holder = getPersonByEmail(e);
   if (holder && holder.person_id !== personId) {
-    // Same address ⇒ same human. Collapse; the slack_id-bearing row survives
-    // (getPersonByEmail's canonical "Slack wins" order).
-    const survivorId = row.slack_id ? personId : (holder.slack_id ? holder.person_id : personId);
+    // Same address ⇒ same human. Collapse under the ONE survivor rule
+    // (canonicalSurvivor: Slack wins, then most recently seen).
+    const survivorId = canonicalSurvivor(row, holder).person_id;
     const loserId = survivorId === personId ? holder.person_id : personId;
     if (mergePersonRows(survivorId, loserId)) {
       // The merge picks the surviving row's email by provenance — which may be
@@ -2061,11 +2240,26 @@ export interface ResolvedPerson {
  *   - the address is already held by a row with a DIFFERENT slack_id → two
  *     Slack accounts, one address = two people. slack_id is the stronger
  *     handle, so the holder keeps the address and this caller gets its own row.
- *   - neither matches → unambiguous fuzzy name, else create.
+ *   - neither matches → the ONE person the name genuinely identifies
+ *     (findPersonByName: whole-name, distinct-person), and only if that row
+ *     doesn't already carry a DIFFERENT slack_id/email than the caller
+ *     supplied; else create — from a HANDLE (slack_id / email) only.
  * Because the slack_id lookup happens first, an attach can no longer collide
  * with the UNIQUE index at all — the old silently-swallowed catch is gone.
  *
- * Returns null only when given no usable handle at all.
+ * A bare name never mints a row and never binds a merely similar one. Until
+ * 2026-09-12 the name step took an exact match OR a single LIKE hit ("Dan" →
+ * "Idan Cohen"), bound it even when it held a different address (two humans,
+ * one row), and on a miss created a keyless source='manual' external — which
+ * is how "Chris Ray — we fired him" minted `p_mtxjgd6k_e3lj3e` beside the
+ * real Christian Ray. Name-only callers use findPersonByName directly for the
+ * miss's candidates; here a name-only miss is null.
+ *
+ * Every hit stamps `last_seen` (touchPersonSeenById): no reader calls this
+ * function — each caller IS an engagement (a booking, a message, a write
+ * about the person).
+ *
+ * Returns null when given no usable handle, or only a name that identifies nobody.
  */
 export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null {
   const db = getDb();
@@ -2091,18 +2285,22 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
     mergePersonRows(bySlack.person_id, emailRow.person_id);
   }
 
-  // 2. Target = the strongest handle that matched, else an unambiguous name.
+  // 2. Target = the strongest handle that matched, else the ONE person the name
+  //    genuinely identifies. A name is never strong enough to hand back a row
+  //    that already belongs to a DIFFERENT identity — another slack_id, or
+  //    another address when the caller supplied one (binding "Chris Ray
+  //    <chris@acme>" onto a same-named row holding a different email is how two
+  //    humans became one row, the incoming address silently `kept_existing`).
   let targetId = bySlack?.person_id ?? emailRow?.person_id;
   if (!targetId && name) {
-    const matches = searchPeopleMemory(name);
-    const exact = matches.filter(m => m.name.toLowerCase() === name.toLowerCase());
-    const pick = exact.length === 1 ? exact[0] : (matches.length === 1 ? matches[0] : null);
-    // A name is never strong enough to hand back a row that already belongs to
-    // a DIFFERENT Slack identity.
-    if (pick && !(slackId && pick.slack_id && pick.slack_id !== slackId)) targetId = pick.person_id;
+    const { match } = findPersonByName(name);
+    const otherSlack = !!(match && slackId && match.slack_id && match.slack_id !== slackId);
+    const otherEmail = !!(match && usableEmail && match.email && match.email.toLowerCase() !== usableEmail);
+    if (match && !otherSlack && !otherEmail) targetId = match.person_id;
   }
 
-  // 3. Enrich the matched row with whatever handle it doesn't have yet.
+  // 3. Enrich the matched row with whatever handle it doesn't have yet, and
+  //    stamp the engagement.
   if (targetId) {
     if (slackId && !getPersonById(targetId)?.slack_id) {
       // bySlack was empty ⇒ no row owns this slack_id ⇒ the UNIQUE index on
@@ -2116,11 +2314,13 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
       `).run(slackId, targetId);
     }
     if (usableEmail) targetId = setPersonEmail(targetId, usableEmail).personId ?? targetId;
+    touchPersonSeenById(targetId);
     const row = getPersonById(targetId);
     return row ? { person_id: row.person_id, created: false, row } : null;
   }
 
-  // 4. create — requires at least one handle.
+  // 4. create — from a HANDLE only. A bare name is not enough to mint a person.
+  if (!slackId && !usableEmail) return null;
   const personId = slackId ? `p_${slackId.replace(/[^A-Za-z0-9]/g, '_')}` : newPersonId();
   const ownerDomain = (input.ownerDomain ?? '').trim().toLowerCase();
   const kind: 'internal' | 'external' | 'self' =
@@ -2128,8 +2328,8 @@ export function resolvePerson(input: ResolvePersonInput): ResolvedPerson | null 
     ?? (slackId ? 'internal'
       : (usableEmail && ownerDomain && usableEmail.endsWith('@' + ownerDomain)) ? 'internal'
       : 'external');
-  const source = slackId ? 'slack' : (usableEmail ? 'calendar' : 'manual');
-  const displayName = name ?? (usableEmail ? usableEmail.split('@')[0] : (slackId ?? 'Unknown'));
+  const source = slackId ? 'slack' : 'calendar';
+  const displayName = name ?? (usableEmail ? usableEmail.split('@')[0] : slackId!);
   try {
     db.prepare(`
       INSERT INTO people_memory (person_id, slack_id, email, kind, source, name, gender, last_seen)
@@ -2297,9 +2497,10 @@ export function formatThreadPeopleBlock(
       : 'unknown';
     // v3.5.x — an `auto` gender (image/legacy name-guess) is NOT authoritative:
     // surface it as unknown so it can't drive gendered Hebrew forms (the Daniel
-    // mis-gender). Only a person/owner-confirmed gender steers. Mirrors the tz
+    // mis-gender). Only a human-stated gender steers (authoritativeGender —
+    // a NULL legacy tag is a guess too, not a confirmation). Mirrors the tz
     // unconfirmed-guess gate above.
-    const gender = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
+    const gender = authoritativeGender(p);
     lines.push(`- ${p.name}: email=${email}, tz=${tz}, gender=${gender}`);
   }
   if (lines.length === 0) return '';
@@ -2378,13 +2579,15 @@ export function formatPeopleMemoryForPrompt(
         const t = JSON.parse(p.currently_traveling) as CurrentTravel;
         const { inferTimezoneFromStateStatic } = require('../utils/locationTz') as typeof import('../utils/locationTz');
         const zone = inferTimezoneFromStateStatic(t.location);
-        const travelToday = zone ? DateTime.now().setZone(zone).toISODate()! : null;
-        if (!travelToday && t.location && t.from && t.until) {
-          travelTag = `, travel recorded to ${t.location} from ${t.from} until ${t.until} (destination timezone unresolved)`;
-        } else if (travelToday && t.location && t.until && t.until >= travelToday) {
-          travelTag = (t.from && t.from > travelToday)
-            ? `, upcoming travel to ${t.location} from ${t.from} until ${t.until}`
-            : `, currently in ${t.location} until ${t.until}`;
+        // An unresolvable destination is judged on UTC-12's date (LAST_CALENDAR_DAY_ZONE)
+        // so it, too, drops off the line once its window has ended everywhere.
+        const travelToday = DateTime.now().setZone(zone ?? LAST_CALENDAR_DAY_ZONE).toISODate()!;
+        if (t.location && t.from && t.until && t.until >= travelToday) {
+          travelTag = !zone
+            ? `, travel recorded to ${t.location} from ${t.from} until ${t.until} (destination timezone unresolved)`
+            : (t.from > travelToday)
+              ? `, upcoming travel to ${t.location} from ${t.from} until ${t.until}`
+              : `, currently in ${t.location} until ${t.until}`;
         }
       } catch (_) { /* fail silent — travel field stays unrendered */ }
     }
@@ -2449,9 +2652,10 @@ export function formatPeopleMemoryForPrompt(
     const langPart = outboundLang
       ? `, language_pref: ${outboundLang}`
       : `, language_pref: unknown — no inbound message or stored preference yet; default to English but don't present it as their known language`;
-    // v3.5.x — only a confirmed (person/owner) gender is authoritative; an `auto`
-    // guess renders 'unknown' so it can't steer gendered Hebrew forms.
-    const genderField = p.gender && p.gender !== 'unknown' && p.gender_set_by !== 'auto' ? p.gender : 'unknown';
+    // v3.5.x — only a human-stated (person/owner) gender is authoritative; an
+    // `auto` guess or an untagged legacy value renders 'unknown' so it can't
+    // steer gendered Hebrew forms (authoritativeGender).
+    const genderField = authoritativeGender(p);
     // Externals have no Slack account, so there is no slack_id to hand back —
     // rendering the column raw printed "slack_id: null" and invited the model to
     // pass that string to a tool. Their handle is the email.

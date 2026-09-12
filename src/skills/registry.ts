@@ -475,8 +475,9 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
  * (get_person_memory, manage_preference, update_my_preferences,
  * update_person_memory — the merged learn/forget/recall_preferences) are
  * deliberately NOT added here: they stay unreachable in a room regardless of
- * authority, both because they're absent from this set and because
- * core/assistant.ts:430's hard-block keys on senderRole, not authority.
+ * authority because they're absent from this set. AssistantSkill also
+ * explicitly refuses these tools on room surfaces; its WRITE authority
+ * comes from context.authority, while senderRole remains the DATA scope.
  */
 const OWNER_ROOM_ACTION_TOOLS = new Set<string>([
   ...COLLEAGUE_ALLOWED_TOOLS,
@@ -881,9 +882,9 @@ export async function executeSkillTool(
   //       Sonnet "can't call what it can't see" → the practical wall.
   //   (2) Hard-block at HANDLE — a small `ownerOnlyTools` Set in
   //       `core/assistant.ts` (executeToolCall) refuses 4 names if a
-  //       colleague-context turn somehow names them, keyed on senderRole
-  //       (not authority) so it stays absolute in a room regardless of who
-  //       is authenticated as acting.
+  //       non-owner somehow names them, keyed on authenticated authority.
+  //       Its separate surface === 'room' refusal keeps private memory reads
+  //       and the existing preference / markdown tools blocked in rooms.
   // Problem: (1) covers ~20 owner-only tools, (2) only 5. If (1) ever ships
   // a tool by accident (Module G coverage map gap — exactly how `web_research`
   // shipped to every owner turn pre-v3.3.0), the colleague path has no second
@@ -897,8 +898,8 @@ export async function executeSkillTool(
   // still dispatches against COLLEAGUE_ALLOWED_TOOLS unchanged. Data-only
   // tools (get_person_memory, manage_preference, update_my_preferences,
   // update_person_memory) are in neither set, so this chokepoint blocks them
-  // regardless of authority — core/assistant.ts:430's hard-block is a second,
-  // independent wall behind it.
+  // regardless of authority — AssistantSkill's explicit room-surface refusal
+  // also blocks them; its WRITE gates use authority, not the DATA scope.
   if (context.senderRole === 'colleague') {
     const actionFloor = context.authority === 'owner' ? OWNER_ROOM_ACTION_TOOLS : COLLEAGUE_ALLOWED_TOOLS;
     if (!actionFloor.has(toolName)) {
@@ -962,12 +963,16 @@ export async function executeSkillTool(
   // v2.6.4 — fall through to the Connection for THIS transport (find_slack_channel
   // etc.). v4.3.0 (#24) — scoped to context.channel only, same seam-fix as
   // getSkillTools above: a tool call that arrived on one transport must never
-  // dispatch to a DIFFERENT transport's Connection.
+  // dispatch to a DIFFERENT transport's Connection. The turn's surface rides
+  // along (#154 field, resolved once at the transport front door — read here,
+  // never re-derived): a Connection-owned tool that returns stored data about
+  // a person scopes its payload by it in code (W9) — find_slack_user hands a
+  // room identity only (connections/slack/index.ts, projectDirectoryMatch).
   const profileId = context.profile.user.slack_user_id;
   const conn = getConnection(profileId, context.channel);
   if (conn?.executeToolCall) {
     try {
-      const result = await conn.executeToolCall(toolName, args);
+      const result = await conn.executeToolCall(toolName, args, { surface: context.surface });
       if (result !== null) {
         logger.info('Tool executed', { tool: toolName, connection: conn.id });
         return result;

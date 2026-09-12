@@ -2,7 +2,7 @@ const assert=require('node:assert/strict'),{test}=require('node:test'),fs=requir
 const {DateTime,Settings,IANAZone}=require('luxon'),Database=require('better-sqlite3');
 // Durable actual-module regressions. Default execution needs no ignored evidence files.
 const root=path.resolve(__dirname,'..'),baseline='cc532f74fc1696516c845ea3f7e1021fe4b8067b',before=process.env.LIBRARIAN_BEFORE==='1',compiled=new Map();
-const actual=new Set(['src/db/people.ts','src/db/jobs.ts','src/core/requests/types.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/attendeeAvailability.ts','src/utils/timezoneConvert.ts','src/utils/responseDeadline.ts','src/tasks/dispatchers/summaryActionFollowup.ts']);
+const actual=new Set(['src/memory/resolveAttendeeEmails.ts','src/db/people.ts','src/db/jobs.ts','src/core/requests/types.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/attendeeAvailability.ts','src/utils/timezoneConvert.ts','src/utils/responseDeadline.ts','src/tasks/dispatchers/summaryActionFollowup.ts']);
 actual.add('src/skills/summary.ts');actual.add('src/tasks/index.ts');
 actual.add('src/utils/workHours.ts');
 const days=['Monday','Tuesday','Wednesday','Thursday','Friday'];let now=Date.parse('2026-09-11T12:00:00Z');
@@ -29,9 +29,9 @@ function harness(options={}){
  'src/connections/registry.ts':{getConnection:()=>options.noConnection?undefined:{sendDirect:async(id,text)=>{sends.push({id,text});return options.sendFailure?{ok:false,reason:'error'}:{ok:true};},postToChannel:async(id,text)=>{sends.push({id,text});return {ok:true};}}},
  'src/tasks/index.ts':{completeTask:id=>taskUpdates.push({id,complete:true}),updateTask:(id,p)=>taskUpdates.push({id,...p})},
  'src/db/requests.ts':{createRequest:p=>{requests.push(JSON.parse(JSON.stringify(p)));return {id:'req_fixture'};}},'src/core/requests/closeRequest.ts':{},
- 'src/memory/peopleMemory.ts':{},'src/utils/skillPreferences.ts':{},
+ 'src/memory/peopleMemory.ts':{syncPersonOperationalSections:async()=>true},'src/utils/skillPreferences.ts':{},
  'src/utils/resolveSlackId.ts':{SLACK_ID_RE:/^U[A-Z]+$/,resolveSlackId:(id)=>({slack_id:id||undefined,was_hallucinated:false})},
- 'src/memory/resolveAttendeeEmails.ts':{nameGenuinelyMatches:(a,b)=>a===b},
+
  'src/connectors/graph/calendar.ts':{},'src/skills/knowledge.ts':{},'src/utils/extractJson.ts':{},'src/utils/threadActivity.ts':{reactActivityComplete:noop},'src/tasks/dispatchers.ts':{DISPATCHERS:{}},
  };
  if(options.actualTasks)delete mocks['src/tasks/index.ts'];
@@ -50,7 +50,7 @@ function harness(options={}){
   vm.runInNewContext('(function(require,module,exports){'+compiled.get(rel)+'\n})',{Date:Clock,console,Set,Map,Buffer,setTimeout},{filename:rel})(req,mod,mod.exports);return mod.exports;
  }
  const person=()=>sqlite.prepare('SELECT * FROM people_memory WHERE person_id=?').get(row.person_id);
- const tool=(args,role='owner')=>new(load('src/core/assistant.ts').AssistantSkill)().executeToolCall('update_person_profile',{colleague_name:row.name,...(row.slack_id?{colleague_slack_id:row.slack_id}:{}),...args},{profile,userId:role==='owner'?'UOWNER':'UCOLLEAGUE',senderRole:role,channelId:'DOWNER'});
+ const tool=(args,role='owner')=>new(load('src/core/assistant.ts').AssistantSkill)().executeToolCall('update_person_profile',{colleague_name:row.name,...(row.slack_id?{colleague_slack_id:row.slack_id}:{}),...args},{profile,userId:role==='owner'?'UOWNER':'UCOLLEAGUE',senderRole:role,authority:role,surface:role==='owner'?'owner_dm':'colleague_dm',channelId:'DOWNER'});
  const entry=()=>{const a=load('src/utils/attendeeAvailability.ts');return a.loadAttendeeAvailabilityForEmails([row.email],profile.user.email,profile.user.timezone)?.[0];};
  return {load,sqlite,person,tool,entry,profile,sends,taskUpdates,requests,logs,modelCalls:()=>modelCalls,setNow:s=>{now=Date.parse(s);},
  summary:(task)=>load('src/tasks/dispatchers/summaryActionFollowup.ts').dispatchSummaryActionFollowup(null,task||{id:'task_fixture',owner_user_id:'UOWNER',owner_channel:'DOWNER',context:JSON.stringify({target_slack_id:row.slack_id,target_name:row.name,action_description:'send the draft'})},profile),

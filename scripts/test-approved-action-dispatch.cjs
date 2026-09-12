@@ -269,8 +269,7 @@ async function main() {
     catch (err) { results.push({ id: c.id, pass: false, reason: err.message }); }
   }
   const report = { phase: repairBefore ? 'repair-before' : before ? 'baseline' : 'after', beforeRevision: before ? '3f2f17e' : 'approval-audit-20260911-action-dispatch-1', passed: results.filter(x => x.pass).length, failed: results.filter(x => !x.pass).length, cases: results };
-  fs.mkdirSync(evidenceDir, { recursive: true });
-  fs.writeFileSync(path.join(evidenceDir, `action-dispatch-attempt2-${report.phase}.json`), JSON.stringify(report, null, 2));
+  if (process.env.WORKSHOP_TEST_OUTPUT_DIR) fs.writeFileSync(path.join(process.env.WORKSHOP_TEST_OUTPUT_DIR, `action-dispatch-${report.phase}.json`), JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ ...report, cases: results.filter(x => !x.pass) }, null, 2));
   process.exitCode = report.failed ? 1 : 0;
 }

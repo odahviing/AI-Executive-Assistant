@@ -11,9 +11,13 @@ import logger from './logger';
 
 export function detectGenderFromPronouns(pronouns: string | undefined): PersonGender {
   if (!pronouns) return 'unknown';
-  const p = pronouns.toLowerCase();
-  if (p.includes('he/') || p.startsWith('he ') || p === 'he' || p.includes('/him')) return 'male';
-  if (p.includes('she/') || p.startsWith('she ') || p === 'she' || p.includes('/her')) return 'female';
+  // Match whole tokens in the structured pronouns field: "she/her" contains
+  // the substring "he/", which previously misread a woman's declaration.
+  const tokens = pronouns.toLowerCase().split(/[\s/,]+/);
+  const male = tokens.includes('he') || tokens.includes('him');
+  const female = tokens.includes('she') || tokens.includes('her');
+  if (male && !female) return 'male';
+  if (female && !male) return 'female';
   return 'unknown';
 }
 
@@ -191,8 +195,8 @@ export async function detectGenderFromSelfDeclaredMorphology(
  *                               form is unavoidable. We NEVER guess from the name.
  *
  * Runs fire-and-forget in the background — never blocks message handling.
- * Skips entirely if gender is already known (confirmed or not) — this is also
- * what caps step 2's cost at one Haiku call per person ever, not per turn.
+ * Known gender skips the model tiers; deterministic pronoun corrections still run.
+ * This preserves the existing model-call gate.
  */
 export async function detectAndSaveGender(params: {
   slackId: string;
@@ -209,17 +213,16 @@ export async function detectAndSaveGender(params: {
 }): Promise<void> {
   const { slackId, name, pronouns, imageUrl, botToken, selfText } = params;
 
-  // Skip if we already have a value — a tentative guess is still better than
-  // nothing and can be overwritten on the NEXT strong signal via the normal
-  // upsert paths. A confirmed value is also skipped here (can't be overridden
-  // by auto-detection regardless).
   const existing = getPersonMemory(slackId);
-  if (existing?.gender && existing.gender !== 'unknown') return;
+  // Deterministic declarations can correct an old guess without spending an
+  // additional model call. Known values still skip morphology and vision.
+  const pronounGender = detectGenderFromPronouns(pronouns);
+  if (existing?.gender && existing.gender !== 'unknown' && pronounGender === 'unknown') return;
 
   // Step 1 — pronouns. A Slack pronouns field is the person's OWN declaration,
   // so record it as 'person': it steers gendered forms and an 'auto' signal
   // can't clobber it (owner can still override).
-  let gender = detectGenderFromPronouns(pronouns);
+  let gender = pronounGender;
   let setBy: CoreFieldSetBy = 'person';
   let source: 'pronouns' | 'image' | 'self_declaration' = 'pronouns';
 
@@ -233,15 +236,6 @@ export async function detectAndSaveGender(params: {
   // gate is the only Hebrew-specific line, so widening to Arabic/Russian
   // later is a one-line change here, not a signature change there.
   //
-  // "The person can always override their own value" (owner decision) is NOT
-  // this function re-firing — the skip-if-known guard above means this whole
-  // pass only ever runs once per person. The override path is the explicit
-  // `confirm_gender` tool (assistant.ts → confirmPersonGenderById), which
-  // writes through setCoreFieldWithProvenanceById directly. That rank check
-  // only refuses a write when the incoming rank is STRICTLY LOWER than the
-  // current one (people.ts:setCoreFieldWithProvenanceById), so a person's own later correction —
-  // arriving at the same 'person' rank as whatever is already stored — always
-  // lands; verified in the store, no change needed there.
   if (gender === 'unknown' && selfText && detectMessageLanguage(selfText) === 'Hebrew') {
     gender = await detectGenderFromSelfDeclaredMorphology(selfText, 'Hebrew');
     setBy = 'person';

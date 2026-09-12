@@ -42,7 +42,7 @@ export function selfSlackId(ownerSlackId: string): string {
  * wrong assistant.email that never matched a real mailbox, corrected months
  * later to one that does) never propagated, because upsertPersonMemory —
  * which DOES reconcile all three safely (setPersonEmail's merge-safe
- * overwrite, the timezone provenance chokepoint, the gender_confirmed guard)
+ * overwrite and the timezone provenance chokepoint)
  * — was never called again after boot #1. Now every field is compared, and
  * ANY drift re-runs the same safe upsert.
  */
@@ -61,11 +61,6 @@ export function seedAssistantSelf(profile: UserProfile): void {
     name: profile.assistant.name,
     email: profile.assistant.email,
     timezone: profile.user.timezone,
-    // Default assumption — 'Maelle' reads as female. Owner can override via
-    // confirm_gender if the assistant persona should be different.
-    // upsertPersonMemory never overwrites a confirmed gender
-    // (gender_confirmed=1), so re-asserting this on every reconcile is safe.
-    gender: 'female',
     // name/timezone here are OWNER-AUTHORED CONFIG (profile.assistant.name /
     // profile.user.timezone), never a live Slack read — 'owner' rank so a
     // later config correction always lands on the permanent column instead of
@@ -87,9 +82,8 @@ export function seedAssistantSelf(profile: UserProfile): void {
  * Returns '' when there are no interesting facts to render — we don't want an
  * empty block polluting the prompt on a fresh install.
  *
- * includeMutationHint=true (owner-only) appends the synthetic slack_id so the
- * LLM knows how to call note_about_person / update_person_profile on itself
- * when the owner teaches it something.
+ * includeMutationHint=true (owner-only) points to note_about_self. The shared
+ * person-write tools also resolve the configured assistant name to this row.
  */
 export function formatAssistantSelfForPrompt(
   profile: UserProfile,
@@ -108,7 +102,7 @@ export function formatAssistantSelfForPrompt(
 
   // If there's nothing substantive, skip the block entirely.
   const anyProfile =
-    prof.engagement_level || prof.communication_style || prof.language_preference ||
+    prof.communication_style || prof.language_preference ||
     prof.working_hours || prof.role_summary || prof.collaboration_notes;
   if (notes.length === 0 && !anyProfile && log.length === 0) {
     return includeMutationHint

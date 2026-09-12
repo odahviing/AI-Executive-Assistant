@@ -192,7 +192,7 @@ export function resolveNamedInternalAttendees(params: {
         && nameGenuinelyMatches(m.name, m.email, name),
       );
       // Collapse duplicate rows for the SAME person before the ambiguity test.
-      // people_memory legitimately holds two rows for one human — a
+      // Legacy data can still hold duplicate rows for one human — a
       // calendar-sourced, email-only row (slack_id NULL) and the later
       // Slack-sourced row, sharing one email (e.g. luke.j@reflectiz.com). Those
       // are ONE internal person, not an ambiguous pair: email is the logical key

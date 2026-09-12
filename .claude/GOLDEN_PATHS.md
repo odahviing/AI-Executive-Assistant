@@ -51,7 +51,7 @@
 ## Identity
 
 - **Z23 · A short name matching two people → refuses to guess.** lane: `librarian` · anchors: `src/utils/resolveSlackId.ts:101-118` (whole-token `nameGenuinelyMatches` + `distinct.size === 1` gate) · trace: "Dan" matches Idan and Dan → >1 distinct identity → null, tool asks for disambiguation · expect: never first-seen-wins.
-- **Z24 · A stated correction (email/timezone/name) is saved durably at its provenance tier and a sync can't stomp it.** lane: `librarian` · anchors: `src/db/people.ts:1966` (`email_set_by`, written only by `setPersonEmail`; sibling `name_set_by`/timezone tiers) · trace: person-stated correction → provenance column set → routine directory sync writes at lower authority and loses · expect: a correction survives the next sync.
+- **Z24 · A stated correction (email/timezone/name) is saved durably at its provenance tier and a sync can't stomp it.** lane: `librarian` · anchors: `src/db/people.ts:2144` (`email_set_by`, written only by `setPersonEmail`; sibling `name_set_by`/timezone tiers) · trace: person-stated correction → provenance column set → routine directory sync writes at lower authority and loses · expect: a correction survives the next sync.
 - **Z25 · An external attendee resolved once is reused, not re-guessed.** lane: `librarian` · anchors: `src/skills/meetings/bookingRequest.ts:315-336` (directory override + `emailStatedByHuman` tier) · trace: same external contact booked again later in the conversation → confident whole-name directory match overrides a model-typed email; a human-typed email outranks both, and either swap is stated in the reply · expect: no `@example.com`-class fabrication reaches Graph.
 
 ## Transport

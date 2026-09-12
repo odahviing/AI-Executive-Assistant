@@ -1,8 +1,8 @@
 /**
  * v3.0.6 — auto-write a booking record into each non-owner attendee's
- * person_memory md file when a meeting is successfully booked / moved /
- * finalized via coord. Code-driven (no Sonnet judgment), runs once per
- * mutation. Closes the gap surfaced 2026-05-25 where Maelle had booked a
+ * person_memory md file when a meeting is successfully booked, including
+ * bookings finalized via coord. Code-driven, once per completed booking.
+ * Closes the gap surfaced 2026-05-25 where Maelle had booked a
  * Modiin lunch meeting with Natan earlier in the day but had NO memory of
  * the venue she'd negotiated when asked about it that night — because the
  * existing capturePass only runs on COLLEAGUE DM threads, not on owner DM
@@ -53,14 +53,12 @@ export interface RecordBookingParams {
    * differently-spelled name (closes the duplicate-row edge).
    */
   attendees: Array<{ email: string; name?: string; slack_id?: string }>;
-  /** Kind of mutation — drives the verb in the line. */
-  mutation: 'booked' | 'moved' | 'updated';
+  /** This producer records completed bookings only. */
+  mutation: 'booked';
 }
 
 const VERB_BY_MUTATION: Record<RecordBookingParams['mutation'], string> = {
   booked: 'Booked',
-  moved: 'Moved',
-  updated: 'Updated',
 };
 
 // v3.1.7 — meeting attendees aren't always people. Recording/notetaker bots
@@ -92,7 +90,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { resolvePerson, appendPersonInteractionById } = require('../db') as typeof import('../db');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { writePersonSection, readPersonMemorySync } = require('./peopleMemory') as typeof import('./peopleMemory');
+    const { writePersonSection } = require('./peopleMemory') as typeof import('./peopleMemory');
 
     const ownerEmail = params.profile.user.email.toLowerCase();
     const ownerDomain = ownerEmail.split('@')[1] ?? '';
@@ -104,7 +102,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     const tz = params.profile.user.timezone;
 
     const whenDt = DateTime.fromISO(params.startIso, { zone: tz });
-    const dateStr = whenDt.isValid ? whenDt.toFormat('yyyy-MM-dd') : '????-??-??';
+    const dateStr = new Date().toISOString().split('T')[0];
     const whenLabel = whenDt.isValid ? whenDt.toFormat('EEE d MMM HH:mm') : params.startIso;
     const verb = VERB_BY_MUTATION[params.mutation];
     const locPart = params.location && params.location.trim().length > 0
@@ -132,7 +130,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       // the last-N-interactions recall (used when booking) includes externals.
       try {
         appendPersonInteractionById(person.person_id, {
-          type: params.mutation === 'booked' ? 'meeting_booked' : 'coordination',
+          type: 'meeting_booked',
           summary: `${verb} "${params.subject}"${locPart} for ${whenLabel}`,
         });
       } catch (err) {
@@ -140,28 +138,13 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
       }
 
       // Then the md narrative note, keyed by person_id.
-      const existing = readPersonMemorySync(params.profile, person.person_id, person.name) ?? '';
-
-      // Append the new line to "What we've discussed" — DON'T replace.
-      // Match capturePass behavior: append latest line, keep history.
-      const sectionRegex = /## What we've discussed\s*\n([\s\S]*?)(?=\n## |\n*$)/i;
-      let newBody: string;
-      const m = existing.match(sectionRegex);
-      if (m && m[1].trim().length > 0) {
-        // Existing body — append the new line.
-        newBody = `${m[1].trim()}\n${newLine}`;
-      } else {
-        // Section absent or empty — start fresh.
-        newBody = newLine;
-      }
-
       try {
         await writePersonSection({
           profile: params.profile,
           personId: person.person_id,
           displayName: person.name,
           section: "What we've discussed",
-          text: newBody,
+          text: newLine, append: true,
         });
       } catch (err) {
         logger.warn('recordBooking: writePersonSection failed for attendee', {

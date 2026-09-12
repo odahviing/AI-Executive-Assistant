@@ -212,7 +212,8 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   const ownerDomain = profile.user.email.trim().toLowerCase().split('@')[1] ?? '';
   const isMeaningfulParticipant = (email: string): boolean =>
     !ownerAddresses.includes(email) && email !== mailboxEmail && email !== assistantEmail && !isNonHumanAttendee(email);
-  const externalParticipants = extracted.participants.filter(isMeaningfulParticipant);
+  const externalParticipants = extracted.participants.filter(p => isMeaningfulParticipant(p.email));
+  const externalParticipantEmails = externalParticipants.map(p => p.email);
 
   // ── Person store (#24) — resolve-or-create a row for each address on
   // the message Maelle is ACTING on, never for one seen only in the deeper
@@ -221,11 +222,18 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // enforced upstream; this loop just earns the row for exactly that
   // (now-filtered) set. Fires here — independent of whether a booking ever
   // happens — because being addressed on the chain she was asked to act on
-  // IS the engagement (L1), the same "found → upserted" shape the Slack
-  // directory search uses (connections/slack/index.ts:311).
-  for (const email of externalParticipants) {
+  // IS the engagement (L1).
+  //
+  // The display name the header carried travels WITH the address (L11 — one
+  // person, one record): a fresh row is named by the human, not the address's
+  // local part, and the store's own name rule (resolvePerson, db/people.ts)
+  // can bind this address onto a row it already holds for that person without
+  // it — an owner-noted external, or the same human's later Slack row. The
+  // name is a forwarded-header claim, so it is a handle the store may match
+  // on, never an authority: an existing row's name is not rewritten here.
+  for (const { email, name } of externalParticipants) {
     try {
-      resolvePerson({ email, ownerDomain });
+      resolvePerson({ email, name, ownerDomain });
     } catch (err) {
       logger.warn('Email inbound — resolvePerson failed for an extracted participant', {
         err: String(err).slice(0, 200),
@@ -357,7 +365,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   }
 
   const participantsLine = externalParticipants.length > 0
-    ? `Extracted participants from the forwarded header: ${externalParticipants.join(', ')}`
+    ? `Extracted participants from the forwarded header: ${externalParticipants.map(p => (p.name ? `${p.name} <${p.email}>` : p.email)).join(', ')}`
     : 'No participant addresses could be extracted from the forwarded header — ask if attendees are unclear.';
 
   const turnText = [
@@ -402,7 +410,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     // resolves ADDRESSES an internal-name lookup could never produce (an
     // external is never in people_memory under the owner's own domain) — one
     // authoritative route, two contributors, not a second competing spine.
-    extractedAttendeeEmails: externalParticipants,
+    extractedAttendeeEmails: externalParticipantEmails,
   });
 
   // ── Output-time gate stack (#24) — the FIRST transport-neutral entry into

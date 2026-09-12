@@ -18,9 +18,8 @@
  *   - The per-sender SOCIAL CONTEXT block (buildSocialContextBlock) loads
  *     the SENDER's own row. For owner-as-sender, that's the owner row.
  *
- * Pre-seeding ensures the row exists from the first message — without it,
- * note_about_self would fail because appendPersonNote/recordSocialMoment
- * silently no-op on missing rows.
+ * Pre-seeding ensures the owner's own work/social history has a row from the
+ * first message. note_about_self is Maelle's identity row on the owner path.
  */
 
 import { getPersonMemory, upsertPersonMemory } from '../db';

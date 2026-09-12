@@ -16,14 +16,14 @@ function harness({ captureFailure = false, profileFailure = false } = {}) {
     const ddl = schema.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\([\\s\\S]*?\\n    \\);`));
     assert.ok(ddl, table); db.exec(ddl[0]);
   }
-  db.exec(`CREATE TABLE people_memory (person_id TEXT PRIMARY KEY, slack_id TEXT UNIQUE, name TEXT, notes TEXT DEFAULT '[]', interaction_log TEXT DEFAULT '[]', profile_json TEXT DEFAULT '{}', engagement_rank INTEGER DEFAULT 2, last_social_at TEXT, last_initiated_at TEXT, last_social_capture_unknown_at TEXT, updated_at TEXT)`);
+  db.exec(`CREATE TABLE people_memory (person_id TEXT PRIMARY KEY, slack_id TEXT UNIQUE, name TEXT, notes TEXT DEFAULT '[]', interaction_log TEXT DEFAULT '[]', profile_json TEXT DEFAULT '{}', engagement_rank INTEGER DEFAULT 2, last_social_at TEXT, last_initiated_at TEXT, last_social_capture_unknown_at TEXT, last_seen TEXT, updated_at TEXT)`);
   for (const id of ['U_OWNER', 'U_PERSON']) db.prepare('INSERT INTO people_memory(person_id,slack_id,name) VALUES (?,?,?)').run(id,id,id);
   const modules = new Map();
   const logs = [];
   let random = 0;
   const logger = { info: (...x) => logs.push(x), warn: (...x) => logs.push(x), error: (...x) => logs.push(x) };
   const capture = { marked: false, modelCalls: 0, failureMode: captureFailure?'all':profileFailure?'profile':'none', humanTs:String(Date.now()/1000) };
-  const allowed = new Set(['src/skills/social.ts', 'src/db/people.ts', 'src/db/socialSubjects.ts', 'src/db/engagementRank.ts', 'src/core/social/stateMachine.ts', 'src/core/social/logEngagement.ts', 'src/memory/capturePass.ts', 'src/utils/extractJson.ts']);
+  const allowed = new Set(['src/memory/resolveAttendeeEmails.ts','src/skills/social.ts', 'src/db/people.ts', 'src/db/socialSubjects.ts', 'src/db/engagementRank.ts', 'src/core/social/stateMachine.ts', 'src/core/social/logEngagement.ts', 'src/memory/capturePass.ts', 'src/utils/extractJson.ts']);
   function load(rel) {
     if (modules.has(rel)) return modules.get(rel).exports;
     assert.ok(allowed.has(rel), `Unexpected module ${rel}`);
@@ -67,7 +67,7 @@ function harness({ captureFailure = false, profileFailure = false } = {}) {
   const skill = new (load('src/skills/social.ts').SocialSkill)();
   const engagement = load('src/core/social/logEngagement.ts');
   return { db, people, subjects, state, skill, engagement, capture, runCapture:()=>load('src/memory/capturePass.ts').runCapturePass(profile), random: n => {random=n;},
-    note: (sender, target, note = 'PRIVATE owner assessment', initiated_by = 'maelle') => skill.executeToolCall('note_about_person', { colleague_slack_id: target, colleague_name: target, note, topic: 'gaming', subject: 'a game', initiated_by }, { profile, userId: sender, senderRole: sender === 'U_OWNER' ? 'owner' : 'colleague' }),
+    note: (sender, target, note = 'PRIVATE owner assessment', initiated_by = 'maelle') => skill.executeToolCall('note_about_person', { colleague_slack_id: target, colleague_name: target, note, topic: 'gaming', subject: 'a game', initiated_by }, { profile, userId: sender, senderRole: sender === 'U_OWNER' ? 'owner' : 'colleague', authority: sender === 'U_OWNER' ? 'owner' : 'colleague', surface: sender === 'U_OWNER' ? 'owner_dm' : 'colleague_dm' }),
     pick: personSlackId => state.directiveForProactiveSlot({ personSlackId, ownerUserId: 'U_OWNER', ownerTimezone:'UTC' }),
   };
 }

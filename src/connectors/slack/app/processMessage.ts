@@ -14,6 +14,8 @@ import {
   appendToConversation,
   auditLog,
   logEvent,
+  getPersonMemory,
+  touchPersonSeenById,
   upsertPersonMemory,
   getSummarySessionByThread,
 } from '../../../db';
@@ -175,9 +177,27 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       outcome: 'success',
     });
 
+    // An authenticated owner turn counts as engagement on every surface.
+    // Refresh only presence on an existing row: replaying the configured name
+    // at owner rank would overwrite an accepted name correction. Config seeds
+    // a missing row only; no Slack profile read or timezone/email sync occurs.
+    if (authority === 'owner') {
+      try {
+        const ownerMemory = getPersonMemory(user.slack_user_id);
+        if (ownerMemory) {
+          touchPersonSeenById(ownerMemory.person_id);
+        } else {
+          upsertPersonMemory({ slackId: user.slack_user_id, name: user.name, by: 'owner' });
+        }
+      } catch (err) {
+        logger.warn('owner last_seen stamp failed — continuing', { err: String(err).slice(0, 200) });
+      }
+    }
+
     // If this is from a colleague — identify them FIRST, then check active jobs
     // Owner-in-group / owner-in-channel gets colleague TOOLS but skips the colleague
-    // funnel (no self-upsert, no coord/outreach intercept). The pending-request
+    // funnel (no Slack-read self-upsert — his presence stamp is the block above —
+    // no coord/outreach intercept). The pending-request
     // rate limit lives at creation time now (`colleaguePendingCapRefusal`, keyed
     // on `authority`, src/tasks/skill.ts) and never applied to the owner anyway.
     // Report row 146b — ONE users.info fetch for this senderId, hoisted above

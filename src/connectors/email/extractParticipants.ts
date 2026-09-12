@@ -16,6 +16,16 @@
  * model as conversation context separately (read wide) — this is only the
  * deterministic attendee hint layered on top.
  *
+ * Each participant is the ADDRESS plus the DISPLAY NAME written beside it on
+ * that header line ("Nikki Hardee <nhardee@kevel.com>"). The name travels to
+ * the person store with the address (connectors/email/inbound.ts) so a fresh
+ * row is named by the human rather than the address's local part, and so the
+ * store's own name rule (db/people.ts resolvePerson) can bind the address
+ * onto a row it already holds for that person without it — an owner-noted
+ * external, or the same human's Slack row (L11 — one person, one record).
+ * Before this the name was dropped here, and the live store carried rows
+ * named "nhardee", "nikki", "lyz" that could never meet an existing row.
+ *
  * Correctness here is guaranteed SOCIALLY, not syntactically (owner
  * decision): the reply names the attendees extracted, the owner reads it
  * before forwarding it on, so a miss is visible rather than silent. The RFC
@@ -92,10 +102,21 @@ export interface EmailTimezoneHint {
   statedTimezone: string;
 }
 
+export interface ForwardedParticipant {
+  /** Lowercased address from the ORIGINAL forwarded message's top header block. */
+  email: string;
+  /** The display name written beside that address on the same header line,
+   *  exactly as written; null for a bare address (or an address-shaped
+   *  "name" — a mail client rendering `addr <addr>`). A forwarded-header
+   *  CLAIM, so the store treats it as a handle it may match on, never as an
+   *  authority: an existing row's name is not rewritten from it. */
+  name: string | null;
+}
+
 export interface ExtractedParticipants {
-  /** Email addresses on the ORIGINAL forwarded message's top header block.
-   *  Empty when this isn't a genuine forward, or none were found. */
-  participants: string[];
+  /** People on the ORIGINAL forwarded message's top header block, one entry
+   *  per address. Empty when this isn't a genuine forward, or none were found. */
+  participants: ForwardedParticipant[];
   /** Stated timezone/location hints, keyed by email. Empty when nothing was
    *  actually written anywhere in this email. */
   timezoneHints: EmailTimezoneHint[];
@@ -112,7 +133,8 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
       tools: [{
         name: 'extract_participants',
         description:
-          'Extract (1) the email addresses of the people on the ORIGINAL forwarded message — the From/To/Cc-style ' +
+          'Extract (1) the people on the ORIGINAL forwarded message — each email address with the display name ' +
+          'written beside it — from the From/To/Cc-style ' +
           'header block that sits immediately under a GENUINE forward marker, in whatever language it is written — ' +
           'and (2) any timezone/location actually stated for those people, either in the sender\'s own new note or ' +
           'within the original chain. Do NOT extract participants from a plain REPLY-quote block (see below).',
@@ -121,8 +143,15 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
           properties: {
             participants: {
               type: 'array',
-              items: { type: 'string' },
-              description: 'Email addresses found in the top forwarded header block only. Empty array if none found, or this is not a genuine forward (e.g. it is a plain reply).',
+              description: 'People found in the top forwarded header block only. Empty array if none found, or this is not a genuine forward (e.g. it is a plain reply).',
+              items: {
+                type: 'object',
+                properties: {
+                  email: { type: 'string', description: 'The email address as written in that header block.' },
+                  name: { type: 'string', description: 'The display name written beside that address on the same header line, exactly as written (e.g. "Nikki Hardee" from "Nikki Hardee <nhardee@kevel.com>"). Omit when the header carries a bare address.' },
+                },
+                required: ['email'],
+              },
             },
             attendee_timezones: {
               type: 'array',
@@ -151,9 +180,10 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
         content:
           `A person forwarded this email to their assistant. Find the header block of the ORIGINAL message they ` +
           `forwarded (the "From / To / Cc" style lines a mail client inserts right after a forward marker, in ANY ` +
-          `language — English "From:", Hebrew "מאת:", etc). Extract ONLY the email addresses from THAT block — the ` +
-          `participants of the original conversation. Do NOT pull addresses from any older quoted message further ` +
-          `down the chain.\n\n` +
+          `language — English "From:", Hebrew "מאת:", etc). Extract ONLY the people from THAT block — the ` +
+          `participants of the original conversation: each email address, and the display name written beside it ` +
+          `on the same line exactly as written (omit the name when only a bare address appears). Do NOT pull ` +
+          `addresses from any older quoted message further down the chain.\n\n` +
           `IMPORTANT — a forward is NOT a reply. Many mail clients (Outlook in particular) insert the exact same ` +
           `"From: / Sent: / To: / Subject:" block above a plain REPLY-quote as they do above a genuine forward. If ` +
           `this email is itself a REPLY (its subject/content shows it is replying to a previous message, not ` +
@@ -172,15 +202,15 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
     const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
     const input = toolUse?.input as { participants?: unknown; attendee_timezones?: unknown } | undefined;
 
-    const rawParticipants = input?.participants;
-    const participants = Array.isArray(rawParticipants)
-      ? [...new Set(
-          rawParticipants
-            .filter((a): a is string => typeof a === 'string')
-            .map(a => a.trim().toLowerCase())
-            .filter(a => EMAIL_RE.test(a)),
-        )]
-      : [];
+    const participants: ForwardedParticipant[] = [];
+    for (const raw of Array.isArray(input?.participants) ? input.participants : []) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const r = raw as Record<string, unknown>;
+      const email = typeof r.email === 'string' ? r.email.trim().toLowerCase() : '';
+      if (!EMAIL_RE.test(email) || participants.some(p => p.email === email)) continue;
+      const name = typeof r.name === 'string' ? r.name.trim() : '';
+      participants.push({ email, name: name && !EMAIL_RE.test(name) ? name : null });
+    }
 
     const rawHints = input?.attendee_timezones;
     const timezoneHints: EmailTimezoneHint[] = Array.isArray(rawHints)

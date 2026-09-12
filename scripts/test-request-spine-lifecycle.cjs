@@ -12,6 +12,7 @@ function harness(o={}){
  const update=(id,p)=>{assert.equal(id,row.id);effects.updates.push(clone(p));const fields={state:'state',nextCheckAt:'next_check_at',nextCheckHandler:'next_check_handler',expiresAt:'expires_at',details:'details_json',requesterNotifiedAt:'requester_notified_at',ownerDmChannel:'owner_dm_channel',ownerDmThreadTs:'owner_dm_thread_ts',terminalDmMsgTs:'terminal_dm_msg_ts'};for(const [k,v]of Object.entries(p))if(fields[k])row[fields[k]]=k==='details'?JSON.stringify(v):v;};
  const conn={sendDirect:async(id,body,opts)=>{effects.sends.push({id,body,opts});return {ok:!o.sendFail,ts:'sent.ts',ref:'DOWNER'};},postToChannel:async(id,body,opts)=>{effects.sends.push({id,body,opts});return {ok:!o.sendFail,ts:'sent.ts',ref:id};}};
  const mocks={
+  'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForPerson:(person,fallback)=>({timezone:person?.timezone||fallback}),attendeeTzForDay:entry=>entry.timezone},
   'src/db/requests.ts':{getDueRequests:()=>[clone(row)],getRequest:()=>row,updateRequest:update,getRequestByIdempotencyKey:()=>null,buildIdempotencyKey:()=> 'test-key',createRequest:p=>{effects.creates.push(p);if(o.bridgeFail)throw Error('fixture request insert failed');return {id:row.id};}},
   'src/core/requests/closeRequest.ts':{closeRequest:p=>{effects.closes.push(p);if(['resolved','cancelled','expired','logged'].includes(row.state))return {ok:true};row.state=p.state;row.next_check_at=null;row.next_check_handler=null;return {ok:true};}},
   'src/core/requests/resolver.ts':{withRequestLock:async(_id,work)=>work()},
@@ -33,7 +34,7 @@ function harness(o={}){
  if(o.actualJobs)delete mocks['src/db/jobs.ts'];
  function load(file){
   if(mocks[file])return mocks[file];if(mods.has(file))return mods.get(file).exports;
-  if(!['src/core/requests/runner.ts','src/core/requests/colleagueOofReengage.ts','src/core/requests/types.ts','src/db/jobs.ts'].includes(file)){effects.unexpected.push(file);throw Error('unmocked '+file);}
+  if(!['src/utils/timezoneConvert.ts','src/utils/weTimeResolver.ts','src/core/requests/runner.ts','src/core/requests/colleagueOofReengage.ts','src/core/requests/types.ts','src/db/jobs.ts'].includes(file)){effects.unexpected.push(file);throw Error('unmocked '+file);}
   const filename=path.join(file==='src/core/requests/types.ts'?root:source,file);if(!cache.has(filename))cache.set(filename,ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);
   const m={exports:{}};mods.set(file,m);vm.runInNewContext('(function(require,module,exports){'+cache.get(filename)+'\n})',{Date,Map,Set})(spec=>spec==='luxon'?{DateTime}:load(path.posix.normalize(path.posix.join(path.posix.dirname(file),spec))+'.ts'),m,m.exports);return m.exports;
  }

@@ -77,10 +77,10 @@ For **owner's uncommitted changes**: `git diff --stat` + `git diff` on anything 
 
 Settle the accumulated tree before writing the version bump or CHANGELOG. Reuse a completed checkpoint only when its evidence and reviewed file snapshot still match; a bugger run with `releaseCheckpoint: true` can supply its full battery, so do not dispatch it again here. An ordinary package run explicitly defers Golden30 and does not supply a release pass. Engine `verification.packageReady` means its package passed independent review; `wrapReady` additionally requires the complete fixed Z1–Z30 release inventory. Feature’s external checkpoint keeps its engine `wrapReady` false; establish release completion here from the actual checkpoint evidence.
 
-1. Run the full battery under GOLDEN_PATHS.md’s header once for this release checkpoint. Use WORKSHOP.md’s provider policy (Codex Sol medium for the paper battery; Claude SDK general-purpose Sonnet medium). Do not start the accumulated-diff review while a battery failure is unresolved.
+1. Run `npm run test:release -- --out <new-evidence-directory>` once on the accumulated source snapshot. It executes every discovered `scripts/test-*.cjs` suite, expands timezone suites across the existing three host zones without repeating the aggregate, and runs typecheck. Inspect each new suite for network, live writes or unsafe side effects before execution; isolate fixtures or return it to its owner, never silently exclude it. Its `report.json` must say `passed`; final red tests, skipped checks, timeout, missing output or source changes block wrap. Also run the full paper battery under GOLDEN_PATHS.md’s header once for this release checkpoint. Use WORKSHOP.md’s provider policy (Codex Sol medium for the paper battery; Claude SDK general-purpose Sonnet medium). Do not start the accumulated-diff review while a battery failure is unresolved.
 2. Run one independent Bouncer over the full accumulated diff and affected dependencies, with product/audit/framework scope recorded separately. Codex uses Astra high; Claude SDK keeps its native Fable override at this release checkpoint. If this exact accumulated-diff review already ran against the unchanged snapshot, reuse its actual traced result rather than paying for a duplicate.
 
-An overturn blocks wrap. Reuse the builder to repair it, update step 3’s inventory, invalidate the affected checks and run targeted independent rechecks including dependencies. Keep the unaffected checkpoint evidence; rerun the full battery only when impact cannot be bounded. A discovery remains next-run intake unless the owner adds it to this release. Neither skipped checks nor old failures become passes by omission.
+An overturn blocks wrap. Reuse the builder to repair it, update step 3’s inventory, invalidate the affected checks and run targeted independent rechecks including dependencies. Keep the unaffected checkpoint evidence. Record changed file hashes, dependency impact, invalidated check IDs and their replacement results against the final source inventory; unbounded impact requires the full executable/paper checkpoint again. A targeted recheck supersedes only its named affected checks, never an unrelated failure. Run `node scripts/workshop-release.cjs --check <report.json>` to test exact reuse; a mismatch requires the recorded impact/recheck evidence, never editing the old report into a pass. A discovery remains next-run intake unless the owner adds it to this release. Neither skipped checks nor old failures become passes by omission.
 
 Before proceeding, persist every implementation and independent review using the Manager verification contract, then run `node scripts/ledger-stats.cjs --verification`. Exit 1 blocks wrap. Missing/failed regression evidence, incomplete boundary coverage, old review attempts or changed snapshots remain blocking. The cost policy never waives independent review or this gate.
 
@@ -150,7 +150,7 @@ When unsure → classify as high-impact. Better to over-link than to bury someth
 
 ### 7. Update memory files (conditional)
 
-Update `.claude/memory/project_overview.md` + `project_architecture.md` (also the owner's auto-memory at `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/`) if any of the following shipped:
+Keep architecture facts in `.claude/memory/project_architecture.md`, the canonical architecture memory. `.claude/memory/project_overview.md` carries product orientation and links to it; SESSION_STARTER and ARCHITECTURE_MAP remain navigation. Auto-memory copies at `C:/Users/idanc/.claude/projects/E--Code-Maelle/memory/` should contain pointers to these repo sources, not independently maintained architecture bodies. Preserve an existing body in a dated archive before replacing it with a pointer, after checking for its active writer. Update the relevant canonical source if any of the following shipped:
 
 - New skill / new core module / new Connection implementation
 - New architectural primitive (registry pattern, new layer, new invariant)
@@ -180,13 +180,11 @@ Do NOT update for:
 - Internal refactors
 - Prompt tweaks
 
-### 9. Typecheck
+### 9. Confirm the final release snapshot
 
-```bash
-npm run typecheck
-```
+Reuse step 4’s executable regression/typecheck result when its snapshot still matches (`node scripts/workshop-release.cjs --check <report.json>`). Version, documentation or bookkeeping-only changes require recorded hash/impact reconciliation; code or dependency changes require the affected executable checks and a fresh typecheck. Preserve the original evidence and record replacement results; never run the full suite again solely because the checklist reached this step.
 
-Must pass. If it doesn't, stop and fix — don't ship broken. A fix here lands AFTER step 4's verify and step 6's CHANGELOG: if it changes behavior, invalidate affected checks and apply step 4's targeted recheck rule; if it changes what shipped, reopen step 6's entry — then come back. This step runs BEFORE the bookkeeping on purpose: the books close at step 10, and a gate that can force more work runs before the step that closes them.
+The final executable result must pass. If it doesn't, stop and fix — don't ship broken. A fix here lands AFTER step 4's verify and step 6's CHANGELOG: if it changes behavior, invalidate affected checks and apply step 4's targeted recheck rule; if it changes what shipped, reopen step 6's entry — then come back. This step runs BEFORE the bookkeeping on purpose: the books close at step 10, and a gate that can force more work runs before the step that closes them.
 
 ### 10. Bookkeeping — preflight, then the ledger BEFORE the report
 

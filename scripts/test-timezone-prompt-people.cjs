@@ -64,6 +64,7 @@ function load(rel) {
       getPersonMemory: () => null,
     };
     if (Object.hasOwn(mocks, resolved)) return mocks[resolved];
+    if (resolved === 'src/memory/resolveAttendeeEmails') return load(resolved + '.ts');
     if (resolved === 'src/utils/timezoneConvert') return load('src/utils/timezoneConvert.ts');
     if (resolved === 'src/utils/locationTz' || resolved === 'src/utils/timezoneValidator' || resolved === 'src/utils/workingHoursDefault') return load(resolved + '.ts');
     throw new Error(`Unexpected dependency: ${resolved}`);

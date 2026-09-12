@@ -9,6 +9,7 @@ const actual = new Set([
   'src/connections/email/ownerAddresses.ts',
   'src/connectors/email/htmlToText.ts',
   'src/db/people.ts',
+  'src/memory/resolveAttendeeEmails.ts',
   'src/utils/attendeeAvailability.ts',
   'src/utils/locationTz.ts',
   'src/utils/workingHoursDefault.ts',
@@ -47,7 +48,7 @@ function harness(options = {}) {
     'src/connections/registry.ts':{registerConnection:noop,getConnection:()=>options.noSlack ? undefined : {sendDirect:async(...a)=>{notifications.push(a);return {ok:true};}}},
     'src/utils/offeredSlotsStash.ts':{EMAIL_KEY_PREFIX:'email:'},
     'src/memory/recordBooking.ts':{isNonHumanAttendee:()=>false},
-    'src/connectors/email/extractParticipants.ts':{extractForwardedParticipants:async()=>{counts.extract++;if(options.extractFailure)throw Error('fixture extraction failure');return {participants:[row.email],timezoneHints:hints};}},
+    'src/connectors/email/extractParticipants.ts':{extractForwardedParticipants:async()=>{counts.extract++;if(options.extractFailure)throw Error('fixture extraction failure');return {participants:[{email:row.email,name:null}],timezoneHints:hints};}},
     'src/core/orchestrator.ts':{runOrchestrator:async input=>{counts.orchestrator++;assert.equal(input.channel,'email');assert.deepEqual(Array.from(input.extractedAttendeeEmails),[row.email]);return {reply:'Fixture reply'};}},
     'src/utils/guards/runOutputGates.ts':{runOutputGates:async(reply,args)=>{counts.gate++;assert.equal(args.transport,'email');return reply;}},
   };

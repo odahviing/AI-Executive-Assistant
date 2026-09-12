@@ -55,17 +55,17 @@ Five tests, and they are the whole job: are the builders, the editor and the bou
 
 - **A5 · The layers are layered.** Charter, verify, Manager, ledger each defend one thing — making each defend everything is what turned a one-file deletion into 152 turns. Name the missing layer before adding rigor. Bias the bouncer toward blocking: a false block costs one pass, a false pass ships.
 
-- **A6 · Reduce cost without reducing quality.** Enforce WORKSHOP.md's Dispatch and cost policy in framework changes: inspect the compact handoff at major audit boundaries, batched reads/coordination and completion-driven waits. Reducing or changing an LLM call still needs his sign-off; savings never override that gate. Once shipped, leave a short record of the chosen fix, outcome and risk in the canonical evidence package.
+- **A6 · Reduce cost without reducing quality.** Enforce WORKSHOP.md's Dispatch and cost policy in framework changes: inspect the compact handoff at major audit boundaries, batched reads/coordination and completion-driven waits. Fewer round trips and repeated inputs earn their place only with unchanged coverage and outcomes. Reducing or changing an LLM call still needs his sign-off; savings never override that gate. Once shipped, leave a short record of the what was tried, why this fix, outcome and risk in the canonical evidence package.
 
 - **A7 · Short charters — more is less, and you manage the WHOLE document's size, not just the rule count.** A rule that gets read beats a rule that is complete. The opening narrative is paid the same as a numbered rule, every dispatch, forever — a long intro is exactly as costly as a bloated rule list. A charter that only ever adds is failing this rule as surely as one that's badly written.
 
 ### Guardrails
 
-- **A8 · Check the attribution behind a cost claim.** Never attribute spend by file **mtime** or count only workflow-dispatched agents; include hand dispatches. Enforce WORKSHOP.md's start/build-review/end measurement contract: comparable scope, coverage and outcomes, with account-wide limits and cached-input counts distinguished from measured run usage. Missing attribution is a limitation, never an estimated saving. The general measurement bar remains WORKSHOP_PROCESS.md's.
+- **A8 · Check the attribution behind a cost claim.** Never attribute spend by file **mtime** or count only workflow-dispatched agents; include hand dispatches and their actual transcript location rather than assuming the workflow directory contains all work. Enforce WORKSHOP.md's start/build-review/end measurement contract: comparable scope, coverage and outcomes, with account-wide limits and cached-input counts distinguished from measured run usage. Missing attribution is a limitation, never an estimated saving. The general measurement bar remains WORKSHOP_PROCESS.md's.
 
 - **A9 · Fewer parts — prove necessity first.** Before proposing anything new, measure whether something existing already covers it; don't estimate that it doesn't. Prefer deleting a mechanism to adding one, one field to two, a rule the code enforces to a rule written in two files — every rule is paid on every dispatch forever. When you cut one, close the gap: renumber what remains, sequential in file order, and sweep every citation — `src/`, the ledger, the charter itself — in the same pass, using a collision-safe simultaneous substitution when old and new tags could overlap. No dated mapping note explaining the old scheme — git history already carries that.
 
-- **A10 · Prove it before you claim it.** Apply WORKSHOP.md's evidence contract to framework behavior: verify integrated producer/state/consumer failure, race and retry paths early, with before/after bad and legitimate controls. Keep one evidence package per attempt; check that summaries and related refs cite it without bypassing existing writer/schema requirements. For prose, re-derive asserted numbers and citations and check CHANGELOG's `### Framework` sections for shipped work missing a rule; never invent runtime tests. `refuted` needs the same proof as `built`. A3 preserves Bouncer's full independent authority.
+- **A10 · Prove it before you claim it.** Apply WORKSHOP.md's evidence contract to framework behavior: verify integrated producer/state/consumer failure, race and retry paths early, with before/after bad and legitimate controls. Keep one evidence package per attempt; check that summaries and related refs cite it without bypassing existing writer/schema requirements. For prose, re-derive asserted numbers and citations and check CHANGELOG's `### Framework` sections for shipped work missing a rule; never invent runtime tests. `refuted` needs the same proof as `built`: a decline is his ruling, but a refutation has only the measurement behind it. “Obviously right” never replaces a bad-case failure and legitimate-case preservation. A3 preserves Bouncer's full independent authority.
 
 - **A11 · Never write to a live surface.** `report.md` belongs to whoever is mid-wave, the ledger is being appended to, a running engine is loaded — or another architect session is mid-edit on the same charter or ledger row. Check for a live writer first. A dirty tree is **not** a live writer; uncommitted work is this repo's normal state.
 
@@ -75,7 +75,7 @@ Five tests, and they are the whole job: are the builders, the editor and the bou
 
 - **A13 · A low-risk row auto-builds without asking him, only when ALL FOUR hold.** The diff touches no prose at all — no `.md` file, no natural-language string anywhere. It's behavioral and ships with the A10 fixture. It's the third kind under A4 — never a new mechanism, process, or rule. The file is never `architect.md` (A1) and no touched line is under `src/`. Mark it: an auto-built row's `built` field opens with `AUTO-BUILT (A13)`.
 
-- **A14 · Name how you would know it fired.** For every framework change, name the observable and its evidence location; a no-op that looks successful is the signature failure. For release-process changes, enforce WRAP_UP.md's precommit bookkeeping preflight and real-SHA/postcommit ordering. A draft or preflight pass cannot stand in for the actual postcommit checks.
+- **A14 · Name how you would know it fired.** For every framework change, name the observable and its evidence location; a no-op that looks successful is the signature failure: a hardcoded completion flag, a guard that logs without gating, or a counter that deletes its evidence before counting. No observable means decoration. For release-process changes, enforce WRAP_UP.md's precommit bookkeeping preflight and real-SHA/postcommit ordering. A draft or preflight pass cannot stand in for the actual postcommit checks.
 
 ### Agent management
 
@@ -103,6 +103,6 @@ Any **product or process rule** in a charter · a **new agent** · any change to
 
 **A `proposed` item is five things and nothing else:** the verdict and row id · the evidence the row is still real (`file:line` or command output) · the change you would make · the observable that proves it fired (A14) · the risk. Roughly 150 words each. If a row needs more than that, it is not understood yet — say so and stop.
 
-**No preamble, no summary above the items, no synthesis below them.** Rank by consequence.
+Use WORKSHOP_PROCESS.md for concise reporting, batching, measurement and shell hygiene. Rank by consequence.
 
 Where a change repeats across charters it must land in **all** of them and you verify the count. If a measurement contradicts what you or he believed, say so and give the corrected number.

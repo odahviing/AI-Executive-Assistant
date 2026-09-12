@@ -9,10 +9,10 @@
  * here: ONE resolution path for internal AND external.
  *
  * Two paths:
- *   - slack_id resolves (hallucination-guarded via resolveSlackId) → internal
- *     person: ensure the row exists, return its person_id + slack_id.
- *   - no slack_id BUT owner-path → resolvePerson by name/email finds-or-creates
- *     the external row and returns its person_id (slack_id null).
+ *   - a real Slack ID resolves through the store and may create a row.
+ *   - owner-path names use the store's whole-name picker; names alone never
+ *     create. An email may create an external; conflicting handles never bind.
+ *   - the owner's configured assistant identity resolves its existing SELF row.
  *
  * Colleague-path with no slack_id returns null on purpose: a colleague write
  * always carries the requester's own slack_id (the self-write gate forces it),
@@ -20,14 +20,15 @@
  * colleague-path external write.
  */
 
-import { resolvePerson, getPersonMemory, upsertPersonMemory } from '../db';
-import { resolveSlackId } from './resolveSlackId';
+import { resolvePerson, getPersonMemory, findPersonByName } from '../db';
+import { SLACK_ID_RE } from './resolveSlackId';
 
 export interface PersonWriteTarget {
   personId: string;
   slackId: string | null;   // null for pure-email externals
   name: string;
   hallucinated: boolean;     // resolveSlackId rejected a bad slack_id input
+  created: boolean;
 }
 
 export function resolvePersonTarget(opts: {
@@ -36,30 +37,26 @@ export function resolvePersonTarget(opts: {
   email?: string;
   isOwner: boolean;
   ownerDomain: string;
+  assistantSelf?: { slackId: string; name: string };
 }): PersonWriteTarget | null {
-  const idRes = resolveSlackId(opts.rawSlackId, opts.name);
-
-  if (idRes.slack_id) {
-    // Internal — ensure the row exists, then read its person_id. An EXISTING
-    // row keeps its stored name: upsertPersonMemory writes `name` verbatim
-    // (it's built for SLACK signals, where users.info is authoritative), but
-    // `opts.name` here is a model-supplied tool arg — passing it through
-    // overwrote "Luke Joas" with a bare "Luke", and when the arg was omitted
-    // the `?? slack_id` fallback stomped the name with a raw "U07…" string.
-    // The tool-arg name only ever seeds a BRAND-NEW row.
-    const existing = getPersonMemory(idRes.slack_id);
-    const seedName = (opts.name ?? '').trim() || idRes.slack_id;
-    upsertPersonMemory({ slackId: idRes.slack_id, name: existing?.name?.trim() || seedName });
-    const row = existing ?? getPersonMemory(idRes.slack_id);
-    if (!row) return null;
-    return { personId: row.person_id, slackId: idRes.slack_id, name: row.name, hallucinated: idRes.was_hallucinated };
+  const selfByName = !opts.rawSlackId && !opts.email && opts.assistantSelf &&
+    opts.name?.trim().toLowerCase() === opts.assistantSelf.name.toLowerCase();
+  if (opts.isOwner && opts.assistantSelf &&
+      (opts.rawSlackId === opts.assistantSelf.slackId || selfByName)) {
+    // A supplied real handle identifies its own row. A name shared with a
+    // human is ambiguous; only an explicit SELF key can select SELF then.
+    if (selfByName && findPersonByName(opts.name!).status !== 'not_found') return null;
+    const row = getPersonMemory(opts.assistantSelf.slackId);
+    return row ? { personId: row.person_id, slackId: null, name: row.name, hallucinated: false, created: false } : null;
   }
-
-  // Owner-path external: find-or-create by name / email.
-  if (opts.isOwner && ((opts.name && opts.name.trim()) || (opts.email && opts.email.trim()))) {
-    const resolved = resolvePerson({ name: opts.name, email: opts.email, ownerDomain: opts.ownerDomain });
+  const slackId = opts.rawSlackId && SLACK_ID_RE.test(opts.rawSlackId) ? opts.rawSlackId : undefined;
+  if (slackId || opts.isOwner) {
+    // Resolve all handles together: resolving a name to Slack first would
+    // bypass the store's conflicting-email gate.
+    const resolved = resolvePerson({ slackId, name: opts.name, email: opts.email, ownerDomain: opts.ownerDomain });
     if (resolved) {
-      return { personId: resolved.person_id, slackId: resolved.row.slack_id, name: resolved.row.name, hallucinated: idRes.was_hallucinated };
+      return { personId: resolved.person_id, slackId: resolved.row.slack_id, name: resolved.row.name,
+        hallucinated: !!opts.rawSlackId && !slackId, created: resolved.created };
     }
   }
 

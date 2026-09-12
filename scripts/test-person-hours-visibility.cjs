@@ -7,7 +7,7 @@
 const assert=require('node:assert/strict'),{test}=require('node:test'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript'),cp=require('node:child_process');
 const luxon=require('luxon'),Database=require('better-sqlite3');
 const root=path.resolve(__dirname,'..'),baseline='13f50a4dbc23cf2c214112d61d508e536a2aa380',before=process.env.LIBRARIAN_BEFORE==='1',compiled=new Map();
-const actual=new Set(['src/db/people.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts']);
+const actual=new Set(['src/memory/resolveAttendeeEmails.ts','src/db/people.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts']);
 const WEEK=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'],MF=WEEK.slice(1,6),ST=WEEK.slice(0,5);
 const auto=(workdays,hoursStart,hoursEnd)=>JSON.stringify({workdays,hoursStart,hoursEnd});
 const stated=(workdays,hoursStart,hoursEnd,timezone,extra={})=>JSON.stringify({...extra,working_hours_structured:{workdays,hoursStart,hoursEnd,...(timezone?{timezone}:{})}});
@@ -28,10 +28,10 @@ function harness(people){
   'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:tz=>tz==='Asia/Jerusalem'?ST:undefined},
   'src/utils/logger.ts':{__esModule:true,default:{info:noop,debug:noop,warn:noop,error:noop}},
   'src/connections/registry.ts':{getConnection:()=>undefined},
-  'src/memory/peopleMemory.ts':{readPersonMemory:async()=>null,writePersonSection:async()=>({ok:true}),resolvePersonSlug:async()=>null},
+  'src/memory/peopleMemory.ts':{syncPersonOperationalSections:async()=>true,readPersonMemory:async()=>null,writePersonSection:async()=>({ok:true}),resolvePersonSlug:async()=>null},
   'src/utils/skillPreferences.ts':{},
   'src/utils/resolveSlackId.ts':{SLACK_ID_RE:/^U[A-Z]+$/,resolveSlackId:id=>({slack_id:id||undefined,was_hallucinated:false})},
-  'src/memory/resolveAttendeeEmails.ts':{nameGenuinelyMatches:(a,b)=>a===b},
+
  };
  function load(rel){
   if(rel==='src/db.ts')return {...load('src/db/people.ts'),getDb:()=>sqlite,getPersonSocialSummary:()=>({live:[],dead:[]})};
@@ -45,7 +45,7 @@ function harness(people){
   const req=s=>s==='luxon'?luxon:s==='@anthropic-ai/sdk'?{}:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),s))+'.ts'):require(s);
   vm.runInNewContext('(function(require,module,exports){'+compiled.get(rel)+'\n})',{Date,console,Set,Map,Buffer,setTimeout},{filename:rel})(req,mod,mod.exports);return mod.exports;
  }
- const ctx=role=>({profile,userId:role==='owner'?'UOWNER':'UALEX',senderRole:role,channelId:'DOWNER'});
+ const ctx=role=>({profile,userId:role==='owner'?'UOWNER':'UALEX',senderRole:role,authority:role,surface:role==='owner'?'owner_dm':'colleague_dm',channelId:'DOWNER'});
  const skill=()=>new(load('src/core/assistant.ts').AssistantSkill)();
  return {load,sqlite,
   roster:(focus,social=false)=>load('src/db/people.ts').formatPeopleMemoryForPrompt('UOWNER','Asia/Jerusalem',focus,social),

@@ -9,11 +9,14 @@ const beforeAt = process.argv.indexOf('--before-ref')
 const beforeRef = beforeAt >= 0 ? process.argv[beforeAt + 1] : null
 const runtimeAt = process.argv.indexOf('--runtime-ref')
 const runtimeRef = runtimeAt >= 0 ? process.argv[runtimeAt + 1] : null
+const directoryAt = process.argv.indexOf('--runtime-dir')
+const runtimeDirectory = directoryAt >= 0 ? process.argv[directoryAt + 1] : null
 const baselineOnly = Boolean(beforeRef) || process.argv.includes('--baseline')
 const root = fs.mkdtempSync(path.join(__dirname, '..', '.workshop-verification-'))
 fs.mkdirSync(path.join(root, 'scripts'))
 fs.mkdirSync(path.join(root, '.claude/agent-loop'), { recursive: true })
 for (const file of ['ledger-stats.cjs', 'ledger-file.cjs', 'workshop-verification.cjs']) {
+  if (runtimeDirectory) { fs.copyFileSync(path.join(runtimeDirectory, file), path.join(root, 'scripts', file)); continue }
   if (beforeRef || runtimeRef) {
     if (beforeRef && file === 'workshop-verification.cjs') continue
     const old = spawnSync('git', ['show', `${beforeRef || runtimeRef}:scripts/${file}`], { cwd: path.join(__dirname, '..'), encoding: 'utf8' })
@@ -164,6 +167,69 @@ const writeBuild = (e = validEvidence()) => cli('ledger-file.cjs', '--ref', 'new
 const writeReview = (r = validReview()) => cli('ledger-file.cjs', '--review', '--ref', 'new', '--review-file', jsonFile('review.json', r))
 const gate = (...args) => cli('ledger-stats.cjs', ...args)
 const partialSync = (ownerDecision = false) => cli('ledger-file.cjs', '--gh-sync', '--ref', 'gh#24', '--version', '99.0.0', '--ghstate', 'partial', '--note', 'Released repairs; the remaining ticket feature stays open.', ...(ownerDecision ? ['--verdict', 'needs-owner-decision'] : ['--recommend', 'build the remaining feature']))
+
+test('writer stores shared immutable references and legacy inline history still reads', () => {
+  setRows([row('historic', 'built')]); assert.equal(writeBuild().status, 0)
+  const r = JSON.parse(fs.readFileSync(ledger, 'utf8').trim().split('\n').at(-1))
+  assert.ok(r.evidenceRef, 'new writes must reference one immutable package')
+  assert.equal(r.evidence, undefined)
+  const file = path.join(root, r.evidenceRef.file), before = fs.readFileSync(file)
+  const review = validReview(); review.coveredRefs = ['new', 'child']
+  assert.equal(writeReview(review).status, 0)
+  fs.appendFileSync(ledger, JSON.stringify(row('child', 'needs-dependency')) + '\n')
+  assert.equal(writeReview(review).status, 0)
+  assert.equal(cli('ledger-file.cjs', '--review', '--ref', 'child', '--from-ref', 'new', '--review-file', jsonFile('shared.json', review)).status, 0)
+  const child = JSON.parse(fs.readFileSync(ledger, 'utf8').trim().split('\n').at(-1))
+  assert.deepEqual(child.evidenceRef, r.evidenceRef)
+  assert.deepEqual(fs.readFileSync(file), before)
+  assert.equal(open().length, 0)
+  const full = contract.readRows(ledger).at(-1)
+  assert.ok(Buffer.byteLength(JSON.stringify(child)) < Buffer.byteLength(JSON.stringify(full)))
+})
+test('tampered or missing referenced evidence cannot clear a finding', () => {
+  for (const mode of ['tamper', 'missing']) {
+    setRows([]); assert.equal(writeBuild().status, 0); assert.equal(writeReview().status, 0)
+    const r = JSON.parse(fs.readFileSync(ledger, 'utf8').trim().split('\n')[0]); assert.ok(r.evidenceRef)
+    const file = path.join(root, r.evidenceRef.file), saved = fs.readFileSync(file)
+    try {
+      if (mode === 'tamper') fs.writeFileSync(file, '{}'); else fs.unlinkSync(file)
+      assert.equal(gate('--verification').status, 1)
+      assert.equal(writeReview().status, 1)
+    } finally { fs.writeFileSync(file, saved) }
+  }
+})
+test('wrap event count distinguishes covered refs and implementation refs', () => {
+  const rows = [row('parent','verified'),row('child','verified',{verificationOf:'parent'}),row('parent','wrapped',{state:'wrapped'}),row('child','wrapped',{state:'wrapped'}),row('parent','wrapped',{state:'wrapped'}),row('gh#7','partial',{state:'partial'})]
+  assert.deepEqual(contract.wrapCounts(rows),{events:6,coveredRefs:2,implementationRefs:1,verifiedImplementationRefs:1})
+})
+test('new bundled identity is refused while legacy combined history stays readable', () => {
+  setRows([row('P24+P25','built')]); assert.equal(open().length,0)
+  const r=cli('ledger-file.cjs','--ref','gh#24+gh#25','--lane','architect','--source','owner','--finding','Two unrelated defects bundled into one identity','--rootCause','scripts/fixture.cjs:1','--verdict','built','--invariant','none','--evidence-file',jsonFile('bundle.json',validEvidence()))
+  assert.equal(r.status,1); assert.match(r.stderr,/atomic/)
+})
+test('canonical Cleaner path ref is an atomic identity, not a bundled ref', () => {
+  setRows([])
+  const r=cli('ledger-file.cjs','--ref','dead-export:db/people.ts:updatePersonGender','--lane','cleaner','--source','audit','--finding','Unused symbol requires owning lane removal','--verdict','queued-next-run','--rootCause','src/db/people.ts:1','--invariant','none')
+  assert.equal(r.status,0,r.stderr);assert.equal(open()[0].ref,'dead-export:db/people.ts:updatePersonGender')
+})
+test('writer wrap companions derive earlier review lineage and reset on a child own repair', () => {
+  setRows([row('child','needs-dependency')]);assert.equal(writeBuild().status,0)
+  const review=validReview();review.coveredRefs=['new','child'];assert.equal(writeReview(review).status,0)
+  assert.equal(cli('ledger-file.cjs','--review','--ref','child','--from-ref','new','--runId','earlier-review','--review-file',jsonFile('prior-review.json',review)).status,0)
+  const wrap=(ref,version)=>cli('ledger-file.cjs','--wrap-companion','--ref',ref,'--version',version,'--sha','fixture-sha')
+  assert.equal(wrap('new','99.0.0').status,0);assert.equal(wrap('child','99.0.0').status,0)
+  let history=contract.readRows(ledger),wrapped=history.filter(r=>r.runId==='wrap-99.0.0')
+  const earlierHistory=history,earlierWrap=wrapped
+  assert.deepEqual(contract.wrapCounts(wrapped,history),{events:2,coveredRefs:2,implementationRefs:1,verifiedImplementationRefs:0})
+  const own=validEvidence();own.attemptId='child-own-repair';own.builder='child-builder'
+  assert.equal(cli('ledger-file.cjs','--ref','child','--lane','architect','--source','owner','--finding','Child now has an independently implemented correction','--rootCause','scripts/fixture.cjs:1','--verdict','built','--invariant','none','--evidence-file',jsonFile('child-own.json',own)).status,0)
+  const ownReview=validReview();ownReview.attemptId=own.attemptId
+  assert.equal(cli('ledger-file.cjs','--review','--ref','child','--review-file',jsonFile('child-own-review.json',ownReview)).status,0)
+  assert.equal(wrap('child','99.1.0').status,0)
+  history=contract.readRows(ledger);wrapped=history.filter(r=>r.runId==='wrap-99.1.0')
+  assert.deepEqual(contract.wrapCounts(wrapped,history),{events:1,coveredRefs:1,implementationRefs:1,verifiedImplementationRefs:0})
+  assert.equal(contract.wrapCounts(earlierWrap,earlierHistory).implementationRefs,1,'future child repair must not rewrite an earlier release snapshot')
+})
 
 test('partial GitHub sync reopens legacy shipped ticket without inventing an implementation', () => {
   for (const ownerDecision of [false, true]) {

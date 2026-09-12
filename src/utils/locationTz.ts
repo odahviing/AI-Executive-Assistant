@@ -131,7 +131,7 @@ Location: "${state}"`,
     const raw = ((resp.content[0] as any)?.text ?? '').trim();
     if (!raw || raw.toLowerCase() === 'unknown') return null;
     // Sanity check: looks like an IANA name (Region/City)
-    if (!/^[A-Z][A-Za-z_]+\/[A-Z][A-Za-z_]+/.test(raw)) {
+    if (!isStrictIana(raw)) {
       logger.debug('locationTz: Sonnet returned non-IANA shape', { state, raw });
       return null;
     }

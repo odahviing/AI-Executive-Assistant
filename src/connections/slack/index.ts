@@ -25,13 +25,67 @@ import {
   type SendOutcome,
 } from './messaging';
 import { formatForSlack } from './formatting';
-import { upsertPersonMemory, searchPeopleMemory } from '../../db';
-import { detectAndSaveGender } from '../../utils/genderDetect';
+import { searchPeopleMemory } from '../../db';
 import logger from '../../utils/logger';
 
 function toSendResult(outcome: SendOutcome): SendResult {
   if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts, attachments_failed: outcome.attachments_failed };
   return { ok: false, reason: outcome.reason, detail: outcome.detail };
+}
+
+/** The turn's surface — `SkillContext.surface` (src/skills/types.ts), by value. */
+type ToolSurface = 'owner_dm' | 'colleague_dm' | 'room';
+
+/**
+ * One find_slack_user hit BEFORE surface projection — what both sources (the
+ * people_memory pull-through and Slack users.list) resolve to, so the payload
+ * a caller receives is shaped in exactly one place: projectDirectoryMatch.
+ */
+interface DirectoryMatch {
+  slack_id: string;
+  name: string;
+  timezone?: string;
+  /** people_memory only: `timezone_set_by === 'auto'` — an inferred guess. */
+  tzUnconfirmed: boolean;
+  /** people_memory only — Slack's directory carries no city field. */
+  state?: string;
+  email?: string;
+}
+
+/**
+ * W9 — the tool's payload is scoped HERE, by surface, before it reaches the
+ * model; nothing downstream (prompt, guard) is asked to hold back what this
+ * function already withheld.
+ *
+ *   room (MPIM / channel, whoever is typing — the owner is not owner in a
+ *   shared space): IDENTITY ONLY, slack_id + name. Everything else on the row
+ *   — timezone, city, email — is stored data the room prompt already strips
+ *   from PEOPLE IN THIS THREAD; this tool used to hand it straight back
+ *   ("who is Paul?" in a channel → Paul's city and email in the room).
+ *
+ *   owner_dm / colleague_dm: the full shape (tz + note, city, email). For a
+ *   colleague asking about a third party this is wider than L6 tier 3 (name,
+ *   timezone, language, availability) — whether city and email stay in a
+ *   colleague DM is the owner's call and is deliberately left as it was.
+ *
+ *   undefined (an untyped caller omitted the required scope): treated as room.
+ */
+function projectDirectoryMatch(m: DirectoryMatch, surface: ToolSurface | undefined) {
+  if (surface !== 'owner_dm' && surface !== 'colleague_dm') {
+    return { slack_id: m.slack_id, name: m.name };
+  }
+  // `tz_iana` + `tz_note`, never a bare `timezone` (v2.6.6): Sonnet read the
+  // IANA string as a city ("Since you're in Brisbane...", Shayan, May 10).
+  return {
+    slack_id: m.slack_id,
+    name: m.name,
+    tz_iana: m.timezone,
+    tz_note: m.timezone
+      ? `${!m.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : ''}${m.tzUnconfirmed ? ' Guessed, not confirmed — confirm before presenting their local time as fact.' : ''}`.trim() || undefined
+      : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
+    state: m.state,
+    email: m.email,
+  };
 }
 
 /**
@@ -236,7 +290,10 @@ If you already have an email for the person, you don't need this tool to book a 
         : { ok: false, reason: 'error', detail: res.detail };
     },
 
-    async executeToolCall(toolName, args) {
+    // executeSkillTool (src/skills/registry.ts) forwards the required turn
+    // surface from SkillContext through the Connection contract. Projection
+    // still fails closed if an untyped caller omits or supplies an invalid scope.
+    async executeToolCall(toolName, args, scope: { surface: ToolSurface }) {
       if (toolName === 'find_slack_channel') {
         const results = await slackFindChannelByName(app, botToken, args.name as string);
         return {
@@ -248,52 +305,34 @@ If you already have an email for the person, you don't need this tool to book a 
       if (toolName === 'find_slack_user') {
         try {
           const query = (args.name as string).toLowerCase();
+          const surface = scope?.surface;
 
-          // v2.6.6 — people_memory pull-through. Before hitting Slack
-          // workspace, look in people_memory: if we know this person, return
-          // them with the same cautionary "(timezone only, city unknown)"
-          // suffix that formatPeopleMemoryForPrompt uses on owner-path. This
-          // closes the duplication where colleague-path Sonnet got bare
-          // `timezone: "Australia/Brisbane"` (and inferred Brisbane) while
-          // owner-path Sonnet got the cautionary suffix. Single source of
-          // truth: people_memory's renderer. Slack workspace lookup stays
-          // as the fallback for net-new names.
-          //
-          // Privacy: same fields the caller would have learned via Slack
-          // (slack_id, name, tz, email). No notes / preferences / topics —
-          // those stay owner-only via formatPeopleMemoryForPrompt.
+          // v2.6.6 — people_memory pull-through. Before hitting the Slack
+          // workspace, look in people_memory: a person we know comes back with
+          // the same cautionary tz framing formatPeopleMemoryForPrompt uses on
+          // owner-path (v4.8.x: including its unconfirmed-guess marker for an
+          // auto-inferred zone — `tzUnconfirmed` in that function, src/db/
+          // people.ts). This is also how a single-/multi-channel guest
+          // resolves — users.list may omit guests, but one we have engaged
+          // with has a row here. Slack workspace lookup stays as the fallback
+          // for net-new names. Both sources resolve to DirectoryMatch; what the
+          // caller receives is shaped once, by surface, in projectDirectoryMatch.
+          let found: DirectoryMatch[] = [];
+          let source: 'people_memory' | 'slack' = 'slack';
           try {
-            const memoryHits = searchPeopleMemory(args.name as string);
-            const cleanFromMemory = memoryHits
+            found = searchPeopleMemory(args.name as string)
               .filter(p => p.slack_id && /^[UW][A-Z0-9]{6,}$/.test(p.slack_id))
-              .map(p => {
-                // v4.8.x — mirror formatPeopleMemoryForPrompt's unconfirmed-guess
-                // marker (the `tzUnconfirmed` const in that function, src/db/people.ts
-                // — no line number: that file churns daily), not just its
-                // "city unknown" suffix. An
-                // auto-inferred zone (timezone_set_by === 'auto') is a guess, same
-                // as on owner-path; presenting it as settled fact here just because
-                // the caller is a colleague-path tool call is the same honesty gap
-                // the comment above already closed for the city-unknown case.
-                const tzUnconfirmed = p.timezone && p.timezone_set_by === 'auto'
-                  ? ' Guessed, not confirmed — confirm before presenting their local time as fact.'
-                  : '';
-                return {
-                  slack_id: p.slack_id,
-                  name: p.name,
-                  tz_iana: p.timezone || undefined,
-                  tz_note: p.timezone
-                    ? `${!p.state ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.' : ''}${tzUnconfirmed}`.trim() || undefined
-                    : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
-                  state: p.state || undefined,
-                  email: p.email || undefined,
-                };
-              });
-            if (cleanFromMemory.length > 0) {
-              logger.info('find_slack_user — people_memory hit', {
-                query: args.name, matches: cleanFromMemory.length,
-              });
-              return { matches: cleanFromMemory, count: cleanFromMemory.length, source: 'people_memory' };
+              .map(p => ({
+                slack_id: p.slack_id!,
+                name: p.name,
+                timezone: p.timezone || undefined,
+                tzUnconfirmed: !!p.timezone && p.timezone_set_by === 'auto',
+                state: p.state || undefined,
+                email: p.email || undefined,
+              }));
+            if (found.length > 0) {
+              source = 'people_memory';
+              logger.info('find_slack_user — people_memory hit', { query: args.name, matches: found.length });
             }
           } catch (err) {
             logger.warn('find_slack_user — people_memory lookup threw, falling through to Slack', {
@@ -301,123 +340,49 @@ If you already have an email for the person, you don't need this tool to book a 
             });
           }
 
-          // Store full raw member alongside match so we can read pronouns/image later
-          const matches: Array<{ slack_id: string; name: string; timezone?: string; email?: string; _raw: any }> = [];
-          let cursor: string | undefined;
-
-          // Paginate through all workspace members — avoids missing people in large workspaces
-          do {
-            const result = await app.client.users.list({
-              token: botToken,
-              limit: 200,
-              ...(cursor ? { cursor } : {}),
-            });
-            const members = (result.members as any[]) ?? [];
-
-            for (const m of members) {
-              if (
-                !m.deleted && !m.is_bot &&
-                (m.real_name?.toLowerCase().includes(query) ||
-                 m.name?.toLowerCase().includes(query) ||
-                 m.profile?.display_name?.toLowerCase().includes(query))
-              ) {
-                matches.push({
-                  slack_id: m.id,
-                  name:     m.real_name || m.profile?.display_name || m.name,
-                  // v4.8.x — `m.tz` absent means Slack reported NOTHING; falling
-                  // back to 'UTC' here used to write that default into
-                  // people_memory as though it were a real Slack reading, which
-                  // the permanent/temp divert (applyAutoTimezoneById) then reads
-                  // back as "Slack currently reads UTC" and can raise an owner
-                  // question about a zone Slack never actually said. Leave it
-                  // undefined so upsertPersonMemory's `if (params.timezone)`
-                  // guard skips the write entirely — no signal in, no signal
-                  // fabricated out.
-                  timezone: m.tz || undefined,
-                  email:    m.profile?.email,
-                  _raw:     m,
-                });
-              }
-            }
-
-            cursor = (result.response_metadata as any)?.next_cursor || undefined;
-          } while (cursor && matches.length < 20);
-
-          // Persist all matches into people_memory and kick off gender detection.
-          // Side-effect of finding someone on this transport: cache directory data.
-          for (const match of matches) {
-            upsertPersonMemory({
-              slackId:  match.slack_id,
-              name:     match.name,
-              email:    match.email,
-              timezone: match.timezone,
-              // A real users.list() read — `match.timezone` is `m.tz || undefined`
-              // above, so its absence means Slack reported no zone for this
-              // person, not that this call skipped looking.
-              timezoneReadingAbsent: !match.timezone,
-            });
-            detectAndSaveGender({
-              slackId:  match.slack_id,
-              name:     match.name,
-              pronouns: match._raw?.profile?.pronouns || undefined,
-              imageUrl: match._raw?.profile?.image_192 || match._raw?.profile?.image_72 || undefined,
-              botToken,
-            }).catch(() => {});
-          }
-
-          // Fallback for guest users: users.list() may not return single/multi-channel guests.
-          // If no matches found, check people_memory for a known slack_id and validate via users.info().
-          if (matches.length === 0) {
-            const memoryMatches = searchPeopleMemory(args.name as string);
-            for (const pm of memoryMatches) {
-              if (!pm.slack_id || !/^U[A-Z0-9]{7,11}$/.test(pm.slack_id)) continue;
-              try {
-                const info = await app.client.users.info({ token: botToken, user: pm.slack_id });
-                const u = info.user as any;
-                if (u && !u.deleted) {
-                  matches.push({
-                    slack_id: u.id,
-                    name: u.real_name || u.profile?.display_name || u.name,
-                    // See the 'UTC' note above the users.list() loop — same
-                    // fabrication risk, same fix: no reading, no default.
-                    timezone: u.tz || undefined,
-                    email: u.profile?.email,
-                    _raw: u,
+          // Paginate through all workspace members — avoids missing people in
+          // large workspaces. A READ, nothing more: this used to upsert every
+          // substring match (up to 20) into people_memory and fire gender
+          // detection for each, so people merely searched for got a row and a
+          // fresh `last_seen`, displacing real contacts from the last_seen-
+          // ordered roster (formatPeopleMemoryForPrompt, src/db/people.ts).
+          // Engagement earns the record, and every engagement path persists
+          // on its own: an @mention (app/helpers.ts), a colleague's own
+          // message (app/processMessage.ts), a room's members (app/
+          // handlers.ts), an outreach send (skills/outreach.ts), a booking
+          // (memory/recordBooking.ts). A search result the turn never acts on
+          // is not one of them.
+          if (found.length === 0) {
+            let cursor: string | undefined;
+            do {
+              const result = await app.client.users.list({
+                token: botToken,
+                limit: 200,
+                ...(cursor ? { cursor } : {}),
+              });
+              const members = (result.members as any[]) ?? [];
+              for (const m of members) {
+                if (
+                  !m.deleted && !m.is_bot &&
+                  (m.real_name?.toLowerCase().includes(query) ||
+                   m.name?.toLowerCase().includes(query) ||
+                   m.profile?.display_name?.toLowerCase().includes(query))
+                ) {
+                  found.push({
+                    slack_id: m.id,
+                    name:     m.real_name || m.profile?.display_name || m.name,
+                    // `m.tz` absent means Slack reported NOTHING — no 'UTC'
+                    // default, so the tz_note says "no signal" instead of
+                    // presenting a fabricated zone as a reading.
+                    timezone: m.tz || undefined,
+                    tzUnconfirmed: false,
+                    email:    m.profile?.email,
                   });
-                  upsertPersonMemory({
-                    slackId: u.id,
-                    name: u.real_name || u.profile?.display_name || u.name,
-                    email: u.profile?.email,
-                    timezone: u.tz || undefined,
-                    // A real users.info() read (guest-user fallback, inside
-                    // the try above) — absent `u.tz` means Slack reported no
-                    // zone, not that the lookup failed (a throw skips this line).
-                    timezoneReadingAbsent: !u.tz,
-                  });
-                  logger.info('Found guest user via users.info fallback', { slackId: u.id, name: u.real_name });
                 }
-              } catch {
-                // users.info failed — ID might be invalid, skip
               }
-            }
+              cursor = (result.response_metadata as any)?.next_cursor || undefined;
+            } while (cursor && found.length < 20);
           }
-
-          // v2.6.6 — rename `timezone` → `tz_iana` + add `tz_note` so Sonnet
-          // doesn't read the IANA tz string as a city. Same shape as the
-          // people_memory pull-through above; one source of truth for the
-          // cautionary framing. Pre-fix, `timezone: "Australia/Brisbane"`
-          // had Sonnet writing "Since you're in Brisbane..." (Shayan, May 10).
-          const cleanMatches = matches.map(({ _raw: _raw, timezone, ...m }) => {
-            void _raw;
-            return {
-              ...m,
-              tz_iana: timezone || undefined,
-              tz_note: timezone
-                ? 'City not on file — TZ is reliable for time math; only ask for city when location/venue matters.'
-                : 'No timezone on file for this person — Slack and people_memory have no signal. Do not assume UTC or any other zone; say you don\'t know their local time, or ask, rather than presenting a fabricated one.',
-              state: undefined,
-            };
-          });
 
           // External-email signal — when query was an email AND no Slack match
           // AND email is outside owner's company domain, return external:true
@@ -428,7 +393,7 @@ If you already have an email for the person, you don't need this tool to book a 
           const ownerDomain = ownerEmail.includes('@') ? ownerEmail.split('@')[1] : '';
           const isExternalEmail = isEmail && ownerDomain &&
             !queryRaw.toLowerCase().endsWith('@' + ownerDomain);
-          if (cleanMatches.length === 0 && isExternalEmail) {
+          if (found.length === 0 && isExternalEmail) {
             return {
               matches: [],
               count: 0,
@@ -438,8 +403,11 @@ If you already have an email for the person, you don't need this tool to book a 
             };
           }
 
-          logger.info('find_slack_user', { query: args.name, matches: cleanMatches.length });
-          return { matches: cleanMatches, count: cleanMatches.length };
+          const matches = found.map(m => projectDirectoryMatch(m, surface));
+          logger.info('find_slack_user', { query: args.name, matches: matches.length, source, surface: surface ?? 'unscoped' });
+          return source === 'people_memory'
+            ? { matches, count: matches.length, source }
+            : { matches, count: matches.length };
         } catch (err) {
           logger.error('find_slack_user failed', { err: String(err) });
           return { error: String(err) };

@@ -89,7 +89,7 @@ function harness(options = {}) {
     'src/utils/ownerDailyThread.ts': { postOwnerDecision: async args => { effects.ownerPosts.push(args.text); return { ok: true, channel: 'DOWNER', threadTs: 'owner.daily', ts: 'owner.next' }; } },
     'src/utils/workHours.ts': { workTimeBaseFromNow: () => '2026-09-10T00:00:00Z', addWorkdays: () => '2026-09-14T00:00:00Z' },
     'src/utils/weTimeResolver.ts': { StatedTimeClarificationError: class extends Error {}, statedClockPersonContext: () => undefined, statedZoneFromArgs: args => args.stated_zone || args.start_timezone, resolveStatedInstant: input => ({ startIso: input.startIso, endIso: input.endIso }) },
-    'src/utils/attendeeAvailability.ts': { loadAttendeeAvailabilityForPerson: (person, fallback) => ({ timezone: person?.timezone || fallback }), attendeeTzForDay: entry => entry.timezone },
+    'src/utils/attendeeAvailability.ts': { loadAttendeeAvailabilityForPerson: (person, fallback) => ({ timezone: person?.timezone || fallback }), attendeeTzForDay: entry => entry.timezone, attendeeTravelTimezoneForDay: () => undefined },
     'src/utils/workingElsewhere.ts': { getTravelContextForInstant: () => undefined },
     'src/utils/logger.ts': { __esModule: true, default: { info() {}, warn() {}, error() {} } },
     'src/llm/models.ts': { MODEL_HAIKU: 'test-only' },
