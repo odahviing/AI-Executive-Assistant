@@ -1,8 +1,8 @@
-# Report — 4.9.6 release preparation
+# Report — cumulative since the 4.9.6 wrap
 
-**26 rows await you** — 4.9.6 is ready to commit; parked decisions remain in the ledger.
+**27 rows await you** — v4.9.6 wrapped; parked decisions remain in the ledger.
 
-31 open rows — 10 still-real · 18 need a re-read · 3 cite no file · 26 rulable · 5 waiting on a verb.
+32 open rows — 22 still-real · 6 need a re-read · 4 cite no file · 27 rulable · 5 waiting on a verb.
 
 ### pending owner (0)
 
