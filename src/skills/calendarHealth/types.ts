@@ -1,8 +1,7 @@
 /**
  * calendarHealth shared types — the HealthIssue shape produced by the
  * check_calendar_health detector and threaded through the auto-move engines.
- * Moved VERBATIM (interface body byte-for-byte) out of ../calendarHealth.ts;
- * only `export` was added so the sibling modules + handlers can import it.
+ * Includes per-attempt completion certainty for honest failure reporting.
  */
 
 export interface HealthIssue {
@@ -39,5 +38,6 @@ export interface HealthIssue {
   fixed?: boolean;                // set by active-mode loop when Maelle acted on this issue
   fix_detail?: string;            // human-readable one-liner describing the fix applied
   fix_failed?: boolean;           // set when active-mode tried to fix and an error was thrown
+  fix_unconfirmed?: boolean;      // a calendar write was attempted but its completion is not confirmed
   fix_error?: string;
 }

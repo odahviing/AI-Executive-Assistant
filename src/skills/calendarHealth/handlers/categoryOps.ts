@@ -1,11 +1,6 @@
-/**
- * categoryOps — the `set_event_category` and `manage_calendar_issue` case
- * bodies, extracted VERBATIM from
- * ../../calendarHealth.ts. No logic changes: relative import depth deepened two
- * levels; free vars threaded via OpCtx (each handler destructures only what its
- * body uses).
- */
+/** Category updates and owner-scoped calendar issue transitions. */
 import { updateMeeting } from '../../../connectors/graph/calendar';
+import { DateTime } from 'luxon';
 import {
   auditLog,
   axisFor,
@@ -187,49 +182,80 @@ export async function handleManageCalendarIssue(args: Record<string, unknown>, c
           return { error: 'bad_action', message: `manage_calendar_issue action must be 'list' | 'approve' | 'start_resolve' | 'owner_will_resolve' | 'owner_done', got "${action}".` };
         }
 
-        // start_resolve opens a follow_up request before flipping the row
-        // so the row carries a request_id back. Other actions just update.
+        // IDs are global; authorize the loaded row before creating requests,
+        // attaching them, changing status, or disclosing its contents.
+        const { getCalendarIssueById, attachRequestToIssue } = require('../../../db/calendarIssues') as typeof import('../../../db/calendarIssues');
+        const row = getCalendarIssueById(issueId);
+        if (!row || row.owner_user_id !== ownerUserId) {
+          return { error: 'not_found', message: `Issue "${issueId}" not found.` };
+        }
+        if (action === 'start_resolve' && ['approved', 'dismissed', 'resolved'].includes(row.status)) {
+          return { error: 'issue_closed', message: 'This issue is already closed; no new resolution request was opened.' };
+        }
+
+        // Reuse one owned tracker, with the existing 24h expiry used by owner
+        // calendar work. Persist request, attachment and status atomically.
         let requestId: string | undefined;
-        if (action === 'start_resolve') {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { createRequest } = require('../../../db/requests') as
-              typeof import('../../../db/requests');
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { getCalendarIssueById } = require('../../../db/calendarIssues') as
-              typeof import('../../../db/calendarIssues');
-            const row = getCalendarIssueById(issueId);
-            const subject = row
-              ? `Resolve ${row.issue_class}: ${(notes ?? '').slice(0, 60) || row.event_date}`
-              : 'Resolve calendar issue';
-            const created = createRequest({
+        const { getDb } = require('../../../db') as typeof import('../../../db');
+        const { createRequest, getRequest, getRequestByIdempotencyKey, updateRequest } = require('../../../db/requests') as typeof import('../../../db/requests');
+        const { closeRequest } = require('../../../core/requests/closeRequest') as typeof import('../../../core/requests/closeRequest');
+        try {
+          getDb().transaction(() => {
+            const key = `calendar_fix:${ownerUserId}:${issueId}`;
+            const linked = row.request_id ? getRequest(row.request_id) : null;
+            const existing = linked ?? getRequestByIdempotencyKey(key);
+            const existingIssueId = existing?.details_json
+              ? (JSON.parse(existing.details_json) as { calendar_issue_id?: string }).calendar_issue_id
+              : undefined;
+            if (existing && (existing.owner_user_id !== ownerUserId || existing.kind !== 'follow_up' || existing.subkind !== 'calendar_fix'
+                || existing.outcome_external_event_id !== row.event_id || existingIssueId !== issueId)) {
+              throw new Error('The linked resolution request does not match this issue.');
+            }
+            const open = existing && ['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(existing.state);
+            if (action === 'start_resolve') {
+              if (existing && !open) throw new Error('The earlier resolution request is closed; no duplicate request was opened.');
+              if (existing && (!existing.next_check_at || !existing.next_check_handler)) {
+                // Repair a legacy timerless tracker without extending its life.
+                const createdAt = DateTime.fromSQL(existing.created_at, { zone: 'UTC' });
+                const bound = existing.expires_at ?? (createdAt.isValid ? createdAt.plus({ hours: 24 }).toUTC().toISO() : null);
+                if (!bound) throw new Error('The earlier request has no valid creation time for its expiry.');
+                updateRequest(existing.id, { expiresAt: bound, nextCheckAt: bound, nextCheckHandler: 'expiry' });
+              }
+              const expiry = DateTime.now().plus({ hours: 24 }).toUTC().toISO()!;
+              const created = existing ?? createRequest({
               ownerUserId,
               initiatedBy: ownerUserId,
               initiatedByRole: 'owner',
               kind: 'follow_up',
               subkind: 'calendar_fix',
-              subject,
-              description: `Calendar issue fix — ${row?.issue_class ?? '(unknown class)'} on ${row?.event_date ?? '?'}. ${notes ?? ''}`.trim(),
+              subject: `Resolve ${row.issue_class}: ${(notes ?? '').slice(0, 60) || row.event_date}`,
+              description: `Calendar issue fix — ${row.issue_class} on ${row.event_date}. ${notes ?? ''}`.trim(),
               state: 'in_flight',
               informed: 1,
-              outcomeExternalEventId: row?.event_id,
+              outcomeExternalEventId: row.event_id,
               details: { calendar_issue_id: issueId, notes },
+              idempotencyKey: key,
+              ownerDmChannel: ctx.context.channelId,
+              originChannel: ctx.context.channelId,
+              originThreadTs: ctx.context.threadTs,
+              expiresAt: expiry,
+              nextCheckAt: expiry,
+              nextCheckHandler: 'expiry',
             });
             requestId = created.id;
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { attachRequestToIssue } = require('../../../db/calendarIssues') as
-              typeof import('../../../db/calendarIssues');
             attachRequestToIssue(issueId, requestId);
-          } catch (err) {
-            logger.warn('start_resolve — request creation failed, falling back to status-only', {
-              issueId, err: String(err).slice(0, 200),
-            });
-          }
-        }
-
-        const updated = updateCalendarIssueStatus(issueId, newStatus, notes);
-        if (!updated) {
-          return { error: 'not_found', message: `Issue "${issueId}" not found.` };
+            } else if (open) {
+              const closed = closeRequest({ id: existing.id,
+                state: action === 'owner_done' ? 'resolved' : 'cancelled',
+                closureReason: `calendar_issue_${action}`, closedBy: 'owner',
+              });
+              if (!closed.ok) throw new Error('Could not close the linked resolution request.');
+            }
+            if (!updateCalendarIssueStatus(issueId, newStatus, notes)) throw new Error('Calendar issue no longer exists.');
+          })();
+        } catch (err) {
+          logger.warn('manage_calendar_issue — transition failed', { issueId, err: String(err).slice(0, 200) });
+          return { error: 'transition_failed', message: String(err).slice(0, 200) };
         }
 
         auditLog({
@@ -243,9 +269,7 @@ export async function handleManageCalendarIssue(args: Record<string, unknown>, c
 
         const messageByAction: Record<string, string> = {
           approve:            'Issue acknowledged — won\'t be flagged again.',
-          start_resolve:      requestId
-            ? 'Request opened. Call move_meeting as appropriate; cascade auto-resolves the row on event change.'
-            : 'Marked for resolution. Call move_meeting as appropriate.',
+          start_resolve:      'Resolution request is open. Call move_meeting as appropriate; cascade auto-resolves the row on event change.',
           owner_will_resolve: 'Marked owner_side — waiting on you to handle.',
           owner_done:         'Issue resolved.',
         };

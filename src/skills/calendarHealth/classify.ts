@@ -1,9 +1,4 @@
-/**
- * classify — extracted VERBATIM from ../calendarHealth.ts (module-level helpers
- * `parseGraphDt` + `classifyEventCategory`). Bodies are byte-for-byte identical;
- * only relative import depth was deepened one level for this dir and `export`
- * was added so calendarHealth.ts + the handlers can import them back.
- */
+/** Owner-zone Graph datetime parsing and the existing category classifier. */
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
@@ -18,10 +13,12 @@ import logger from '../../utils/logger';
 export function parseGraphDt(dateTimeStr: string, eventTz: string, fallbackTz: string): DateTime {
   const clean = dateTimeStr.replace(/\.\d+$/, '');
   const tz = eventTz || fallbackTz;
-  if (clean.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(clean)) {
-    return DateTime.fromISO(clean).setZone(tz);
-  }
-  return DateTime.fromISO(clean, { zone: tz });
+  const instant = clean.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(clean)
+    ? DateTime.fromISO(clean, { setZone: true })
+    : DateTime.fromISO(clean, { zone: tz });
+  // The Graph zone identifies the instant; all health day/hour comparisons
+  // use the owner's requested calendar zone, including UTC Graph responses.
+  return instant.setZone(fallbackTz);
 }
 
 /**

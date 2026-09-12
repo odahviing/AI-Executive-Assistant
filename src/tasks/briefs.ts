@@ -4,7 +4,7 @@ import { SONNET } from '../llm/models';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { markEventsSeen, getDb, getPreferences, appendToConversation } from '../db';
+import { getDb, getPreferences, appendToConversation } from '../db';
 import {
   getRequestsForBrief,
   markRequestSurfaced,
@@ -16,7 +16,7 @@ import { relayClosureToRequester } from '../core/requests/requesterRelay';
 import type { RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
-import { getPersonByEmail } from '../db/people';
+import { authoritativeGender, getPersonByEmail } from '../db/people';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import { formatSeenLogBlock, NEWS_PER_GOAL_TIMEOUT_MS, type NewsBundle } from '../skills/news';
 import { processCalendarEvents } from '../skills/meetings/ops';
@@ -138,6 +138,8 @@ function relativeTime(isoStr: string | undefined | null, timezone: string): stri
   const dt  = DateTime.fromISO(isoStr).setZone(timezone);
   const now = DateTime.now().setZone(timezone);
   const diffDays = now.startOf('day').diff(dt.startOf('day'), 'days').days;
+  if (diffDays < -1.5) return dt.toFormat('EEEE d MMM');
+  if (diffDays < -0.5) return 'tomorrow';
   if (diffDays < 0.5) return 'today';
   if (diffDays < 1.5) return 'yesterday';
   if (diffDays < 2.5) return 'two days ago';
@@ -341,6 +343,7 @@ async function collectBriefingData(
     ownerCalendarEvents = await getCalendarEvents(profile.user.email, calFrom, calTo, timezone);
   } catch (err) {
     logger.warn('brief — calendar fetch failed', { err: String(err).slice(0, 200) });
+    items.push({ kind: 'calendar_unavailable' });
   }
 
   // Today + tomorrow calendar surface.
@@ -386,6 +389,7 @@ async function collectBriefingData(
       if (tomorrows.length > 0) items.push({ kind: 'calendar_tomorrow', date: DateTime.now().setZone(timezone).plus({ days: 1 }).toFormat('EEEE d MMM'), events: tomorrows });
     } catch (err) {
       logger.warn('brief — calendar surface build threw', { err: String(err).slice(0, 200) });
+      items.push({ kind: 'calendar_unavailable' });
     }
   }
 
@@ -461,14 +465,20 @@ async function collectBriefingData(
     logger.warn('brief — tombstone collection threw', { err: String(err).slice(0, 200) });
   }
 
-  // Pronoun map.
+  // Pronoun map. Only human-backed gender may steer the composer's phrasing.
   const peopleGender: Record<string, 'he' | 'she' | 'they'> = {};
-  const peopleRows = db.prepare(`SELECT name, gender FROM people_memory WHERE gender IS NOT NULL`).all() as Array<{ name: string; gender: string }>;
+  const peopleRows = db.prepare(`SELECT name, gender, gender_set_by, gender_confirmed FROM people_memory WHERE gender IS NOT NULL`).all() as Array<{
+    name: string;
+    gender: string;
+    gender_set_by: 'auto' | 'person' | 'owner' | null;
+    gender_confirmed: number;
+  }>;
   for (const row of peopleRows) {
     if (!row.name) continue;
     const firstName = row.name.split(' ')[0];
-    peopleGender[row.name] = pronounFor(row.gender);
-    if (firstName && !peopleGender[firstName]) peopleGender[firstName] = pronounFor(row.gender);
+    const pronoun = pronounFor(authoritativeGender(row));
+    peopleGender[row.name] = pronoun;
+    if (firstName && !peopleGender[firstName]) peopleGender[firstName] = pronoun;
   }
 
   return { items, requestIdsToSurface, requestIdsToStale, peopleGender };
@@ -494,13 +504,14 @@ async function generateBriefingText(
   // passes a summary when the health pass had something to say (it drops the
   // text on `vacuous` — see the gather site), so presence IS the signal.
   const hasHealth = !!(healthSummary && healthSummary.trim().length > 0);
+  const hasHolds = !!(slotHoldsSummary && slotHoldsSummary.trim().length > 0);
   // o#180 — the timeout branch is distinct from "genuinely nothing to
   // report": `newsTimedOut` only reaches here when the Promise.race in
   // sendMorningBriefing lost to the clock, never on an empty-but-completed
   // gather. That's the one case the composer must say something about.
   const newsIncomplete = !hasNews && newsTimedOut;
 
-  if (items.length === 0 && !hasNews && !hasHealth) {
+  if (items.length === 0 && !hasNews && !hasHealth && !hasHolds) {
     // No time-of-day greeting on line 1 — the Slack app shows the first line
     // as the preview, so lead with the useful state, not "Morning —".
     return newsIncomplete
@@ -571,6 +582,7 @@ FORMAT:
 - Plain text only. • for bullets. *single asterisks* for bold. NEVER **double**.
 
 WHAT GETS SURFACED:
+- calendar_unavailable means the calendar could not be checked. Say so plainly; never infer an empty or free day from missing calendar data.
 - Everything still open AND every closure ${firstName} hasn't been informed about yet. Don't hide stuff he should know about.
 - Prefer OUTCOME / current state over activity.
 - Skip internal plumbing.
@@ -625,7 +637,6 @@ ${Object.keys(peopleGender).length > 0
     : '';
   // #30 — active slot holds, so ${firstName} can see if tentative reservations
   // are piling up (overuse oversight; there's no hard global cap by design).
-  const hasHolds = !!(slotHoldsSummary && slotHoldsSummary.trim().length > 0);
   const holdsPart = hasHolds
     ? `\n\nSLOT HOLDS — tentative reservations currently open (not booked yet). Fold into the brief as a brief, human note ONLY if it's worth ${firstName}'s attention (e.g. several open, or one sitting a while). Plain sentences, no header:\n${slotHoldsSummary!.trim()}`
     : '';
@@ -647,10 +658,14 @@ ${Object.keys(peopleGender).length > 0
       messages: [{ role: 'user', content: userContent }],
     });
     // find the TEXT block — with thinking on, content[0] is a thinking block.
-    return ((response.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
+    const text = ((response.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
+    if (!text) throw new Error('Brief composer returned no text');
+    return text;
   } catch (err) {
     logger.error('Briefing AI generation failed — falling back to simple format', { err: String(err) });
-    return buildFallbackBriefing(items, profile);
+    const fallback = buildFallbackBriefing(items, profile);
+    if (!fallback) throw new Error('Brief composition failed without usable fallback');
+    return fallback;
   }
 }
 
@@ -659,6 +674,13 @@ function buildFallbackBriefing(items: RichItem[], _profile: UserProfile): string
   // Slack preview (first line) carries real content, not "Morning —".
   const lines: string[] = [];
   for (const item of items) {
+    if (item.kind === 'calendar_unavailable') lines.push('Calendar unavailable — I could not check your schedule.');
+    if (item.kind === 'calendar_today' || item.kind === 'calendar_tomorrow') {
+      lines.push(String(item.date));
+      for (const event of item.events as Array<{ subject: string; start: string; end: string; all_day?: boolean }>) {
+        lines.push(`• ${event.all_day ? 'All day' : `${event.start}–${event.end}`}: ${event.subject}`);
+      }
+    }
     if (item.kind === 'outreach')        lines.push(`• ${item.colleague}: ${item.status}`);
     if (item.kind === 'coordination')    lines.push(`• ${item.colleague} / ${item.subject}: ${item.status}`);
     if (item.kind === 'approval')        lines.push(`• ${item.requester_name ?? 'someone'}: ${item.subject}`);
@@ -788,8 +810,8 @@ export async function sendMorningBriefing(
         new Promise<undefined>(r => { const t = setTimeout(() => r(undefined), BRIEF_HEALTH_TIMEOUT_MS); if (typeof t.unref === 'function') t.unref(); }),
       ]);
       // Read the tool's own `vacuous` flag ("nothing worth saying" —
-      // checkHealth.ts:1618), the same structured signal dispatchRoutine rides
-      // (dispatchers/routine.ts:204-212). Pre-fix the brief threw the flag away and re-derived
+      // checkHealth.ts:1617), the same structured signal consumed as
+      // `vacuousRoutineRun` (tasks/dispatchers/routine.ts:212-216). Pre-fix the brief threw the flag away and re-derived
       // it with an English regex over the composed prose, which broke the
       // moment a template was reworded or an issue description happened to
       // contain "looks good" — and the brief itself is composed in the owner's
@@ -912,8 +934,9 @@ export async function sendMorningBriefing(
     throw new Error('Morning briefing delivery failed: no Slack connection registered');
   }
 
-  // These bookkeeping writes follow confirmed delivery. Their failure cannot
-  // turn that send into an apparent delivery failure or invite a duplicate.
+  // These independent writes follow confirmed delivery. A failure must not
+  // skip other acknowledgements or report the delivered brief as unsent.
+  // If the daily marker itself fails, a later invocation cannot dedup on it.
   try {
     const { logEvent } = require('../db');
     logEvent({
@@ -922,8 +945,11 @@ export async function sendMorningBriefing(
       title: 'morning_briefing_sent',
       detail: DateTime.now().setZone(profile.user.timezone).toFormat('yyyy-MM-dd'),
     });
-    markEventsSeen(ownerUserId);
+  } catch (err) {
+    logger.warn('briefs — delivered but daily marker write failed', { ownerUserId, err: String(err).slice(0, 200) });
+  }
 
+  try {
     // v3.2.6 — fire-and-forget the seen-log write so tomorrow's brief / an
     // on-demand ask doesn't repeat today's stories (topic-level dedup). Non-fatal.
     if (newsBundle) {
@@ -934,7 +960,11 @@ export async function sendMorningBriefing(
       // then resurface on tomorrow's re-pull instead of being silently buried.
       void writeSeenLog(profile, newsBundle, { briefText: textToSend }).catch(() => { /* non-fatal */ });
     }
+  } catch (err) {
+    logger.warn('briefs — delivered but news seen write failed', { ownerUserId, err: String(err).slice(0, 200) });
+  }
 
+  try {
     // POST-BRIEF: stamp surfaced + auto-park stale items.
     // Stamp goes FIRST so surfaced_count is reflective; stale closures land
     // after — those rows will surface ONE more time next brief with closure

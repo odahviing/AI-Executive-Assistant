@@ -32,11 +32,11 @@ export class CalendarHealthSkill implements Skill {
 - Double bookings: overlapping non-all-day events (tagged with internal_only + movable_event_id when detectable)
 - OOF conflicts: meetings scheduled on days with an OOF/vacation event
 - Missing categories: events without Outlook categories
-- Busy day: a work day with free time below the profile threshold / 6+ meetings / no 30-min block for thinking time
+- Busy day: a work day with free time below the configured profile threshold
 
 Returns a list of issues. Behavior depends on \`mode\`:
 - passive (default) → returns the issues for you to narrate. Owner asks for fixes; you execute them via book_floating_block / set_event_category / etc. in follow-up calls.
-- active → executes safe fixes in-tool before returning: missing floating blocks get booked, missing categories get set when the classifier is high-confidence, busy-day threshold breaches fire a DM to the owner. Overlap + OOF conflicts on a MOVABLE (internal-only, no external attendee) meeting are auto-resolved by initiating a move-coordination to reschedule it (see the fix loop below); a movable meeting with an external attendee is left for the owner. Each issue in the returned list is tagged \`fixed: true\` with \`fix_detail\` when Maelle acted on it.
+- active → books missing floating blocks, sets high-confidence categories, and can move an internal-only, unprotected double booking directly to a slot free for everyone. Busy days and OOF conflicts are report-only. \`fixed: true\` confirms a calendar change; \`fix_detail\` also states any incomplete notifications or follow-ups.
 
 Use this proactively when the owner asks about their schedule, or when they ask you to check calendar health.`,
         input_schema: {
@@ -44,16 +44,16 @@ Use this proactively when the owner asks about their schedule, or when they ask 
           properties: {
             start_date: {
               type: 'string',
-              description: 'Start date YYYY-MM-DD. Defaults to today. When omitted, the tool uses a smart default window: today → end of the owner\'s current workweek, extended by 7 days when ≤24h remain (so there\'s runway to coordinate moves).',
+              description: 'Start date YYYY-MM-DD. When omitted, defaults to today. The fully defaulted range runs today through the Saturday ending next week (8–14 calendar days inclusive, depending on today).',
             },
             end_date: {
               type: 'string',
-              description: 'End date YYYY-MM-DD. Defaults paired with start_date — see above. Only override when you have a specific reason (e.g. owner asked "check next month").',
+              description: 'End date YYYY-MM-DD. When omitted, defaults to the Saturday ending next week. An explicit date overrides that bound; use explicit dates when the owner names a range.',
             },
             mode: {
               type: 'string',
               enum: ['passive', 'active'],
-              description: 'Optional override. When omitted, uses profile.behavior.calendar_health_mode. "active" executes the safe subset of fixes in-tool; "passive" just detects and reports.',
+              description: 'Optional override. When omitted, uses profile.behavior.calendar_health_mode. "active" executes supported in-tool fixes; "passive" just detects and reports.',
             },
           },
           required: [],
@@ -155,7 +155,7 @@ Use the owner's own categories listed in the EVENT CATEGORIES block of your syst
 Actions:
 - list — read active rows (filtered to event_end > now).
 - approve — owner said "it's fine, leave it" / "ignore it" / "stop flagging this" / "I keep telling you to ignore this." Marks the row terminal so it WON'T re-flag on future runs. Use this for a recurring busy-day or category-limit warning the owner has waved off (e.g. "5 weekly 1:1s on Monday, that's intentional"). Get the issue_id from a 'list' call or check_calendar_health's activeTrackedIssues — every detected issue, including busy_day, now has a trackable row.
-- start_resolve — owner said "fix it." Opens a request_id under the row, transitions to in_progress. Caller MUST follow with move_meeting / etc. as appropriate; the row auto-resolves on cascade when the underlying event changes.
+- start_resolve — owner said "fix it." Reuses the row's open request without extending it, or opens one with a 24-hour expiry, then transitions to in_progress. Continue only on \`updated: true\` + \`status: 'in_progress'\` + \`request_id\`. \`not_found\`, \`issue_closed\`, and \`transition_failed\` open no new request. The row auto-resolves when the event changes.
 - owner_will_resolve — owner said "I'll handle it." Row sits in owner_side state until owner declares done OR the underlying event changes.
 - owner_done — owner declared he fixed it. Row transitions to resolved.
 
@@ -243,26 +243,26 @@ You can monitor and improve the owner's calendar hygiene.
 Available tools:
 - check_calendar_health: scan for issues. Mode = ${mode.toUpperCase()} (profile default; can be overridden with the \`mode\` arg)
   • passive: detects and returns the issue list — you narrate, owner asks for fixes, you execute
-  • active: detects + EXECUTES the safe fixes in one pass (books missing floating blocks, tags uncategorized events with high-confidence category, DMs owner about busy days). Each issue comes back tagged \`fixed:true\` with a one-liner \`fix_detail\` describing what changed.
+  • active: books missing floating blocks, tags high-confidence categories, and can directly move eligible internal-only, unprotected double bookings. Busy days and OOF conflicts need owner direction. \`fixed:true\` confirms a calendar write; \`fix_detail\` states any notification/follow-up failures.
 - book_floating_block: book a floating block in its preferred window. Pass \`block_name\` (one of: ${blocks.map(b => b.name).join(', ') || 'none configured'}). Configured blocks: ${blocksLine}. All floating blocks live under \`meetings.floating_blocks\`.
   POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - buffer - duration\` (abut_before) or \`anchor.end + buffer\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
 - set_event_category: add Outlook categories to events
-- manage_calendar_issue: list active tracked issues, or transition one. action='list' (read active rows), 'approve' (owner waved it off / "leave it" — won't re-flag), 'start_resolve' (owner said "fix it" — opens a resolve; you then call move_meeting etc. and the row auto-resolves when the event changes), 'owner_will_resolve' (owner will handle it himself), 'owner_done' (owner says he fixed it). issue_id required except for 'list'.
+- manage_calendar_issue: list or transition tracked issues. action='list' (active rows), 'approve' (owner waved it off; won't re-flag), 'start_resolve' (reuse/open a 24-hour resolve; continue only on \`updated:true\` + \`status:'in_progress'\` + \`request_id\`), 'owner_will_resolve' (owner will handle), 'owner_done' (owner fixed it). issue_id required except for 'list'.
 
 Calendar issue workflow:
 1. check_calendar_health detects issues; active mode auto-fixes the safe subset before returning
 2. For ANY remaining issues (overlaps, OOF conflicts, busy days that need owner input), report to the owner with the issue ID
 3. Owner responds:
    - "it's fine" / "I know" → call manage_calendar_issue with action='approve' + the issue_id
-   - "move X to Y" / "fix it" → call manage_calendar_issue with action='start_resolve' + the issue_id, then use move_meeting to reschedule (the row auto-resolves when the event changes — no separate "resolved" call)
+   - "move X to Y" / "fix it" → call action='start_resolve'. On \`updated:true\` + \`status:'in_progress'\` + \`request_id\`, use move_meeting; the row auto-resolves when the event changes. On error, report it and stop; no new request opened.
    - "cancel X" → use delete_meeting (the row auto-resolves on the cascade)
    - "I'll handle it myself" → call manage_calendar_issue with action='owner_will_resolve' + the issue_id (then action='owner_done' once he says he's done)
 4. Approved/resolved issues won't be flagged again
 
 NARRATING ACTIVE-MODE RESULTS — use \`summary_text\` verbatim (v2.7.4):
-When check_calendar_health returns, the response carries a \`summary_text\` field that is a DETERMINISTIC per-issue summary built from \`fixed: true + fix_detail\` (successes) and \`fix_failed: true + fix_error\` (failures). USE THIS VERBATIM as the body of your reply — do NOT improvise from \`issues[]\` directly, do NOT skip fix_failed lines, do NOT add invented commentary about what got done.
+When check_calendar_health returns, \`summary_text\` is a DETERMINISTIC per-issue summary built from \`fixed + fix_detail\` (confirmed calendar changes and any incomplete follow-ups) and \`fix_failed + fix_error\` (failures). USE THIS VERBATIM as your reply body — do NOT improvise from \`issues[]\`, skip failures, or invent what got done.
 
-Why: previously Sonnet narrated "I started moving X" when the move-coord actually failed silently (slot search returned zero). The summary_text is the only honest source for "what got done this turn" — fixed actions appear as ✓ lines, failed attempts as × lines, undetected/skipped as ! lines. Owner sees the truth.
+Why: previously Sonnet narrated "I started moving X" when no calendar change was confirmed. The summary_text is the only honest source for "what got done this turn" — confirmed changes appear as ✓ lines, failed attempts as × lines, undetected/skipped as ! lines. Owner sees the truth.
 
 Light polish only: you may strip the ✓/×/! prefix characters when posting to Slack, and may slightly rephrase awkward template strings into natural EA voice (humanGate runs after you anyway). But every CLAIM in your reply must trace back to a line in summary_text. If summary_text is "Calendar looks healthy — no issues found." then your reply is "Calendar looks good." or similar — nothing more.
 
@@ -285,8 +285,8 @@ When the analyzer flags a \`busy_day\` issue, it carries \`free_minutes\` (total
 CATEGORY_LIMIT_EXCEEDED — surface as informational, ask for direction:
 When the analyzer flags a \`category_limit_exceeded\` issue, narrate it briefly with the named category, the rule (per_day or per_week), the count vs limit, and the day/week label. Active mode does NOT auto-resolve these — picking which interview / outside-meeting to bump is judgment-heavy and only ${firstName} can decide. Frame as a question: "Tuesday has 3 interviews, your limit is 2 — want me to move one, or keep all 3?". Include the affected event subjects (look them up via \`get_calendar\` if not already in context) so ${firstName} can pick. On owner decline ("keep them all" / "leave it"), call \`manage_calendar_issue\` with action='approve' + the issue_id so tomorrow's check doesn't re-surface the same row.
 
-OOF_CONFLICT WITH PROTECTION REASONS — frame as a question, not a status line.
-When an \`oof_conflict\` issue carries \`protection_reasons\` (the meeting can't be auto-moved because it has externals, ≥4 attendees, etc.), present it to the owner as a QUESTION: "External meeting on Thursday during your vacation — want me to handle, or you'll fix it yourself?". Include the meeting subject + date + the protection reasons in plain words, and the issue_id. If the owner says "no, leave it", call \`manage_calendar_issue\` with action='approve' + that issue_id; if he says "I'll fix it / I'll handle", call action='owner_will_resolve'. Either way tomorrow's check won't re-surface the row. Don't dismiss without explicit owner intent — only on a clear "I'll handle / leave it / no" reply.
+OOF_CONFLICT — report-only; frame as a question, not a status line.
+Present every \`oof_conflict\` to the owner; active mode does not move it. Include subject, date, issue_id, and any \`protection_reasons\` in plain words: "External meeting Thursday during your vacation — want me to handle it, or will you?". "Leave it" → approve; "I'll handle" → owner_will_resolve. Only dismiss on explicit owner intent.
 
 Rules:
 - In passive mode: only book floating blocks when explicitly asked or after check_calendar_health reveals a gap

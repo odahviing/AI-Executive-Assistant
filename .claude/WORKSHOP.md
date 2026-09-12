@@ -35,11 +35,9 @@ This is the canonical policy for Workshop dispatches, never Maelle runtime setti
 | Codex role or work | Model | Reasoning effort |
 | --- | --- | --- |
 | Manager (UI: Astra Light) | `gpt-6-astra` | `low` |
-| Contained builders, tests and documentation | `gpt-5.6-sol` | `medium` |
-| Approval, identity, calendar or architecture work | `gpt-6-astra` | `high` |
-| Independent Bouncer | `gpt-6-astra` | `high` |
+| Routine subagents, including independent Bouncer | `gpt-6-astra` (Astra Light) or `gpt-5.6-sol` | `low` for Astra; `medium` for Sol |
 
-Use `xhigh` only for a named difficult problem, with the reason in its dispatch. Report model/effort actually applied; a follow-up does not change an existing agent's runtime settings.
+For Codex, higher effort requires an explicit owner request; lane, sensitivity or reviewer role alone never escalates it. Earlier high-effort core audits were specific exceptions. Report model/effort actually applied; a follow-up does not change an existing agent's runtime settings.
 
 Use one builder and one independent reviewer per bounded package; reuse the builder for repairs and add a specialist only for a real dependency. Keep lane ownership and independent review. The first handoff carries executed tests and the evidence below. Recheck changed paths and affected dependencies after repairs, retaining unaffected evidence. Full Golden30 runs once at the release checkpoint under GOLDEN_PATHS.md; skipped or invalidated checks never count as passes.
 

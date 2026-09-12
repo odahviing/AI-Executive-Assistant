@@ -218,14 +218,26 @@ export function ensureBriefingCron(profile: UserProfile): void {
   const workDays = getProfileWorkDays(profile);
 
   if (existing) {
-    // Update schedule if it changed
-    if (existing.schedule_time !== scheduleTime) {
-      const nextRunAt = computeNextRunAt('weekdays', scheduleTime, null, profile.user.timezone, undefined, workDays);
+    const now = DateTime.utc();
+    const nextRunAt = computeNextRunAt('weekdays', scheduleTime, null, profile.user.timezone, now, workDays);
+    const storedNext = existing.next_run_at
+      ? DateTime.fromISO(existing.next_run_at, { zone: 'utc' })
+      : null;
+    // The profile timezone and workday union are part of the schedule even
+    // though routines persist only the clock string. Refresh a future cursor
+    // whenever it is no longer the next occurrence under the current profile.
+    // Preserve an overdue cursor: the materializer must still get the chance
+    // to apply its existing catch-up/lateness policy to that firing.
+    const futureCursorChanged = storedNext != null && (
+      !storedNext.isValid ||
+      (storedNext > now && storedNext.toMillis() !== DateTime.fromISO(nextRunAt).toMillis())
+    );
+    if (existing.schedule_time !== scheduleTime || futureCursorChanged) {
       db.prepare(`
         UPDATE routines SET schedule_time = ?, next_run_at = ?, updated_at = datetime('now')
         WHERE id = ?
       `).run(scheduleTime, nextRunAt, cronId);
-      logger.info('Briefing cron schedule updated', { cronId, scheduleTime });
+      logger.info('Briefing cron schedule updated', { cronId, scheduleTime, nextRunAt });
     }
     return;
   }

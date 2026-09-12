@@ -75,13 +75,14 @@ test('Claude dispatches preserve provider-native selectors', async () => {
   const r = await run({ releaseCheckpoint: true })
   assert.ok(r.calls.every(c => !c.opts.model || ['sonnet', 'opus', 'fable', 'haiku'].includes(c.opts.model)))
 })
-test('Codex Manager defaults to Astra Light while bounded workers remain Sol medium', () => {
+test('Codex Manager defaults to Astra Light and routine subagents include independent review', () => {
   const config = fs.readFileSync(path.join(repo, '.codex/config.toml'), 'utf8')
   const policy = fs.readFileSync(path.join(repo, '.claude/WORKSHOP.md'), 'utf8')
   assert.match(config, /^model = "gpt-6-astra"$/m)
   assert.match(config, /^model_reasoning_effort = "low"$/m)
   assert.match(policy, /Manager \(UI: Astra Light\).*`gpt-6-astra`.*`low`/)
-  assert.match(policy, /Contained builders, tests and documentation.*`gpt-5\.6-sol`.*`medium`/)
+  assert.match(policy, /Routine subagents, including independent Bouncer.*`gpt-6-astra`.*`gpt-5\.6-sol`.*`low`.*`medium`/)
+  assert.match(policy, /higher effort requires an explicit owner request/)
 })
 test('cost policy preserves refusal of an absent independent review', async () => {
   const r = await run({}, { ...canned, 'bouncer:wave': null })

@@ -1,10 +1,4 @@
-/**
- * autoMove — extracted VERBATIM from ../calendarHealth.ts (module-level engines
- * `revalidateActiveOverlapIssues` + `executeInternalAutoMove` +
- * `pullInternalMeetingToAbut`). Bodies byte-for-byte identical; only relative
- * import depth was deepened one level for this dir and `export` was added so
- * the check_calendar_health handler can import them back.
- */
+/** Live overlap revalidation and shared autonomous move execution. */
 import { DateTime } from 'luxon';
 import {
   getCalendarEvents,
@@ -50,7 +44,7 @@ export async function revalidateActiveOverlapIssues(
   const eventsByDate = new Map<string, Awaited<ReturnType<typeof getCalendarEvents>>>();
   for (const date of overlapDates) {
     try {
-      eventsByDate.set(date, await getCalendarEvents(userEmail, date, date, timezone));
+      eventsByDate.set(date, await getCalendarEvents(userEmail, date, date, timezone, 'live'));
     } catch (err) {
       logger.warn('revalidateOverlap — day fetch failed, keeping its issues surfaced', {
         date, err: String(err).slice(0, 120),
@@ -73,6 +67,10 @@ export async function revalidateActiveOverlapIssues(
       const aE = parseGraphDt(a.end.dateTime, a.end.timeZone ?? '', timezone).toMillis();
       const bS = parseGraphDt(b.start.dateTime, b.start.timeZone ?? '', timezone).toMillis();
       const bE = parseGraphDt(b.end.dateTime, b.end.timeZone ?? '', timezone).toMillis();
+      if (![aS, aE, bS, bE].every(Number.isFinite) || aE <= aS || bE <= bS) {
+        survivors.push(row); // malformed time is unknown, never proof of resolution
+        continue;
+      }
       stillOverlaps = aS < bE && aE > bS;
     }
     if (stillOverlaps) {
@@ -89,11 +87,11 @@ export async function revalidateActiveOverlapIssues(
 
 // #133 — shared autonomous internal-meeting move. Extracted from the
 // double_booking auto-fix so EVERY active-mode auto-move (clash-clearing AND
-// efficient-calendar defrag) runs ONE path: record on the requests-spine (the
-// revert handle) → updateMeeting → rebalance floating blocks → notify the
-// internal attendee(s) with a pushback escape → resolve the spine record →
-// shadow-notify the owner. Caller supplies the already-chosen, free + rule-valid
-// target (newStartIso) and the human phrasing; helper sets issue.fixed on success.
+// efficient-calendar defrag) runs ONE path: record the revert handle → PATCH
+// and verify → record success → rebalance/notify → shadow-notify the owner.
+// Caller supplies the already-chosen, free + rule-valid
+// target (newStartIso) and the human phrasing; verified writes are recorded
+// before ancillary cleanup/notifications, whose failures remain in fix_detail.
 export async function executeInternalAutoMove(params: {
   movable: CalendarEvent;
   origStart: DateTime;
@@ -157,9 +155,20 @@ export async function executeInternalAutoMove(params: {
     }
   }
 
-  // Record BEFORE executing so "revert" has a deterministic handle (event id +
-  // original/new times). state in_flight → resolved once the move + notify land.
-  // Best-effort: a record hiccup must NEVER block the move. TTL via `expiry`.
+  // Re-read memory at the mutation chokepoint. The detector's snapshot predates
+  // earlier moves in this sweep; pending writes must not be repeated on retry.
+  const { getRecentlyAutoMovedEventIds, getRequestsByExternalEventId } = require('../../db/requests') as typeof import('../../db/requests');
+  const { getSuppressedEventIds } = require('../../db') as typeof import('../../db');
+  if (getSuppressedEventIds(ownerUserId).has(movable.id)
+      || getRecentlyAutoMovedEventIds(ownerUserId).has(movable.id)
+      || getRequestsByExternalEventId(ownerUserId, movable.id).some(r => r.subkind === 'auto_move')) {
+    logger.info('auto-move skipped — event already settled or a move is pending', { eventId: movable.id });
+    return;
+  }
+
+  // Record BEFORE executing so every move has durable memory and a revert
+  // handle. Existing expiry owns pending/unknown completion; notification is
+  // separate from whether the calendar mutation was confirmed.
   let autoMoveReq: { id: string } | null = null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -190,50 +199,68 @@ export async function executeInternalAutoMove(params: {
       nextCheckHandler: 'expiry',
     });
   } catch (reqErr) {
-    logger.warn('auto-move request-record create failed — proceeding with the move', { err: String(reqErr).slice(0, 160) });
+    logger.warn('auto-move request-record create failed — no calendar write', { err: String(reqErr).slice(0, 160) });
+    issue.fix_failed = true;
+    issue.fix_error = `I couldn't record the move of "${subj}", so I left it unchanged.`;
+    return;
   }
 
-  await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
+  issue.fix_unconfirmed = true;
+  try {
+    await updateMeeting({ userEmail, timezone, meetingId: movable.id, start: newStartIso, end: newEndIso });
+  } catch (err) {
+    // A transport failure can arrive after PATCH applied. The same safe,
+    // exact-id readback below decides the outcome; never blindly repeat PATCH.
+    logger.warn('auto-move write threw — checking the calendar outcome', { eventId: movable.id, err: String(err).slice(0, 160) });
+  }
 
-  // gh#180-c — verify the PATCH actually landed BEFORE minting any claim that
-  // says it did (the colleague notice, the shadowNotify DM to the owner,
-  // issue.fixed). Graph can return 200 OK without the write applying (sync
-  // delay, race, or a recurring-instance id that silently rebinds) — reuses
-  // the read-back already shipped for move_meeting / create_meeting
-  // (connectors/graph/calendarReads.ts's verifyEventMoved) rather than a new one.
+  // Verify the exact requested start AND end before claiming success. Reuse
+  // the strict readback comparator: the legacy start-only verifier treats an
+  // unreadable calendar as success, which cannot authorize notifications.
   {
-    const { verifyEventMoved } = await import('../../connectors/graph/calendar');
-    const verify = await verifyEventMoved(userEmail, movable.id, newStartIso, timezone);
-    if (!verify.ok) {
-      logger.warn('auto-move verify failed — Graph accepted PATCH but readback drifted', {
+    const { verifyApprovedCalendarAction } = await import('../../connectors/graph/calendar');
+    const verify = await verifyApprovedCalendarAction({
+      userEmail, profile, tool: 'move_meeting',
+      args: { meeting_id: movable.id, new_start: newStartIso, new_end: newEndIso },
+    });
+    if (verify.status !== 'desired_state_observed') {
+      logger.warn('auto-move completion unconfirmed by calendar readback', {
         eventId: movable.id, issueType: issue.type, reason: verify.reason,
-        expected: 'expected' in verify ? verify.expected : undefined,
-        got: 'got' in verify ? verify.got : undefined,
+        status: verify.status,
       });
       issue.fix_failed = true;
-      issue.fix_error = verify.reason === 'not_found'
-        ? `I tried to move "${subj}" but couldn't find it on the calendar afterward — left it for you to check.`
-        // gh#180-c follow-up — `verify.got` is what the read-back actually
-        // showed, which is not necessarily the OLD time (sync delay, race, or
-        // a recurring-instance id silently rebinding can all land somewhere
-        // else entirely). Quote the real read-back instead of asserting the
-        // old time as fact.
-        : verify.got
-          ? `I tried to move "${subj}" but the calendar now shows it at ${verify.got}, not the new time — left it for you to check.`
-          : `I tried to move "${subj}" but a read-back after the move didn't match what I expected — left it for you to check.`;
-      if (autoMoveReq) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
-          closeRequest({
-            id: autoMoveReq.id, state: 'cancelled', closureReason: 'auto_move_write_did_not_land', closedBy: 'system',
-          });
-        } catch (reqErr) {
-          logger.warn('auto-move request-record close(cancelled) threw', { err: String(reqErr).slice(0, 160) });
-        }
-      }
+      issue.fix_error = verify.status === 'unavailable'
+        ? `I tried to move "${subj}" but couldn't verify the calendar afterward — left it for you to check.`
+        : `I tried to move "${subj}" but the calendar afterward did not match the requested start and end — left it for you to check.`;
+      // An inconclusive readback cannot prove no write occurred. Keep the
+      // existing in-flight handle/timer so the next sweep cannot repeat it.
       return;
     }
+  }
+
+  const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
+  issue.fixed = true;
+  issue.fix_unconfirmed = false;
+  issue.fix_failed = false;
+  issue.fix_error = undefined;
+  issue.fix_detail = `Moved "${subj}" to ${newLocal} ${moveVerb}.`;
+  internalActions.push({ tool: 'move_meeting', detail: `Auto-moved "${subj}" to ${newLocal} (${issue.type})` });
+  const followUpFailures: string[] = [];
+  try {
+    const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
+    const closed = closeRequest({
+      id: autoMoveReq.id, state: 'resolved', closureReason: 'auto_move_executed', closedBy: 'system',
+      outcomeExternalEventId: movable.id,
+      outcomeJson: {
+        original_start: mStart.toISO(), original_end: mEnd.toISO(),
+        new_start: newStartIso, new_end: newEndIso, subject: subj,
+        colleague_subject: colleagueSubj, kept_event_id: keptEventId,
+      },
+    });
+    if (!closed.ok) throw new Error('Move record could not be closed.');
+  } catch (err) {
+    followUpFailures.push('I could not finish updating the move record.');
+    logger.warn('auto-move request-record resolve failed — move already done', { err: String(err).slice(0, 160) });
   }
 
   // elan-hold-survives-the-move-that-resolved-it (2026-09-06) — every OTHER
@@ -247,6 +274,9 @@ export async function executeInternalAutoMove(params: {
   // (registrar-added return) lets the notify loop below skip anyone this
   // cascade already told, so Elan doesn't get a correction AND a fresh
   // "I moved it" DM for the same move.
+  let correctedColleagueSlackIds = new Set<string>();
+  let cascadeComplete = false;
+  try {
   const artifactsResult = await closeMeetingArtifacts({
     ownerUserId,
     meetingId: movable.id,
@@ -255,24 +285,18 @@ export async function executeInternalAutoMove(params: {
     bookingThreadTs: context.threadTs,
     newStartIso,
     newEndIso,
-    // Tier-0 skip (closeMeetingArtifacts.ts's `fulfillingRequestId`) — THIS
-    // run's own auto_move row is stamped `outcome_external_event_id = movable.id`
-    // and is still `in_flight` at this instant, so step 5's
-    // `getRequestsByExternalEventId` (open states only, db/requests.ts:545)
-    // would match it and close it `resolved / meeting_moved`, leaving the
-    // `closeRequest(auto_move_executed)` below a no-op on an already-terminal
-    // row (closeRequest.ts's terminal guard). That closure_reason is
-    // load-bearing twice: it is the ONLY shape REVERTIBLE_ACTIVITY_PREDICATE
-    // accepts for an auto-move (db/requests.ts:590 — "revert" / "undo that"
-    // would stop finding this move while the shadow DM below still offers it),
-    // and it is what `getRecentlyAutoMovedEventIds` (db/requests.ts:647) reads
-    // to stop the next active-mode sweep re-moving an event the owner just
-    // reverted (the 2026-07-13 re-move loop). Same contract the resolver uses:
-    // this caller owns its own row's close, every OTHER artifact still
-    // cascades.
+    // This caller owns auto_move_executed closure, including if its closure
+    // write failed above. The cascade must not close that handle differently.
     ...(autoMoveReq ? { fulfillingRequestId: autoMoveReq.id } : {}),
   });
-  const correctedColleagueSlackIds = new Set(artifactsResult.correctedColleagueSlackIds);
+  correctedColleagueSlackIds = new Set(artifactsResult.correctedColleagueSlackIds);
+  cascadeComplete = true;
+  } catch (err) {
+    // The cascade can have partially notified people before failing. Do not
+    // send fresh notices with an unknown correction set and risk duplicates.
+    followUpFailures.push('I could not confirm that the related follow-ups and attendee notifications finished.');
+    logger.warn('auto-move artifact cleanup failed — move already confirmed', { err: String(err).slice(0, 160) });
+  }
 
   try {
     const { rebalanceFloatingBlocksAfterMutation } = await import('../../utils/rebalanceFloatingBlocks');
@@ -293,12 +317,14 @@ export async function executeInternalAutoMove(params: {
   const { getPersonByEmail } = require('../../db') as typeof import('../../db');
   const notified: string[] = [];
   for (const a of participantsRaw) {
+    if (!cascadeComplete) break;
     const email = a.emailAddress.address;
     if (!email || email.toLowerCase() === profile.user.email.toLowerCase()) continue;
+    try {
     const row = getPersonByEmail(email.trim().toLowerCase());
     if (!row?.slack_id) continue;
     if (correctedColleagueSlackIds.has(row.slack_id)) continue;
-    await notifyColleagueOfMove({
+    const delivered = await notifyColleagueOfMove({
       profile, ownerChannel: context.channelId, ownerThreadTs: context.threadTs,
       colleagueSlackId: row.slack_id,
       colleagueName: a.emailAddress.name || row.name || email,
@@ -306,37 +332,18 @@ export async function executeInternalAutoMove(params: {
       originalStartIso: mStart.toISO()!, originalEndIso: mEnd.toISO()!,
       newStartIso, newEndIso, conflictReason,
     });
+    if (!delivered) throw new Error('Attendee notification was not confirmed.');
     notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
+    } catch (err) {
+      followUpFailures.push(`I couldn't confirm the notification to ${a.emailAddress.name || email}.`);
+      logger.warn('auto-move attendee notice failed — move already confirmed', { eventId: movable.id, err: String(err).slice(0, 160) });
+    }
   }
 
-  const newLocal = DateTime.fromISO(newStartIso, { zone: timezone }).toFormat('EEE d MMM HH:mm');
-  issue.fixed = true;
   issue.fix_detail = notified.length > 0
     ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} ${moveVerb}, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
     : `Moved "${subj}" to ${newLocal} ${moveVerb}.`;
-  internalActions.push({
-    tool: 'move_meeting',
-    detail: `Auto-moved "${subj}" to ${newLocal} (${issue.type})${notified.length ? ` — notified ${notified.join(', ')}` : ''}`,
-  });
-
-  if (autoMoveReq) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { closeRequest } = require('../../core/requests/closeRequest') as typeof import('../../core/requests/closeRequest');
-      closeRequest({
-        id: autoMoveReq.id, state: 'resolved', closureReason: 'auto_move_executed', closedBy: 'system',
-        outcomeExternalEventId: movable.id,
-        outcomeJson: {
-          original_start: mStart.toISO(), original_end: mEnd.toISO(),
-          new_start: newStartIso, new_end: newEndIso, subject: subj,
-          colleague_subject: colleagueSubj,
-          kept_event_id: keptEventId,
-        },
-      });
-    } catch (reqErr) {
-      logger.warn('auto-move request-record resolve failed — move already done', { err: String(reqErr).slice(0, 160) });
-    }
-  }
+  if (followUpFailures.length) issue.fix_detail += ` ${followUpFailures.join(' ')}`;
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -345,11 +352,8 @@ export async function executeInternalAutoMove(params: {
       channel: context.channelId,
       icon: '🔧',
       action: `Active-mode autofix — ${issue.type}`,
-      detail: `${issue.description}. I moved "${subj}" to ${newLocal} (free for everyone)${notified.length ? ` and let ${notified.join(', ')} know` : ''}. Say "revert" if you'd rather I hadn't.`,
-      // gh#180 — keyed to the auto-move request record (when one was created)
-      // so a later revert can correct THIS specific claim by threading under
-      // it, wherever in the owner's DM it landed. No key when the record
-      // create failed above (best-effort) — nothing could revert it then either.
+      detail: `${issue.fix_detail} Say "revert" if you'd rather I hadn't.`,
+      // Key the owner notice to the durable move handle for later correction.
       conversationKey: autoMoveReq?.id,
     });
   } catch (err) {

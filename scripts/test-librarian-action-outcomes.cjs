@@ -131,7 +131,7 @@ for (const [label,options] of [['history',{historyThrows:true}],['bookkeeping',{
 });
 for (const [label, force, thread] of [['requested',true,'brief.thread'],['scheduled',false,undefined]]) test(`LA-brief-${label}: confirmed send preserves history and lifecycle`, async () => {
   const h = brief(); await h.run(force,thread);
-  assert.equal(h.effects.posts.length,1); assert.equal(h.effects.events.length,1); assert.equal(h.effects.seen,1);
+  assert.equal(h.effects.posts.length,1); assert.equal(h.effects.events.length,1); assert.equal(h.effects.seen,0);
   assert.equal(h.effects.surfaced,1); assert.equal(h.effects.closures,1); assert.equal(h.effects.history.length,1);
   assert.equal(h.effects.posts[0][2].threadTs,thread); assert.equal(h.effects.history[0][0],thread || 'brief.1');
 });

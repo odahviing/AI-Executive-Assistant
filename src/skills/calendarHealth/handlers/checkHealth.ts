@@ -1,10 +1,4 @@
-/**
- * handleCheckHealth — the `check_calendar_health` case body, extracted VERBATIM
- * from ../../calendarHealth.ts. No logic changes: relative import depth deepened
- * two levels, free vars (context/self/profile/userEmail/timezone) threaded via
- * OpCtx, and the single `this.executeToolCall` re-dispatch rewritten to
- * `self.executeToolCall` (self = the skill instance).
- */
+/** Detect calendar health, apply allowed fixes, and return current issue state. */
 import { DateTime } from 'luxon';
 import {
   getCalendarEvents,
@@ -138,9 +132,8 @@ function skipsIssueTracking(
 
 export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
   const { context, self, profile, userEmail, timezone } = ctx;
-        // v2.1.4 — default window is owner-rule-driven (today → end of
-        // workweek; extend 7 days when ≤24h left). Explicit args still
-        // override. See utils/workHours.computeHealthCheckWindow.
+        // The shared default is today through Saturday ending next week;
+        // explicit routine/tool dates override it.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { computeHealthCheckWindow } = require('../../../utils/workHours') as typeof import('../../../utils/workHours');
         const defaultWindow = computeHealthCheckWindow(profile);
@@ -217,16 +210,11 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // detection for 14 days (the bug). The waived set is date-scoped via
         // the block's synthetic event_id — only the exact day(s) the owner
         // approved/deleted are suppressed.
-        let waivedBlockGapIds: Set<string> = new Set();
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getWaivedFloatingBlockEventIds } = require('../../../db/calendarIssues') as typeof import('../../../db/calendarIssues');
-          waivedBlockGapIds = getWaivedFloatingBlockEventIds(profile.user.slack_user_id);
-        } catch (err) {
-          logger.warn('Calendar health: waived-gap preload failed — detection will not suppress', {
-            err: String(err).slice(0, 200),
-          });
-        }
+        // Missing rejection memory is not permission to recreate a waived block.
+        // Fail before detection or any autonomous mutation when it is unreadable.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getWaivedFloatingBlockEventIds } = require('../../../db/calendarIssues') as typeof import('../../../db/calendarIssues');
+        const waivedBlockGapIds = getWaivedFloatingBlockEventIds(profile.user.slack_user_id);
 
         // Iterate through each day in range
         let cursor = DateTime.fromISO(startDate, { zone: timezone });
@@ -754,7 +742,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         const dedupedIssues: HealthIssue[] = [];
         for (const issue of issues) {
           const ids = [...(issue.eventIds ?? [])].sort().join('|');
-          const key = `${issue.type}:${issue.date}:${ids}`;
+          const key = JSON.stringify([issue.type, issue.date, ids, issue.block_name, issue.category_name, issue.rule_broken]);
           if (seen.has(key)) continue;
           seen.add(key);
           dedupedIssues.push(issue);
@@ -775,7 +763,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // re-validate overlap rows against the live calendar first, so a stale
         // one (owner moved the event in Outlook, date outside the health window)
         // is resolved instead of surfaced. Fail-safe: keeps the row on any error.
-        const activeIssues = await revalidateActiveOOOIssues(
+        await revalidateActiveOOOIssues(
           await revalidateActiveOverlapIssues(
             getActiveCalendarIssues(ownerUserId), profile.user.email, profile.user.timezone,
           ),
@@ -787,10 +775,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // stays flagged, fix_failed=true). Fixes covered:
         //   - missing_floating_block → book the block
         //   - missing_category → set category when classifier is high-conf
-        //   - oof_conflict → move-coord for non-protected meetings
-        //   - double_booking → direct floating-block move (Path a) OR
-        //     move-coord on the movable side (Path b)
-        //   - busy_day → DM the owner with candidates to move (no auto-move)
+        //   - double_booking / inefficient_gap → attendee-free internal move
+        //   - oof_conflict / busy_day → report only for owner direction
         let fixesApplied = 0;
         // v2.6.5 — internal_actions surfaces active-mode auto-fixes back up
         // through the tool result so the claim-checker can see them. Without
@@ -809,6 +795,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // reshapes the day, so auto-adding lunch or auto-resolving on it is
           // exactly the harm the old WE suppressor prevented — now generalized to
           // EVERY override (no floating blocks on ANY override day, owner rule).
+          let hasUnconfirmedMove = false;
           for (const issue of issues) {
             try {
               if (getEffectiveWorkDay(issue.date, profile).hasOverride) {
@@ -868,17 +855,10 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                   }
                 }
               }
-              // busy_day: no fix action in-tool — the owner needs to decide
-              // which meeting to move. A separate DM already fires below
-              // (batched) so this issue stays in the returned list for narration.
+              // busy_day: report only — the owner decides which meeting to move.
               else if (issue.type === 'oof_conflict' && issue.eventIds && issue.eventIds[0]) {
-                // v2.1.1 — surprise-vacation handling. When an OOF day has
-                // meetings scheduled BEFORE the vacation, the non-protected
-                // ones get moved out automatically (1:1s, small internal
-                // groups). Protected meetings (≥4 attendees / external /
-                // rule-matched) stay flagged for the owner. Same pattern
-                // as double_booking path (b) — internal-only coord with
-                // the meeting's attendees, move-intent.
+                // OOF conflicts are report-only. Add protection reasons so
+                // the owner can decide how to handle the meeting.
                 try {
                   const conflictingId = issue.eventIds[0];
                   const conflicting = events.find(e => e.id === conflictingId);
@@ -1146,7 +1126,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                       // declines when the earlier meeting sits right after lunch). Clear
                       // the pull's failure stamp first so a successful push narrates as a
                       // fix instead of being silently dropped.
-                      if (!issue.fixed) {
+                      if (!issue.fixed && !issue.fix_unconfirmed) {
                         const keptProt = protection.isProtected(kept, profile);
                         if (!keptProt.protected && !keptProt.reasons.includes('has external attendee')
                             && !dismissedEventIds.has(kept.id) && !recentlyAutoMovedIds.has(kept.id)) {
@@ -1197,6 +1177,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 issueType: issue.type, date: issue.date, err: String(err).slice(0, 300),
               });
             }
+            if (issue.fix_unconfirmed) { hasUnconfirmedMove = true; break; }
           }
 
           // v2.3.1 (#67) — busy_day DM removed per owner direction.
@@ -1220,6 +1201,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // #133c — blocks the sweep relocated this run; the lunch-anchored
           // fallback below skips them (Graph re-fetch may still show the old
           // position — defer to the next sweep on settled data).
+          // An uncertain write invalidates assumptions for further moves in
+          // this scan. Report it now; do not compound it with defrag/rebalance.
+          if (!hasUnconfirmedMove) {
           const consolidatedBlockIds = new Set<string>();
           try {
             const { rebalanceFloatingBlocksAfterMutation } = await import('../../../utils/rebalanceFloatingBlocks');
@@ -1328,7 +1312,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               };
               let cursorFb = DateTime.fromISO(startDate, { zone: timezone });
               const endFb = DateTime.fromISO(endDate, { zone: timezone });
-              while (cursorFb <= endFb) {
+                while (cursorFb <= endFb && !hasUnconfirmedMove) {
                 const dStr = cursorFb.toFormat('yyyy-MM-dd');
                 const dName = cursorFb.toFormat('EEEE');
                 if (!allWorkDays.includes(dName) || getEffectiveWorkDay(dStr, profile).hasOverride
@@ -1381,6 +1365,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                           dayEventsForBusy: dayEvts, issue: synthIssueB,
                           userEmail, ownerUserId, timezone, profile, context, internalActions,
                         });
+                        issues.push(synthIssueB);
+                        if (synthIssueB.fix_unconfirmed) { hasUnconfirmedMove = true; break; }
                         if (synthIssueB.fixed) fixesApplied += 1;
                       }
                     }
@@ -1405,6 +1391,8 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                     dayEventsForBusy: dayEvts, issue: synthIssue,
                     userEmail, ownerUserId, timezone, profile, context, internalActions,
                   });
+                  issues.push(synthIssue);
+                  if (synthIssue.fix_unconfirmed) { hasUnconfirmedMove = true; break; }
                   if (synthIssue.fixed) fixesApplied += 1;
                 }
                 cursorFb = cursorFb.plus({ days: 1 });
@@ -1412,6 +1400,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             } catch (err) {
               logger.warn('Lunch-anchored defrag fallback threw — continuing', { err: String(err).slice(0, 200) });
             }
+          }
           }
 
           logger.info('Calendar health: active mode complete', {
@@ -1534,6 +1523,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         }
         // Auto-stale anything not touched in this pass within the date range.
         markStaleResolved(ownerUserId, touchedRowIds, startDate, endDate);
+        // Return the state AFTER this scan's fixes, upserts and stale resolution.
+        // The owner needs new IDs immediately and must not see rows just closed.
+        const activeIssues = getActiveCalendarIssues(ownerUserId);
 
         // Route 2 narration. Build a deterministic per-issue summary text
         // directly from the issue list + fix outcomes. The routine prompt
@@ -1581,9 +1573,13 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // A SUCCESSFUL fix of either type still surfaces (Maelle reports the action she took).
         const isSilentFailedIssue = (i: HealthIssue): boolean =>
           i.fix_failed === true &&
+          !i.fix_unconfirmed &&
           (i.type === 'inefficient_gap' || i.type === 'missing_floating_block');
 
         const summaryLines: string[] = [];
+        for (const action of internalActions) {
+          if (action.tool === 'rebalance_floating_blocks') summaryLines.push(`✓ ${action.detail}`);
+        }
         for (const i of issues) {
           // A non-actionable failed autofix stays silent (see isSilentFailedIssue).
           if (isSilentFailedIssue(i)) continue;

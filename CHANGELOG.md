@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.9.7 — Reliable calendar health and daily briefings
+
+Calendar Health now keeps current issue tracking and reports confirmed, failed and uncertain autofix outcomes accurately. Daily briefings preserve calendar information during composition failures, use authoritative person data and leave unshown events unread.
+
+### Fixed
+
+- Keep distinct missing calendar blocks and current issue IDs; evaluate owner-local dates and revalidate overlaps using live, valid calendar data.
+- Require a durable record before automatic moves, verify the exact resulting interval, prevent immediate repeated moves, and distinguish a completed move from failed notifications or uncertain completion.
+- Bind calendar-issue resolution to the correct owner and issue, reuse timed requests, persist transitions atomically and close work when the owner takes over or finishes it.
+- Include hold-only briefing input, report unavailable calendars honestly, reject empty composition and retain calendar details in fallback output.
+- Preserve independent delivery bookkeeping, stop marking unseen event records as read, render future deadlines correctly and use confirmed gender provenance for briefing pronouns.
+- Refresh a stale future briefing schedule after timezone or workday changes while preserving overdue catch-up.
+
+### Framework
+
+- Use Astra low or Sol medium for routine Workshop agents; higher effort requires an explicit owner request.
+- Add read-only bookkeeping drafts and integrity checks, and combine manual Golden30 with accumulated-diff review while retaining independent evidence and all release gates.
+
+### Verification and limits
+
+- 28 Calendar Health/briefing correction references independently reviewed; three stale citation comments corrected separately. Existing schedules and product rules remain in place.
+- Full executable checkpoint: 81 suite/zone executions, 2,420 assertions passed, no failures or skips, and passing typecheck. Golden30 completed with 24 passes and six stale anchors; model-dependent outcomes remain explicitly bounded by structural evidence.
+- Plain-text skill-memory execution timing is deferred in #205; the standing-preference issue #155 remains open. Additional briefing delivery recovery and expanded emergency fallback were not implemented at the owner's direction.
+- No claim of production conversation outcomes before live use.
+
+---
+
 ## 4.9.6 — Reliable person identity and memory writes
 
 Person-memory writes now preserve who supplied a fact, bind to the intended person and report the actual saved outcome. Memory history survives long files and concurrent updates, while Slack directory searches no longer create contacts merely because they appeared in search results.

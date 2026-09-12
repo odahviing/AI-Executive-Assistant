@@ -1,0 +1,33 @@
+// Actual read-only Golden CLI in isolated source/return fixtures; no model or product calls.
+const { test, after } = require('node:test'), assert = require('node:assert/strict');
+const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+const repo = path.resolve(__dirname, '..'), root = fs.mkdtempSync(path.join(repo, '.workshop-golden-'));
+const v = require('./workshop-verification.cjs');
+fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, '.claude')); fs.mkdirSync(path.join(root, 'evidence'));
+for (const file of ['workshop-release.cjs', 'workshop-verification.cjs']) fs.copyFileSync(file === 'workshop-release.cjs' && process.env.WORKSHOP_BEFORE_RELEASE || path.join(__dirname, file), path.join(root, 'scripts', file));
+fs.copyFileSync(path.join(repo, '.claude/GOLDEN_PATHS.md'), path.join(root, '.claude/GOLDEN_PATHS.md'));
+assert.equal(cp.spawnSync('git', ['init', '-q'], { cwd: root }).status, 0);
+const runner = require(path.join(root, 'scripts/workshop-release.cjs'));
+after(() => { const resolved = fs.realpathSync(root); assert.equal(path.dirname(resolved), fs.realpathSync(repo)); assert.ok(path.basename(resolved).startsWith('.workshop-golden-')); fs.rmSync(resolved, { recursive: true, force: true }); });
+function base() { return { itemsInFile: 30, goldenTraces: Array.from({ length: 30 }, (_, i) => ({ id: `Z${i + 1}`, verdict: 'pass', evidence: 'fixture:1 structural trace; model-dependent response remains unproven' })), snapshot: [...runner.sourceSnapshot(root), ...v.snapshot(['.claude/GOLDEN_PATHS.md'], root)] }; }
+function retain(p) { fs.writeFileSync(path.join(root, 'evidence/return.json'), JSON.stringify({ itemsInFile: p.itemsInFile, goldenTraces: p.goldenTraces })); return { ...p, output: 'return.json', outputSha256: v.snapshot(['evidence/return.json'], root)[0].sha256 }; }
+function check(p) { fs.writeFileSync(path.join(root, 'evidence/report.json'), JSON.stringify(p)); return cp.spawnSync(process.execPath, ['scripts/workshop-release.cjs', '--check-golden', 'evidence/report.json'], { cwd: root, encoding: 'utf8' }); }
+test('preserved source snapshot includes executable source with real hashes', () => { const s = runner.sourceSnapshot(root); assert.equal(s.length, 2); assert.ok(s.every(x => /^[a-f0-9]{64}$/.test(x.sha256))); });
+test('complete current Golden30 passes and retains model residue', () => { const p = retain(base()), before = fs.readFileSync(path.join(root, 'evidence/return.json'), 'utf8'), result = check(p); assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).passed, 30); assert.equal(fs.readFileSync(path.join(root, 'evidence/return.json'), 'utf8'), before); });
+test('stale anchor with intact behavior remains allowed', () => { const p = base(); p.goldenTraces[0] = { id: 'Z1', verdict: 'stale-anchor', evidence: 'src/current.ts:42 moved anchor; behavior intact' }; const r = check(retain(p)); assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).staleAnchors, 1); });
+test('missing duplicate invented and wrongly counted results block', () => { for (const change of [p => p.goldenTraces.pop(), p => p.goldenTraces[29].id = 'Z1', p => p.goldenTraces[29].id = 'Z31', p => p.itemsInFile = 29, p => delete p.goldenTraces]) { const p = base(); change(p); assert.equal(check(retain(p)).status, 1); } });
+test('failure unknown verdict and absent evidence block', () => { for (const item of [{ verdict: 'fail', evidence: 'src/x.ts:1 fails' }, { verdict: 'skipped', evidence: 'not run' }, { verdict: 'pass', evidence: ' ' }, { verdict: 'pass' }]) { const p = base(); p.goldenTraces[0] = { id: 'Z1', ...item }; assert.equal(check(retain(p)).status, 1); } });
+test('missing duplicate stale and added-source snapshots block', () => { const p = retain(base()); assert.equal(check({ ...p, snapshot: [] }).status, 1); assert.equal(check({ ...p, snapshot: [...p.snapshot, p.snapshot[0]] }).status, 1); assert.equal(check({ ...p, snapshot: p.snapshot.map((s, i) => i ? s : { ...s, sha256: '0'.repeat(64) }) }).status, 1); fs.writeFileSync(path.join(root, 'scripts/added.cjs'), '// changed source'); assert.equal(check(p).status, 1); fs.unlinkSync(path.join(root, 'scripts/added.cjs')); assert.equal(check(p).status, 0); });
+test('changed Golden catalog invalidates review and exact catalog remains mandatory', () => { const file = path.join(root, '.claude/GOLDEN_PATHS.md'), original = fs.readFileSync(file, 'utf8'), p = retain(base()); fs.writeFileSync(file, original + '\nchanged header'); assert.equal(check(p).status, 1); fs.writeFileSync(file, original.replace('**Z30', '**Z31')); assert.equal(check(retain(base())).status, 1); fs.writeFileSync(file, original); assert.equal(check(retain(base())).status, 0); });
+test('missing empty and tampered reviewer output block with valid restore', () => { const p = retain(base()), file = path.join(root, 'evidence/return.json'), original = fs.readFileSync(file); fs.unlinkSync(file); assert.equal(check(p).status, 1); fs.writeFileSync(file, ''); assert.equal(check(p).status, 1); fs.writeFileSync(file, 'tampered'); assert.equal(check(p).status, 1); fs.writeFileSync(file, original); assert.equal(check(p).status, 0); });
+test('report cannot hide a failure from retained independent output', () => { const p = base(); p.goldenTraces[0].verdict = 'fail'; const retained = retain(p); retained.goldenTraces[0].verdict = 'pass'; assert.equal(check(retained).status, 1); });
+test('malformed report and missing required file reject without source writes', () => { const p = retain(base()); delete p.output; assert.equal(check(p).status, 1); assert.equal(check(null).status, 1); });
+test('native snapshot/report commands avoid metadata reconstruction and reject postcapture changes', () => {
+  const cli = args => cp.spawnSync(process.execPath, ['scripts/workshop-release.cjs', ...args], { cwd: root, encoding: 'utf8' });
+  const captured = cli(['--golden-snapshot']); assert.equal(captured.status, 0, captured.stderr);
+  fs.writeFileSync(path.join(root, 'evidence/snapshot.json'), captured.stdout);
+  retain(base()); const args = ['--golden-report', 'evidence/snapshot.json', 'evidence/return.json'];
+  const report = cli(args); assert.equal(report.status, 0, report.stderr); assert.equal(check(JSON.parse(report.stdout)).status, 0);
+  fs.writeFileSync(path.join(root, 'scripts/added.cjs'), '// postcapture edit'); assert.equal(cli(args).status, 1); fs.unlinkSync(path.join(root, 'scripts/added.cjs'));
+  const bad = base(); bad.goldenTraces[0].verdict = 'fail'; retain(bad); assert.equal(cli(args).status, 1);
+});
