@@ -1,11 +1,11 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "status": "running",
     "id": "wrap-4.9.7",
-    "note": "Owner-authorized patch wrap: Calendar Health, daily briefing and accumulated reviewed Workshop changes"
+    "note": "4.9.7 wrapped; cloud verification follows final bookkeeping push",
+    "status": "complete"
   },
-  "lastWrapIso": "2026-09-12T16:20:29+03:00",
+  "lastWrapIso": "2026-09-12T20:54:36+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
   "nextReportId": 300,
   "verifiedClean": [
