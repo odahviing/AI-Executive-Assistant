@@ -227,6 +227,163 @@ const NO_TZ_ARITHMETIC = 'Never compute a timezone conversion yourself. Where a 
  */
 const TIME_IS_NOT_A_PERSONAL_FACT = 'Which clock time, date or timezone a slot falls on — as stated, converted or labelled — is scheduling logistics, never a fact about anyone, and never this rule\'s target.';
 
+/**
+ * slot-grounding-rewrite-substituted-next-day-times-into-a-today-sentence
+ * (2026-09-14) — the DETERMINISTIC half of the ungrounded-slot-claim rewrite,
+ * and the reason the 2026-08-24 "hand it the real lines" design was not enough
+ * on its own.
+ *
+ * Live incident (07:39:39Z, colleague DM 1789371421.383909): the grounded
+ * lines were `[availability_precheck 2026-09-14T13:30 … not bookable]` plus
+ * `[availability_precheck alternatives (bookable …): 2026-09-15T09:45, …]`.
+ * The draft offered fabricated times "today"; the rewrite correctly reached
+ * for the only real times it had — TOMORROW's — and dropped their day, so
+ * next-day times shipped inside a today sentence. Every ISO in front of the
+ * model carried the date; the model simply did not carry it into the prose,
+ * and nothing checked that it had. The 2026-08-26/2026-09-09 work fixed WHICH
+ * lines the rewriter sees; this fixes what the rewriter is allowed to do with
+ * a line whose day differs from the one it is writing into.
+ *
+ * The check is code, not a prompt hope (W3/G3): a substituted clock time —
+ * one the rewrite introduced that the draft did not already contain — must
+ * carry its own date when its source day is NOT the day the draft's own
+ * grounded times already put it on. A same-day substitution, and a tape with
+ * one date, never fire (the common case, byte-identical behaviour). Failing the
+ * check DISCARDS the rewrite in favour of the caller's existing
+ * minimal-redaction fallback (the draft with only the fabricated time
+ * blanked), so a wrong fire is a safe MISS — it can never corrupt a correct
+ * reply, because this whole path runs only on a draft the rewriter has
+ * ALREADY independently confirmed false (G5).
+ *
+ * Regex only on structured tokens — ISO instants, numeric dates, clock times
+ * (W4/G8): the day FRAMING ("today" / "היום" / "mañana") is natural language
+ * and is never read here. That is exactly why the test is "did it name the
+ * date", not "did it say the right day word" — a day word is unjudgeable in
+ * code, a date is not.
+ */
+// `T` for an ISO instant (the precheck lines), a space for the slot list's own
+// render (`2026-09-14 17:15-17:40`, turnHelpers.ts's `fmt`) — both are the same
+// structured date+time token, and a search line is exactly where a second day
+// enters the list.
+const GROUNDED_INSTANT_RE = /(\d{4})-(\d{2})-(\d{2})[T ]([01]?\d|2[0-3]):([0-5]\d)/g;
+const CLOCK_TIME_RE = /(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])/g;
+/** A numeric date token: `2026-09-15`, `15/09`, `15.9.2026`, `09/15`. */
+const NUMERIC_DATE_TOKEN_RE = /(\d{1,4})[./-](\d{1,2})(?:[./-](\d{2,4}))?/g;
+
+/** `9:45` and `09:45` are the same instant — one key for both. */
+const clockKey = (hour: string, minute: string): string => `${Number(hour)}:${minute}`;
+
+/** Clock times a piece of text names, normalized. */
+function clockTimesIn(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(CLOCK_TIME_RE)) out.add(clockKey(m[1], m[2]));
+  return out;
+}
+
+/** time → the dates the grounded lines offer it on. */
+function groundedTimesByDate(lines: string[]): Map<string, Set<string>> {
+  const byTime = new Map<string, Set<string>>();
+  for (const line of lines) {
+    for (const m of line.matchAll(GROUNDED_INSTANT_RE)) {
+      const date = `${m[1]}-${m[2]}-${m[3]}`;
+      const key = clockKey(m[4], m[5]);
+      const dates = byTime.get(key) ?? new Set<string>();
+      dates.add(date);
+      byTime.set(key, dates);
+    }
+  }
+  return byTime;
+}
+
+/**
+ * The date forms the TAPE itself renders, so a rewrite that quotes the tape
+ * passes: numeric (`15/09`, `09/15`, `15.9.2026`, the ISO) and the
+ * month-name shapes the `[local: Wed 23 Sep 09:15 EDT]` suffix and the house
+ * style use (`23 Sep`, `Sep 23`, `Wednesday 23 Sep`). A bare `15:00` (a
+ * clock) or `9-10` (a range) is not a date — the token must carry the day AND
+ * the month.
+ *
+ * The month vocabulary is a closed list of structured tokens, not natural
+ * language (W4): nothing here reads meaning, and it can only ever make the
+ * audit MORE permissive — a form it fails to recognize costs a legitimate
+ * rewrite, so the list exists to stop exactly that.
+ */
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const DAY_THEN_MONTH_RE = new RegExp(`(\\d{1,2})(?:st|nd|rd|th)?[\\s,.-]*(${MONTHS.join('|')})`, 'gi');
+const MONTH_THEN_DAY_RE = new RegExp(`(${MONTHS.join('|')})[a-z]*[\\s,.-]*(\\d{1,2})`, 'gi');
+
+function textNamesDate(text: string, isoDate: string): boolean {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  for (const m of text.matchAll(NUMERIC_DATE_TOKEN_RE)) {
+    const parts = [m[1], m[2], m[3]].filter(Boolean).map(Number);
+    if (parts.includes(day) && parts.includes(month)) return true;
+    if (parts.includes(year) && parts.includes(month) && parts.includes(day)) return true;
+  }
+  const monthName = MONTHS[month - 1];
+  for (const m of text.matchAll(DAY_THEN_MONTH_RE)) {
+    if (Number(m[1]) === day && m[2].toLowerCase() === monthName) return true;
+  }
+  for (const m of text.matchAll(MONTH_THEN_DAY_RE)) {
+    if (Number(m[2]) === day && m[1].toLowerCase() === monthName) return true;
+  }
+  return false;
+}
+
+/**
+ * The audit itself. Returns the offending time (for the log) or null.
+ *
+ * bouncer overturn (2026-09-14) — the first build demanded a date on EVERY
+ * substituted time whenever the tape carried two or more dates, and a
+ * multi-date tape is the NORMAL state of a thread (`priorTurnAvailabilityLines`
+ * folds earlier turns' searches in, runOutputGates.ts — one live tape spans
+ * 09-15…10-01). That discarded legitimate same-day rewrites into the minimal
+ * redaction and threw away real options, which is the corruption this guard
+ * exists to prevent, not cause. It also enforced more than the prompt asked
+ * for, so a compliant rewrite could still be discarded.
+ *
+ * The rule now matches the prompt exactly, anchored on a deterministic fact:
+ * the draft's OWN grounded times fix the day the draft is speaking about (the
+ * incident draft named 13:30, which only the 2026-09-14 line offers), and a
+ * date is demanded only of a substituted time whose source dates EXCLUDE that
+ * day. Same-day substitutions, and anything already in the draft, pass
+ * untouched.
+ *
+ * Fires on nothing it cannot prove: a time the tape does not offer at all
+ * (that is the `noUngroundedTimeClaim` self-attest's job), or a single-date
+ * tape — both return null and the rewrite ships. When the draft gives no
+ * anchor day at all, the date is required of every substituted time instead
+ * (bouncer discovery below). The action is always the same one:
+ * DISCARD in favour of the caller's minimal redaction. It never composes or
+ * ships a claim of its own.
+ */
+function substitutedTimeMissingItsDate(draft: string, rewrite: string, groundedToolLines: string[]): { time: string; dates: string[]; draftDays: string[] } | null {
+  const byTime = groundedTimesByDate(groundedToolLines);
+  const draftTimes = clockTimesIn(draft);
+  const draftDays = new Set<string>();
+  for (const time of draftTimes) {
+    for (const d of byTime.get(time) ?? []) draftDays.add(d);
+  }
+  // bouncer discovery (2026-09-14, owner-approved) — no anchor derivable is
+  // the incident MINUS its 13:30 line, and standing down there ranked silent
+  // wrongness above visible degradation. With no day to compare against, every
+  // substituted time must carry its own date; a single-date tape still can't
+  // lose a day, so that case remains untouched.
+  if (draftDays.size === 0) {
+    const allDates = new Set<string>();
+    for (const dates of byTime.values()) for (const d of dates) allDates.add(d);
+    if (allDates.size < 2) return null;
+  }
+  for (const time of clockTimesIn(rewrite)) {
+    if (draftTimes.has(time)) continue;
+    const sourceDates = byTime.get(time);
+    if (!sourceDates || sourceDates.size === 0) continue;
+    if ([...sourceDates].some(d => draftDays.has(d))) continue;
+    if ([...sourceDates].some(d => textNamesDate(rewrite, d))) continue;
+    return { time, dates: [...sourceDates], draftDays: [...draftDays] };
+  }
+  return null;
+}
+
 export interface ClaimCheckInput {
   reply: string;
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
@@ -1114,6 +1271,22 @@ export async function rewriteOwningTheMiss(opts: {
     ? opts.groundedToolLines.map(l => `  ${l}`).join('\n')
     : '  (the search ran and found nothing usable this turn)';
 
+  // slot-grounding-rewrite-substituted-next-day-times-into-a-today-sentence
+  // (2026-09-14) — the prompt half of the day-carry rule, stated ONLY when the
+  // grounded lines actually span more than one day (prompt budget: on a
+  // single-day tape there is no day to lose). The code half below
+  // (`substitutedTimeMissingItsDate`) is what ENFORCES it — this clause exists
+  // so a compliant rewrite is the normal outcome rather than a discarded one.
+  const groundedSpansMultipleDays = (() => {
+    const byTime = groundedTimesByDate(opts.groundedToolLines ?? []);
+    const dates = new Set<string>();
+    for (const set of byTime.values()) for (const d of set) dates.add(d);
+    return dates.size > 1;
+  })();
+  const dayCarryRule = groundedSpansMultipleDays
+    ? '\n- The results above are NOT all on the same day. Any time you take from a line whose date differs from the day the draft is already talking about MUST be written with that date beside it — numeric ("15/09 09:45", "on 15/09: 09:45, 10:15") or the same form the lines use ("Tue 23 Sep 16:45"). A day word alone ("today", "tomorrow", "היום", "מחר") does NOT satisfy this, and a time carried across days without its date causes this whole rewrite to be DISCARDED. A time from the SAME day the draft is already speaking about needs nothing extra, and if the draft names no confirmed time of its own to fix which day that is, put the date on EVERY time you offer. Never move a time from one day into a sentence that speaks about another day.'
+    : '';
+
   const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that no real availability search confirms — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 REAL AVAILABILITY RESULTS (this turn's, plus any \`(earlier turn)\` search from this thread — the ONLY times/verdicts actually confirmed; settled, do not re-judge):
@@ -1123,7 +1296,7 @@ FLAGGED CLAIM: ${what}
 STEP 1 — Call verdict="keep" (leave message empty) if the draft does NOT actually offer that flagged time as available, or if it does and the time matches one of the real results above — a line's own instant or its \`[local: …]\` text — WITH A POSITIVE/AVAILABLE verdict attached. ${NO_TZ_ARITHMETIC} Do NOT call verdict="keep" when the matched result carries a NEGATIVE verdict (unavailable, busy, blocked, \`available: false\`, \`can_join=false\`, or a conflict/broken-rule reason) — merely appearing in the result is not the same as being confirmed available, and that is exactly the case STEP 2 must rewrite, not keep. Do not manufacture a problem that isn't one.
 
 STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely states a specific time as available that the real result above does not back. Put the corrected reply in \`message\`. The rewrite must:
-- Replace the fabricated time with the REAL time(s) from the list above, if any exist — never invent a substitute time of your own.
+- Replace the fabricated time with the REAL time(s) from the list above, if any exist — never invent a substitute time of your own.${dayCarryRule}
 - If the list above found nothing usable, say plainly that no time was actually confirmed yet (never invent one) — an honest "let me get back to you with the real options" is fine.
 - Keep every OTHER fact in the message intact: names, other correctly-stated times, numbers, the rest of the answer.
 - Sound like a real person, never a disclaimer or a system message.
@@ -1417,6 +1590,23 @@ ${opts.draft}`;
       if (input.noUngroundedTimeClaim !== true) {
         logger.warn('claim_checker_rewrite — verdict=rewrite but model would not attest the rewrite drops the ungrounded time claim; shipping a scoped fallback (never the known-false original)', {
           action_type: opts.actionType,
+          messagePreview: message.slice(0, 160),
+        });
+        return resolveMinimalRedactionFallback();
+      }
+      // slot-grounding-rewrite-substituted-next-day-times-into-a-today-sentence
+      // (2026-09-14) — the self-attest above asks only whether every time in
+      // the rewrite is a REAL one; "real" was true of the next-day
+      // alternatives that shipped inside a today sentence, so it could not
+      // catch this. The day is a deterministic fact on the line, so it is
+      // checked in code here rather than asked of the model again.
+      const dayLoss = substitutedTimeMissingItsDate(opts.draft, message, opts.groundedToolLines ?? []);
+      if (dayLoss) {
+        logger.warn('claim_checker_rewrite — rewrite carried a substituted time across days without its date; discarding it for the scoped fallback (never the known-false original)', {
+          action_type: opts.actionType,
+          time: dayLoss.time,
+          sourceDates: dayLoss.dates,
+          draftDays: dayLoss.draftDays,
           messagePreview: message.slice(0, 160),
         });
         return resolveMinimalRedactionFallback();

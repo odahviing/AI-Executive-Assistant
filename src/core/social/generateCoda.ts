@@ -43,6 +43,7 @@
 
 import { getAnthropicClient } from '../../llm/client';
 import { SONNET } from '../../llm/models';
+import { logLlmUsage } from '../../utils/usageLog';
 import type { UserProfile } from '../../config/userProfile';
 import type { SocialDirective } from './stateMachine';
 import logger from '../../utils/logger';
@@ -408,7 +409,16 @@ Output the coda sentence only. No quotes, no label.`;
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
       ...SONNET,
-      max_tokens: 100,
+      // 2026-09-14 — was 100 since v2.2.1, when a coda was ~10 tokens of English.
+      // A Hebrew coda that also names its source no longer fits: Hebrew BPE runs
+      // ~1 token per character at worst, so a ~150-char sentence is ~150 tokens,
+      // plus a Latin source title/URL (~40) plus the tool_use JSON wrapper
+      // {"sentence":"…"} (~10) ≈ 200 worst case — over the old ceiling, which
+      // truncated the tool block mid-JSON and yielded no `sentence` at all
+      // (silent null at the !sentence check below). 400 = ~2x that worst case;
+      // the extra output is only ever billed on the long tail, and the coda is
+      // capped at once per person per day (L8).
+      max_tokens: 400,
       tools: [{
         name: 'compose_coda',
         description: 'Compose the coda sentence.',
@@ -423,7 +433,26 @@ Output the coda sentence only. No quotes, no label.`;
     });
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
     const sentence = toolUse?.input?.sentence as string | undefined;
-    if (!sentence) return null;
+    // 2026-09-14 — this was the only forced-tool Sonnet call in src/ with no
+    // usage line, so ten silent no-coda turns could not be attributed or
+    // priced. `stop_reason` is what names the next one: 'max_tokens' = the
+    // output ceiling truncated the tool block, anything else = the model
+    // genuinely returned nothing usable.
+    logLlmUsage('social_coda', SONNET.model, resp, {
+      stop_reason: resp.stop_reason,
+      hasSentence: Boolean(sentence),
+      mode: directive.mode,
+      language: language ?? 'en',
+    });
+    if (!sentence) {
+      logger.warn('Social coda compose returned no sentence', {
+        stop_reason: resp.stop_reason,
+        hasToolUse: Boolean(toolUse),
+        mode: directive.mode,
+        language: language ?? 'en',
+      });
+      return null;
+    }
     return sentence.trim();
   } catch (err) {
     logger.warn('generateSocialCoda threw', { err: String(err).slice(0, 200) });
@@ -531,7 +560,16 @@ export async function composeSocialCoda(
       otherCategorySubjectLabels,
       language: pending.language,
     });
-    if (!coda || coda.trim().length === 0) return null;
+    if (!coda || coda.trim().length === 0) {
+      // The compose call itself already logged WHY it produced nothing; this
+      // names the second silent exit — a sentence that came back whitespace-only.
+      if (coda) {
+        logger.warn('Social coda compose returned a blank sentence', {
+          personSlackId: pending.personSlackId, mode: pending.directive.mode,
+        });
+      }
+      return null;
+    }
 
     // Bounce fix (gh#198) — mark this category "already suggested" the
     // moment there's an actual candidate sentence for it, so

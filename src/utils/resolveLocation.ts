@@ -17,24 +17,43 @@
  *      field with the Teams join URL after Graph createEvent.
  *
  *   3. OFFICE DAY:
- *      a. External attendee + known-different TZ
- *         → online; teams URL as location (post-create patch).
- *      b. External attendee + same TZ OR unknown TZ
- *         → ask_owner_online_or_physical. Caller refuses + asks owner.
- *      c. Internal-only, count ≥4
+ *      a. External attendee + owner forced physical (is_online=false)
+ *         → full_label, isOnline=true (see FORCED PHYSICAL below).
+ *      b. External attendee, colleague driving → online, no ask (v3.2.6).
+ *      c. External attendee, owner driving → ask_owner_online_or_physical,
+ *         WHATEVER the external's zone (owner ruling 2026-09-15: a known-
+ *         different zone used to go straight online; "a few internal people
+ *         might sit in the meeting room with the external on the screen").
+ *         With an external on the invite a Teams link is a given — the one
+ *         question is whether the internal people meet onsite, and the ask
+ *         text says exactly that (onsiteOrOnlineAsk). Caller refuses + asks.
+ *      d. Internal-only, count ≥4
  *         → meeting_room_label + addRoomEmail + isOnline=true
  *         (Teams link goes in body, not location).
- *      d. Internal-only, count ≤3
+ *      e. Internal-only, count ≤3
  *         → short_label + isOnline=true
  *         (Teams link goes in body, not location).
  *
  *   4. HOME DAY:
  *      a. External attendee → online; teams URL as location (post-create patch).
- *      b. Internal-only → "Huddle", isOnline=false.
+ *         Owner forced physical (is_online=false) → short_label, isOnline=true.
+ *      b. Internal-only + owner forced physical → short_label, isOnline=true
+ *         ("Huddle" is the home-day default, never a physical venue).
+ *      c. Internal-only → "Huddle", isOnline=false.
  *
  *   5. NON-WORK DAY (Fri/Sat for an Israeli profile, etc.):
  *      Resolve location anyway — the BOOK decision in planMeeting handles the
- *      OOF refusal. Default to online; teams URL as location.
+ *      OOF refusal. Default to online; teams URL as location. Owner forced
+ *      physical → short_label, isOnline=true.
+ *
+ *   FORCED PHYSICAL (owner is_online=false, no venue named) keeps the venue
+ *   label AND isOnline=true, so Graph attaches the Teams link (owner ruling
+ *   2026-09-15: "F2F with a remote person → with link; it happened a couple
+ *   of times" — every forced-physical exit used to drop the link). Graph
+ *   sends location + isOnlineMeeting together; its sentinel filter only drops
+ *   literal "Teams" strings, so a real label survives (calendarMutations.ts).
+ *   Link-less by design: a phone-dial location (path 1), an owner-named venue
+ *   without an online hint (path 1), and Huddle (4c).
  *
  * Output flavors:
  *   - resolved          : caller stamps location/isOnline directly, plus an
@@ -57,11 +76,15 @@ export interface ResolveLocationInput {
   category?: string | null;
 
   // Party shape
-  participantCount: number;                 // total including owner + externals
+  participantCount: number;                 // people: owner + everyone else, never the room mailbox (planMeeting.participantHeadcount)
   hasExternalAttendee: boolean;
 
-  // TZ signal for office+external case (path 3a vs 3b)
-  externalAttendeeInDifferentTz?: boolean;  // undefined = unknown → ask path
+  // TZ signal for the office+external ask's reasoning (every value asks on
+  // the owner path since 2026-09-15; undefined = unknown)
+  externalAttendeeInDifferentTz?: boolean;
+  // Display names (or emails) of the external attendees, for the ask text.
+  // Built by planMeeting's locationSignalsFor — never a second source.
+  externalAttendeeNames?: string[];
 
   // Travel state
   anyParticipantRemote?: boolean;
@@ -106,7 +129,15 @@ export type LocationVerdict =
       reasoning: string;
     };
 
-const HUDDLE_LABEL = 'Huddle';
+/**
+ * The home-day INTERNAL default. Stamped as a plain location string with
+ * isOnline=false (path 4c): an ad-hoc voice/video huddle the team starts
+ * itself — not a physical venue, and not a Graph/Teams online meeting (no
+ * join link is generated for it). Graph's location sanitizer passes the
+ * string through unchanged (calendarMutations.ts); the venue catalog treats
+ * it as a company space, never an outside venue (db/venues.ts).
+ */
+export const HUDDLE_LABEL = 'Huddle';
 
 const PHONE_LOCATION_RE = /^\+?\d[\d\s\-().]{5,}$/;
 
@@ -117,6 +148,23 @@ const PHONE_LOCATION_RE = /^\+?\d[\d\s\-().]{5,}$/;
  */
 export function isPhoneLocationString(location: string): boolean {
   return PHONE_LOCATION_RE.test(location.trim());
+}
+
+/**
+ * The ONE office-day external ask (path 3c), owner-shaped 2026-09-15: "apart
+ * from <external>, do you want the rest to meet onsite (with <external> on
+ * Teams), or all online?" — externals named when known, counted when many.
+ * The Teams link is never in question (an external is on the invite); asking
+ * "online or physical?" read as if she didn't know that.
+ */
+function onsiteOrOnlineAsk(externalNames: string[], fullLabel: string): string {
+  const names = externalNames.map(n => n.trim()).filter(Boolean);
+  const who = names.length === 1 ? names[0]
+    : names.length === 2 ? `${names[0]} and ${names[1]}`
+    : names.length > 2 ? `the ${names.length} external guests`
+    : 'the external guest';
+  const them = names.length === 1 ? names[0] : 'them';
+  return `Apart from ${who}, do you want the rest to meet onsite at ${fullLabel} (with ${them} on Teams), or all online?`;
 }
 
 export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
@@ -203,9 +251,26 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   // the event should be before booking. Owner-explicit hints (path 1 above)
   // override this skip — that's where "I'm meeting Amazia at my home" wins
   // over the Huddle / no-stamp default.
+  //
+  // On a MOVE with no owner hint the existing venue is PRESERVED, whatever the
+  // day types: Maelle never stamps these categories, so whatever location the
+  // event carries is the owner's own — path 0 above only preserves within one
+  // day type, and a cross-day-type move of a Private/Logistic event used to
+  // fall through here to skip_stamp and PATCH the venue away (2026-09-14).
   if (input.category) {
     const cat = (profile.categories ?? []).find(c => c.name === input.category);
     if (cat && (cat.no_default_location === true || cat.sets_sensitivity_private === true)) {
+      if (
+        input.intent === 'move' && !hasOwnerHint
+        && input.existingLocation !== undefined && input.existingIsOnline !== undefined
+      ) {
+        return {
+          kind: 'preserve_existing',
+          isOnline: input.existingIsOnline,
+          location: input.existingLocation,
+          reasoning: `category ${cat.name} is never auto-stamped — move keeps the owner-stated location`,
+        };
+      }
       return {
         kind: 'skip_stamp',
         reasoning: `category ${cat.name} flagged ${cat.no_default_location ? 'no_default_location' : 'sets_sensitivity_private'} — no auto-stamp`,
@@ -231,41 +296,24 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   // ── (3) OFFICE DAY ──────────────────────────────────────────────────────
   if (isOfficeDay) {
     if (input.hasExternalAttendee) {
-      // (3a) Known-different TZ → online auto.
-      if (input.externalAttendeeInDifferentTz === true) {
-        if (ownerForcedPhysical) {
-          // Owner said in-person — respect, stamp the full address.
-          return {
-            kind: 'resolved',
-            isOnline: false,
-            location: fullLabel,
-            reasoning: 'office day + external (different TZ) + owner forced physical',
-          };
-        }
-        return {
-          kind: 'resolved',
-          isOnline: true,
-          location: '',          reasoning: 'office day + external in different TZ → online (Teams URL as location)',
-        };
-      }
-      // (3b) Owner forced physical → stamp full address, no ask needed.
+      // (3a) Owner said in-person → the full address, Teams link kept (FORCED
+      // PHYSICAL, header). The external's zone no longer matters once he chose.
       if (ownerForcedPhysical) {
         return {
           kind: 'resolved',
-          isOnline: false,
+          isOnline: true,
           location: fullLabel,
-          reasoning: 'office day + external + owner forced physical',
+          reasoning: 'office day + external + owner forced physical → office address, Teams link kept',
         };
       }
-      // Same TZ OR unknown TZ AND no owner hint.
-      // v3.2.6 (RC4 follow-up) — on the COLLEAGUE path, don't raise an
-      // "online or physical?" approval to the owner: that's friction for a
+      // (3b) v3.2.6 (RC4 follow-up) — on the COLLEAGUE path, don't raise an
+      // "onsite or online?" approval to the owner: that's friction for a
       // booking a colleague is driving, and it was a regression from RC4
       // (which stopped honoring the online hint on colleague-path, sending
       // external office-day meetings here instead of just booking online).
-      // An external guest with unknown/same TZ defaults to ONLINE (Teams) —
-      // the safe no-assumption default; no approval. Owner-path still asks,
-      // so the owner gets to decide his own external meetings.
+      // An external guest defaults to ONLINE (Teams) — the safe no-assumption
+      // default; no approval. Owner-path asks, so the owner gets to decide his
+      // own external meetings.
       if (input.initiatorRole === 'colleague') {
         return {
           kind: 'resolved',
@@ -273,17 +321,20 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
           location: '',          reasoning: 'office day + external (colleague-path) → default online, no owner approval',
         };
       }
+      // (3c) Owner path → ask, whatever the external's zone (header).
       return {
         kind: 'ask_owner_online_or_physical',
-        suggestedAskText: `Office day with an external guest — online or physical at ${fullLabel}?`,
-        reasoning: input.externalAttendeeInDifferentTz === false
-          ? 'office day + external in same TZ → must ask owner'
-          : 'office day + external with unknown TZ → must ask owner',
+        suggestedAskText: onsiteOrOnlineAsk(input.externalAttendeeNames ?? [], fullLabel),
+        reasoning: input.externalAttendeeInDifferentTz === true
+          ? 'office day + external in different TZ → ask owner whether the internals meet onsite (owner ruling 2026-09-15)'
+          : input.externalAttendeeInDifferentTz === false
+            ? 'office day + external in same TZ → must ask owner'
+            : 'office day + external with unknown TZ → must ask owner',
       };
     }
     // Internal-only on office day.
     if (input.participantCount >= 4) {
-      // (3c) Big internal → Meeting Room + room_email + Teams in body. v3.7.x —
+      // (3d) Big internal → Meeting Room + room_email + Teams in body. v3.7.x —
       // isOnline is ALWAYS true here (owner: a 4+/Meeting-Room meeting always keeps
       // the Teams link — people join online even for a physical one; the link lives
       // in the body, the location field shows the room). A bare is_online=false
@@ -296,10 +347,11 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
         reasoning: `office day + internal ≥4 → ${meetingRoomLabel} (+ room email, Teams link in body — always kept)`,
       };
     }
-    // (3d) Small internal → short_label + Teams in body.
+    // (3e) Small internal → short_label + Teams in body (kept on forced
+    // physical too — FORCED PHYSICAL, header).
     return {
       kind: 'resolved',
-      isOnline: !ownerForcedPhysical,
+      isOnline: true,
       location: shortLabel,
       reasoning: `office day + internal ≤3 → ${shortLabel} (Teams backup in body)`,
     };
@@ -318,15 +370,33 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     if (input.hasExternalAttendee && ownerForcedPhysical) {
       // Owner forced physical with an external on a home day — owner is
       // probably hosting at home. Stamp short_label as best-effort label;
-      // owner-explicit text hint is the proper channel for "my home".
+      // owner-explicit text hint is the proper channel for "my home". Teams
+      // link kept (FORCED PHYSICAL, header).
       return {
         kind: 'resolved',
-        isOnline: false,
+        isOnline: true,
         location: shortLabel,
-        reasoning: 'home day + external + owner forced physical (fallback to short label)',
+        reasoning: 'home day + external + owner forced physical (fallback to short label, Teams link kept)',
       };
     }
-    // (4b) Internal-only on home day → Huddle.
+    // (4b) Internal-only on home day + owner forced physical → a real place.
+    // Huddle is the home-day INTERNAL DEFAULT (see HUDDLE_LABEL), not a physical
+    // venue, so it can never be the answer to "book it in our office" (live
+    // 2026-09-14: a forced in-person 3h internal on a home day was stamped
+    // "Huddle" while the reply said "in the office"). Same short-label
+    // best-effort fallback the external branch above and the non-work-day
+    // branch below already use; an owner-explicit location string (path 1)
+    // still wins when he names the place. Teams link kept (FORCED PHYSICAL,
+    // header).
+    if (ownerForcedPhysical) {
+      return {
+        kind: 'resolved',
+        isOnline: true,
+        location: shortLabel,
+        reasoning: 'home day + internal-only + owner forced physical (fallback to short label, Teams link kept)',
+      };
+    }
+    // (4c) Internal-only on home day → Huddle.
     return {
       kind: 'resolved',
       isOnline: false,
@@ -341,9 +411,9 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
   if (ownerForcedPhysical) {
     return {
       kind: 'resolved',
-      isOnline: false,
+      isOnline: true,
       location: shortLabel,
-      reasoning: 'non-work day + owner forced physical (fallback to short label)',
+      reasoning: 'non-work day + owner forced physical (fallback to short label, Teams link kept)',
     };
   }
   return {

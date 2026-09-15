@@ -585,7 +585,9 @@ async function resolveRequestInner(
 
   // v2.9.1 — universal approve path: read on_approve and dispatch.
   // - If callbacks.on_approve.tool is in RESOLVER_REPLAY_TOOLS → replay it
-  //   (with relaxed=true / confirm_outside_window=true override flag).
+  //   with the override flag matching the tool: `confirm_outside_window=true`
+  //   for book_floating_block only; `relaxed=true` for create_meeting /
+  //   move_meeting / update_meeting (see the injection block below).
   // - If on_approve is absent → close + notify (Sonnet handles the implied
   //   work next turn; Module D Y.2 should have already gated this case).
   //

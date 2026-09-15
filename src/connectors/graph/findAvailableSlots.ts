@@ -539,21 +539,19 @@ export async function findAvailableSlots(params: {
     const durationMs = params.durationMinutes * 60 * 1000;
     const step = 15 * 60 * 1000;
 
-    // v1.6.4 — meetingMode steers which work days are valid.
-    //   in_person → office_days only
-    //   online    → office_days + home_days (all work days)
-    //   either    → office_days + home_days, tagged so caller can narrate
-    //   custom    → office_days + home_days + travel buffer padded
+    // Every work day is walked whatever the meetingMode. The in-person/home-day
+    // question is checkSlot rule 1b (`inPersonRequested`, driven by the yaml
+    // flag `physical_meetings_require_office_day`) — a per-slot SOFT verdict
+    // the owner overrides like any other, not a day the walker never visits.
+    // Until 2026-09-14 this was a hardcoded whole-day clamp here that the
+    // booking path had no counterpart for (M1) and no yaml flag switched off.
     const profile = params.profile;
     const officeDayNames = profile ? (profile.schedule.office_days.days as string[]) : [];
     const homeDayNames = profile ? (profile.schedule.home_days.days as string[]) : [];
-    const defaultWorkDays: string[] =
+    const workDays: string[] =
       params.workDays ?? (profile
-        ? (meetingMode === 'in_person' ? officeDayNames : [...officeDayNames, ...homeDayNames])
+        ? [...officeDayNames, ...homeDayNames]
         : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
-    const workDays = meetingMode === 'in_person' && profile
-      ? officeDayNames                    // hard constraint: in-person = office only
-      : defaultWorkDays;
 
     const [defaultStartHour, defaultStartMin] = (params.workHoursStart ?? '09:00').split(':').map(Number);
     const [defaultEndHour, defaultEndMin] = (params.workHoursEnd ?? '18:00').split(':').map(Number);
@@ -1007,17 +1005,12 @@ export async function findAvailableSlots(params: {
       dayMap.set(dayReason, (dayMap.get(dayReason) ?? 0) + 1);
     };
 
-    // All workweek days regardless of meetingMode filter — used to detect
-    // (a) a workday excluded specifically because of the requested mode
-    // (e.g. Monday is a home day; meetingMode='in_person' excludes it), and
-    // (b) a workday taken off entirely by a per-date override (vacation, sick
-    // day). (a) surfaces as `wrong_day_type` in daySummary so Sonnet can
-    // narrate "Monday is a home day, in-person needs an office day"; (b)
-    // surfaces as `vacation_or_off_day` instead — split 2026-08-24
-    // (findavailableslots-day-off-mislabeled-wrong-day-type) so "Tuesday,
-    // he's off" reuses checkSlot's own verdict name rather than the
-    // in-person/home-day mismatch label. A plain weekend (never in this
-    // list) stays silent — that needs no explanation.
+    // All workweek days — used to tell a workday taken off by a per-date
+    // override (vacation, sick day: surfaces as `vacation_or_off_day` in
+    // daySummary, checkSlot's own verdict name) from a plain weekend, which
+    // stays silent. The in-person/home-day mismatch is no longer a day skip
+    // here: checkSlot rule 1b rejects those slots one by one under
+    // `wrong_day_type` via mapVerdictToRejectLabel.
     const allWorkweekDays: string[] = profile
       ? [...officeDayNames, ...homeDayNames]
       : workDays;
@@ -1146,7 +1139,7 @@ export async function findAvailableSlots(params: {
       // rendered "Idan has Wednesday 9 Sep off" (hasOverride) vs "Wednesday
       // isn't one of Idan's working days" (no override). Tagging it
       // 'wrong_day_type' here instead — the SEPARATE label the in-person/
-      // home-day mismatch below correctly uses — produced a FALSE reason
+      // home-day mismatch (checkSlot rule 1b) uses — produced a FALSE reason
       // ("not the right kind of day for that — Idan is not in the office
       // then") for a day that IS his office day and was simply blocked
       // (2026-08-24 KPMG/Mike incident: Idan set an off-day override on
@@ -1160,13 +1153,6 @@ export async function findAvailableSlots(params: {
       if (!dayIsWorkday) {
         return allWorkweekDays.includes(dayName)
           ? { kind: 'day_skip', dayKey, reason: 'vacation_or_off_day' }
-          : { kind: 'silent' };
-      }
-      // meetingMode: in-person requires an office-type day; a home / away day in
-      // in_person mode is a wrong-day-type exclusion (narrated in day_summary).
-      if (effectiveDay && meetingMode === 'in_person' && dayType !== 'office') {
-        return allWorkweekDays.includes(dayName)
-          ? { kind: 'day_skip', dayKey, reason: 'wrong_day_type' }
           : { kind: 'silent' };
       }
       const dayHours = getWorkHoursForDay(effectiveDay);
@@ -1390,6 +1376,9 @@ export async function findAvailableSlots(params: {
           leadTimeHours: params.minBufferHours,
           // v4.1.x (M1) — same padding the write path will apply, resolved once.
           travelBufferMinutes: effectiveTravelBufferMinutes,
+          // Rule 1b — in-person on a non-office day, when the yaml flag says so.
+          // Relaxed (owner names a time) keeps the slot, labelled (M8).
+          inPersonRequested: meetingMode === 'in_person',
           // v4.1.x (M10) — masks a private optional event's subject before it
           // can reach a colleague-facing `over_optional` tag.
           viewer: params.viewer,
@@ -1610,12 +1599,10 @@ export async function findAvailableSlots(params: {
     //
     // findavailableslots-drops-context-on-colleague-oof-deadend (2026-08-16)
     // — daySummary is built from `dayReasons`, not `rejectedCounts`, but the
-    // two day-type branches above (`vacation_or_off_day` for a per-date
-    // off-day, `wrong_day_type` for an in-person/home-day mismatch — split
-    // 2026-08-24, findavailableslots-day-off-mislabeled-wrong-day-type)
-    // write straight into `dayReasons` without going through `trackReject`
-    // — deliberately: they are a whole-day skip, not a per-slot rejection,
-    // so they don't belong in the per-reason log/counts. A window whose
+    // off-day branch above (`vacation_or_off_day` for a per-date off-day)
+    // writes straight into `dayReasons` without going through `trackReject`
+    // — deliberately: it is a whole-day skip, not a per-slot rejection,
+    // so it doesn't belong in the per-reason log/counts. A window whose
     // ONLY story is a day-type skip
     // (e.g. a vacation-only week, nothing else ever rejected) left
     // `rejectedCounts` empty, so this gate never ran and `daySummary` was

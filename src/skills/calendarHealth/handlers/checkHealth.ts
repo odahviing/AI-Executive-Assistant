@@ -247,16 +247,18 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
             continue;
           }
 
-          // Get events for this day (future-facing only — skip anything that
-          // already ended, so a health check never flags a past meeting).
-          const dayEvents = events.filter(e => {
+          // The whole day's events, then the future-facing subset. Block
+          // PRESENCE reads the whole day — an early lunch that already ended is
+          // still today's lunch, not a missing one (2026-09-14). The overlap /
+          // OOF / category detectors below read `dayEvents` (already-ended
+          // events are not actionable, so a health check never flags a past
+          // meeting).
+          const dayAllEvents = events.filter(e => {
             if (e.isCancelled) return false;
-            const eventStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
-            if (eventStart.toFormat('yyyy-MM-dd') !== dayStr) return false;
-            const eventEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-            if (eventEnd.toMillis() < nowMs) return false;   // already elapsed — not actionable
-            return true;
+            return parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toFormat('yyyy-MM-dd') === dayStr;
           });
+          const dayEvents = dayAllEvents.filter(e =>
+            parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis() >= nowMs);
 
           // ── Missing floating blocks ──
           // Every block configured for the profile (lunch + any custom) is
@@ -272,9 +274,14 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // delete doesn't re-fire; future days where the block genuinely
           // hasn't been placed surface for the active-mode auto-book on
           // the day of.
+          // v3.7.x (#143) — no floating blocks on a per-date override day: the
+          // same gate the fix loop applies, so a day booking refuses is never
+          // reported "No lunch on …" run after run (2026-09-14).
+          const dayHasOverride = getEffectiveWorkDay(dayStr, profile).hasOverride;
           for (const block of floatingBlocks) {
+            if (dayHasOverride) break;
             if (!fb.blockAppliesOnDay(block, dayName, profile)) continue;
-            const hasBlock = dayEvents.some(e => {
+            const hasBlock = dayAllEvents.some(e => {
               if (e.isAllDay) return false;
               return fb.isFloatingBlockEvent(
                 { subject: e.subject, categories: e.categories },
@@ -298,6 +305,16 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
               // auto-book still fires normally.
               const winEndMs = fb.windowMsForDay(dayStr, block.preferred_end, timezone);
               if (Number.isFinite(winEndMs) && winEndMs <= DateTime.now().setZone(timezone).toMillis()) continue;
+              // `can_skip` (userProfile.ts: "fine to leave un-booked when no
+              // room") — the same gate analyzeCalendar (ops/analysis.ts)
+              // applies: a skippable block with no in-window room is not an
+              // issue; with room, it is one (and active mode books it).
+              if (block.can_skip) {
+                const { aligned } = fb.findBlockDestination(
+                  dayAllEvents.filter(e => !e.isAllDay && e.showAs !== 'free'), block, dayStr, timezone,
+                );
+                if (aligned === null) continue;
+              }
               issues.push({
                 type: 'missing_floating_block',
                 date: dayStr,
@@ -1186,9 +1203,9 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
           // missing-block / buffer issues.
 
           // v2.9.3 (#104) — periodic floating-block rebalance sweep. The
-          // mutation-time hook (rebalanceFloatingBlocksAfterMutation in
-          // meetings/ops.ts + coord/booking.ts) only fires when Maelle
-          // herself booked or moved a meeting via her own tools. Events
+          // mutation-time hook (rebalanceFloatingBlocksAfterMutation, called
+          // from meetings/ops/handlers/createMeeting.ts + moveMeeting.ts)
+          // only fires when Maelle herself booked or moved a meeting. Events
           // added in Outlook directly never trigger it, leaving lunch (or
           // any floating block) sitting on top of a meeting until owner
           // notices. Active-mode runs twice a day; iterating each date in

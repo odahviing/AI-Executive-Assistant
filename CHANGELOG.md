@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.9.8 — Location and floating blocks, fixed from the roots
+
+Two module audits (meeting location, floating blocks) traced how each decision is actually made and repaired every proven root the owner approved, alongside the small bugs from the day's live chats. The location decision now runs through one shared path for create, move and update; a floating block the owner places outside its window counts as lunch and is protected like any commitment; and drive blocks no longer pick up colleagues mentioned in the same sentence.
+
+### Fixed
+
+- In-person on a home day is one soft rule driven by the profile flag `physical_meetings_require_office_day`, shared by search and booking; the search's hardcoded home-day exclusion is gone, and the owner gets a one-step heads-up instead of a refusal.
+- `update_meeting` re-evaluates location through the same signal builder as create and move, so adding an external to an office-day meeting asks the owner "onsite apart from the guest, or all online?" instead of silently keeping or dropping the room. The ask also covers an external in a different timezone, and names the guest.
+- Every forced face-to-face booking carries a Teams link; the venue label is unchanged. A forced in-person meeting on a home day resolves to the office label, never "Huddle".
+- The model's `is_online:true` no longer discards the venue the resolver chose; a Private or Logistic event keeps its venue when moved across day types; category and location read the same effective day.
+- The meeting-room mailbox is never counted as a person when sizing the room.
+- An out-of-window floating block counts as placed: no reclaim offers, no "no room for lunch" rejection for that day, no second lunch booked, and it is a commitment so nothing books over it silently.
+- Relocating a stretched floating block keeps the event's real length; the reclaim-to-its-own-start offer is gone.
+- Calendar health no longer reports a missing lunch on an override day or for an early lunch that already happened; both missing-block detectors use the same day-scoped rule.
+- Owner floating-block moves are recorded in the activity log; a rebalance that moves a block reports the move in the tool result.
+- Names mentioned in a booking sentence are unioned into the invite only when the call already named an attendee, so a solo drive block cannot absorb a colleague; the classifier sees the owner's in-person signal.
+- The slot-grounding rewrite never carries a substituted time without its date when the source is a different day; the search tape records which attendee calendars were actually read.
+- Social coda compose: token ceiling 100 → 400, usage and stop reason logged, every silent exit on the route logs its reason.
+- Dead `confirm_outside_window` on moves, dead `default_location` / `default_is_online` schema keys and dead move-arg reads removed; ten prompt and tool-description claims corrected to match the handlers (net prompt down).
+
+### Not changed
+
+- Colleague-path defaults (online, no ask) are unchanged. Huddle stays a plain label with no Teams link, by the owner's ruling. A colleague's own online/physical flag still reaches an owner-approved replay; the owner has not ruled on stripping it.
+
+### Verification and limits
+
+- 10 independently verified refs, each with executed fail-before/pass-after regressions and a Fable Bouncer review; full release battery 84/84 executions; Golden30 run in full at the checkpoint, 20 pass, 10 stale anchors, 0 fail. Prompt-only and comment-only refs are structural passes; model obedience is not claimed.
+- Two regression harnesses were repaired as part of the checkpoint (a real-clock leak in the timezone owner-decisions sandbox; an unparseable summary line), script-only.
+- Open owner decisions from the audits (replay flag provenance, ask-vs-default per role, Huddle as a YAML label, travel buffer for office visits, attendee-based block matching, rejection memory, duplicate blocks, dense counter-offer on an explicit time, hours-only override days, face-to-face on a home day) are recorded, not built. gh#206 filed for the uncovered "no access to X's calendar" claim class.
+
+---
+
 ## 4.9.7 — Reliable calendar health and daily briefings
 
 Calendar Health now keeps current issue tracking and reports confirmed, failed and uncertain autofix outcomes accurately. Daily briefings preserve calendar information during composition failures, use authoritative person data and leave unshown events unread.

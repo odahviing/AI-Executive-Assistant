@@ -38,7 +38,7 @@ const wireText = 'An interesting report about burnout.';
 const source = { title: 'Clinicians discuss burnout', url: 'https://news.example/reports/clinicians', content: 'A physician couple discussed their decision to move abroad.' };
 const profile = { user: { name: 'Owner Test', slack_user_id: 'U_OWNER' }, assistant: { name: 'Maelle' } };
 
-function harness({ results = [source], messages = [], subjects = [], category = null, searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText } = {}) {
+function harness({ results = [source], messages = [], subjects = [], category = null, searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText, truncated = false } = {}) {
   const unexpected = [];
   const warnings = [];
   const searches = [];
@@ -46,13 +46,18 @@ function harness({ results = [source], messages = [], subjects = [], category = 
   const composerCalls = [];
   const validatorCalls = [];
   const unansweredCalls = [];
+  const usageLogs = [];
   const forbidden = label => () => { unexpected.push(label); throw new Error(`Forbidden side effect: ${label}`); };
   const dependencies = {
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async args => {
       composerCalls.push(args);
-      return { content: [{ type: 'tool_use', input: { sentence } }] };
+      // `truncated` replays a max_tokens cut: the tool block came back with no `sentence`.
+      return truncated
+        ? { stop_reason: 'max_tokens', content: [{ type: 'tool_use', input: {} }] }
+        : { stop_reason: 'tool_use', content: [{ type: 'tool_use', input: { sentence } }] };
     } } }) },
     '../../llm/models': { SONNET: { model: 'isolated-composer' } },
+    '../../utils/usageLog': { logLlmUsage: (...args) => usageLogs.push(args) },
     '../../utils/logger': { info: () => {}, warn: (...args) => warnings.push(args) },
     '../../skills/general': { tavilySearch: async (...args) => {
       searches.push(args);
@@ -85,11 +90,11 @@ function harness({ results = [source], messages = [], subjects = [], category = 
         ...overrides,
       }, profile);
       assert.deepEqual(unexpected, [], 'caught forbidden effects must fail the test too');
-      assert.equal(warnings.length, Number(searchThrows) + Number(historyThrows), 'unexpected fail-open is a failure');
+      assert.equal(warnings.length, Number(searchThrows) + Number(historyThrows) + Number(truncated), 'unexpected fail-open is a failure');
       assert.equal(unansweredCalls.length, 0, 'composition, validation, and grounding outcomes must not spend a delivered-raise counter');
       return result;
     },
-    searches, historyReads, composerCalls, validatorCalls, unansweredCalls,
+    searches, historyReads, composerCalls, validatorCalls, unansweredCalls, usageLogs, warnings,
   };
 }
 
@@ -272,6 +277,22 @@ test('continue colleague path keeps newest matching user message over an assista
   assert.ok(history.includes('burnout latest opinion'));
   assert.ok(!history.includes('burnout earlier opinion'));
   assert.ok(!history.includes('burnout assistant echo'));
+});
+
+test('max_tokens-truncated tool block returns null, warns with stop_reason, and logs usage', async () => {
+  const h = harness({ truncated: true });
+  assert.equal(await h.compose(), null);
+  assert.equal(h.composerCalls.length, 1);
+  assert.equal(h.composerCalls[0].max_tokens, 400, 'ceiling raised from 100 so a Hebrew coda plus source fits');
+  assert.equal(h.validatorCalls.length, 0, 'nothing to validate when no sentence came back');
+  assert.equal(h.warnings.length, 1);
+  assert.equal(h.warnings[0][0], 'Social coda compose returned no sentence');
+  // JSON round-trip: the warn payload is built inside the vm realm, so strict deepEqual rejects it on prototype identity alone.
+  assert.deepEqual(JSON.parse(JSON.stringify(h.warnings[0][1])), { stop_reason: 'max_tokens', hasToolUse: true, mode: 'raise_new', language: 'en' });
+  assert.equal(h.usageLogs.length, 1);
+  assert.equal(h.usageLogs[0][0], 'social_coda');
+  assert.equal(h.usageLogs[0][3].stop_reason, 'max_tokens');
+  assert.equal(h.usageLogs[0][3].hasSentence, false);
 });
 
 test('rejected coda returns no wire text or history', async () => {

@@ -123,6 +123,7 @@ export type RuleViolationKind =
   | 'in_the_past'
   | 'within_lead_time'
   | 'vacation_or_off_day'
+  | 'in_person_on_home_day'
   | 'category_day_type'
   | 'category_per_day'
   | 'category_per_week'
@@ -169,6 +170,7 @@ export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<R
   'category_per_day',
   'category_per_week',
   'category_day_type',
+  'in_person_on_home_day',
 ]);
 
 /**
@@ -252,6 +254,9 @@ export function mapVerdictToRejectLabel(
     case 'category_per_day': return 'category_per_day';
     case 'category_per_week': return 'category_per_week';
     case 'vacation_or_off_day': return 'wrong_day_type';
+    // The in-person/home-day mismatch was a search-only whole-day skip until
+    // 2026-09-14 (rule 1b below); same label the walker always narrated it under.
+    case 'in_person_on_home_day': return 'wrong_day_type';
     case 'owner_busy_collision': return 'owner_busy_collision';
     // checkslot-verdict-translator-answers-owner-busy-for-anything-it-does-not-know
     // (2026-09-09) — `attendee_busy_collision` is a member of RuleViolationKind
@@ -394,6 +399,14 @@ export interface RuleCheckInput {
    * events from the result and offer to move them).
    */
   isFloatingBlock?: boolean;
+  /**
+   * The caller asked for an IN-PERSON meeting (search: meeting_mode='in_person';
+   * booking: the owner's is_online=false). Feeds rule 1b — read together with
+   * `meetings.physical_meetings_require_office_day`, which had no code reader
+   * from 2.0.7 until 2026-09-14 while the search walker hard-excluded home days
+   * on its own. One predicate now, here, soft and owner-overridable.
+   */
+  inPersonRequested?: boolean;
   /**
    * v4.1.x (M10) — WHO the produced `violation_label` is for. The label embeds
    * the colliding meeting's subject, and on a COLLEAGUE-initiated create_meeting
@@ -636,10 +649,13 @@ export function requiredFreeMinutesForWorkDay(
  * travel-buffer scan (rule 7) can never disagree about what counts.
  *
  *   ignore     — cancelled, a free-show (FYI / "Not Me"), a floating block
- *                (lunch / gym slides; rule 6 owns the "no room to shift" case),
- *                or an ALL-DAY workingElsewhere marker (below)
+ *                INSIDE its preferred window (lunch / gym slides; rule 6 owns
+ *                the "no room to shift" case), or an ALL-DAY workingElsewhere
+ *                marker (below)
  *   optional   — a TIMED workingElsewhere event: join-if-free, skippable (M2)
- *   commitment — everything else, INCLUDING an all-day busy / oof
+ *   commitment — everything else, INCLUDING an all-day busy / oof and a
+ *                floating block the owner placed OUTSIDE its window (nothing
+ *                slides it any more — see the branch below)
  *
  * An ALL-DAY `workingElsewhere` event is NOT a commitment. It used to be,
  * and the SAME search said the opposite one screen away: the walker's own
@@ -777,6 +793,14 @@ export function formatOofUntilDisplay(span: OofSpan, ownerTz: string): string | 
 export function occupancyRoleOf(
   ev: CalendarEvent,
   floatingBlockDefs: ReturnType<typeof getFloatingBlocks>,
+  /**
+   * The owner's timezone. Required (never defaulted): the floating-block
+   * branch below decides elastic-vs-commitment by comparing the event against
+   * its preferred window, and a window is a LOCAL clock range — resolving it
+   * in the event's stored Graph zone (often UTC) would misclassify the block
+   * by the UTC offset.
+   */
+  timezone: string,
 ): OccupancyRole {
   if (ev.isCancelled) return 'ignore';
   if (ev.showAs === 'free') return 'ignore';   // only 'free' is a non-collision; 'tentative' falls through to 'commitment' below and DOES collide
@@ -788,10 +812,33 @@ export function occupancyRoleOf(
   // An ALL-DAY WE marker is a working day elsewhere, not a commitment and
   // not a skippable meeting. Ignored, which is what the walker always did.
   if (ev.showAs === 'workingElsewhere') return 'ignore';
-  // A movable floating block (lunch / focus / gym) is NOT a hard collision:
-  // rule 6 already validated it can still fit elsewhere in its window, and
-  // `rebalanceFloatingBlocksAfterMutation` slides it after the write commits.
-  if (floatingBlockDefs.some(b => isFloatingBlockEvent(ev, b))) return 'ignore';
+  // A floating block (lunch / focus / gym) is elastic ONLY INSIDE its window:
+  // there rule 6 validates it can still fit elsewhere in that window and
+  // `rebalanceFloatingBlocksAfterMutation` slides it after the write commits,
+  // so it is no hard collision → 'ignore'.
+  //
+  // OUTSIDE its window it is a COMMITMENT. Owner ruling 2026-09-14 ("I'm
+  // allowed to move a floating block outside of my frame. Count it as lunch.")
+  // means such a block satisfies the block — it does NOT mean its clock time is
+  // free. Nothing can slide it any more: rule 6 now skips the day (the block is
+  // placed) and the sweep leaves an out-of-window block alone
+  // (rebalanceFloatingBlocks.ts), so calling it 'ignore' would let a meeting be
+  // booked straight over the owner's lunch with no heads-up on any surface.
+  // As a commitment it flows through the ordinary paths: the occupancy scan
+  // tiers the slot `unfiltered` with an owner double-book notice, the colleague
+  // path refuses, and the search stops offering it silently.
+  const matchedBlock = floatingBlockDefs.find(b => isFloatingBlockEvent(ev, b));
+  if (matchedBlock) {
+    if (ev.isAllDay) return 'ignore';
+    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
+    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).setZone(timezone);
+    if (!evStart.isValid || !evEnd.isValid) return 'ignore';
+    const dayDate = evStart.toFormat('yyyy-MM-dd');
+    const winStart = DateTime.fromISO(`${dayDate}T${matchedBlock.preferred_start}`, { zone: timezone });
+    const winEnd = DateTime.fromISO(`${dayDate}T${matchedBlock.preferred_end}`, { zone: timezone });
+    if (!winStart.isValid || !winEnd.isValid) return 'ignore';
+    return (evStart < winStart || evEnd > winEnd) ? 'commitment' : 'ignore';
+  }
   return 'commitment';
 }
 
@@ -905,7 +952,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   let overCommitment: RuleCheckResult['overCommitment'];
   for (const ev of input.events) {
     if (excludeSet.has(ev.id)) continue;
-    const role = occupancyRoleOf(ev, floatingBlockDefs);
+    const role = occupancyRoleOf(ev, floatingBlockDefs, tz);
     if (role === 'ignore') continue;
     const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
     const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
@@ -1067,6 +1114,26 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
     };
   }
 
+  // ── (1b) in-person needs an office day ──────────────────────────────────
+  // `physical_meetings_require_office_day` (yaml) — a soft own-day rule like the
+  // rest of the ladder: the owner books through it one-step with a heads-up
+  // (#127), a colleague escalates. Flag off → no rule. Evaluated on the
+  // EFFECTIVE day (an "office Tuesday" override counts as office; an away day
+  // does not), the same accessor resolveLocation stamps the venue from.
+  if (!input.allowRelaxed && input.inPersonRequested
+      && profile.meetings.physical_meetings_require_office_day
+      && effectiveDay.location !== 'office' && reports('in_person_on_home_day')) {
+    const dayKind = effectiveDay.location === 'home' ? 'home' : 'away';
+    return {
+      passes: false,
+      violation_kind: 'in_person_on_home_day',
+      violation_label: ownerReads
+        ? `in-person meetings are only on your office days — ${slotStart.toFormat('EEEE d MMM')} is a ${dayKind} day`
+        : `${ownerFirst} only takes in-person meetings on office days — ${slotStart.toFormat('EEEE d MMM')} is a ${dayKind} day`,
+      ...slotFacts,
+    };
+  }
+
   // ── (2-4) category rules ────────────────────────────────────────────────
   // Bypassed under allowRelaxed — owner override is total (rule 11); the search
   // path likewise skips category in relaxed mode, so the two stay aligned.
@@ -1171,6 +1238,26 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // booking lunch can't silently squeeze out a separate gym/coffee block.
       if (input.isFloatingBlock && slotStart >= windowStart && slotEnd <= windowEnd) continue;
 
+      // Owner ruling 2026-09-14 — "I'm allowed to move a floating block outside
+      // of my frame. Count it as lunch." When the block already sits on this
+      // day OUTSIDE its window, it is PLACED: nothing is waiting to be fitted
+      // into the window, so this capacity check has no subject and must not
+      // reject the slot for leaving "no room for lunch" (live 2026-09-14: a
+      // 13:00–13:55 "Drive home & lunch" against an 11:30–13:30 window had the
+      // day's remaining bookings warned as lunch-less). A block sitting INSIDE
+      // its window still goes through the check below — there it really is
+      // movable within the window, which is what that math measures.
+      const placedOutsideWindow = input.events.some(ev => {
+        if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
+        if (!isFloatingBlockEvent({ subject: ev.subject, categories: ev.categories }, block)) return false;
+        const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(tz);
+        const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).setZone(tz);
+        if (!evStart.isValid || !evEnd.isValid) return false;
+        if (evStart.toFormat('yyyy-MM-dd') !== slotStart.toFormat('yyyy-MM-dd')) return false;
+        return evStart < windowStart || evEnd > windowEnd;
+      });
+      if (placedOutsideWindow) continue;
+
       const blockDurationMin = block.duration_minutes ?? 25;
 
       // Collect busy intervals inside the window (today only). This is a
@@ -1254,7 +1341,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // skippable optional-join and an elastic lunch block all used to count,
       // and lunch alone erased the buffer-width band around it from every
       // Outside offer).
-      if (occupancyRoleOf(ev, floatingBlockDefs) !== 'commitment') continue;
+      if (occupancyRoleOf(ev, floatingBlockDefs, tz) !== 'commitment') continue;
       // All-day commitments have no travel geometry. An all-day event that
       // overlaps THIS slot can't reach here at all (the scan saw it and rule 8
       // returned), so what this skips is the one remaining shape: a NEIGHBOURING

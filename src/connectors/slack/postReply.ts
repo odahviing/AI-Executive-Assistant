@@ -290,7 +290,11 @@ function scheduleSocialCoda(opts: {
       logger.info('Social coda dropped — the lull ended before send', { threadTs, personSlackId: coda.personSlackId });
       return false;
     }
-    return isSocialInitiationDue({ personSlackId: coda.personSlackId, ownerTimezone: profile.user.timezone });
+    const due = isSocialInitiationDue({ personSlackId: coda.personSlackId, ownerTimezone: profile.user.timezone });
+    if (!due) {
+      logger.info('Social coda dropped — the daily cadence closed before send', { threadTs, personSlackId: coda.personSlackId });
+    }
+    return due;
   };
 
   const delayMs = pickCodaDelayMs();

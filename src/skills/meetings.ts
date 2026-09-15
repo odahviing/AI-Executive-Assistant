@@ -59,7 +59,7 @@ Reply phrasing when available:
 Results:
 - Free → confirm availability, tell the colleague to send the invite themselves
 - Partially free → offer partial join (first or last N minutes), same ownership rule
-- Blocked by scheduling rule (lunch, buffer) → escalate to owner with context
+- Blocked by scheduling rule (lunch, travel buffer) → escalate to owner with context
 - Busy with another meeting → decline with the conflict info
 
 If the meeting is NOT yet booked and they need to find a time together, use find_available_slots (it checks every internal attendee's calendar) and book the agreed slot with create_meeting.`,
@@ -170,8 +170,8 @@ Use ONLY for:
 Do NOT use for:
 - "Is he free at 3pm today to join my meeting" → use check_join_availability (specific time, existing meeting context)
 - Checking colleague availability before scheduling → use find_available_slots with attendee_emails (it intersects their calendars AND applies the schedule rules)
-- Needing actual bookable slots (with buffers, rules) → use find_available_slots
-- Presenting meeting-time options to anyone. Free/busy data does not apply schedule rules (office-day start, thinking-time, lunch, buffer). For bookable options, always use find_available_slots.`,
+- Needing actual bookable slots (with rules) → use find_available_slots
+- Presenting meeting-time options to anyone. Free/busy data does not apply schedule rules (office-day start, thinking-time, lunch, travel buffer). For bookable options, always use find_available_slots.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -292,7 +292,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             },
             must_be: {
               type: 'boolean',
-              description: `OPTIONAL (default false). COLLEAGUE-PATH ONLY. Set true when a colleague's request is a genuine MUST-BE and the strict search would otherwise find nothing: (1) they named a SPECIFIC time that has to happen ("it has to be 12:00 tomorrow"), OR (2) they said it MUST be today/tomorrow (urgent) and ${profile.user.name.split(' ')[0]}'s clean options are too far out. When set and no clean slot exists, the tool returns \`owner_approval_candidates\` — times that are open but sit inside ${profile.user.name.split(' ')[0]}'s soft day-load protections (focus / buffer / booking lead-time). Do NOT offer these to the colleague and do NOT book them; raise create_approval(kind=policy_exception) with one so ${profile.user.name.split(' ')[0]} decides with a single yes. Leave false for ordinary requests — those just hear his day is loaded.`,
+              description: `OPTIONAL (default false). COLLEAGUE-PATH ONLY. Set true when a colleague's request is a genuine MUST-BE and the strict search would otherwise find nothing: (1) they named a SPECIFIC time that has to happen ("it has to be 12:00 tomorrow"), OR (2) they said it MUST be today/tomorrow (urgent) and ${profile.user.name.split(' ')[0]}'s clean options are too far out. When set and no clean slot exists, the tool returns \`owner_approval_candidates\` — times that are open but sit inside ${profile.user.name.split(' ')[0]}'s soft day-load protections (focus / travel buffer / booking lead-time). Do NOT offer these to the colleague and do NOT book them; raise create_approval(kind=policy_exception) with one so ${profile.user.name.split(' ')[0]} decides with a single yes. Leave false for ordinary requests — those just hear his day is loaded.`,
             },
             moving_event_ids: {
               type: 'array',
@@ -328,7 +328,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
 
 RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
 
-LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once. You don't recreate this math; you let the handler run.
+LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once (on create, move, or an update_meeting attendee change that lands there). You don't recreate this math; you let the handler run.
 
 WHEN TO PASS \`is_online\` AT ALL (v2.9.1):
 - **DEFAULT: OMIT.** No conversational signal → leave \`is_online\` unset. The handler picks per day-type + party shape. Do NOT default to \`true\` "to be safe" — that corrupts the decision (an internal home-day meeting should be Huddle, not Teams).
@@ -342,7 +342,7 @@ LOCATION FIELD:
 
 WHEN THE SIGNAL ALREADY EXISTS, ACT ON IT (this thread said video, said in person, named a venue) — reading the thread and people_memory is your job, not the owner's to repeat.
 
-Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
+Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, travel buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
 SUBJECT — with an EXTERNAL on the invite, secure a REAL one BEFORE booking. Externals see the invite, and a rename hits them as a SECOND notification — so never send an external a placeholder ("Meeting with X and Y") you'll rename right after. When the subject is missing and the invite includes an external (candidate / other company / personal domain), ASK for it BEFORE create_meeting, batched with any other missing field in ONE question ("what day, and what should I call it?") — never day-first, then subject after the fact. Internal-only bookings on ${profile.user.name.split(' ')[0]}'s OWN path may use a working title and be renamed later, for speed. On the COLLEAGUE path, when the colleague asking for the meeting hasn't stated a subject, ASK for one before booking — batch it with any other missing field, same as above — instead of inventing a placeholder like "Team Sync"; a colleague's meeting gets its real subject up front, not a rename after the fact.
 
@@ -425,7 +425,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
             },
             confirm_attendee_conflict: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Colleague-path only. On a colleague booking, create_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at this slot; the message is already phrased as "Just FYI — <reason>. Want me to book it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call create_meeting with the SAME args plus confirm_attendee_conflict=true to book. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the booking proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that books over someone\'s busy time silently.',
+              description: 'OPTIONAL (default false). Colleague-path only. On a colleague booking, create_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at this slot; the message is already phrased as "Just FYI — <reason>. Want me to book it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call create_meeting with the SAME args plus confirm_attendee_conflict=true to book. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the booking proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, travel buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that books over someone\'s busy time silently.',
             },
             sensitivity: {
               type: 'string',
@@ -443,9 +443,8 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
 Owner-path: owner override IS the approval. Move the meeting when he asks.
 
 FREED SLOT — after a successful move the result includes \`vacated\` = the slot the meeting just LEFT (its old time): { start, end, label }. Surface it when useful ("that frees up your 11:00 today") so it's in the conversation. If the owner then asks to put something into "the new open slot" / "the freed slot", use \`vacated\` — don't re-ask what time the moved meeting used to be, and don't confuse where it moved TO with where it moved FROM.
-RECLAIM — the result may also include \`reclaimable_block\` = { name, label, … } when this move/delete freed room inside a displaced floating block's window (e.g. lunch got bumped earlier, now its window is open again). OFFER it in the same reply ("…frees 12:30 — want lunch back there?"); it's a proposal, not done. Act only on his yes.
 
-Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=policy_exception) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking. If the colleague (who's on the meeting) asks to move it but names NO new time, don't escalate straight to approval — call find_available_slots (owner + the other required attendees), offer 2–3 rule-compliant slots, let them pick, then move_meeting. Escalate (create_approval kind=policy_exception) only if they insist on a specific time that breaks a rule.`,
+Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, travel buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=policy_exception) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking. If the colleague (who's on the meeting) asks to move it but names NO new time, don't escalate straight to approval — call find_available_slots (owner + the other required attendees), offer 2–3 rule-compliant slots, let them pick, then move_meeting. Escalate (create_approval kind=policy_exception) only if they insist on a specific time that breaks a rule.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -464,10 +463,6 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
               type: 'boolean',
               description: 'OPTIONAL (default false). Set TRUE only when the owner named an EXACT off-grid new time ("move it to 14:40"). Otherwise the handler snaps new_start to the :00/:15/:30/:45 grid.',
             },
-            confirm_outside_window: {
-              type: 'boolean',
-              description: 'OPTIONAL. Floating-block out-of-window override — see FLOATING BLOCKS rule in the MEETINGS SKILL section. Ignored on non-floating-block moves.',
-            },
             relaxed: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
@@ -482,7 +477,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
             },
             confirm_attendee_conflict: {
               type: 'boolean',
-              description: 'OPTIONAL (default false). Colleague-path only. On a colleague-requested move, move_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at the new time; the message is already phrased as "Just FYI — <reason>. Want me to move it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call move_meeting with the SAME args plus confirm_attendee_conflict=true to move it. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the move proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that moves over someone\'s busy time silently.',
+              description: 'OPTIONAL (default false). Colleague-path only. On a colleague-requested move, move_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at the new time; the message is already phrased as "Just FYI — <reason>. Want me to move it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call move_meeting with the SAME args plus confirm_attendee_conflict=true to move it. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the move proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, travel buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that moves over someone\'s busy time silently.',
             },
           },
           required: ['meeting_id', 'meeting_subject', 'new_start'],
@@ -699,14 +694,15 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // The TIMED overlaps, for the partial-join carve below. Classified by the
         // validator's OWN predicate (occupancyRoleOf) rather than a local copy of
         // the skip list — free-shows don't collide, a TIMED workingElsewhere event
-        // is an optional join, a floating block is elastic (it slides, and
-        // `pendingBlockMoves` below is what slides it). All-day blocks are
+        // is an optional join, a floating block inside its window is elastic (it
+        // slides, and `pendingBlockMoves` below is what slides it) while one the
+        // owner placed outside its window is a real commitment. All-day blocks are
         // deliberately excluded HERE and only here: they are real commitments (the
         // validator reports them on `overCommitment`), but they have no clock
         // window to carve a "he could join the first 20 minutes" out of.
         const directConflicts = events.filter(ev => {
           if (ev.isAllDay) return false;
-          if (occupancyRoleOf(ev, floatingBlocks) !== 'commitment') return false;
+          if (occupancyRoleOf(ev, floatingBlocks, timezone) !== 'commitment') return false;
           const s = evTime(ev.start).toMillis();
           const e = evTime(ev.end).toMillis();
           return s < meetingEndMs && e > meetingStartMs;
@@ -761,36 +757,41 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const wEnd = DateTime.fromISO(`${dayStr}T${block.preferred_end}`, { zone: timezone }).toMillis();
           if (meetingStartMs >= wEnd || meetingEndMs <= wStart) continue;  // no overlap
 
+          // The block's CURRENT event on this day, found FIRST so the
+          // destination search sizes for the event's real span (an owner-
+          // stretched lunch moves at its own length — blockSizedToEvent, the
+          // one helper every mover shares). Bound to THIS day's block window:
+          // `events` spans the whole week (the validator needs it for per-week
+          // category caps + the day's focus floor), so an unbounded find would
+          // return another day's lunch and silently skip the real one.
+          const existingBlockEvent = events.find(e => {
+            if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
+            if (!fb.isFloatingBlockEvent(
+              { subject: e.subject, categories: e.categories },
+              block,
+            )) return false;
+            return evTime(e.start).toMillis() < wEnd && evTime(e.end).toMillis() > wStart;
+          });
+          const sizedBlock = existingBlockEvent ? fb.blockSizedToEvent(block, existingBlockEvent, timezone) : block;
+
           // Destination search (owner ruling 2026-08-28): this is picking
           // WHERE the block moves to, not just a capacity check (that's
           // checkSlot rule 6) — so it goes through the two-pass finder: a
           // genuinely free slot first, a WE-tagged slot only as a fallback.
           const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
-            events.filter(e => !e.isAllDay), block, dayStr, timezone, undefined,
+            events.filter(e => !e.isAllDay), sizedBlock, dayStr, timezone, undefined,
             { start: meetingStartMs, end: meetingEndMs },
           );
           if (aligned !== null) {
             // Block fits — does its CURRENT event overlap the proposed
-            // meeting? If so, record a pending move. Bound to THIS day's block
-            // window: `events` now spans the whole week (the validator needs it
-            // for per-week category caps + the day's focus floor), so an
-            // unbounded find would return another day's lunch and silently skip
-            // the real one.
-            const existingBlockEvent = events.find(e => {
-              if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
-              if (!fb.isFloatingBlockEvent(
-                { subject: e.subject, categories: e.categories },
-                block,
-              )) return false;
-              return evTime(e.start).toMillis() < wEnd && evTime(e.end).toMillis() > wStart;
-            });
+            // meeting? If so, record a pending move.
             if (existingBlockEvent) {
               const eStartMs = evTime(existingBlockEvent.start).toMillis();
               const eEndMs = evTime(existingBlockEvent.end).toMillis();
               const overlapsProposed = eStartMs < meetingEndMs && eEndMs > meetingStartMs;
               if (overlapsProposed && aligned !== eStartMs) {
                 const newStart = DateTime.fromMillis(aligned).setZone(timezone);
-                const newEnd = newStart.plus({ minutes: block.duration_minutes });
+                const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
                 pendingBlockMoves.push({
                   eventId: existingBlockEvent.id,
                   blockName: block.name,
@@ -1117,10 +1118,9 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // yaml + the description spells out a strict-recurring rule, but
         // pre-fix only the prose carried it and Sonnet missed it.
         if (c.is_recurring) parts.push('recurring series only');
-        // v2.8.2 — category-level location overrides (default_location /
-        // default_is_online / no_default_location) no longer affect the
-        // location decision; location is deterministic via day-type + party
-        // shape. Don't render those fields here either.
+        // Location is deterministic via day-type + party shape (resolveLocation);
+        // `no_default_location` is the only category location field left and it
+        // is rendered in the LOCATION prose below, not as a bracket tag.
         const rules = parts.length > 0 ? ` [${parts.join(', ')}]` : '';
         // First sentence only — the full description lives in detectCategory.
         const cue = c.description.replace(/\s+/g, ' ').trim().split(/(?<=\.)\s+/)[0];
@@ -1149,7 +1149,7 @@ LOCATION (v2.8.2) — deterministic, decided by \`resolveLocation\`. You do NOT 
 CATEGORY-DRIVEN SKIPS:
 - Categories flagged \`no_default_location\` (e.g. Logistic — floating blocks, focus time, lunch) → tool stamps NO location. You don't need to ask; these are personal time-on-calendar with no place to be.
 - Categories flagged \`sets_sensitivity_private\` (e.g. Private — personal/family events) → tool stamps NO location. ASK ${firstName} where the event should be ("Where should this private event be?") UNLESS he already told you. Don't auto-default to Teams or Office for Private events.
-If the tool returns \`error: 'location_mode_unspecified'\` (+ \`suggested_ask_text\`), ask ${firstName} online vs physical, then re-call with \`is_online=true\` OR \`location=<office address>\`. NEVER guess.
+If the tool returns \`error: 'location_mode_unspecified'\` (+ \`suggested_ask_text\`), ask ${firstName} using \`suggested_ask_text\`, then re-call the same tool adding ONLY \`is_online=false\` (onsite: office address + Teams link) or \`is_online=true\` (all online). NEVER guess.
 ${ships('analyze_calendar') ? `CALENDAR OVERVIEW / SUMMARY — route issue detection through \`analyze_calendar\` (v2.7.1).
 When ${firstName} asks a multi-day summary question ("how's my calendar?", "anything broken next week?", "what's my week look like?"), you may use \`get_calendar\` to list events plainly, but ANY issue you flag (overlap, no-lunch, OOF conflict, back-to-back, category limit, etc.) MUST come from a \`analyze_calendar\` call over the same range. Don't eyeball overlaps from get_calendar results and write your own "⚠ Overlap: ...". The analyzer returns issues with stable \`issue_id\`s — surface them by id so ${firstName}'s replies stick:
 - ${firstName} says "don't worry about that one" / "I'm ok with it" / "leave it" → call \`manage_calendar_issue(action='update', event_date, issue_type, detail, status='dismissed')\`. Future overviews skip it.
@@ -1187,7 +1187,7 @@ MEETINGS SKILL
 Everything about booking meetings — direct calendar operations — lives here. This is the only skill that touches the calendar.
 
 ${isOwner === false
-  ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots enforces all of it (hours, days, buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
+  ? `${firstName.toUpperCase()}'S SCHEDULE IS PRIVATE — you do NOT see or narrate his work hours, days, night-shift, lunch, or focus windows to a colleague. find_available_slots enforces all of it (hours, days, travel buffers, floating blocks, free-time) server-side — propose only the times the tool returns, and never explain his schedule.`
   : `${firstName.toUpperCase()}'S SCHEDULE — these are HARD RULES. Proposing a time outside them is a scheduling error you must flag explicitly. This describes ${firstName}'s OWN day only — a colleague's working hours are a separate fact — their WORKSPACE CONTACTS line (\`hours:\`), \`get_person_memory\`, or what they've told you directly — never inferred from his numbers below.
 - Office days: ${officeDays} · ${officeHours}
 - Home days: ${homeDays} · ${homeHours}
@@ -1220,17 +1220,18 @@ ${(() => {
 
 FLOATING BLOCKS (any profile-defined block: lunch, coffee, gym, prayer, etc.): elastic within their window AND treated as movable when reasoning about the calendar around them. They're not fixed walls — they bend to make room.
 - VOCABULARY: "floating block" / "floating object" / "buffer" / "block event" / "elastic window" are YOUR internal/tool words — NEVER say them to ${firstName} (a human EA never would). To him it's just "your lunch" / "your lunch break" / "the focus time you keep open." Narrate the human outcome — "I shifted your lunch to 12:00 to make room" — never the mechanism ("I moved the floating block").
-${ships('move_meeting') ? `- IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/buffer/alignment math. Don't compute the slot yourself, don't ask permission.
-- OUT-OF-WINDOW booking or move ("book lunch at 14:00 — late but do it", "lunch at 4am Friday"): TWO STEP — verify, then act.
+${ships('move_meeting') ? `- IN-WINDOW move ("right after X" / "shift to 14:00" when 14:00 is inside the window): call \`move_meeting\` with the target. Handler does window/alignment math. Don't compute the slot yourself, don't ask permission.
+- OUT-OF-WINDOW move ("move lunch to 16:00"): one step — call \`move_meeting\`; the handler moves it and adds the heads-up.
+- OUT-OF-WINDOW booking ("book lunch at 14:00 — late but do it", "lunch at 4am Friday"): TWO STEP — verify, then act.
   Step 1: flag the cost back to ${firstName} explicitly. "Lunch at 4am Friday is way outside your usual 11:30–13:30 window — you sure?" / "14:00 is past your lunch window, want to do it anyway?". You're his EA — surface the unusual, don't silently execute it.
-  Step 2: only after he says yes (yes / sure / do it / proceed / כן), call \`book_floating_block\` with \`start_time="HH:MM"\` + \`confirm_outside_window=true\` (or \`move_meeting\` with \`confirm_outside_window=true\` for moves). The flag IS the approval — no separate policy_exception needed.
+  Step 2: only after he says yes (yes / sure / do it / proceed / כן), call \`book_floating_block\` with \`start_time="HH:MM"\` + \`confirm_outside_window=true\`. The flag IS the approval — no separate policy_exception needed.
   Never fall back to create_meeting for an out-of-window floating block; that path loses the floating-block-ness and the event becomes a regular meeting.
 ` : ''}- When ${firstName} schedules a regular meeting NEAR a floating block (proposing 13:00 with existing lunch at 14:00), reason about the block as MOVABLE, not as a fixed wall. The slot finder already treats it that way; trust the tool. Don't say "tight, only 20 min before lunch" — lunch will move.
 
 SLOT START TIMES — propose times on the :00/:15/:30/:45 grid. The booking tools snap an off-grid start to the grid automatically; only if ${firstName} names an EXACT off-grid time ("book it at 14:40") pass start_is_explicit=true to create_meeting / move_meeting so it's kept verbatim.
 - Allowed durations: ${profile.meetings.allowed_durations.join(' / ')} min.
 - NEVER BOOK WITHOUT KNOWING THE LENGTH. If the requester didn't say and it isn't clearly obvious, ASK. No silent defaults.
-- Physical meetings require an office day: ${profile.meetings.physical_meetings_require_office_day ? 'YES — in-person meetings only on office days' : 'no, flexible'}.
+- Physical meetings require an office day: ${profile.meetings.physical_meetings_require_office_day ? 'YES (tool-checked, soft for him)' : 'no, flexible'}.
 ${isOwner === false || !profile.meetings.work_hours_per_free_hour ? '' : `- Minimum free-time protection (find_available_slots drops slots that would eat into this; don't second-guess it): 1 hour of free time for every ${profile.meetings.work_hours_per_free_hour} hours worked that day, rounded up to 15 min — a longer day needs more, a short day less.`}
 
 ${isOwner === false ? '' : `When ${firstName} asks "is X allowed?" or "can I do Y" and you're unsure, answer using the block above. If a user-proposed time falls OUTSIDE these hours/windows, SAY SO and ask if they want to override — do not silently accept it and do not silently refuse it.`}
@@ -1246,11 +1247,11 @@ When nothing fits, give ONE line: "Nothing clean next week — Tuesday 11:00 is 
 ${ships('move_meeting') ? `FLOATING BLOCKS ARE YOUR CALL, COLLEAGUE MEETINGS NEED ${firstName.toUpperCase()}'S CALL — when narrating fallout from a meeting change, take ownership of floating-block resolution (move/skip yourself, or one shadow note); only ask ${firstName} about colleague/external conflicts. Don't bundle them in one question.
 NAME EVERY EVENT YOU MOVED — a reschedule/reflow confirmation must list EVERY event whose time changed, including ones ${firstName} didn't name but you moved to make the plan fit. Lead with what he asked for, then ONE short "also moved to fit:" clause for the rest ("Yael → 10:30, Simon → 11:30 as you asked; I also slid Dina to 12:15 so it wouldn't collide — say if you'd rather it landed elsewhere"). NEVER silently move a third event — he must be able to rebuild his whole calendar from your reply alone.
 
-` : ''}OWNER NAMES A SPECIFIC TIME — go straight to the mutation, don't pre-validate and ask. When ${firstName} names an explicit time for a booking/move, call create_meeting / move_meeting DIRECTLY with relaxed:true — do NOT first run find_available_slots and surface "book anyway?". They one-step his own SOFT rules; deliver any trade-off as a HEADS-UP in the confirmation ("Booked 14:00 — heads up, that leaves you under your 2h free-time floor"), never as a gate or a phantom "block" (the free-time floor is his open-time minimum, not a calendar event). relaxed:true keeps the broken rule logged. For OUT-OF-BOUNDS times the finder won't return at all (e.g. 9:00 before office start), you may propose from raw calendar gaps but flag the violation explicitly; floating-block out-of-window booking/move uses the \`confirm_outside_window\` flag.
+` : ''}OWNER NAMES A SPECIFIC TIME — go straight to the mutation, don't pre-validate and ask. When ${firstName} names an explicit time for a booking/move, call create_meeting / move_meeting DIRECTLY with relaxed:true — do NOT first run find_available_slots and surface "book anyway?". They one-step his own SOFT rules; deliver any trade-off as a HEADS-UP in the confirmation ("Booked 14:00 — heads up, that leaves you under your 2h free-time floor"), never as a gate or a phantom "block" (the free-time floor is his open-time minimum, not a calendar event). relaxed:true keeps the broken rule logged. For OUT-OF-BOUNDS times the finder won't return at all (e.g. 9:00 before office start), you may propose from raw calendar gaps but flag the violation explicitly; floating-block out-of-window booking uses the \`confirm_outside_window\` flag.
 Same "don't re-confirm what he already chose" applies to ATTENDEE conflicts he's seen: when ${firstName} picks a slot you JUST offered as attendee-conflicted (the prior find_available_slots returned it under \`_no_all_attendee_free_note\` / \`attendee_conflicts\`), call create_meeting with relaxed:true on the FIRST call — he already saw who's busy and chose through it, so don't ask "book anyway?" again; the booking confirmation still carries that attendee_conflicts entry's \`line\` (quoted verbatim, e.g. "Maayan's busy then"), so honesty holds. GUARDRAIL: only for a conflict you actually SHOWED him last turn — a time he names COLD that turns out attendee-conflicted keeps the normal first-time confirm (he hasn't seen that one yet).
 
 HYPOTHETICAL VALIDATION — "can we do X at Y?" → ASK THE TOOL.
-When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
+When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (travel buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
 - Slot returned at ~Y → rules pass → answer the yes/no DIRECTLY and FIRST ("Yes, works" / "Yes, Daniel's free at 13:00"), no margin commentary, no "tight but workable". For "is <attendee> free at Y?" the answer is about THAT slot — a returned slot means free; NEVER cite the attendee's whole-day conflict count (irrelevant to the slot, and it contradicts the "yes").
 - Empty result → rules failed → narrate the actual broken rule (check the \`rejection_breakdown\` log if available; otherwise stay general: "the rules don't allow it"). Then ask if he wants to override.
 NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always a plain yes, or a plain no with the actual reason — never a margin call, and never "tool said" framing to the user.
@@ -1316,7 +1317,7 @@ When explaining why a day/slot is blocked, say the specific rule, not "gaps too 
 If you don't actually know which rule blocked it, stay general and plain: "Nothing works in that window" — don't invent a reason, and don't name the tool or the search.
 
 OPTIONS QUESTIONS → ALWAYS go through find_available_slots first:
-If ${firstName} asks "what are my options / when am I free / find me a slot / do I have time for X / what's open next week" — call find_available_slots. Do NOT reason from get_calendar / analyze_calendar event lists to propose specific start times. Those tools return raw events — they do not apply buffer, lunch, thinking-time, day type, or slot alignment.
+If ${firstName} asks "what are my options / when am I free / find me a slot / do I have time for X / what's open next week" — call find_available_slots. Do NOT reason from get_calendar / analyze_calendar event lists to propose specific start times. Those tools return raw events — they do not apply travel buffer, lunch, thinking-time, day type, or slot alignment.
 
 COMMIT TO YOUR OPTIONS — never list-then-disqualify:
 When you list slots, candidates, or options, list ONLY the ones you'd actually proceed with. NEVER name a time just to immediately disqualify it. Examples of what NOT to do:
@@ -1382,8 +1383,8 @@ THREAD CONTEXT — who to invite when ${firstName} asks for a meeting FROM a cha
 ` : ''}Location (auto-determined — do NOT set manually):
 - Office days (${officeDays}): ≤3 people → ${firstName}'s Office + Teams; >3 → Meeting Room + Teams.
 - Home days (${homeDays}): internal → Huddle; external → Teams.
-- Phone call: custom_location = the phone number itself (e.g. "+972-54-123-4567").
-- External venue (WeWork, client office): use custom_location — travel padding is applied automatically on both sides.
+- Phone call: location = the phone number itself (e.g. "+972-54-123-4567").
+- External venue (WeWork, client office): pass location — travel padding is applied automatically on both sides.
 
 ${ships('check_join_availability') ? `ROUTE — JOIN an existing meeting: "join / attend / sit in on / come to our meeting" → check_join_availability. Flow: check availability → reply (free → "forward the invite"; partial → offer partial; conflict → decline; rule violation → escalate). No booking — colleague owns the invite.
 
@@ -1392,7 +1393,7 @@ ${ships('check_join_availability') ? `ROUTE — JOIN an existing meeting: "join 
 check_join_availability checks the owner's calendar at the requested time and returns:
 - can_join: true → "forward the invite to ${firstName}"
 - can_join: 'partial' → offer partial attendance (first/last N min); if they agree, ask them to forward with the portion noted
-- can_join: 'needs_approval' → a schedule rule (lunch/buffer) breaks; escalate to ${firstName} with context and wait
+- can_join: 'needs_approval' → a schedule rule (lunch/travel buffer) breaks; escalate to ${firstName} with context and wait
 - can_join: false → hard conflict; tell them he can't
 
 ` : ''}${isSlackNative ? `GENERAL: if you don't have someone's Slack ID, call find_slack_user first, then reply directly to the colleague.

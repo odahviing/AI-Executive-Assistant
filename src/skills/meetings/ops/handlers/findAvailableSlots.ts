@@ -252,10 +252,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // also masked the email leg's forwarded subjects unconditionally.
   const viewerEmail = viewerEmailFor(context);
   const offerCount = offeredSlotCount(context.profile);
-        // v1.6.4 — meeting_mode is required from the LLM. Let findAvailableSlots
-        // scope the workDays per mode (in_person → office only, else both). Do
-        // NOT pre-pass workDays from here — the function's own mode-aware logic
-        // decides so in_person is enforced as a hard rule.
+        // v1.6.4 — meeting_mode is required from the LLM. Do NOT pre-pass
+        // workDays from here: every work day is walked, and in_person on a
+        // non-office day is checkSlot rule 1b (soft, owner-overridable) per slot.
         {
           // moving-event-gate-false-positive-blocks-attendeeless-move
           // (2026-08-12) — captured BEFORE the default-fill just below

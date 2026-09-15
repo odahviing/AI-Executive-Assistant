@@ -1314,23 +1314,21 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           targetName: deleteTargetIdentity.targetName,
         });
 
-        // v3.2.x (Tier 1) — a delete frees the deleted event's slot, which may
-        // open a displaced floating block's window. Run the same post-mutation
-        // rebalance (move_meeting/create_meeting already do) and surface any
-        // reclaim candidate as a PROPOSE-ONLY offer. Guarded on preDeleteStartIso
-        // (the freed slot); skipped if the pre-delete probe didn't capture it.
-        let reclaimable: import('../../../../utils/rebalanceFloatingBlocks').ReclaimableBlock[] = [];
+        // A delete frees the deleted event's slot, so a floating block that was
+        // overlapping it can now slide inside its own window. Run the same
+        // post-mutation rebalance move_meeting/create_meeting already do.
+        // Guarded on preDeleteStartIso (the freed slot); skipped if the
+        // pre-delete probe didn't capture it.
         if (preDeleteStartIso) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
               typeof import('../../../../utils/rebalanceFloatingBlocks');
-            const rebal = await rebalanceFloatingBlocksAfterMutation({
+            await rebalanceFloatingBlocksAfterMutation({
               profile: context.profile,
               affectedSlotIso: preDeleteStartIso,
               ownerSlackId: context.profile.user.slack_user_id,
             });
-            reclaimable = rebal?.reclaimable ?? [];
           } catch (err) {
             logger.warn('rebalance after delete_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
@@ -1377,9 +1375,6 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           notified_who: notifiedWho ?? undefined,
           organizer_name: organizerName ?? undefined,
           organizer_email: organizerEmail ?? undefined,
-          // v3.2.x — a displaced floating block whose window this delete freed.
-          // PROPOSE-ONLY: the reply offers to bring it home; not auto-moved.
-          ...(reclaimable.length ? { reclaimable_block: reclaimable[0] } : {}),
           action_summary: `Cancelled '${cancelledLabel}'. ${notifiedSentence}`,
           _note: 'Report ONLY this occurrence, named by cancelled_label, and report the notification ONLY as notified_via says. Maelle sends NO Slack message on a cancellation — never write "I let <name> know" / "<name> has been notified" / "I\'ll notify them", and never say the decline is permanent or covers other dates: each call cancels exactly one occurrence and Outlook\'s notice says so. If several cancellations ran this turn, list one line per SUCCESSFUL call\'s cancelled_label and nothing else.',
         };

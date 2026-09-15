@@ -39,6 +39,24 @@ export interface DetectCategoryInput {
   // this, given the category this call returns) independently agreed it was
   // physical. Passed through verbatim, never parsed here (G8) — the model reads it.
   locationHint?: string;
+  /**
+   * 2026-09-14 (owner ruling "yes it should see it, why not?") — the owner
+   * explicitly asked for an IN-PERSON meeting (`is_online: false`) without
+   * naming a venue. `locationHint` alone couldn't carry that: with no address
+   * string the classifier read a Physical suggestion as "no physical location
+   * given" and overrode it, a reason that is simply false when the owner said
+   * "in our office". The venue itself is resolved AFTER this step
+   * (resolveLocation), so this flag is the only in-hand physical signal.
+   *
+   * OWNER PATH ONLY — the caller gates it. On the colleague path `is_online`
+   * is Sonnet-derived with no real request behind it (v3.2.6), which is why
+   * resolveLocation ignores it there; letting it steer the category would
+   * reintroduce that same phantom signal one layer up. `is_online: true` is
+   * deliberately NOT forwarded: "online" is already the classifier's default
+   * reading of a meeting with no venue, so a flag for it would add nothing and
+   * could only push an existing classification around.
+   */
+  ownerRequestedInPerson?: boolean;
 }
 
 export interface DetectCategoryResult {
@@ -147,6 +165,7 @@ Recurring: ${input.isRecurring ? 'YES (part of a series)' : 'NO (one-time)'}
 Attendee count: ${attendeeCount} (${input.profile.user.name.split(' ')[0]} included)
 Attendees: ${attendeesLine}
 ${input.locationHint ? `Location given: ${input.locationHint.slice(0, 200)}` : ''}
+${input.ownerRequestedInPerson ? `Meeting mode: IN-PERSON — ${input.profile.user.name.split(' ')[0]} explicitly asked for a physical meeting. The venue is resolved after this step, so treat this as a stated in-person meeting even though no address appears above.` : ''}
 ${input.body ? `Body: ${input.body.slice(0, 300)}` : ''}
 
 OUTPUT — ONE LINE in this exact format:

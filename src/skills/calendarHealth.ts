@@ -78,7 +78,7 @@ Pass anchor_event_id from get_calendar's event id field. NEVER hand-compute the 
 CATEGORIES: if the EVENT CATEGORIES block is in your system prompt, pass \`category\` with the name that fits this kind of block (typically the one whose description mentions personal time / schedule admin). Omit if no categories are defined or none fits.
 
 OWNER OVERRIDE — booking outside the preferred window:
-When the owner explicitly says to book a floating block at a time OUTSIDE its preferred window ("book lunch at 14:00 even though that's late", "yes I know it's after my lunch hours, do it anyway"), call this tool with start_time="HH:MM" + confirm_outside_window=true. The handler bypasses the window check (owner override IS the approval) AND bypasses the day-of-week check (owner is allowed to book a block on any day they ask). It still enforces the rules that DON'T bend: buffer, conflict detection, alignment. Resulting event is tagged as a first-class floating block (canonical subject + matching category) so downstream code recognizes it. Never fall back to create_meeting for this — that path would lose the floating-block-ness. Owner-only path: this flag is ignored on colleague calls (colleagues can't trigger this tool anyway — it's owner-restricted by registry).`,
+When the owner explicitly says to book a floating block at a time OUTSIDE its preferred window ("book lunch at 14:00 even though that's late", "yes I know it's after my lunch hours, do it anyway"), call this tool with start_time="HH:MM" + confirm_outside_window=true. The handler bypasses the window check (owner override IS the approval) AND bypasses the day-of-week check (owner is allowed to book a block on any day they ask). The override is total — the block is written at that time, even over an existing meeting; you already surfaced the cost in step 1, so the tool obeys. Resulting event is tagged as a first-class floating block (canonical subject + matching category) so downstream code recognizes it. Never fall back to create_meeting for this — that path would lose the floating-block-ness. Owner-only path: this flag is ignored on colleague calls (colleagues can't trigger this tool anyway — it's owner-restricted by registry).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -111,7 +111,7 @@ When the owner explicitly says to book a floating block at a time OUTSIDE its pr
             },
             confirm_outside_window: {
               type: 'boolean',
-              description: 'OPTIONAL. Owner override flag — when true, the handler accepts a start_time that is OUTSIDE the block\'s preferred window AND/OR on a day the block is not normally scheduled. Use ONLY when the owner has explicitly said to book it there ("yes book lunch at 14:00, late is fine"). The override IS the approval — no separate policy_exception approval needed. Buffer + conflict checks still enforced. Pair with start_time.',
+              description: 'OPTIONAL. Owner override flag — when true, the handler accepts a start_time that is OUTSIDE the block\'s preferred window AND/OR on a day the block is not normally scheduled. Use ONLY when the owner has explicitly said to book it there ("yes book lunch at 14:00, late is fine"). The override IS the approval — no separate policy_exception approval needed; it books even over a conflict. Pair with start_time.',
             },
             category: categoryNames.length > 0
               ? {
@@ -245,7 +245,7 @@ Available tools:
   • passive: detects and returns the issue list — you narrate, owner asks for fixes, you execute
   • active: books missing floating blocks, tags high-confidence categories, and can directly move eligible internal-only, unprotected double bookings. Busy days and OOF conflicts need owner direction. \`fixed:true\` confirms a calendar write; \`fix_detail\` states any notification/follow-up failures.
 - book_floating_block: book a floating block in its preferred window. Pass \`block_name\` (one of: ${blocks.map(b => b.name).join(', ') || 'none configured'}). Configured blocks: ${blocksLine}. All floating blocks live under \`meetings.floating_blocks\`.
-  POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - buffer - duration\` (abut_before) or \`anchor.end + buffer\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
+  POSITIONAL INTENT: when the owner says "before X" / "after X" for a floating block (X = a meeting on the same day), pass \`prefer_position: 'abut_before' | 'abut_after'\` + \`anchor_event_id\` (the event id from get_calendar). The handler computes \`anchor.start - duration\` (abut_before) or \`anchor.end\` (abut_after), snaps to a quarter-hour aligned slot, and verifies window + conflicts. Don't compute the time yourself and pass it through create_meeting — that bypasses the alignment + window-edge checks (the lunch window's preferred_end is exclusive, so e.g. starting AT 13:30 isn't a valid lunch slot). When the owner says "as late as possible" / "right before lunch ends", pass \`prefer_position: 'latest_in_window'\`.
 - set_event_category: add Outlook categories to events
 - manage_calendar_issue: list or transition tracked issues. action='list' (active rows), 'approve' (owner waved it off; won't re-flag), 'start_resolve' (reuse/open a 24-hour resolve; continue only on \`updated:true\` + \`status:'in_progress'\` + \`request_id\`), 'owner_will_resolve' (owner will handle), 'owner_done' (owner fixed it). issue_id required except for 'list'.
 
@@ -268,8 +268,6 @@ Light polish only: you may strip the ✓/×/! prefix characters when posting to 
 
 WRONG: "Calendar looks good" when summary_text contains ✓ lines (erases the autonomous actions).
 WRONG: "I started moving Michal's biweekly" when summary_text says "× Tried to fix ... but couldn't" — must narrate the failure honestly, not the wish.
-
-Every fix fires a shadow DM automatically (via \`book_floating_block\` / \`set_event_category\` wrappers + v1_shadow_mode) — you don't need to DM separately.
 
 PROTECTION RULES (v2.1.1 — deterministic, in code):
 A meeting is PROTECTED from auto-reshuffle if ANY of:

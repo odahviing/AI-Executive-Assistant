@@ -18,6 +18,7 @@
 
 import crypto from 'crypto';
 import { getDb } from './client';
+import { HUDDLE_LABEL } from '../utils/resolveLocation';
 import logger from '../utils/logger';
 
 export interface VenueRow {
@@ -367,7 +368,7 @@ export function isCompanyLocation(
 ): boolean {
   if (!location || location.trim().length === 0) return true;  // empty = not external
   const loc = location.trim().toLowerCase();
-  if (loc === 'huddle') return true;
+  if (loc === HUDDLE_LABEL.toLowerCase()) return true;
   const candidates = [
     officeLabels.short_label,
     officeLabels.meeting_room_label,

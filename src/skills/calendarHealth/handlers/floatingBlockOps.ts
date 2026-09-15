@@ -157,7 +157,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
               event_id: existingNearby.id, subject: existingNearby.subject,
               start: eStart.toFormat('HH:mm'), end: eEnd.toFormat('HH:mm'),
               date, block_name: block.name, override_used: true,
-              message: `${blockLabel} is already on the calendar on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')}. To move it to ${explicitStartTime}, use move_meeting with confirm_outside_window=true rather than book_floating_block.`,
+              message: `${blockLabel} is already on the calendar on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')}. To move it to ${explicitStartTime}, use move_meeting (owner path moves it as asked, in or out of the window — no flag) rather than book_floating_block.`,
             };
           }
 
@@ -291,8 +291,16 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           };
         }
 
-        // Idempotency: if the block's event already exists in the window,
-        // return created:false. Bug-3 fix: the message now ATTRIBUTES the
+        // Idempotency: if the block's event already exists ON THIS DAY —
+        // anywhere on it, in or out of the preferred window — return
+        // created:false. Owner ruling 2026-09-14 ("I'm allowed to move a
+        // floating block outside of my frame. Count it as lunch."): a placed
+        // block satisfies the block wherever it sits, so a window-scoped match
+        // (what this used to be) would book a SECOND lunch on a day whose lunch
+        // the owner had moved past the window — the exact duplicate the
+        // override branch above was already fixed for, whose comment already
+        // claimed this branch worked day-wide. Both are day-scoped now.
+        // Bug-3 fix: the message ATTRIBUTES the
         // booking to Maelle herself instead of phrasing it as discovered
         // calendar state. The previous wording ("Lunch is already on the
         // calendar...") was being parroted verbatim by Sonnet, making her
@@ -305,8 +313,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           );
           if (!matches) return false;
           const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
-          const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-          return eStart.toMillis() < windowEnd.toMillis() && eEnd.toMillis() > windowStart.toMillis();
+          return eStart.toFormat('yyyy-MM-dd') === date;
         });
         if (existingEvent) {
           const eStart = parseGraphDt(existingEvent.start.dateTime, existingEvent.start.timeZone, timezone);
@@ -325,7 +332,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             // already did this" rather than "the calendar happens to have
             // this." Pairs with the action-tape closing line that asks
             // Sonnet to lead with what she did.
-            message: `You already booked ${blockLabel} on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')} — same slot, no change.`,
+            message: `You already booked ${blockLabel} on ${date} at ${eStart.toFormat('HH:mm')}–${eEnd.toFormat('HH:mm')} — already placed, no change.`,
             assistant_hint: `You (Maelle) booked this earlier in this conversation. Narrate as your action ("I booked it at ${eStart.toFormat('HH:mm')}"), not as discovered state ("it's on the calendar").`,
           };
         }
@@ -430,7 +437,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             assistant_hint: slotResult.error === 'no_room' && busyDetails.length > 0
               ? `The window was fragmented by these busy blocks: ${busyDetails.map(b => `${b.start}-${b.end}`).join(', ')}. With quarter-hour alignment, no aligned ${block.duration_minutes}-min slot fit any gap. If the owner pushes back ("but I have time at HH:MM"), explain WHICH busy block conflicts — don't just say "tight".`
               : slotResult.error === 'anchor_outside_window'
-              ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time — that's a policy_exception approval (deferred_action move_meeting with confirm_outside_window=true) if the owner explicitly wants to override.`
+              ? `Tell the owner honestly: the requested position lands outside the block's preferred window (${block.preferred_start}-${block.preferred_end}). Don't fall back to create_meeting at the boundary time. If the owner explicitly wants it there anyway: an existing block → move_meeting with that time (owner path moves it as asked, no flag); no block yet → retry book_floating_block with start_time="HH:MM" + confirm_outside_window=true.`
               : slotResult.error === 'anchor_conflicts_busy'
               ? `Tell the owner the abut slot conflicts with another meeting (named in the detail above). Either pick a different anchor or fall back to earliest position.`
               : undefined,

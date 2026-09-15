@@ -85,13 +85,10 @@ export interface BookingRequest {
   isRecurring?: boolean;
   isFloatingBlock?: boolean;
 
-  // Move/cancel — reference to the existing event being mutated.
+  // Move/cancel — reference to the existing event being mutated. (The event's
+  // own categories / location / prior slot are read from Graph by the move
+  // handler and handed to planMeeting directly — no tool declares them as args.)
   existingEventId?: string;
-  existingEventCategories?: string[];
-  existingEventLocation?: string;
-  existingEventIsOnline?: boolean;
-  priorSlotStartIso?: string;
-  priorSlotEndIso?: string;
 
   // Owner-explicit override path, already gated on the authenticated sender.
   // Handlers NEVER set this from raw args — they call `grantRelaxed`.
@@ -195,25 +192,16 @@ export async function normalizeBookingRequest(
     locationHint: args.location as string | undefined,
     isRecurring: typeof args.is_recurring === 'boolean' ? args.is_recurring as boolean : undefined,
     // isFloatingBlock is set ONLY when the caller passed a real
-    // is_floating_block object with a name. Pre-fix, `confirm_outside_window`
-    // alone would set this true — but that flag is also valid on regular
-    // move_meeting calls (owner override on a non-floating-block move).
-    // The mis-tag tripped planMeeting / scheduleRules into bypassing rule 8
-    // owner_busy_collision (floating blocks are exempt by design), so a
-    // policy_exception approval that rode `confirm_outside_window=true`
-    // through to its deferred_action move silently slipped past the
-    // double-booking check the owner never explicitly approved.
+    // is_floating_block object with a name — never inferred from any other
+    // flag: the mis-tag once let a move bypass rule 8 owner_busy_collision
+    // (floating blocks are exempt by design) and slip past a double-booking
+    // check the owner never approved.
     isFloatingBlock: typeof args.is_floating_block === 'object'
       && args.is_floating_block !== null
       && typeof (args.is_floating_block as { name?: unknown }).name === 'string'
       ? true
       : undefined,
     existingEventId: args.meeting_id as string | undefined,
-    existingEventCategories: args.existing_categories as string[] | undefined,
-    existingEventLocation: args.existing_location as string | undefined,
-    existingEventIsOnline: typeof args.existing_is_online === 'boolean' ? args.existing_is_online as boolean : undefined,
-    priorSlotStartIso: args.prior_start as string | undefined,
-    priorSlotEndIso: args.prior_end as string | undefined,
     relaxed,
     relaxedReason,
     context: ctx,

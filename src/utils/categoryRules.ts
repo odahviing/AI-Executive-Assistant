@@ -6,7 +6,8 @@
  * Each category in `profile.categories` can carry:
  *   - limits.per_day / limits.per_week  (max-count windows)
  *   - day_type ('office_days' | 'home_days' | 'any')
- *   - default_location / default_is_online / requires_travel_buffer
+ *   - requires_travel_buffer / no_default_location (location itself is
+ *     resolveLocation's, not a category rule)
  *
  * Three exports:
  *   checkCategorySlot         — is this slot allowed for this category?

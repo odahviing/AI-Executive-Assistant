@@ -1,20 +1,23 @@
 /**
- * Post-mutation floating-block rebalance.
+ * Post-mutation floating-block rebalance — the ONE mover of a floating block
+ * that Maelle moves on her own initiative.
  *
- * After a meeting is created or moved, any floating block on the affected
- * day may now overlap that meeting. This helper tries to re-place each
- * affected block inside its preferred window. If no in-window slot is
- * available, the block is left where it is and the owner is shadow-DM'd —
- * the bumping-out-of-window decision still belongs to the owner (via the
- * policy_exception approval flow), not this cascade.
+ * For each block configured for the affected day: skip if the day is a
+ * schedule-override day, the block has no event, its event already ended
+ * today, or the owner placed it outside its window (counts as placed). A block
+ * a meeting now overlaps is re-placed inside its window at the event's own
+ * span (blockSizedToEvent); with no in-window slot it is left where it is,
+ * `overlapping` is counted and the owner is shadow-DM'd once per overlap
+ * (process-lifetime dedup). With `consolidateDense` (the calendar-health
+ * sweep only) a non-overlapped block sitting in a dead sliver on a dense
+ * calendar is slid to abut a neighbour. Every move writes a `move_meeting`
+ * activity row (revertible via the existing revert path) and a shadow DM, and
+ * is returned in `moves` for the caller's confirmation.
  *
- * Same shape as `closeMeetingArtifacts` (post-mutation, fire-and-forget,
- * never throws), different concern (block placement rather than DB-artifact
- * cleanup).
- *
- * Called from `move_meeting` and `create_meeting` handlers after the
- * underlying Graph mutation succeeds. Best-effort: a failure here must
- * never undo the calendar mutation that just landed.
+ * Never throws — a failure here must never undo the calendar mutation that
+ * just landed. Callers: create_meeting / move_meeting (post-write) and the
+ * calendar-health sweep (per day, batched events). `dryRunFloatingBlockRelocation`
+ * below runs the same search read-only for the pre-booking confirmation.
  */
 
 import { DateTime } from 'luxon';
@@ -75,7 +78,53 @@ function logRebalanceMoveActivity(
 }
 
 /**
- * The reclaim-slot search, shared by the real mover (the overlap branch below)
+ * Destination search + the "that isn't a move" guard, shared by both
+ * relocation callers in this file (the overlap mover and the pre-booking dry
+ * run, via computeBlockRelocation) so the rule lives in ONE place.
+ *
+ * The block's own event is excluded from the busy pool (Maelle is the one
+ * moving it), which means its CURRENT slot reads as free and the finder can
+ * hand back the start it already sits at. That is never a relocation: moving
+ * a block to where it already starts changes nothing, and surfacing it
+ * produces nonsense ("move your lunch to 13:00" for a 13:00 block — live
+ * 2026-09-14). It is reachable here through the WE fallback pass, which can
+ * hand back the block's own start once the WE event holding it stops counting
+ * as busy. Every slot the finder returns fits fully inside the window, so any
+ * start that DIFFERS from the current one is a genuine improvement; an
+ * identical start is not.
+ *
+ * Owner ruling (2026-08-28): this is a DESTINATION SEARCH (picking where the
+ * block lands among several candidate gaps), not a single-slot capacity
+ * check — so it goes through the two-pass finder: a genuinely free slot
+ * first, a WE-tagged slot only as a fallback when no clear slot exists.
+ */
+function findRelocationDestination(
+  block: fb.FloatingBlock,
+  dateStr: string,
+  tz: string,
+  blockEvent: CalendarEvent,
+  blockStartMs: number,
+  realEvents: CalendarEvent[],
+  extraBusy?: { start: number; end: number },
+): { aligned: number | null; usedWorkingElsewhereFallback: boolean; currentPlacementAcceptable: boolean } {
+  const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
+    realEvents, block, dateStr, tz, new Set([blockEvent.id]), extraBusy,
+  );
+  // `currentPlacementAcceptable` separates the two no-move outcomes for the
+  // caller: the finder's best answer IS where the block already sits (nothing
+  // to do, and nothing to tell the owner — the placement is fine), versus no
+  // in-window slot at all (a real "no room" the caller does surface).
+  if (aligned === blockStartMs) {
+    return { aligned: null, usedWorkingElsewhereFallback: false, currentPlacementAcceptable: true };
+  }
+  if (aligned === null) {
+    return { aligned: null, usedWorkingElsewhereFallback: false, currentPlacementAcceptable: false };
+  }
+  return { aligned, usedWorkingElsewhereFallback, currentPlacementAcceptable: false };
+}
+
+/**
+ * The in-window relocation check, shared by the real mover (the overlap branch below)
  * and the pre-booking dry-run (`dryRunFloatingBlockRelocation`) so there is
  * ONE place that decides "can this block actually move inside its window" —
  * never two implementations that can drift (M1-style: one search, one
@@ -96,23 +145,18 @@ function computeBlockRelocation(
   blockEndMs: number,
   realEvents: CalendarEvent[],
   extraBusy?: { start: number; end: number },
-): { inWindow: boolean; aligned: number | null; usedWorkingElsewhereFallback: boolean } {
+): { inWindow: boolean; aligned: number | null; usedWorkingElsewhereFallback: boolean; currentPlacementAcceptable: boolean } {
   const winStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
   const winEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
   if (
     Number.isFinite(winStart) && Number.isFinite(winEnd)
     && (blockStartMs < winStart || blockEndMs > winEnd)
   ) {
-    return { inWindow: false, aligned: null, usedWorkingElsewhereFallback: false };
+    return { inWindow: false, aligned: null, usedWorkingElsewhereFallback: false, currentPlacementAcceptable: false };
   }
-  // Owner ruling (2026-08-28): this is a DESTINATION SEARCH (picking where the
-  // block lands among several candidate gaps), not a single-slot capacity
-  // check — so it goes through the two-pass finder: a genuinely free slot
-  // first, a WE-tagged slot only as a fallback when no clear slot exists.
-  const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
-    realEvents, block, dateStr, tz, new Set([blockEvent.id]), extraBusy,
-  );
-  return { inWindow: true, aligned, usedWorkingElsewhereFallback };
+  return { inWindow: true, ...findRelocationDestination(
+    block, dateStr, tz, blockEvent, blockStartMs, realEvents, extraBusy,
+  ) };
 }
 
 /**
@@ -225,8 +269,10 @@ export async function dryRunFloatingBlockRelocation(params: {
       // Only report blocks the CANDIDATE slot actually overlaps.
       if (!(candidateStartMs < blockEndMs && candidateEndMs > blockStartMs)) continue;
 
+      // Sized to the event's own span — the same block the real mover uses.
+      const sizedBlock = fb.blockSizedToEvent(block, blockEvent, tz);
       const relocation = computeBlockRelocation(
-        block, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents,
+        sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents,
         { start: candidateStartMs, end: candidateEndMs },
       );
       if (!relocation.inWindow || relocation.aligned === null) {
@@ -234,7 +280,7 @@ export async function dryRunFloatingBlockRelocation(params: {
         continue;
       }
       const rs = DateTime.fromMillis(relocation.aligned, { zone: tz });
-      const re = rs.plus({ minutes: block.duration_minutes });
+      const re = rs.plus({ minutes: sizedBlock.duration_minutes });
       results.push({
         block: block.name,
         relocatable: true,
@@ -271,30 +317,19 @@ function shouldSkipOverlapShadow(fingerprint: string): boolean {
   return false;
 }
 
-/**
- * A floating block that sits OUTSIDE its preferred window and could now be
- * brought home — the mutation that just landed (a move or delete) freed an
- * aligned slot inside the block's window. Tier 1 is PROPOSE-ONLY: the helper
- * surfaces the candidate, the handler attaches it to the tool result, and the
- * reply offers it ("…frees 12:30 — want lunch back there?"). We never auto-move
- * it here, because a block outside its window may be owner-pinned on purpose;
- * a declinable offer is the safe altitude.
- */
-export interface ReclaimableBlock {
-  name: string;
-  /** ISO start of the in-window aligned slot the block could move back to. */
-  targetSlotIso: string;
-  /** Human label for the reply, e.g. "Wed 3 Jun 12:30–13:00". */
-  label: string;
-  /** Graph event id of the displaced block (so a follow-up move can target it). */
-  blockEventId: string;
+export interface RebalanceResult {
+  moved: number;
+  overlapping: number;
+  movedBlockEventIds: string[];
   /**
-   * True when no genuinely free slot existed in the window and this
-   * candidate only clears the block against a Working-Elsewhere event
-   * (owner ruling 2026-08-28 — WE is a second-tier fallback, never a
-   * clean slot). Omitted when the slot is fully clear.
+   * One human line per real post-write move ("moved lunch 12:00→11:30"), the
+   * same shape check_join_availability's `blocks_moved` carries. create_meeting
+   * / move_meeting put it on their tool result so the confirmation states the
+   * move — live 2026-09-14 08:43Z an approved booking slid lunch 12:00→11:30
+   * and the owner's confirmation said nothing, because both callers awaited
+   * this and discarded the count.
    */
-  usedWorkingElsewhereFallback?: boolean;
+  moves: string[];
 }
 
 export async function rebalanceFloatingBlocksAfterMutation(params: {
@@ -302,14 +337,6 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   /** ISO timestamp of the new event start — used to derive the affected date. */
   affectedSlotIso: string;
   ownerSlackId?: string;
-  /**
-   * The slot this mutation actually FREED (a move's old position, a delete's
-   * removed event). When provided, a reclaim candidate is only surfaced if this
-   * freed range intersects the block's preferred window — i.e. THIS mutation
-   * plausibly opened the room, so we don't re-offer on unrelated same-day edits.
-   * Omit to fall back to permissive detection (any open window).
-   */
-  freedRangeIso?: { start: string; end: string };
   /**
    * #133b — DENSE consolidation opt-in. When true AND the tenant is on dense
    * packing, a block that sits in a DEAD sliver (6–29 min) but overlaps nothing
@@ -327,7 +354,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
    * helper fetches the one affected day itself (unchanged).
    */
   preloadedDayEvents?: CalendarEvent[];
-}): Promise<{ moved: number; overlapping: number; reclaimable: ReclaimableBlock[]; movedBlockEventIds: string[] }> {
+}): Promise<RebalanceResult> {
   // movedBlockEventIds — every block event this call actually relocated (overlap-
   // fix OR dense consolidation). The calendar-health sweep collects these so the
   // #133c lunch-anchored fallback can SKIP a block moved this sweep: Graph
@@ -335,8 +362,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   // show the block's OLD position — acting on it would move a meeting to close a
   // sliver consolidation already closed. Deferring to the next sweep (settled
   // data) is correct and churn-free.
-  const result: { moved: number; overlapping: number; reclaimable: ReclaimableBlock[]; movedBlockEventIds: string[] } =
-    { moved: 0, overlapping: 0, reclaimable: [], movedBlockEventIds: [] };
+  const result: RebalanceResult = { moved: 0, overlapping: 0, movedBlockEventIds: [], moves: [] };
   const { profile, affectedSlotIso } = params;
 
   try {
@@ -350,7 +376,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     const dayName = slotDt.toFormat('EEEE');
 
     // v3.7.x (#143) — no floating blocks on a per-date override day, so there's
-    // nothing to rebalance or reclaim there. Skip entirely.
+    // nothing to rebalance there. Skip entirely.
     if (getEffectiveWorkDay(dateStr, profile).hasOverride) {
       logger.info('rebalanceFloatingBlocks: skipped — schedule-override day', { date: dateStr });
       return result;
@@ -384,21 +410,6 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     // batched path); otherwise fetch just this one day (the per-mutation path).
     const events = params.preloadedDayEvents ?? await getCalendarEvents(profile.user.email, startIso, endIso, tz);
     const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
-
-    // Freed-range gate (optional): when the caller tells us the slot this
-    // mutation actually freed, reclaim offers are limited to blocks whose
-    // window that freed range overlaps — so we don't re-offer on unrelated
-    // same-day edits. Absent → permissive (any open window qualifies).
-    let freedStartMs: number | null = null;
-    let freedEndMs: number | null = null;
-    if (params.freedRangeIso) {
-      const fs = DateTime.fromISO(params.freedRangeIso.start, { zone: tz });
-      const fe = DateTime.fromISO(params.freedRangeIso.end, { zone: tz });
-      if (fs.isValid && fe.isValid && fe.toMillis() > fs.toMillis()) {
-        freedStartMs = fs.toMillis();
-        freedEndMs = fe.toMillis();
-      }
-    }
 
     // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
@@ -440,6 +451,11 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
       const blockEndMs = DateTime.fromISO(blockEvent.end.dateTime, {
         zone: blockEvent.end.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
+      // The block sized to ITS EVENT's span (an owner-stretched 40-min lunch
+      // relocates as 40, never shrinks to the 25 in yaml). Built once; both
+      // movers below search and re-size with it.
+      const sizedBlock = fb.blockSizedToEvent(block, blockEvent, tz);
+      const fromHHMM = DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm');
 
       // v3.7.x (#140) — never rebalance a block whose slot has already passed
       // today. On a same-day sweep at 13:01 a lunch that already sat at
@@ -455,86 +471,28 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         continue;
       }
 
-      // Block sits OUTSIDE its preferred window. We never AUTO-move it back —
-      // it may be owner-pinned on purpose (confirm_outside_window / manual
-      // Outlook edit), and silently undoing that is the regression the v2.x
-      // sweep was careful to avoid. BUT the mutation that just landed (a move
-      // or delete) may have freed an aligned slot inside the window — Tier 1
-      // (v3.2.x): surface that as a PROPOSE-ONLY reclaim candidate so the reply
-      // can offer to bring the block home. A wrong guess (owner-pinned) is just
-      // a declinable offer, so detection here doesn't need to disambiguate.
+      // Owner ruling 2026-09-14 — "I'm allowed to move a floating block
+      // outside of my frame. Count it as lunch." A block that EXISTS on the
+      // day satisfies that block, wherever it sits. So an out-of-window block
+      // is DONE here: no auto-move (it may be owner-pinned) and no reclaim
+      // offer either. The whole propose-only reclaim path — its
+      // ReclaimableBlock payload, the freed-range gate that fed it and the
+      // `reclaimable_block` tool field — is deleted with that ruling, because
+      // offering to "bring lunch home" second-guesses a placement the owner is
+      // entitled to make.
       const ownerPinWinStart = fb.windowMsForDay(dateStr, block.preferred_start, tz);
       const ownerPinWinEnd = fb.windowMsForDay(dateStr, block.preferred_end, tz);
       if (
         Number.isFinite(ownerPinWinStart) && Number.isFinite(ownerPinWinEnd)
         && (blockStartMs < ownerPinWinStart || blockEndMs > ownerPinWinEnd)
       ) {
-        // v3.2.x — DIAGNOSTIC (not a fix). A floating block sitting at the
-        // window START (e.g. lunch 11:30 with window 11:30–13:30) was being
-        // routed here as "out-of-window" when it should read as in-window and
-        // take the auto-slide path — but the old log line carried nothing to
-        // tell a boundary bug from a real out-of-window pin from a TZ-parse
-        // skew. Dump the raw inputs so the NEXT occurrence is self-explaining:
-        // raw event start/end (+ their stored timeZone), the computed block ms
-        // vs window ms in owner-local, and which side of the comparison tripped.
-        logger.info('rebalanceFloatingBlocks: OUT-OF-WINDOW classification — diagnostic', {
+        logger.info('rebalanceFloatingBlocks: block skipped — owner placed it outside its window (counts as placed)', {
           block: block.name, date: dateStr,
-          rawEventStart: blockEvent.start.dateTime, rawEventStartTz: blockEvent.start.timeZone ?? 'utc',
-          rawEventEnd: blockEvent.end.dateTime, rawEventEndTz: blockEvent.end.timeZone ?? 'utc',
-          blockLocal: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm:ss')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm:ss')}`,
-          windowLocal: `${DateTime.fromMillis(ownerPinWinStart).setZone(tz).toFormat('HH:mm:ss')}-${DateTime.fromMillis(ownerPinWinEnd).setZone(tz).toFormat('HH:mm:ss')}`,
-          blockStartMs, blockEndMs, winStartMs: ownerPinWinStart, winEndMs: ownerPinWinEnd,
-          startBelowWindow: blockStartMs < ownerPinWinStart,
-          endAboveWindow: blockEndMs > ownerPinWinEnd,
-          startDeltaMs: blockStartMs - ownerPinWinStart,  // 0 = exactly at window start (the suspected edge bug)
-          freedRangeIso: params.freedRangeIso ?? null,
+          currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+          preferredWindow: `${block.preferred_start}-${block.preferred_end}`,
         });
-        // Freed-range gate: if the caller told us what slot was freed, only
-        // consider this block when that freed range overlaps its window — the
-        // mutation has to plausibly be what opened the room. No overlap → this
-        // mutation isn't relevant to this block; skip without offering.
-        if (
-          freedStartMs !== null && freedEndMs !== null
-          && !(freedStartMs < ownerPinWinEnd && freedEndMs > ownerPinWinStart)
-        ) {
-          logger.info('rebalanceFloatingBlocks: block outside window, freed range not in its window — no offer', {
-            block: block.name, date: dateStr,
-          });
-          continue;
-        }
-        // Destination search — same two-pass rule as the overlap-branch math
-        // via computeBlockRelocation (owner ruling 2026-08-28): a genuinely
-        // free slot first, a WE-tagged slot only as a fallback.
-        const { aligned: reclaimSlot, usedWorkingElsewhereFallback: reclaimUsedWE } = fb.findBlockDestination(
-          realEvents, block, dateStr, tz, new Set([blockEvent.id]),
-        );
-        // Any in-window aligned slot is "more home" than the current
-        // out-of-window placement, so its mere existence makes this a candidate.
-        if (reclaimSlot !== null) {
-          const rs = DateTime.fromMillis(reclaimSlot, { zone: tz });
-          const re = rs.plus({ minutes: block.duration_minutes });
-          result.reclaimable.push({
-            name: block.name,
-            targetSlotIso: rs.toISO()!,
-            label: `${rs.toFormat('EEE d MMM HH:mm')}–${re.toFormat('HH:mm')}`,
-            blockEventId: blockEvent.id,
-            ...(reclaimUsedWE ? { usedWorkingElsewhereFallback: true } : {}),
-          });
-          logger.info('rebalanceFloatingBlocks: reclaim candidate found (propose-only)', {
-            block: block.name, date: dateStr,
-            currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
-            reclaimTo: rs.toFormat('HH:mm'),
-          });
-        } else {
-          logger.info('rebalanceFloatingBlocks: block outside window, no in-window slot to reclaim', {
-            block: block.name, date: dateStr,
-            currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
-            preferredWindow: `${block.preferred_start}-${block.preferred_end}`,
-          });
-        }
         continue;
       }
-
       // Does any non-block event overlap the block right now?
       const overlapping = realEvents.find(e => {
         if (e.id === blockEvent.id) return false;
@@ -564,11 +522,11 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             excludeEventIds: [blockEvent.id],
           });
           const target = fb.findConsolidatingSlotForBlock(
-            block, dateStr, tz, commitments, densityConfigFromProfile(profile.meetings), blockStartMs,
+            sizedBlock, dateStr, tz, commitments, densityConfigFromProfile(profile.meetings), blockStartMs,
           );
           if (target !== null) {
             const newStart = DateTime.fromMillis(target, { zone: tz });
-            const newEnd = newStart.plus({ minutes: block.duration_minutes });
+            const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
             try {
               await updateMeeting({
                 userEmail: profile.user.email, timezone: tz,
@@ -576,16 +534,17 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               });
               result.moved++;
               result.movedBlockEventIds.push(blockEvent.id);
+              result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
               logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
               await shadowNotify(profile, {
                 channel: '',
                 icon: '🔧',
                 action: 'Dense calendar — floating block consolidated',
-                detail: `Slid your ${block.name.replace(/_/g, ' ')} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')} so the free time around it lands as one clean break instead of split minutes. Tell me if you'd rather it stayed at ${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}.`,
+                detail: `Slid your ${block.name.replace(/_/g, ' ')} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')} so the free time around it lands as one clean break instead of split minutes. Tell me if you'd rather it stayed at ${fromHHMM}.`,
               });
-              logger.info('rebalanceFloatingBlocks: consolidated block (dense)', {
+              logger.info('rebalanceFloatingBlocks: consolidated block (dense) — owner shadow-notified', {
                 block: block.name, date: dateStr,
-                from: DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm'),
+                from: fromHHMM,
                 to: newStart.toFormat('HH:mm'),
               });
             } catch (err) {
@@ -615,11 +574,11 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
       // preference survives rebalance instead of silently resetting to
       // earliest). Shared with the pre-booking dry run — see
       // computeBlockRelocation's own doc comment.
-      const relocation = computeBlockRelocation(block, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents);
+      const relocation = computeBlockRelocation(sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents);
       const aligned = relocation.aligned;
       if (aligned !== null) {
         const newStart = DateTime.fromMillis(aligned, { zone: tz });
-        const newEnd = newStart.plus({ minutes: block.duration_minutes });
+        const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
         try {
           await updateMeeting({
             userEmail: profile.user.email,
@@ -630,6 +589,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           });
           result.moved++;
           result.movedBlockEventIds.push(blockEvent.id);
+          result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
           logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
           const weNote = relocation.usedWorkingElsewhereFallback
             ? ' (no fully clear gap in the window — this one sits against a Working-Elsewhere block.)'
@@ -640,14 +600,30 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             action: 'Floating block rebalanced',
             detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.${weNote}`,
           });
+          logger.info('rebalanceFloatingBlocks: block relocated — owner shadow-notified', {
+            block: block.name, date: dateStr, from: fromHHMM, to: newStart.toFormat('HH:mm'),
+            usedWorkingElsewhereFallback: relocation.usedWorkingElsewhereFallback,
+          });
         } catch (err) {
           logger.warn('rebalanceFloatingBlocks: updateMeeting failed', {
             blockId: blockEvent.id, err: String(err).slice(0, 200),
           });
         }
+      } else if (relocation.currentPlacementAcceptable) {
+        // The finder's best in-window answer IS where the block already sits
+        // (reachable via the WE-fallback pass, once the Working-Elsewhere event
+        // overlapping the block stops counting as busy). Nothing to move and
+        // nothing to say: the placement is already the right one, so this must
+        // not become a "no room — want me to bump it outside?" DM about a slot
+        // Maelle would have picked anyway.
+        logger.info('rebalanceFloatingBlocks: block left in place — current placement is the best in-window slot', {
+          block: block.name, date: dateStr,
+          currentPlacement: `${DateTime.fromMillis(blockStartMs).setZone(tz).toFormat('HH:mm')}-${DateTime.fromMillis(blockEndMs).setZone(tz).toFormat('HH:mm')}`,
+          overlappingEvent: overlapping.subject,
+        });
       } else {
-        // No in-window slot — leave overlapping. Owner can decide to bump
-        // outside the window via the policy_exception approval flow.
+        // No in-window slot — leave overlapping and tell the owner once; moving
+        // it outside the window is his call (move_meeting, one-step).
         result.overlapping++;
         // Dedupe shadows on a stable fingerprint so the same overlap
         // doesn't DM the owner twice a day until it resolves. Lives
@@ -681,7 +657,6 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     affectedSlotIso,
     moved: result.moved,
     overlapping: result.overlapping,
-    reclaimable: result.reclaimable.length,
   });
   return result;
 }

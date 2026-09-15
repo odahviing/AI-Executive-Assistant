@@ -440,8 +440,9 @@ export function analyzeCalendar(
     // gh#200 retry (bouncer overturn) — the `oof_with_meetings` gate must catch
     // ANY oof event on the day, timed included, not only an all-day span: HEAD
     // read `myEvents.find(e => e.showAs === 'oof')` with no isAllDay test, and
-    // checkHealth.ts:500's own detector still does (`dayEvents.filter(e =>
-    // e.showAs === 'oof')`) — narrowing to all-day-only here silently dropped a
+    // checkHealth.ts:517's own detector still does (`dayEvents.filter(e =>
+    // e.showAs === 'oof')`, the future-facing subset of `dayAllEvents`) —
+    // narrowing to all-day-only here silently dropped a
     // timed OOF block with meetings on top of it, and disagreed with that other
     // surface (the exact drift this predicate exists to prevent).
     const anyOofToday = myEvents.find(e => e.showAs === 'oof');
@@ -612,13 +613,15 @@ export function analyzeCalendar(
     // Floating-block missing detection. Walk every block configured in the
     // profile (lunch + any custom). For each block applying on this
     // day-of-week:
-    //   - "present" means: an event matches via is_floating_block AND its
-    //     start lands inside the block's preferred window. Strict-window
-    //     check matches the prior lunch semantic — a "Lunch" at 18:00 on a
-    //     workday still counts as a missing lunch in its window.
-    //   - missing AND !block.can_skip → emit `missing_floating_block` with
-    //     a suggested start computed from the best free gap inside the
-    //     block's preferred window.
+    //   - "present" means: any event on the DAY matches via is_floating_block
+    //     — the same day-scoped presence checkHealth.ts and checkSlot rule 6
+    //     use (owner ruling 2026-09-14: a block he placed outside its window
+    //     counts as placed). A strict in-window test here made this detector
+    //     disagree with both (M1).
+    //   - missing → emit `missing_floating_block` with a suggested start from
+    //     the best free gap inside the window. `can_skip` (userProfile.ts:
+    //     "fine to leave un-booked when no room") suppresses it ONLY when no
+    //     gap fits — the same gate checkHealth.ts applies.
     // Detection uses ProcessedEvent.is_floating_block (already computed via
     // isFloatingBlockEvent on the raw subject upstream — so private-flagged
     // lunches are still detected).
@@ -634,22 +637,20 @@ export function analyzeCalendar(
       const blockWindowEnd   = beH * 60 + beM;
       const minBlockMin = block.duration_minutes;
 
-      const blockEvent = timedMeetings.find(e => {
-        if (e.is_floating_block?.name !== block.name) return false;
-        const [sh, sm] = e._localStartTime.split(':').map(Number);
-        const evStart = sh * 60 + sm;
-        return evStart >= blockWindowStart && evStart < blockWindowEnd;
-      });
+      const blockEvent = timedMeetings.find(e => e.is_floating_block?.name === block.name);
       if (blockEvent) {
-        // v3.0.3 — block exists. Check whether it's STUCK on a meeting that
-        // overlaps it AND no clean alternative slot exists in the window.
-        // (rebalance handles silent moves when an alternative exists; this
-        // detects the can't-be-fixed-silently case so it surfaces to the
-        // owner via the new calendar_issues row.)
         const [bsh, bsm] = blockEvent._localStartTime.split(':').map(Number);
         const [beh, bem] = blockEvent._localEndTime.split(':').map(Number);
         const bStartMin = bsh * 60 + bsm;
         const bEndMin = beh * 60 + bem;
+        // Placed outside its window by the owner — counts as placed, and the
+        // rebalance never touches it, so there is no "stuck" story to tell.
+        if (bStartMin < blockWindowStart || bEndMin > blockWindowEnd) continue;
+        // v3.0.3 — block exists in-window. Check whether it's STUCK on a
+        // meeting that overlaps it AND no clean alternative slot exists in the
+        // window. (rebalance handles silent moves when an alternative exists;
+        // this detects the can't-be-fixed-silently case so it surfaces to the
+        // owner via the calendar_issues row.)
         const overlapper = timedMeetings.find(other => {
           if (other === blockEvent) return false;
           if (other.is_floating_block) return false;  // ignore other blocks
@@ -702,20 +703,20 @@ export function analyzeCalendar(
         }
       }
 
-      if (!block.can_skip) {
-        const suggestedStart = bestGapStart !== undefined ? fmt(bestGapStart) : block.preferred_start;
-        const blockLabel = block.name.replace(/_/g, ' ');
-        const suggestedFix = bestGapStart !== undefined
-          ? `Want me to block ${minBlockMin} min at ${suggestedStart}?`
-          : `No free gap in your ${blockLabel} window — want me to bump something and block ${minBlockMin} min at ${suggestedStart}?`;
-        issues.push({
-          type: 'missing_floating_block',
-          severity: 'medium',
-          detail: `No ${blockLabel} event booked`,
-          suggestedFix,
-          block_name: block.name,
-        });
-      }
+      // No room + skippable → fine to leave un-booked (can_skip's one meaning).
+      if (bestGapStart === undefined && block.can_skip) continue;
+      const suggestedStart = bestGapStart !== undefined ? fmt(bestGapStart) : block.preferred_start;
+      const blockLabel = block.name.replace(/_/g, ' ');
+      const suggestedFix = bestGapStart !== undefined
+        ? `Want me to block ${minBlockMin} min at ${suggestedStart}?`
+        : `No free gap in your ${blockLabel} window — want me to bump something and block ${minBlockMin} min at ${suggestedStart}?`;
+      issues.push({
+        type: 'missing_floating_block',
+        severity: 'medium',
+        detail: `No ${blockLabel} event booked`,
+        suggestedFix,
+        block_name: block.name,
+      });
     }
 
     const sortedMy = timedMeetings.sort((a, b) => a._localStartTime.localeCompare(b._localStartTime));

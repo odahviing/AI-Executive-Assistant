@@ -7,7 +7,14 @@ const root=path.resolve(__dirname,'..'),snapshot=process.env.MATCHMAKER_SNAPSHOT
 const read=rel=>fs.readFileSync(snapshot&&fs.existsSync(path.join(root,snapshot,rel))?path.join(root,snapshot,rel):path.join(root,rel),'utf8');
 const weekdays=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 const noop=()=>{};
-Settings.now=()=>Date.parse('2026-09-11T00:00:00Z');
+// One pinned clock for BOTH clock readers: luxon (`DateTime.now`) and the raw
+// `Date.now()` the finder's past-cursor skip and the lead-time rule use
+// (findAvailableSlots.ts / scheduleRules.ts). The sandbox receives PinnedDate,
+// never the host Date, so the 2026-09-14/15 fixtures can never drift into the
+// past (2026-09-15: four accept cases went 1→0 slots once the host clock passed them).
+const PINNED_NOW=Date.parse('2026-09-11T00:00:00Z');
+Settings.now=()=>PINNED_NOW;
+class PinnedDate extends Date{constructor(...a){super(...(a.length?a:[PINNED_NOW]));}static now(){return PINNED_NOW;}}
 function compile(source,bindings={},deps={}) {
  const mod={exports:{}};
  const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
@@ -45,7 +52,7 @@ function harness(options={}) {
   const mod={exports:{}};modules.set(rel,mod);
   const js=ts.transpileModule(read(rel),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const req=s=>s==='luxon'?luxon:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),s))+'.ts'):(()=>{throw Error('Unexpected module '+s);})();
-  vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date,console,Set,Map,Buffer,setTimeout,Intl},{filename:rel})(req,mod,mod.exports);return mod.exports;
+  vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date:PinnedDate,console,Set,Map,Buffer,setTimeout,Intl},{filename:rel})(req,mod,mod.exports);return mod.exports;
  }
  const availability=load('src/utils/attendeeAvailability.ts'),resolver=load('src/utils/weTimeResolver.ts');
  const entries=()=>availability.loadAttendeeAvailabilityForEmails([person.email],profile.user.email,profile.user.timezone);
@@ -130,7 +137,7 @@ test('booking planner remote-mode travel read uses same destination date as find
  const record={from:'2026-09-14',until:'2026-09-14',location:'America/New_York'};
  for(const [slotStartIso,expected] of [['2026-09-14T02:00:00+03:00',false],['2026-09-15T00:15:00+03:00',true]]) {
   const result=compile(`${day.getText()}\n${travel.getText()}\nexport const result=travelForMeetingDay('p1');`,
-   {DateTime,input:{slotStartIso},profile:h.profile,getTravelRecordById:(_id,date)=>date&&date>record.until?null:record,inferTimezoneFromStateStatic:x=>x}).result;
+   {DateTime,input:{slotStartIso},slotStartIso,profile:h.profile,getTravelRecordById:(_id,date)=>date&&date>record.until?null:record,inferTimezoneFromStateStatic:x=>x}).result;
   assert.equal(!!result,expected);
  }
 });

@@ -59,9 +59,27 @@ Capture his words as close to verbatim as reasonable for `--note`; no `--lane` o
 
 **A chat that was open before today runs the OLD engine with none of this, silently** — framework files load once per chat. Start fresh.
 
+## Astra (Codex) runs the Workshop now — you are working in parallel
+
+**Since 4.9.2 (2026-09-11) the Workshop is orchestrated by OpenAI Codex, "Astra", not by a Claude Manager chat.** `.codex/config.toml` and `AGENTS.md` are its entry points; `.claude/WORKSHOP.md`'s *Dispatch and cost policy* is the shared contract and now names Codex models. **The lane charters did not change** — same eight lanes, same `W1`–`W12`, same quality bar. Only the orchestrator did. Its builders run in `/root/<lane>_<topic>` sandboxes with the reviewer in `/root/bouncer_*`.
+
+What that means for THIS chat:
+
+- **Assume Astra is in the tree at the same time as you.** "Shared tree" below is no longer a theoretical multi-chat case — it is the normal condition. `git fetch` and read the FULL working tree before you edit or wrap; line numbers move under you, and uncommitted `src/` work may not be yours. Never bundle a commit without looking at what else is staged.
+- **Do not assume a Claude engine ran.** `bugger.js` / `feature.js` were last used 2026-09-08. Both Windows tasks are **Disabled** — check with `Get-ScheduledTask | Where-Object TaskName -match 'Maelle'` before calling any cadence live, and never re-enable one without his word.
+- **The log-review intake has not run since its watermark.** `grep lastSeenIso .claude/agent-loop/state.json` against `lastWrapIso` in the same file shows the gap. Nothing has read the chat logs for bugs since that mark — which is the richest untouched source of exactly the small items this chat is for. `powershell -File scripts/vm-logs.ps1 [term] [lines] [days]` is the way in.
+- **Astra-era ledger refs are PACKAGES, not atomic items** (`timezone-audit-20260911-matchmaker-core` bundles several roots). Read one as a bundle; do not treat it as a single bug or assume closing it closed everything inside.
+- **NEVER read `ledger.jsonl` raw.** Rows now embed full evidence blobs and the file is multi-megabyte (`ls -la .claude/agent-loop/ledger.jsonl`) — reading it whole will consume the session. Always go through `node scripts/ledger-stats.cjs`. The evidence itself is gitignored under `artifacts/workshop-verification/`.
+- **Two copies of some memories now exist and will drift** — Codex added `E:/Code/Maelle/.claude/memory/` copies of the architecture and overview memories and prepended "read the repo copy" headers to the home copies. When they disagree, say so; do not silently pick one.
+- **Charter prose now carries dated `Owner ruling 2026-09-11` paragraphs** (M11/M12/R2/R11/L2/L5). Those are his words and they are current — read them before arguing with a charter.
+
+**Filing still works the same way**, and the fast paths at the top of this file are the cheapest door: a bug he names in one sentence gets recorded with `ledger-file.cjs` and triaged later; a decline or defer on an open row gets recorded the same way. Neither needs the Manager skill.
+
 ## Which chat is this?
 
-**One chat per job — his split, 2026-07-29:** a **bugs** chat · a **framework** chat (the engines, the Manager skill, this file, the architect — it never touches `src/`) · and **one chat per big feature**. If the first message does not make it obvious, ask. The standing mode below governs any **interactive** chat; the loop's agents are deliberately exempt from it (see the framework section).
+**One chat per job — his split, 2026-07-29:** a **bugs** chat · a **framework** chat (the engines, the Manager skill, this file, the architect — it never touches `src/`) · and **one chat per big feature**. If the first message does not make it obvious, ask.
+
+**Unless he says otherwise, THIS is a bugs chat, and its diet is SMALL bugs and small fixes** — one symptom, one root, usually one lane: a wrong string, a stale comment, a guard firing on the wrong condition, a field nothing reads, a message naming an action that was not attempted. Take them one at a time, prove the root from code plus the live log, propose, and build only on his per-item word. **Small does not mean skip the lane** — a one-line edit in a lane's file still goes to that lane. A big feature, a cross-subsystem redesign or a multi-area audit is a different job and usually Astra's now; say so rather than quietly starting one here. The standing mode below governs any **interactive** chat; the loop's agents are deliberately exempt from it (see the framework section).
 
 Standing mode:
 

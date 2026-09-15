@@ -263,9 +263,11 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
   // If we ALSO pass a plain string like "Microsoft Teams" / "Teams" as the
   // displayName, Graph stores the string and fails to link it — Outlook shows
   // "Microsoft Teams — Unknown / No address". Drop those sentinel strings.
-  // Real physical locations ("Idan's Office", "Meeting Room", "Slack Huddle",
-  // "+972-..." phone numbers, "WeWork Sarona") pass through unchanged so the
-  // location pill still shows them alongside the auto-generated Teams link.
+  // Every other location string — physical ("Idan's Office", "Meeting Room",
+  // "WeWork Sarona"), a "+972-..." phone number, or the home-day "Huddle"
+  // label (utils/resolveLocation.ts HUDDLE_LABEL — a plain string, not a
+  // Teams meeting) — passes through unchanged so the location pill still
+  // shows it (alongside the auto-generated Teams link when isOnline).
   const isTeamsSentinel = (s?: string): boolean => {
     if (!s) return false;
     const n = s.trim().toLowerCase();

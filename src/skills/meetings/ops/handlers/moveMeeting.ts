@@ -928,13 +928,11 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           const isExternalNow = attendeesAfterEdit.some(a =>
             ownerDomain && a.email.endsWith('@' + ownerDomain) ? false : a.email !== ownerEmailLc
           );
-          // Count includes owner (resolveLocation reads total participantCount).
-          const oldCount = existing.attendees.some(a => a.email === ownerEmailLc)
-            ? existing.attendees.length
-            : existing.attendees.length + 1;
-          const newCount = attendeesAfterEdit.some(a => a.email === ownerEmailLc)
-            ? attendeesAfterEdit.length
-            : attendeesAfterEdit.length + 1;
+          // The ONE head-count create/move use (owner counted once, the room
+          // mailbox never — planMeeting.participantHeadcount).
+          const { participantHeadcount } = await import('../../planMeeting');
+          const oldCount = participantHeadcount(context.profile, existing.attendees);
+          const newCount = participantHeadcount(context.profile, attendeesAfterEdit);
           const crossedThreshold = (oldCount <= 3 && newCount >= 4)
             || (oldCount >= 4 && newCount <= 3)
             || (oldCount <= 4 && newCount >= 5)
@@ -951,9 +949,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           const explicitLocationChanged = typeof args.location === 'string'
             && (args.location as string).trim() !== (existing.location ?? '').trim();
           // Only a roster-moved shape or an `is_online` venue change re-PLACES
-          // the meeting (resolveLocation + the trip-day override). A bare
-          // explicit `location` re-classifies only — see the comment at the
-          // resolveLocation call.
+          // the meeting (resolveLocation). A bare explicit `location`
+          // re-classifies only — see the comment at the resolveLocation call.
           const rePlaceVenue = shapeChanged || venueChangeRequested;
 
           if ((rePlaceVenue || explicitLocationChanged) && existing.startIso) {
@@ -984,6 +981,10 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                 // re-evaluation has the same blind spot when an explicit venue
                 // string came in on THIS call.
                 locationHint: typeof args.location === 'string' ? args.location : undefined,
+                // …and the same for a venue-less "make it in person": owner-path
+                // only, since a colleague-path is_online carries no real request
+                // (v3.2.6). See detectCategory's own doc for why true isn't sent.
+                ownerRequestedInPerson: args.is_online === false && context.senderRole === 'owner',
               });
               const newCategory = catResult.category;
               const oldCategory = existing.categories[0] ?? null;
@@ -1011,18 +1012,53 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               // home day for no reason the owner asked for; his ruling is that a
               // physical venue coexists with the join link (resolveLocation.ts,
               // path 3c). The event's own isOnline stays untouched on this path.
+              //
+              // Same input create/move build (planMeeting → resolveLocation):
+              // the party-shape + travel signals from the ONE builder
+              // (`locationSignalsFor`), the initiator role, the owner's
+              // is_online hint on a venue change. Until 2026-09-14 this call
+              // passed only has-external, so two externals added to an
+              // office-day room meeting kept "Meeting Room" + the room mailbox
+              // where create asks online-vs-physical (live 08:53:33Z).
               const loc = rePlaceVenue
-                ? resolveLocation({
-                  profile: context.profile,
-                  startIso: existing.startIso,
-                  intent: 'new_booking',
-                  category: newCategory ?? oldCategory ?? undefined,
-                  participantCount: newCount,
-                  hasExternalAttendee: isExternalNow,
-                  existingLocation: existing.location,
-                  existingIsOnline: existing.isOnline,
-                })
+                ? await (async () => {
+                  const { locationSignalsFor } = await import('../../planMeeting');
+                  const signals = locationSignalsFor(context.profile, attendeesAfterEdit, existing.startIso);
+                  return resolveLocation({
+                    profile: context.profile,
+                    startIso: existing.startIso!,
+                    intent: 'new_booking',
+                    category: newCategory ?? oldCategory ?? undefined,
+                    participantCount: newCount,
+                    hasExternalAttendee: signals.hasExternalAttendee,
+                    externalAttendeeInDifferentTz: signals.externalAttendeeInDifferentTz,
+                    externalAttendeeNames: signals.externalAttendeeNames,
+                    anyParticipantRemote: signals.anyParticipantRemote,
+                    ownerIsOnlineHint: venueChangeRequested && typeof args.is_online === 'boolean' ? args.is_online : undefined,
+                    initiatorRole: context.senderRole === 'colleague' ? 'colleague' : 'owner',
+                    existingLocation: existing.location,
+                    existingIsOnline: existing.isOnline,
+                  });
+                })()
                 : undefined;
+              if (loc?.kind === 'ask_owner_online_or_physical') {
+                // The same refusal create_meeting / move_meeting return for this
+                // verdict (`ask_location_mode`): nothing is written on a guess,
+                // the model relays the one question, and the re-call carries
+                // is_online / location. Colleague-path: the model routes it via
+                // create_approval, as on create.
+                logger.info('update_meeting — location mode unresolved after shape change, asking', {
+                  meetingId: args.meeting_id, reasoning: loc.reasoning,
+                });
+                return {
+                  success: false,
+                  error: HANDLER_ERROR_CODE.LOCATION_MODE_UNSPECIFIED,
+                  meeting_subject: args.meeting_subject,
+                  suggested_ask_text: loc.suggestedAskText,
+                  _deferred_action_hint: { tool: 'update_meeting', args: { ...args } },
+                  _note: 'The attendee change puts an external guest on an office-day meeting. Nothing was changed yet. A Teams link is a given (the external is on the invite) — the only open question is whether the internal people meet onsite. Ask the owner with suggested_ask_text as worded, then re-call update_meeting with the same attendee change plus is_online=false (onsite — office address stamped, Teams link kept) or is_online=true (all online). Do not pass location=<office address> for onsite; that drops the link.',
+                };
+              }
               if (loc?.kind === 'resolved') {
                 if (venueChangeRequested) {
                   // Venue change → apply the FULL verdict verbatim (trust
@@ -1049,29 +1085,14 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                   if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
                 }
               }
-              // v3.4.2 (travel context) — when the meeting's day is a trip day,
-              // an onsite (internal, not remote-forced) meeting's location is the
-              // TRIP place, not the home day-type default (Huddle/Teams) the
-              // re-eval above produced. This is the placeholder-update path —
-              // adding people to a Boston-week meeting came back "Huddle" because
-              // the re-eval was travel-blind. Mirrors create/move. No-op off-trip,
-              // and skipped on a bare explicit-`location` edit for the same reason
-              // resolveLocation is above — the string is the venue, isOnline stays.
-              try {
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { getTravelContextForInstant } = require('../../../../utils/workingElsewhere') as
-                  typeof import('../../../../utils/workingElsewhere');
-                const tctx = getTravelContextForInstant(existing.startIso, context.profile);
-                if (rePlaceVenue && tctx.isAway && tctx.location && isExternalNow === false) {
-                  newLocationFromShape = tctx.location;
-                  newIsOnlineFromShape = false;
-                  logger.info('update_meeting — trip day, location → trip place', { location: tctx.location });
-                }
-              } catch (err) {
-                logger.warn('update_meeting — travel-context location override threw', { err: String(err).slice(0, 160) });
-              }
-              // preserve_existing / ask_owner / room_unavailable — leave the
-              // event's location alone. Category change still applies if any.
+              // A trip day needs no override here: the builder's
+              // `anyParticipantRemote` carries the owner's own travel and
+              // resolveLocation answers online — the lodging is never a venue,
+              // exactly as create/move behave. (A v3.4.2 block here used to
+              // stamp the trip place instead — a second decision create never
+              // made.)
+              // preserve_existing / skip_stamp — leave the event's location
+              // alone. Category change still applies if any.
             } catch (err) {
               logger.warn('update_meeting — shape re-evaluation threw, applying attendee change without category/location update', {
                 err: String(err).slice(0, 200),
@@ -1966,26 +1987,11 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             const movingEvent = dayEvents.find(e => e.id === args.meeting_id);
             const matchedBlock = movingEvent ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
             if (matchedBlock) {
-              // v3.4.2 — preserve the MOVING EVENT's own duration. Pre-fix
-              // a move re-derived the end from the block CONFIG (duration_minutes,
-              // e.g. 25), so moving an owner-stretched 40-min lunch silently reset
-              // it to 25. Read the event's actual span; fall back to config only
-              // if the event's times don't parse. effectiveBlock carries it so the
-              // placement search (findBlockDestination) also sizes for the real
-              // duration.
-              const movingDurationMin = (() => {
-                try {
-                  const s = DateTime.fromISO(movingEvent!.start.dateTime, { zone: movingEvent!.start.timeZone ?? 'utc' });
-                  const e = DateTime.fromISO(movingEvent!.end.dateTime, { zone: movingEvent!.end.timeZone ?? 'utc' });
-                  if (s.isValid && e.isValid && e.toMillis() > s.toMillis()) {
-                    return Math.round(e.diff(s, 'minutes').minutes);
-                  }
-                } catch { /* fall through to config */ }
-                return matchedBlock.duration_minutes;
-              })();
-              const effectiveBlock = movingDurationMin !== matchedBlock.duration_minutes
-                ? { ...matchedBlock, duration_minutes: movingDurationMin }
-                : matchedBlock;
+              // v3.4.2 — preserve the MOVING EVENT's own duration (an owner-
+              // stretched 40-min lunch stays 40). The ONE sizing helper every
+              // mover shares; the placement search below sizes off it too.
+              const effectiveBlock = fb.blockSizedToEvent(matchedBlock, movingEvent!, timezone);
+              const movingDurationMin = effectiveBlock.duration_minutes;
               // Window bounds, needed by the owner-path in-window check below.
               // Exclude the floating block itself (it's about to move).
               const wStart = fb.windowMsForDay(dayStr, matchedBlock.preferred_start, timezone);
@@ -1996,8 +2002,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               // snap to a different slot, don't refuse on conflict. Out-of-window
               // is NOT refused either: owner override is total and one-step
               // (rules 1, 6, 11) — moving his own lunch to 16:00 is his call, so
-              // we move it and add a heads-up rather than bouncing for a
-              // confirm_outside_window re-ask.
+              // we move it and add a heads-up rather than bouncing for a re-ask.
+              // (No flag gates this: `confirm_outside_window` is read by
+              // book_floating_block only; move_meeting never reads it.)
               // v4.1.x — STRICT (post-clamp) owner path. The name was already
               // `isOwnerPath` but the definition was the loose one, which now
               // collides head-on with the canonical split: `isOwnerPath` is
@@ -2069,6 +2076,27 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     newStartIso: effectiveStart,
                     newEndIso: effectiveEnd,
                   });
+                  // M18 — the same `move_meeting` activity row the main move
+                  // path writes far below, so "undo that" (handleRevertAction)
+                  // finds this move too. This branch returned before that row
+                  // until 2026-09-14. A block has no attendees → no target.
+                  logActivity({
+                    ownerUserId: context.profile.user.slack_user_id,
+                    kind: 'follow_up',
+                    subkind: 'move_meeting',
+                    subject: `Moved '${args.meeting_subject}'`,
+                    outcomeJson: {
+                      event_id: args.meeting_id,
+                      original_start: preMoveStartIso,
+                      original_end: preMoveEndIso,
+                      new_start: effectiveStart,
+                      new_end: effectiveEnd,
+                    },
+                    initiatedBy: context.userId,
+                    initiatedByRole: context.senderRole,
+                    originThreadTs: context.threadTs,
+                    originChannel: context.channelId,
+                  });
                   // v3.2.1 (#120 / 120b) — return the vacated slot here too. The
                   // floating-block move (e.g. lunch) is exactly the case where
                   // the owner moves a block to FREE its slot for another meeting;
@@ -2102,7 +2130,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 return {
                   success: false,
                   error: 'no_in_window_slot',
-                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. To move it OUTSIDE the window, raise create_approval(kind='policy_exception') with deferred_action={ tool: 'move_meeting', args: { meeting_id, new_start, confirm_outside_window: true } }.`,
+                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. Moving it OUTSIDE the window is the owner's call: raise create_approval(kind='policy_exception') with deferred_action={ tool: 'move_meeting', args: { meeting_id, new_start } } — the approved replay runs as the owner and moves it as asked.`,
                 };
               }
               const alignedDt = DateTime.fromMillis(alignedMs).setZone(timezone);
@@ -2381,9 +2409,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 : 'Move violates a soft scheduling rule. If the owner ALREADY authorized overriding it in THIS message (e.g. "do it anyway", "I\'ll handle the conflict"), retry move_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred move) so the owner\'s later "yes" replays it on its own. Do NOT ask and then rely on re-issuing the move yourself next turn — that pending action gets lost.',
             };
           }
-          // v2.8.2 — ask_location_mode on move (rare — external attendee,
-          // same/unknown TZ, and the move flips into office day). Refuse +
-          // surface the ask.
+          // v2.8.2 — ask_location_mode on move (rare — external attendee, any
+          // zone, and the move flips into an office day). Refuse + surface
+          // the ask.
           if (movePlan.action === 'ask_location_mode') {
             return {
               success: false,
@@ -2393,7 +2421,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
               ...openQuestionsField(movePlan.openQuestions),
               category: movePlan.category,
               _deferred_action_hint: { tool: 'move_meeting', args: { ...args } },
-              _note: 'Move lands on an office day with external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call move_meeting with either is_online=true or location=<full office address>.',
+              _note: 'The move lands an external guest on an office day. A Teams link is a given (the external is on the invite) — the only open question is whether the internal people meet onsite. Ask the owner with suggested_ask_text as worded, then re-call move_meeting with is_online=false (onsite — office address stamped, Teams link kept) or is_online=true (all online). Do not pass location=<office address> for onsite; that drops the link.',
             };
           }
           // v2.8.2 — meeting room busy + ≥6 people on the move target slot.
@@ -2764,8 +2792,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // "move X into the freed slot" resolve from this turn instead of Maelle
         // re-asking the old time. v3.2.1 — shared helper (see top of file); the
         // floating-block early return uses the same one. Computed BEFORE the
-        // rebalance so it can gate reclaim detection to the slot this move
-        // actually freed.
+        // rebalance because the rebalance may move a block INTO the vacated
+        // range; reading pre-move start/end first keeps the narrated freed slot
+        // the one this move actually opened.
         const vacated = computeVacatedSlot(preMoveStartIso, preMoveEndIso, timezone);
         // 1.4 (diagnostic) — the freed-slot narration once said 11:00 when the moved
         // occurrence was at 14:00. Log the pre-move start (from getEventType) and the
@@ -2779,22 +2808,19 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           vacated,
         });
 
-        // v3.2.x (Tier 1) — capture the rebalance return so a displaced
-        // floating block whose window this move just freed can be OFFERED back
-        // (reclaimable_block), same propose-only pattern as `vacated`. The freed
-        // range (the meeting's OLD slot) gates the offer to a relevant move.
-        let reclaimable: import('../../../../utils/rebalanceFloatingBlocks').ReclaimableBlock[] = [];
+        // Post-move rebalance: a floating block the moved meeting now lands on
+        // slides inside its own window. The real moves ride the success return
+        // (`blocks_moved`) — awaited-and-discarded until 2026-09-14.
+        let blocksMoved: string[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
             typeof import('../../../../utils/rebalanceFloatingBlocks');
-          const rebal = await rebalanceFloatingBlocksAfterMutation({
+          blocksMoved = (await rebalanceFloatingBlocksAfterMutation({
             profile: context.profile,
             affectedSlotIso: effectiveStart,
             ownerSlackId: context.profile.user.slack_user_id,
-            ...(vacated ? { freedRangeIso: { start: vacated.start, end: vacated.end } } : {}),
-          });
-          reclaimable = rebal?.reclaimable ?? [];
+          })).moves;
         } catch (err) {
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
@@ -2850,10 +2876,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           booked_end: effectiveEnd,
           // v3.1.8 — the slot that just opened up (old time of the moved meeting).
           ...(vacated ? { vacated } : {}),
-          // v3.2.x — a displaced floating block this move could bring home.
-          // PROPOSE-ONLY: surface it; the reply offers ("…frees 12:30 — want
-          // lunch back there?"). Not auto-moved (may be owner-pinned).
-          ...(reclaimable.length ? { reclaimable_block: reclaimable[0] } : {}),
+          // The floating block(s) this move actually slid (same shape as
+          // check_join_availability's field) — state it, never silently.
+          ...(blocksMoved.length > 0 ? { blocks_moved: blocksMoved } : {}),
           // #A (2026-07-19) — non-blocking attendee-busy heads-up. The move already went
           // through (owner override is total), but a colleague-requested move can re-land
           // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.

@@ -1857,6 +1857,15 @@ async function runSlotGroundingCheckAndMaybeRewrite(ctx: OutputGateContext, init
   // (below) as one list, so a substitution can only ever come from a real
   // search line — the 18:45:37Z rewrite reached for the precheck's
   // alternatives because they were the only lines it was given.
+  //
+  // slot-grounding-rewrite-substituted-next-day-times-into-a-today-sentence
+  // (2026-09-14) — and that is exactly what happened again at 07:39:39Z, in
+  // the other direction: the list spanned TWO days (a 2026-09-14 precheck
+  // verdict plus 2026-09-15 alternatives) and the rewrite carried the
+  // next-day times into the draft's "today" sentence with no date on them.
+  // Handing the rewriter the right lines does not make it keep their DAY, so
+  // that is now enforced deterministically inside the rewriter over this very
+  // list — claimChecker.ts's `substitutedTimeMissingItsDate`.
   const groundedToolLines = [...thisTurnLines, ...priorTurnAvailabilityLines(ctx)];
 
   let cleanReply = initialReply;

@@ -195,7 +195,24 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // we already resolved (the "what's Simon's email?" bug). `attendees`
         // aliases args.attendees, so the push is what the normalizer reads. Dedupe
         // by email; per-turn set, so nothing stale from earlier in the thread.
-        if (Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
+        //
+        // 2026-09-14 — ONLY when this booking already names at least one
+        // attendee. `context.resolvedMeetingAttendees` is the orchestrator's
+        // per-TURN resolution of every person NAMED IN THE MESSAGE, with no
+        // notion of which booking they belong to — so on "add me 1 hour drive
+        // before my onsite with einav" / "add a drive home and move Michal's
+        // meeting" it unioned a colleague into the owner's SOLO drive block.
+        // Both went to Graph with a real invite and were stripped seconds later
+        // by update_meeting, so the colleague got an invite plus a cancellation
+        // for the owner's own commute (and the injected attendee also flipped
+        // the classifier off Logistic onto Meeting — "a colleague invited is
+        // work coordination"). An empty attendee list is the model saying this
+        // event has no participants; it is never a missing email. The original
+        // fix's case is untouched: a booking that DOES name someone (even as a
+        // bare {name} with no email) still gets every resolved address unioned.
+        const callerNamedAnAttendee = attendees.length > 0;
+        if (callerNamedAnAttendee
+            && Array.isArray(context.resolvedMeetingAttendees) && context.resolvedMeetingAttendees.length > 0) {
           const present = new Set(attendees.map(a => (a.email ?? '').toLowerCase().trim()).filter(Boolean));
           const added: string[] = [];
           for (const email of context.resolvedMeetingAttendees) {
@@ -1265,6 +1282,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           action: plan.action, start: args.start, subject: args.subject,
           reasoning: 'reasoning' in plan ? plan.reasoning : undefined,
           category: 'category' in plan ? plan.category : undefined,
+          // The RAW owner location hints that drove resolveLocation. The later
+          // "call entry" line logs the RESOLVED isOnline + location, which
+          // can't tell "the owner asked for in-person" from "the resolved
+          // venue happens to be physical" (2026-09-14: a forced in-person
+          // internal on a home day stamped Huddle — the log couldn't show
+          // whether is_online=false had even been passed).
+          argIsOnline: typeof args.is_online === 'boolean' ? args.is_online : undefined,
+          argLocation: typeof args.location === 'string' ? args.location : undefined,
         });
 
         // v3.2.x (#8) — colleague proposed a slot that breaks a soft rule and
@@ -1402,10 +1427,11 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               : 'A soft scheduling rule was violated. If the owner ALREADY authorized overriding it in THIS message, retry create_meeting now with relaxed=true. Otherwise call create_approval(kind=policy_exception) with suggested_ask_text — this PERSISTS the override (the orchestrator stamps the deferred booking) so the owner\'s later "yes" replays it on its own, instead of relying on you to re-issue the booking next turn.',
           };
         }
-        // v2.8.2 — ask_location_mode: office day + external + same/unknown TZ
-        // with no owner hint. Refuse and surface the ask. Sonnet relays to the
-        // owner, the owner replies online/physical, Sonnet re-calls with
-        // is_online=true OR location=<full address> set explicitly.
+        // v2.8.2 — ask_location_mode: office day + external, owner path, no
+        // owner hint (any zone since 2026-09-15). Refuse and surface the ask.
+        // Sonnet relays it, the owner answers onsite / all online, Sonnet
+        // re-calls with is_online=false (→ office address + Teams link kept,
+        // resolveLocation path 3a) or is_online=true (→ Teams, no venue).
         if (plan.action === 'ask_location_mode') {
           return {
             success: false,
@@ -1419,7 +1445,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // confirm_override branch above.
             ...(plan.attendeeBusyLabel ? { _attendee_busy_note: plan.attendeeBusyLabel } : {}),
             _deferred_action_hint: { tool: 'create_meeting', args: { ...args } },
-            _note: 'Office day + external attendee in same/unknown timezone. Ask the owner online vs physical, then re-call create_meeting with either is_online=true or location=<full office address>.',
+            _note: 'Office day with an external guest: a Teams link is a given (the external is on the invite) — the only open question is whether the internal people meet onsite. Ask the owner with suggested_ask_text as worded, then re-call create_meeting with is_online=false (onsite — the office address is stamped and the Teams link kept) or is_online=true (all online). Do not pass location=<office address> for onsite; that drops the link.',
           };
         }
         // v2.8.2 — meeting room mailbox busy + ≥6 people (small-room fallback
@@ -1741,7 +1767,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             return s.isValid && e.isValid ? Math.round(e.diff(s, 'minutes').minutes) : undefined;
           })(),
           attendeeEmails: attendees.map(a => a.email).filter(Boolean),
-          meetingMode: effectiveIsOnline ? 'online' : 'in_person',
+          // Not "online vs in person": a forced-physical booking carries the
+          // venue AND isOnline=true (Teams link kept, resolveLocation.ts).
+          isOnline: effectiveIsOnline,
+          location: planLocation,
           category: args.category,
         });
 
@@ -1825,9 +1854,14 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // location with no em-dash separators (an em-dash joiner makes the
           // Outlook location field hard to read), routed through
           // scrubInternalLeakage for safety against any owner-yaml accidental
-          // dashes.
+          // dashes. `plan.location` (resolveLocation) is the ONLY source: an
+          // is_online=true meeting that the tree still gave a venue (internal
+          // on an office day — the room WITH a Teams link) keeps that venue
+          // here exactly as the body block above renders it. Until 2026-09-14
+          // a second `args.is_online === true` check here dropped it while the
+          // body still said "Location: …"; external + is_online=true reaches
+          // an empty location through the tree itself (path 1b → '').
           location: ((): string | undefined => {
-            if (args.is_online === true) return undefined;
             if (!resolvedLocationParts || resolvedLocationParts.length === 0) return undefined;
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { scrubInternalLeakage } = require('../../../../utils/textScrubber') as typeof import('../../../../utils/textScrubber');
@@ -1938,15 +1972,18 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // write the raw joinUrl into location.
 
           // v2.2.3 (scenario 8 row 7) — post-mutation floating-block rebalance.
+          // The real moves ride the success return (`blocks_moved`) so the
+          // confirmation states them — awaited-and-discarded until 2026-09-14.
+          let blocksMoved: string[] = [];
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
               typeof import('../../../../utils/rebalanceFloatingBlocks');
-            await rebalanceFloatingBlocksAfterMutation({
+            blocksMoved = (await rebalanceFloatingBlocksAfterMutation({
               profile: context.profile,
               affectedSlotIso: args.start as string,
               ownerSlackId: context.profile.user.slack_user_id,
-            });
+            })).moves;
           } catch (err) {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
@@ -2257,6 +2294,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // discovery instead of the result of her own action (issue #26 bug 1).
             action_summary: `Booked '${args.subject}' for ${bookedWhen}.`,
             ...(bookedTripNote ? { _trip_note: bookedTripNote } : {}),
+            // The floating block(s) this booking actually slid, same shape as
+            // check_join_availability's field. State it in the confirmation
+            // ("I moved your lunch to 11:30 to make room"), never silently.
+            ...(blocksMoved.length > 0 ? { blocks_moved: blocksMoved } : {}),
             // jim-douglass follow-up (2026-08-30) — an attendee's invited
             // address diverged from what was passed (directory override, or a
             // human-stated address kept over a stale row). State the actual

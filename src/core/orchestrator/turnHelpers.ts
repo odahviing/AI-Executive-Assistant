@@ -528,7 +528,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}]`;
         }
 
-        const slots: Array<{ start?: string; end?: string }> =
+        const slots: Array<{ start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }> }> =
           Array.isArray(result) ? result :
           (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
           [];
@@ -646,6 +646,37 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             return `${d.date}(${byAttendee(d.blocked_by ?? [])}${kinds.length ? `,${kinds.join('+')}` : ''})`;
           });
         const attendeeBlockedPart = attendeeBlockedParts.length ? ` attendee_blocked=${attendeeBlockedParts.join(',')}` : '';
+        // invented-no-access-to-a-named-attendees-calendar (2026-09-14) — the
+        // three renders above all describe a PROBLEM the search found
+        // (off days, partial conflicts, a blocked day). None of them says the
+        // plain positive fact: WHOSE calendars this search actually read. So a
+        // search that read Levana's calendar and found her free left a line
+        // saying nothing about Levana at all, and a later turn's reply ("I
+        // could only check yours and Daniel's, I had no access to Levana's
+        // calendar" — 2026-09-14T07:43:08Z, a turn with no tool call of its
+        // own) contradicted the tape with nothing on the tape to contradict.
+        // The tape is what the drafting model reads back on later turns
+        // (summaries are persisted to history verbatim, postReply Step 1b) and
+        // what every claim-checker judges against, so the fix is the fact
+        // itself, upstream, not a guard downstream (G2).
+        //
+        // Source is the per-slot `attendee_status` the colleague path attaches
+        // from a REAL per-attendee free/busy read (handlers/findAvailableSlots.ts's
+        // annotateSlotsWithAttendeeStatus) — the same field `attendeeCheckSource`
+        // above already trusts for `attendee_check=slots`. `'unknown'` is
+        // EXCLUDED: an external attendee, or an internal read that came back
+        // with nothing, is not a calendar we saw (G7 — an inability to check is
+        // its own state, never a pass), and claiming it here would manufacture
+        // the mirror-image lie.
+        const readCalendars = new Set<string>();
+        for (const s of slots) {
+          for (const a of s.attendee_status ?? []) {
+            if (typeof a.email === 'string' && a.email && typeof a.status === 'string' && a.status !== 'unknown') {
+              readCalendars.add(a.email.toLowerCase());
+            }
+          }
+        }
+        const attendeesReadPart = readCalendars.size ? ` calendars_read=${[...readCalendars].sort().join('+')}` : '';
         if (slots.length === 0) {
           // gh#chris-kelley-oof-block-a — a zero-result day_summary (the
           // rejection reason for EVERY date, e.g. owner_out_of_office) used
@@ -671,7 +702,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           }
           return `[find_available_slots${window} dur=${dur}m: 0 slots${reasonPart}${offDaysPart}${preferredPart}]`;
         }
-        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${preferredPart}]`;
+        return `[find_available_slots${window} dur=${dur}m → ${slots.length} slots: ${slotList}${offDaysPart}${attendeePartialPart}${attendeeBlockedPart}${attendeesReadPart}${preferredPart}]`;
       }
       case 'check_join_availability': {
         // proposed-slot-not-grounded-in-search-result (2026-08-24) — this tool

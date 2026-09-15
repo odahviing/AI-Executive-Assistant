@@ -216,10 +216,11 @@ const UserProfileSchema = z.object({
     // inside a defined window (preferred_start..preferred_end). Lunch is
     // one example; coffee breaks, gym, prayer time, daily writing hour all
     // use the same shape. Elastic within the window (Maelle reshuffles to
-    // make room for meetings, no approval needed). Out-of-window booking
-    // or move requires the owner-override flag on book_floating_block and
-    // move_meeting (confirm_outside_window=true) — owner direct request IS
-    // the approval.
+    // make room for meetings, no approval needed). Out-of-window BOOKING
+    // needs the owner-override flag on book_floating_block
+    // (confirm_outside_window=true); an out-of-window MOVE needs no flag —
+    // the owner path of move_meeting moves it as asked. Owner direct request
+    // IS the approval either way.
     //
     // Lives under `meetings` (not `schedule`) because floating blocks are
     // EVENTS that happen during the day — same conceptual bucket as the
@@ -335,17 +336,10 @@ const UserProfileSchema = z.object({
     //   'home_days'   → only on profile.schedule.home_days.days
     //   'any'         → no day-type restriction (default)
     day_type: z.enum(['office_days', 'home_days', 'any']).optional(),
-    // default_location — what create_meeting stamps when Sonnet leaves
-    // both is_online and location unspecified. Overrides the v2.5.2
-    // day-aware default for THIS category.
-    //   'office'           → stamp profile.meetings.office_location, isOnline=default_is_online
-    //   'online'           → no physical location, isOnline=true
-    //   'custom_required'  → Sonnet MUST ask the owner / colleague for the venue
-    //   'none'             → fall through to v2.5.2 day-aware default
-    default_location: z.enum(['office', 'online', 'custom_required', 'none']).optional(),
-    // When default_location='office', whether the meeting is hybrid
-    // (in-person + Teams link) or strictly in-person. Default true (hybrid).
-    default_is_online: z.boolean().optional(),
+    // (`default_location` / `default_is_online` were removed 2026-09-14: no
+    // reader since v2.8.2 — the venue is resolveLocation's day-type × party-
+    // shape tree, and `no_default_location` below is the one category-level
+    // location switch. Non-strict schema: a yaml still carrying them parses.)
     // When true, create_meeting / find_available_slots auto-pad slots with
     // profile.meetings.travel_buffer_minutes on both sides. The flag is
     // about the meeting category ("this requires travel"), not the buffer

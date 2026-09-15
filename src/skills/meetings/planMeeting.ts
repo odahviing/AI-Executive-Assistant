@@ -48,6 +48,7 @@ import { findMeetingOwner } from './findMeetingOwner';
 import { getTravelRecordById, getEffectiveTimezoneById, personIdForSlackId, searchPeopleMemory, type CurrentTravel } from '../../db/people';
 import { getVenueTravelTimeMinutes, isCompanyLocation } from '../../db/venues';
 import { inferTimezoneFromStateStatic } from '../../utils/locationTz';
+import { getEffectiveWorkDayForInstant } from '../../utils/workHours';
 import logger from '../../utils/logger';
 import type { BookingRequest } from './bookingRequest';
 
@@ -186,11 +187,6 @@ export function planInputFromBookingRequest(
     isOnlineHint: req.isOnlineHint,
     categoryHint: req.category ?? null,
     existingEventId: req.existingEventId,
-    existingEventCategories: req.existingEventCategories,
-    existingEventLocation: req.existingEventLocation,
-    existingEventIsOnline: req.existingEventIsOnline,
-    priorSlotStartIso: req.priorSlotStartIso,
-    priorSlotEndIso: req.priorSlotEndIso,
     allowRelaxed: req.relaxed,
     // v4.4.x (#154) — see the field doc on PlanMeetingInput.ownerRoomBend.
     ownerRoomBend: req.relaxedReason === 'owner_room_bend',
@@ -276,61 +272,58 @@ export type PlanAction =
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
-export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> {
-  const { profile, intent, initiator } = input;
-  const ownerEmail = profile.user.email;
+/**
+ * The party-shape signals resolveLocation reads — has-external, external-in-a-
+ * different-zone, anyone-remote (owner travel, a travelling participant, a
+ * cross-zone colleague) — plus the tz-assumption hedges collected on the way.
+ * ONE builder for every caller that re-places a venue: planMeeting (create /
+ * move) and update_meeting's attendee-shape re-evaluation (ops/handlers/
+ * moveMeeting.ts), which until 2026-09-14 hand-built a partial input (no
+ * remote/zone signals, no initiator role) and so could stamp a room where
+ * create would have asked or gone online. `participants` may or may not
+ * include the owner; `slotStartIso` scopes travel to the meeting's own date.
+ */
+export interface LocationSignals {
+  anyParticipantRemote: boolean;
+  hasExternalAttendee: boolean;
+  externalAttendeeInDifferentTz: boolean | undefined;
+  // Display names of the externals (people-memory name → stated name → the
+  // address), for resolveLocation's onsite-or-online ask.
+  externalAttendeeNames: string[];
+  tzAssumptionNotes: string[];
+}
 
-  // v2.9.0 — normalize participants invariant: owner is ALWAYS in the list
-  // with isOwner=true. Callers built via normalizeBookingRequest already
-  // satisfy this; legacy callers (coord/booking, deferred-replay paths) may
-  // not. Inject here once so downstream code can rely on the invariant
-  // without repeating the check. nonOwnerParticipants is a convenience for
-  // the few places that explicitly need "everyone except the owner".
-  const hasOwner = input.participants.some(p => p.isOwner === true || (p.email ?? '').toLowerCase() === ownerEmail.toLowerCase());
-  const participants: PlanParticipant[] = hasOwner
-    ? input.participants
-    : [{ email: ownerEmail, isOwner: true }, ...input.participants];
-  const nonOwnerParticipants = participants.filter(p => !p.isOwner);
-
-  // ── Cancel / move on an existing event → ownership matters FIRST ────────
-  if ((intent === 'cancel' || intent === 'move') && input.existingEventId) {
-    const ownerInfo = await findMeetingOwner({
-      ownerUserId: profile.user.slack_user_id,
-      ownerEmail,
-      eventId: input.existingEventId,
-    });
-    logger.info('planMeeting — ownership resolved', {
-      intent, eventId: input.existingEventId, ownerInfo,
-    });
-
-    // Owner is attendee, not organizer:
-    if (!ownerInfo.ownerIsOrganizer) {
-      if (intent === 'move') {
-        // Just refuse, no DM.
-        return {
-          action: 'refuse_not_owners',
-          organizerName: ownerInfo.organizerName,
-          organizerEmail: ownerInfo.organizerEmail,
-        };
-      }
-      // intent === 'cancel' → ONE outcome, whoever asked: decline the owner's
-      // own copy. v4.2.x (#147) collapsed what used to be two branches (asker-is-
-      // the-organizer → silent decline; anyone else → decline + a Slack DM to the
-      // organizer). They only ever differed by that DM, and the DM is gone: the
-      // organizer's notice is Outlook's own decline response, sent by
-      // `declineMeeting` on the Graph call itself. So there is nothing left to
-      // branch on, and `askerIsOwnerOfMeeting` (plus its `participantEmail`
-      // helper) went with it.
-      return {
-        action: 'decline_as_attendee',
-        organizerName: ownerInfo.organizerName,
-        organizerEmail: ownerInfo.organizerEmail,
-      };
-    }
-    // Owner IS organizer → fall through to normal pipeline (book = delete/move on Graph).
+/**
+ * The ONE head-count for the room threshold and the room-capacity check:
+ * the owner (counted once, listed or not) plus every other participant,
+ * never the meeting-room mailbox (owner ruling 2026-09-15 — a 3-person
+ * meeting with the room pre-added on `args.attendees` counted 4 and got the
+ * Meeting Room). create/move read it here via `planMeeting`; update_meeting's
+ * before/after roster counts (ops/handlers/moveMeeting.ts) call it directly.
+ */
+export function participantHeadcount(
+  profile: UserProfile,
+  participants: ReadonlyArray<{ email?: string; isOwner?: boolean }>,
+): number {
+  const ownerLc = profile.user.email.toLowerCase();
+  const roomLc = (profile.meetings.room_email ?? '').toLowerCase().trim();
+  let others = 0;
+  for (const p of participants) {
+    const email = (p.email ?? '').toLowerCase().trim();
+    if (p.isOwner === true || email === ownerLc || (roomLc && email === roomLc)) continue;
+    others++;
   }
+  return others + 1;
+}
 
-  // ── Owner state (load preferences first) ────────────────────────────────
+export function locationSignalsFor(
+  profile: UserProfile,
+  participants: PlanParticipant[],
+  slotStartIso: string | undefined,
+): LocationSignals {
+  const ownerEmail = profile.user.email;
+  const nonOwnerParticipants = participants.filter(p =>
+    !p.isOwner && (p.email ?? '').toLowerCase() !== ownerEmail.toLowerCase());
   // Travel state lookup
   // v4.8.x (2026-09-02, gh owner-own-trip-read-is-not-date-scoped-books-online-
   // after-trip-ends) — resolve the OWNER's own travel by the MEETING's date,
@@ -340,8 +333,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // traveling right now", so booking a date AFTER a trip that's active today
   // still read the trip as active and forced the meeting online. `meetingIsoDate`
   // and `travelForMeetingDay` are defined right below and reused by that loop.
-  const meetingIsoDate = input.slotStartIso
-    ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }).toISODate()
+  const meetingIsoDate = slotStartIso
+    ? DateTime.fromISO(slotStartIso, { zone: profile.user.timezone }).toISODate()
     : null;
   const travelForMeetingDay = (personId: string): CurrentTravel | null => {
     const t = getTravelRecordById(personId, null);
@@ -350,7 +343,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // A resolved destination owns its inclusive trip dates. An unresolvable
     // location retains the existing conservative remote flag; no local clock
     // is asserted from that fallback.
-    const at = input.slotStartIso ? DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone }) : DateTime.now();
+    const at = slotStartIso ? DateTime.fromISO(slotStartIso, { zone: profile.user.timezone }) : DateTime.now();
     const day = destination ? at.setZone(destination).toISODate()!
       : meetingIsoDate ?? at.setZone(profile.user.timezone).toISODate()!;
     return (day >= t.from && day <= t.until) ? t : null;
@@ -499,6 +492,119 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       tzAssumptionNotedIds.add(personId);
     }
   }
+  const externals: Array<{ email: string; name?: string }> = [];
+  for (const p of nonOwnerParticipants) {
+    const e = (p.email ?? '').toLowerCase();
+    if (e && !e.endsWith('@' + ownerDomain)) externals.push({ email: e, name: p.name });
+  }
+  const hasExternal = externals.length > 0;
+  const externalAttendeeNames: string[] = [];
+  // Decide if ANY external attendee is in a known-different TZ. Lookup is
+  // best-effort: people_memory exact-email match → the PERMANENT stored zone
+  // (getEffectiveTimezoneById — never a raw column read, so a transient
+  // auto-tier reading, Slack or chat, can't flip this). If any external is
+  // known-different from owner's TZ, fire the auto-online path (3a). If all externals are
+  // same-TZ → ask. If any external TZ is unknown AND no external is
+  // known-different → ask. v4.8.x (o#262) — no early `break` on the first
+  // different match now: every external still gets checked for an active
+  // tempDiffering reading, so one sitting behind the first different match is
+  // never missed (travellers excepted — see the guard on the push).
+  let externalAttendeeInDifferentTz: boolean | undefined = undefined;
+  if (hasExternal) {
+    const ownerTz = profile.user.timezone;
+    let anyDifferent = false;
+    let anyUnknown = false;
+    for (const { email, name } of externals) {
+      const matches = searchPeopleMemory(email);
+      const exact = matches.find(m => (m.email ?? '').toLowerCase() === email);
+      externalAttendeeNames.push(exact?.name?.trim() || name?.trim() || email);
+      const eff = exact ? getEffectiveTimezoneById(exact.person_id) : undefined;
+      const tz = eff?.timezone;
+      if (!tz) { anyUnknown = true; continue; }
+      // Same traveller guard as the participant loop above, for the same
+      // reason: no "assuming their permanent zone" hedge for someone whose
+      // zone the search actually swapped for a trip — but only when the
+      // trip record really did (resolvable AND different from home; see
+      // `travelActuallySwappedZone`), not merely because a trip is on file.
+      if (eff?.tempDiffering && exact && !travelActuallySwappedZone(travelForMeetingDay(exact.person_id), tz) && !tzAssumptionNotedIds.has(exact.person_id)) {
+        // Attribute by `source` — same honesty fix as the participant loop
+        // above (2026-09-01, capturepass-haiku-zone dep): the chat-capture
+        // pass is now a second writer of this reading, not only Slack.
+        const readingClause = eff.tempDiffering.source === 'chat'
+          ? `they mentioned ${eff.tempDiffering.value} in a recent chat`
+          : `Slack currently reads ${eff.tempDiffering.value}`;
+        const note = `assuming ${exact.name || email} is on their established ${tz} zone — ${readingClause} (through ${eff.tempDiffering.expiresAt}), flag me if that's changed`;
+        tzAssumptionNotes.push(note);
+        tzAssumptionNotedIds.add(exact.person_id);
+      }
+      if (tz !== ownerTz) anyDifferent = true;
+    }
+    if (anyDifferent) externalAttendeeInDifferentTz = true;
+    else if (anyUnknown) externalAttendeeInDifferentTz = undefined; // unknown → ask
+    else externalAttendeeInDifferentTz = false;                      // all same → ask
+  }
+  return { anyParticipantRemote, hasExternalAttendee: hasExternal, externalAttendeeInDifferentTz, externalAttendeeNames, tzAssumptionNotes };
+}
+
+export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> {
+  const { profile, intent, initiator } = input;
+  const ownerEmail = profile.user.email;
+
+  // v2.9.0 — normalize participants invariant: owner is ALWAYS in the list
+  // with isOwner=true. Callers built via normalizeBookingRequest already
+  // satisfy this; legacy callers (coord/booking, deferred-replay paths) may
+  // not. Inject here once so downstream code can rely on the invariant
+  // without repeating the check. nonOwnerParticipants is a convenience for
+  // the few places that explicitly need "everyone except the owner".
+  const hasOwner = input.participants.some(p => p.isOwner === true || (p.email ?? '').toLowerCase() === ownerEmail.toLowerCase());
+  const participants: PlanParticipant[] = hasOwner
+    ? input.participants
+    : [{ email: ownerEmail, isOwner: true }, ...input.participants];
+  const nonOwnerParticipants = participants.filter(p => !p.isOwner);
+
+  // ── Cancel / move on an existing event → ownership matters FIRST ────────
+  if ((intent === 'cancel' || intent === 'move') && input.existingEventId) {
+    const ownerInfo = await findMeetingOwner({
+      ownerUserId: profile.user.slack_user_id,
+      ownerEmail,
+      eventId: input.existingEventId,
+    });
+    logger.info('planMeeting — ownership resolved', {
+      intent, eventId: input.existingEventId, ownerInfo,
+    });
+
+    // Owner is attendee, not organizer:
+    if (!ownerInfo.ownerIsOrganizer) {
+      if (intent === 'move') {
+        // Just refuse, no DM.
+        return {
+          action: 'refuse_not_owners',
+          organizerName: ownerInfo.organizerName,
+          organizerEmail: ownerInfo.organizerEmail,
+        };
+      }
+      // intent === 'cancel' → ONE outcome, whoever asked: decline the owner's
+      // own copy. v4.2.x (#147) collapsed what used to be two branches (asker-is-
+      // the-organizer → silent decline; anyone else → decline + a Slack DM to the
+      // organizer). They only ever differed by that DM, and the DM is gone: the
+      // organizer's notice is Outlook's own decline response, sent by
+      // `declineMeeting` on the Graph call itself. So there is nothing left to
+      // branch on, and `askerIsOwnerOfMeeting` (plus its `participantEmail`
+      // helper) went with it.
+      return {
+        action: 'decline_as_attendee',
+        organizerName: ownerInfo.organizerName,
+        organizerEmail: ownerInfo.organizerEmail,
+      };
+    }
+    // Owner IS organizer → fall through to normal pipeline (book = delete/move on Graph).
+  }
+
+  // ── Owner state (load preferences first) ────────────────────────────────
+  // Party-shape + travel signals, built by the ONE builder update_meeting
+  // shares (see locationSignalsFor).
+  const locationSignals = locationSignalsFor(profile, participants, input.slotStartIso);
+  const { tzAssumptionNotes } = locationSignals;
 
   // ── Detect category ─────────────────────────────────────────────────────
   let category: string | null = null;
@@ -519,6 +625,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         isRecurring: input.isRecurring,
         requestedCategory: input.categoryHint,
         locationHint: input.locationHint,
+        ownerRequestedInPerson: input.isOnlineHint === false && input.initiator !== 'colleague',
       });
       category = det.category;
       categoryReason = det.reason + ' (re-detected on move; day type changed)';
@@ -540,6 +647,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         isRecurring: input.isRecurring,
         requestedCategory: input.categoryHint,
         locationHint: input.locationHint,
+        ownerRequestedInPerson: input.isOnlineHint === false && input.initiator !== 'colleague',
       });
       category = det.category;
       categoryReason = det.reason;
@@ -630,66 +738,20 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   let widenedAlternatives: Array<{ start: string; end: string; label: string }> = [];
   let alternativesRequestedDay = '';
   let roomAskText: string | undefined;
+  // People in the room, never the room itself (see participantHeadcount).
+  const headcount = participantHeadcount(profile, participants);
   if (input.slotStartIso) {
-    const externalEmails: string[] = [];
-    for (const p of nonOwnerParticipants) {
-      const e = (p.email ?? '').toLowerCase();
-      if (e && !e.endsWith('@' + ownerDomain)) externalEmails.push(e);
-    }
-    const hasExternal = externalEmails.length > 0;
-    // Decide if ANY external attendee is in a known-different TZ. Lookup is
-    // best-effort: people_memory exact-email match → the PERMANENT stored zone
-    // (getEffectiveTimezoneById — never a raw column read, so a transient
-    // auto-tier reading, Slack or chat, can't flip this). If any external is
-    // known-different from owner's TZ, fire the auto-online path (3a). If all externals are
-    // same-TZ → ask. If any external TZ is unknown AND no external is
-    // known-different → ask. v4.8.x (o#262) — no early `break` on the first
-    // different match now: every external still gets checked for an active
-    // tempDiffering reading, so one sitting behind the first different match is
-    // never missed (travellers excepted — see the guard on the push).
-    let externalAttendeeInDifferentTz: boolean | undefined = undefined;
-    if (hasExternal) {
-      const ownerTz = profile.user.timezone;
-      let anyDifferent = false;
-      let anyUnknown = false;
-      for (const email of externalEmails) {
-        const matches = searchPeopleMemory(email);
-        const exact = matches.find(m => (m.email ?? '').toLowerCase() === email);
-        const eff = exact ? getEffectiveTimezoneById(exact.person_id) : undefined;
-        const tz = eff?.timezone;
-        if (!tz) { anyUnknown = true; continue; }
-        // Same traveller guard as the participant loop above, for the same
-        // reason: no "assuming their permanent zone" hedge for someone whose
-        // zone the search actually swapped for a trip — but only when the
-        // trip record really did (resolvable AND different from home; see
-        // `travelActuallySwappedZone`), not merely because a trip is on file.
-        if (eff?.tempDiffering && exact && !travelActuallySwappedZone(travelForMeetingDay(exact.person_id), tz) && !tzAssumptionNotedIds.has(exact.person_id)) {
-          // Attribute by `source` — same honesty fix as the participant loop
-          // above (2026-09-01, capturepass-haiku-zone dep): the chat-capture
-          // pass is now a second writer of this reading, not only Slack.
-          const readingClause = eff.tempDiffering.source === 'chat'
-            ? `they mentioned ${eff.tempDiffering.value} in a recent chat`
-            : `Slack currently reads ${eff.tempDiffering.value}`;
-          const note = `assuming ${exact.name || email} is on their established ${tz} zone — ${readingClause} (through ${eff.tempDiffering.expiresAt}), flag me if that's changed`;
-          tzAssumptionNotes.push(note);
-          tzAssumptionNotedIds.add(exact.person_id);
-        }
-        if (tz !== ownerTz) anyDifferent = true;
-      }
-      if (anyDifferent) externalAttendeeInDifferentTz = true;
-      else if (anyUnknown) externalAttendeeInDifferentTz = undefined; // unknown → ask
-      else externalAttendeeInDifferentTz = false;                      // all same → ask
-    }
     locationVerdict = resolveLocation({
       profile,
       startIso: input.slotStartIso,
       // find_slots early-returns above; by here intent is new_booking | move | cancel.
       intent: intent as 'new_booking' | 'move' | 'cancel',
       category,                              // v2.8.2 — drives Logistic / Private skip-stamp
-      participantCount: participants.length,  // owner is already in the list (v2.9 invariant)
-      hasExternalAttendee: hasExternal,
-      externalAttendeeInDifferentTz,
-      anyParticipantRemote,
+      participantCount: headcount,
+      hasExternalAttendee: locationSignals.hasExternalAttendee,
+      externalAttendeeInDifferentTz: locationSignals.externalAttendeeInDifferentTz,
+      externalAttendeeNames: locationSignals.externalAttendeeNames,
+      anyParticipantRemote: locationSignals.anyParticipantRemote,
       ownerLocationHint: input.locationHint,
       ownerIsOnlineHint: input.isOnlineHint,
       initiatorRole: input.initiator,  // v3.2.6 (RC4) — gate baseless colleague-path online
@@ -697,9 +759,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       existingLocation: input.existingEventLocation,
       existingIsOnline: input.existingEventIsOnline,
     });
-    // (v2.8.2) ask_owner_online_or_physical: caller must ask, never auto-pick.
-    // Owner-path AND colleague-path both surface the question; colleague-path
-    // routes through create_approval so Sonnet doesn't try to resolve it locally.
+    // (v2.8.2) ask_owner_online_or_physical: caller must ask, never auto-pick
+    // (owner path only — the colleague path resolves online inside the tree).
     // v4.1.x (M3) — recorded as a GATE and the pipeline keeps going, so the
     // rule check and the attendee free/busy check run in the SAME call and
     // their questions ride out with this one.
@@ -753,6 +814,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
       allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
+      // Rule 1b — the owner's own "in person" (is_online=false). A colleague-path
+      // is_online carries no real request (v3.2.6), same gate detectCategory's
+      // ownerRequestedInPerson uses.
+      inPersonRequested: input.isOnlineHint === false && input.initiator !== 'colleague',
       // v4.1.x (M1) — the booking lead time is now a real rule in THE validator,
       // keyed on who is asking, so the write path enforces the same floor the
       // search does. Pre-fix a colleague naming "3pm today" at 2pm was refused
@@ -1161,7 +1226,9 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     location = locationVerdict.location;
     preserveExisting = true;
   } else if (locationVerdict && locationVerdict.kind === 'skip_stamp') {
-    // Logistic / Private category — no auto-stamp. Empty location, not online.
+    // Logistic / Private category on a fresh booking — no auto-stamp. Empty
+    // location, not online. (A move of one comes back `preserve_existing` from
+    // resolveLocation path 1.5, never this branch — its venue is the owner's.)
     isOnline = false;
     location = '';
   } else {
@@ -1186,14 +1253,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         profile,
         startIso: input.slotStartIso,
         endIso: input.slotEndIso,
-        participantCount: participants.length,
+        participantCount: headcount,
       });
       if (verdict.kind === 'room_busy_small_fits') {
         location = verdict.smallLabel;
         addRoomEmail = false;
         logger.info('planMeeting — meeting room busy, falling back to small room label', {
           slot: input.slotStartIso, smallLabel: verdict.smallLabel,
-          participantCount: participants.length,
+          participantCount: headcount,
         });
       } else if (verdict.kind === 'room_busy_too_big') {
         if (input.allowRelaxed) {
@@ -1205,11 +1272,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           addRoomEmail = false;
           roomBusyNotice = 'the meeting room is taken and the group is large — booked without it, you\'ll need to grab space';
           logger.info('planMeeting — meeting room busy + too large, owner override → booking without the room', {
-            slot: input.slotStartIso, participantCount: participants.length,
+            slot: input.slotStartIso, participantCount: headcount,
           });
         } else {
           logger.info('planMeeting — meeting room busy + group too large for fallback', {
-            slot: input.slotStartIso, participantCount: participants.length,
+            slot: input.slotStartIso, participantCount: headcount,
           });
           roomAskText = verdict.suggestedAskText;
           gates.push({ kind: 'room', ask: verdict.suggestedAskText });
@@ -1340,15 +1407,13 @@ export async function loadEventsForCheck(profile: UserProfile, slotStartIso: str
   return getOwnerEventsForDecision(profile.user.email, start.toFormat('yyyy-MM-dd'), end.toFormat('yyyy-MM-dd'), tz);
 }
 
+// The EFFECTIVE day type (yaml base + per-date override, M11) — the same
+// accessor resolveLocation's preserve-on-move path compares, so "did the day
+// type flip" can't be answered two ways for one move (raw yaml said office→home
+// while the override made both office).
 function sameDayType(profile: UserProfile, isoA: string, isoB: string): boolean {
-  const tz = profile.user.timezone;
-  const dayA = DateTime.fromISO(isoA, { zone: tz, setZone: true }).setZone(tz).toFormat('EEEE');
-  const dayB = DateTime.fromISO(isoB, { zone: tz, setZone: true }).setZone(tz).toFormat('EEEE');
-  const office = profile.schedule.office_days.days as string[];
-  const home = profile.schedule.home_days.days as string[];
-  const typeOf = (d: string): 'office' | 'home' | 'off' =>
-    office.includes(d) ? 'office' : home.includes(d) ? 'home' : 'off';
-  return typeOf(dayA) === typeOf(dayB);
+  return getEffectiveWorkDayForInstant(isoA, profile).location
+    === getEffectiveWorkDayForInstant(isoB, profile).location;
 }
 
 function pickCanonicalCategory(profile: UserProfile, raw: string[]): string | null {

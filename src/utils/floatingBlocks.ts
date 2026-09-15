@@ -4,8 +4,9 @@
  * Single source of truth for "protected N-minute periods that can live
  * anywhere in a defined window". Lunch is the canonical example today —
  * but the concept is general: coffee break, thinking time, gym window,
- * daily writing hour, etc. All of these are elastic within their window
- * and requiring approval only to move OUTSIDE it.
+ * daily writing hour, etc. All of these are elastic within their window;
+ * a block the owner places outside it counts as placed (owner ruling
+ * 2026-09-14) and is his to move one-step, never Maelle's to slide.
  *
  * This module exposes:
  *   - FloatingBlock shape
@@ -266,6 +267,29 @@ export function busyForBlockWindow(
     busy.push({ start: Math.max(evStart, windowStart), end: Math.min(evEnd, windowEnd) });
   }
   return busy;
+}
+
+/**
+ * blockSizedToEvent — the block definition sized to the EVENT's own span.
+ * Config `duration_minutes` sizes a block Maelle CREATES; once a block event
+ * exists, its real length is the owner's (he stretches a 25-min lunch to 40),
+ * so every relocation — the post-write rebalance, the dense consolidation,
+ * the pre-booking dry run, check_join's in-turn move, move_meeting — searches
+ * and re-sizes with THIS, never the config number. Falls back to config only
+ * when the event's times don't parse. One place (2026-09-14): four movers
+ * used to shrink a stretched block back to config while move_meeting alone
+ * preserved it (3.4.2).
+ */
+export function blockSizedToEvent(
+  block: FloatingBlock,
+  event: { start: { dateTime: string; timeZone?: string }; end: { dateTime: string; timeZone?: string } },
+  timezone: string,
+): FloatingBlock {
+  const s = DateTime.fromISO(event.start.dateTime, { zone: event.start.timeZone ?? 'utc' }).setZone(timezone);
+  const e = DateTime.fromISO(event.end.dateTime, { zone: event.end.timeZone ?? 'utc' }).setZone(timezone);
+  if (!s.isValid || !e.isValid || e.toMillis() <= s.toMillis()) return block;
+  const minutes = Math.round(e.diff(s, 'minutes').minutes);
+  return minutes === block.duration_minutes ? block : { ...block, duration_minutes: minutes };
 }
 
 /**
