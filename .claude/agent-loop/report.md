@@ -1,8 +1,8 @@
 # Report — cumulative since the 4.9.8 wrap
 
-**28 rows await you** — v4.9.8 wrapped, 0 new from this wrap.
+**29 rows await you** — v4.9.8 wrapped, 1 new from this wrap (gh#206 partial: the detection class is your call).
 
-33 open rows — 22 still-real · 6 need a re-read · 5 cite no file · 28 rulable · 5 waiting on a verb.
+34 open rows — 25 still-real · 4 need a re-read · 5 cite no file · 29 rulable · 5 waiting on a verb.
 
 ### pending owner (0)
 
