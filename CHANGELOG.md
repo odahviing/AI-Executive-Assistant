@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.9.9 — A held slot stays held, and old news stays old
+
+Four repairs found by reading real conversations. A tentative hold is no longer released by an unrelated all-day marker, so the slot it reserves is still protected when someone tries to book over it. A request closed weeks ago is no longer announced as news when a colleague opens a fresh subject in the same DM. An attendee who is away all day is named as away instead of merely busy, and routine housekeeping notices collect in one daily thread instead of opening a new one each time.
+
+### Fixed
+
+- A hold was released minutes after it was made because the reconcile counted any calendar event touching the window that listed the person who asked for it — an all-day vacation marker for someone else qualified. Fulfilment now means a timed commitment covering the held window with that person on it, or an event carrying the hold's own subject. A colleague confirming their own held slot through Maelle also releases it now; a timezone-format mismatch had silently prevented that, which is what left the faulty calendar check doing the job.
+- A request cancelled weeks earlier was still "the latest in the thread" of a long-running direct message, so a new, unrelated ask opened with its closed status. The relay now speaks only for a closure the colleague has not been told about, recent, and newer than the last reply in that conversation. An activity record is no longer described to a colleague as a cancelled request.
+- An attendee out of office for a whole day is reported as out of office, with the end of the absence when it is known, instead of a generic conflict. Calendar-health now says who is away and offers to skip or move the occurrence.
+- Housekeeping notices with no conversation of their own (a floating block moved, an automatic fix) post as replies in the day's owner thread rather than as a new direct message each time, and are recorded so a follow-up question about one has it in context.
+
+### Verification and limits
+
+- Four independently verified references, each with executed fail-before/pass-after regressions and an independent review. Three were re-issued: one after a review sent it back, one after the owner ruled against the first shape, one for a test-harness repair that changed no product code. Full release battery and the fixed Golden30 battery ran at the checkpoint, with no failure.
+- Owner-visible choices recorded rather than assumed: a closure older than seven days is no longer relayed, and a colleague can see another colleague's absence end date on a specific rejected time. A very long timed event covering a held window still closes that hold; a same-titled meeting that merely overlaps does too. Housekeeping notices that used to arrive on their own now sit inside the day's thread, including the security-class ones, and a day with notices but no decisions opens that thread.
+- Known limit, not fixed here: a real meeting whose title matches a floating block (a lunch invite) is read as that block, so a hold it fills is not closed automatically and expires instead.
+
+---
+
 ## 4.9.8 — Location and floating blocks, fixed from the roots
 
 Two module audits (meeting location, floating blocks) traced how each decision is actually made and repaired every proven root the owner approved, alongside the small bugs from the day's live chats. The location decision now runs through one shared path for create, move and update; a floating block the owner places outside its window counts as lunch and is protected like any commitment; and drive blocks no longer pick up colleagues mentioned in the same sentence.

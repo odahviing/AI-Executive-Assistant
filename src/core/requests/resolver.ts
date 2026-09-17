@@ -1575,7 +1575,8 @@ RULES:
   // `requests` row. createOutreachJob's default bridge births one paired
   // to every row it inserts, and one stamped with THIS row's own
   // origin_thread_ts would become the newest row for that thread_ts —
-  // hijacking getLatestRequestForThread (read by systemPrompt.ts's
+  // hijacking getLatestRequestForThread (read, through
+  // getUnrelayedTerminalRequestForThread, by systemPrompt.ts's
   // threadRequestStatusSection) into reporting the stamp's synthetic
   // 'resolved' state instead of row's real one (a reject → 'cancelled'
   // would read as resolved; a still-open amend → 'awaiting_colleague'

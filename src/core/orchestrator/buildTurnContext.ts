@@ -297,7 +297,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
         let hasOperationalRelay = false;
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } =
+          const { getAwaitingOwnerRequests, getOpenRequestsForThread, getUnrelayedTerminalRequestForThread } =
             require('../../db/requests') as typeof import('../../db/requests');
           if (isOwnerTyping) {
             hasOperationalRelay = getAwaitingOwnerRequests(profile.user.slack_user_id).some(
@@ -306,11 +306,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
           } else if (threadTs) {
             const openInThread = getOpenRequestsForThread(profile.user.slack_user_id, threadTs)
               .filter(r => r.state === 'awaiting_owner' || r.state === 'awaiting_colleague');
-            const latest = getLatestRequestForThread(profile.user.slack_user_id, threadTs);
-            const terminalUnrelayed = !!latest
-              && latest.state !== 'awaiting_owner'
-              && latest.state !== 'awaiting_colleague'
-              && latest.state !== 'in_flight';
+            // Same selection systemPrompt.ts's threadRequestStatusSection renders
+            // from, so the coda is suppressed exactly when that section ships.
+            const terminalUnrelayed = !!getUnrelayedTerminalRequestForThread(profile.user.slack_user_id, threadTs);
             hasOperationalRelay = openInThread.length > 0 || terminalUnrelayed;
           }
         } catch (err) {

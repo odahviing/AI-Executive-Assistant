@@ -44,8 +44,9 @@ const mocks = {
   'src/utils/logger.ts': loggerMock,
   'src/utils/usageLog.ts': { logLlmUsage: noop },
   'src/utils/detectMessageLanguage.ts': { detectMessageLanguage: () => 'he' },
-  // real value, copied from utils/attendeeAvailability.ts:398
-  'src/utils/attendeeAvailability.ts': { ATTENDEE_REASON_PREFIXES: ['attendee_busy_collision', 'outside_attendee_work_hours'] },
+  // real value of ATTENDEE_REASON_PREFIXES, hand-copied from utils/attendeeAvailability.ts — the real
+  // module pulls workHours → db/scheduleOverrides (SQLite), so importing it would break the no-DB isolation.
+  'src/utils/attendeeAvailability.ts': { ATTENDEE_REASON_PREFIXES: ['attendee_busy_collision', 'outside_attendee_work_hours', 'attendee_out_of_office'] },
 };
 const loaded = new Map();
 function load(rel) {

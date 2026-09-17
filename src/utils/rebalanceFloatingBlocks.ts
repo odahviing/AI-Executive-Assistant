@@ -595,7 +595,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
             ? ' (no fully clear gap in the window — this one sits against a Working-Elsewhere block.)'
             : '';
           await shadowNotify(profile, {
-            channel: '',  // sendDirect path; cache handles the channel
+            channel: '',  // no conversation context → owner's daily thread (shadowNotify route 3)
             icon: '🔧',
             action: 'Floating block rebalanced',
             detail: `Moved ${block.name} to ${newStart.toFormat('HH:mm')}–${newEnd.toFormat('HH:mm')} on ${slotDt.toFormat('EEE d MMM')}.${weNote}`,

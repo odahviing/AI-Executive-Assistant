@@ -163,6 +163,8 @@ function harness() {
       viewer: ctx.senderRole, viewerEmail: 'viewer@example.test', movingEventIdMismatchWarning: undefined,
       CalendarOfflineError: class CalendarOfflineError extends Error {},
       firstRejectReason: counts => counts ? Object.keys(counts)[0] : undefined,
+      // the real pure span lookup the block imports (findAvailableSlots.ts, 2026-09-15)
+      ...compile(namedFunction('src/connectors/graph/findAvailableSlots.ts', 'oofUntilDisplayFor').getText(), {}),
       humanizeViolationLabel: reason => `fixture label: ${reason}`,
       attendeeHoursGroundingNotes() { throw Error('unexpected attendee-hours branch'); },
       attendeeCheckWarnings: () => ({}),

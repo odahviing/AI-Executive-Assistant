@@ -63,12 +63,22 @@ const SEARCH_REJECT_PHRASES: Record<SearchRejectLabel, (ownerFirst: string, oofU
 /**
  * The ATTENDEE-scoped half — a DIFFERENT closed vocabulary
  * (`ATTENDEE_REASON_PREFIXES`, utils/attendeeAvailability.ts), kept as its
- * own exhaustive Record so a third prefix declared there also forces an
- * entry here, independent of `SEARCH_REJECT_PHRASES` above.
+ * own exhaustive Record so a new prefix declared there also forces an
+ * entry here, independent of `SEARCH_REJECT_PHRASES` above. Name-free on
+ * purpose: `broken_rule_label` is the one attendee-reason field the email
+ * leg keeps (skills/meetings/ops.ts strips the raw `broken_rule` that carries
+ * the address), so the phrase itself must never name the person.
+ *
+ * `attendee_out_of_office` reads the same already-formatted `oofUntilDisplay`
+ * as `owner_out_of_office` above (day_summary.oof_until_display — the walker
+ * formats an attendee's span with the same helper), quoted verbatim.
  */
-const ATTENDEE_REJECT_PHRASES: Record<(typeof ATTENDEE_REASON_PREFIXES)[number], string> = {
-  outside_attendee_work_hours: `outside the attendee's working hours`,
-  attendee_busy_collision: `an attendee is already booked then`,
+const ATTENDEE_REJECT_PHRASES: Record<(typeof ATTENDEE_REASON_PREFIXES)[number], (oofUntilDisplay?: string) => string> = {
+  outside_attendee_work_hours: () => `outside the attendee's working hours`,
+  attendee_busy_collision: () => `an attendee is already booked then`,
+  attendee_out_of_office: (oofUntilDisplay) => oofUntilDisplay
+    ? `an attendee is out of office through ${oofUntilDisplay}`
+    : `an attendee is out of office that day`,
 };
 
 function asSearchRejectLabel(kind: string | undefined): SearchRejectLabel | undefined {
@@ -107,7 +117,7 @@ export function humanizeViolationLabel(reason: SearchRejectReason | undefined, o
   const searchLabel = asSearchRejectLabel(kind);
   if (searchLabel) return SEARCH_REJECT_PHRASES[searchLabel](ownerFirst, oofUntilDisplay);
   const attendeePrefix = asAttendeePrefix(kind);
-  if (attendeePrefix) return ATTENDEE_REJECT_PHRASES[attendeePrefix];
+  if (attendeePrefix) return ATTENDEE_REJECT_PHRASES[attendeePrefix](oofUntilDisplay);
   return 'unknown';
 }
 
@@ -174,6 +184,12 @@ export function attendeeConflictLine(
     return you
       ? 'you have something right up against that time, and this one needs travel time either side'
       : `${name} has something right up against that time, and this one needs travel time either side`;
+  }
+  if (conflict.reason === 'out_of_office') {
+    // The whole owner-local day is `oof` on their free/busy (a vacation, not
+    // a clash) — free/busy-level status, nothing more, so a colleague may hear
+    // it (M10); "busy then" would invite "could she do an hour later?".
+    return you ? 'you\'re out of office that day' : `${name} is out of office that day`;
   }
   return you ? 'you\'re busy then' : `${name}'s busy then`;
 }

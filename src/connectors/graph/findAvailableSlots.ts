@@ -17,10 +17,10 @@ import { attendeeWorkSegmentsBetween, tzTempDifferingForDay, ATTENDEE_REASON_PRE
 import type { TimezoneTempSource } from '../../db/people';
 
 /**
- * AttendeeTaggedReason — the two `ATTENDEE_REASON_PREFIXES`
+ * AttendeeTaggedReason — the `ATTENDEE_REASON_PREFIXES`
  * (utils/attendeeAvailability.ts) as the walker actually emits them: tagged
- * `:<email>` at the two reject sites below (`attendee_busy_collision:…` /
- * `outside_attendee_work_hours:…`). Combined with `SearchRejectLabel`
+ * `:<email>` at the reject sites below (`attendee_busy_collision:…` /
+ * `attendee_out_of_office:…` / `outside_attendee_work_hours:…`). Combined with `SearchRejectLabel`
  * (scheduleRules.ts — the owner-rule half of this same vocabulary) into
  * `SearchRejectReason`, which is what `CursorOutcome.reason` and
  * `diagnosticsOut.rejectedCounts`/`rejectedExamples` are typed against below —
@@ -47,6 +47,25 @@ export function firstRejectReason(
 }
 
 /**
+ * The away span's already-formatted end for a rejected instant, when the
+ * reject reason is an all-day out-of-office — the OWNER's
+ * (`owner_out_of_office`) or an ATTENDEE's (`attendee_out_of_office:<email>`,
+ * 2026-09-15). Both live on the day_summary entry for that date
+ * (`oof_until_display`, one field, one span mechanism), never on a per-instant
+ * field, so the callers that turn a `broken_rule` into a label (createMeeting.ts,
+ * ops/handlers/findAvailableSlots.ts) read it through this one lookup instead
+ * of two copies of the same `find(d => d.date === …)` keyed to one reason each.
+ */
+export function oofUntilDisplayFor(
+  reason: SearchRejectReason | undefined,
+  daySummary: DaySummaryEntry[] | undefined,
+  date: string,
+): string | undefined {
+  if (reason !== 'owner_out_of_office' && !reason?.startsWith('attendee_out_of_office:')) return undefined;
+  return daySummary?.find(d => d.date === date)?.oof_until_display;
+}
+
+/**
  * ONE attendee-side conflict tagged onto a KEPT slot (see `tagAttendeeConflicts`
  * below). THE shape for "who can't make this slot, and why" — the search path
  * renders it into prose (`attendeeConflictLine`, skills/meetings/ops/
@@ -67,10 +86,14 @@ export function firstRejectReason(
  * "Slack" (the capture-pass 'chat' writer post-dates that assumption).
  * 'travel_buffer' — the attendee is free DURING the slot but has a commitment
  * adjacent to it, and the category needs travel padding either side.
+ * 'out_of_office' (2026-09-15) — the attendee's free/busy is `oof` for the
+ * whole owner-local day (the KEEP-mode twin of the `attendee_out_of_office`
+ * reject prefix); the same slot would otherwise read as a plain 'busy' clash
+ * and the requester would be told "she's busy then" about a vacation.
  */
 export type AttendeeConflictTag = {
   email: string;
-  reason: 'busy' | 'off_hours' | 'travel_buffer';
+  reason: 'busy' | 'off_hours' | 'travel_buffer' | 'out_of_office';
   assumed?: boolean;
   tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
 };
@@ -163,6 +186,13 @@ export interface DaySummaryEntry {
    * for the whole span instead of a fresh day-scoped "out of office that
    * whole day" for every day inside it — the actual gh#200 incident (several
    * proposed days, each re-explained, with no end ever named).
+   *
+   * 2026-09-15 — the SAME field also carries an ATTENDEE's away end when
+   * `top_reasons` includes `attendee_out_of_office` instead: the span of the
+   * top `blocked_by` attendee whose free/busy is `oof` across this date,
+   * formatted by the same `formatOofUntilDisplay`. One field, one span
+   * mechanism; `oofUntilDisplayFor` (above) is how readers key it to either
+   * reason.
    */
   oof_until_display?: string;
   /**
@@ -721,6 +751,48 @@ export async function findAvailableSlots(params: {
       }
     }
 
+    // 2026-09-15 — an ATTENDEE's whole-day out-of-office, per owner-local day.
+    // Graph's free/busy already says `oof` (parseGraphFreeBusySlot keeps the
+    // status); until now the walker flattened it into the busy pool above, so
+    // a colleague's week of vacation rejected 286 candidates as
+    // `attendee_busy_collision` (calendar-health auto-move, 2026-09-15) and
+    // the reply could only say "no slot works for everyone" where the true,
+    // actionable answer was "Dina is out that week — skip it or push it?".
+    // email → owner-local day key → the span's already-formatted last day
+    // (undefined for a single-day span), via the SAME `formatOofUntilDisplay`
+    // the owner's own `oofUntilByDay` above uses — one span-display mechanism.
+    // Only a day the `oof` interval covers END TO END counts; a partial-day
+    // `oof` block stays an ordinary busy collision. The owner's own rows are
+    // skipped: his all-day OOF is `oofDayKeys` (his calendar events, above).
+    const attendeeOofDays = new Map<string, Map<string, string | undefined>>();
+    for (const [emailKey, slots] of Object.entries(busyMap)) {
+      const email = emailKey.toLowerCase();
+      if (email === ownerEmailLower) continue;
+      for (const slot of slots) {
+        if (slot.status !== 'oof') continue;
+        const oofStart = DateTime.fromISO(slot.start).setZone(params.timezone);
+        const oofEnd = DateTime.fromISO(slot.end).setZone(params.timezone);
+        if (!oofStart.isValid || !oofEnd.isValid) continue;
+        const coveredDays: string[] = [];
+        for (let d = oofStart.startOf('day'); d < oofEnd; d = d.plus({ days: 1 })) {
+          if (oofStart <= d && oofEnd >= d.plus({ days: 1 })) coveredDays.push(d.toFormat('yyyy-MM-dd'));
+        }
+        if (coveredDays.length === 0) continue;
+        const untilDisplay = formatOofUntilDisplay({
+          eventId: email,
+          startDate: coveredDays[0],
+          endDateExclusive: DateTime.fromISO(coveredDays[coveredDays.length - 1], { zone: params.timezone }).plus({ days: 1 }).toFormat('yyyy-MM-dd'),
+        }, params.timezone);
+        let days = attendeeOofDays.get(email);
+        if (!days) { days = new Map(); attendeeOofDays.set(email, days); }
+        for (const key of coveredDays) days.set(key, untilDisplay);
+      }
+    }
+    const attendeeOutOfOfficeOn = (dayKey: string): string | undefined => {
+      for (const [email, days] of attendeeOofDays) if (days.has(dayKey)) return email;
+      return undefined;
+    };
+
     // v3.6.4 — SOFT / OPTIONAL tier. A TIMED workingElsewhere event (e.g. a
     // daily standup the owner joins only if free) is not a hard block: it's
     // avoided when clean slots exist, but bookable-over as a fallback, and it
@@ -1260,8 +1332,18 @@ export async function findAvailableSlots(params: {
         // Dan-OOO-shows-free bug) and a masked attendee flipped free↔blocked
         // between searches (the Lori/Monday contradiction). DROP mode still stops
         // at the first — one reason is enough to reject the slot.
+        // 2026-09-15 — a whole-day out-of-office is read BEFORE the busy pool
+        // in both modes: the `oof` interval also sits in `allBusy`, so it would
+        // otherwise be reported as a plain clash ("she's busy then") about a
+        // vacation. Same verdict, true reason (M9).
         if (keepAttendeeConflicts) {
           const seenBusy = new Set<string>();
+          for (const [email, days] of attendeeOofDays) {
+            if (days.has(dayKey)) {
+              seenBusy.add(email);
+              attendeeConflicts.push({ email, reason: 'out_of_office' });
+            }
+          }
           for (const busy of allBusy) {
             if (busy.email === ownerEmailLower || seenBusy.has(busy.email)) continue;
             if (cursor.getTime() < busy.end.getTime() && slotEnd.getTime() > busy.start.getTime()) {
@@ -1270,6 +1352,10 @@ export async function findAvailableSlots(params: {
             }
           }
         } else {
+          const outOfOfficeEmail = attendeeOutOfOfficeOn(dayKey);
+          if (outOfOfficeEmail) {
+            return { kind: 'reject', reason: `attendee_out_of_office:${outOfOfficeEmail}`, iso: cursorDt.toISO()! };
+          }
           const overlapsAttendee = allBusy.find(busy =>
             busy.email !== ownerEmailLower &&
             cursor.getTime() < busy.end.getTime() &&
@@ -1646,8 +1732,7 @@ export async function findAvailableSlots(params: {
         }
         const allDays = new Set<string>([...acceptedPerDay.keys(), ...dayReasons.keys()]);
         // ONE parse of a day's reason map, read by BOTH per-attendee consumers
-        // below. Per-attendee labels (`attendee_busy_collision:<email>` /
-        // `outside_attendee_work_hours:<email>`) split out into a per-email
+        // below. Per-attendee labels (`<ATTENDEE_REASON_PREFIXES>:<email>`) split out into a per-email
         // tally, and collapse to their canonical prefix in `reasonCounts` so
         // `top_reasons` stays clean. Readers: `blocked_by` (accepted===0 — the
         // whole day is dead) and `attendee_partial_conflicts` (accepted > 0 —
@@ -1656,7 +1741,7 @@ export async function findAvailableSlots(params: {
         // (2026-09-06) added the second reader; it first shipped with its OWN
         // copy of this prefix-parsing, two parses of the same strings that
         // could drift apart — one parse now, both readers off it.
-        // 2026-09-06 — the prefix pair itself now lives in
+        // 2026-09-06 — the prefix list itself now lives in
         // utils/attendeeAvailability.ts (imported above); this splitter reads it
         // rather than re-typing it. The two colleague-path booking Guards never
         // parse these strings at all — they run in `tagAttendeeConflicts` mode,
@@ -1706,9 +1791,14 @@ export async function findAvailableSlots(params: {
           }
           // gh#200 — the away span's real end (already formatted — see
           // oofUntilByDay above), only when it reaches past this one day
-          // (oofUntilByDay is empty for a single-day OOF).
+          // (oofUntilByDay is empty for a single-day OOF). 2026-09-15 — or the
+          // top out-of-office ATTENDEE's span end for this date (see
+          // attendeeOofDays above), same field, same formatter.
           const oof_until_display = top_reasons.includes('owner_out_of_office')
-            ? oofUntilByDay.get(date) : undefined;
+            ? oofUntilByDay.get(date)
+            : top_reasons.includes('attendee_out_of_office')
+              ? blocked_by?.map(b => attendeeOofDays.get(b.email)?.get(date)).find(Boolean)
+              : undefined;
           return {
             date, accepted, top_reasons,
             ...(blocked_by ? { blocked_by } : {}),

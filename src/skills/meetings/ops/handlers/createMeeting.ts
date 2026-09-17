@@ -21,6 +21,7 @@ import {
   type ConflictingEventEntry,
   type SearchRejectReason,
   firstRejectReason,
+  oofUntilDisplayFor,
   getFreeBusyForDecision,
   createMeeting,
   CalendarOfflineError,
@@ -961,9 +962,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // real end lives on the day_summary entry for the requested
                 // day instead, already formatted by the walker, quoted
                 // verbatim here.
-                const brokenRuleUntilDisplay = brokenRule === 'owner_out_of_office'
-                  ? diagnostics.daySummary?.find(d => d.date === startDt.toFormat('yyyy-MM-dd'))?.oof_until_display
-                  : undefined;
+                const brokenRuleUntilDisplay = oofUntilDisplayFor(brokenRule, diagnostics.daySummary, startDt.toFormat('yyyy-MM-dd'));
 
                 // v4.3.x (#165b) — name the ACTUAL conflicting event when the
                 // rejection is a real calendar clash (not a work-hours/lunch/
@@ -2015,14 +2014,15 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             bookingStartIso: args.start as string | undefined,
           });
 
-          // The booked slot became real, so any tentative hold on it is
-          // resolved. Release it; if it was held by SOMEONE ELSE (the owner
-          // booked over it via override_hold), DM that holder it was let go.
-          // The holder's own confirm releases silently (it's their meeting now).
+          // The booked window became real, so any tentative hold overlapping it
+          // is resolved (overlap, not exact start — an owner override_hold
+          // booking may start inside the held window). If it was held by
+          // SOMEONE ELSE, DM that holder it was let go. The holder's own confirm
+          // releases silently as 'fulfilled_by_booking' (it's their meeting now).
           try {
             const sh = await import('../../../../db/slotHolds');
-            const cleared = sh.releaseHoldsForOwner(
-              context.profile.user.slack_user_id, { startIso: args.start as string }, 'slot_booked',
+            const cleared = sh.releaseHoldsTakenByBooking(
+              context.profile.user.slack_user_id, args.start as string, args.end as string, context.userId,
             );
             for (const h of cleared) {
               if (!h.holder_slack_id || h.holder_slack_id === context.userId) continue;

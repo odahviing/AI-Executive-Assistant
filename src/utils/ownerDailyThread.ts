@@ -19,8 +19,11 @@
  * Typed replies (which carry the daily-root ts, not a per-message ts) route to
  * content attribution in threadBoundApprovalAutoResolve.
  *
- * Scope: APPROVALS ONLY. The brief, calendar-health, and colleague-conversation
- * shadows stay on their own surfaces (owner direction — don't merge those in).
+ * Scope: approvals PLUS context-less shadow notices (shadowNotify route 3, e.g.
+ * "Floating block rebalanced" — owner ruling 2026-09-15: a new top-level thread
+ * per notice a couple of times a day is spam). Kept separate: the morning brief,
+ * the calendar-health report thread, and colleague-conversation shadows (those
+ * carry a conversationKey and thread under their own anchor).
  *
  * `postOwnerDecision` (below) is THE post path for anything decision-shaped.
  * Call it instead of `conn.sendDirect(owner, …)` — a bare DM escapes the book.

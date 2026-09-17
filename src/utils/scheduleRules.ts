@@ -195,9 +195,9 @@ export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<R
  * or above — whichever): the two are different strings for the same rule in
  * several cases (`outside_working_hours` vs `outside_owner_work_hours`,
  * `vacation_or_off_day` vs the search-only `wrong_day_type`), and
- * `mapVerdictToRejectLabel` is the boundary between them. Two ATTENDEE-scoped
- * prefixes (`attendee_busy_collision`, `outside_attendee_work_hours`) are
- * deliberately NOT members here — those are a separate closed vocabulary
+ * `mapVerdictToRejectLabel` is the boundary between them. The ATTENDEE-scoped
+ * prefixes (`attendee_busy_collision`, `outside_attendee_work_hours`,
+ * `attendee_out_of_office`) are deliberately NOT members here — those are a separate closed vocabulary
  * (`ATTENDEE_REASON_PREFIXES`, utils/attendeeAvailability.ts) the walker tags
  * with `:<email>`, combined with this one into `SearchRejectReason`
  * (connectors/graph/findAvailableSlots.ts, the one file that already imports

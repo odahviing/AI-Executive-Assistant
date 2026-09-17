@@ -196,10 +196,10 @@ function deliveredNotification(result: unknown): boolean {
  * the marker only says that
  * one happened. The value names the source, for a log reader:
  *   slots   — find_available_slots rejected a candidate or quarter-hours on an
- *             attendee reason (`attendee_busy_collision:<email>` /
- *             `outside_attendee_work_hours:<email>`, or their per-day tallies
+ *             attendee reason (`<ATTENDEE_REASON_PREFIXES>:<email>` —
+ *             busy / out-of-office / outside hours, or their per-day tallies
  *             `blocked_by` / `attendee_partial_conflicts`, which exist only
- *             for those two reasons — findAvailableSlots.ts's daySummary builder)
+ *             for those reasons — findAvailableSlots.ts's daySummary builder)
  *             — OR it KEPT a slot instead of rejecting it and tagged the finding
  *             on the slot itself: a relaxed owner search's per-slot
  *             `attendee_conflicts[]`, or a colleague-path search's per-slot

@@ -38,7 +38,7 @@ function load(rel) {
     'src/skills/registry': { getActiveSkills: () => [], getSkillTools: () => [] },
     'src/utils/skillPreferences': { formatSystemPromptPreferenceBlocks: () => '' },
     'src/utils/logger': { __esModule: true, default: { info: noop, warn: noop, debug: noop, error: noop } },
-    'src/db/requests': { getAwaitingOwnerRequests: () => [], getOpenRequestsForThread: () => [], getLatestRequestForThread: () => null },
+    'src/db/requests': { getAwaitingOwnerRequests: () => [], getOpenRequestsForThread: () => [], getUnrelayedTerminalRequestForThread: () => null },
     'src/core/requests/types': { parseDetails: () => null },
     'src/core/assistantSelf': { formatAssistantSelfForPrompt: () => '' },
     'src/memory/peopleMemory': { formatPeopleCatalogSync: () => '', readPersonMemorySync: () => '' },

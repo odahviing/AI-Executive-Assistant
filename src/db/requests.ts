@@ -10,6 +10,7 @@
 import crypto from 'crypto';
 import { DateTime } from 'luxon';
 import { getDb } from './client';
+import { getConversationHistory } from './conversations';
 import type {
   CreateRequestInput,
   NextCheckHandler,
@@ -385,6 +386,72 @@ export function getLatestRequestForThread(ownerUserId: string, threadTs: string)
     LIMIT 1
   `).get(ownerUserId, threadTs) as RequestRow | undefined;
   return row ?? null;
+}
+
+/**
+ * stale-terminal-request-relay (2026-09-17) — the colleague-facing status
+ * relay (systemPrompt.ts's threadRequestStatusSection; buildTurnContext.ts's
+ * social-directive suppression reads the same answer) used to take
+ * getLatestRequestForThread's raw newest row and speak up for ANY terminal
+ * one, with no once-only or recency bound. A colleague who keeps replying
+ * inside one DM thread keeps one thread key for weeks (handlers.ts:459 keys
+ * `thread_ts ?? ts`, so every in-thread reply reuses the root ts), so a
+ * flag cancelled 2026-08-19 was led with as news on 2026-09-16, ahead of an
+ * unrelated new ask (Chris Kelley, req_1786971618475_ae5kz) — and would have
+ * been led with again on every later turn of that DM.
+ *
+ * Returns the thread's newest row only while its closure is still NEWS to the
+ * colleague, read entirely from state the spine already writes (no new table,
+ * no new column):
+ *   - terminal, and `requester_notified_at` unset — a confirmed close-loop
+ *     relay (notifyRequesterOfDecision / relayClosureToRequester) already told
+ *     them, and gh#179-a appended that relay to this thread's own history;
+ *   - closed AFTER Maelle's last reply in this thread — once she has replied
+ *     since the closure, this section rendered in that reply's prompt, so the
+ *     status has been said (R3: exactly once). An older assistant row with no
+ *     ts takes the nearest earlier ts as its lower bound; no bound → render;
+ *   - closed within STALE_TERMINAL_RELAY_DAYS — a colleague coming back weeks
+ *     later is not chasing that decision, whatever the thread key says.
+ * A newest row that is still open → null: the open-request sections speak
+ * for it. getLatestRequestForThread itself stays raw — runOutputGates.ts's
+ * claim-checker needs the newest row regardless of relay state.
+ */
+const STALE_TERMINAL_RELAY_DAYS = 7;  // one week: 2 owner workdays across a weekend + the 48h colleague wait, both conventions on this spine
+
+export function getUnrelayedTerminalRequestForThread(ownerUserId: string, threadTs: string): RequestRow | null {
+  const row = getLatestRequestForThread(ownerUserId, threadTs);
+  if (!row || !TERMINAL_STATES.has(row.state) || row.requester_notified_at) return null;
+  const closedAt = parseSpineTimestamp(row.closed_at ?? row.updated_at);
+  if (!closedAt || closedAt < DateTime.utc().minus({ days: STALE_TERMINAL_RELAY_DAYS })) return null;
+  const lastReply = lastAssistantReplyAt(threadTs);
+  return lastReply && lastReply >= closedAt ? null : row;
+}
+
+const TERMINAL_STATES: ReadonlySet<RequestState> = new Set(['resolved', 'cancelled', 'expired']);
+
+/** closed_at is ISO; created_at/updated_at are SQLite `datetime('now')` UTC — accept both. */
+function parseSpineTimestamp(value: string | null | undefined): DateTime | null {
+  if (!value) return null;
+  const iso = DateTime.fromISO(value, { zone: 'utc' });
+  if (iso.isValid) return iso;
+  const sql = DateTime.fromSQL(value, { zone: 'utc' });
+  return sql.isValid ? sql : null;
+}
+
+/**
+ * When Maelle last replied in this thread, from the stored history's Slack-format
+ * ts (postReply.ts stamps every reply; a relay append without one inherits the
+ * nearest earlier ts as a lower bound). Null when nothing bounds it.
+ */
+function lastAssistantReplyAt(threadTs: string): DateTime | null {
+  let bound: DateTime | null = null;
+  let lastReply: DateTime | null = null;
+  for (const m of getConversationHistory(threadTs)) {
+    const ts = m.ts ? Number(m.ts) : NaN;
+    if (Number.isFinite(ts)) bound = DateTime.fromSeconds(ts, { zone: 'utc' });
+    if (m.role === 'assistant') lastReply = bound;
+  }
+  return lastReply;
 }
 
 /**

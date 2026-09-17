@@ -5,7 +5,7 @@ import { getActiveSkills, getSkillTools } from '../../skills/registry';
 import { formatSystemPromptPreferenceBlocks } from '../../utils/skillPreferences';
 import logger from '../../utils/logger';
 import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
-import { getAwaitingOwnerRequests, getOpenRequestsForThread, getLatestRequestForThread } from '../../db/requests';
+import { getAwaitingOwnerRequests, getOpenRequestsForThread, getUnrelayedTerminalRequestForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
 import { formatPeopleCatalogSync, readPersonMemorySync } from '../../memory/peopleMemory';
@@ -338,11 +338,14 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
     // relay text ("Give this to the colleague...") about his own terminal
     // request. A genuine colleague still gets this section unchanged.
     if (isOwnerTyping || !threadTs) return '';
-    const latest = getLatestRequestForThread(user.slack_user_id, threadTs);
-    // Open rows are already covered above; only speak up for a TERMINAL row.
-    if (!latest || latest.state === 'awaiting_owner' || latest.state === 'awaiting_colleague' || latest.state === 'in_flight') {
-      return '';
-    }
+    // Open rows are already covered above. The spine decides whether the
+    // newest TERMINAL row is still news to this colleague (never relayed,
+    // closed since Maelle's last reply here, not weeks old) — see
+    // getUnrelayedTerminalRequestForThread. A stale or already-told closure
+    // renders nothing, so a DM thread a colleague keeps replying inside for
+    // weeks cannot resurface a month-old cancellation ahead of a fresh ask.
+    const latest = getUnrelayedTerminalRequestForThread(user.slack_user_id, threadTs);
+    if (!latest) return '';
     const subj = latest.subject ? `"${latest.subject}"` : 'the request in this thread';
     // gh#179-b — this is exactly the relay point that broke live (Yael,
     // 2026-08-03): correcting a colleague with the real outcome pulls in

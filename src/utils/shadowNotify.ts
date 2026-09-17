@@ -1,7 +1,9 @@
 import type { UserProfile } from '../config/userProfile';
 import { getConnection } from '../connections/registry';
 import type { SendOptions } from '../connections/types';
+import { appendToConversation } from '../db/conversations';
 import logger from './logger';
+import { getOrCreateOwnerDailyThread } from './ownerDailyThread';
 
 /**
  * Shadow mode — v1 safety net.
@@ -13,6 +15,20 @@ import logger from './logger';
  * SECURITY: Shadow messages are ONLY sent to the owner's DM channel.
  * If the originating channel is not the owner's DM, we redirect to the
  * owner's DM instead. Colleagues must NEVER see shadow/debug messages.
+ *
+ * Where in the owner's DM (three routes, first match wins):
+ *   1. `conversationKey` — one owner-DM thread per conversation ("Conversation
+ *      with X"), anchored on the first shadow for that key.
+ *   2. caller's `channel` + `threadTs` IS the owner's own DM thread — post there,
+ *      inside the conversation he is already reading.
+ *   3. everything else (a rebalance move, an unkeyed auto-fix, a flood or
+ *      image-guard notice from a colleague surface) — a reply in the owner's
+ *      daily thread (`getOrCreateOwnerDailyThread`), never a fresh top-level
+ *      DM. Owner ruling 2026-09-15 on "🔧 Floating block rebalanced" landing
+ *      top-level: "spammy to get it a couple of times a day in a new thread".
+ *      Each notice is also appended to that thread's history so a reply to it
+ *      has the notice in context (SlackMaster S4). Plain top-level DM only
+ *      when the daily thread cannot be reached.
  *
  * Ported to the Connection interface in v1.8.14 — no longer takes `app`.
  * Skills that call shadowNotify are now fully transport-agnostic.
@@ -51,7 +67,7 @@ export async function shadowNotify(
      * threads under it. Use the inbound colleague threadTs for inbound-
      * colleague shadows, the request's own origin thread for request-side
      * shadows, or any stable per-conversation id. Omit for system shadows (cron ticks,
-     * dispatchers without a conversation context) — those stay top-level.
+     * dispatchers without a conversation context) — those go to the owner's daily thread.
      */
     conversationKey?: string;
     /**
@@ -169,15 +185,36 @@ export async function shadowNotify(
       // fall through
     }
 
-    // Default: standalone DM to the owner. Used when the originating context
-    // wasn't the owner's DM (e.g. a request initiated by a colleague, or top-level
-    // ask with no thread_ts).
+    // Default: a reply in the owner's daily thread. Used when the originating
+    // context wasn't the owner's DM (a rebalance sweep, a colleague-surface
+    // notice, a top-level ask with no thread_ts) — the day's housekeeping reads
+    // as one thread he can follow or mute instead of a top-level DM per notice.
+    const daily = await getOrCreateOwnerDailyThread({ profile, conn });
+    if (daily) {
+      const res = await conn.postToChannel(daily.channel, text, { threadTs: daily.rootTs, attachments: params.attachments });
+      if (res.ok) {
+        ownerDmChannelCache.set(ownerId, daily.channel);
+        recordShadowInHistory(daily.rootTs, daily.channel, text, res.ts, params.action);
+        if (res.attachments_failed) {
+          logger.warn('shadowNotify attachment upload failed (daily-thread post)', {
+            attachments_failed: res.attachments_failed, action: params.action,
+          });
+        }
+        return;
+      }
+      logger.info('shadowNotify daily-thread post failed, falling back to DM', {
+        reason: res.reason, detail: res.detail, action: params.action,
+      });
+    }
+
+    // Daily thread unreachable — a plain DM still beats a lost notice.
     const res = await conn.sendDirect(ownerId, text, { attachments: params.attachments });
     if (!res.ok) {
       logger.warn('shadowNotify failed (sendDirect)', { reason: res.reason, detail: res.detail, action: params.action });
       return;
     }
     if (res.ref) ownerDmChannelCache.set(ownerId, res.ref);
+    if (res.ts) recordShadowInHistory(res.ts, res.ref ?? '', text, res.ts, params.action);
     if (res.attachments_failed) {
       logger.warn('shadowNotify attachment upload failed (default sendDirect)', {
         attachments_failed: res.attachments_failed, action: params.action,
@@ -186,5 +223,21 @@ export async function shadowNotify(
   } catch (err) {
     // Shadow notifications are fire-and-forget — never let them break the main flow.
     logger.warn('shadowNotify threw', { err: String(err), action: params.action });
+  }
+}
+
+/**
+ * A notice that lands in a thread must be readable by the next turn in that
+ * thread: a DM turn builds its context from `getConversationHistory(threadTs)`
+ * alone (processMessage.ts — no Slack replies merge in a 1:1), so without this
+ * row the owner's "why did you move lunch?" under the notice would meet a model
+ * that never saw the notice. Delivery already succeeded; a history failure is
+ * logged, never retried (a retry would post the notice twice).
+ */
+function recordShadowInHistory(threadTs: string, channel: string, text: string, ts: string | undefined, action: string): void {
+  try {
+    appendToConversation(threadTs, channel, { role: 'assistant', content: text, ts });
+  } catch (err) {
+    logger.warn('shadowNotify — history append failed', { action, threadTs, err: String(err).slice(0, 200) });
   }
 }

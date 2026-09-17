@@ -4,6 +4,7 @@ import {
   getCalendarEvents,
   getOwnerEventsForDecision,
   type CalendarEvent,
+  type DaySummaryEntry,
   updateMeeting,
   findAvailableSlots,
 } from '../../../connectors/graph/calendar';
@@ -1035,6 +1036,13 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
 
                     // eslint-disable-next-line @typescript-eslint/no-require-imports
                     const { attendeeCheckParams } = require('../../../utils/attendeeAvailability') as typeof import('../../../utils/attendeeAvailability');
+                    // 2026-09-15 — the search's own per-day verdicts, so the
+                    // "left for you" line below can name WHY (an attendee's
+                    // whole-day out-of-office) instead of a blanket "no slot
+                    // free for everyone" — the 2026-09-15T10:02Z routine
+                    // rejected all 286 candidates for a week Dina was on
+                    // vacation and could only say it needed his call.
+                    const overlapDiag: { daySummary?: DaySummaryEntry[] } = {};
                     const slots = await findAvailableSlots({
                       userEmail,
                       timezone,
@@ -1052,6 +1060,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                       // clash-fixes into the NEXT week). Nothing free in-window → surface.
                       autoExpand: false,
                       profile,
+                      diagnosticsOut: overlapDiag,
                     });
                     // v3.2.6 (RC1) — prefer a slot that leaves floating blocks
                     // (lunch) untouched. Only displace a block when NO
@@ -1073,7 +1082,27 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                       // v3.2.6 (Part A) — no in-week slot free for everyone. Per
                       // owner direction: do NOT push to next week — return it to him.
                       issue.fix_failed = true;
-                      issue.fix_error = 'No slot free for everyone this week — left for you (move it yourself, or tell me to look next week).';
+                      // 2026-09-15 — when every searched day died on an attendee's
+                      // whole-day out-of-office (`attendee_out_of_office`, the
+                      // walker's own per-day verdict + `oof_until_display`, the
+                      // same span string the owner's OOF quotes), say so by name:
+                      // the decision he actually faces is "skip it or push it to
+                      // the next occurrence", not "find another hour this week".
+                      // First names come off the movable event's own attendee
+                      // list; the raw address never reaches the report.
+                      const oofDays = (overlapDiag.daySummary ?? []).filter(d => d.accepted === 0 && d.top_reasons.includes('attendee_out_of_office'));
+                      const oofEmails = [...new Set(oofDays.flatMap(d => (d.blocked_by ?? []).map(b => b.email.toLowerCase())))];
+                      const nameOf = (email: string) => participantsRaw.find(a => a.emailAddress.address?.toLowerCase() === email)?.emailAddress.name?.trim().split(/\s+/)[0] || email;
+                      const oofUntil = oofDays.map(d => d.oof_until_display).find(Boolean);
+                      if (oofDays.length > 0 && oofDays.length === (overlapDiag.daySummary ?? []).length && oofEmails.length > 0) {
+                        const names = oofEmails.map(nameOf);
+                        const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+                        const be = names.length === 1 ? 'is' : 'are';
+                        const when = oofUntil ? `through ${oofUntil}` : oofDays.length === 1 ? 'that day' : 'on every day I checked';
+                        issue.fix_error = `${who} ${be} out of office ${when} — left for you: skip this occurrence, or tell me to push it to the next one.`;
+                      } else {
+                        issue.fix_error = 'No slot free for everyone this week — left for you (move it yourself, or tell me to look next week).';
+                      }
                     } else {
                       // v3.2.6 (Part A) — the movable meeting is internal-only
                       // (external attendees were gated out above) and `top` is a

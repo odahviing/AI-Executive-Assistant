@@ -8,12 +8,12 @@ for(const method of ['getOpenRequestsForOwner','getAwaitingOwnerRequests','getRe
  const db=new Database(':memory:');try{
  db.exec("CREATE TABLE requests(id TEXT,owner_user_id TEXT,parent_request_id TEXT,kind TEXT,state TEXT,last_surfaced_at TEXT,informed INTEGER,created_at TEXT,updated_at TEXT)");
  const put=db.prepare("INSERT INTO requests VALUES(?,?,'old_refusal',?,'awaiting_owner',NULL,1,datetime('now'),datetime('now'))");put.run('repeat','OWNER','approval');put.run('child','OWNER','outreach');put.run('other','OTHER','approval');
- const requests=compile('src/db/requests.ts',{crypto:require('node:crypto'),luxon:{DateTime},'./client':{getDb:()=>db},'../core/requests/types':{APPROVAL_SUBKINDS:[]},'../core/requests/activityRevertibility':{},'../utils/logger':log});
+ const requests=compile('src/db/requests.ts',{crypto:require('node:crypto'),luxon:{DateTime},'./client':{getDb:()=>db},'./conversations':{getConversationHistory:()=>[]},'../core/requests/types':{APPROVAL_SUBKINDS:[]},'../core/requests/activityRevertibility':{},'../utils/logger':log});
  assert.deepEqual(requests[method]('OWNER','2099-01-01T00:00:00Z').map(r=>r.id),['repeat']);
  }finally{db.close();}
 });
 test('legitimate top-level approval remains visible to owner',()=>{
- const db=new Database(':memory:');try{db.exec("CREATE TABLE requests(id TEXT,owner_user_id TEXT,parent_request_id TEXT,kind TEXT,state TEXT,created_at TEXT);INSERT INTO requests VALUES('top','OWNER',NULL,'approval','awaiting_owner','2026-09-11')");const requests=compile('src/db/requests.ts',{crypto:require('node:crypto'),luxon:{DateTime},'./client':{getDb:()=>db},'../core/requests/types':{},'../core/requests/activityRevertibility':{},'../utils/logger':log});assert.equal(requests.getAwaitingOwnerRequests('OWNER')[0].id,'top');}finally{db.close();}
+ const db=new Database(':memory:');try{db.exec("CREATE TABLE requests(id TEXT,owner_user_id TEXT,parent_request_id TEXT,kind TEXT,state TEXT,created_at TEXT);INSERT INTO requests VALUES('top','OWNER',NULL,'approval','awaiting_owner','2026-09-11')");const requests=compile('src/db/requests.ts',{crypto:require('node:crypto'),luxon:{DateTime},'./client':{getDb:()=>db},'./conversations':{getConversationHistory:()=>[]},'../core/requests/types':{},'../core/requests/activityRevertibility':{},'../utils/logger':log});assert.equal(requests.getAwaitingOwnerRequests('OWNER')[0].id,'top');}finally{db.close();}
 });
 for(const scenario of ['terminal','changed','legitimate'])test('owner-handled scanner '+scenario+' snapshot',async()=>{
  const row={id:'req_scan',kind:'approval',state:'awaiting_owner',owner_user_id:'OWNER',subject:'QBR review',target_name:'Paul',updated_at:'same-second',details_json:'{}'};let fresh=row,closed=0,relayed=0;

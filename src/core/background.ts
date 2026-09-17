@@ -27,7 +27,7 @@ import logger from '../utils/logger';
  * as 'expired' and DMs the holder that the time was freed (threaded into the
  * conversation where the hold was made — decision 4: "always cancel after 2
  * days → DM the person"). Owner-parked holds with no holder slack_id are
- * released silently. Fire-and-forget on the 5-min tick; never throws upward.
+ * released silently. Fire-and-forget via processSlotHoldsIfDue; never throws upward.
  */
 async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promise<void> {
   try {
@@ -68,11 +68,28 @@ async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promis
   }
 }
 
+/** Hold/event subject identity — exact after case/whitespace normalization
+ *  (the same normalization the per-meeting hold cap uses), never fuzzy. */
+function normalizedSubject(s: string | null | undefined): string {
+  return (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 /**
- * Reconcile active holds against the REAL calendar: when a held slot has become
- * an actual meeting WITH the holder on it (e.g. the colleague sent the Outlook
- * invite themselves — "I sent the invite"), the hold is fulfilled. Release it so
- * it doesn't dangle or later "I freed up your slot" a meeting that's now real.
+ * Reconcile active holds against the REAL calendar (owner ruling 2026-09-17:
+ * "I do want to auto-close a hold if you see it on the Outlook"): when the
+ * hold's OWN meeting is on the calendar — e.g. the colleague sent the Outlook
+ * invite themselves — release it `fulfilled_by_booking` (the brief reports it).
+ * A booking made through Maelle never reaches here; createMeeting releases it
+ * on the spot (db/slotHolds releaseHoldsTakenByBooking).
+ *
+ * "The hold's own meeting" means ALL of: a timed real commitment (all-day
+ * events and everything `occupancyRoleOf` — the validator's own predicate —
+ * calls free / working-elsewhere / elastic are never a booked hold; the
+ * 2026-09-15 false release was a two-week all-day free "Dina - Vacation"
+ * marker with the holder on it), the holder as attendee, and the event
+ * COVERING the held window — or, when the hold carries a subject and the
+ * event's subject equals it, merely overlapping it (same meeting, shifted a
+ * little when the invite was sent). Brushing the window is never enough.
  * Owner-parked holds (no holder_slack_id) are skipped — no attendee to match.
  */
 async function reconcileFulfilledHolds(profiles: Map<string, UserProfile>): Promise<void> {
@@ -80,9 +97,14 @@ async function reconcileFulfilledHolds(profiles: Map<string, UserProfile>): Prom
     const { getActiveSlotHolds, releaseSlotHold } = await import('../db/slotHolds');
     const { getPersonMemory } = await import('../db/people');
     const { getCalendarEvents } = await import('../connectors/graph/calendar');
+    const { occupancyRoleOf } = await import('../utils/scheduleRules');
+    const { getFloatingBlocks } = await import('../utils/floatingBlocks');
     const { DateTime } = await import('luxon');
     for (const profile of profiles.values()) {
       const holds = getActiveSlotHolds(profile.user.slack_user_id);
+      if (holds.length === 0) continue;
+      const tz = profile.user.timezone;
+      const floatingBlocks = getFloatingBlocks(profile);
       for (const h of holds) {
         if (!h.holder_slack_id) continue;
         const holderEmail = (getPersonMemory(h.holder_slack_id)?.email ?? '').toLowerCase();
@@ -90,22 +112,24 @@ async function reconcileFulfilledHolds(profiles: Map<string, UserProfile>): Prom
         const startMs = Date.parse(h.start_iso);
         const endMs = Date.parse(h.end_iso);
         if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
-        const day = DateTime.fromMillis(startMs).setZone(profile.user.timezone).toFormat('yyyy-MM-dd');
+        const holdSubject = normalizedSubject(h.subject);
+        const day = DateTime.fromMillis(startMs).setZone(tz).toFormat('yyyy-MM-dd');
         let events;
         try {
-          events = await getCalendarEvents(profile.user.email, day, day, profile.user.timezone);
+          events = await getCalendarEvents(profile.user.email, day, day, tz);
         } catch { continue; }
-        const fulfilled = events.some(ev => {
-          if (ev.isCancelled) return false;
+        const match = events.find(ev => {
+          if (ev.isAllDay || occupancyRoleOf(ev, floatingBlocks, tz) !== 'commitment') return false;
+          if (!(ev.attendees ?? []).some(a => (a.emailAddress?.address ?? '').toLowerCase() === holderEmail)) return false;
           const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
           const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis();
-          if (!(evStart < endMs && evEnd > startMs)) return false;   // must overlap the held window
-          return (ev.attendees ?? []).some(a => (a.emailAddress?.address ?? '').toLowerCase() === holderEmail);
+          const sameSubject = holdSubject !== '' && normalizedSubject(ev.subject) === holdSubject;
+          return sameSubject ? (evStart < endMs && evEnd > startMs) : (evStart <= startMs && evEnd >= endMs);
         });
-        if (fulfilled) {
+        if (match) {
           releaseSlotHold(h.id, 'fulfilled_by_booking');
-          logger.info('reconcileFulfilledHolds — hold became a real meeting, released', {
-            id: h.id, holder: h.holder_name,
+          logger.info('reconcileFulfilledHolds — the held meeting is on the calendar, released', {
+            id: h.id, holder: h.holder_name, eventId: match.id, subjectMatch: normalizedSubject(match.subject) === holdSubject,
           });
         }
       }
@@ -125,7 +149,7 @@ async function processSlotHoldsIfDue(profiles: Map<string, UserProfile>): Promis
   const now = Date.now();
   if (now - lastHoldProcessMs < HOLD_PROCESS_INTERVAL_MS) return;
   lastHoldProcessMs = now;
-  await reconcileFulfilledHolds(profiles);   // release holds that became real meetings
+  await reconcileFulfilledHolds(profiles);   // release holds whose own meeting is now on the calendar
   await sweepExpiredSlotHolds(profiles);      // then expire the genuinely-stale ones
 }
 

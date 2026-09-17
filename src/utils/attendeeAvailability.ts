@@ -382,20 +382,27 @@ export function loadAttendeeAvailabilityForEmails(
 }
 
 /**
- * The two ATTENDEE-scoped rejection prefixes the slot walker emits as
+ * The ATTENDEE-scoped rejection prefixes the slot walker emits as
  * `<prefix>:<email>` (findAvailableSlots.ts) when it is DROPPING conflicted
  * slots. Declared once for the walker and its own day-summary splitter
  * (findAvailableSlots.ts's splitDayReasons), which imports it instead of
  * carrying a copy.
  *
+ * `attendee_out_of_office` (2026-09-15) — the attendee's free/busy reads `oof`
+ * for the WHOLE owner-local day (an all-day out-of-office / vacation span).
+ * Before it, a week-long vacation rejected every candidate as
+ * `attendee_busy_collision`, so the reply could only say "no slot works for
+ * everyone" where "Dina is out that week" was the true, actionable answer
+ * (M9). A partial-day `oof` block stays `attendee_busy_collision`.
+ *
  * The only declaration in the codebase: core/orchestrator/turnHelpers.ts's
- * `attendeeCheckSource` imports this constant rather than hand-typing the two
+ * `attendeeCheckSource` imports this constant rather than hand-typing the
  * strings (landed 2026-09-06) — deliberately NOT widened to also match
  * `travel_buffer_collision`, since owner-side `checkSlot` padding and this
  * attendee-side check both emit that label with no email on purpose, so it's
  * indistinguishable from the owner's own constraint at that call site.
  */
-export const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours'] as const;
+export const ATTENDEE_REASON_PREFIXES = ['attendee_busy_collision', 'outside_attendee_work_hours', 'attendee_out_of_office'] as const;
 
 /**
  * The full attendee-check param bundle for `findAvailableSlots`, in ONE call.

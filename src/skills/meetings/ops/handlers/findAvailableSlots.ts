@@ -16,6 +16,7 @@ import {
   type SearchRejectReason,
   findAvailableSlots,
   firstRejectReason,
+  oofUntilDisplayFor,
   GraphPermissionError,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
@@ -1194,9 +1195,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // rejectedCounts is non-empty — see findAvailableSlots.ts),
                 // never on a per-instant field. Already formatted by the
                 // walker; quoted verbatim into the label below.
-                const brokenRuleUntilDisplay = brokenRule === 'owner_out_of_office'
-                  ? diag.daySummary?.find(d => d.date === cand.start.slice(0, 10))?.oof_until_display
-                  : undefined;
+                const brokenRuleUntilDisplay = oofUntilDisplayFor(brokenRule, diag.daySummary, cand.start.slice(0, 10));
                 // #148 — render the (already owner-local) slot back in the zone the
                 // candidate was STATED in, so Sonnet quotes "08:00 ET (15:00 his time)"
                 // instead of head-converting the owner-local time back to the foreign zone.
@@ -2266,7 +2265,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // A sampled day_summary explains rejected candidates, not every
                   // instant in that day or window.
                   result._no_all_attendee_free_note =
-                    `No suitable slot in this search met every participant constraint, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee busy/travel conflict tagged in \`attendee_conflicts: [{email, reason, line}]\`. Present them and say plainly, per slot, who can't make it by quoting every conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both). A \`day_summary\` row with \`accepted:0\` establishes only that no sampled candidate survived this search and its constraints; describe that scoped result, and describe broader availability only when an explicit calendar finding establishes it. Never present a tagged slot as clean. ${ownerFirst} can choose one, or you can offer to search a different timeframe or wider window.`;
+                    `No suitable slot in this search met every participant constraint, so these are ${ownerFirst}'s genuinely open slots (his working hours, focus time and own calendar all still respected) with each attendee busy/out-of-office/travel conflict tagged in \`attendee_conflicts: [{email, reason, line}]\`. Present them and say plainly, per slot, who can't make it by quoting every conflict entry's \`line\` verbatim (e.g. "Tue 16:15 — <line>"; two conflicts → quote both). A \`day_summary\` row with \`accepted:0\` establishes only that no sampled candidate survived this search and its constraints; describe that scoped result, and describe broader availability only when an explicit calendar finding establishes it. Never present a tagged slot as clean. ${ownerFirst} can choose one, or you can offer to search a different timeframe or wider window.`;
                 }
               }
               if (hasOverOptional) {

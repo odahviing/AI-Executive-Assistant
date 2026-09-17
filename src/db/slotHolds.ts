@@ -11,9 +11,14 @@
  * row that blocks nobody).
  *
  * Lifecycle: active → (released | expired). Expiry = min(2 owner-workdays,
- * slot-start), enforced by `sweepExpiredSlotHolds` on the 5-min tick, which
- * DMs the holder that the time was freed. Release also fires on confirm/book
- * (the hold became a real meeting) and on owner-books-over (with a heads-up).
+ * slot-start), enforced by `sweepExpiredSlotHolds` (30-min cadence), which
+ * DMs the holder that the time was freed. Release also fires when a booking
+ * Maelle makes lands on the held time (`releaseHoldsTakenByBooking`: the
+ * holder's own confirm = fulfilled; someone else booking over it = a heads-up
+ * DM), and when the hold's own meeting shows up on the calendar booked outside
+ * Maelle (`reconcileFulfilledHolds` in core/background.ts: a timed real
+ * commitment with the holder on it covering the held window — never an
+ * all-day / free marker that merely touches it).
  *
  * Honest-tentative, never a hard lock: the reads ANNOTATE a held slot and let
  * Maelle narrate it; they never hard-remove it. A race (someone insists on a
@@ -162,20 +167,45 @@ export function releaseSlotHold(id: string, closureReason: string, expired = fal
   return res.changes > 0;
 }
 
-/** Owner cancels — release any active hold matching (holder name and/or slot).
- *  Owner-only path; returns the rows released so the caller can DM each holder. */
+/** Release every active hold matching (holder and/or slot START instant).
+ *  Explicit release paths only (owner cancel, colleague release, same-slot
+ *  re-hold). The start is compared as an INSTANT: holds are stored as UTC
+ *  ("…Z") while a caller may pass the owner-local offset form of the same time. */
 export function releaseHoldsForOwner(
   ownerUserId: string,
   opts: { holderSlackId?: string; startIso?: string },
   reason: string,
 ): SlotHold[] {
+  const startMs = opts.startIso ? Date.parse(opts.startIso) : NaN;
   const active = getActiveSlotHolds(ownerUserId).filter(h => {
     if (opts.holderSlackId && h.holder_slack_id !== opts.holderSlackId) return false;
-    if (opts.startIso && h.start_iso !== opts.startIso) return false;
+    if (opts.startIso && Date.parse(h.start_iso) !== startMs) return false;
     return true;
   });
   for (const h of active) releaseSlotHold(h.id, reason);
   return active;
+}
+
+/** A booking Maelle made landed on [startIso, endIso) — every active hold
+ *  overlapping it is resolved. THE one definition of a fulfilled hold: the
+ *  holder booked it themselves → 'fulfilled_by_booking' (the brief reports it
+ *  as "became a real meeting"); anyone else took the time → 'slot_booked' (the
+ *  caller DMs that holder). */
+export function releaseHoldsTakenByBooking(
+  ownerUserId: string,
+  startIso: string,
+  endIso: string,
+  bookerSlackId: string,
+): SlotHold[] {
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return [];
+  const taken = getActiveSlotHolds(ownerUserId).filter(h =>
+    startMs < Date.parse(h.end_iso) && endMs > Date.parse(h.start_iso));
+  for (const h of taken) {
+    releaseSlotHold(h.id, h.holder_slack_id === bookerSlackId ? 'fulfilled_by_booking' : 'slot_booked');
+  }
+  return taken;
 }
 
 /** Holds due for expiry (active + past min(2wd, slot-start)). The sweep releases
@@ -188,7 +218,9 @@ export function getDueSlotHolds(nowIso: string): SlotHold[] {
   `).all(nowIso) as SlotHold[];
 }
 
-/** Holds released as fulfilled-by-booking in the last `hours` — so the brief can
+/** Holds whose own meeting got booked in the last `hours` — by the holder
+ *  through Maelle (releaseHoldsTakenByBooking) or seen on the calendar
+ *  (reconcileFulfilledHolds), both 'fulfilled_by_booking' — so the brief can
  *  tell the owner "the slot I was holding for X became a real meeting." */
 export function getRecentlyFulfilledHolds(ownerUserId: string, hours = 24): SlotHold[] {
   const db = getDb();
