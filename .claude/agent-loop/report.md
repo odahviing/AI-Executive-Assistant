@@ -1,6 +1,6 @@
 # Report
 
-**35 rows await you** — v4.9.12 release bookkeeping prepared, 0 new product decisions from this wrap.
-board: 40 open rows — 22 still-real — 11 need a re-read — 7 cite no file — 35 rulable — 5 waiting on a verb (node scripts/ledger-stats.cjs --open)
+**38 rows await you** — v4.9.12 wrapped, 0 new product decisions from this wrap.
+board: 43 open rows — 23 still-real — 10 need a re-read — 10 cite no file — 38 rulable — 5 waiting on a verb (node scripts/ledger-stats.cjs --open)
 
-All previous recommendations and owner deferrals are preserved in the ledger. No pending decision was silently resolved by this release.
+Previous recommendations and owner deferrals remain in the ledger. Related roadmap tickets received partial updates; no pending product decision was resolved by this release.
