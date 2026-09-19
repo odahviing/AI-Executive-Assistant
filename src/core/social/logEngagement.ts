@@ -151,60 +151,31 @@ export function applyOrganicMatchSignal(params: {
 }
 
 /**
- * Reserve the social bookkeeping immediately before a coda send attempt.
+ * Reserve today's social attempt immediately before the transport posts it.
  *
- * Called by the transport after all final gates, immediately before posting.
- * A network rejection may follow an accepted post, so the existing policy
- * reserves cadence before sending. False means the cadence write failed and
- * the transport must drop the candidate; it must not send with an open gate.
+ * This is deliberately separate from `recordCodaDelivered`: the once-per-day
+ * cap must close before the network call so concurrent timers cannot both send,
+ * and it stays closed when the transport outcome is uncertain so Maelle never
+ * retries blindly. The reservation is not evidence that the person received the
+ * topic, so it must never stamp the subject/category markers whose later absence
+ * is interpreted as silence.
  *
- * This used to run at GENERATION time in the orchestrator's coda block, which was
- * exact while the coda was concatenated onto the reply — stamping meant sending.
- * Once the coda became its own message posted a beat later, generation stopped
- * implying delivery: the transport drops it on a leak hit, a prep throw, the
- * person speaking again inside the beat, another turn answering first, or a failed
- * post. Pre-send drops must not consume a ping or raise. The final send attempt
- * reserves both: an ambiguous network failure may still mean delivery.
- *
- * Three writes, guarded SEPARATELY and in this order on purpose:
- *   1. `recordSocialMoment` → `people_memory.last_initiated_at`. This is the
- *      once-per-day cadence gate AND the window anchor
- *      `adjustRankFromColleagueResponse` (below) scores replies against. For a
- *      `raise_new` coda it is the ONLY gate — there is no subject row yet — so it
- *      goes first and a failure in a later write cannot cost us the gate.
- *   2. `markSubjectRaised` → `social_subjects.last_assistant_initiated_at`, which
- *      drives the raise→ignored/answered signal on the person's next chat and
- *      (for `continue` codas) a second independent read of the daily gate.
- *      Absent on `raise_new`.
- *   3. `markCategoryRaised` → `social_person_category_scores.last_raise_attempt_at`,
- *      the marker the picker's in-place category-raise resolve pass judges a
- *      `raise_new` raise's silence by (recordCategoryRaiseUnanswered — two
- *      unanswered raises zero the category, L12). Stamped HERE and only here,
- *      not at compose time: a raise the validator or the coda gates dropped
- *      was never seen, so it must never count as "invited back and ignored" —
- *      compose time keeps only the rotation-slot tried-marker
- *      (recordCategoryRaiseTried, generateCoda.ts). Absent on `continue`.
- *
- * NEVER throws. The caller is a `setTimeout` in the transport where an escaped
- * rejection is an unhandled one, and a social aside is optional by definition —
- * but the gate failing OPEN is the one outcome worth shouting about, because it is
- * the only way the same person gets pinged twice in a day.
+ * False means the cadence write failed and the transport must drop the candidate;
+ * it must not send with an open gate. Never throws because the transport invokes
+ * it from a fire-and-forget timer.
  */
-export function recordCodaDelivered(params: {
+export function reserveCodaAttempt(params: {
   personSlackId: string;
   subjectId?: string;
-  /** Category a `raise_new` coda targeted — with `ownerUserId`, drives write 3. */
-  raisedCategoryLabel?: string;
-  ownerUserId?: string;
 }): boolean {
-  const { personSlackId, subjectId, raisedCategoryLabel, ownerUserId } = params;
+  const { personSlackId, subjectId } = params;
 
   let gateStamped = false;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { recordSocialMoment } = require('../../db/people') as typeof import('../../db/people');
     // Returns false when this slack_id has no people_memory row, in which case
-    // NOTHING was written — a silent no-op before the return value existed.
+    // NOTHING was written — a silent no-op would leave the daily gate open.
     gateStamped = recordSocialMoment(personSlackId, 'maelle');
   } catch (err) {
     logger.error('Coda cadence reservation THREW before send', {
@@ -215,8 +186,27 @@ export function recordCodaDelivered(params: {
     logger.error('Coda cadence reservation failed — transport must drop without sending', {
       personSlackId, subjectId: subjectId ?? null,
     });
-    return false;
   }
+  return gateStamped;
+}
+
+/**
+ * Record the topic markers for a coda whose transport call resolved successfully.
+ *
+ * Subject/category raise markers are later interpreted as delivered-and-unanswered,
+ * so a rejected or uncertain send must never create them. The pre-send cadence
+ * reservation remains intact in that case and prevents a blind retry. Individual
+ * marker failures stay non-throwing because delivery has already happened and a
+ * bookkeeping failure cannot be repaired by sending the coda again.
+ */
+export function recordCodaDelivered(params: {
+  personSlackId: string;
+  subjectId?: string;
+  /** Category a delivered `raise_new` coda targeted. */
+  raisedCategoryLabel?: string;
+  ownerUserId?: string;
+}): void {
+  const { personSlackId, subjectId, raisedCategoryLabel, ownerUserId } = params;
 
   if (subjectId) {
     try {
@@ -249,9 +239,8 @@ export function recordCodaDelivered(params: {
 
   logger.info('Social coda delivery recorded', {
     personSlackId, subjectId: subjectId ?? null,
-    raisedCategoryLabel: raisedCategoryLabel ?? null, gateStamped,
+    raisedCategoryLabel: raisedCategoryLabel ?? null,
   });
-  return gateStamped;
 }
 
 /**
@@ -266,13 +255,14 @@ export function recordCodaDelivered(params: {
  * engagement; down-ranking is owner-directive / revival-aging only, never here.
  *
  * Window anchor is `people_memory.last_initiated_at`, stamped by
- * `recordCodaDelivered` above on every coda reaching its final SEND ATTEMPT —
+ * `reserveCodaAttempt` above on every coda reaching its final SEND ATTEMPT —
  * continue AND raise_new. The old anchor read the most-recent RAISED SUBJECT,
  * which is NULL for raise_new (discovery) codas — so a warm reply to "any good
  * music lately?" never scored. Anchoring on last_initiated_at fixes that. Because
  * the stamp now follows final send eligibility rather than generation, a reply cannot be
- * credited for a pre-send drop. An ambiguous network failure may still have
- * delivered. There is no longer a 48h coda rank-check (ignoring is free, and engagement
+ * credited for a pre-send drop. A rejected send remains conservatively reserved
+ * because an ambiguous network failure may still have delivered. There is no longer a
+ * 48h coda rank-check (ignoring is free, and engagement
  * is credited here, live, for both coda modes).
  */
 export function adjustRankFromColleagueResponse(params: {

@@ -28,7 +28,7 @@ function harness({ captureFailure = false, profileFailure = false } = {}) {
     if (modules.has(rel)) return modules.get(rel).exports;
     assert.ok(allowed.has(rel), `Unexpected module ${rel}`);
     const mod = { exports: {} }; modules.set(rel, mod);
-    const sourceRoot = process.env.SOCIAL_LIFECYCLE_BEFORE_DIR || root;
+    const sourceRoot = process.env.SOCIAL_LIFECYCLE_BEFORE_DIR || process.argv[2] || root;
     const file = path.join(sourceRoot, rel);
     const source = fs.readFileSync(fs.existsSync(file) ? file : path.join(root,rel), 'utf8');
     const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
@@ -66,7 +66,11 @@ function harness({ captureFailure = false, profileFailure = false } = {}) {
   const state = load('src/core/social/stateMachine.ts');
   const skill = new (load('src/skills/social.ts').SocialSkill)();
   const engagement = load('src/core/social/logEngagement.ts');
-  return { db, people, subjects, state, skill, engagement, capture, runCapture:()=>load('src/memory/capturePass.ts').runCapturePass(profile), random: n => {random=n;},
+  const deliver = params => {
+    assert.equal(engagement.reserveCodaAttempt(params), true);
+    engagement.recordCodaDelivered(params);
+  };
+  return { db, people, subjects, state, skill, engagement, deliver, capture, runCapture:()=>load('src/memory/capturePass.ts').runCapturePass(profile), random: n => {random=n;},
     note: (sender, target, note = 'PRIVATE owner assessment', initiated_by = 'maelle') => skill.executeToolCall('note_about_person', { colleague_slack_id: target, colleague_name: target, note, topic: 'gaming', subject: 'a game', initiated_by }, { profile, userId: sender, senderRole: sender === 'U_OWNER' ? 'owner' : 'colleague', authority: sender === 'U_OWNER' ? 'owner' : 'colleague', surface: sender === 'U_OWNER' ? 'owner_dm' : 'colleague_dm' }),
     pick: personSlackId => state.directiveForProactiveSlot({ personSlackId, ownerUserId: 'U_OWNER', ownerTimezone:'UTC' }),
   };
@@ -102,7 +106,7 @@ test('direct colleague social note and owner self note preserve activity and cad
 test('person-initiated note preserves eligibility; accepted coda accounting closes it', async () => {
   const h = harness(); await h.note('U_PERSON','U_PERSON','Shared voluntarily','person');
   assert.equal(h.pick('U_PERSON').mode,'raise_new');
-  h.engagement.recordCodaDelivered({personSlackId:'U_PERSON',ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'});
+  h.deliver({personSlackId:'U_PERSON',ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'});
   assert.equal(h.pick('U_PERSON').mode,'none');
   assert.equal(h.pick('U_OWNER').mode,'raise_new');
 });
@@ -124,7 +128,7 @@ test('unanswered category raises expire only after two delivered attempts', () =
   const h = harness(); const category=h.subjects.getCategoryByLabel('gaming');
   h.subjects.adjustCategoryScore({ownerUserId:'U_OWNER',personSlackId:'U_PERSON',categoryId:category.id,delta:1});
   for(let count=1;count<=2;count++) {
-    h.engagement.recordCodaDelivered({personSlackId:'U_PERSON',ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'});
+    h.deliver({personSlackId:'U_PERSON',ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'});
     h.db.exec("UPDATE people_memory SET last_initiated_at=datetime('now','-2 days'); UPDATE social_person_category_scores SET last_raise_attempt_at=datetime('now','-2 days')");
     h.pick('U_PERSON');
     assert.equal(h.subjects.getCategoryScoresForPerson('U_PERSON')[0].score,count===2?0:1);
@@ -133,17 +137,24 @@ test('unanswered category raises expire only after two delivered attempts', () =
 test('failed cadence reservation returns false without marking a subject or category raised', () => {
   const h=harness(); const category=h.subjects.getCategoryByLabel('gaming');
   const sub=h.subjects.createSubject({ownerUserId:'U_OWNER',personSlackId:'U_MISSING',categoryId:category.id,label:'Missing person game',createdBy:'colleague'});
-  const reserved=h.engagement.recordCodaDelivered({personSlackId:'U_MISSING',subjectId:sub.id,ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'});
+  const reserved=h.engagement.reserveCodaAttempt({personSlackId:'U_MISSING',subjectId:sub.id});
   assert.equal(reserved,false);
   assert.equal(h.subjects.getSubjectById(sub.id).last_assistant_initiated_at,null);
   assert.equal(h.subjects.getCategoryScoresForPerson('U_MISSING')[0].last_raise_attempt_at,null);
 });
-test('successful cadence reservation returns true and preserves subject marker', () => {
+test('reserved but unconfirmed coda closes cadence without creating a silence marker', () => {
   const h=harness(); const category=h.subjects.getCategoryByLabel('gaming');
   const sub=h.subjects.createSubject({ownerUserId:'U_OWNER',personSlackId:'U_PERSON',categoryId:category.id,label:'Real game',createdBy:'colleague'});
-  const reserved=h.engagement.recordCodaDelivered({personSlackId:'U_PERSON',subjectId:sub.id});
-  // The old API returned void; behavioral control is its persisted state.
-  if (h.state.isSocialInitiationDue) assert.equal(reserved,true);
+  const params={personSlackId:'U_PERSON',subjectId:sub.id,ownerUserId:'U_OWNER',raisedCategoryLabel:'gaming'};
+  assert.equal(h.engagement.reserveCodaAttempt(params),true);
+  assert.equal(h.subjects.getSubjectById(sub.id).last_assistant_initiated_at,null);
+  assert.equal(h.subjects.getCategoryScoresForPerson('U_PERSON')[0].last_raise_attempt_at,null);
+  assert.equal(h.pick('U_PERSON').mode,'none','uncertain send must not reopen the day for a blind retry');
+});
+test('confirmed coda delivery creates subject marker after reservation', () => {
+  const h=harness(); const category=h.subjects.getCategoryByLabel('gaming');
+  const sub=h.subjects.createSubject({ownerUserId:'U_OWNER',personSlackId:'U_PERSON',categoryId:category.id,label:'Real game',createdBy:'colleague'});
+  h.deliver({personSlackId:'U_PERSON',subjectId:sub.id});
   assert.ok(h.subjects.getSubjectById(sub.id).last_assistant_initiated_at);
   assert.equal(h.pick('U_PERSON').mode,'none');
 });
@@ -178,7 +189,7 @@ test('exact repeated subject creation reuses the existing row including retired 
 test('failed capture records unknown and cannot count a real reply as silence', async () => {
   const h=harness({captureFailure:true}); const category=h.subjects.getCategoryByLabel('gaming');
   const sub=h.subjects.createSubject({ownerUserId:'U_OWNER',personSlackId:'U_PERSON',categoryId:category.id,label:'A real game',createdBy:'colleague'});
-  h.engagement.recordCodaDelivered({personSlackId:'U_PERSON',subjectId:sub.id});
+  h.deliver({personSlackId:'U_PERSON',subjectId:sub.id});
   h.db.exec("UPDATE people_memory SET last_initiated_at=datetime('now','-2 days'); UPDATE social_subjects SET last_assistant_initiated_at=datetime('now','-2 days'), unanswered_raises=1");
   await h.runCapture();
   assert.equal(h.capture.marked,true);
@@ -193,7 +204,7 @@ for(const profileFailure of [true,false]) test(`profile extraction ${profileFail
   const h=harness({profileFailure}); const category=h.subjects.getCategoryByLabel('gaming');
   const sub=h.subjects.createSubject({ownerUserId:'U_OWNER',personSlackId:'U_PERSON',categoryId:category.id,label:'A real game',createdBy:'colleague'});
   h.capture.subjectId=sub.id;
-  h.engagement.recordCodaDelivered({personSlackId:'U_PERSON',subjectId:sub.id});
+  h.deliver({personSlackId:'U_PERSON',subjectId:sub.id});
   await h.runCapture();
   assert.equal(h.capture.modelCalls,profileFailure?1:2);
   if(profileFailure) {

@@ -50,6 +50,7 @@ import {
   type OutreachJob,
 } from '../../db';
 import logger from '../../utils/logger';
+import { withRequestLock } from '../../core/requests/resolver';
 
 // ── Outreach reply classifier (Sonnet) ───────────────────────────────────────
 
@@ -122,7 +123,18 @@ async function isOutreachReplyByContext(params: {
  */
 function buildOutreachJobContextBlock(job: OutreachJob): string {
   const preview = job.message.slice(0, 400);
+  let originalAsk = '';
+  if (job.context_json && (job.intent === 'oof_reengage'
+      || (job.request_id && getRequest(job.request_id)?.subkind === 'oof_reengage'))) {
+    try {
+      const context = JSON.parse(job.context_json) as Record<string, unknown>;
+      const facts = Object.fromEntries(['subject', 'duration_minutes', 'attendee_emails', 'meeting_mode', 'requester_is_attending']
+        .filter(key => context[key] !== undefined).map(key => [key, context[key]]));
+      originalAsk = `Original meeting request facts: ${JSON.stringify(facts)}`;
+    } catch { /* The existing message remains available if legacy payload is corrupt. */ }
+  }
   return [
+    ...(originalAsk ? [originalAsk] : []),
     `AN OUTREACH YOU SENT THIS COLLEAGUE ON THE OWNER'S BEHALF IS STILL OPEN`,
     `You asked ${job.colleague_name}: "${preview}${job.message.length > preview.length ? '…' : ''}"`,
     `Their message just now is almost certainly the reply to that. If it resolves what was asked (a time, a yes/no, an edit), use your real tools to act on it now — never just acknowledge it in words. If it needs the owner's judgment, route it through the normal approval flow.`,
@@ -413,51 +425,59 @@ export async function closeOutreachReplyIfResolvedThisTurn(params: {
   }
   if (!mutated && !booked && !freshApproval) return;
 
-  try {
-    updateOutreachJob(params.jobId, { status: 'replied' });
-    logger.info('Outreach reply resolved this turn — linked request closed', {
-      jobId: params.jobId, mutated, booked, freshApproval,
-    });
-  } catch (err) {
-    logger.warn('closeOutreachReplyIfResolvedThisTurn — close failed', {
-      jobId: params.jobId, err: String(err).slice(0, 200),
-    });
-  }
-
-  // Owner-visible trace/relay — see the doc comment above. A durable
-  // `logEvent` row always; a real Slack message into the outreach's own
-  // owner-conversation thread ONLY on mutated/booked — freshApproval's own
-  // owner-facing post already happened inside createApprovalRequest, so
-  // posting again here would double him up on the same event (R3).
-  try {
-    const linkedRequestId = getLinkedRequestIdForOutreach(params.jobId);
-    const requestRow = linkedRequestId ? getRequest(linkedRequestId) : null;
-    const who = requestRow?.target_name ?? requestRow?.requester_name ?? 'They';
-    const subject = requestRow?.subject || 'that outreach';
-    const detail = (mutated || booked)
-      ? `${who} replied to "${subject}" and it's handled — I acted on it directly.`
-      : `${who} replied to "${subject}" and it needed your call, so I've raised a fresh approval for it.`;
-    if ((mutated || booked) && requestRow?.owner_dm_channel) {
-      const conn = getConnection(params.ownerUserId, 'slack');
-      if (conn) {
-        await conn.postToChannel(requestRow.owner_dm_channel, detail, {
-          threadTs: requestRow.owner_dm_thread_ts ?? undefined,
-        });
-      }
+  const linkedRequestId = getLinkedRequestIdForOutreach(params.jobId);
+  if (!linkedRequestId) return;
+  await withRequestLock(linkedRequestId, async () => {
+    const current = getRequest(linkedRequestId);
+    if (!current || !['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(current.state)) return;
+    try {
+      updateOutreachJob(params.jobId, { status: 'replied' });
+      if (getRequest(linkedRequestId)?.state !== 'resolved') return;
+      logger.info('Outreach reply resolved this turn — linked request closed', {
+        jobId: params.jobId, mutated, booked, freshApproval,
+      });
+    } catch (err) {
+      logger.warn('closeOutreachReplyIfResolvedThisTurn — close failed', {
+        jobId: params.jobId, err: String(err).slice(0, 200),
+      });
+      return;
     }
-    logEvent({
-      ownerUserId: params.ownerUserId,
-      type: 'outreach_reply',
-      title: (mutated || booked) ? `${who} — outreach resolved` : `${who} — outreach escalated`,
-      detail,
-      actor: who,
-      refId: params.jobId,
-    });
-  } catch (err) {
-    logger.warn('closeOutreachReplyIfResolvedThisTurn — owner relay failed', {
-      jobId: params.jobId, err: String(err).slice(0, 200),
-    });
-  }
+
+    // Owner-visible trace/relay — see the doc comment above. A durable
+    // `logEvent` row always; a real Slack message into the outreach's own
+    // owner-conversation thread ONLY on mutated/booked — freshApproval's own
+    // owner-facing post already happened inside createApprovalRequest, so
+    // posting again here would double him up on the same event (R3).
+    try {
+      const linkedRequestId = getLinkedRequestIdForOutreach(params.jobId);
+      const requestRow = linkedRequestId ? getRequest(linkedRequestId) : null;
+      const who = requestRow?.target_name ?? requestRow?.requester_name ?? 'They';
+      const subject = requestRow?.subject || 'that outreach';
+      const detail = (mutated || booked)
+        ? `${who} replied to "${subject}" and it's handled — I acted on it directly.`
+        : `${who} replied to "${subject}" and it needed your call, so I've raised a fresh approval for it.`;
+      if ((mutated || booked) && requestRow?.owner_dm_channel) {
+        const conn = getConnection(params.ownerUserId, 'slack');
+        if (conn) {
+          await conn.postToChannel(requestRow.owner_dm_channel, detail, {
+            threadTs: requestRow.owner_dm_thread_ts ?? undefined,
+          });
+        }
+      }
+      logEvent({
+        ownerUserId: params.ownerUserId,
+        type: 'outreach_reply',
+        title: (mutated || booked) ? `${who} — outreach resolved` : `${who} — outreach escalated`,
+        detail,
+        actor: who,
+        refId: params.jobId,
+      });
+    } catch (err) {
+      logger.warn('closeOutreachReplyIfResolvedThisTurn — owner relay failed', {
+        jobId: params.jobId, err: String(err).slice(0, 200),
+      });
+    }
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

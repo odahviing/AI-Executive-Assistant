@@ -515,11 +515,11 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
     }
     try { updateRequest(rec.id, { closureReason: `${rec.subkind}_reverted` }); } catch { /* best-effort */ }
 
-    // Permanent "don't touch this event again" dismissal — auto_move ONLY. An
-    // owner-requested move had no autofix to suppress; writing this for a
-    // plain move_meeting revert would silently disable calendar-health on
-    // that event forever.
-    if (rec.subkind === 'auto_move') {
+    let rejectionRecorded = false;
+    let rejectionStorageFailed = false;
+    // Reverting an automatic move rejects it permanently, including rebalance activity.
+    // Explicit owner-requested moves retain ordinary revert behavior.
+    if (rec.subkind === 'auto_move' || (rec.subkind === 'move_meeting' && rec.initiated_by_role === 'system')) {
       const keptEventId = typeof oc.kept_event_id === 'string' ? oc.kept_event_id : null;
       try {
         const { dismissOverlapIssue, DISMISSAL_NEVER_EXPIRES } = await import('../../../../db/calendarIssues');
@@ -533,7 +533,8 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
           eventEndMs: DISMISSAL_NEVER_EXPIRES,
           notes: 'owner reverted auto-move — leave it',
         });
-      } catch (e) { logger.warn('revert_action — dismissal write failed', { err: String(e).slice(0, 160) }); }
+        rejectionRecorded = true;
+      } catch (e) { rejectionStorageFailed = true; logger.warn('revert_action — dismissal write failed', { err: String(e).slice(0, 160) }); }
     }
 
     const restoredLocal = DateTime.fromISO(originalStart, { zone: timezone }).toFormat('EEE d MMM HH:mm');
@@ -582,7 +583,8 @@ export async function handleRevertAction(args: Record<string, unknown>, ctx: OpC
       corrections_relayed: cascade.correctionsRelayed,
       message: `Put "${viewSubject}" back to ${restoredLocal}`
         + `${cascade.correctionsRelayed ? ` and let ${cascade.correctionsRelayed} ${cascade.correctionsRelayed === 1 ? 'person' : 'people'} know` : ''}.`
-        + `${rec.subkind === 'auto_move' ? " I won't auto-move it again." : ''}`,
+        + `${rejectionRecorded ? " I won't auto-move it again." : ''}`
+        + `${rejectionStorageFailed ? " The move was restored, but I could not save your rejection; that decision still needs recording." : ''}`,
     };
   }
 

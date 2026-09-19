@@ -8,6 +8,8 @@ const { DateTime, Settings } = require('luxon');
 const root = path.resolve(__dirname, '..');
 const dir = path.join(root, 'artifacts/workshop-verification/calendar-health-20260912/matchmaker');
 const before = process.argv.includes('--before');
+const outputArg = process.argv.indexOf('--output-dir');
+const outputDir = outputArg >= 0 ? path.resolve(process.argv[outputArg + 1]) : path.join(dir, 'current');
 Settings.now = () => DateTime.fromISO('2026-09-13T06:00:00Z').toMillis();
 // Avoid recursive Settings.now inside fromISO.
 const now = Date.parse('2026-09-13T06:00:00Z'); Settings.now = () => now;
@@ -49,7 +51,7 @@ function harness(opts = {}) {
     verifyApprovedCalendarAction: async p => { calls.push(['verify', p]); return opts.strictVerify ?? { status: 'desired_state_observed' }; },
     findAvailableSlots: async p => { calls.push(['slots', p]); return opts.slots ?? []; },
   };
-  const fb = { densityCommitments: () => [], getFloatingBlocks: p => p.meetings.floating_blocks, blockAppliesOnDay: () => true, isFloatingBlockEvent: (e, b) => e.subject === b.name, floatingBlockSyntheticEventId: (p, name, date) => ({ eventId: `${name}:${date}`, eventEndMs: Date.parse(`${date}T20:00Z`) }), windowMsForDay: (date, time, zone) => DateTime.fromISO(`${date}T${time}`, { zone }).toMillis() };
+  const fb = { hasOtherHumanAttendee: e => (e.attendees ?? []).some(a => a.emailAddress.address !== profile.user.email), densityCommitments: () => [], getFloatingBlocks: p => p.meetings.floating_blocks, blockAppliesOnDay: () => true, isFloatingBlockEvent: (e, b) => e.subject === b.name, floatingBlockSyntheticEventId: (p, name, date) => ({ eventId: `${name}:${date}`, eventEndMs: Date.parse(`${date}T20:00Z`) }), windowMsForDay: (date, time, zone) => DateTime.fromISO(`${date}T${time}`, { zone }).toMillis() };
   const work = { computeHealthCheckWindow: () => ({ startDate: '2026-09-14', endDate: '2026-09-14' }), getEffectiveWorkDay: () => ({ windows: [{ startMin: 540, endMin: 1080 }], hasOverride: false }), formatMinuteOfDay: n => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`, totalWorkMinutes: w => w.reduce((n, x) => n + x.endMin - x.startMin, 0) };
   const modules = new Map();
   function load(name) {
@@ -136,5 +138,6 @@ async function test(id, fn) { try { await fn(); results.push({ id, status: 'pass
   await test('terminal-issue-no-revival', async () => { const h = harness({ rows: [{ ...issue, status: 'approved' }] }); const r = await h.manage({ action: 'start_resolve', issue_id: 'owned' }); assert.equal(r.error, 'issue_closed'); assert.equal(h.requestRows.length, 0); });
   await test('legitimate-approve-control', async () => { const h = harness({ rows: [issue] }); const r = await h.manage({ action: 'approve', issue_id: 'owned' }); assert.equal(r.updated, true); assert.equal(h.rows[0].status, 'approved'); });
   const report = { snapshot: before ? 'preserved c3d042d source' : 'working tree', results, passed: results.filter(r => r.status === 'pass').length, failed: results.filter(r => r.status === 'fail').length };
-  fs.writeFileSync(path.join(dir, before ? 'before-results.json' : 'after-results.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2)); process.exitCode = report.failed ? 1 : 0;
+  fs.mkdirSync(outputDir,{recursive:true});
+  fs.writeFileSync(path.join(outputDir, before ? 'before-results.json' : 'after-results.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2)); process.exitCode = report.failed ? 1 : 0;
 })();

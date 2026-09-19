@@ -161,7 +161,11 @@ function deliveredRaiseHarness() {
     return dependencies[name];
   };
   vm.runInNewContext(`(function(require,module,exports){${deliveryCode}\n})`, {}, { filename: deliveryPath })(isolatedRequire, module, module.exports);
-  return { record: module.exports.recordCodaDelivered, calls };
+  return {
+    reserve: module.exports.reserveCodaAttempt,
+    record: module.exports.recordCodaDelivered,
+    calls,
+  };
 }
 
 test('incident-shaped search: preserve article evidence without assigning the topic to the recipient', async () => {
@@ -237,6 +241,7 @@ test('accepted continue coda leaves raise accounting to the delivery boundary', 
 
 test('confirmed delivery preserves cadence and subject raise accounting', () => {
   const h = deliveredRaiseHarness();
+  assert.equal(h.reserve({ personSlackId: 'U_RECIPIENT', subjectId: 'subj_recipient_burnout' }), true);
   h.record({ personSlackId: 'U_RECIPIENT', subjectId: 'subj_recipient_burnout', ownerUserId: 'U_OWNER' });
   assert.deepEqual(h.calls.socialMoments, [['U_RECIPIENT', 'maelle']]);
   assert.deepEqual(h.calls.raisedSubjects, ['subj_recipient_burnout']);

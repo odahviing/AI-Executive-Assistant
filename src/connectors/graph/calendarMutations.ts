@@ -21,9 +21,12 @@ function resolveOwnerUserId(userEmail: string): string {
 }
 
 /**
- * One Graph dateTime/timeZone pair. Timed events carry UTC so two explicitly
- * different occurrences of a repeated local hour remain different instants.
- * All-day events retain local calendar dates and midnight boundaries.
+ * One Graph dateTime/timeZone pair. Ordinary timed events retain the supplied
+ * owner/effective timezone as Graph metadata, while the zoneless wall clock is
+ * derived from the exact input instant. A repeated DST wall clock has two
+ * possible instants and Graph exposes no fold marker, so only that ambiguous
+ * endpoint falls back to UTC. All-day events retain local calendar dates and
+ * midnight boundaries in the supplied timezone.
  */
 function normalizeForGraph(iso: string, tz: string, isAllDay: boolean): { dateTime: string; timeZone: string } {
   // CRITICAL: anchor a ZONELESS datetime in the INTENDED tz, not the process's
@@ -35,8 +38,9 @@ function normalizeForGraph(iso: string, tz: string, isAllDay: boolean): { dateTi
   // only ever appeared on trips (at home server-tz == home-tz, so it was a
   // no-op). `zone: tz` makes the binding canonical regardless of where we run.
   const dt = DateTime.fromISO(iso, { zone: tz, setZone: true });
-  if (!dt.isValid) throw new Error('Cannot serialize an invalid calendar datetime');
-  const timeZone = isAllDay ? tz : 'UTC';
+  const local = dt.setZone(tz);
+  if (!dt.isValid || !local.isValid) throw new Error('Cannot serialize an invalid calendar datetime');
+  const timeZone = !isAllDay && local.getPossibleOffsets().length > 1 ? 'UTC' : tz;
   return { dateTime: dt.setZone(timeZone).toISO({ includeOffset: false, suppressMilliseconds: true })!, timeZone };
 }
 

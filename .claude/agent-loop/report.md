@@ -1,10 +1,10 @@
-# Report — cumulative since the 4.9.9 wrap
+# Report — cumulative since the 4.9.10 release
 
-**30 rows await you** — v4.9.9 wrapped and shipped (d946224), 1 new from this wrap: a hold is not auto-closed by a real meeting whose title matches a floating block.
+**34 rows await you** — v4.9.10 verified for release; deployment pending. Four optional product proposals remain from this audit; the seven answered decisions are resolved.
 
-35 open rows — 25 still-real · 5 need a re-read · 5 cite no file · 30 rulable · 5 waiting on a verb.
+39 open rows — 25 still-real · 9 need a re-read · 5 cite no file · 34 rulable · 5 waiting on a verb. Counts: node scripts/ledger-stats.cjs --open.
 
-out: 4 built and shipped in 4.9.9, 1 discovery queued, golden 30/30 answered (18 pass, 12 stale anchors, 0 fail).
+out: 34 new corrections independently verified; two historical records revalidated without new implementation. All103 executable suite/timezone checks and typecheck pass. Golden30 complete:14 pass,16 relocated anchors,0 fail; original Z30 failure preserved and repaired.
 
 ### pending owner (0)
 

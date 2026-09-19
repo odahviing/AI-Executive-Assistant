@@ -25,6 +25,7 @@ for(const kind of ['reschedule','oof'])for(const nudged of [false,true])test('R4
  const row={id:'req_follow',state:'awaiting_colleague',phase:nudged?'outreach:nudged':'outreach:awaiting_reply',next_check_at:'2026-10-01T00:00:00Z',next_check_handler:'outreach_expiry'};
  const prefix=kind==='reschedule'?'../':'../../',m={'@anthropic-ai/sdk':{},luxon:{DateTime}};
  const put=(file,value)=>m[prefix+file]=value;
+ put('core/requests/resolver',{withRequestLock:async(_id,work)=>work()});put('core/requests/closeRequest',{});
  put('llm/client',{getAnthropicClient:()=>({messages:{create:async()=>({content:[{type:'text',text:'{"status":"checking"}'}]})}})});put('llm/models',{});
  put('db/requests',{getRequest:()=>row,updateRequest:(id,p)=>{if(p.nextCheckAt!==undefined)row.next_check_at=p.nextCheckAt;if(p.nextCheckHandler!==undefined)row.next_check_handler=p.nextCheckHandler;if(p.phase!==undefined)row.phase=p.phase;}});
  put('db/jobs',{updateOutreachJob(){}});put('db',{appendToConversation(){}});put('db/people',{});put('utils/attendeeAvailability',{loadAttendeeAvailabilityForPerson:(person,fallback)=>({timezone:person?.timezone||fallback}),attendeeTzForDay:entry=>entry.timezone});put('connectors/graph/calendar',{});put('connectors/graph/calendarReads',{});put('utils/responseDeadline',{});put('utils/scheduleRules',{});put('utils/shadowNotify',{});put('utils/extractJson',{extractFirstJsonObject:x=>x});put('utils/logger',log);

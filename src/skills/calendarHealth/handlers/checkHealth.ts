@@ -398,7 +398,7 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 b,
               ),
             );
-            if (matchesAnyBlock) return false;
+            if (matchesAnyBlock && !fb.hasOtherHumanAttendee(e, profile)) return false;
             // Exclusion 5: yaml category flagged no_issue_tracking — unless this
             // is a mixed meeting (see the note above the filter).
             if (skipsIssueTracking(e, noTrackCategories, ownerEmailLowerForTracking, privateEmailsLower)) return false;
@@ -1298,6 +1298,11 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 consolidateDense: true,
                 preloadedDayEvents: dayEvents,   // #143c — batched read
               });
+              for (const question of result.ownerQuestions ?? []) {
+                issues.push({ type: 'double_booking', date: dt.toFormat('yyyy-MM-dd'),
+                  eventIds: [question.eventId, question.peerEventId],
+                  description: question.description, suggestion: question.description });
+              }
               for (const id of result.movedBlockEventIds) consolidatedBlockIds.add(id);
               if (result.moved > 0) {
                 internalActions.push({
@@ -1660,7 +1665,19 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
         // the owner can verify "all good". v3.5.x — vacuous now means "nothing
         // worth saying" (all detected issues acknowledged/resolved), so the
         // routine goes quiet instead of re-sending a waived count.
-        const vacuous = summaryLines.length === 0 && narratableCount === 0 && fixesApplied === 0;
+        // Owner rule: only successful NEW blocks on the literal final scan date
+        // are routine maintenance. Keep the full result and action evidence for
+        // explicit checks and claim verification; only automatic delivery uses
+        // this existing silence flag. Any other issue/action keeps its report.
+        const onlyHorizonAdditions = mode === 'active' && issues.length > 0
+          && activeIssues.length === 0
+          && issues.every(i => i.type === 'missing_floating_block' && i.fixed === true
+            && !i.fix_failed && !i.fix_unconfirmed && i.date === endDate)
+          && fixesApplied === issues.length
+          && internalActions.length === issues.length
+          && internalActions.every(a => a.tool === 'book_floating_block');
+        const vacuous = onlyHorizonAdditions
+          || (summaryLines.length === 0 && narratableCount === 0 && fixesApplied === 0);
         // v3.5.x (#3 follow-up, 2026-06-25) — the routine narrates from `issues`,
         // not the deterministic `summary_text`, so filtering only summary_text
         // left an acknowledged issue (the approved "5 weeklies on June 29") in

@@ -28,7 +28,8 @@ import type { UserProfile } from '../config/userProfile';
 import type { OutreachJob } from '../db/jobs';
 import { createOutreachJob, updateOutreachJob, getLinkedRequestIdForOutreach } from '../db/jobs';
 import { getRequest, updateRequest } from '../db/requests';
-import { calcResponseDeadline } from '../utils/responseDeadline';
+import { withRequestLock } from '../core/requests/resolver';
+import { closeRequest } from '../core/requests/closeRequest';
 import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
 import { renderClockInZone } from '../utils/timezoneConvert';
 import { resolveStatedInstant } from '../utils/weTimeResolver';
@@ -141,7 +142,19 @@ export async function handleRescheduleReply(
     bot_token: string;
   },
 ): Promise<boolean> {
+  const requestId = params.job.request_id ?? getLinkedRequestIdForOutreach(params.job.id);
+  // Serialize with the spine sweep while retaining the durable timer.
+  const handle = () => handleRescheduleReplyLocked(params, requestId);
+  return requestId ? withRequestLock(requestId, handle) : handle();
+}
+
+async function handleRescheduleReplyLocked(
+  params: Parameters<typeof handleRescheduleReply>[1],
+  requestId: string | null | undefined,
+): Promise<boolean> {
   const { job, replyText, profile } = params;
+  const current = requestId ? getRequest(requestId) : undefined;
+  if (current && !['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(current.state)) return true;
   if (job.intent !== 'meeting_reschedule' || !job.context_json) return false;
 
   const conn = getConnection(profile.user.slack_user_id, 'slack');
@@ -183,15 +196,64 @@ export async function handleRescheduleReply(
     counter: decision.counter_start,
   });
 
-  // v3.1.1 — reply arrived → kill the expiry timer. Path 2 moved it off the
-  // deleted `outreach_expiry` TASK onto the linked request's next_check.
-  if (job.request_id && decision.status !== 'checking') {
-    updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
-  }
+  // Completion clears the timer through the canonical closure. Until then,
+  // retain it so parsing, delivery, or process failures cannot orphan the work.
 
   const conversation: Array<{ role: 'maelle' | 'colleague'; text: string }> =
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
   conversation.push({ role: 'colleague', text: replyText });
+
+  const finishHandledAction = () => updateOutreachJob(job.id, {
+    status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation),
+  });
+  const notifyHandledOwner = async (text: string, remember = false) => {
+    try {
+      await conn.postToChannel(job.owner_channel, text, { threadTs: job.owner_thread_ts ?? undefined });
+      if (remember && job.owner_thread_ts) {
+        appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: text });
+      }
+    } catch (err) {
+      // A notification failure cannot authorize replaying a completed or
+      // already-attempted calendar action through the generic reply path.
+      logger.warn('Reschedule handled; owner notification failed', { jobId: job.id, err: String(err).slice(0, 200) });
+    }
+  };
+
+  const finishUncertainMove = async (start: string, end: string): Promise<boolean> => {
+    // An exception does not prove a calendar write failed. Verify only the
+    // exact requested state with the existing non-mutating recovery reader.
+    let status: 'desired_state_observed' | 'different_state_observed' | 'unavailable' = 'unavailable';
+    try {
+      const { verifyApprovedCalendarAction } = await import('../connectors/graph/calendarReads');
+      const verification = await verifyApprovedCalendarAction({
+        userEmail: profile.user.email, profile, tool: 'move_meeting', eventId: ctx.meeting_id,
+        args: { meeting_id: ctx.meeting_id, new_start: start, new_end: end, stated_zone: timezone },
+      });
+      status = verification.status;
+    } catch (err) {
+      logger.warn('Reschedule read-only verification unavailable', { jobId: job.id, err: String(err).slice(0, 200) });
+    }
+    const observed = status === 'desired_state_observed';
+    const reason = observed ? 'reschedule_desired_state_observed'
+      : status === 'different_state_observed' ? 'reschedule_requested_state_not_observed'
+      : 'reschedule_action_attempted_unconfirmed';
+    const ownerMsg = observed
+      ? `I tried to move "${ctx.meeting_subject}". A read-only check confirms the requested time is now on the calendar, but does not establish which attempt produced it. I have not repeated the action.`
+      : status === 'different_state_observed'
+        ? `I tried to move "${ctx.meeting_subject}", but a read-only check did not find the requested calendar state. I have not repeated the action, and no further automatic check is pending.`
+        : `I tried to move "${ctx.meeting_subject}", but could not confirm whether it worked. I have not repeated the action, and no further automatic check is pending.`;
+    // Persist an honest outcome BEFORE fallible delivery. closeRequest sets
+    // informed=0 so the existing owner brief can surface this exact reason
+    // even when the immediate warning fails. No unresolved calendar retry.
+    updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
+    if (requestId) {
+      closeRequest({ id: requestId, state: observed ? 'resolved' : 'cancelled',
+        closureReason: reason, closedBy: 'system', skipChildren: true,
+        outcomeJson: { replayed: 'move_meeting', verified: observed } });
+    }
+    await notifyHandledOwner(ownerMsg);
+    return true;
+  };
 
   // ── Branch: approved → move the meeting ──────────────────────────────────
   if (decision.status === 'approved') {
@@ -200,15 +262,14 @@ export async function handleRescheduleReply(
     // re-move. Skip straight past the move + rebalance.
     if (ctx.already_moved) {
       const colleagueMsg = `Great — see you then.`;
+      conversation.push({ role: 'maelle', text: colleagueMsg });
+      finishHandledAction();
       try {
         if (job.dm_channel_id) await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
         else await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
       } catch (err) { logger.warn('reschedule (already_moved approve) colleague DM failed', { err: String(err).slice(0, 160) }); }
-      conversation.push({ role: 'maelle', text: colleagueMsg });
-      await conn.postToChannel(job.owner_channel,
-        `${job.colleague_name} is fine with the moved time for "${ctx.meeting_subject}" (${proposedStartLocal}).`,
-        { threadTs: job.owner_thread_ts ?? undefined });
-      updateOutreachJob(job.id, { status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation) });
+      await notifyHandledOwner(
+        `${job.colleague_name} is fine with the moved time for "${ctx.meeting_subject}" (${proposedStartLocal}).`);
       return true;
     }
     try {
@@ -234,23 +295,15 @@ export async function handleRescheduleReply(
       }
     } catch (err) {
       logger.error('updateMeeting failed on reschedule approval', { err: String(err), jobId: job.id });
-      await conn.postToChannel(
-        job.owner_channel,
-        `${job.colleague_name} said yes to moving "${ctx.meeting_subject}" to ${proposedStartLocal}, but I hit an error updating the calendar. You'll need to move it manually.`,
-        { threadTs: job.owner_thread_ts ?? undefined },
-      );
-      updateOutreachJob(job.id, {
-        status: 'replied',
-        reply_text: replyText,
-        conversation_json: JSON.stringify(conversation),
-      });
-      return true;
+      return finishUncertainMove(ctx.proposed_start, ctx.proposed_end);
     }
 
     // Confirm to colleague — thread back into the original outreach DM
     // when we recorded it (v2.1.5); fall back to a fresh DM for legacy
     // rows that predate the ts capture.
     const colleagueMsg = `Great, moved to ${proposedStartLocal}. See you then.`;
+    conversation.push({ role: 'maelle', text: colleagueMsg });
+    finishHandledAction();
     try {
       if (job.dm_channel_id) {
         await conn.postToChannel(job.dm_channel_id, colleagueMsg, {
@@ -262,22 +315,10 @@ export async function handleRescheduleReply(
     } catch (err) {
       logger.warn('Failed to DM colleague the confirmation', { err: String(err) });
     }
-    conversation.push({ role: 'maelle', text: colleagueMsg });
 
     // Report to owner
     const ownerMsg = `${job.colleague_name} confirmed, moved "${ctx.meeting_subject}" to ${proposedStartLocal}–${proposedEndLocal}.`;
-    await conn.postToChannel(job.owner_channel, ownerMsg, {
-      threadTs: job.owner_thread_ts ?? undefined,
-    });
-    if (job.owner_thread_ts) {
-      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
-    }
-
-    updateOutreachJob(job.id, {
-      status: 'replied',
-      reply_text: replyText,
-      conversation_json: JSON.stringify(conversation),
-    });
+    await notifyHandledOwner(ownerMsg, true);
     return true;
   }
 
@@ -298,8 +339,7 @@ export async function handleRescheduleReply(
     }
     // Persist the colleague reply; DO NOT set a terminal status → job stays open.
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
-    // Re-arm the request's spine timer: one re-ask at +24h (overrides the
-    // reply-time timer clear above).
+    // Re-arm the existing request timer for one re-ask at +24h.
     if (job.request_id && !alreadyNudged) {
       // outreach-expiry-tombstone-says-never-replied (2026-08-12) — this IS a
       // genuine reply ("checking"), so mark it same as coordinator.ts's continue
@@ -431,21 +471,19 @@ export async function handleRescheduleReply(
                 }
                 moveApplied = true;
               } catch (err) {
-                // updateMeeting threw → the move did NOT land. Do NOT confirm it:
-                // this used to fall straight through and ship a phantom "moved to
-                // X" to the colleague + "so I moved it" to the owner + close the
-                // job, all on a failed PATCH. Leave moveApplied false and drop to
-                // the owner-ask fallback below — mirror the `approved` branch,
-                // which errors out on the same failure instead of lying.
-                logger.error('Reschedule counter auto-accept: updateMeeting failed — asking owner instead', {
+                logger.error('Reschedule counter write threw; verifying without replay', {
                   err: String(err), jobId: job.id,
                 });
+                return finishUncertainMove(counterStartDt.toISO() ?? ctx.proposed_start,
+                  counterEndDt.toISO() ?? ctx.proposed_end);
               }
 
               if (moveApplied) {
                 // Confirm to colleague — thread into the original DM if we have it
                 const counterLocal = counterStartDt.toFormat('HH:mm');
                 const colleagueMsg = `Works — moved to ${counterLocal}. See you then.`;
+                conversation.push({ role: 'maelle', text: colleagueMsg });
+                finishHandledAction();
                 try {
                   if (job.dm_channel_id) {
                     await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
@@ -455,9 +493,9 @@ export async function handleRescheduleReply(
                 } catch (err) {
                   logger.warn('Reschedule counter auto-accept: colleague DM failed', { err: String(err) });
                 }
-                conversation.push({ role: 'maelle', text: colleagueMsg });
 
-                // Shadow DM the owner
+                // The move is terminal; shadow delivery cannot fall into owner approval.
+                try {
                 await shadowNotify(profile, {
                   channel: job.owner_channel,
                   threadTs: job.owner_thread_ts ?? undefined,
@@ -465,11 +503,9 @@ export async function handleRescheduleReply(
                   detail: `${job.colleague_name} countered "${ctx.meeting_subject}" to ${counterStartDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Say the word if you'd rather I hadn't.`,
                 });
 
-                updateOutreachJob(job.id, {
-                  status: 'replied',
-                  reply_text: replyText,
-                  conversation_json: JSON.stringify(conversation),
-                });
+                } catch (err) {
+                  logger.warn('Reschedule counter handled; shadow notification failed', { jobId: job.id, err: String(err).slice(0, 200) });
+                }
                 return true;
               }
             }
@@ -482,20 +518,36 @@ export async function handleRescheduleReply(
       }
     }
 
-    // Fallback: ask owner.
-    const ownerMsg = `${job.colleague_name} can't do ${proposedStartLocal}, but offers ${counterDesc} for "${ctx.meeting_subject}". Want me to take it?`;
-
-    await conn.postToChannel(job.owner_channel, ownerMsg, {
-      threadTs: job.owner_thread_ts ?? undefined,
-    });
-    if (job.owner_thread_ts) {
-      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
+    // Owner ruling 2026-09-19: a counter needing judgment is an approval,
+    // never an untracked question. The classifier supplies only a clock, not
+    // an authoritative date, so use the existing open-conflict move anchor:
+    // the owner's exact choice must arrive before anything can be replayed.
+    const { createApprovalRequest } = await import('../tasks/skill');
+    const raised = await createApprovalRequest({
+      kind: 'policy_exception',
+      ask_text: `${job.colleague_name} can't do ${proposedStartLocal}, and offers ${counterDesc} for "${ctx.meeting_subject}". Their reply: "${replyText}". Which exact date and time should I use?`,
+      payload: {
+        meeting_id: ctx.meeting_id,
+        subject: ctx.meeting_subject,
+        open_options: [replyText],
+        context: `The colleague countered the proposed move; automatic acceptance was not established. Proposed interval: ${ctx.proposed_start}–${ctx.proposed_end}. Reply: ${replyText}`,
+        rule: 'reschedule_counter_requires_owner_decision',
+      },
+    }, {
+      profile,
+      // This decision originates with the colleague, never with the owner
+      // merely because the outbound request carries his return channel.
+      userId: job.colleague_slack_id, senderRole: 'colleague', authority: 'colleague',
+      surface: 'colleague_dm', channel: 'slack',
+      channelId: job.dm_channel_id ?? '', threadTs: job.dm_message_ts ?? '',
+      currentUserMessage: replyText,
+    }, { replacingOutreachRequestId: requestId ?? undefined }) as { ok?: boolean; approval_id?: string; error?: string };
+    if (!raised?.ok || !raised.approval_id) {
+      // Keep the original timed work if raising was refused or unavailable.
+      // In particular, the existing two-pending-request cap still applies.
+      throw new Error(`Reschedule counter approval was not tracked: ${raised?.error ?? 'unconfirmed'}`);
     }
-    updateOutreachJob(job.id, {
-      status: 'replied',
-      reply_text: replyText,
-      conversation_json: JSON.stringify(conversation),
-    });
+    finishHandledAction();
     return true;
   }
 
@@ -504,23 +556,16 @@ export async function handleRescheduleReply(
 
 /**
  * v3.2.6 (Part A) — notify a colleague that an active-mode autofix ALREADY moved
- * a shared meeting (off a clash) to a verified-free in-week slot, with a pushback
- * escape hatch. Creates a `meeting_reschedule` outreach job tagged
- * `already_moved` so the colleague's reply routes back through
- * `handleRescheduleReply`: "fine" → no-op confirm; "doesn't work" → owner
- * approval w/ revert; a counter → auto-accept (same-week, rule-compliant) or ask.
+ * a shared meeting (off a clash) to a verified-free in-week slot. This is an
+ * informational notice: confirmed delivery finishes the request; silence is
+ * fine. A later reply uses the existing recent-outbound conversation context.
+ * Explicit owner checks and actual proposals use message_colleague's required
+ * await_reply argument instead; this automatic producer never invents one.
  * Best-effort; never throws (a notify failure must not unwind the move). Returns
  * whether the DM actually reached the colleague — v4.2.x, so the option-C
  * correction relay can't report a correction it never delivered.
  *
- * R3/R4 — this ask ENDS ON ITS OWN. It is `await_reply: 1`, so it needs the two
- * things that make silence a complete outcome instead of an orphan: a
- * `reply_deadline` (the only thing that arms the linked request's
- * `outreach_expiry` timer) and the owner's return channel on that request (the
- * only thing that lets the expiry tombstone reach him). Both were missing until
- * 2026-07-26, which is why the request was born `awaiting_colleague` with
- * `next_check_at` NULL and a later calendar mutation was the ONLY thing that
- * could ever close it. See the block at the createOutreachJob call below.
+ * No calendar action is retried to recover notice delivery.
  */
 export async function notifyColleagueOfMove(params: {
   profile: UserProfile;
@@ -556,6 +601,7 @@ export async function notifyColleagueOfMove(params: {
    */
   correctsToldStartIso?: string;
 }): Promise<boolean> {
+  let jobId: string | undefined;
   try {
     const { profile } = params;
     const conn = getConnection(profile.user.slack_user_id, 'slack');
@@ -589,7 +635,7 @@ export async function notifyColleagueOfMove(params: {
       ...(params.correctsToldStartIso ? { correction: true } : {}),
     };
 
-    const jobId = createOutreachJob({
+    jobId = createOutreachJob({
       owner_user_id: profile.user.slack_user_id,
       owner_channel: params.ownerChannel,
       owner_thread_ts: params.ownerThreadTs,
@@ -597,67 +643,29 @@ export async function notifyColleagueOfMove(params: {
       colleague_name: params.colleagueName,
       colleague_tz: params.colleagueTz,
       message,
-      await_reply: 1,
+      await_reply: 0,
       status: 'sent',
-      sent_at: new Date().toISOString(),
       intent: 'meeting_reschedule',
-      // `reply_deadline` is the ONLY thing that arms the linked request's
-      // `outreach_expiry` next_check (db/jobs.ts — the reply_deadline branch of
-      // createOutreachJob). Omitting it fell through to the "no explicit
-      // deadline" branch: state `awaiting_colleague`, phase
-      // `outreach:awaiting_reply`, next_check_at NULL — an ask with no terminal
-      // path, which is what left a calendar mutation as its only possible
-      // closer. Same shared convention message_colleague uses (24 working
-      // hours in THEIR zone, skills/outreach.ts → calcResponseDeadline), so
-      // silence resolves the way it does for every other await_reply
-      // outreach: expire, close, tell both sides.
-      reply_deadline: calcResponseDeadline(params.colleagueTz ?? tz, { slackId: params.colleagueSlackId, ownerTimezone: profile.user.timezone }),
+      // The existing bridge keeps unconfirmed delivery in_flight with a
+      // bounded timer. Only a confirmed send may stamp sent_at and resolve.
       context_json: JSON.stringify(ctx),
     });
 
     const res = await conn.sendDirect(params.colleagueSlackId, message);
     if (!res.ok) {
-      // Not delivered → there is no ask. Cancel it through the spine (the bridge in
-      // updateOutreachJob closes the linked request) rather than leaving a live
-      // `awaiting_colleague` row: with the timer now armed, an undelivered notice
-      // would otherwise expire and tell the owner "they never replied" about a
-      // message that never arrived. Mirrors skills/outreach.ts's send-failure path.
-      updateOutreachJob(jobId, {
-        status: 'cancelled',
-        reply_text: `Move notice not delivered: ${res.reason}`,
-      });
-      logger.warn('notifyColleagueOfMove — DM not delivered, ask cancelled (move stands)', {
+      const requestId = getLinkedRequestIdForOutreach(jobId);
+      if (requestId) closeRequest({ id: requestId, state: 'cancelled',
+        closureReason: res.reason === 'error' ? 'move_notice_attempted_unconfirmed' : 'move_notice_not_delivered',
+        closedBy: 'system', skipChildren: true });
+      logger.warn('notifyColleagueOfMove — delivery not confirmed, notice closed (move stands)', {
         jobId, colleague: params.colleagueName, meetingId: params.meetingId, reason: res.reason,
       });
       return false;
     }
-    // Delivered. `ts` is optional — without it we just can't thread follow-ups to
-    // the DM; the ask itself stays live and the reply still routes by colleague
-    // (db/jobs.ts → getOutreachJobsByColleague), so a missing ts is not a failure.
-    if (res.ts) {
-      updateOutreachJob(jobId, { dm_channel_id: res.ref, dm_message_ts: res.ts });
-    }
-
-    // The expiry tombstone to the owner is gated on the REQUEST's
-    // `owner_dm_channel` (core/requests/runner.ts — runOutreachExpiryOrDecision),
-    // and createOutreachJob never sets it: only message_colleague stamped it
-    // post-send. So this class expired silently on the owner's side even once the
-    // timer existed. Channel ONLY — never the thread ts: on the autofix path
-    // `ownerThreadTs` is the pseudo-key `brief_health_<ownerId>` (tasks/briefs.ts),
-    // not a Slack ts, and it is passed straight through to chat.postMessage, which
-    // rejects an invalid thread_ts. A top-level DM in his own channel is the right
-    // home for an autofix tombstone anyway — the daily decision thread is
-    // approvals-only by owner ruling (utils/ownerDailyThread.ts).
-    if (params.ownerChannel) {
-      try {
-        const linkedRequestId = getLinkedRequestIdForOutreach(jobId);
-        if (linkedRequestId) updateRequest(linkedRequestId, { ownerDmChannel: params.ownerChannel });
-      } catch (err) {
-        logger.warn('notifyColleagueOfMove — owner return-channel stamp failed (expiry tombstone may not land)', {
-          jobId, err: String(err).slice(0, 200),
-        });
-      }
-    }
+    // Stamping confirmed delivery closes this informational request through
+    // the existing bridge, while retaining conversational follow-up context.
+    updateOutreachJob(jobId, { sent_at: new Date().toISOString(),
+      dm_channel_id: res.ref, dm_message_ts: res.ts });
 
     logger.info('notifyColleagueOfMove — sent move notice', {
       jobId, colleague: params.colleagueName, meetingId: params.meetingId,
@@ -665,7 +673,16 @@ export async function notifyColleagueOfMove(params: {
     });
     return true;
   } catch (err) {
-    logger.warn('notifyColleagueOfMove threw — move stands, notice not sent', { err: String(err).slice(0, 200) });
+    try {
+      if (jobId) {
+        const requestId = getLinkedRequestIdForOutreach(jobId);
+        if (requestId) closeRequest({ id: requestId, state: 'cancelled',
+          closureReason: 'move_notice_attempted_unconfirmed', closedBy: 'system', skipChildren: true });
+      }
+    } catch (closeErr) {
+      logger.warn('notifyColleagueOfMove — could not persist notice outcome; existing timer retained', { jobId, err: String(closeErr).slice(0, 200) });
+    }
+    logger.warn('notifyColleagueOfMove threw — move stands, notice unconfirmed', { err: String(err).slice(0, 200) });
     return false;
   }
 }

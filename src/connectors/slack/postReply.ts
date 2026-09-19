@@ -33,7 +33,7 @@ import logger from '../../utils/logger';
 import { runDeliberationGuard, runOutputGates, runCodaGates } from '../../utils/guards/runOutputGates';
 import { getThreadInboundRevision, isThreadActive } from './inboundQueue';
 import { getLastMaelleMessage } from '../../utils/threadActivity';
-import { recordCodaDelivered } from '../../core/social/logEngagement';
+import { recordCodaDelivered, reserveCodaAttempt } from '../../core/social/logEngagement';
 import { composeSocialCoda } from '../../core/social/generateCoda';
 import { isSocialInitiationDue } from '../../core/social/stateMachine';
 
@@ -219,12 +219,12 @@ function pickCodaDelayMs(): number {
  * - Fire-and-forget: it cannot delay, fail or crash the turn. Nothing on this
  *   path is ever awaited by the person's reply — composition included, which is
  *   the whole reason it moved in here.
- * - The send attempt closes the social gate (`recordCodaDelivered`) before the
- *   network call because a timeout can hide an accepted post. Only confirmed
- *   posts enter history and the owner's shadow mirror.
+ * - The send attempt closes the daily cadence gate (`reserveCodaAttempt`) before
+ *   the network call because a timeout can hide an accepted post. Subject/category
+ *   delivery markers, history and the owner's shadow mirror require a confirmed post.
  *
  * Order inside the beat: lull/cadence → compose → recheck → gate → recheck →
- * account → post. Cheap checks run before anything
+ * reserve attempt → post → record delivery. Cheap checks run before anything
  * that costs a model call, so the common "they started typing again" case spends
  * nothing. Composition is one call into the social lane (`composeSocialCoda`) —
  * we get the wire sentence plus its evidence-bearing history rendering, or null;
@@ -347,22 +347,28 @@ function scheduleSocialCoda(opts: {
         // keep this check, synchronous accounting and say invocation in one
         // event-loop turn so two local timers cannot both claim an open day.
         if (!stillEligible()) return;
-        // Social bookkeeping — the once-per-day cadence gate + the raise
-        // marker (subject for `continue`, category for `raise_new`) — goes in
-        // on the line BEFORE the post, not after.
-        //
-        // A DB write either side of a network call leaves residue; the choice is
-        // which side carries it. AFTER: posted, gate still open → the same person
-        // can be pinged twice today (the 3-codas-in-8-minutes class the owner
-        // reported). BEFORE: gate burned, nothing posted → one silent skipped
-        // social day, self-healing in 24h. Cheap side wins — but the decisive
-        // reason is subtler: a `say` REJECTION does not prove the message didn't
-        // land (an accepted post whose response times out throws here), so
-        // stamping only on success would leave the gate open on a coda the person
-        // is looking at. Stamping first is correct, not merely cheaper. Every
-        // drop path — lull/cadence checks, prep, composition and gates — sits
-        // above this line. A failed cadence stamp must also prevent sending.
-        const accounted = recordCodaDelivered({
+        // Reserve the once-per-day attempt BEFORE the post. A rejected/uncertain
+        // network outcome can hide an accepted Slack post, so the cadence stays
+        // closed and Maelle never retries blindly. Every pre-send drop path sits
+        // above this line, and a failed reservation must prevent sending.
+        const reserved = reserveCodaAttempt({
+          personSlackId: coda.personSlackId,
+          subjectId: coda.subjectId,
+        });
+        if (!reserved) return;
+        const sendResult = await say({ text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
+        // Bolt/WebClient normally rejects `ok:false`; keep the explicit response
+        // check for injected/custom `say` implementations. A wrapper that returns
+        // void is still confirmed because it resolves only after its Slack call.
+        if (typeof sendResult === 'object' && sendResult !== null && 'ok' in sendResult
+          && (sendResult as { ok?: unknown }).ok !== true) {
+          logger.warn('Social coda post returned an unsuccessful acknowledgement — delivery not recorded', {
+            threadTs, personSlackId: coda.personSlackId,
+          });
+          return;
+        }
+        // Only a confirmed send may start the subject/category silence clock.
+        recordCodaDelivered({
           personSlackId: coda.personSlackId,
           subjectId: coda.subjectId,
           ownerUserId: profile.user.slack_user_id,
@@ -370,8 +376,6 @@ function scheduleSocialCoda(opts: {
             ? coda.directive.categoryLabel ?? undefined
             : undefined,
         });
-        if (!accounted) return;
-        await say({ text, thread_ts: threadTs, unfurl_links: false, unfurl_media: false });
         // History, so the NEXT turn knows she asked — otherwise she re-asks, or
         // misreads the answer ("yeah, Berlin", with no memory of the question).
         // Written only after a confirmed post. The lull was current when send

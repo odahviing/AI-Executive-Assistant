@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.9.10 — Reliable request tracking and protected floating objects
+
+Repairs the request spine and floating-object scheduling, with the owner's decisions applied across approval, calendar health, booking and briefing paths. Also addresses the reported remote-meeting question, UTC event display, misleading approval-delivery warning and screenshot-origin booking instructions.
+
+### Fixed
+
+- Completed automatic meeting-move notifications finish after confirmed delivery. Silence does not trigger repeated closure notices; explicit requests to check with a colleague still wait for a reply.
+- Counteroffers needing an owner decision use the existing approval flow. Replacing their source outreach is atomic and preserves the two-pending-request limit. Unanswered owner approvals close after two delivered briefings; failed delivery does not count.
+- Task identity distinguishes scheduled occurrences while preserving exact retries. Task edits, cancellation, research delivery, requester attribution and terminal notifications preserve truthful state, retry boundaries and requester follow-through. Unfinished out-of-office booking handoffs stay tracked.
+- Reschedule failures preserve uncertainty and safely verify calendar outcomes when possible, without blindly replaying a move.
+- Floating objects with another human attendee still count toward the daily object but remain fixed commitments. Owner-self and room resources do not make a solo block fixed. Hold reconciliation and calendar listings use the same distinction.
+- Floating placement reserves other objects and duplicate instances, uses actual event durations, preserves owner-positioned blocks and uses Working Elsewhere as a fallback. Independent moves stay within their ranges; a required chain is surfaced instead of silently rearranging several events.
+- Rejected event suggestions persist. Automatic placement respects those decisions, including an owner's correction or explicit undo of an automatic floating move. Duplicate objects are never automatically deleted.
+- Automatic calendar-health scans stay quiet when their only result is a successful floating-object addition on the final scanned date. Errors and substantive results remain visible.
+- Ordinary calendar mutations retain local timezone metadata without shifting their instants; ambiguous daylight-saving folds keep the necessary UTC representation. Existing events are not migrated.
+- Remote external one-to-one meetings no longer prompt for a redundant hybrid arrangement. Approval-delivery claims use current-turn confirmed evidence. Booking instructions better preserve screenshot-supplied purpose and participants.
+- Failed social-coda sends no longer create delivered-topic markers that later count as silence; the daily attempt limit remains reserved before sending, with no added retry or model call.
+
+### Verification and limits
+
+- 34 new corrections independently reviewed; two older records revalidated without counting new work. All 103 executable suite/timezone checks and typecheck pass; Golden30 is complete, including the repaired preexisting Coda failure. Four prompt changes have structural tests; model obedience and live production outcomes remain unproven by those tests.
+- Passive asynchronous floating-block notifications still do not universally ask immediately; later calendar health can surface the issue (#204). General multi-person delegated task execution remains future work (#184).
+- No complex floating-object optimizer, new universal request kinds, classifier image-input expansion or broad booking audit is included.
+
+### Framework
+
+- Owning charters reflect the approved behavior. Local incident preparation and raw verification output stay outside Git; reusable regression tests and compact verification records are retained.
+
+---
+
+
 ## 4.9.9 — A held slot stays held, and old news stays old
 
 Four repairs found by reading real conversations. A tentative hold is no longer released by an unrelated all-day marker, so the slot it reserves is still protected when someone tries to book over it. A request closed weeks ago is no longer announced as news when a colleague opens a fresh subject in the same DM. An attendee who is away all day is named as away instead of merely busy, and routine housekeeping notices collect in one daily thread instead of opening a new one each time.

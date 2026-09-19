@@ -28,7 +28,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
-import { getFloatingBlocks, isFloatingBlockEvent, blockAppliesOnDay, windowMsForDay, findAlignedSlotForBlock } from './floatingBlocks';
+import { getFloatingBlocks, isFloatingBlockEvent, hasOtherHumanAttendee, blockAppliesOnDay, windowMsForDay, findAlignedSlotForBlock } from './floatingBlocks';
 
 export type ScheduleOutcomeStatus = 'none' | 'booked_compliant' | 'booked_conflict';
 
@@ -118,6 +118,10 @@ function checkCompliance(
   // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
   for (const block of blocks) {
     if (!blockAppliesOnDay(block, dayName, profile)) continue;
+    // An attendee-bearing matching event already fulfills the daily object; it is never relocated.
+    if ([event, ...allDayEvents].some(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free'
+        && isFloatingBlockEvent(e, block) && hasOtherHumanAttendee(e, profile)
+        && DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).setZone(tz).toFormat('yyyy-MM-dd') === dayStr)) continue;
     const winStart = windowMsForDay(dayStr, block.preferred_start, tz);
     const winEnd = windowMsForDay(dayStr, block.preferred_end, tz);
     if (eEnd.toMillis() <= winStart || eStart.toMillis() >= winEnd) continue;

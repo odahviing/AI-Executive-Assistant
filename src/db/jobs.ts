@@ -502,7 +502,7 @@ export function getOutreachJobsByColleague(
   ownerUserId: string
 ): OutreachJob[] {
   const db = getDb();
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT oj.* FROM outreach_jobs oj
     JOIN requests r ON oj.request_id = r.id
     WHERE oj.colleague_slack_id = ? AND oj.owner_user_id = ?
@@ -511,6 +511,28 @@ export function getOutreachJobsByColleague(
     AND oj.created_at >= datetime('now', '-7 days')
     ORDER BY oj.created_at DESC
   `).all(colleagueSlackId, ownerUserId) as OutreachJob[];
+  return rows.filter(job => !completeLegacyAutomaticMoveNotice(job));
+}
+
+/** Retire only proven, delivered health FYIs created before the owner ruling.
+ * already_moved alone is not authority: an explicit owner check may use it too.
+ * The health runner's synthetic origin and the post-send receipt identify the
+ * automatic producer without classifying message prose or trusting a new flag. */
+export function completeLegacyAutomaticMoveNotice(job: OutreachJob | null | undefined): boolean {
+  if (!job?.request_id || job.intent !== 'meeting_reschedule' || job.await_reply !== 1
+      || !job.sent_at || !job.dm_channel_id || !job.dm_message_ts) return false;
+  const { getRequest } = require('./requests') as typeof import('./requests');
+  const row = getRequest(job.request_id);
+  if (!row || row.state !== 'awaiting_colleague' || row.kind !== 'outreach'
+      || row.subkind !== 'meeting_reschedule' || row.initiated_by_role !== 'system'
+      || row.owner_user_id !== job.owner_user_id || row.target_slack_id !== job.colleague_slack_id
+      || row.origin_thread_ts !== `brief_health_${row.owner_user_id}`
+      || job.owner_thread_ts !== row.origin_thread_ts || row.origin_channel !== job.owner_channel) return false;
+  try {
+    if (JSON.parse(job.context_json ?? '{}').already_moved !== true) return false;
+  } catch { return false; }
+  updateOutreachJob(job.id, { await_reply: 0, sent_at: job.sent_at });
+  return getRequest(row.id)?.state === 'resolved';
 }
 
 /** The one open-state set on the spine — same one getOpenRequestsForOwner uses. */

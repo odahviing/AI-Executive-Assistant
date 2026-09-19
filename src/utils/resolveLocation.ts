@@ -20,17 +20,21 @@
  *      a. External attendee + owner forced physical (is_online=false)
  *         → full_label, isOnline=true (see FORCED PHYSICAL below).
  *      b. External attendee, colleague driving → online, no ask (v3.2.6).
- *      c. External attendee, owner driving → ask_owner_online_or_physical,
- *         WHATEVER the external's zone (owner ruling 2026-09-15: a known-
- *         different zone used to go straight online; "a few internal people
- *         might sit in the meeting room with the external on the screen").
- *         With an external on the invite a Teams link is a given — the one
- *         question is whether the internal people meet onsite, and the ask
- *         text says exactly that (onsiteOrOnlineAsk). Caller refuses + asks.
- *      d. Internal-only, count ≥4
+ *      c. External attendee, owner driving, owner + external only → online.
+ *         There is no internal group whose onsite arrangement needs deciding;
+ *         an explicit physical hint still wins above.
+ *      d. External attendee, owner driving, at least one other participant
+ *         → ask_owner_online_or_physical, WHATEVER the external's zone (owner
+ *         ruling 2026-09-15: a known-different zone used to go straight online;
+ *         "a few internal people might sit in the meeting room with the external
+ *         on the screen"). With an external on the invite a Teams link is a
+ *         given - the one question is whether the internal people meet onsite,
+ *         and the ask text says exactly that (onsiteOrOnlineAsk). Caller refuses
+ *         + asks.
+ *      e. Internal-only, count ≥4
  *         → meeting_room_label + addRoomEmail + isOnline=true
  *         (Teams link goes in body, not location).
- *      e. Internal-only, count ≤3
+ *      f. Internal-only, count ≤3
  *         → short_label + isOnline=true
  *         (Teams link goes in body, not location).
  *
@@ -321,7 +325,21 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
           location: '',          reasoning: 'office day + external (colleague-path) → default online, no owner approval',
         };
       }
-      // (3c) Owner path → ask, whatever the external's zone (header).
+      // Owner + one external only → online. The hybrid question exists to
+      // decide where the internal remainder sits while the external joins on
+      // Teams. In a one-to-one there is no remainder, so asking whether the
+      // owner sits alone at the office cannot change how the meeting happens.
+      // An explicit physical/location hint already returned above.
+      if (input.participantCount === 2) {
+        return {
+          kind: 'resolved',
+          isOnline: true,
+          location: '',
+          reasoning: 'office day + owner/external one-to-one → online; no internal group needs an onsite decision',
+        };
+      }
+      // (3d) Owner path with an internal remainder → ask, whatever the
+      // external's zone (header).
       return {
         kind: 'ask_owner_online_or_physical',
         suggestedAskText: onsiteOrOnlineAsk(input.externalAttendeeNames ?? [], fullLabel),
@@ -334,7 +352,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
     }
     // Internal-only on office day.
     if (input.participantCount >= 4) {
-      // (3d) Big internal → Meeting Room + room_email + Teams in body. v3.7.x —
+      // (3e) Big internal → Meeting Room + room_email + Teams in body. v3.7.x -
       // isOnline is ALWAYS true here (owner: a 4+/Meeting-Room meeting always keeps
       // the Teams link — people join online even for a physical one; the link lives
       // in the body, the location field shows the room). A bare is_online=false
@@ -347,7 +365,7 @@ export function resolveLocation(input: ResolveLocationInput): LocationVerdict {
         reasoning: `office day + internal ≥4 → ${meetingRoomLabel} (+ room email, Teams link in body — always kept)`,
       };
     }
-    // (3e) Small internal → short_label + Teams in body (kept on forced
+    // (3f) Small internal → short_label + Teams in body (kept on forced
     // physical too — FORCED PHYSICAL, header).
     return {
       kind: 'resolved',

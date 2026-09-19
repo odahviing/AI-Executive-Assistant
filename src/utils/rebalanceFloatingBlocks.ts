@@ -50,7 +50,8 @@ import { logActivity } from '../core/requests/logActivity';
 // (already threaded by every call site, previously unused in this file);
 // no owner id → best-effort skip, matching logActivity's own fail-soft
 // contract.
-function logRebalanceMoveActivity(
+// Shared with check_join_availability's in-turn block moves (the same activity contract).
+export function logRebalanceMoveActivity(
   ownerSlackId: string | undefined,
   blockName: string,
   blockEvent: CalendarEvent,
@@ -240,8 +241,14 @@ export async function dryRunFloatingBlockRelocation(params: {
     const dayEndIso = startDt.endOf('day').toUTC().toISO();
     if (!dayStartIso || !dayEndIso) return results;
     const events = params.preloadedDayEvents ?? await getCalendarEvents(profile.user.email, dayStartIso, dayEndIso, tz);
-    const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
+    // Keep a private occupancy snapshot: later blocks must see earlier destinations,
+    // while callers retain their original calendar read for audit and comparison.
+    const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free')
+      .map(e => ({ ...e }));
 
+    const { getSuppressedEventIds } = await import('../db/calendarIssues');
+    const suppressed = getSuppressedEventIds(profile.user.slack_user_id);
+    const sourceRanges = fb.preserveFloatingSourceRanges(realEvents, profile);
     const nowMs = DateTime.now().setZone(tz).toMillis();
 
     for (const block of blocks) {
@@ -255,6 +262,8 @@ export async function dryRunFloatingBlockRelocation(params: {
       });
       if (!blockEvent) continue; // nothing on the calendar this day to protect
 
+      if (!fb.isMovableFloatingBlockEvent(blockEvent, block, tz, profile, suppressed)) continue;
+      const movementEvents = [...realEvents, ...sourceRanges.filter(e => e.id !== `floating-source:${blockEvent.id}`)];
       const blockStartMs = DateTime.fromISO(blockEvent.start.dateTime, {
         zone: blockEvent.start.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
@@ -272,7 +281,7 @@ export async function dryRunFloatingBlockRelocation(params: {
       // Sized to the event's own span — the same block the real mover uses.
       const sizedBlock = fb.blockSizedToEvent(block, blockEvent, tz);
       const relocation = computeBlockRelocation(
-        sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents,
+        sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, movementEvents,
         { start: candidateStartMs, end: candidateEndMs },
       );
       if (!relocation.inWindow || relocation.aligned === null) {
@@ -281,6 +290,9 @@ export async function dryRunFloatingBlockRelocation(params: {
       }
       const rs = DateTime.fromMillis(relocation.aligned, { zone: tz });
       const re = rs.plus({ minutes: sizedBlock.duration_minutes });
+      // Reserve this simulated destination before planning the next block.
+      blockEvent.start = { dateTime: rs.toISO()!, timeZone: tz };
+      blockEvent.end = { dateTime: re.toISO()!, timeZone: tz };
       results.push({
         block: block.name,
         relocatable: true,
@@ -330,6 +342,7 @@ export interface RebalanceResult {
    * this and discarded the count.
    */
   moves: string[];
+  ownerQuestions: Array<{ eventId: string; peerEventId: string; blockName: string; description: string }>;
 }
 
 export async function rebalanceFloatingBlocksAfterMutation(params: {
@@ -362,7 +375,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   // show the block's OLD position — acting on it would move a meeting to close a
   // sliver consolidation already closed. Deferring to the next sweep (settled
   // data) is correct and churn-free.
-  const result: RebalanceResult = { moved: 0, overlapping: 0, movedBlockEventIds: [], moves: [] };
+  const result: RebalanceResult = { moved: 0, overlapping: 0, movedBlockEventIds: [], moves: [], ownerQuestions: [] };
   const { profile, affectedSlotIso } = params;
 
   try {
@@ -409,8 +422,14 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
     // #143c — use the caller's pre-fetched day events when provided (the sweep's
     // batched path); otherwise fetch just this one day (the per-mutation path).
     const events = params.preloadedDayEvents ?? await getCalendarEvents(profile.user.email, startIso, endIso, tz);
-    const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free');
+    // Keep a private occupancy snapshot: later blocks must see earlier destinations,
+    // while callers retain their original calendar read for audit and comparison.
+    const realEvents = events.filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free')
+      .map(e => ({ ...e }));
 
+    const { getSuppressedEventIds } = await import('../db/calendarIssues');
+    const suppressed = getSuppressedEventIds(profile.user.slack_user_id);
+    const sourceRanges = fb.preserveFloatingSourceRanges(realEvents, profile);
     // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
 
     for (const block of blocks) {
@@ -445,6 +464,8 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         continue;
       }
 
+      if (!fb.isMovableFloatingBlockEvent(blockEvent, block, tz, profile, suppressed)) continue;
+      const movementEvents = [...realEvents, ...sourceRanges.filter(e => e.id !== `floating-source:${blockEvent.id}`)];
       const blockStartMs = DateTime.fromISO(blockEvent.start.dateTime, {
         zone: blockEvent.start.timeZone ?? 'utc',
       }).setZone(tz).toMillis();
@@ -517,7 +538,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           // same rationale as autoMove's abut-the-block guards. Was its own
           // hand-rolled filter that (unlike this) never excluded WE — fixed
           // here to match rule 6 / the other three density-pool call sites.
-          const commitments = densityCommitments(realEvents, profile, {
+          const commitments = densityCommitments(movementEvents, profile, {
             floatingBlocksAsNeighbours: true,
             excludeEventIds: [blockEvent.id],
           });
@@ -527,6 +548,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           if (target !== null) {
             const newStart = DateTime.fromMillis(target, { zone: tz });
             const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
+            const movedBefore = result.moved;
             try {
               await updateMeeting({
                 userEmail: profile.user.email, timezone: tz,
@@ -536,6 +558,9 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               result.movedBlockEventIds.push(blockEvent.id);
               result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
               logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
+              // Graph accepted this move; reserve it even if notification fails.
+              blockEvent.start = { dateTime: newStart.toISO()!, timeZone: tz };
+              blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: tz };
               await shadowNotify(profile, {
                 channel: '',
                 icon: '🔧',
@@ -551,6 +576,9 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
               logger.warn('rebalanceFloatingBlocks: dense consolidation updateMeeting failed', {
                 blockId: blockEvent.id, err: String(err).slice(0, 200),
               });
+              // A lost write response leaves occupancy unknown. Do not plan another
+              // move from the old snapshot; the next sweep reads fresh state.
+              if (result.moved === movedBefore) break;
             }
             continue;
           }
@@ -574,11 +602,12 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
       // preference survives rebalance instead of silently resetting to
       // earliest). Shared with the pre-booking dry run — see
       // computeBlockRelocation's own doc comment.
-      const relocation = computeBlockRelocation(sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, realEvents);
+      const relocation = computeBlockRelocation(sizedBlock, dateStr, tz, blockEvent, blockStartMs, blockEndMs, movementEvents);
       const aligned = relocation.aligned;
       if (aligned !== null) {
         const newStart = DateTime.fromMillis(aligned, { zone: tz });
         const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
+        const movedBefore = result.moved;
         try {
           await updateMeeting({
             userEmail: profile.user.email,
@@ -591,6 +620,9 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           result.movedBlockEventIds.push(blockEvent.id);
           result.moves.push(`moved ${block.name.replace(/_/g, ' ')} ${fromHHMM}→${newStart.toFormat('HH:mm')}`);
           logRebalanceMoveActivity(params.ownerSlackId, block.name, blockEvent, tz, newStart, newEnd);
+          // Graph accepted this move; reserve it even if notification fails.
+          blockEvent.start = { dateTime: newStart.toISO()!, timeZone: tz };
+          blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: tz };
           const weNote = relocation.usedWorkingElsewhereFallback
             ? ' (no fully clear gap in the window — this one sits against a Working-Elsewhere block.)'
             : '';
@@ -608,6 +640,8 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           logger.warn('rebalanceFloatingBlocks: updateMeeting failed', {
             blockId: blockEvent.id, err: String(err).slice(0, 200),
           });
+          // Stop only for an unacknowledged write, not a failed shadow notice.
+          if (result.moved === movedBefore) break;
         }
       } else if (relocation.currentPlacementAcceptable) {
         // The finder's best in-window answer IS where the block already sits
@@ -625,6 +659,8 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
         // No in-window slot — leave overlapping and tell the owner once; moving
         // it outside the window is his call (move_meeting, one-step).
         result.overlapping++;
+        result.ownerQuestions.push({ eventId: blockEvent.id, peerEventId: overlapping.id, blockName: block.name,
+          description: `Your ${block.name.replace(/_/g, ' ')} overlaps "${overlapping.subject}". There is no independent move inside its window. Would you like to rearrange the events or leave this overlap?` });
         // Dedupe shadows on a stable fingerprint so the same overlap
         // doesn't DM the owner twice a day until it resolves. Lives
         // process-lifetime — restarts reset (acceptable; we just want

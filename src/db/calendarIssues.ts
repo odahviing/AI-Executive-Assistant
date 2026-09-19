@@ -370,21 +370,10 @@ export function upsertCluster(
   `).all(ownerUserId, ...eventIds, ...eventIds) as CalendarIssueRow[])
     .filter(r => sameAxis(r.issue_class, cluster.anchor_class));
 
-  // Any terminal row still INSIDE its declared window → suppressed.
-  //
-  // v4.2.x — the `event_end_ms > now` bound is the same one the READ path has
-  // always had (`getSuppressedEventIds`), and this path was the only place that
-  // ignored it: a terminal row silenced TRACKING of its event forever while the
-  // read path had long since stopped silencing DETECTION of it — two answers
-  // from one row. It only ever mattered for a row whose expiry is EARLIER than
-  // the event it names, which is exactly what a bounded owner-decision
-  // suppression is (`dismissOverlapIssue` + OWNER_UNDO_SUPPRESSION_HOURS): past
-  // that window the issue is detected again, so it has to be trackable and
-  // narratable again, or the window would be bounded on one side only. An
-  // expired terminal row falls through to the active-row logic below, finds
-  // nothing active (terminal is not active) and inserts a fresh row.
+  // Owner decisions never expire; automatic resolution remains bounded by the occurrence.
   const nowMs = Date.now();
-  const terminal = existing.find(r => TERMINAL_STATUSES.has(r.status) && r.event_end_ms > nowMs);
+  const terminal = existing.find(r => r.status === 'approved' || r.status === 'dismissed'
+    || (r.status === 'resolved' && r.event_end_ms > nowMs));
   if (terminal) return { action: 'suppressed', row_id: terminal.id };
 
   const active = existing.filter(r => ACTIVE_STATUSES.has(r.status));
@@ -638,29 +627,8 @@ export function getCalendarIssueById(id: string): CalendarIssueRow | null {
   return (db.prepare(`SELECT * FROM calendar_issues WHERE id = ?`).get(id) as CalendarIssueRow | null) ?? null;
 }
 
-/** Set of event_ids referenced by TERMINAL rows (approved/dismissed/resolved
- *  + event_end_ms still in the future). Read-only callers (the double_booking /
- *  dead-gap detectors, analyze_calendar, brief-pre-filter, routine narration)
- *  use this to drop issues whose event_ids fall in the set, so the owner doesn't
- *  see already-acknowledged conflicts re-narrated or re-auto-moved.
- *  Write-path callers (upsertCluster) handle suppression independently via
- *  the 'suppressed' return value.
- *
- *  v4.2.x (#148) — AXIS-SCOPED. `forClass` names the class being suppressed, and
- *  only terminal rows on that class's axis are returned (see
- *  QUESTION_ONLY_CLASSES). Omit it for the conflict axis, which is what every
- *  day-shape detector wants: an answered "which category?" must never silence a
- *  double-booking. Pass a question-only class to get that question's own settled
- *  set (so a dismissed category ask isn't re-narrated every run).
- *
- *  gh#180 — `event_end_ms` on a row is a WRITE-TIME choice, not a fixed
- *  "meeting end": a STATED rejection (`revert_last_auto_move`) writes
- *  `DISMISSAL_NEVER_EXPIRES` (permanent — the owner said no, period); an
- *  INFERRED one (owner quietly moved a just-auto-moved meeting back himself,
- *  `moveMeeting.ts`) writes a real, short bound (`OWNER_UNDO_SUPPRESSION_HOURS`)
- *  because it's a guess at intent, not a statement. This filter has to stay —
- *  the inferred case must actually expire — see `DISMISSAL_NEVER_EXPIRES`'s own
- *  comment for why the stated case doesn't go stale the same way. */
+/** Owner-approved/dismissed identities never expire. Auto-resolved rows last through their occurrence.
+ * Existing axes keep category questions separate from day-shape decisions. */
 export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass): Set<string> {
   const db = getDb();
   // axisFor-not-read-for-filtering (2026-08-14) — filter on the PERSISTED
@@ -672,8 +640,7 @@ export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass
   const rows = db.prepare(`
     SELECT event_id, peer_event_id FROM calendar_issues
     WHERE owner_user_id = ?
-      AND status IN ('approved','dismissed','resolved')
-      AND event_end_ms > ?
+      AND (status IN ('approved','dismissed') OR (status = 'resolved' AND event_end_ms > ?))
       AND axis = ?
   `).all(ownerUserId, Date.now(), axis) as Array<{ event_id: string; peer_event_id: string | null }>;
   const out = new Set<string>();
@@ -687,7 +654,7 @@ export function getSuppressedEventIds(ownerUserId: string, forClass?: IssueClass
 /** v3.1.7 / #119 — synthetic event_ids of floating-block gaps the owner has
  *  DELIBERATELY waived: `missing_floating_block` rows that are `approved`
  *  (preemptive dismiss) or `dismissed` (owner deleted the block on that day),
- *  with event_end_ms still in the future. The detector skips re-flagging /
+ *  without expiry. The detector skips re-flagging /
  *  re-booking any day whose synthetic id is in this set.
  *
  *  Deliberately EXCLUDES `resolved` — that status means the gap auto-filled
@@ -702,8 +669,7 @@ export function getWaivedFloatingBlockEventIds(ownerUserId: string): Set<string>
     WHERE owner_user_id = ?
       AND issue_class = 'missing_floating_block'
       AND status IN ('approved','dismissed')
-      AND event_end_ms > ?
-  `).all(ownerUserId, Date.now()) as Array<{ event_id: string }>;
+  `).all(ownerUserId) as Array<{ event_id: string }>;
   const out = new Set<string>();
   for (const r of rows) out.add(r.event_id);
   return out;
@@ -745,101 +711,10 @@ export function dismissFloatingBlockGap(opts: {
   `).run(id, opts.ownerUserId, opts.eventId, opts.eventDate, opts.eventEndMs, axisFor('missing_floating_block'), opts.notes ?? null);
 }
 
-/**
- * v4.2.x — how long an INFERRED "leave it alone" decision holds. An owner move of
- * a meeting an autofix had just moved is a decision read off an action, not a
- * stated one ("if i change the auto fix, don't change it again" — owner
- * 2026-07-26), so it expires; a stated one (`revert_last_auto_move`, which says
- * "I won't auto-move it again") passes `DISMISSAL_NEVER_EXPIRES` and holds for
- * its life.
- *
- * 24h, from the sweep cadence rather than a round number: active mode runs twice a
- * day — the daily brief (tasks/briefs.ts, active mode on today) and the
- * "Calendar health check" routine at 13:00 local on weekdays — and the widest gap
- * between two consecutive sweeps is routine→next-morning-brief, ~18.5h on the
- * live rows. 12h (the `getRecentlyAutoMovedEventIds` horizon) does not span it, so
- * a decision taken after the midday sweep would be re-overridden by the next
- * morning's. 24h covers one full cycle of BOTH sweeps and no more.
- */
-export const OWNER_UNDO_SUPPRESSION_HOURS = 24;
-
-/**
- * gh#180 — sentinel `event_end_ms` for a STATED "don't auto-fix this event
- * again" dismissal (`revert_last_auto_move`). Originally this passed the
- * occurrence's OWN end (`originalEnd`) — a snapshot of where the meeting sat at
- * the moment of rejection. That snapshot goes stale the instant the SAME event
- * is later rescheduled to a later end (an ordinary, unrelated move): the cascade
- * that keeps a row's `event_end_ms` fresh (`resolveCalendarIssuesForMeeting`)
- * deliberately never touches a TERMINAL row (so it can't clobber an
- * acknowledged decision), so the dismissal row was frozen at the old
- * timestamp. Once "now" passed it, `getSuppressedEventIds`'s
- * `event_end_ms > now` filter silently dropped the row, and the exact autofix
- * the owner had already rejected fired again on the very same event id
- * ("Sync with Erez" — rejected once, re-triggered weeks later after the
- * meeting moved further out). A stated rejection means "this event id, don't
- * auto-fix it again" — not "until this snapshot of its end happens to lapse" —
- * so it's written as a value that never satisfies `event_end_ms <= now`.
- * Event ids are unique per occurrence and never reused, so this can't leak
- * onto an unrelated later event, and a recurring series' other occurrences
- * already carry their own distinct ids — no recurrence-scope logic needed.
- */
+/** Existing sentinel for durable owner decisions. Event/suggestion identity is unchanged. */
 export const DISMISSAL_NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
 
-/** v3.7.x (#139) — record that the owner REJECTED an active-mode auto-move of an
- *  overlapping meeting. Writes a terminal `dismissed` overlap row anchored on the
- *  meeting's event id (+ the peer it clashed with, when known) so
- *  getSuppressedEventIds returns it and every day-shape detector stops re-flagging
- *  + re-moving it — the "if I said no, it's no" guarantee, using the SAME
- *  dismissal mechanism as floating-block gaps.
- *  Occurrence-anchored: only this event/occurrence is suppressed; other
- *  occurrences of a recurring series still surface. Idempotent: an existing
- *  `approved` waiver is left alone; anything else is ensured terminal-dismissed.
- *
- *  Two callers, two windows, one mechanism: the auto-move branch of the
- *  generalized revert dispatch (gh#52 52-U4b; formerly `revert_last_auto_move`,
- *  `handleRevertAction` in ops/handlers/calendarReads.ts) passes
- *  `DISMISSAL_NEVER_EXPIRES` (gh#180 — NOT the occurrence's own
- *  end; that snapshot goes stale on a later reschedule, see the constant's own
- *  comment); the owner's conversational move of a just-auto-moved meeting (the
- *  inferred one, skills/meetings/ops/handlers/moveMeeting.ts) passes
- *  `min(the moved meeting's own end, now + OWNER_UNDO_SUPPRESSION_HOURS)` — its
- *  OWN bound, computed independently of whatever this row already holds.
- *  `eventEndMs` IS this row's expiry on both the read (`getSuppressedEventIds`)
- *  and the write (`upsertCluster`) path — but on an UPDATE to an EXISTING row
- *  the two callers' bounds are MAX'd, never blindly replaced: see the
- *  function's own comment below for why a later, smaller bound must not win.
- *
- *  v4.2.x — the lookup is PROBLEM-AXIS only (#148, QUESTION_ONLY_CLASSES): a
- *  day-shape decision must not reach over and flip an open `missing_category`
- *  question on the same event to `dismissed`, which the unscoped `event_id`-only
- *  match did — killing the question Maelle had just asked. The UPDATE also
- *  re-stamps event_date so the row speaks for the decision just taken, not an
- *  older one's date.
- *
- *  event_end_ms on the UPDATE is MONOTONIC (max of existing and new),
- *  never a blind overwrite. The two callers can fire on the SAME event id
- *  SECONDS apart: `revert_last_auto_move` writes the STATED, permanent bound
- *  (DISMISSAL_NEVER_EXPIRES) first, then, in the very same turn, the owner (or
- *  a routine acting for him) moves the same event again for an unrelated
- *  reason and `move_meeting`'s own-change detector writes its INFERRED,
- *  OWNER_UNDO_SUPPRESSION_HOURS-bounded suppression on top of it. A blind
- *  overwrite let the second, smaller bound silently downgrade the permanent
- *  one — by the next sweep the "never again" dismissal had quietly expired
- *  and the exact auto-fix the owner had already rejected fired again on the
- *  same event, repeating once a day ("Sync with Erez", reported 4 times).
- *  Math.max keeps a later, LARGER bound winning over a smaller stale one
- *  (the case this comment used to describe) while making it impossible for
- *  any write to shorten an existing one: "if I said no, it's no" can only be
- *  reinforced by a later write, never quietly undone by a less-certain one.
- *
- *  calendar-issues-schema-lacks-axis-column — UNIQUE(owner_user_id, event_id,
- *  axis) means a fresh dismissal INSERT here (axis='conflict') can no longer
- *  collide with an open `missing_category` question on the same event
- *  (axis='question'): the two rows simply coexist. Before the axis column,
- *  they occupied the same slot and this function's INSERT catch reclaimed
- *  the question row outright — the accepted cost, at the time, of a STATED
- *  "never again" dismissal actually landing. That trade is gone: both facts
- *  are independently trackable now, so there is nothing left to reclaim. */
+/** Reject this occurrence on the existing conflict axis; independent question rows survive. */
 export function dismissOverlapIssue(opts: {
   ownerUserId: string;
   eventId: string;
@@ -920,9 +795,11 @@ export function updateCalendarIssueStatus(
   const db = getDb();
   const result = db.prepare(`
     UPDATE calendar_issues
-    SET status = ?, notes = COALESCE(?, notes), updated_at = datetime('now')
+    SET status = ?, notes = COALESCE(?, notes),
+        event_end_ms = CASE WHEN ? IN ('approved','dismissed') THEN ? ELSE event_end_ms END,
+        updated_at = datetime('now')
     WHERE id = ?
-  `).run(status, notes ?? null, issueId);
+  `).run(status, notes ?? null, status, DISMISSAL_NEVER_EXPIRES, issueId);
   return result.changes > 0;
 }
 

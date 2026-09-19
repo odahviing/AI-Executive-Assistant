@@ -12,7 +12,7 @@ import logger from '../../utils/logger';
 import { displaySubject } from '../../utils/displaySubject';
 import type { UserProfile } from '../../config/userProfile';
 import { densityConfigFromProfile, scoreSlotDensity, alignDownQuarter } from '../../utils/calendarDensity';
-import { densityCommitments } from '../../utils/floatingBlocks';
+import { densityCommitments, getFloatingBlocks, hasOtherHumanAttendee, isFloatingBlockEvent } from '../../utils/floatingBlocks';
 import { parseGraphDt } from './classify';
 import type { HealthIssue } from './types';
 
@@ -131,6 +131,12 @@ export async function executeInternalAutoMove(params: {
   const newStartIso = params.newStartIso;
   const newEndIso = DateTime.fromISO(newStartIso).plus({ minutes: durationMin }).toUTC().toISO()!;
 
+  const floatingBlocks = getFloatingBlocks(profile);
+  if (floatingBlocks.some(b => isFloatingBlockEvent(movable, b)) && hasOtherHumanAttendee(movable, profile)) {
+    issue.suggestion = `This is a fixed meeting with another person. Would you like to move it yourself?`;
+    return;
+  }
+
   // Owner rule — NEVER auto-move a SOLO event (no non-owner attendee). A
   // placeholder / personal block with nobody else on it is the owner's own time:
   // there's no one to coordinate with, and relocating it is exactly the "Tax
@@ -163,6 +169,24 @@ export async function executeInternalAutoMove(params: {
       || getRecentlyAutoMovedEventIds(ownerUserId).has(movable.id)
       || getRequestsByExternalEventId(ownerUserId, movable.id).some(r => r.subkind === 'auto_move')) {
     logger.info('auto-move skipped — event already settled or a move is pending', { eventId: movable.id });
+    return;
+  }
+
+  // An autonomous meeting move cannot trigger a second relocation. Read the actual destination.
+  try {
+    const destinationEvents = await getCalendarEvents(userEmail, newStartIso, newEndIso, timezone, 'live');
+    const targetStart = DateTime.fromISO(newStartIso).toMillis();
+    const targetEnd = DateTime.fromISO(newEndIso).toMillis();
+    if (destinationEvents.some(e => e.id !== movable.id && !e.isCancelled && e.showAs !== 'free'
+        && floatingBlocks.some(b => isFloatingBlockEvent(e, b))
+        && parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis() < targetEnd
+        && parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis() > targetStart)) {
+      issue.suggestion = 'That move also needs another calendar event to move. Would you like to rearrange them?';
+      return;
+    }
+  } catch {
+    issue.fix_failed = true;
+    issue.fix_error = 'I could not check the destination, so I left the meeting unchanged.';
     return;
   }
 
@@ -306,8 +330,8 @@ export async function executeInternalAutoMove(params: {
   }
 
   // Notify each non-owner internal attendee (resolve slack_id from email). The
-  // notice is a meeting_reschedule(already_moved) so a "doesn't work" reply
-  // routes back to the owner with a revert option. Skip anyone
+  // informational already_moved notice completes after delivery; optional pushback
+  // uses the existing recent-outbound conversation route. Skip anyone
   // closeMeetingArtifacts already corrected above — they've already been told
   // the real new time via the relay; a second "I moved it" DM would be a
   // duplicate notice for the same move.

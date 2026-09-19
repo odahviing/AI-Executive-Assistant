@@ -15,9 +15,10 @@
  *   A.  forced-physical (is_online=false, no venue named) keeps the venue AND
  *       isOnline=true so Graph attaches the Teams link; phone / Huddle / the
  *       ≥4 room branch unchanged.
- *   B.  office day + external in a DIFFERENT zone asks the owner too (owner
- *       path only; colleague path still books online), and both zones ask
- *       the ONE onsite-or-online question naming the external(s).
+ *   B.  office day + external in a DIFFERENT zone asks the owner too when an
+ *       internal remainder could meet onsite (owner path only; colleague path
+ *       still books online), while an owner/external one-to-one is online
+ *       without asking where the owner sits alone.
  *   C.  the meeting-room mailbox never counts as a person — ONE head-count
  *       (participantHeadcount) for create/move and update_meeting's counts.
  *
@@ -98,6 +99,7 @@ const resolveLocationModule = compile(text('src/utils/resolveLocation.ts'), {}, 
   throw Error(`FORBIDDEN module: ${name}`);
 });
 const rules = compile(text('src/utils/scheduleRules.ts'), {}, name => {
+  if (name === '../db/calendarIssues') return { getSuppressedEventIds: () => new Set() };
   if (name === 'luxon') return luxon;
   if (name === './categoryRules') return { checkCategorySlot: () => ({ allowed: true }), getProfileCategoryByName: () => undefined };
   if (name === './displaySubject') return { displaySubject: ev => ev.subject, PRIVATE_MASK: '(private)' };
@@ -390,8 +392,35 @@ test('A · Graph keeps a real venue label next to isOnlineMeeting — only liter
   assert.match(src, /\.\.\.\(effectiveLocation && \{ location:\s+\{ displayName: effectiveLocation \} \}\)/);
 });
 
-// ── B · office day + external in ANY zone asks the owner the ONE question ─
+// ── B · owner/external 1:1 is online; a real hybrid roster asks once ──────
 const askBase = { startIso: OFFICE, participantCount: 3, hasExternalAttendee: true, initiatorRole: 'owner' };
+
+test('B · Louis incident: owner + one external on an office day books online without asking where the owner sits', () => {
+  for (const externalAttendeeInDifferentTz of [true, false, undefined]) {
+    const v = resolve({
+      startIso: OFFICE,
+      participantCount: 2,
+      hasExternalAttendee: true,
+      initiatorRole: 'owner',
+      externalAttendeeInDifferentTz,
+      externalAttendeeNames: ['Louis'],
+    });
+    assert.deepEqual(shape(v), { kind: 'resolved', isOnline: true, location: '', addRoomEmail: undefined });
+    assert.match(v.reasoning, /one-to-one/);
+  }
+});
+
+test('B · owner-explicit physical one-to-one still uses the office address and keeps Teams (legitimate control)', () => {
+  const v = resolve({
+    startIso: OFFICE,
+    participantCount: 2,
+    hasExternalAttendee: true,
+    initiatorRole: 'owner',
+    ownerIsOnlineHint: false,
+    externalAttendeeNames: ['Louis'],
+  });
+  assert.deepEqual(shape(v), { kind: 'resolved', isOnline: true, location: 'Reflectiz, 6 Hanagar St', addRoomEmail: undefined });
+});
 
 test('B · office day + external in a different zone, owner path → ask (was: silent online)', () => {
   const v = resolve({ ...askBase, externalAttendeeInDifferentTz: true, externalAttendeeNames: ['Dana Levi'] });

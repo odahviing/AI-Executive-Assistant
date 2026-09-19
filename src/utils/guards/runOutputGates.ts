@@ -1029,7 +1029,29 @@ async function runClaimCheckAndMaybeRewrite(
       || !verdict.target_name
       || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase());
 
-    const matchingToolAlreadyRan = (mutationCarried || attendeeCheckCarried) && targetMatches;
+    // approval-relay-claim-retracted-after-confirmed-delivery (2026-09-16) —
+    // create_approval correctly carries `mutated=task`: creating the durable
+    // request is not itself a generic message mutation. But its producer also
+    // knows whether the owner-facing post actually landed and stamps the
+    // separate `notified=approval_owner` marker only for owner_notified=true.
+    // Accept that marker only for a MESSAGE claim whose named target is exactly
+    // the configured owner's full name or one of its exact tokens. This keeps a
+    // delivered approval from grounding "sent to Michal," and an absent target
+    // from turning an owner-specific delivery into a blanket message shield.
+    const ownerFullNameLower = profile.user.name.trim().toLowerCase();
+    const ownerNameTokensLower = ownerFullNameLower.split(/\s+/).filter(Boolean);
+    const claimTargetLower = verdict.target_name?.trim().toLowerCase();
+    // Unlike the general mutation recap shield, an approval notification is
+    // accepted from THIS turn only. A prior approval delivered to the same
+    // owner says nothing about whether today's distinct ask was relayed.
+    const currentToolSummariesText = (result.toolSummaries ?? []).join(' ');
+    const approvalOwnerNotificationCarried = verdict.action_type === 'message'
+      && !!claimTargetLower
+      && (claimTargetLower === ownerFullNameLower || ownerNameTokensLower.includes(claimTargetLower))
+      && currentToolSummariesText.includes('notified=approval_owner');
+
+    const matchingToolAlreadyRan = ((mutationCarried || attendeeCheckCarried) && targetMatches)
+      || approvalOwnerNotificationCarried;
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the
     // tool that ran doesn't cover (e.g. "updated to 25 min" claim while only

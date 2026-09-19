@@ -55,6 +55,9 @@ Thumbs.db
 # Durable regression fixtures live under scripts/fixtures instead.
 /artifacts/workshop-verification/
 
+# Local incident intake can contain private conversation excerpts.
+/artifacts/run-preparation/
+
 # Ephemeral isolated workspaces created by Workshop regression tests.
 /.workshop-before-linked-*/
 /.workshop-verification-*/

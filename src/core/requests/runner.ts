@@ -20,7 +20,7 @@ import { DateTime } from 'luxon';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getDueRequests, getRequest, updateRequest, createRequest, getRequestByIdempotencyKey, buildIdempotencyKey } from '../../db/requests';
-import { getOutreachJobByRequestId, updateOutreachJob } from '../../db/jobs';
+import { getOutreachJobByRequestId, updateOutreachJob, completeLegacyAutomaticMoveNotice } from '../../db/jobs';
 import { workTimeBaseFromNow, addWorkdays } from '../../utils/workHours';
 import { calcResponseDeadline, isColleagueSendDeferred } from '../../utils/responseDeadline';
 import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../../utils/attendeeAvailability';
@@ -115,7 +115,7 @@ export async function sweepDueRequests(opts: {
     await withRequestLock(row.id, async () => {
     const current = getRequest(row.id);
     if (!current || (!['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(current.state)
-        && !(current.next_check_handler === 'requester_relay_retry' && ['resolved', 'cancelled', 'expired'].includes(current.state)))
+        && !(current.next_check_handler === 'requester_relay_retry' && ['resolved', 'cancelled', 'expired', 'logged'].includes(current.state)))
         || !current.next_check_at || Date.parse(current.next_check_at) > Date.now()) return;
     try {
       const action = await dispatchHandler(current, profile, opts.app);
@@ -154,6 +154,9 @@ async function dispatchHandler(
   app: App | undefined,
 ): Promise<'closed' | 'rearmed' | 'noop'> {
   const handler = row.next_check_handler as NextCheckHandler | null;
+  if (row.kind === 'outreach' && row.subkind === 'meeting_reschedule'
+      && (handler === 'outreach_expiry' || handler === 'reschedule_reask')
+      && completeLegacyAutomaticMoveNotice(getOutreachJobByRequestId(row.id))) return 'closed';
   switch (handler) {
     case 'requester_relay_retry':
       await retryRequesterRelay(row, profile);
@@ -402,13 +405,15 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
     const conn = getConnection(ownerId, 'slack');
     if (conn) {
       if (remindingSomeoneElse) {
-        // Remind someone else: DM them framed as coming from the owner, then
+        // Remind someone else: attribute the ask to its authenticated initiator, then
         // report back to the owner (or flag if they were unreachable). This is
         // the behavior the old tasks-table dispatchReminder owned — now folded
         // into the single spine chokepoint so there's one reminder path.
-        const ownerFirst = profile.user.name.split(' ')[0];
+        const initiatorName = row.initiated_by === ownerId
+          ? profile.user.name.split(' ')[0]
+          : getPersonMemory(row.initiated_by)?.name?.split(' ')[0] ?? 'A colleague';
         const targetName = row.target_name ?? 'them';
-        const framed = `${ownerFirst} asked me to remind you: ${message}`;
+        const framed = `${initiatorName} asked me to remind you: ${message}`;
         const res = await sendTracked(conn, { dm: targetSlackId }, framed, undefined, 'runReminderFire colleague DM', row.id);
         delivered = res.ok;
         if (res.ok) {
@@ -585,6 +590,11 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
     }
   } catch (err) {
     logger.warn('runResearchRun — orchestrator threw', { requestId: row.id, err: String(err).slice(0, 300) });
+  }
+  if (answer && !delivered) {
+    // Delivery failure must not discard completed research or force its rerun.
+    // The sweep still closes this as failed delivery, never completed work.
+    updateRequest(row.id, { outcomeJson: { answer } });
   }
   if (!answer || !delivered) throw new Error('Research answer was not delivered');
   closeRequest({

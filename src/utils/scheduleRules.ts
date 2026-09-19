@@ -116,7 +116,7 @@ import type { UserProfile } from '../config/userProfile';
 import type { CalendarEvent } from '../connectors/graph/calendar';
 import { checkCategorySlot, getProfileCategoryByName } from './categoryRules';
 import { displaySubject, PRIVATE_MASK, type SubjectViewer } from './displaySubject';
-import { blockAppliesOnDay, busyForBlockWindow, getFloatingBlocks, isFloatingBlockEvent } from './floatingBlocks';
+import { blockAppliesOnDay, blockSizedToEvent, busyForBlockWindow, getFloatingBlocks, hasOtherHumanAttendee, isFloatingBlockEvent, isMovableFloatingBlockEvent } from './floatingBlocks';
 import { getEffectiveWorkDayForInstant, ownerWorkSegmentsBetween } from './workHours';
 
 export type RuleViolationKind =
@@ -801,6 +801,8 @@ export function occupancyRoleOf(
    * by the UTC offset.
    */
   timezone: string,
+  profile?: UserProfile,
+  suppressed: ReadonlySet<string> = new Set(),
 ): OccupancyRole {
   if (ev.isCancelled) return 'ignore';
   if (ev.showAs === 'free') return 'ignore';   // only 'free' is a non-collision; 'tentative' falls through to 'commitment' below and DOES collide
@@ -830,14 +832,7 @@ export function occupancyRoleOf(
   const matchedBlock = floatingBlockDefs.find(b => isFloatingBlockEvent(ev, b));
   if (matchedBlock) {
     if (ev.isAllDay) return 'ignore';
-    const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).setZone(timezone);
-    const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).setZone(timezone);
-    if (!evStart.isValid || !evEnd.isValid) return 'ignore';
-    const dayDate = evStart.toFormat('yyyy-MM-dd');
-    const winStart = DateTime.fromISO(`${dayDate}T${matchedBlock.preferred_start}`, { zone: timezone });
-    const winEnd = DateTime.fromISO(`${dayDate}T${matchedBlock.preferred_end}`, { zone: timezone });
-    if (!winStart.isValid || !winEnd.isValid) return 'ignore';
-    return (evStart < winStart || evEnd > winEnd) ? 'commitment' : 'ignore';
+    return isMovableFloatingBlockEvent(ev, matchedBlock, timezone, profile, suppressed) ? 'ignore' : 'commitment';
   }
   return 'commitment';
 }
@@ -947,12 +942,14 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
   // with no tier and a soft reason for a hard conflict.
   const floatingBlockDefs = getFloatingBlocks(profile);
   const ownerEmailLower = profile.user.email.toLowerCase();
+  const { getSuppressedEventIds } = require('../db/calendarIssues') as typeof import('../db/calendarIssues');
+  const suppressedFloatingIds = getSuppressedEventIds(profile.user.slack_user_id);
   let level: BookingLevel = 'free';
   let overOptional: string | undefined;
   let overCommitment: RuleCheckResult['overCommitment'];
   for (const ev of input.events) {
     if (excludeSet.has(ev.id)) continue;
-    const role = occupancyRoleOf(ev, floatingBlockDefs, tz);
+    const role = occupancyRoleOf(ev, floatingBlockDefs, tz, profile, suppressedFloatingIds);
     if (role === 'ignore') continue;
     const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' });
     const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' });
@@ -1247,6 +1244,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // day's remaining bookings warned as lunch-less). A block sitting INSIDE
       // its window still goes through the check below — there it really is
       // movable within the window, which is what that math measures.
+      let placedBlockEvent: CalendarEvent | undefined;
       const placedOutsideWindow = input.events.some(ev => {
         if (ev.isCancelled || ev.isAllDay || ev.showAs === 'free') return false;
         if (!isFloatingBlockEvent({ subject: ev.subject, categories: ev.categories }, block)) return false;
@@ -1254,11 +1252,15 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).setZone(tz);
         if (!evStart.isValid || !evEnd.isValid) return false;
         if (evStart.toFormat('yyyy-MM-dd') !== slotStart.toFormat('yyyy-MM-dd')) return false;
-        return evStart < windowStart || evEnd > windowEnd;
+        placedBlockEvent ??= ev;
+        return hasOtherHumanAttendee(ev, profile) || suppressedFloatingIds.has(ev.id) || evStart < windowStart || evEnd > windowEnd;
       });
       if (placedOutsideWindow) continue;
 
-      const blockDurationMin = block.duration_minutes ?? 25;
+      // Capacity and relocation protect the same owner-edited span.
+      const blockDurationMin = placedBlockEvent
+        ? blockSizedToEvent(block, placedBlockEvent, tz).duration_minutes
+        : block.duration_minutes;
 
       // Collect busy intervals inside the window (today only). This is a
       // single-slot CAPACITY check ("is there still room for the block
@@ -1275,7 +1277,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
         block,
         windowStart.toMillis(),
         windowEnd.toMillis(),
-        excludeSet,
+        new Set([...excludeSet, ...(placedBlockEvent ? [placedBlockEvent.id] : [])]),
       );
       // Add the proposed slot, clipped to the window.
       busyInWindow.push({
@@ -1341,7 +1343,7 @@ export function checkSlot(input: RuleCheckInput): RuleCheckResult {
       // skippable optional-join and an elastic lunch block all used to count,
       // and lunch alone erased the buffer-width band around it from every
       // Outside offer).
-      if (occupancyRoleOf(ev, floatingBlockDefs, tz) !== 'commitment') continue;
+      if (occupancyRoleOf(ev, floatingBlockDefs, tz, profile, suppressedFloatingIds) !== 'commitment') continue;
       // All-day commitments have no travel geometry. An all-day event that
       // overlaps THIS slot can't reach here at all (the scan saw it and rule 8
       // returned), so what this skips is the one remaining shape: a NEIGHBOURING

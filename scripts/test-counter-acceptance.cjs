@@ -113,7 +113,7 @@ function harness(options = {}) {
     modules.set(relative, module);
     const isolatedRequire = spec => {
       if (spec === 'luxon') return { DateTime };
-      if (spec === 'node:util' || spec === 'node:async_hooks') return require(spec);
+      if (spec === 'node:util' || spec === 'node:async_hooks' || spec === 'node:crypto') return require(spec);
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external module: ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };

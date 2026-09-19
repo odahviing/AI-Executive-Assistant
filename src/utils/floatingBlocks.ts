@@ -4,7 +4,7 @@
  * Single source of truth for "protected N-minute periods that can live
  * anywhere in a defined window". Lunch is the canonical example today —
  * but the concept is general: coffee break, thinking time, gym window,
- * daily writing hour, etc. All of these are elastic within their window;
+ * daily writing hour, etc. Solo instances are elastic within their window;
  * a block the owner places outside it counts as placed (owner ruling
  * 2026-09-14) and is his to move one-step, never Maelle's to slide.
  *
@@ -167,6 +167,38 @@ export function isFloatingBlockEvent(
   return false;
 }
 
+/** Matching human-attendee events count as the block, but remain fixed commitments. */
+export function hasOtherHumanAttendee(event: Pick<CalendarEvent, 'attendees'>, profile?: UserProfile): boolean {
+  const owner = profile?.user.email.toLowerCase();
+  const room = profile?.meetings.room_email?.toLowerCase();
+  return (event.attendees ?? []).some(a => {
+    const email = a.emailAddress?.address?.toLowerCase();
+    return (!('type' in a) || a.type !== 'resource') && !!email && email !== owner && email !== room;
+  });
+}
+
+/** Eligibility shared by search, validation and movers; callers supply durable decisions. */
+export function isMovableFloatingBlockEvent(
+  event: CalendarEvent, block: FloatingBlock, timezone: string,
+  profile?: UserProfile, suppressed: ReadonlySet<string> = new Set(),
+): boolean {
+  if (!isFloatingBlockEvent(event, block) || event.isCancelled || event.isAllDay
+      || event.showAs === 'free' || hasOtherHumanAttendee(event, profile) || suppressed.has(event.id)) return false;
+  const start = DateTime.fromISO(event.start.dateTime, { zone: event.start.timeZone ?? 'utc' }).setZone(timezone);
+  const end = DateTime.fromISO(event.end.dateTime, { zone: event.end.timeZone ?? 'utc' }).setZone(timezone);
+  const day = start.toFormat('yyyy-MM-dd');
+  return start.isValid && end.isValid && start.toMillis() >= windowMsForDay(day, block.preferred_start, timezone)
+    && end.toMillis() <= windowMsForDay(day, block.preferred_end, timezone);
+}
+
+/** Reserve source ranges: a later automatic move cannot depend on an earlier vacated slot. */
+export function preserveFloatingSourceRanges(events: CalendarEvent[], profile: UserProfile): CalendarEvent[] {
+  const blocks = getFloatingBlocks(profile);
+  return events.filter(e => blocks.some(b => isFloatingBlockEvent(e, b))).map(e => ({
+    ...e, id: `floating-source:${e.id}`, subject: '', categories: [],
+  }));
+}
+
 /**
  * densityCommitments — THE busy pool for the day's dense-packing gap-scoring
  * math (scoreSlotDensity / findDeadGaps / earlierConnectiveStart /
@@ -203,7 +235,7 @@ export function densityCommitments(
     .filter(e => !e.isCancelled && !e.isAllDay && e.showAs !== 'free' && e.showAs !== 'workingElsewhere')
     .filter(e => !exclude.has(e.id))
     .filter(e => opts.floatingBlocksAsNeighbours
-      || !blocks.some(b => isFloatingBlockEvent({ subject: e.subject, categories: e.categories }, b)))
+      || !blocks.some(b => isMovableFloatingBlockEvent(e, b, profile.user.timezone, profile)))
     .map(e => ({
       start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'utc' }).toMillis(),
       end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'utc' }).toMillis(),
@@ -240,7 +272,7 @@ export function densityCommitments(
  * and mis-flagged the block's own event as a competing busy interval.
  *
  * Excludes, uniformly for every caller: cancelled events, showAs='free',
- * the block's own calendar instance, and any id in `excludeIds` (a move's
+ * the moving instance identified by `excludeIds` (other matching instances stay busy) (a move's
  * own moving event, etc) — plus showAs='workingElsewhere' unless the caller
  * opts into treating it as busy. Every surviving interval is clipped to
  * [windowStart, windowEnd) in millis so callers can go straight into
@@ -260,7 +292,8 @@ export function busyForBlockWindow(
     if (excludeIds?.has(ev.id)) continue;
     if (ev.showAs === 'free') continue;
     if (ev.showAs === 'workingElsewhere' && !treatWorkingElsewhereAsBusy) continue;
-    if (isFloatingBlockEvent({ subject: ev.subject, categories: ev.categories }, block)) continue;
+    // Explicit moving ids exclude only that instance; other matching events stay busy.
+    if (!excludeIds && isFloatingBlockEvent(ev, block) && !hasOtherHumanAttendee(ev)) continue;
     const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
     const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis();
     if (evEnd <= windowStart || evStart >= windowEnd) continue;

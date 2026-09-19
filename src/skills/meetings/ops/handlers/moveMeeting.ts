@@ -36,6 +36,32 @@ import { createApprovalRequest } from '../../../../tasks/skill';
 import { logActivity } from '../../../../core/requests/logActivity';
 import type { OpCtx } from './context';
 
+/** An explicit owner correction rejects only the automatic move still reflected in the calendar. */
+export async function recordOwnerAutoMoveCorrection(params: {
+  ownerUserId: string; eventId: string; priorStart?: string; priorEnd?: string;
+  newStart: string; newEnd: string; timezone: string;
+}): Promise<boolean> {
+  try {
+  const { ownerUserId, eventId, priorStart, priorEnd, newStart, newEnd, timezone } = params;
+  if (!priorStart || !priorEnd) return true;
+  const instant = (value: string) => DateTime.fromISO(value, { zone: timezone }).toMillis();
+  if (instant(priorStart) === instant(newStart) && instant(priorEnd) === instant(newEnd)) return true;
+  const { getLatestAutomaticMoveForEvent } = await import('../../../../db/requests');
+  const automatic = getLatestAutomaticMoveForEvent(ownerUserId, eventId);
+  if (!automatic) return true;
+  const outcome = JSON.parse(automatic.outcome_json ?? '{}');
+  if (instant(outcome.new_start) !== instant(priorStart) || instant(outcome.new_end) !== instant(priorEnd)) return true;
+  const { dismissOverlapIssue, DISMISSAL_NEVER_EXPIRES } = await import('../../../../db/calendarIssues');
+  dismissOverlapIssue({ ownerUserId, eventId,
+    eventDate: DateTime.fromISO(newStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
+    eventEndMs: DISMISSAL_NEVER_EXPIRES, notes: 'owner corrected an automatic move - leave this event alone' });
+  return true;
+  } catch {
+    // Calendar success remains success; the caller must disclose missing rejection memory.
+    return false;
+  }
+}
+
 /**
  * seriesKeyOf — the series identity of a Graph event, or undefined when the
  * event isn't part of a recurring series at all. A seriesMaster's own id IS
@@ -1432,6 +1458,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // (failing closed on every transient read error has its own cost:
         // every move_meeting would refuse whenever Graph blips) — not
         // silent; see the catch below.
+        let ownerDecisionWarning: string | undefined;
         let preMoveStartIso: string | undefined;
         let preMoveEndIso: string | undefined;
         let preMoveIsAllDay: boolean | undefined;
@@ -1985,7 +2012,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             const dayStr = newStartDt.toFormat('yyyy-MM-dd');
             const dayEvents = await getCalendarEvents(userEmail, dayStr, dayStr, timezone);
             const movingEvent = dayEvents.find(e => e.id === args.meeting_id);
-            const matchedBlock = movingEvent ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
+            const matchedBlock = movingEvent && !fb.hasOtherHumanAttendee(movingEvent, context.profile) ? blocks.find(b => fb.isFloatingBlockEvent(movingEvent, b)) : null;
             if (matchedBlock) {
               // v3.4.2 — preserve the MOVING EVENT's own duration (an owner-
               // stretched 40-min lunch stays 40). The ONE sizing helper every
@@ -2054,6 +2081,9 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   isAllDay: preMoveIsAllDay,
                   eventType: preMoveEventType,
                 }).then(async () => {
+                  if (!await recordOwnerAutoMoveCorrection({ ownerUserId: context.profile.user.slack_user_id,
+                    eventId: args.meeting_id as string, priorStart: preMoveStartIso, priorEnd: preMoveEndIso,
+                    newStart: effectiveStart, newEnd: effectiveEnd, timezone })) ownerDecisionWarning = 'The meeting moved, but I could not save your rejection of the automatic move. That decision still needs recording.';
                   await closeMeetingArtifacts({
                     ownerUserId: context.profile.user.slack_user_id,
                     meetingId: args.meeting_id as string,
@@ -2105,6 +2135,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   return {
                     success: true,
                     action_summary: `Moved ${matchedBlock.name} to ${formatIsoTime(effectiveStart, timezone)}.${windowNote}`,
+                    ...(ownerDecisionWarning ? { warning: ownerDecisionWarning } : {}),
                     // #1.5 — surface the POST-snap booked instant on the floating-block
                     // owner-move path too (lunch is the canonical case). Without it
                     // mutationActions falls back to the pre-snap input arg and the reply
@@ -2611,56 +2642,11 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // same event id on all three writes). An autonomous action repeated
         // something he had explicitly undone, and messaged a colleague twice.
         //
-        // The durable "if I said no, it's no" record lived ONLY on the explicit
-        // tool: `revert_last_auto_move` writes a terminal dismissal
-        // (handlers/calendarReads.ts) and was its only caller. The conversational
-        // undo — what he actually does — wrote nothing, leaving one protection:
-        // `getRecentlyAutoMovedEventIds`' 12h window, timed from MY move instead of
-        // HIS decision (undo it 13h after the autofix and the next sweep re-does
-        // it), off a record whose write is explicitly best-effort. So his decision
-        // is now recorded where every mover already looks — `getSuppressedEventIds`,
-        // read by the double-booking pair scan, the dead-gap scan and all three
-        // defrag paths (calendarHealth/handlers/checkHealth.ts) — which is what
-        // makes it hold "regardless of which detector would fire next".
-        //
-        // BOUNDED, because it is INFERRED from an action rather than stated
-        // (OWNER_UNDO_SUPPRESSION_HOURS): after the window a genuinely different,
-        // later problem on the same event is detected, tracked and narrated again.
-        // Keyed on the event HE touched — never its peer (that meeting he did not
-        // touch), and never an autofix he left alone: the trigger is the recent
-        // auto-move record for THIS id. Owner-authenticated senderRole only, never a
-        // claim in a message; a colleague's move already answers to its own
-        // rule-compliance gate above. (The floating-block owner-move branch earlier
-        // in this handler needs none of this: blocks are rebalanced, never
-        // auto-moved — calendarHealth/autoMove.ts — so no block id can be in the
-        // record set.)
+        // A correction of the last automatic destination records the owner's durable decision.
         if (context.senderRole === 'owner') {
-          try {
-            const movedId = args.meeting_id as string;
-            const ownerUserId = context.profile.user.slack_user_id;
-            const { getRecentlyAutoMovedEventIds } = await import('../../../../db/requests');
-            if (getRecentlyAutoMovedEventIds(ownerUserId).has(movedId)) {
-              const { dismissOverlapIssue, OWNER_UNDO_SUPPRESSION_HOURS } =
-                await import('../../../../db/calendarIssues');
-              const windowEndMs = Date.now() + OWNER_UNDO_SUPPRESSION_HOURS * 60 * 60 * 1000;
-              const eventEndMs = DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis();
-              dismissOverlapIssue({
-                ownerUserId,
-                eventId: movedId,
-                eventDate: DateTime.fromISO(effectiveStart, { zone: timezone }).toFormat('yyyy-MM-dd'),
-                eventEndMs: Math.min(eventEndMs, windowEndMs),
-                notes: `owner moved this himself after an autofix moved it — leave it alone for ${OWNER_UNDO_SUPPRESSION_HOURS}h`,
-              });
-              logger.info('move_meeting — owner changed a recent autofix; autofix suppressed for this event', {
-                meetingId: movedId, suppressionHours: OWNER_UNDO_SUPPRESSION_HOURS,
-                until: new Date(Math.min(eventEndMs, windowEndMs)).toISOString(),
-              });
-            }
-          } catch (err) {
-            logger.warn('move_meeting — autofix-suppression write threw, move already landed', {
-              err: String(err).slice(0, 160),
-            });
-          }
+          if (!await recordOwnerAutoMoveCorrection({ ownerUserId: context.profile.user.slack_user_id,
+            eventId: args.meeting_id as string, priorStart: preMoveStartIso, priorEnd: preMoveEndIso,
+            newStart: effectiveStart, newEnd: effectiveEnd, timezone })) ownerDecisionWarning = 'The meeting moved, but I could not save your rejection of the automatic move. That decision still needs recording.';
         }
         // #30 — the move landed on this slot, so release any hold overlapping it
         // (overlap, not exact-start: a move target may not begin exactly at the
@@ -2812,15 +2798,18 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // slides inside its own window. The real moves ride the success return
         // (`blocks_moved`) — awaited-and-discarded until 2026-09-14.
         let blocksMoved: string[] = [];
+        let floatingBlockQuestions: string[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
             typeof import('../../../../utils/rebalanceFloatingBlocks');
-          blocksMoved = (await rebalanceFloatingBlocksAfterMutation({
+          const floatingResult = await rebalanceFloatingBlocksAfterMutation({
             profile: context.profile,
             affectedSlotIso: effectiveStart,
             ownerSlackId: context.profile.user.slack_user_id,
-          })).moves;
+          });
+            blocksMoved = floatingResult.moves;
+            if (context.senderRole === 'owner') floatingBlockQuestions = (floatingResult.ownerQuestions ?? []).map(q => q.description);
         } catch (err) {
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
@@ -2867,6 +2856,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         return {
           success: true,
           moved: movedSubject,
+          ...(ownerDecisionWarning ? { warning: ownerDecisionWarning } : {}),
           ...presentationLocalFieldFor(preMoveAttendeeEmails, effectiveStart, userEmail, timezone),
           // #1.5 — the ACTUAL booked time after exact-offer preservation or grid
           // cleanup. Narration and mutationActions reflect where it truly landed.
@@ -2879,6 +2869,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // The floating block(s) this move actually slid (same shape as
           // check_join_availability's field) — state it, never silently.
           ...(blocksMoved.length > 0 ? { blocks_moved: blocksMoved } : {}),
+          ...(floatingBlockQuestions.length > 0 ? { floating_block_questions: floatingBlockQuestions } : {}),
           // #A (2026-07-19) — non-blocking attendee-busy heads-up. The move already went
           // through (owner override is total), but a colleague-requested move can re-land
           // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.

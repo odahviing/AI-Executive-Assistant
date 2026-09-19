@@ -188,7 +188,7 @@ export function isRequesterSendUnconfirmed(result: { ok: boolean; reason?: strin
 /** Exact terminal copy lives on its request; no second lifecycle or recomposition. */
 export function recordRequesterRelayFailure(row: RequestRow, body: string, unconfirmed: boolean): void {
   const current = getRequest(row.id) ?? row;
-  if (!['resolved', 'cancelled', 'expired'].includes(current.state) || current.requester_notified_at) return;
+  if (!['resolved', 'cancelled', 'expired', 'logged'].includes(current.state) || current.requester_notified_at) return;
   const outcome = readOutcome(current);
   updateRequest(row.id, {
     outcomeJson: { ...outcome, requester_relay: { body, delivery: unconfirmed ? 'unconfirmed' : 'failed' } },

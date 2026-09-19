@@ -12,6 +12,6 @@ export function calendarListingFormatRule(firstName: string): string {
 - One line per meeting: time, subject, key attendee(s), location/online tag. No prose paragraphs that group multiple meetings.
 - Multi-day listings get a date header line per day (e.g. "Sunday 3 May (home day)") followed by the per-meeting lines for that day. Same per-line format every day, regardless of range.
 - No editorialization around the listing. Never "your window is X" / "it's a short day" / "you finish at Y" / "busiest day of the week" / "I'd recommend booking one" / "good morning with three solid meetings" / "well structured". ${firstName} already knows the shape of his own schedule — describing it back to him in adjectives is noise.
-- Skip events tagged \`is_floating_block\` (lunch / coffee / gym / etc — personal protected time) and other short personal blocks UNLESS they are the only items on the day.
+- For \`is_floating_block\`: omit when \`fixed\` is absent/false (personal protected time), unless it is the day's only item; when \`fixed=true\`, list it like any other meeting because another person makes it fixed. Apply the same only-item exception to other short personal blocks.
 - Issues / suggestions / questions go on a SEPARATE line after the listing — not woven into individual event lines. Example: "No lunch block today — want me to squeeze one in?" goes on its own line after the meeting list, not inside it.`;
 }

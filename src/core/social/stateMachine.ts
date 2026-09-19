@@ -250,7 +250,7 @@ export function isSocialInitiationDue(params: {
   // left the daily gate un-armed and fired on EVERY turn (owner got 3 codas in
   // 8 min, 2026-07-13). people_memory.last_initiated_at is stamped for BOTH modes
   // — it is literally the per-person 24h gate field — so read it here to make
-  // once-per-day hold regardless of mode. Written by `recordCodaDelivered`
+  // once-per-day hold regardless of mode. Written by `reserveCodaAttempt`
   // (core/social/logEngagement.ts) immediately before the transport send
   // attempt, NOT at composition; for a raise_new coda it is the only gate.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -347,10 +347,10 @@ export function directiveForProactiveSlot(params: {
   // same lazy moment as the subject pass above. A raise_new aimed at a
   // category that already had standing (score > 0) leaves no subject row
   // behind, so the subject loop above can never judge its silence; the
-  // category row carries the marker instead (`last_raise_attempt_at`,
-  // reserved immediately before the send attempt — recordCodaDelivered →
-  // markCategoryRaised, so a validator- or gate-dropped raise the person
-  // never saw can never be judged here). Judged per category:
+  // category row carries the marker instead (`last_raise_attempt_at`, written
+  // after a confirmed send — recordCodaDelivered → markCategoryRaised, so a
+  // validator-, gate-, or transport-dropped raise the person never saw can
+  // never be judged here). Judged per category:
   //   - a live subject exists now → the raise was answered or mooted
   //     (reconciliation created/revived one, or subjects were there all
   //     along) → marker/counter cleared;

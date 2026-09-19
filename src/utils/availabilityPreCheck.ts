@@ -1523,7 +1523,7 @@ function renderPromptBlock(verdicts: SlotVerdict[], profile: UserProfile, reques
   });
   // v4.3.x (G164-a) — removed the duplicated reversal-honesty instruction
   // (now lives only in meetings.ts's MEETINGS HONESTY block); kept below is
-  // just the clock-mechanism fact, which meetings.ts:1422 also states.
+  // just the clock-mechanism fact, which meetings.ts getSystemPromptSection also states.
   return `## AVAILABILITY CHECK (rule-aware, deterministic)
 
 I pre-checked the times in this colleague's question against ${profile.user.name.split(' ')[0]}'s real scheduling rules (work hours, buffer, focus blocks, category limits). Use these verdicts in your reply — do NOT eyeball get_calendar and disagree:

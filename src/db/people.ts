@@ -1543,8 +1543,8 @@ export function appendPersonInteractionById(personId: string, interaction: Omit<
  * @returns true when the row was actually stamped; FALSE when this person_id has
  *          no people_memory row, in which case nothing was written. The return
  *          exists because `last_initiated_at` is the once-per-day coda gate: a
- *          silent no-op here leaves that gate open, and the caller that just
- *          DELIVERED a coda (`recordCodaDelivered`) has to be able to say so.
+ *          silent no-op here leaves that gate open, and the caller reserving
+ *          a coda attempt (`reserveCodaAttempt`) has to be able to say so.
  *
  * v4.4.x (#170) — person_id-keyed worker (works for externals too).
  */

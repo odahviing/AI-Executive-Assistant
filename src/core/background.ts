@@ -119,7 +119,9 @@ async function reconcileFulfilledHolds(profiles: Map<string, UserProfile>): Prom
           events = await getCalendarEvents(profile.user.email, day, day, tz);
         } catch { continue; }
         const match = events.find(ev => {
-          if (ev.isAllDay || occupancyRoleOf(ev, floatingBlocks, tz) !== 'commitment') return false;
+          // Occupancy needs the owner profile so a self attendee or configured
+          // room does not turn a movable floating block into a human meeting.
+          if (ev.isAllDay || occupancyRoleOf(ev, floatingBlocks, tz, profile) !== 'commitment') return false;
           if (!(ev.attendees ?? []).some(a => (a.emailAddress?.address ?? '').toLowerCase() === holderEmail)) return false;
           const evStart = DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
           const evEnd = DateTime.fromISO(ev.end.dateTime, { zone: ev.end.timeZone ?? 'utc' }).toMillis();

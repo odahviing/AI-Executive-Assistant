@@ -19,10 +19,11 @@ import {
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, withRequestLock, notifyRequesterOfDecision, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
-import { requesterRelayLanguage } from '../core/requests/requesterRelay';
+import { requesterRelayLanguage, relayClosureToRequester } from '../core/requests/requesterRelay';
 import { logActivity } from '../core/requests/logActivity';
 import { composeOwnerAskText, extractCallbacks } from '../core/approvals/approvalCallbacks';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
@@ -40,6 +41,14 @@ import { MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from '../utils/usageLog';
 
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
+/** Exact task occurrence identity; amendments replace the same key atomically. */
+function taskOccurrenceKey(owner: string, requester: string | null, kind: string, title: string,
+  due: string, target: string | null, description: string | null, message: string | null): string {
+  return `task:${createHash('sha256').update(JSON.stringify([
+    buildIdempotencyKey({ ownerUserId: owner, requesterSlackId: requester, kind, subject: title }),
+    due, target ?? owner, description ?? '', message ?? '',
+  ])).digest('hex')}`;
+}
 
 // The TOOL-facing subset of core/requests/types.ts's canonical
 // APPROVAL_SUBKINDS — everything create_approval may mint. `satisfies`
@@ -87,6 +96,7 @@ const anthropic = getAnthropicClient();
 const COLLEAGUE_PENDING_CAP = 2;
 async function colleaguePendingCapRefusal(
   context: SkillContext, ownerUserId: string,
+  replacingPendingRequest = false,
 ): Promise<{ error: string; reason: string } | null> {
   // gh#handyman-authority-clamp-sweep (third consumer, 2026-08-19) — `authority`
   // alone still isn't enough: processMessage.ts's debounce merge clamps
@@ -98,7 +108,7 @@ async function colleaguePendingCapRefusal(
   // colleagues' pending-request cap, which is documented above as never
   // applying to him. Compare the authenticated identity directly.
   if (context.authority !== 'colleague' || context.userId === ownerUserId) return null;
-  const pending = getPendingRequestCountForColleague(ownerUserId, context.userId);
+  const pending = getPendingRequestCountForColleague(ownerUserId, context.userId) - (replacingPendingRequest ? 1 : 0);
   if (pending < COLLEAGUE_PENDING_CAP) return null;
 
   // gh#pending-cap-blocks-unrelated-questions (2026-08-10, SlackMaster hand-off) —
@@ -580,6 +590,8 @@ function gateApprovalAsk(
 export async function createApprovalRequest(
   args: Record<string, unknown>,
   context: SkillContext,
+  // Code-only handoff from a locked reschedule reply; never a tool argument.
+  handoff?: { replacingOutreachRequestId?: string },
 ): Promise<unknown> {
   const { profile, channelId, threadTs } = context;
   const ownerUserId = profile.user.slack_user_id;
@@ -607,6 +619,19 @@ export async function createApprovalRequest(
         }
         const payload = (rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {});
         const askText = args.ask_text as string;
+        const replacementId = handoff?.replacingOutreachRequestId;
+        if (replacementId) {
+          const source = getRequest(replacementId);
+          let sourceMeeting: unknown;
+          try { sourceMeeting = JSON.parse(String(source ? parseDetails(source)?.context_json ?? '{}' : '{}')).meeting_id; } catch { /* invalid source is refused below */ }
+          if (!source || source.kind !== 'outreach' || source.subkind !== 'meeting_reschedule'
+              || source.state !== 'awaiting_colleague' || source.owner_user_id !== ownerUserId
+              || source.target_slack_id !== context.userId || context.authority !== 'colleague' || context.senderRole !== 'colleague'
+              || context.userId === ownerUserId || args.kind !== 'policy_exception'
+              || typeof sourceMeeting !== 'string' || sourceMeeting !== payload.meeting_id) {
+            return { error: 'invalid_outreach_handoff', reason: 'The open reschedule request does not belong to this colleague and meeting.' };
+          }
+        }
 
         // #145 — a CALENDAR change must never ride a freeform approval. Freeform
         // carries no action, so approving "Move GTM to Wed?" changes nothing and
@@ -1366,7 +1391,7 @@ export async function createApprovalRequest(
         // about to mint a brand-new approval — the "3rd tracked item" the
         // cap exists to stop, never a correction to one of the first two.
         {
-          const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId);
+          const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId, !!replacementId);
           if (capRefusal) {
             logger.info('create_approval — refused at the colleague pending cap', {
               requesterSlackId, subject,
@@ -1407,7 +1432,11 @@ export async function createApprovalRequest(
 
         let row;
         try {
-          row = createRequest({
+          // The old outreach and its approval represent one pending ask. Persist
+          // the replacement atomically, before fallible owner delivery, so an
+          // insertion failure cannot lose the source deadline or consume a slot.
+          const persist = () => {
+          const created = createRequest({
             ownerUserId,
             initiatedBy: context.userId,
             initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
@@ -1416,7 +1445,7 @@ export async function createApprovalRequest(
             subject,
             description: askText,
             state: priorDecline ? 'awaiting_colleague' : 'awaiting_owner',
-            parentRequestId: priorDecline?.id,
+            parentRequestId: priorDecline?.id ?? replacementId,
             requesterSlackId,
             requesterName,
             originChannel: channelId,
@@ -1434,6 +1463,13 @@ export async function createApprovalRequest(
               ...payload,
             },
           });
+          if (replacementId) closeRequest({ id: replacementId, state: 'resolved',
+            closureReason: 'outreach_escalated_to_approval', closedBy: 'system', skipChildren: true });
+          return created;
+          };
+          row = replacementId
+            ? (require('../db/client') as typeof import('../db/client')).getDb().transaction(persist)()
+            : persist();
         } catch (err) {
           const errMsg = String(err);
           const isUniqueViolation = errMsg.includes('UNIQUE constraint failed')
@@ -1810,50 +1846,82 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // the old tasks-table dispatchers were the duplicate path, now deleted.
         const nextCheckHandler = taskType === 'research' ? 'research_run' : 'reminder_fire';
 
-        // gh#pending-cap-blocks-unrelated-questions — creation-time cap
-        // (see colleaguePendingCapRefusal above). create_task is
-        // colleague-reachable (o#219), so a capped colleague trying to open
-        // a THIRD tracked reminder/follow_up/research is refused here —
-        // never at message receipt, so an ordinary question never trips it.
-        const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId);
-        if (capRefusal) {
-          return { error: capRefusal.error, message: capRefusal.reason };
-        }
+        // Task identity includes its scheduled occurrence and destination. A
+        // title alone must not reserve that title forever after the first use.
+        const idempotencyKey = taskOccurrenceKey(ownerUserId, context.userId, kind, title, dueAt,
+          targetSlackId ?? null, description ?? null, message ?? null);
+        return withRequestLock(idempotencyKey, async () => {
+          let existing = getRequestByIdempotencyKey(idempotencyKey);
+          if (!existing) {
+            // Pre-occurrence-key tasks still carry the old title-only key.
+            // Recognize an exact legacy occurrence without reserving its title
+            // for unrelated dates, recipients, or message payloads.
+            const legacy = getRequestByIdempotencyKey(buildIdempotencyKey({
+              ownerUserId, requesterSlackId: context.userId, kind, subject: title,
+            }));
+            const legacyDetails = legacy ? parseDetails(legacy) ?? {} : {};
+            const legacyDue = typeof legacyDetails.due_at === 'string'
+              ? toTimerInstant(legacyDetails.due_at, profile.user.timezone) : legacy?.next_check_at;
+            if (legacy && legacyDue && taskOccurrenceKey(legacy.owner_user_id, legacy.requester_slack_id,
+              legacy.kind, legacy.subject, legacyDue, legacy.target_slack_id, legacy.description,
+              typeof legacyDetails.message === 'string' ? legacyDetails.message : null) === idempotencyKey) {
+              existing = legacy;
+            }
+          }
+          if (existing) {
+            if (!['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(existing.state)) {
+              return { created: false, already_closed: true, task_id: existing.id, state: existing.state,
+                message: 'This scheduled task has already ended. No new reminder or action was scheduled.' };
+            }
+            const existingDue = DateTime.fromISO(existing.next_check_at ?? dueAt).setZone(profile.user.timezone);
+            return { created: true, reused_existing: true, task_id: existing.id,
+              due: existingDue.toFormat('EEEE, d MMMM') + ' at ' + existingDue.toFormat('HH:mm') };
+          }
+          // gh#pending-cap-blocks-unrelated-questions — creation-time cap
+          // (see colleaguePendingCapRefusal above). create_task is
+          // colleague-reachable (o#219), so a capped colleague trying to open
+          // a THIRD tracked reminder/follow_up/research is refused here —
+          // never at message receipt, so an ordinary question never trips it.
+          const capRefusal = await colleaguePendingCapRefusal(context, ownerUserId);
+          if (capRefusal) {
+            return { error: capRefusal.error, message: capRefusal.reason };
+          }
 
-        const row = createRequest({
-          ownerUserId,
-          initiatedBy: context.userId,
-          // o#219 — create_task IS colleague-reachable (registry.ts's
-          // COLLEAGUE_ALLOWED_TOOLS has no authority/senderRole gate on it), so
-          // stamp the role that actually created it — same pattern as
-          // create_approval below — never hardcode 'owner'. runner.ts's
-          // runResearchRun derives its senderRole/authority off `initiated_by`
-          // itself (not this field), so a colleague-raised research row no
-          // longer replays with full owner tool access into a shared room.
-          initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
-          kind,
-          subject: title,
-          description,
-          state: 'in_flight',
-          informed: 1,
-          // The reminder is an activity OWNED BY its requester (owner or
-          // colleague — create_task is colleague-reachable too). runReminderFire
-          // reads this to frame third-party reminders ("<requester> asked me to
-          // remind you").
-          requesterSlackId: context.userId,
-          targetSlackId,
-          targetName,
-          originChannel: channelId,
-          originThreadTs: threadTs,
-          // #154 — any room surface (MPIM or real channel), not MPIM-only. The
-          // return-leg readers (resolver.ts/runner.ts/briefs.ts/
-          // closeMeetingArtifacts.ts) already gate on `origin_is_mpim &&
-          // origin_channel`; this is what feeds that boolean.
-          originIsMpim: context.surface === 'room',
-          expiresAt: undefined,
-          nextCheckAt: dueAt,
-          nextCheckHandler,
-          details: { message, due_at: dueAt },
+          const row = createRequest({
+            ownerUserId,
+            idempotencyKey,
+            initiatedBy: context.userId,
+            // o#219 — create_task IS colleague-reachable (registry.ts's
+            // COLLEAGUE_ALLOWED_TOOLS has no authority/senderRole gate on it), so
+            // stamp the role that actually created it — same pattern as
+            // create_approval below — never hardcode 'owner'. runner.ts's
+            // runResearchRun derives its senderRole/authority off `initiated_by`
+            // itself (not this field), so a colleague-raised research row no
+            // longer replays with full owner tool access into a shared room.
+            initiatedByRole: context.senderRole === 'owner' ? 'owner' : 'colleague',
+            kind,
+            subject: title,
+            description,
+            state: 'in_flight',
+            informed: 1,
+            // The reminder is an activity OWNED BY its requester (owner or
+            // colleague — create_task is colleague-reachable too). runReminderFire
+            // derives attribution from initiated_by when framing reminders ("<requester> asked me to
+            // remind you").
+            requesterSlackId: context.userId,
+            targetSlackId,
+            targetName,
+            originChannel: channelId,
+            originThreadTs: threadTs,
+            // #154 — any room surface (MPIM or real channel), not MPIM-only. The
+            // return-leg readers (resolver.ts/runner.ts/briefs.ts/
+            // closeMeetingArtifacts.ts) already gate on `origin_is_mpim &&
+            // origin_channel`; this is what feeds that boolean.
+            originIsMpim: context.surface === 'room',
+            expiresAt: undefined,
+            nextCheckAt: dueAt,
+            nextCheckHandler,
+            details: { message, due_at: dueAt },
         });
 
         const dueDt = DateTime.fromISO(dueAt).setZone(profile.user.timezone);
@@ -1863,46 +1931,64 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           task_id: row.id,
           due: dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm'),
         };
+        });
       }
 
       case 'edit_task': {
         const id = args.task_id as string;
-        const row = getRequest(id);
-        if (!row) return { error: 'Task not found' };
-        if (row.kind === 'approval') {
-          return { error: 'approval_requires_decision_tool', message: 'Correct the approval through create_approval, or record the owner decision through resolve_approval, so its stored action and visible ask stay together.' };
-        }
-
-        const detailsCurrent = parseDetails(row) ?? {};
-        const patch: Parameters<typeof updateRequest>[1] = {};
-        if (typeof args.title === 'string') patch.subject = args.title;
-        if (typeof args.description === 'string') patch.description = args.description;
-        // #149 — same UTC anchoring as create_task, so a rescheduled reminder
-        // can't re-acquire the naive-clock delay.
-        let dueAtNormalized: string | null = null;
-        if (typeof args.due_at === 'string') {
-          dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
-          if (!dueAtNormalized) {
-            return {
-              error: 'bad_due_at',
-              message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
-            };
+        return withRequestLock(id, async () => {
+          const row = getRequest(id);
+          if (!row) return { error: 'Task not found' };
+          if (row.kind === 'approval') {
+            return { error: 'approval_requires_decision_tool', message: 'Correct the approval through create_approval, or record the owner decision through resolve_approval, so its stored action and visible ask stay together.' };
           }
-          patch.nextCheckAt = dueAtNormalized;
-          patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
-        }
-        if (typeof args.message === 'string') {
-          patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
-        }
-        if (Object.keys(patch).length === 0) return { updated: false, message: 'Nothing to update' };
-        updateRequest(id, patch);
-        logger.info('Task edited via skill', { id, fields: Object.keys(patch) });
-        const result: Record<string, unknown> = { updated: true, task_id: id };
-        if (dueAtNormalized) {
-          const dueDt = DateTime.fromISO(dueAtNormalized).setZone(profile.user.timezone);
-          result.new_due = dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm');
-        }
-        return result;
+
+          if (!['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(row.state)) {
+            return { updated: false, error: 'task_already_closed', state: row.state,
+              message: 'This task has already ended. Create a new task to schedule more work.' };
+          }
+
+          const detailsCurrent = parseDetails(row) ?? {};
+          const patch: Parameters<typeof updateRequest>[1] = {};
+          if (typeof args.title === 'string') patch.subject = args.title;
+          if (typeof args.description === 'string') patch.description = args.description;
+          // #149 — same UTC anchoring as create_task, so a rescheduled reminder
+          // can't re-acquire the naive-clock delay.
+          let dueAtNormalized: string | null = null;
+          if (typeof args.due_at === 'string') {
+            dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
+            if (!dueAtNormalized) {
+              return {
+                error: 'bad_due_at',
+                message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
+              };
+            }
+            patch.nextCheckAt = dueAtNormalized;
+            patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
+          }
+          if (typeof args.message === 'string') {
+            patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
+          }
+          if (Object.keys(patch).length === 0) return { updated: false, message: 'Nothing to update' };
+          if (['reminder_fire', 'research_run'].includes(row.next_check_handler ?? '') && row.next_check_at) {
+            const due = dueAtNormalized ?? row.next_check_at;
+            const key = taskOccurrenceKey(row.owner_user_id, row.requester_slack_id, row.kind, patch.subject ?? row.subject,
+              due, row.target_slack_id, patch.description ?? row.description,
+              typeof patch.details?.message === 'string' ? patch.details.message : typeof detailsCurrent.message === 'string' ? detailsCurrent.message : null);
+            const existing = getRequestByIdempotencyKey(key);
+            if (existing && existing.id !== id) return { updated: false, error: 'task_already_exists', task_id: existing.id,
+              message: 'Another task already tracks that scheduled occurrence. No task was changed.' };
+            patch.idempotencyKey = key;
+          }
+          updateRequest(id, patch);
+          logger.info('Task edited via skill', { id, fields: Object.keys(patch) });
+          const result: Record<string, unknown> = { updated: true, task_id: id };
+          if (dueAtNormalized) {
+            const dueDt = DateTime.fromISO(dueAtNormalized).setZone(profile.user.timezone);
+            result.new_due = dueDt.toFormat('EEEE, d MMMM') + ' at ' + dueDt.toFormat('HH:mm');
+          }
+          return result;
+        });
       }
 
       case 'get_my_tasks': {
@@ -1967,6 +2053,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           }
           return {
             task_id: r.id,
+            state: r.state,
+            closure_reason: r.closure_reason,
             kind: r.kind,
             subkind: r.subkind,
             subject: r.subject,
@@ -2012,15 +2100,24 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         if (row.kind === 'approval') {
           return resolveRequest(id, { verdict: 'cancel', reason: 'The owner cancelled this request.' }, { profile, resolvedByColleague: false, resolvingUserId: context.userId });
         }
-        closeRequest({
-          id,
-          state: 'cancelled',
-          closureReason: 'owner_cancel_task_tool',
-          closedBy: 'owner',
+        return withRequestLock(id, async () => {
+          const current = getRequest(id);
+          if (!current) return { error: 'Task not found' };
+          const closed = closeRequest({ id, state: 'cancelled', closureReason: 'owner_cancel_task_tool', closedBy: 'owner' });
+          if (!closed.ok || closed.reason === 'already terminal') {
+            return { cancelled: closed.ok && closed.state === 'cancelled', already_closed: true, state: closed.state, title: current.subject };
+          }
+          const hasRequester = !!current.requester_slack_id && current.requester_slack_id !== ownerUserId;
+          const notified = hasRequester ? await relayClosureToRequester({ row: current, profile,
+            label: 'cancel_task requester closure',
+            compose: ({ lang, hi, ownerFirst, subject }) => lang === 'he'
+              ? `${hi} — ${ownerFirst} ביטל את הבקשה לגבי ${subject}.`
+              : `${hi} — ${ownerFirst} cancelled the request about ${subject}.`,
+          }) : false;
+          return { cancelled: true, title: current.subject,
+            ...(hasRequester ? { requester_notify_outcome: notified ? 'sent' : 'failed' } : {}) };
         });
-        return { cancelled: true, title: row.subject };
       }
-
       case 'get_briefing': {
         const events = getUnseenEvents(ownerUserId);
         const open = getOpenRequestsForOwner(ownerUserId);

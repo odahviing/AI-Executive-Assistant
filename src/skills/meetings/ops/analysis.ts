@@ -118,7 +118,7 @@ interface ProcessedEvent {
   // through `isFloatingBlockEvent` so it honors the yaml's
   // `match_subject_regex` + `match_category` (instead of duplicating
   // keyword lists in two places).
-  is_floating_block?: { name: string } | null;
+  is_floating_block?: { name: string; fixed?: boolean } | null;
 }
 
 export function processCalendarEvents(
@@ -256,7 +256,7 @@ export function processCalendarEvents(
             { subject: ev.subject, categories: ev.categories },
             block,
           )) {
-            return { name: block.name };
+            return { name: block.name, fixed: fb.hasOtherHumanAttendee(ev, profile) };
           }
         }
         return null;
@@ -639,6 +639,7 @@ export function analyzeCalendar(
 
       const blockEvent = timedMeetings.find(e => e.is_floating_block?.name === block.name);
       if (blockEvent) {
+        if (blockEvent.is_floating_block?.fixed) continue;
         const [bsh, bsm] = blockEvent._localStartTime.split(':').map(Number);
         const [beh, bem] = blockEvent._localEndTime.split(':').map(Number);
         const bStartMin = bsh * 60 + bsm;

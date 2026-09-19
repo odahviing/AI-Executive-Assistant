@@ -24,8 +24,8 @@ import { verifyScheduledOutcome, type ScheduleOutcome } from '../utils/verifySch
 import logger from '../utils/logger';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 
-/** Items past this surface count flip to cancelled (auto-park). */
-const STALE_SURFACE_THRESHOLD = 3;
+/** Awaiting-owner items auto-park after this many confirmed brief deliveries. */
+const STALE_SURFACE_THRESHOLD = 2;
 
 /** v3.2.6 — news gather is best-effort + fail-open. If it doesn't return within
  *  this window, the brief composes calendar+tasks exactly as today (no delay).
@@ -155,7 +155,7 @@ interface RichItem {
 interface BriefingData {
   items: RichItem[];
   requestIdsToSurface: string[];   // stamp last_surfaced_at + informed=1
-  requestIdsToStale: string[];     // surfaced_count >= threshold → cancel
+  requestIdsToStale: string[];     // next confirmed delivery reaches threshold → cancel
   peopleGender: Record<string, 'he' | 'she' | 'they'>;
 }
 
@@ -433,8 +433,10 @@ async function collectBriefingData(
     items.push(item);
     requestIdsToSurface.push(r.id);
 
-    // Auto-park at surface threshold — ONLY for awaiting_owner items. The
-    // intent is "owner ignored this N times, stop nagging." Doesn't apply to:
+    // Auto-park at the confirmed-delivery threshold — ONLY for awaiting_owner
+    // items. `surfaced_count` is incremented below only after postToChannel
+    // confirms delivery, so composition and failed sends never consume one of
+    // the two appearances. Doesn't apply to:
     //   - awaiting_colleague (we're waiting on someone else; owner can't unblock)
     //   - in_flight (autonomous scheduled fire — reminders, scheduled outreach,
     //     research). Auto-cancelling these would kill the reminder before it fires.
@@ -571,7 +573,7 @@ Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / 
 APPROVAL CONTEXT RULE: when a request item has kind='approval', USE the ask_text + subject + requester_name + payload fields. NEVER ask ${firstName} what the item is about — he filed it through you. If a critical field is missing, surface the gap honestly ("I have a pending Julia approval but the context didn't come through — let me dig") rather than asking him.
 
 CLOSURE NARRATION: When a request has a closure_reason and state in (resolved / cancelled / expired), narrate it as past tense closure in the colleague's paragraph — there's nothing left to act on. Use the closed_at_relative field on the item to anchor the narration in time ("Yesterday: ...", "Earlier today: ...") so ${firstName} doesn't read a stale close as today's news.
-- closure_reason='surfaced_threshold' → "I stopped working on X — let me know if you want me to revive it." (one passive line; this is auto-park after 3 surfaces with no action)
+- closure_reason='surfaced_threshold' → "I stopped working on X — let me know if you want me to revive it." (one passive line; this is auto-park after 2 delivered briefing appearances with no action)
 - closure_reason starting with 'owner_' → YOUR own decision, not an outbound action. Narrate as "${firstName} said <closure_reason>, so I closed the X coord — nothing to do." NEVER claim "I told <requester>" / "I let <name> know" — those imply a DM you sent. Only describe an outbound DM when the item has target_slack_id set AND closure actually involved a colleague reply or relay (e.g., closure_reason='colleague_replied').
 - closure_reason='colleague_replied' → describe the reply.
 - closure_reason starting with 'meeting_' (meeting_created / meeting_moved / meeting_updated / meeting_deleted — what the calendar-mutation cascade actually writes) or starting with 'parent_' → narrate using state: resolved → "the meeting went through (booked/moved/updated), so I closed X"; cancelled → "the meeting got cancelled, so I closed X."

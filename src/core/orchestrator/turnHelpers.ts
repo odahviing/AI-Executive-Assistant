@@ -181,6 +181,25 @@ function deliveredNotification(result: unknown): boolean {
 }
 
 /**
+ * approval-relay-claim-retracted-after-confirmed-delivery (2026-09-16) — an
+ * approval creation is a task mutation AND, only when its own delivery result
+ * says so, a notification to the owner. `createApprovalRequest` sets
+ * `owner_notified:true` only after `postOwnerDecision` returns OK; failed sends
+ * return false and unclear/reused collision shapes may omit it. Carry that
+ * distinct fact instead of changing create_approval's mutation domain from
+ * task to message: the task was still created even when owner delivery failed,
+ * while only the confirmed true value can ground "I sent it to the owner."
+ */
+function approvalOwnerNotified(toolName: string, result: unknown): boolean {
+  if (toolName !== 'create_approval' || result == null || typeof result !== 'object') return false;
+  const r = result as Record<string, unknown>;
+  return r.owner_notified === true
+    && typeof r.error !== 'string'
+    && r.ok !== false
+    && r.success !== false;
+}
+
+/**
  * check-claimed-that-never-ran (2026-09-06, bounce 2) — THE attendee-check
  * marker: the read-side sibling of `mutated=<domain>` above, stamped for the
  * same reason (G2). Whether a call actually evaluated a third party's working
@@ -317,6 +336,7 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
   const attendeeCheck = attendeeCheckSource(toolName, result);
   const markers = [
     ...domains.map(d => `mutated=${d}`),
+    ...(approvalOwnerNotified(toolName, result) ? ['notified=approval_owner'] : []),
     ...(attendeeCheck ? [`attendee_check=${attendeeCheck}`] : []),
   ];
   return markers.length ? `${summary} ${markers.join(' ')}` : summary;

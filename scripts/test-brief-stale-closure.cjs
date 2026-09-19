@@ -132,6 +132,6 @@ for(const [label,options]of [['disappeared',{disappearsAtClose:true}],['already 
 test('other stale request kinds retain their closure and requester loop',async()=>{
   const h=harness({row:{kind:'reminder'}});await h.run();assert.equal(h.row().state,'cancelled');assert.equal(h.effects.requester.length,1);
 });
-for(const [label,row]of [['below threshold',{surfaced_count:1}],['waiting on colleague',{state:'awaiting_colleague'}],['scheduled work',{state:'in_flight'}]])test(`${label} remains open without cleanup`,async()=>{
+for(const [label,row]of [['below threshold',{surfaced_count:0}],['waiting on colleague',{state:'awaiting_colleague'}],['scheduled work',{state:'in_flight'}]])test(`${label} remains open without cleanup`,async()=>{
   const h=harness({row});await h.run();assert.equal(h.effects.requester.length,0);assert.equal(h.row().state,row.state||'awaiting_owner');
 });

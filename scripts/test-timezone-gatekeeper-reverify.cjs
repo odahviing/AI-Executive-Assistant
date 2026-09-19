@@ -21,6 +21,7 @@ function harness(opts={}){
  const calls={calendar:[],checks:[],detect:[],rewrite:[],warnings:[]},modules=new Map();
  const logger={info:noop,warn:(...a)=>calls.warnings.push(a),debug:noop,error:noop};
  const mocks={
+  'src/db/calendarIssues.ts':{getSuppressedEventIds:()=>new Set()},
   'src/db/scheduleOverrides.ts':{getScheduleOverride:(_,d)=>rows[d]??null},
   'src/db.ts':{getPersonMemory:()=>({timezone:'Asia/Jerusalem'})},
   'src/utils/logger.ts':{__esModule:true,default:logger},

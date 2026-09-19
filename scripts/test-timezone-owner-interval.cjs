@@ -15,6 +15,7 @@ function harness(rows={},options={}){
  const modules=new Map(),warnings=[],calls={searches:[],offers:[]};
  const profile={user:{name:'Owner Example',email:'owner@example.test',slack_user_id:'UOWNER',timezone:home},schedule:{work_hours:Object.fromEntries(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d=>[d,['09:00-23:59']])),office_days:{days:['Monday','Tuesday']},home_days:{days:[]}},meetings:{buffer_minutes:0,allowed_durations:[25,55],categories:[]}};
  const mocks={
+  'src/db/calendarIssues.ts':{getSuppressedEventIds:()=>new Set()},
   'src/db/scheduleOverrides.ts':{getScheduleOverride:(_,d)=>rows[d]??null,listScheduleOverrides:()=>Object.entries(rows).map(([date,row])=>({date,...row}))},
   'src/utils/logger.ts':{default:{info:noop,warn:(...a)=>warnings.push(a),error:noop,debug:noop},__esModule:true},
   'src/core/requests/types.ts':{PROMOTE_TIMEZONE_TEMP_TOOL:'promote_timezone_temp'},

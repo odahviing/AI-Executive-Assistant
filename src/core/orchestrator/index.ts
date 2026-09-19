@@ -177,11 +177,10 @@ export interface OrchestratorOutput {
     reason?: string;
   }>;
   /**
-   * v3.1.2 (#118) — True when `check_calendar_health` ran AND returned
-   * `vacuous: true` (no issues found, no auto-fixes applied). The routine
-   * dispatcher uses this to stay silent on auto-fired routine runs that
-   * found nothing. Chat-path calls don't go through `dispatchRoutine`, so
-   * this flag is informational for them (the reply ships normally).
+   * True when at least one `check_calendar_health` call ran and EVERY such
+   * call returned `vacuous: true`. A non-vacuous or error result keeps an
+   * auto-fired routine visible regardless of tool-call order. Chat-path calls
+   * don't go through `dispatchRoutine`, so this is informational for them.
    */
   healthCheckVacuous?: boolean;
   /**
@@ -197,11 +196,12 @@ export interface OrchestratorOutput {
    * L7, social never delays real work). The transport calls
    * `composeSocialCoda` inside that beat instead.
    *
-   * It carries its two ids because the social bookkeeping — the once-per-day
-   * cadence gate and the subject raise-marker — is stamped on DELIVERY, not on
-   * generation (`recordCodaDelivered`, core/social/logEngagement.ts). The
-   * transport is the only layer that knows whether the coda actually went out;
-   * it drops it on a leak hit, a lost lull, or a failed post.
+   * It carries its two ids because social bookkeeping belongs at the send
+   * boundary, not at generation. The transport reserves the once-per-day
+   * cadence with `reserveCodaAttempt` immediately before posting, then stamps
+   * the subject/category marker with `recordCodaDelivered` only after a
+   * confirmed post. A failed or uncertain post stays reserved without becoming
+   * a silence marker.
    */
   socialCoda?: PendingSocialCoda;
 }
@@ -334,12 +334,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // Consumed by the post-hoc hallucination backstop in app.ts — if the reply
   // claims a booking happened but this is false, the claim is rewritten.
   let bookingOccurred = false;
-  // v3.1.2 (#118) — true if check_calendar_health fired this turn AND returned
-  // vacuous=true (no issues, no auto-fixes). Routine dispatcher reads this on
-  // OrchestratorOutput to stay silent on auto-fired runs; owner-asked runs
-  // (which don't go through dispatchRoutine) ignore the flag and narrate
-  // normally so the owner sees the "all clear" verification.
-  let healthCheckVacuous = false;
+  // Tri-state aggregate across every health check this turn: undefined means
+  // none ran, true means all were explicitly vacuous, and false means at least
+  // one was non-vacuous, malformed, or errored. False is sticky so a later
+  // quiet check cannot hide earlier material work or failure.
+  let healthCheckVacuous: boolean | undefined;
   // v1.6.4 — track delete_meeting ids already executed this turn. The claim-
   // checker found a case where the LLM called delete_meeting twice with the
   // same id and then narrated "two meetings deleted" — half lie. This guard
@@ -866,16 +865,18 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         }
       }
 
-      // v3.1.2 (#118) — pick up the vacuous flag on check_calendar_health so
-      // the routine dispatcher can suppress posting on auto-fired runs that
-      // found nothing.
-      if (
-        toolUse.name === 'check_calendar_health' &&
-        result &&
-        typeof result === 'object' &&
-        (result as Record<string, unknown>).vacuous === true
-      ) {
-        healthCheckVacuous = true;
+      // Every health result participates. Silence is allowed only when all of
+      // them explicitly say vacuous; a false/missing flag or structured error
+      // makes the aggregate false permanently for this turn.
+      if (toolUse.name === 'check_calendar_health') {
+        const thisCheckVacuous = !!(
+          result &&
+          typeof result === 'object' &&
+          (result as Record<string, unknown>).vacuous === true
+        );
+        healthCheckVacuous = healthCheckVacuous === undefined
+          ? thisCheckVacuous
+          : healthCheckVacuous && thisCheckVacuous;
       }
 
       // Track whether a real booking occurred this turn — used by the
@@ -1774,10 +1775,10 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // CODA_DELAY_MIN_MS/MAX_MS in postReply.ts), so the LLM round-trips
           // and grounding lookups it costs land on dead time instead of
           // between the work answer being ready and the person seeing it.
-          // Nothing is stamped either — the cadence gate
-          // (people_memory.last_initiated_at) and the subject raise-marker are
-          // written by `recordCodaDelivered` once the transport confirms the
-          // post.
+          // Nothing is stamped here either. At the send boundary the transport
+          // reserves the cadence gate (people_memory.last_initiated_at) before
+          // posting, then writes the subject/category delivery marker only if
+          // that post is confirmed.
           // gh#198 — channelId threaded through so the composer's grounding
           // pass can re-read this person's actual past messages (SlackMaster's
           // getRecentChannelMessages) rather than a topic-beat label.

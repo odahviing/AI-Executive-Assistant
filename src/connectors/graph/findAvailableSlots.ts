@@ -819,15 +819,14 @@ export async function findAvailableSlots(params: {
     // v3.2.6 (RC1) — hoisted to function scope so the per-slot tagging below
     // can flag candidates that overlap a floating block's CURRENT placement
     // (i.e. would force it to shift). Consumers prefer non-disturbing slots.
+    const { getSuppressedEventIds } = await import('../../db/calendarIssues');
+    const suppressedFloatingIds = profile ? getSuppressedEventIds(profile.user.slack_user_id) : new Set<string>();
     const blockRanges: Array<{ start: number; end: number }> = [];
     if (floatingBlocks.length > 0 && ownerEventsForFb.length > 0) {
       for (const evt of ownerEventsForFb) {
         if (evt.isCancelled || evt.isAllDay || evt.showAs === 'free') continue;
         for (const block of floatingBlocks) {
-          if (fb.isFloatingBlockEvent(
-            { subject: evt.subject, categories: evt.categories },
-            block,
-          )) {
+          if (fb.isMovableFloatingBlockEvent(evt, block, params.timezone, profile, suppressedFloatingIds)) {
             const eStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' })
               .setZone(params.timezone).toMillis();
             const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
@@ -861,10 +860,7 @@ export async function findAvailableSlots(params: {
     for (const evt of ownerEventsForFb) {
       if (evt.isCancelled || evt.showAs === 'free' || evt.showAs === 'workingElsewhere') continue;
       if (excludeIdSet.has(evt.id)) continue;
-      const isBlock = floatingBlocks.some(block => fb.isFloatingBlockEvent(
-        { subject: evt.subject, categories: evt.categories },
-        block,
-      ));
+      const isBlock = floatingBlocks.some(block => fb.isMovableFloatingBlockEvent(evt, block, params.timezone, profile, suppressedFloatingIds));
       if (isBlock) continue;  // blocks are elastic — never re-add one
       const s = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' }).setZone(params.timezone);
       const e = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' }).setZone(params.timezone);

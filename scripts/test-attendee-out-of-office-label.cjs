@@ -42,6 +42,7 @@ function loader(mocks) {
 function walkerHarness(freeBusy) {
   const profile = { user: { name: 'Owner Example', email: OWNER, slack_user_id: 'UOWNER', timezone: home }, schedule: { work_hours: Object.fromEntries(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'].map(d => [d, ['09:00-18:00']])), office_days: { days: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'] }, home_days: { days: [] } }, meetings: { buffer_minutes: 0, allowed_durations: [25, 40, 55], categories: [] } };
   const load = loader({
+    'src/db/calendarIssues.ts': { getSuppressedEventIds: () => new Set() },
     'src/db/scheduleOverrides.ts': { getScheduleOverride: () => null, listScheduleOverrides: () => [] },
     'src/utils/logger.ts': loggerMock,
     'src/utils/categoryRules.ts': { checkCategorySlot: () => ({ allowed: true }), getProfileCategoryByName: () => null },

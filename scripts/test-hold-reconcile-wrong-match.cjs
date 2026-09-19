@@ -31,7 +31,8 @@ const OWNER = 'UOWNER', YAEL = 'UYAEL', YAEL_EMAIL = 'yael@reflectiz.com', OWNER
 const NOW = Date.parse('2026-09-15T19:47:00Z');
 // The incident hold, stored exactly as hold_slot stores it (UTC instant).
 const HELD_START = '2026-09-17T12:00:00.000Z', HELD_END = '2026-09-17T12:40:00.000Z';
-const profile = { user: { name: 'Owner Example', email: OWNER_EMAIL, slack_user_id: OWNER, timezone: 'Asia/Jerusalem' }, assistant: { slack: { bot_token: 'x' } }, meetings: { floating_blocks: [] } };
+const lunch = { name: 'lunch', preferred_start: '14:30', preferred_end: '16:30', duration_minutes: 40, can_skip: true };
+const profile = { user: { name: 'Owner Example', email: OWNER_EMAIL, slack_user_id: OWNER, timezone: 'Asia/Jerusalem' }, assistant: { slack: { bot_token: 'x' } }, meetings: { floating_blocks: [lunch] } };
 
 function freshDb() {
   const db = new Database(':memory:');
@@ -46,7 +47,10 @@ function loader(mocks) {
   function load(rel) {
     if (mocks[rel]) return mocks[rel];
     if (modules.has(rel)) return modules.get(rel).exports;
-    const js = ts.transpileModule(fs.readFileSync(path.join(root, rel), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+    const filename = rel === 'src/core/background.ts' && process.env.BACKGROUND_SOURCE_FIXTURE
+      ? process.env.BACKGROUND_SOURCE_FIXTURE
+      : path.join(root, rel);
+    const js = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const mod = { exports: {} }; modules.set(rel, mod);
     const req = s => s === 'luxon' ? luxon : s.startsWith('.') ? load(path.posix.normalize(path.posix.join(path.posix.dirname(rel), s)) + '.ts') : mocks[s] ?? require(s);
     const ctx = { Date: class extends Date { constructor(...a) { super(...(a.length ? a : [NOW])); } static now() { return NOW; } }, console, Set, Map, Promise, JSON, Number, String, Object, Array, Error, Math, RegExp, setInterval: mocks.setInterval ?? setInterval, setTimeout, clearTimeout };
@@ -72,8 +76,11 @@ async function runTick(calendarEvents, { sh, db }) {
   const load = loader({
     'src/db/client.ts': { getDb: () => db },
     'src/db/slotHolds.ts': sh,
-    'src/db/people.ts': { getPersonMemory: id => id === YAEL ? { email: YAEL_EMAIL } : null },
-    'src/connectors/graph/calendar.ts': { getCalendarEvents: async () => calendarEvents },
+    'src/db/people.ts': { getPersonMemory: id => id === YAEL ? { email: YAEL_EMAIL } : id === OWNER ? { email: OWNER_EMAIL } : null },
+    'src/connectors/graph/calendar.ts': { getCalendarEvents: async () => {
+      if (calendarEvents instanceof Error) throw calendarEvents;
+      return calendarEvents;
+    } },
     'src/connections/registry.ts': { getConnection: () => ({ sendDirect: async (to, text) => { dms.push({ to, text }); } }) },
     'src/tasks/runner.ts': { runDueTasks: async () => {} },
     'src/tasks/routineMaterializer.ts': { materializeRoutineTasks: async () => {}, backfillNullNextRunAt: noop },
@@ -94,6 +101,7 @@ async function runTick(calendarEvents, { sh, db }) {
 }
 
 const yael = [{ emailAddress: { name: 'Yael Aharon', address: YAEL_EMAIL }, status: { response: 'accepted' } }];
+const ownerSelf = [{ emailAddress: { name: 'Owner Example', address: OWNER_EMAIL }, status: { response: 'accepted' } }];
 const timed = (id, subject, start, end, extra = {}) => ({
   id, subject, isCancelled: false, isAllDay: false, showAs: 'busy', attendees: yael,
   start: { dateTime: start, timeZone: 'Asia/Jerusalem' }, end: { dateTime: end, timeZone: 'Asia/Jerusalem' }, ...extra,
@@ -139,6 +147,43 @@ test('P4 tick: the same-subject invite sent a little shifted (15:10-15:50, overl
   const hold = h.seed();
   await runTick([timed('ev_shift', ' interview - field & channel   marketing candidate', '2026-09-17T15:10:00', '2026-09-17T15:50:00')], h);
   assert.equal(h.row(hold.id).closure_reason, 'fulfilled_by_booking');
+});
+
+test('P5 profile-aware reconcile: lunch with another person is fixed and can fulfil that person\'s hold', async () => {
+  const h = holdsHarness();
+  const hold = h.seed();
+  await runTick([timed('ev_shared_lunch', 'Lunch', '2026-09-17T15:00:00', '2026-09-17T15:40:00')], h);
+  assert.equal(h.row(hold.id).status, 'released');
+  assert.equal(h.row(hold.id).closure_reason, 'fulfilled_by_booking');
+});
+
+test('R6 profile-aware reconcile: solo or owner-self lunch cannot fulfil an unrelated hold', async () => {
+  const solo = holdsHarness();
+  const soloHold = solo.seed();
+  await runTick([timed('ev_solo_lunch', 'Lunch', '2026-09-17T15:00:00', '2026-09-17T15:40:00', { attendees: [] })], solo);
+  assert.equal(solo.row(soloHold.id).status, 'active');
+
+  const self = holdsHarness();
+  const selfHold = self.seed({ holderSlackId: OWNER, holderName: 'Owner Example' });
+  await runTick([timed('ev_self_lunch', 'Lunch', '2026-09-17T15:00:00', '2026-09-17T15:40:00', { attendees: ownerSelf })], self);
+  assert.equal(self.row(selfHold.id).status, 'active');
+  assert.equal(self.row(selfHold.id).closure_reason, null);
+});
+
+test('P6 profile-aware reconcile: a regular owner-self meeting still fulfils the owner hold', async () => {
+  const h = holdsHarness();
+  const hold = h.seed({ holderSlackId: OWNER, holderName: 'Owner Example' });
+  await runTick([timed('ev_owner_meeting', 'Project review', '2026-09-17T15:00:00', '2026-09-17T15:40:00', { attendees: ownerSelf })], h);
+  assert.equal(h.row(hold.id).status, 'released');
+  assert.equal(h.row(hold.id).closure_reason, 'fulfilled_by_booking');
+});
+
+test('P7 unavailable calendar leaves the hold open for a later reconciliation', async () => {
+  const h = holdsHarness();
+  const hold = h.seed();
+  await runTick(new Error('isolated Graph outage'), h);
+  assert.equal(h.row(hold.id).status, 'active');
+  assert.equal(h.row(hold.id).closure_reason, null);
 });
 
 test('R2 explicit release matches the slot as an instant (owner-local offset form vs stored UTC)', () => {

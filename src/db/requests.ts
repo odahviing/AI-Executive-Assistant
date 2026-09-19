@@ -560,7 +560,7 @@ export function getDueRequests(): RequestRow[] {
     WHERE next_check_at IS NOT NULL
       AND datetime(next_check_at) <= datetime('now')
       AND (state IN ('awaiting_owner','awaiting_colleague','in_flight')
-        OR (state IN ('resolved','cancelled','expired') AND next_check_handler = 'requester_relay_retry'))
+        OR (state IN ('resolved','cancelled','expired','logged') AND next_check_handler = 'requester_relay_retry'))
   `).all() as RequestRow[];
 }
 
@@ -726,6 +726,25 @@ export function getRecentlyAutoMovedEventIds(ownerUserId: string): Set<string> {
   return new Set(rows.map(r => r.id));
 }
 
+/** Confirmed automatic movement of this exact owner's event, including floating
+ * rebalances logged by the system. No age cutoff: the caller must compare the
+ * saved destination with the event's actual pre-correction interval. */
+export function getLatestAutomaticMoveForEvent(ownerUserId: string, eventId: string): RequestRow | null {
+  return (getDb().prepare(`
+    SELECT * FROM requests
+    WHERE owner_user_id = ? AND initiated_by_role = 'system' AND kind = 'follow_up'
+      AND json_valid(outcome_json)
+      AND json_type(outcome_json, '$.new_start') = 'text'
+      AND json_type(outcome_json, '$.new_end') = 'text'
+      AND ((subkind = 'auto_move' AND state = 'resolved'
+        AND closure_reason = 'auto_move_executed' AND outcome_external_event_id = ?)
+        OR (subkind = 'move_meeting' AND state = 'logged' AND closure_reason IS NULL
+          AND json_extract(outcome_json, '$.event_id') = ?))
+    ORDER BY julianday(COALESCE(closed_at, created_at)) DESC, rowid DESC
+    LIMIT 1
+  `).get(ownerUserId, eventId, eventId) as RequestRow | undefined) ?? null;
+}
+
 /**
  * v3.7.x (#141) — the inverse of findMeetingOwner (which goes event_id →
  * requester). Meetings a COLLEAGUE requested (booked through Maelle), so a
@@ -813,11 +832,14 @@ export function cancelColleagueBookingRecordsForEvent(ownerUserId: string, event
  * only cost control; a caller asking "what did you do three months ago"
  * must still find it as long as it's inside the limit.
  */
+// Failed delivery keeps an existing research answer recallable too. Consumers
+// must carry its cancelled state and closure reason, never claim delivery.
 export function getRecentActivityForOwner(ownerUserId: string, limit: number): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
-      AND state = 'logged'
+      AND (state = 'logged' OR (kind = 'research' AND state = 'cancelled'
+        AND json_valid(outcome_json) AND json_type(outcome_json, '$.answer') = 'text'))
     ORDER BY datetime(created_at) DESC
     LIMIT ?
   `).all(ownerUserId, limit) as RequestRow[];

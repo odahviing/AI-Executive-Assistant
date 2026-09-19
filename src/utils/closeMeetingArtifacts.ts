@@ -229,9 +229,9 @@ export async function closeMeetingArtifacts(params: {
     // recorded a false outcome ("resolved: meeting_updated") and dropped a live
     // question to a colleague because the owner renamed the meeting or recategorized
     // it. Nothing is orphaned by skipping: the ask carries its own `outreach_expiry`
-    // timer (skills/meetingReschedule.ts → notifyColleagueOfMove) and the colleague's
-    // reply closes it through handleRescheduleReply, so this cascade is no longer its
-    // only exit.
+    // timer (message_colleague's reply-required proposal), and the colleague's
+    // reply closes it through handleRescheduleReply. Automatic move FYIs instead
+    // finish on confirmed delivery; this cascade is not their only exit either.
     if (params.reason !== 'updated') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getOpenRescheduleOutreach } = require('../db/jobs') as typeof import('../db/jobs');

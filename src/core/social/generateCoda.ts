@@ -477,8 +477,8 @@ Output the coda sentence only. No quotes, no label.`;
  * the coda gates — so a coda the lull already killed costs nothing, including
  * the grounding search/message re-read below, which now run in the exact same
  * spot the topic-beat picker they replace used to. Same reasoning that moved
- * `recordCodaDelivered` to delivery: social bookkeeping is charged on the
- * thing actually happening, not on intending it.
+ * the coda accounting to the send boundary: cadence is reserved only for a
+ * real attempt and silence-bearing markers are charged only after delivery.
  *
  * Returns null on anything short of a usable, vetted sentence. Otherwise
  * returns the wire text and the evidence-carrying history row. Never throws.
@@ -582,12 +582,12 @@ export async function composeSocialCoda(
     // (`last_raise_attempt_at`, which the picker's resolve pass counts toward
     // category death via recordCategoryRaiseUnanswered — two ignored in-place
     // raises kill the category) is deliberately NOT written here: it is
-    // charged at the final send attempt only (recordCodaDelivered →
-    // markCategoryRaised, logEngagement.ts), so a raise the validator dropped
-    // or the transport dropped before sending can never move a category
-    // toward death. A send timeout remains ambiguous under the existing
-    // pre-send accounting policy. Never fires for `continue` — that mode's
-    // silence is judged on its subject row.
+    // charged only after the transport confirms the post
+    // (recordCodaDelivered → markCategoryRaised, logEngagement.ts), so a raise
+    // the validator or transport dropped can never move a category toward
+    // death. An uncertain send keeps only its pre-send cadence reservation,
+    // preventing a blind retry without claiming the person ignored it. Never
+    // fires for `continue` — that mode's silence is judged on its subject row.
     if (pending.directive.mode === 'raise_new' && pending.directive.categoryLabel) {
       try {
         const category = getCategoryByLabel(pending.directive.categoryLabel);

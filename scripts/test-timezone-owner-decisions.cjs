@@ -34,6 +34,7 @@ function harness(options={}) {
  const people=[person,...(options.otherPeople??[])];
  const db={getPersonMemory:()=>person,searchPeopleMemory:email=>people.filter(p=>p.email===email),getTravelRecordById:()=>travel,getEffectiveTimezoneById:id=>({timezone:people.find(p=>p.person_id===id)?.timezone})};
  const mocks={
+  'src/db/calendarIssues.ts':{getSuppressedEventIds:()=>new Set()},
   'src/db/requests.ts':{getRequest:()=>undefined},
   'src/db.ts':db,'src/db/people.ts':db,
   'src/db/scheduleOverrides.ts':{getScheduleOverride:(_,date)=>options.rows?.[date]??null,listScheduleOverrides:()=>[]},

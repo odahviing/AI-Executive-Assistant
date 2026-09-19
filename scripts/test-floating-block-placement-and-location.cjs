@@ -304,11 +304,15 @@ module.exports = { rule6 };`, {
   DateTime,
   blockAppliesOnDay: floatingBlocks.blockAppliesOnDay,
   busyForBlockWindow: floatingBlocks.busyForBlockWindow,
+  blockSizedToEvent: floatingBlocks.blockSizedToEvent,
+  hasOtherHumanAttendee: floatingBlocks.hasOtherHumanAttendee,
+  suppressedFloatingIds: new Set(),
   isFloatingBlockEvent: floatingBlocks.isFloatingBlockEvent,
 }).rule6;
 
 function checkRule6(blockEvent, slot) {
   const profile = {
+    user: {email:'owner@test.invalid',timezone:zone,slack_user_id:'owner'},
     meetings: { floating_blocks: [lunch] },
     schedule: { office_days: { days: ['Sunday'] }, home_days: { days: ['Monday'] } },
   };
@@ -357,6 +361,7 @@ test('D2 · a lunch placed INSIDE its window is still treated as movable (legiti
 const occupancyRoleOf = compile(`${namedFunction('src/utils/scheduleRules.ts', 'occupancyRoleOf').getText()}
 module.exports = { occupancyRoleOf };`, {
   DateTime, isFloatingBlockEvent: floatingBlocks.isFloatingBlockEvent,
+  isMovableFloatingBlockEvent: floatingBlocks.isMovableFloatingBlockEvent,
 }).occupancyRoleOf;
 
 test('D2 · a lunch placed outside its window holds the owner\'s time (commitment)', () => {
@@ -385,7 +390,7 @@ test('D2 · every occupancyRoleOf call site passes the owner timezone', () => {
   for (const file of ['src/utils/scheduleRules.ts', 'src/skills/meetings.ts']) {
     for (const call of collect(source(file), n => ts.isCallExpression(n)
       && n.expression.getText() === 'occupancyRoleOf')) {
-      assert.equal(call.arguments.length, 3, `${file}: occupancyRoleOf called without a timezone`);
+      assert.ok(call.arguments.length >= 3, `${file}: occupancyRoleOf called without a timezone`);
     }
   }
 });
@@ -433,6 +438,7 @@ const activityRows = [];
 function loadRebalance() {
   return compile(text(relocationFile), { DateTime }, name => {
     if (name === 'luxon') return luxon;
+    if (name === '../db/calendarIssues') return {getSuppressedEventIds:()=>new Set()};
     if (name === './floatingBlocks') return floatingBlocks;
     if (name === './calendarDensity') return densityModule;
     if (name === './workHours') return { getEffectiveWorkDay: () => ({ hasOverride: false }) };
@@ -517,7 +523,7 @@ test('E · the pre-booking dry run promises the same 40-min landing the mover ma
 
 test('E · check_join and move_meeting size off the same helper (structural)', () => {
   const join = text('src/skills/meetings.ts');
-  assert.match(join, /fb\.blockSizedToEvent\(block, existingBlockEvent, timezone\)/, 'check_join in-turn move still sizes at config');
+  assert.match(join, /fb\.blockSizedToEvent\(block, (?:existingBlockEvent|blockEvent), timezone\)/, 'check_join in-turn move still sizes at config');
   assert.equal(/newStart\.plus\(\{ minutes: block\.duration_minutes \}\)/.test(join), false);
   const move = text('src/skills/meetings/ops/handlers/moveMeeting.ts');
   assert.match(move, /fb\.blockSizedToEvent\(matchedBlock, movingEvent!, timezone\)/, 'move_meeting keeps its own duration copy');
@@ -526,7 +532,7 @@ test('E · check_join and move_meeting size off the same helper (structural)', (
 test('E · create_meeting / move_meeting put the real moves on the tool result (F7, structural)', () => {
   for (const file of ['src/skills/meetings/ops/handlers/createMeeting.ts', 'src/skills/meetings/ops/handlers/moveMeeting.ts']) {
     const src = text(file);
-    assert.match(src, /blocksMoved = \(await rebalanceFloatingBlocksAfterMutation\(/, `${file}: rebalance result discarded`);
+    assert.match(src, /const floatingResult = await rebalanceFloatingBlocksAfterMutation\(/, `${file}: rebalance result discarded`);
     assert.match(src, /\{ blocks_moved: blocksMoved \}/, `${file}: blocks_moved missing from the success return`);
   }
 });

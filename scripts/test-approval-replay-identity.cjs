@@ -78,7 +78,7 @@ function harness(options = {}) {
     const module = { exports: {} }; modules.set(relative, module);
     const isolatedRequire = spec => {
       if (spec === 'luxon') return { DateTime };
-      if (spec === 'node:util' || spec === 'node:async_hooks') return require(spec);
+      if (spec === 'node:util' || spec === 'node:async_hooks' || spec === 'node:crypto') return require(spec);
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };
@@ -102,6 +102,14 @@ function harness(options = {}) {
   harnesses.push(h); return h;
 }
 afterEach(() => { for (const h of harnesses.splice(0)) assert.deepEqual(h.unexpected, [], 'all dependencies explicitly isolated, including swallowed exceptions'); });
+test('owner counter open-conflict anchor cannot invent a time on bare approval',async()=>{
+ const h=harness({tool:'move_meeting',details:{deferred_action:{tool:'move_meeting',args:{meeting_id:'event-1',meeting_subject:'Planning'}},callbacks:{on_amend:{mode:'run_with_amend'}}}});
+ const r=await h.resolve({verdict:'approve'});assert.equal(r.ok,false);assert.equal(h.row().state,'awaiting_owner');assert.equal(h.effects.executes.length,0);
+});
+test('owner counter exact chosen interval replays stored meeting and chosen times',async()=>{
+ const h=harness({tool:'move_meeting',details:{deferred_action:{tool:'move_meeting',args:{meeting_id:'event-1',meeting_subject:'Planning'}},callbacks:{on_amend:{mode:'run_with_amend'}}}});
+ const r=await h.resolve({verdict:'approve',data:{new_start:'2026-12-08T09:15:00Z',new_end:'2026-12-08T09:45:00Z'}});assert.equal(r.ok,true);assert.equal(h.effects.executes.length,1);assert.equal(h.effects.executes[0].tool,'move_meeting');assert.equal(h.effects.executes[0].args.meeting_id,'event-1');assert.equal(h.effects.executes[0].args.new_start,'2026-12-08T09:15:00Z');assert.equal(h.effects.executes[0].args.new_end,'2026-12-08T09:45:00Z');
+});
 for(const surface of ['colleague_dm','room'])test('audit R6 cancel to private message decision on '+surface,async()=>{
   const h=harness({tool:'delete_meeting',row:{owner_dm_channel:'DOWNER',owner_dm_thread_ts:'owner.daily',origin_is_mpim:surface==='room'?1:0,origin_channel:surface==='room'?'CROOM':'DPAUL'},toolResult:{ok:true,private_raw:'PRIVATE_RESULT_SENTINEL'}});
   const r=await h.resolve({verdict:'approve',data:{tool:'message_colleague',args:{colleague_slack_id:'UTHIRD',message:'Owner chosen message'}}});

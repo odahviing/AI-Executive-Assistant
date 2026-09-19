@@ -1974,15 +1974,18 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
           // The real moves ride the success return (`blocks_moved`) so the
           // confirmation states them — awaited-and-discarded until 2026-09-14.
           let blocksMoved: string[] = [];
+          let floatingBlockQuestions: string[] = [];
           try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
               typeof import('../../../../utils/rebalanceFloatingBlocks');
-            blocksMoved = (await rebalanceFloatingBlocksAfterMutation({
+            const floatingResult = await rebalanceFloatingBlocksAfterMutation({
               profile: context.profile,
               affectedSlotIso: args.start as string,
               ownerSlackId: context.profile.user.slack_user_id,
-            })).moves;
+            });
+            blocksMoved = floatingResult.moves;
+            if (context.senderRole === 'owner') floatingBlockQuestions = (floatingResult.ownerQuestions ?? []).map(q => q.description);
           } catch (err) {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }
@@ -2298,6 +2301,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             // check_join_availability's field. State it in the confirmation
             // ("I moved your lunch to 11:30 to make room"), never silently.
             ...(blocksMoved.length > 0 ? { blocks_moved: blocksMoved } : {}),
+            ...(floatingBlockQuestions.length > 0 ? { floating_block_questions: floatingBlockQuestions } : {}),
             // jim-douglass follow-up (2026-08-30) — an attendee's invited
             // address diverged from what was passed (directory override, or a
             // human-stated address kept over a stale row). State the actual

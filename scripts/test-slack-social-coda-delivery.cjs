@@ -11,7 +11,7 @@ const before = process.env.SLACK_CODA_BEFORE_DIR;
 function deferred() { let resolve; let reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function harness(options = {}) {
-  const timers = [], posts = [], history = [], stamps = [], subjectRaises = [], mirrors = [], unexpected = [], logs = [];
+  const timers = [], posts = [], history = [], stamps = [], subjectRaises = [], categoryRaises = [], mirrors = [], unexpected = [], logs = [];
   const replies = new Map(), charged = new Set();
   let composeCalls = 0, gateCalls = 0;
   const timer = (fn, delay) => { const t = { fn, delay, cancelled: false, unref() {} }; timers.push(t); return t; };
@@ -29,7 +29,13 @@ function harness(options = {}) {
   const queue = load('inboundQueue', { '../../utils/logger': logger });
   const socialDependencies = {
     '../../utils/logger': logger,
-    '../../db/socialSubjects': { countAssistantInitiationsTodayForPerson: () => 0, lastAssistantInitiatedAt: () => null, getCategoryByLabel: () => null, markSubjectRaised: id => subjectRaises.push(id) },
+    '../../db/socialSubjects': {
+      countAssistantInitiationsTodayForPerson: () => 0,
+      lastAssistantInitiatedAt: () => null,
+      getCategoryByLabel: label => ({ id: `CAT_${label}` }),
+      markSubjectRaised: id => subjectRaises.push(id),
+      markCategoryRaised: input => categoryRaises.push(input),
+    },
     '../../db/engagementRank': { getEngagementRank: () => 3 },
     '../../db': { getPersonMemory: person => { if (options.cadenceThrows) throw Error('cadence unavailable'); return { last_initiated_at: charged.has(person) ? new Date().toISOString() : null }; } },
     '../../db/people': { recordSocialMoment: person => { stamps.push({ personSlackId: person }); if (options.stampFails) return false; charged.add(person); return true; } },
@@ -67,7 +73,13 @@ function harness(options = {}) {
       app: { client: { reactions: { add: async () => {} } } },
       profile: { user: { slack_user_id: 'U_OWNER', timezone: 'UTC' }, assistant: { slack: { bot_token: 'fixture' } } },
       result: { reply: 'Work answer ready.', socialCoda: { personSlackId: person, directive: { mode: 'raise_new', categoryLabel: 'music' } } },
-      say: async msg => { posts.push(msg); if (msg.text === 'Social question?' && options.sendThrows) throw Error('timeout after acceptance'); return { ts: String(posts.length) }; },
+      say: async msg => {
+        posts.push(msg);
+        if (msg.text === 'Social question?' && options.sendThrows) throw Error('timeout after acceptance');
+        if (msg.text === 'Social question?' && options.sendExplicitFailure) return { ok: false, error: 'fixture_failure' };
+        if (msg.text === 'Social question?' && options.sendReturnsVoid) return undefined;
+        return { ok: true, ts: String(posts.length) };
+      },
       role: 'owner', senderId: person, channelId: 'D_OWNER', threadTs: 'T1', history: [], userMessage: 'Hello', ...overrides,
     });
   }
@@ -80,7 +92,7 @@ function harness(options = {}) {
     queue.enqueueMessage({ channelId: 'D_OWNER', threadTs: 'T1', isOneOnOneDm: true, text: 'Follow-up', senderId: 'U_OWNER', meta: {}, runner: async () => {}, ...overrides });
   }
   function count() { assert.deepEqual(unexpected, []); return posts.filter(p => p.text === 'Social question?').length; }
-  return { reply, fire, inbound, count, posts, history, stamps, subjectRaises, mirrors, charged, replies, logs, get composeCalls() { return composeCalls; }, get gateCalls() { return gateCalls; } };
+  return { reply, fire, inbound, count, posts, history, stamps, subjectRaises, categoryRaises, mirrors, charged, replies, logs, get composeCalls() { return composeCalls; }, get gateCalls() { return gateCalls; } };
 }
 
 for (const phase of ['compose', 'gate']) {
@@ -122,6 +134,7 @@ test('regression: pending directive rechecks already spent daily eligibility', a
 test('preserved: quiet owner DM posts in same thread and stores provenance internally', async () => {
   const h = harness(); await h.reply(); await h.fire('coda'); assert.equal(h.count(), 1);
   assert.equal(h.stamps.length, 1); assert.equal(h.history.at(-1)[2].content, 'Social question?\n[internal provenance]');
+  assert.equal(h.categoryRaises.length, 1);
   assert.equal(h.posts.at(-1).thread_ts, 'T1'); assert.equal(h.posts.at(-1).unfurl_links, false);
   assert.equal(h.mirrors.length, 0);
 });
@@ -139,8 +152,20 @@ for (const option of ['composeNull','composeThrows','gateDrop','gateThrows','emp
 test('preserved: pending inbound before timer drops before composition', async () => {
   const h = harness(); await h.reply(); h.inbound(); await h.fire('coda'); assert.equal(h.count(), 0); assert.equal(h.composeCalls, 0);
 });
-test('preserved: timeout retains pre-send accounting and omits history receipt', async () => {
-  const h = harness({ sendThrows: true }); await h.reply(); await h.fire('coda'); assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.equal(h.history.length, 1);
+test('regression: rejected send keeps attempt cap without recording category delivery', async () => {
+  const h = harness({ sendThrows: true }); await h.reply(); await h.fire('coda');
+  assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.equal(h.categoryRaises.length, 0);
+  assert.equal(h.history.length, 1); assert.equal(h.mirrors.length, 0);
+});
+test('regression: explicit unsuccessful acknowledgement is not recorded as delivery', async () => {
+  const h = harness({ sendExplicitFailure: true }); await h.reply(); await h.fire('coda');
+  assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.equal(h.categoryRaises.length, 0);
+  assert.equal(h.history.length, 1); assert.equal(h.mirrors.length, 0);
+});
+test('preserved: resolved catch-up wrapper without response body confirms delivery', async () => {
+  const h = harness({ sendReturnsVoid: true }); await h.reply(); await h.fire('coda');
+  assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.equal(h.categoryRaises.length, 1);
+  assert.equal(h.history.length, 2);
 });
 test('preserved: different people can both receive codas', async () => {
   const h = harness(); await h.reply(); await h.reply({ senderId: 'U_OTHER', channelId: 'D_OTHER', threadTs: 'T2' }); await h.fire('coda'); assert.equal(h.count(), 2);
@@ -154,7 +179,7 @@ test('regression: cadence read unavailable fails closed', async () => {
 });
 test('regression: timeout accounting suppresses another pending attempt', async () => {
   const h = harness({ sendThrows: true }); await h.reply(); await h.fire('coda');
-  await h.reply({ threadTs: 'T2' }); await h.fire('coda'); assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1);
+  await h.reply({ threadTs: 'T2' }); await h.fire('coda'); assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.equal(h.categoryRaises.length, 0);
 });
 test('preserved: coda dropped before accounting can be retried on a later quiet reply', async () => {
   const options = { gateDrop: true }; const h = harness(options); await h.reply(); await h.fire('coda');
@@ -173,6 +198,10 @@ test('preserved: inbound in another DM does not cancel this recipient', async ()
 test('preserved: continue coda retains subject raise accounting', async () => {
   const h = harness(); await h.reply({ result: { reply: 'Work answer', socialCoda: { personSlackId: 'U_OWNER', subjectId: 'S1', directive: { mode: 'continue' } } } });
   await h.fire('coda'); assert.equal(h.count(), 1); assert.deepEqual(h.subjectRaises, ['S1']);
+});
+test('regression: rejected continue coda does not start subject silence accounting', async () => {
+  const h = harness({ sendThrows: true }); await h.reply({ result: { reply: 'Work answer', socialCoda: { personSlackId: 'U_OWNER', subjectId: 'S1', directive: { mode: 'continue' } } } });
+  await h.fire('coda'); assert.equal(h.count(), 1); assert.equal(h.stamps.length, 1); assert.deepEqual(h.subjectRaises, []);
 });
 test('regression: failed stamp on continue neither sends nor raises subject', async () => {
   const h = harness({ stampFails: true }); await h.reply({ result: { reply: 'Work answer', socialCoda: { personSlackId: 'U_OWNER', subjectId: 'S1', directive: { mode: 'continue' } } } });

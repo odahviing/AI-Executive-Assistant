@@ -8,7 +8,7 @@
  *      timers firing on next_check_at
  *   4. meeting mutation cascade — calendar event vanished / confirmed
  *   5. outreach reply handler — colleague replied to awaiting_colleague outreach
- *   (also: brief itself, when surfaced_count >= 3 → cancelled)
+ *   (also: after two delivered briefings, surfaced_count >= 2 → cancelled)
  *
  * No other code path may write `state` directly to a terminal value — with ONE
  * named exception: db/requests.ts's cancelColleagueBookingRecordsForEvent.

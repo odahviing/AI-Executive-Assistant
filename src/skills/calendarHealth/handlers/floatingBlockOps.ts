@@ -1,9 +1,4 @@
-/**
- * handleBookFloatingBlock — the `book_floating_block` case body, extracted
- * VERBATIM from ../../calendarHealth.ts. No logic changes: relative import depth
- * deepened two levels; free vars (context/profile/userEmail/timezone) threaded
- * via OpCtx.
- */
+/** Book a configured floating block, preserving owner placement and free-before-WE search. */
 import { DateTime } from 'luxon';
 import {
   getOwnerEventsForDecision,
@@ -337,24 +332,12 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           };
         }
 
-        // Busy blocks in the window, EXCLUDING events that are this block
-        // (we're about to book one; don't let a stale one self-block).
-        const busyInWindow = events
-          .filter(e => {
-            if (e.isAllDay || e.isCancelled || e.showAs === 'free') return false;
-            if (fb.isFloatingBlockEvent(
-              { subject: e.subject, categories: e.categories },
-              block,
-            )) return false;
-            const eStart = parseGraphDt(e.start.dateTime, e.start.timeZone, timezone);
-            const eEnd = parseGraphDt(e.end.dateTime, e.end.timeZone, timezone);
-            return eStart.toMillis() < windowEnd.toMillis() && eEnd.toMillis() > windowStart.toMillis();
-          })
-          .map(e => ({
-            start: Math.max(parseGraphDt(e.start.dateTime, e.start.timeZone, timezone).toMillis(), windowStart.toMillis()),
-            end: Math.min(parseGraphDt(e.end.dateTime, e.end.timeZone, timezone).toMillis(), windowEnd.toMillis()),
-          }));
-
+        // Destination search tries genuinely free time first, then reclaims WE.
+        // Use the same occupancy builder as relocation and slot capacity checks.
+        const placementEvents = events.filter(e => !e.isAllDay);
+        let busyInWindow = fb.busyForBlockWindow(
+          placementEvents, block, windowStart.toMillis(), windowEnd.toMillis(), undefined, true,
+        );
         // v3.0.2 — floating-block math no longer applies a buffer (meeting
         // durations 10/25/40/55 already carry natural spacing). The previous
         // `profile.meetings.buffer_minutes ?? 0` was a path for the owner's
@@ -387,9 +370,17 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
           };
         }
 
-        const slotResult = fb.findPositionalSlotForBlock(
+        let slotResult = fb.findPositionalSlotForBlock(
           block, date, timezone, busyInWindow, preferPosition, anchor,
         );
+        let usedWorkingElsewhereFallback = false;
+        if ('error' in slotResult && (slotResult.error === 'no_room' || slotResult.error === 'anchor_conflicts_busy')) {
+          busyInWindow = fb.busyForBlockWindow(
+            placementEvents, block, windowStart.toMillis(), windowEnd.toMillis(),
+          );
+          slotResult = fb.findPositionalSlotForBlock(block, date, timezone, busyInWindow, preferPosition, anchor);
+          usedWorkingElsewhereFallback = !('error' in slotResult);
+        }
 
         if ('error' in slotResult) {
           // Diagnostic: list the busy blocks that fragmented the window.
@@ -588,7 +579,7 @@ export async function handleBookFloatingBlock(args: Record<string, unknown>, ctx
             date,
             block_name: block.name,
             booked: true,
-            message: `I booked ${blockLabel} on ${date} from ${blockStart.toFormat('HH:mm')} to ${blockEnd.toFormat('HH:mm')}.`,
+            message: `I booked ${blockLabel} on ${date} from ${blockStart.toFormat('HH:mm')} to ${blockEnd.toFormat('HH:mm')}.${usedWorkingElsewhereFallback ? ' No fully clear slot was available, so this overlaps a Working Elsewhere block.' : ''}`,
             ...(overlapping.length > 0 ? { overlapping_events: overlapping } : {}),
           };
         } catch (err) {

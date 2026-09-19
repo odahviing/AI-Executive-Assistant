@@ -328,7 +328,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
 
 RESCHEDULING ≠ CREATING. Before booking a recurring 1:1 (Weekly / BiWeekly) to a NEW time: if that person's series already exists on the calendar, you are RESCHEDULING — call move_meeting on the existing occurrence (get its id from get_calendar), NOT create_meeting. Creating a fresh event leaves a duplicate next to the live series. create_meeting is for genuinely NEW meetings only.
 
-LOCATION & ONLINE — THE HANDLER DECIDES. There's a deterministic process: day-type (office/home) × party shape (internal-only / has-external) × TZ produces the right answer. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle. ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office + different TZ → online with Teams. External + office + same TZ → handler asks ${profile.user.name.split(' ')[0]} once (on create, move, or an update_meeting attendee change that lands there). You don't recreate this math; you let the handler run.
+LOCATION & ONLINE — THE HANDLER DECIDES from day type and party shape. ${profile.user.name.split(' ')[0]}'s home day + internal-only → Huddle; ${profile.user.name.split(' ')[0]}'s office day + internal-only → Office. External + home → online with Teams. External + office on the OWNER path follows total roster regardless of the external's timezone: owner plus one external → online; three or more total participants → asks ${profile.user.name.split(' ')[0]} once whether the group meets onsite or all online (on create, move, or an update_meeting attendee change). On the COLLEAGUE path, an external office-day meeting → online without owner approval. Let the handler run.
 
 WHEN TO PASS \`is_online\` AT ALL (v2.9.1):
 - **DEFAULT: OMIT.** No conversational signal → leave \`is_online\` unset. The handler picks per day-type + party shape. Do NOT default to \`true\` "to be safe" — that corrupts the decision (an internal home-day meeting should be Huddle, not Teams).
@@ -344,7 +344,11 @@ WHEN THE SIGNAL ALREADY EXISTS, ACT ON IT (this thread said video, said in perso
 
 Colleague-path (v2.3.2 + v2.6.5 + v2.6.6): when a colleague has confirmed slot + duration + subject in this DM with you, call this tool directly to book — the requester (1:1), multi-internal (everyone in the same workspace), or owner-only-pollable (requester + externals). Externals are fine; they get the calendar invite via Outlook. The handler enforces server-side: every attendee must have an email; rule-compliant slot (work hours, work days, travel buffers, floating blocks, no conflicts via findAvailableSlots); then auto shadow-DMs the owner so he sees it happen. If the slot fails the rule check, the tool returns { success: false, error: 'not_rule_compliant', message } — fall back to create_approval(kind=policy_exception). If an attendee has no email, the tool returns { success: false, error: 'attendee_missing_email' } — resolve it via find_slack_user (directory lookup); if it truly can't be resolved, raise create_approval(kind=freeform) so the owner supplies it. DO NOT punt with "go ahead and send him the calendar invite" — the colleague's invite won't have the owner's location prefs, won't get auto-categorized, and the owner gets no shadow record. YOU are the EA; YOU book it.
 
-SUBJECT — with an EXTERNAL on the invite, secure a REAL one BEFORE booking. Externals see the invite, and a rename hits them as a SECOND notification — so never send an external a placeholder ("Meeting with X and Y") you'll rename right after. When the subject is missing and the invite includes an external (candidate / other company / personal domain), ASK for it BEFORE create_meeting, batched with any other missing field in ONE question ("what day, and what should I call it?") — never day-first, then subject after the fact. Internal-only bookings on ${profile.user.name.split(' ')[0]}'s OWN path may use a working title and be renamed later, for speed. On the COLLEAGUE path, when the colleague asking for the meeting hasn't stated a subject, ASK for one before booking — batch it with any other missing field, same as above — instead of inventing a placeholder like "Team Sync"; a colleague's meeting gets its real subject up front, not a rename after the fact.
+REQUEST COMPLETION — if one request asks for a message or confirmation and a calendar entry, finish both when their fields are known and their tools are available. message_colleague completes only the message; create_meeting completes the calendar action. If the calendar tool is unavailable, fails, or has an unknown result, say that the calendar part remains incomplete.
+
+SUBJECT SOURCE — ground the subject in the explicit title or purpose and actual participants supported by the current request, attached image, and current thread. Ordinary text and images follow the same rule: retain a stated purpose in English (for example, "Positioning with Einav") and name exactly the participants included. A multi-person meeting names every participant explicitly included (for example, "Strategy with Anna and Ben"). If the source excludes someone or a group, the exclusion applies to both the attendee set and the subject.
+
+SUBJECT WHEN MISSING — with an EXTERNAL on the invite, ASK for a real subject BEFORE create_meeting, batched with other missing fields; a later rename sends a second notification. On the COLLEAGUE path, ask before booking instead of inventing a placeholder. Only an internal meeting on ${profile.user.name.split(' ')[0]}'s own path may use a working title, and it must name actual attendees (for example, "Meeting with Anna").
 
 FLOATING-BLOCK IMPACT — quote it, never re-derive it. When the result includes \`floating_block_impact\` (this booking overlapped a floating block like lunch or focus time), state it VERBATIM in the confirmation instead of computing "X min free will remain" yourself from the raw calendar — it's the real relocation-search answer, not an estimate. \`relocatable: false\` → say plainly that the block (name it) has nowhere to go that day. \`relocatable: true\` with \`newSlotLabel\` → state that as the plan (e.g. "I'll move lunch to 13:00–13:25").
 
@@ -352,7 +356,7 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
         input_schema: {
           type: 'object',
           properties: {
-            subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY, even when conversing in Hebrew.' },
+            subject: { type: 'string', description: 'Meeting subject — ENGLISH ONLY, even when conversing in Hebrew. Ground it in the explicit title or purpose and actual participants supported by the current request, attached image, and current thread; use exactly that supported participant set.' },
             start: { type: 'string', description: 'ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
             end: { type: 'string', description: 'ISO 8601 datetime. Same zone basis as start.' },
             stated_zone: { type: 'string', description: 'Which timezone the owner NAMED for this time. Set it WHENEVER he names ANY zone — INCLUDING his home zone (this is the #1 thing to get right while he travels). Values: "home" (he said "Israel time" / "my home time" / "IL time"), "local" (he said "my time" / "local", or named the place he is physically in), or an IANA zone like "America/New_York" (he named a specific OTHER zone, e.g. "ET"/"EST"/"PT"). OMIT ONLY when he names NO zone — then a bare time is read as where he physically is on a travel day, else his home zone. Example: travelling in Boston he says "6:30 PM Israel time" → start="...T18:30:00", stated_zone="home". Pass the clock as-stated; the tool does ALL timezone math — NEVER hand-convert.' },
@@ -700,9 +704,11 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // deliberately excluded HERE and only here: they are real commitments (the
         // validator reports them on `overCommitment`), but they have no clock
         // window to carve a "he could join the first 20 minutes" out of.
+        const { getSuppressedEventIds } = await import('../db/calendarIssues');
+        const suppressedFloatingIds = getSuppressedEventIds(profile.user.slack_user_id);
         const directConflicts = events.filter(ev => {
           if (ev.isAllDay) return false;
-          if (occupancyRoleOf(ev, floatingBlocks, timezone) !== 'commitment') return false;
+          if (occupancyRoleOf(ev, floatingBlocks, timezone, profile, suppressedFloatingIds) !== 'commitment') return false;
           const s = evTime(ev.start).toMillis();
           const e = evTime(ev.end).toMillis();
           return s < meetingEndMs && e > meetingStartMs;
@@ -733,90 +739,30 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         // has to physically shift, and to where, so active mode can move it in
         // the same turn.
         const joinDayName = DateTime.fromISO(dayStr, { zone: timezone }).toFormat('EEEE');
-        // v3.0.2 — floating-block math is buffer-free; meeting durations carry the spacing.
-        // v2.1.1 — collect which floating-block EVENTS need to be moved in
-        // the same turn if we return "yes free" in active mode. A block
-        // event needs a move when (a) it exists on the calendar and
-        // (b) its CURRENT slot overlaps the proposed meeting. The helper
-        // has already told us the new aligned slot.
+        // A private occupancy snapshot is updated after each accepted move.
+        // Plan the next destination from that state, never the old calendar read.
+        const joinMoveEvents = events.filter(e => !e.isAllDay).map(e => ({ ...e }));
+        const sourceRanges = fb.preserveFloatingSourceRanges(joinMoveEvents, profile);
         const pendingBlockMoves: Array<{
-          eventId: string;
-          blockName: string;
-          currentSubject: string;
-          currentStartHHMM: string;
-          currentEndHHMM: string;
-          newStartIso: string;
-          newEndIso: string;
-          newStartHHMM: string;
-          newEndHHMM: string;
-          usedWorkingElsewhereFallback?: boolean;
+          block: typeof floatingBlocks[number];
+          event: typeof events[number];
         }> = [];
         for (const block of floatingBlocks) {
           if (!fb.blockAppliesOnDay(block, joinDayName, profile)) continue;
-          const wStart = DateTime.fromISO(`${dayStr}T${block.preferred_start}`, { zone: timezone }).toMillis();
-          const wEnd = DateTime.fromISO(`${dayStr}T${block.preferred_end}`, { zone: timezone }).toMillis();
-          if (meetingStartMs >= wEnd || meetingEndMs <= wStart) continue;  // no overlap
-
-          // The block's CURRENT event on this day, found FIRST so the
-          // destination search sizes for the event's real span (an owner-
-          // stretched lunch moves at its own length — blockSizedToEvent, the
-          // one helper every mover shares). Bound to THIS day's block window:
-          // `events` spans the whole week (the validator needs it for per-week
-          // category caps + the day's focus floor), so an unbounded find would
-          // return another day's lunch and silently skip the real one.
-          const existingBlockEvent = events.find(e => {
-            if (e.isCancelled || e.isAllDay || e.showAs === 'free') return false;
-            if (!fb.isFloatingBlockEvent(
-              { subject: e.subject, categories: e.categories },
-              block,
-            )) return false;
-            return evTime(e.start).toMillis() < wEnd && evTime(e.end).toMillis() > wStart;
-          });
-          const sizedBlock = existingBlockEvent ? fb.blockSizedToEvent(block, existingBlockEvent, timezone) : block;
-
-          // Destination search (owner ruling 2026-08-28): this is picking
-          // WHERE the block moves to, not just a capacity check (that's
-          // checkSlot rule 6) — so it goes through the two-pass finder: a
-          // genuinely free slot first, a WE-tagged slot only as a fallback.
-          const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
-            events.filter(e => !e.isAllDay), sizedBlock, dayStr, timezone, undefined,
-            { start: meetingStartMs, end: meetingEndMs },
-          );
-          if (aligned !== null) {
-            // Block fits — does its CURRENT event overlap the proposed
-            // meeting? If so, record a pending move.
-            if (existingBlockEvent) {
-              const eStartMs = evTime(existingBlockEvent.start).toMillis();
-              const eEndMs = evTime(existingBlockEvent.end).toMillis();
-              const overlapsProposed = eStartMs < meetingEndMs && eEndMs > meetingStartMs;
-              if (overlapsProposed && aligned !== eStartMs) {
-                const newStart = DateTime.fromMillis(aligned).setZone(timezone);
-                const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
-                pendingBlockMoves.push({
-                  eventId: existingBlockEvent.id,
-                  blockName: block.name,
-                  currentSubject: existingBlockEvent.subject ?? block.name,
-                  currentStartHHMM: DateTime.fromMillis(eStartMs).setZone(timezone).toFormat('HH:mm'),
-                  currentEndHHMM: DateTime.fromMillis(eEndMs).setZone(timezone).toFormat('HH:mm'),
-                  newStartIso: newStart.toISO()!,
-                  newEndIso: newEnd.toISO()!,
-                  newStartHHMM: newStart.toFormat('HH:mm'),
-                  newEndHHMM: newEnd.toFormat('HH:mm'),
-                  ...(usedWorkingElsewhereFallback ? { usedWorkingElsewhereFallback: true } : {}),
-                });
-              }
-            }
+          const wStart = fb.windowMsForDay(dayStr, block.preferred_start, timezone);
+          const wEnd = fb.windowMsForDay(dayStr, block.preferred_end, timezone);
+          const existing = joinMoveEvents.find(e => !e.isCancelled && e.showAs !== 'free'
+            && fb.isFloatingBlockEvent(e, block)
+            && evTime(e.start).toFormat('yyyy-MM-dd') === dayStr);
+          if (!existing || !fb.isMovableFloatingBlockEvent(existing, block, timezone, profile, suppressedFloatingIds)) continue;
+          const start = evTime(existing.start).toMillis();
+          const end = evTime(existing.end).toMillis();
+          // Owner placement outside the window and already-ended blocks are final.
+          if (start < wStart || end > wEnd || end <= DateTime.now().toMillis()) continue;
+          if (start < meetingEndMs && end > meetingStartMs) {
+            pendingBlockMoves.push({ block, event: existing });
           }
         }
-
-        // ── Free (per THE validator) ────────────────────────────────────────────
-        // v3.3.7 (#124a) — buffer-only collisions FALL THROUGH to "free". The
-        // owner's 5-min buffer is carried by the meeting LENGTHS
-        // (allowed_durations 10/25/40/55 end short of the grid) — it is not a
-        // standalone rule, and it must never escalate on its own. v4.1.x — that
-        // is now structural rather than a local carve-out: the widening buffer
-        // window this handler used to apply is simply gone, and the verdict is
-        // checkSlot's, which has no buffer-collision rule (deleted v2.7.1).
         if (joinCheck.passes) {
           // v2.1.1 — active-mode in-turn block move. When
           // calendar_health_mode='active' AND a floating block event would
@@ -828,25 +774,44 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           const movesDone: string[] = [];
           let movedIntoWorkingElsewhereFallback = false;
           if (activeMode && pendingBlockMoves.length > 0) {
-            for (const mv of pendingBlockMoves) {
+            const { logRebalanceMoveActivity } = await import('../utils/rebalanceFloatingBlocks');
+            for (const { block, event: blockEvent } of pendingBlockMoves) {
+              let moveAccepted = false;
               try {
+                const sizedBlock = fb.blockSizedToEvent(block, blockEvent, timezone);
+                const { aligned, usedWorkingElsewhereFallback } = fb.findBlockDestination(
+                  [...joinMoveEvents, ...sourceRanges.filter(e => e.id !== `floating-source:${blockEvent.id}`)], sizedBlock, dayStr, timezone, new Set([blockEvent.id]),
+                  { start: meetingStartMs, end: meetingEndMs },
+                );
+                if (aligned === null) return {
+                  can_join: false, needs_owner_decision: true, time: timeStr,
+                  blocks_moved: movesDone.length > 0 ? movesDone : undefined,
+                  message: 'Making room requires rearranging other calendar events. Please ask the owner whether to rearrange them before confirming attendance.',
+                };
+                const currentStart = evTime(blockEvent.start);
+                if (aligned === currentStart.toMillis()) continue;
+                const newStart = DateTime.fromMillis(aligned).setZone(timezone);
+                const newEnd = newStart.plus({ minutes: sizedBlock.duration_minutes });
                 await updateMeeting({
-                  userEmail,
-                  meetingId: mv.eventId,
-                  start: mv.newStartIso,
-                  end: mv.newEndIso,
-                  timezone,
+                  userEmail, meetingId: blockEvent.id,
+                  start: newStart.toISO()!, end: newEnd.toISO()!, timezone,
                 });
-                movesDone.push(`moved ${mv.blockName} ${mv.currentStartHHMM}→${mv.newStartHHMM}`);
-                if (mv.usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
+                moveAccepted = true;
+                logRebalanceMoveActivity(profile.user.slack_user_id, block.name, blockEvent, timezone, newStart, newEnd);
+                blockEvent.start = { dateTime: newStart.toISO()!, timeZone: timezone };
+                blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: timezone };
+                movesDone.push(`moved ${block.name} ${currentStart.toFormat('HH:mm')}→${newStart.toFormat('HH:mm')}`);
+                if (usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
                 logger.info('check_join_availability active-mode: block moved in-turn', {
-                  eventId: mv.eventId, blockName: mv.blockName,
-                  from: mv.currentStartHHMM, to: mv.newStartHHMM,
+                  eventId: blockEvent.id, blockName: block.name,
+                  from: currentStart.toFormat('HH:mm'), to: newStart.toFormat('HH:mm'),
                 });
               } catch (err) {
-                logger.warn('In-turn block move failed — proceeding without it', {
-                  eventId: mv.eventId, err: String(err).slice(0, 200),
+                logger.warn('In-turn block move failed - proceeding without it', {
+                  eventId: blockEvent.id, err: String(err).slice(0, 200),
                 });
+                // A failed response cannot establish which slot Graph now holds.
+                if (!moveAccepted) break;
               }
             }
           }

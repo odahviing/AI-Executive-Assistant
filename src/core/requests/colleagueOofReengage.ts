@@ -572,7 +572,7 @@ Classify by MEANING, in any language:
  * cost.
  */
 export async function handleOofReengageReply(
-  app: App,
+  _app: App,
   params: { job: OutreachJob; replyText: string; profile: UserProfile; bot_token: string },
 ): Promise<boolean> {
   const { job, replyText, profile } = params;
@@ -594,11 +594,6 @@ export async function handleOofReengageReply(
   });
 
   logger.info('oof_reengage reply classified', { jobId: job.id, status });
-
-  // A reply of any kind kills the CURRENT expiry timer — re-armed below per branch.
-  if (job.request_id && status !== 'checking') {
-    updateRequest(job.request_id, { nextCheckAt: null, nextCheckHandler: null });
-  }
 
   const conversation: Array<{ role: 'maelle' | 'colleague'; text: string }> =
     job.conversation_json ? JSON.parse(job.conversation_json) : [];
@@ -641,73 +636,13 @@ export async function handleOofReengageReply(
     return true;
   }
 
-  // ── yes → resume straight into a normal booking flow ─────────────────────
-  updateOutreachJob(job.id, { status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation) });
-  try {
-    await conn.sendDirect(profile.user.slack_user_id, `${job.colleague_name} still wants to grab time — finding options now.`);
-  } catch (err) { logger.warn('oof_reengage owner heads-up (yes) failed', { err: String(err).slice(0, 150) }); }
-
-  try {
-    // Dynamic import — avoids a load-time cycle (orchestrator → skills → spine),
-    // same idiom runner.ts's runResearchRun already uses for the same reason.
-    const { runOrchestrator } = await import('../orchestrator');
-    const { runOutputGates } = await import('../../utils/guards/runOutputGates');
-    const attendeeList = Array.isArray(ctx.attendee_emails) && ctx.attendee_emails.length > 0
-      ? ctx.attendee_emails.join(', ') : '';
-    // R2-adjacent: state the ORIGINAL ask's facts explicitly rather than
-    // leaving Sonnet to re-derive them from a bare "yes" — subject, duration
-    // and attendees carry through byte-for-byte from what the colleague
-    // originally asked for.
-    const syntheticMessage =
-      `${job.colleague_name} confirmed they still want to meet — subject: ${ctx.subject ?? 'a meeting'}, `
-      + `duration: ${ctx.duration_minutes ?? 30} minutes${attendeeList ? `, attendees: ${attendeeList}` : ''}`
-      + `${ctx.meeting_mode ? `, mode: ${ctx.meeting_mode}` : ''}. Their reply: "${replyText}". `
-      + `Find available times and propose them now.`;
-    const dmChannelId = job.dm_channel_id ?? job.colleague_slack_id;
-    const dmThreadTs = job.dm_message_ts ?? `oof_reengage_${job.id}`;
-    const result = await runOrchestrator({
-      userMessage: syntheticMessage,
-      conversationHistory: [],
-      threadTs: dmThreadTs,
-      channelId: dmChannelId,
-      userId: job.colleague_slack_id,
-      senderRole: 'colleague',
-      senderName: job.colleague_name,
-      authority: 'colleague',
-      surface: 'colleague_dm',
-      channel: 'slack',
-      interactive: true,
-      profile,
-      app,
-    });
-    if (result.reply) {
-      // gh#201-d (D1 fix, bouncer overturn) — this is a synthetic, re-entered
-      // orchestrator turn whose output reaches a COLLEAGUE. Every other
-      // colleague-facing reply is gated through runOutputGates before it
-      // leaves the process (postReply.ts:495 for Slack, inbound.ts:414 for
-      // the email leg) — sending result.reply straight to the connector
-      // skipped every one of those checks (leak/identity-spoof scan,
-      // owner-fact-check-and-rewrite, humanGate, dateVerifier, the
-      // availability floor), the exact class runOutputGates' own header
-      // (:281-297) records as retired in v4.1.x for re-running the
-      // orchestrator on the reply path (G3). Same minimal shape inbound.ts
-      // uses: gate the draft, then send whatever it returns.
-      const gatedReply = await runOutputGates(result.reply, {
-        profile, result,
-        history: [], userMessage: syntheticMessage,
-        senderId: job.colleague_slack_id, channelId: dmChannelId, threadTs: dmThreadTs,
-        role: 'colleague', colleagueName: job.colleague_name,
-        isMpim: false, isOwnerInGroup: false,
-      });
-      if (job.dm_channel_id) await conn.postToChannel(job.dm_channel_id, gatedReply, { threadTs: job.dm_message_ts });
-      else await conn.sendDirect(job.colleague_slack_id, gatedReply);
-    }
-  } catch (err) {
-    logger.error('oof_reengage — resume-booking orchestrator run threw', { err: String(err).slice(0, 300), jobId: job.id });
-    try {
-      await conn.sendDirect(job.colleague_slack_id, `Let me check on times and get back to you shortly.`);
-    } catch { /* best effort — the reply is already logged above either way */ }
-  }
-  logger.info('oof_reengage reply = yes — resumed booking flow', { jobId: job.id });
-  return true;
+  // Acceptance resumes the ordinary live turn through the coordinator. Keep
+  // this request open until that turn proves booking or creates an approval;
+  // offered options and execution failures are still unfinished work.
+  // The coordinator carries the stored original ask into that same turn.
+  // Retire only this payload's intent routing: later booking replies use the
+  // same normal flow without repeatedly classifying the already-accepted OOF ask.
+  updateOutreachJob(job.id, { intent: undefined });
+  job.intent = undefined;
+  return false;
 }
