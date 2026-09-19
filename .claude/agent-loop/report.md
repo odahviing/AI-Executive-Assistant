@@ -1,11 +1,11 @@
 # Report - 4.9.11
 
-**36 rows await you** - standing backlog; 0 new product decisions from this wrap. The 21 reviewed correction groups are prepared for 4.9.11; commit and cloud verification are pending.
+**38 rows await you** - v4.9.11 wrapped, 0 new product decisions from this wrap. All 21 correction groups independently verified and committed in 923c6c9; cloud verification follows the final bookkeeping push.
 
 ```
 Run wrap-4.9.11
 out: 21 independently verified correction groups
-board: 41 open rows - 24 still-real - 12 need a re-read - 5 cite no file - 36 rulable - 5 waiting on a verb
+board: 43 open rows - 26 still-real - 10 need a re-read - 7 cite no file - 38 rulable - 5 waiting on a verb
 ```
 
 ### pending owner (0)
