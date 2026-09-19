@@ -51,6 +51,7 @@ const DEBOUNCE_MS = 1500;
 
 interface PendingMessage {
   text: string;
+  rawText: string;
   arrivedAt: number;
   /**
    * The authenticated Slack sender id (S6) — never a claim in the text.
@@ -99,19 +100,11 @@ const threadStates: Map<string, ThreadState> = new Map();
 /**
  * Build the queue key.
  *
- * - 1:1 DM channels: key = channelId ONLY. In a DM each top-level message
- *   gets its own threadTs from Slack (threadTs == ts), so threadTs-scoping
- *   would put every message into its own queue and never merge — the exact
- *   bug observed on the v2.5.0 first-deploy test ("3 fast messages, no
- *   batching"). Logically a DM is one ongoing conversation; we coalesce
- *   accordingly.
- *
- * - MPIM / channel: key = channelId|threadTs. These genuinely have parallel
- *   conversations (different threads of replies, different topics) that
- *   shouldn't collapse into each other.
+ * - Top-level DM bursts share the channel key so fragmented typing merges.
+ * - Explicit DM threads, MPIMs and channels retain channel + thread isolation.
  */
-function keyFor(channelId: string, threadTs: string | undefined, isOneOnOneDm: boolean): string {
-  if (isOneOnOneDm) return channelId;
+function keyFor(channelId: string, threadTs: string | undefined, isTopLevelDm: boolean): string {
+  if (isTopLevelDm) return channelId;
   return `${channelId}|${threadTs ?? '_none_'}`;
 }
 
@@ -148,8 +141,7 @@ export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
 
 /**
  * The runner the queue calls when it's time to process a batch. Receives
- * the merged user message + meta from the FIRST pending message (channel,
- * threadTs, etc. don't change within a thread). Receives an AbortSignal it
+ * the merged user message + meta from the LAST pending message. Receives an AbortSignal it
  * MUST honor — when triggered, abandon the turn at the next safe point.
  *
  * The runner ALSO receives a `markWrite` callback. Call it the moment any
@@ -174,10 +166,13 @@ export function isMergeAbort(err: unknown, signal?: AbortSignal): boolean {
  */
 export type TurnRunner = (params: {
   mergedText: string;
+  mergedRawText: string;
   meta: Record<string, unknown>;
   signal: AbortSignal;
   markWrite: () => void;
   spansMultipleSenders: boolean;
+  messageTimestamps: string[];
+  senderIds: string[];
 }) => Promise<void>;
 
 /**
@@ -200,13 +195,18 @@ export function enqueueMessage(params: {
   /** True for 1:1 DMs (owner ↔ Maelle, colleague ↔ Maelle). False for MPIMs and channel mentions. */
   isOneOnOneDm: boolean;
   text: string;
+  /** Human text before transport framing, for intent/participant decisions. */
+  rawText?: string;
   /** The authenticated Slack sender id (S6). Never derived from the text. */
   senderId: string;
   senderName?: string;
   meta: Record<string, unknown>;
   runner: TurnRunner;
 }): void {
-  const key = keyFor(params.channelId, params.threadTs, params.isOneOnOneDm);
+  // Only unthreaded typing bursts share a DM queue. Replies to two existing
+  // threads retain their own anchor and cannot cancel or absorb one another.
+  const key = keyFor(params.channelId, params.threadTs,
+    params.isOneOnOneDm && params.meta.messageTs === params.threadTs);
   const state = getOrCreate(key);
   state.inboundRevision++;
 
@@ -233,6 +233,7 @@ export function enqueueMessage(params: {
 
   const msg: PendingMessage = {
     text: params.text,
+    rawText: params.rawText ?? params.text,
     arrivedAt: Date.now(),
     senderId: params.senderId,
     senderName: params.senderName,
@@ -247,19 +248,7 @@ export function enqueueMessage(params: {
         key, newMessagePreview: params.text.slice(0, 60),
       });
       state.inFlight.abort();
-      // Only the NEW message goes in pending. The aborted turn's text is not
-      // there to re-merge: scheduleRun snapshots the batch and empties pending
-      // before it runs (:271-272), and its abort branch discards that snapshot
-      // rather than pushing it back (:299-308). So the next turn's mergedText is
-      // this message alone.
-      //
-      // Nothing is lost by that, which is why the abort branch doesn't bother
-      // restoring it: every inbound message is written to conversation history at
-      // ARRIVAL, before it is ever enqueued (processMessage.ts:appendToConversation), and the turn
-      // that ends up running is the LAST message's runner (:278-280) — whose
-      // history snapshot was taken after the earlier message was already stored.
-      // The superseded message reaches the model as the preceding user turn in
-      // history, not as merged text.
+      // The abort handler restores the unexecuted batch ahead of this arrival.
       state.pending.push(msg);
       // The aborted turn's catch handler in scheduleRun will detect the
       // abort and re-trigger debounce; we don't need to start a new timer
@@ -341,14 +330,21 @@ async function scheduleRun(key: string): Promise<void> {
     });
     await runner({
       mergedText,
+      mergedRawText: batch.map(m => m.rawText).join('\n\n'),
       meta,
       signal: controller.signal,
       markWrite: () => { state.hasWriteFired = true; },
       spansMultipleSenders,
+      messageTimestamps: batch.map(m => m.meta.messageTs).filter((ts): ts is string => typeof ts === 'string'),
+      senderIds: [...distinctSenders],
     });
   } catch (err: any) {
     if (isMergeAbort(err, controller.signal)) {
       logger.info('inboundQueue — turn aborted for merge', { key });
+      // A top-level DM burst can change anchors. Restore the unexecuted
+      // messages themselves; the last runner's thread history cannot contain
+      // earlier messages stored under a different top-level anchor.
+      state.pending.unshift(...batch);
       // The new arrival that triggered the abort is already in pending.
       // Restart debounce so any further arrivals also collect into the batch.
       if (state.debounceTimer) clearTimeout(state.debounceTimer);
@@ -406,9 +402,10 @@ export function isThreadActive(
   threadTs: string | undefined,
   isOneOnOneDm: boolean,
 ): boolean {
-  const state = threadStates.get(keyFor(channelId, threadTs, isOneOnOneDm));
-  if (!state) return false;
-  return state.inFlight !== null || state.pending.length > 0 || state.debounceTimer !== null;
+  const states = isOneOnOneDm
+    ? [...threadStates].filter(([key]) => key === channelId || key.startsWith(`${channelId}|`)).map(([, state]) => state)
+    : [threadStates.get(keyFor(channelId, threadTs, false))];
+  return states.some(state => state && (state.inFlight !== null || state.pending.length > 0 || state.debounceTimer !== null));
 }
 
 /** Snapshot arrivals using the same scope as the queue, including all threads in a DM. */
@@ -417,7 +414,10 @@ export function getThreadInboundRevision(
   threadTs: string | undefined,
   isOneOnOneDm: boolean,
 ): number {
-  return threadStates.get(keyFor(channelId, threadTs, isOneOnOneDm))?.inboundRevision ?? 0;
+  if (isOneOnOneDm) return [...threadStates]
+    .filter(([key]) => key === channelId || key.startsWith(`${channelId}|`))
+    .reduce((sum, [, state]) => sum + state.inboundRevision, 0);
+  return threadStates.get(keyFor(channelId, threadTs, false))?.inboundRevision ?? 0;
 }
 
 /**

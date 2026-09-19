@@ -18,6 +18,8 @@ import { markProcessed, markContentProcessed } from '../processedDedup';
 import { is1on1DM, OVERLOAD_REPLY, buildGroupDmPreamble } from './helpers';
 import { isSlackDocFile, isSlackImageFile, extractSlackDocText, downloadAndScanImageBatch } from './fileIngestion';
 import type { SlackAppContext } from './context';
+import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
+import { readSlackThread } from '../threadHistory';
 
   // On-restart catch-up routes missed messages THROUGH this live path instead
   // of reimplementing it. Register a replay fn (closure over processMessage +
@@ -37,6 +39,7 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
   registerInboundReplay(user.slack_user_id, async ({ message, channelId, postThreadTs, isMpim, isChannel, mpimMemberIds }) => {
     const senderId = message.user as string | undefined;
     if (!senderId) return;
+    if (!await readInternalSlackConversation(app.client, assistant.slack.bot_token, channelId, senderId)) return;
     const ts = (message.ts as string) ?? postThreadTs;
     // Media (audio/video/image) candidates only ever come from the DM/panel
     // scan — background.ts's MPIM/channel mention discovery excludes any
@@ -47,15 +50,6 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
 
     let text = (message.text as string) ?? '';
     let voiceInput = false;
-
-    const postCatchUpCaption = async () => {
-      try {
-        await app.client.chat.postMessage({
-          token: assistant.slack.bot_token, channel: channelId, thread_ts: postThreadTs,
-          text: '_↩️ Catching up on your message_', unfurl_links: false, unfurl_media: false,
-        });
-      } catch (_) { /* caption is cosmetic */ }
-    };
 
     const audioFile = files.find(f => typeof f.mimetype === 'string'
       && ((f.mimetype as string).startsWith('audio/') || (f.mimetype as string).startsWith('video/')));
@@ -88,7 +82,6 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
       // colleague image scanAndPrepareImage actually flags stays refused and
       // the text is not answered either (see fileIngestion.ts's
       // hadSecurityRefusal gate) — only a fetch failure ever degrades.
-      await postCatchUpCaption();
       await processImageFileShare({
         files: imageFiles,
         message,
@@ -104,11 +97,8 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
 
     if (!text || text.trim().length < 1) return;  // nothing replayable
 
-    // Caption first, then processMessage posts the actual reply via `say`.
-    await postCatchUpCaption();
-
     const catchUpSay = async (msg: { text: string; thread_ts?: string }) => {
-      await app.client.chat.postMessage({
+      return app.client.chat.postMessage({
         token: assistant.slack.bot_token, channel: channelId,
         thread_ts: msg.thread_ts ?? postThreadTs, text: msg.text,
         unfurl_links: false, unfurl_media: false,
@@ -150,18 +140,14 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     // exists to prevent — see helpers.ts's own comment).
     const resolvedText = await resolveSlackMentions(text);
 
-    // isMpim/isChannel replay a mention-gated group candidate exactly as the
-    // live app_mention handler would (see registerMentionHandler's own
-    // `isExplicitMention: true`) — background.ts only ever produces one of
-    // these when the message @-mentioned the bot, so the addressee gate must
-    // be skipped here too rather than re-classifying text she was already
-    // deterministically shown to be addressed by.
+    // Preserve explicit mention provenance before text normalization. Other
+    // MPIM candidates pass through the same live addressee/continuation gate.
     await processMessage({
       senderId, text: resolvedText, channelId, ts, threadTs: postThreadTs,
       framing: groupContext ? { prefix: groupContext } : undefined,
       say: catchUpSay as unknown as Function, client: app.client,
       isChannel: isChannel ?? false, isMpim: isMpim ?? false,
-      isExplicitMention: (isMpim || isChannel) ? true : undefined,
+      isExplicitMention: !!ctx.botUserId && text.includes(`<@${ctx.botUserId}>`),
       mpimMemberIds,
       voiceInput,
     });
@@ -184,6 +170,7 @@ export function registerDmHandler(ctx: SlackAppContext): void {
 
     // Only handle 1:1 DMs here
     if (!is1on1DM(channelId)) return;
+    if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, message.user)) return;
 
     const senderRole1v1 = getSenderRole(message.user!);
     logger.info('1:1 DM received', { senderId: message.user, channelId, role: senderRole1v1, subtype: subtype ?? 'text' });
@@ -500,6 +487,8 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     // Without the second branch, group-DM replies that don't @-mention the bot
     // (e.g. "Yes, that works for me") are silently dropped.
     if (event.channel_type !== 'mpim' && event.channel_type !== 'channel') return;
+    const internalChannel = await readInternalSlackConversation(client, assistant.slack.bot_token, event.channel, 'user' in event ? event.user : undefined);
+    if (!internalChannel || internalChannel.is_mpim !== true) return;
     if (!('user' in event) || !event.user) return;
 
     // ── Image file_share (v1.7.1) — OWNER ONLY in MPIM ───────────────────────
@@ -520,18 +509,6 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
           return;
         }
         // Confirm this isn't a real channel masquerading as MPIM
-        if (event.channel_type === 'channel') {
-          try {
-            const ch = (await client.conversations.info({
-              token: assistant.slack.bot_token,
-              channel: event.channel as string,
-            })).channel as any;
-            if (ch?.is_mpim !== true) return;
-          } catch (err) {
-            logger.warn('conversations.info failed during MPIM image check — skipping', { err: String(err) });
-            return;
-          }
-        }
 
         const ts = event.ts;
         const threadTs = ('thread_ts' in event && event.thread_ts) ? event.thread_ts as string : ts;
@@ -587,24 +564,8 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     // contradicted S3 and disagreed with catch-up.
     // MPIM messages (channel_type='mpim' OR 'channel'+is_mpim) are untouched
     // by this — they fall through to the relevance check below unchanged.
-    if (event.channel_type === 'channel') {
-      let isMpimChannel = false;
-      try {
-        const ch = (await client.conversations.info({
-          token: assistant.slack.bot_token,
-          channel: event.channel as string,
-        })).channel as any;
-        isMpimChannel = ch?.is_mpim === true;
-      } catch (err) {
-        logger.warn('conversations.info failed — cannot confirm MPIM, skipping', { err: String(err), channelId: event.channel });
-        return;
-      }
-      if (!isMpimChannel) {
-        // Real channel — never processed here, mentioned or not. She joins
-        // or continues a channel thread only via an explicit @-mention.
-        return;
-      }
-    }
+    // Eligibility above positively identified an internal MPIM. Real channels
+    // enter only through app_mention, including every continuation turn (S3).
 
     // v2.6.1 — log event.ts + thread_ts + bot-mention presence so we can
     // correlate this handler with the parallel `app_mention` handler when
@@ -699,15 +660,9 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
       // Pattern: <@UXXXXXX> is a Slack @mention
       const mentionPattern = /<@(U[A-Z0-9]+)>/g;
       const mentionedIds = [...rawText.matchAll(mentionPattern)].map(m => m[1]);
-      if (mentionedIds.length > 0 && !mentionedIds.includes(ctx.botUserId ?? '')) {
-        // Message @mentions other people but not the bot — not directed at us
-        logger.info('MPIM @mention directed at others, not bot — staying silent', {
-          senderId: event.user,
-          mentionedIds,
-          preview: rawText.slice(0, 80),
-        });
-        return;
-      }
+      // Mentioning a human can name the subject of a request to Maelle. The
+      // existing addressee classifier decides meaning; only a bot mention is
+      // a deterministic addressing signal.
 
       // ── Relevance check — MPIM rules (different from channels) ───────────────
       // Default: RESPOND. The classifier only suppresses on clear IGNORE conditions.
@@ -766,6 +721,7 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
         // channels return early above), so isChannel is always false.
         isChannel: false,
         isMpim: true,
+        isExplicitMention: botExplicitlyMentioned,
         mpimMemberIds,
       }).catch(err => logger.error('processMessage error', { err }));
     });
@@ -798,6 +754,7 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
       // The user who reacted shouldn't be the bot itself.
       const reactor = ('user' in event ? (event.user as string) : undefined);
       if (reactor === ctx.botUserId) return;
+      if (!item.channel || !reactor || !await readInternalSlackConversation(client, profile.assistant.slack.bot_token, item.channel, reactor)) return;
       const reaction = ('reaction' in event ? (event.reaction as string) : '') || '';
 
       // ── Path 1 + 2: outreach followup close + shadow ────────────────────
@@ -963,6 +920,8 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
   const { assistant } = profile;
   app.event('app_mention', async ({ event, say, client }) => {
     if (!('user' in event) || !event.user) return;
+    const internalChannel = await readInternalSlackConversation(client, assistant.slack.bot_token, event.channel, event.user);
+    if (!internalChannel) return;
 
     // v2.6.1 — log event.ts so we can correlate against the MPIM `message`
     // handler when both fire for the same user @-mention in an MPIM.
@@ -1016,11 +975,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       // leaking raw U0… ids (#M-3, invariant 9 — channel threads stay read-only).
       const threadNamesById = new Map<string, string>();
       try {
-        const infoRes = await client.conversations.info({
-          token: assistant.slack.bot_token,
-          channel: event.channel,
-        });
-        const ch = infoRes.channel as any;
+        const ch = internalChannel;
         if (ch?.is_mpim === true) {
           isMpimChannel = true;
           const membersRes = await client.conversations.members({
@@ -1075,13 +1030,7 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
       let threadFetchOk = true;
       if (threadTs !== event.ts) {
         try {
-          const replies = await client.conversations.replies({
-            token: assistant.slack.bot_token,
-            channel: event.channel,
-            ts: threadTs,
-            limit: 50,
-          });
-          const threadMessages = (replies.messages as any[]) ?? [];
+          const threadMessages = await readSlackThread(client, assistant.slack.bot_token, event.channel, threadTs);
           threadMsgs = threadMessages;
           const uniqueUserIds = [...new Set(
             threadMessages

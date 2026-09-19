@@ -557,6 +557,9 @@ export async function executeApprovedSkillTool(
     return refuse('approved_action_requires_authenticated_owner');
   }
   if (!WRITE_TOOLS.has(toolName)) return refuse('unsupported_approved_action');
+  if (toolName === 'update_my_preferences' && typeof args.mode === 'string' && args.mode.trim() === 'read') {
+    return refuse('unsupported_approved_action');
+  }
   // Calendar replay already preserves its origin for scoped domain narration.
   // Generic results can contain private data: the caller must supply the real
   // stored owner decision anchor, never relabel an origin room as owner-private.

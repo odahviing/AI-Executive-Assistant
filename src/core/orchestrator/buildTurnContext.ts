@@ -228,7 +228,9 @@ export async function buildTurnContext(input: OrchestratorInput) {
         // own contract, so an ordinary booking is never touched — this only
         // drops a name the model could not have read off this message.
         const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
-        const normalizedMessage = normalize(userMessage);
+        // Slack's model-facing message also includes room rosters and transport
+        // framing. Those names are context, not people named by the human.
+        const normalizedMessage = normalize(input.rawUserMessage ?? (isRoom ? '' : userMessage));
         turnMeetingPeople = rawMeetingPeople.filter(
           name => typeof name === 'string' && name.trim() && normalizedMessage.includes(normalize(name)),
         );
@@ -488,7 +490,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const focusSlackIds = input.isMpim && input.mpimMemberIds
     ? new Set(input.mpimMemberIds.filter(id => id !== profile.user.slack_user_id))
     : undefined;
-  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel, input.authority);
+  const promptParts = buildSystemPromptParts(profile, input.senderRole, input.senderName, input.isOwnerInGroup, focusSlackIds, input.isMpim, input.isChannel, input.threadTs, input.userId, input.mpimMemberIds, toolScopes, input.channel, input.authority, input.threadParticipantIds);
 
   // Inject active jobs for this thread so Maelle knows what she already committed to.
   // This prevents her from treating follow-up messages as new requests.

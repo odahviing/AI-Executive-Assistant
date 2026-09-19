@@ -19,7 +19,7 @@ const root = path.resolve(__dirname, '..');
 const baseline = 'edd243330307d5dd025e8dc4f7770da24aab16c3';
 const before = process.env.CONNECTION_TOOL_SCOPE_BEFORE === '1';
 const replayed = 'src/skills/registry.ts';
-const actual = new Set([replayed, 'src/connections/registry.ts', 'src/connections/slack/index.ts']);
+const actual = new Set([replayed, 'src/connections/registry.ts', 'src/connections/slack/index.ts', 'src/connections/slack/eligibility.ts']);
 const compiled = new Map();
 const OWNER = 'UOWNER001', COLLEAGUE = 'UCOLL0001';
 const PROFILE = {

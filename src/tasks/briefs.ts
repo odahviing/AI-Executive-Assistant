@@ -548,7 +548,7 @@ UPDATES (news) — after the calendar/tasks body, add an "Updates" section of ne
 - Each bullet cites its source as a Slack hyperlink: <url|short label> (e.g. <https://...|Reuters>). NEVER paste a bare URL, and NEVER write "[link]" followed by the URL — that doubles the text. One compact hyperlink per bullet.
 - NEVER assert a current-events fact not present in the sources.
 - If a topic/company returned nothing, just leave it out — do NOT add an apology or a "couldn't find anything on X" line. If nothing new at all, OMIT the Updates section entirely (no empty heading).
-Write it in ${ownerLangName}.${formatSeenLogBlock(profile)}`
+Write it in ${ownerLangName}.${formatSeenLogBlock(profile)}${formatSkillPreferencesBlock(profile, 'news')}`
     : newsIncomplete
     // o#180 — the gather lost the race against the clock (not "nothing new");
     // say so in ONE short line so the owner can tell "dropped for cause" apart

@@ -20,6 +20,7 @@
 
 import type { App } from '@slack/bolt';
 import logger from '../../utils/logger';
+import { isInternalSlackUser, readInternalSlackConversation } from './eligibility';
 
 /**
  * v3.1 (audit fix LATENT-2) — only pass a `thread_ts` that looks like a real
@@ -71,6 +72,7 @@ export async function resolveDmChannelId(
   userId: string,
 ): Promise<string | null> {
   try {
+    if (!await isInternalSlackUser(app.client, botToken, userId)) return null;
     const open = await app.client.conversations.open({ token: botToken, users: userId });
     return ((open.channel as any)?.id as string | undefined) ?? null;
   } catch {
@@ -94,9 +96,8 @@ export async function resolveDmCounterpart(
   channelId: string,
 ): Promise<string | null> {
   try {
-    const res = await app.client.conversations.info({ token: botToken, channel: channelId });
-    const ch = res.channel as { is_im?: boolean; user?: string } | undefined;
-    if (!res.ok || !ch) return null;
+    const ch = await readInternalSlackConversation(app.client, botToken, channelId);
+    if (!ch) return null;
     return ch.is_im && ch.user ? ch.user : null;
   } catch (err) {
     logger.warn('resolveDmCounterpart failed', { channelId, detail: String(err).slice(0, 200) });
@@ -172,9 +173,15 @@ export async function sendDM(
   } = {},
 ): Promise<SendOutcome> {
   try {
+    if (!await isInternalSlackUser(app.client, botToken, userId)) {
+      return { ok: false, reason: 'user_not_found', detail: 'Slack recipient is external or membership is unavailable.' };
+    }
     const open = await app.client.conversations.open({ token: botToken, users: userId });
     const channelId = (open.channel as any)?.id as string | undefined;
     if (!channelId) return { ok: false, reason: 'user_not_found', detail: `Could not open DM with ${userId}` };
+    if (!await readInternalSlackConversation(app.client, botToken, channelId, userId)) {
+      return { ok: false, reason: 'error', detail: 'Slack conversation is external or eligibility is unavailable.' };
+    }
 
     const res = await app.client.chat.postMessage({
       token: botToken,
@@ -213,9 +220,15 @@ export async function sendMpim(
 ): Promise<SendOutcome> {
   if (userIds.length === 0) return { ok: false, reason: 'user_not_found', detail: 'no users supplied' };
   try {
+    if (!(await Promise.all(userIds.map(id => isInternalSlackUser(app.client, botToken, id)))).every(Boolean)) {
+      return { ok: false, reason: 'user_not_found', detail: 'Slack participants include an external or unverified identity.' };
+    }
     const open = await app.client.conversations.open({ token: botToken, users: userIds.join(',') });
     const channelId = (open.channel as any)?.id as string | undefined;
     if (!channelId) return { ok: false, reason: 'user_not_found', detail: 'could not open MPIM' };
+    if (!await readInternalSlackConversation(app.client, botToken, channelId)) {
+      return { ok: false, reason: 'error', detail: 'Slack conversation is external or eligibility is unavailable.' };
+    }
 
     const res = await app.client.chat.postMessage({
       token: botToken,
@@ -247,6 +260,9 @@ export async function postToChannel(
   text: string,
   opts: { threadTs?: string; unfurl?: boolean; attachments?: Array<{ sourceUrl: string; filename?: string }> } = {},
 ): Promise<SendOutcome> {
+  if (!await readInternalSlackConversation(app.client, botToken, channelId)) {
+    return { ok: false, reason: 'error', detail: 'Slack conversation is external or eligibility is unavailable.' };
+  }
   const tryPost = async () => app.client.chat.postMessage({
     token: botToken,
     channel: channelId,
@@ -317,6 +333,7 @@ export async function updateMessage(
   text: string,
 ): Promise<{ ok: boolean; detail?: string }> {
   try {
+    if (!await readInternalSlackConversation(app.client, botToken, channelId)) return { ok: false, detail: 'Slack conversation eligibility unavailable.' };
     await app.client.chat.update({
       token: botToken,
       channel: channelId,

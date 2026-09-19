@@ -12,7 +12,7 @@ const revision = process.argv.find(arg => arg.startsWith('--revision='))?.split(
 const sourceRoot = process.env.SRA_SOURCE_ROOT || root;
 const compiled = new Map(), harnesses = [];
 const actual = new Set(['src/connectors/slack/app/handlers.ts', 'src/utils/ownerDailyThread.ts']);
-const profile = { user: { slack_user_id: 'UOWNER', timezone: 'UTC' }, assistant: { name: 'Maelle' } };
+const profile = { user: { slack_user_id: 'UOWNER', timezone: 'UTC' }, assistant: { name: 'Maelle', slack: { bot_token: 'fixture' } } };
 function harness(options = {}) {
   const effects = { resolutions: [], posts: [], directs: [], history: [], logs: [], unexpected: [], followups: 0 };
   let callback;
@@ -28,6 +28,8 @@ function harness(options = {}) {
     'src/utils/logger.ts': { __esModule: true, default: Object.fromEntries(['info', 'warn', 'error', 'debug'].map(level => [level, (...args) => effects.logs.push({ level, args })])) },
     'src/connectors/slack/inboundReplayRegistry.ts': {}, 'src/connectors/slack/processedDedup.ts': {},
     'src/connectors/slack/app/helpers.ts': {}, 'src/connectors/slack/app/fileIngestion.ts': {},
+    'src/connections/slack/eligibility.ts': { readInternalSlackConversation: async () => ({ is_im: true }) },
+    'src/connectors/slack/threadHistory.ts': {},
     'src/connectors/slack/recentOutboundContext.ts': { closeFollowupForMessageTs: () => { effects.followups++; return null; } },
     'src/db/requests.ts': { getRequestByTerminalMsgTs: () => options.noMatch ? null : row, getRequest: () => row },
     'src/core/requests/resolver.ts': { resolveRequest: async (...args) => { effects.resolutions.push(args); if (options.resolveThrows) throw new Error('isolated resolver unavailable'); return options.resolve ? options.resolve(...args) : options.result || { ok: true }; } },

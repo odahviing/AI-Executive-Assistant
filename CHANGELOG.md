@@ -1,3 +1,31 @@
+## 4.9.11 - Reliable Slack context, preferences and news history
+
+Repairs memory preference handling, Slack conversation boundaries and news delivery tracking. This release contains 21 correction groups reviewed across the combined code, with no additional model calls or memory-design migration.
+
+### Fixed
+
+- Existing preference text can be read and edited safely without silent truncation or overwriting concurrent changes. Summary and news composition receive the taught skill instructions, and preference tools use fresh authorization and file state instead of stale cached results.
+- Slack rejects unsupported external/shared audiences consistently, handles MPIM addressing correctly, keeps queued turns on their own thread, and loads recent history when a conversation reopens. Room membership is separated from the people actually participating in a thread.
+- Catch-up no longer treats a recovery caption, unrelated bot reply or failed send as a completed answer. Hold-expiry notices use the correct private conversation anchor.
+- Direct-topic news searches use standing source preferences and explicit request-only overrides through the existing orchestrator call. Supplied domain filters are validated and enforced, including equivalent hostname forms; saved preferences remain unchanged by a one-time override.
+- News history expires on read and advances only for cited sources in confirmed text delivery across Slack, routines, research and configured WhatsApp. Unshown candidates and failed/unknown delivery do not become seen news.
+- Canonical article deduplication preserves meaningful URL identity, successful empty summaries remain empty, and distinct releases or developments are not merged by lossy word similarity. Empty news plans and unavailable multilingual planning no longer trigger unintended fallback searches.
+
+### Verification
+
+- All 21 correction groups have independent current-snapshot verification. The release checkpoint passed all 113 suite/zone executions and typecheck; Golden30 covered all 30 paths, with moved anchors resolved against current code.
+- One older connection-scope test fixture lacked the new eligibility import. Its loader was repaired without changing assertions or runtime behavior, then independently passed all 11 cases. The original failed checkpoint remains preserved alongside the targeted replacement evidence.
+- Tests establish deterministic behavior and prompt inputs, not universal model obedience or live conversation outcomes. News history remains best-effort if the process crashes after delivery but before its asynchronous history write.
+
+### Deferred
+
+- Broader memory inheritance/clone identity and durable Slack delivery recovery remain owner-deferred. News importance ranking (#123) and the autonomous skill read/plan/act proposal (#205) remain open.
+
+### Framework
+
+- Workshop dispatches group a wave by owning lane, bundle dependencies and allow one independent review across ready batches. Valid evidence is reused while affected paths are rechecked; release gates remain mandatory.
+
+---
 # Changelog
 
 ## 4.9.10 — Reliable request tracking and protected floating objects

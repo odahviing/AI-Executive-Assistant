@@ -46,8 +46,8 @@ export function buildSystemPromptParts(
   isMpim?: boolean,
   isChannel?: boolean,
   threadTs?: string,
-  // v2.8.6 — senderId + mpimMemberIds plumbed so the dynamic prompt can
-  // render PEOPLE IN THIS THREAD (101a fix). Optional for back-compat.
+  // Authenticated current speaker and MPIM room membership are separate from
+  // the observed thread participants below. Membership supports addressing.
   senderId?: string,
   mpimMemberIds?: string[],
   // v3.x (Block 2) — the turn's tool scopes (from classifyTurn, owner-path).
@@ -69,6 +69,9 @@ export function buildSystemPromptParts(
   // floor the real tool array gets when the owner is clamped into a room.
   // Omitted (every pre-existing caller) behaves byte-for-byte as before.
   authority?: 'owner' | 'colleague',
+  // Authenticated speakers and explicit mentions observed in this Slack thread,
+  // never the whole room roster.
+  threadParticipantIds?: string[],
 ): { static: string; dynamic: string } {
   const { user, assistant } = profile;
   const firstName = user.name.split(' ')[0];
@@ -378,10 +381,9 @@ ${peopleCatalog ? '\n' + peopleCatalog : ''}
 ${pendingApprovalsSection}` : '';
 
   // ── STATIC INPUTS ─────────────────────────────────────────────────────────
-  // These are functions only of `profile` + conversation-shape flags
-  // (senderRole, isOwnerInGroup, isMpim, isChannel). They don't change per
-  // turn for the same conversation, so the assembled `staticContent` is
-  // cache-friendly.
+  // Rebuilt each turn from profile, audience, tool scopes and freshly read
+  // preference files. The API may reuse an identical prefix; a changed scope
+  // or preference changes that prefix immediately, without a local TTL cache.
 
   const activeSkills = getActiveSkills(profile);
   const skillNames = activeSkills.map(s => s.name).join(', ') || 'none';
@@ -898,18 +900,19 @@ ${skillsSection}${ownerPreferenceBlocks}`;
     ? ''
     : isRoomSurface
       ? (() => {
-          const ids = new Set<string>();
-          if (senderId && senderId !== user.slack_user_id) ids.add(senderId);
-          if (mpimMemberIds) {
-            for (const id of mpimMemberIds) {
-              if (id && id !== user.slack_user_id) ids.add(id);
-            }
-          }
-          if (ids.size === 0) return '';
-          const names = [...ids].map(id => getPersonMemory(id)?.name).filter((n): n is string => Boolean(n));
-          return names.length > 0
-            ? `PEOPLE IN THIS THREAD: ${names.join(', ')}. Address them by name — this room does not carry their email / timezone / location; ask only if a specific task genuinely needs it.`
-            : '';
+          const roomIds = new Set((mpimMemberIds ?? []).filter(id => id && id !== user.slack_user_id));
+          const participantIds = new Set((threadParticipantIds ?? []).filter(Boolean));
+          if (senderId) participantIds.add(senderId);
+          const namesFor = (ids: Set<string>) => [...ids]
+            .map(id => id === user.slack_user_id ? user.name : getPersonMemory(id)?.name)
+            .filter((name): name is string => Boolean(name));
+          const roomNames = namesFor(roomIds);
+          const participantNames = namesFor(participantIds);
+          const blocks: string[] = [];
+          if (roomNames.length) blocks.push(`ROOM MEMBERS: ${roomNames.join(', ')}. Membership is addressing context, not an attendee or recipient list.`);
+          if (participantNames.length) blocks.push(`OBSERVED THREAD PARTICIPANTS: ${participantNames.join(', ')}. Choose action participants from this thread's request and discussion; room membership alone is insufficient.`);
+          if (blocks.length) blocks.push('Names only on this shared surface; email / timezone / location are withheld. Ask only if a specific task genuinely needs missing information.');
+          return blocks.join('\n');
         })()
       : formatThreadPeopleBlock(senderId, mpimMemberIds, user.slack_user_id);
   const threadPeopleSection = threadPeopleBlock ? `\n\n${threadPeopleBlock}` : '';

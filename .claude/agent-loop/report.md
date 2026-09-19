@@ -1,13 +1,17 @@
-# Report — cumulative since the 4.9.10 release
+# Report - 4.9.11
 
-**33 rows await you** — v4.9.10 wrapped (b81deea). Cloud boot evidence is checked separately at release completion. Four optional product proposals remain from this audit; the seven answered decisions are resolved.
+**36 rows await you** - standing backlog; 0 new product decisions from this wrap. The 21 reviewed correction groups are prepared for 4.9.11; commit and cloud verification are pending.
 
-38 open rows — 24 still-real · 9 need a re-read · 5 cite no file · 33 rulable · 5 waiting on a verb. Counts: node scripts/ledger-stats.cjs --open.
-
-out: 34 new corrections independently verified; two historical records revalidated without new implementation. All103 executable suite/timezone checks and typecheck pass. Golden30 complete:14 pass,16 relocated anchors,0 fail; original Z30 failure preserved and repaired.
+```
+Run wrap-4.9.11
+out: 21 independently verified correction groups
+board: 41 open rows - 24 still-real - 12 need a re-read - 5 cite no file - 36 rulable - 5 waiting on a verb
+```
 
 ### pending owner (0)
 
 ### deferred (0)
 
 ### declined (0)
+
+Owner-deferred memory/context proposals are preserved in the ledger for a later design review; no automatic implementation is authorized. Raw verification and usage artifacts stay outside Git; reusable tests and compact native evidence are retained.

@@ -25,6 +25,8 @@ import { describeImage, downloadSlackImage, buildImageBlock, type AnthropicImage
 import logger from '../../../utils/logger';
 import type { SenderRole, SlackAppContext, ProcessMessageParams } from './context';
 import { failureReply } from './helpers';
+import { readSlackThread } from '../threadHistory';
+import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
 
 // Re-attach a recent thread image on a follow-up owner turn. Image bytes
 // are multimodal ONLY on the turn they arrive; later turns saw just a lossy
@@ -87,7 +89,14 @@ async function reattachRecentThreadImage(
 export async function processMessage(ctx: SlackAppContext, params: ProcessMessageParams): Promise<void> {
   const { app, profile, getSenderRole } = ctx;
   const { assistant, user } = profile;
-    const { senderId, text, framing, channelId, ts, threadTs, say, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
+    const { senderId, text, framing, channelId, ts, threadTs, say: rawSay, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
+    if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, senderId)) return;
+    const say = async (message: { text: string; thread_ts?: string }) => {
+      if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, senderId)) {
+        throw new Error('Slack delivery withheld: conversation eligibility unavailable');
+      }
+      return rawSay(message);
+    };
     const rawRole = getSenderRole(senderId);
 
     // The MODEL-facing string for this turn, composed exactly once: the framing
@@ -392,16 +401,21 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     // and only re-inflated stale history past the DB's recency cap — burying a
     // NEW request under ~50 messages of an already-finished one (Daniel,
     // 2026-06-29: a fresh "meeting with Tal" ask read as a continuation).
+    const namedHumanIds = [...text.matchAll(/(?:<@|\(slack_id:\s*)([A-Z0-9]+)(?:>|\))/g)]
+      .map(m => m[1]).filter(id => id !== ctx.botUserId);
+    let threadParticipantIds: string[] | undefined;
+    const loadHistory = async (exclude: string[]): Promise<typeof dbHistory> => {
+    const dbHistory = getConversationHistory(threadTs).filter(m => !m.ts || !exclude.includes(m.ts));
     let history = dbHistory;
-    if (threadTs !== ts && (isChannel || isMpim)) {
+    threadParticipantIds = (isChannel || isMpim) ? [...new Set([senderId, ...namedHumanIds])] : undefined;
+    if (isChannel || isMpim) {
       try {
-        const threadReplies = await client.conversations.replies({
-          token: assistant.slack.bot_token,
-          channel: channelId,
-          ts: threadTs,
-          limit: 50,
-        });
-        const slackMessages = ((threadReplies.messages as any[]) ?? [])
+        const threadMessages = await readSlackThread(client, assistant.slack.bot_token, channelId, threadTs, Infinity);
+        threadParticipantIds = [...new Set([
+          ...threadMessages.filter(m => m.user && !m.bot_id && m.user !== ctx.botUserId).map(m => String(m.user)),
+          senderId, ...namedHumanIds,
+        ])];
+        const slackMessages = threadMessages.slice(-50)
           .filter(m => m.user && m.text);
 
         // Find messages in Slack but NOT in our DB (by timestamp)
@@ -426,7 +440,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // content already sitting in dbHistory — doubling every one of her own
         // replies in the model's context on every channel/MPIM catch-up merge.
         const missedMessages = await Promise.all(slackMessages
-          .filter(m => m.user !== ctx.botUserId && !dbTimestamps.has(m.ts) && m.ts !== ts)  // exclude current message + her own replies
+          .filter(m => m.user !== ctx.botUserId && !dbTimestamps.has(m.ts) && !exclude.includes(m.ts))
           .map(async m => ({
             role: 'user' as const,
             content: await ctx.resolveSlackMentions(m.text as string),
@@ -453,9 +467,13 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           });
         }
       } catch (err) {
+        threadParticipantIds = undefined; // never substitute full room membership
         logger.warn('Could not fetch Slack thread replies — using DB history only', { err: String(err), channelId, threadTs });
       }
     }
+    return history;
+    };
+    let history = await loadHistory([ts]);
 
     // v1.7.6 — read-receipt reaction is added LATER (after the addressee gate).
     // Previously it fired here, before the gate, so silenced messages still got
@@ -633,15 +651,25 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // they have genuine parallel conversations.
         isOneOnOneDm: !isChannel && !isMpim,
         text: framedText,
+        rawText: text,
         senderId,
         senderName: colleagueName,
-        meta: {},
-        runner: async ({ mergedText, signal, markWrite, spansMultipleSenders }) => {
+        meta: { messageTs: ts },
+        runner: async ({ mergedText, mergedRawText, signal, markWrite, spansMultipleSenders, messageTimestamps, senderIds }) => {
           // Did anything from this turn actually reach the person? Set by the
           // delivery pipeline (postReply's onDelivered), read only by the
           // failure handler at the bottom of this closure.
           let delivered = false;
           try {
+            // The previous turn may have completed after this message arrived.
+            // Refresh at execution, excluding the current batch already carried
+            // in mergedText. Tool summaries and the latest Slack tail now agree.
+            history = await loadHistory(messageTimestamps);
+            if (threadParticipantIds) {
+              const batchNamedIds = [...mergedRawText.matchAll(/(?:<@|\(slack_id:\s*)([A-Z0-9]+)(?:>|\))/g)]
+                .map(m => m[1]).filter(id => id !== ctx.botUserId);
+              threadParticipantIds = [...new Set([...threadParticipantIds, ...senderIds, ...batchNamedIds])];
+            }
             // gh#daniel-sharabi-decisive-reply-stuck-in-continue-loop — a job
             // handleOutreachReply already matched (thread anchor or its own
             // classifier) wins outright: it's a stronger, already-verified
@@ -751,6 +779,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                   ownerUserId: senderId,
                   profile,
                   app,
+                  onBeforeWrite: () => {
+                    if (signal.aborted) throw new Error('aborted_for_merge');
+                    markWrite();
+                  },
                 });
                 if (autoResolve.resolved) {
                   // Acknowledge with a reaction on the owner's message; the
@@ -763,7 +795,6 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                   logger.info('Module D — orchestrator skipped via auto-resolve', {
                     senderId, threadTs, requestId: autoResolve.request_id, verdict: autoResolve.verdict,
                   });
-                  markWrite();
                   return;
                 }
                 logger.debug('Module D — auto-resolve declined, falling through to orchestrator', {
@@ -780,6 +811,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
                   });
                 }
               } catch (err) {
+                if (isMergeAbort(err, signal)) throw err;
                 logger.warn('Module D — auto-resolve threw, falling through to orchestrator', {
                   err: String(err).slice(0, 200),
                 });
@@ -807,6 +839,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             const turnStartedAt = new Date().toISOString();
             const result = await runOrchestrator({
               userMessage: mergedText,
+              rawUserMessage: mergedRawText,
+              threadParticipantIds,
               conversationHistory: history,
               threadTs,
               channelId,
@@ -893,6 +927,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               // The one signal the failure handler below needs: has the person seen
               // anything from this turn yet?
               onDelivered: () => { delivered = true; },
+              onBeforeDelivery: () => {
+                if (signal.aborted) throw new Error('aborted_for_merge');
+                markWrite();
+              },
             });
 
           } catch (err) {

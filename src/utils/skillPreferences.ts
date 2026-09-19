@@ -22,16 +22,15 @@
 import type { UserProfile } from '../config/userProfile';
 import { promises as fs, existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import logger from './logger';
 
 const MAX_FILE_BYTES = 16 * 1024; // 16 KB per skill — plenty for free-text style
 
-// Per-(profile, skill) write mutex. Sonnet sometimes double-fires a tool call
-// on retry (the orchestrator's tool-call cache catches most, not all); also the
-// morning brief composes its prompt while a live `update_my_preferences` may
-// be writing. Without a lock, the read+compute+write is non-atomic and one
-// write clobbers the other. Lock is also the boundary for the `<file>.tmp` →
-// rename atomic-replace below.
+// Per-file write mutex. Preference calls bypass the tool cache so reads and
+// revision conflicts remain fresh; retries are handled here. The lock keeps
+// read/check/write atomic among in-process writers. Atomic rename also keeps
+// prompt readers from seeing a partially written file.
 const writeMutexes = new Map<string, Promise<unknown>>();
 async function withWriteLock<T>(key: string, op: () => Promise<T>): Promise<T> {
   const prev = (writeMutexes.get(key) ?? Promise.resolve()) as Promise<unknown>;
@@ -66,14 +65,15 @@ export function isPrefSkill(s: string): s is PrefSkill {
   return (PREF_SKILLS as readonly string[]).includes(s);
 }
 
-/** Which prompt surface renders an area's file. Exactly one reader per area. */
+/** Primary rendering site per area. Independent skill composers also read
+ * their own file: summary draft/revision, news planning and briefing news. */
 export type PrefInjectionSite =
   | 'system-prompt'   // rendered by buildSystemPromptParts (owner path, scope-gated)
   | 'skill-section'   // rendered inside that skill's own getSystemPromptSection
   | 'brief-compose';  // rendered in the daily-brief compose pass, not the turn prompt
 
 /**
- * The reader for every writable area.
+ * The primary reader for every writable area.
  *
  * A writable area with NO reader silently discards what the owner taught while
  * `update_my_preferences` still confirms it as saved — which is exactly what
@@ -114,13 +114,33 @@ function fileForSkill(profile: UserProfile, skill: string): string | null {
  * Returns '' when no file exists or it's empty.
  */
 export function readSkillPreferences(profile: UserProfile, skill: string): string {
+  const result = readSkillPreferencesSnapshot(profile, skill);
+  return result.ok ? result.text.trim() : '';
+}
+
+export interface SkillPreferencesSnapshot {
+  text: string;
+  revision: string;
+  exists: boolean;
+}
+
+function snapshot(text: string, exists: boolean): SkillPreferencesSnapshot {
+  return { text, revision: createHash('sha256').update(text).digest('hex'), exists };
+}
+
+/** An explicit editing read distinguishes unavailable storage from an empty file. */
+export function readSkillPreferencesSnapshot(
+  profile: UserProfile,
+  skill: string,
+): ({ ok: true } & SkillPreferencesSnapshot) | { ok: false; error: string } {
+  const file = fileForSkill(profile, skill);
+  if (!file) return { ok: false, error: 'invalid_skill' };
   try {
-    const file = fileForSkill(profile, skill);
-    if (!file || !existsSync(file)) return '';
-    return readFileSync(file, 'utf8').trim();
+    return { ok: true, ...snapshot(readFileSync(file, 'utf8'), true) };
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, ...snapshot('', false) };
     logger.warn('skillPreferences read failed', { skill, err: String(err).slice(0, 160) });
-    return '';
+    return { ok: false, error: 'read_failed' };
   }
 }
 
@@ -177,19 +197,23 @@ export function formatSystemPromptPreferenceBlocks(
 
 /**
  * Write a skill's preferences. `add` appends one bullet line; `replace`
- * overwrites the whole file (used to edit or remove — Sonnet passes the full
- * new list). Materializes the dir + file on first write. Non-fatal on fs error.
+ * replaces the full list only against the revision read by the editor. Empty
+ * replacement clears the list. Materializes the file on first successful write.
  */
 export async function writeSkillPreferences(
   profile: UserProfile,
   skill: string,
   mode: 'add' | 'replace',
   text: string,
-): Promise<{ ok: true; created: boolean; duplicate?: boolean; matchedLine?: string } | { ok: false; error: string }> {
+  options: { expectedRevision?: string } = {},
+): Promise<
+  { ok: true; created: boolean; revision: string; duplicate?: boolean; matchedLine?: string; unchanged?: boolean }
+  | { ok: false; error: string; current?: SkillPreferencesSnapshot }
+> {
   const file = fileForSkill(profile, skill);
   if (!file) return { ok: false, error: 'invalid_skill' };
   const clean = text.trim();
-  if (!clean) return { ok: false, error: 'empty_text' };
+  if (!clean && mode === 'add') return { ok: false, error: 'empty_text' };
 
   // Serialize read+compute+write per-(profile, skill) so concurrent writes
   // (Sonnet retry double-fire, brief compose racing live update) don't clobber
@@ -198,14 +222,26 @@ export async function writeSkillPreferences(
   // sees a partial file).
   return withWriteLock(file, async () => {
     try {
-      const root = rootForProfile(profile);
-      if (!existsSync(root)) mkdirSync(root, { recursive: true });
-      const existed = existsSync(file);
-      const priorFull = existed ? readFileSync(file, 'utf8') : '';
+      let priorFull: string;
+      let existed = true;
+      try { priorFull = readFileSync(file, 'utf8'); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return { ok: false, error: 'read_failed' };
+        priorFull = '';
+        existed = false;
+      }
+      const current = snapshot(priorFull, existed);
+      if (mode === 'replace') {
+        if (!options.expectedRevision) return { ok: false, error: 'revision_required', current };
+        // A retry after a successful write must not repeat the write or replace
+        // the recovery backup. Equality is safe even when its revision is old.
+        if (existed && current.text === text) return { ok: true, created: false, revision: current.revision, unchanged: true };
+        if (options.expectedRevision !== current.revision) return { ok: false, error: 'revision_conflict', current };
+      }
 
       let next: string;
       if (mode === 'replace') {
-        next = clean;
+        next = text;
         // M-2 (v3.3) — back up before a destructive overwrite. `replace` blows
         // away the whole file; a misfired "full new list" (Sonnet passing a
         // single bullet) would otherwise wipe every preference with no recovery.
@@ -242,7 +278,7 @@ export async function writeSkillPreferences(
               });
               // M-5 (v3.3) — surface the matched line so the caller can offer a
               // REPLACE instead of silently dropping a refinement of it.
-              return { ok: true, created: false, duplicate: true, matchedLine: t };
+              return { ok: true, created: false, revision: current.revision, duplicate: true, matchedLine: t };
             }
           }
         }
@@ -252,14 +288,17 @@ export async function writeSkillPreferences(
       if (Buffer.byteLength(next, 'utf8') > MAX_FILE_BYTES) {
         return { ok: false, error: 'too_large' };
       }
+      const root = rootForProfile(profile);
+      if (!existsSync(root)) mkdirSync(root, { recursive: true });
       // Atomic write: stage to <file>.tmp then rename. fs.rename is atomic on
       // the same volume — a concurrent reader sees either the OLD file or the
       // FULL new file, never a half-written one.
       const tmp = `${file}.tmp`;
-      await fs.writeFile(tmp, `${next}\n`, 'utf8');
+      const savedText = mode === 'replace' ? next : `${next}\n`;
+      await fs.writeFile(tmp, savedText, 'utf8');
       await fs.rename(tmp, file);
       logger.info('skillPreferences write', { skill, mode, created: !existed });
-      return { ok: true, created: !existed };
+      return { ok: true, created: !existed, revision: snapshot(savedText, true).revision };
     } catch (err) {
       logger.warn('skillPreferences write failed', { skill, mode, err: String(err).slice(0, 160) });
       return { ok: false, error: 'write_failed' };

@@ -1,13 +1,13 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "id": "wrap-2026-09-19-core-review",
-    "status": "complete",
-    "note": "4.9.10 wrapped;34 new corrections independently verified,103 executable checks and Golden30 complete; final cloud boot verification pending"
+    "id": "wrap-4.9.11",
+    "status": "running",
+    "note": "Owner authorized patch; news seven roots independently passed; all builders done. Release checkpoint in progress."
   },
   "lastWrapIso": "2026-09-19T16:36:04+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
-  "nextReportId": 300,
+  "nextReportId": 303,
   "verifiedClean": [
     "postReply.scheduleSocialCoda and logEngagement.reserveCodaAttempt/recordCodaDelivered: failed reservation prevents send; failed/uncertain send reserves daily cadence without delivered-topic markers; confirmed send records markers. Independent40+21 cases, core-review-20260919 Z30 repair.",
     "briefs.sendMorningBriefing: threshold2 consumed only after posted.ok; failed send never surfaces/closes and lock revalidation excludes answered/terminal work. Independent73 cases, owner-briefs attempt1.",

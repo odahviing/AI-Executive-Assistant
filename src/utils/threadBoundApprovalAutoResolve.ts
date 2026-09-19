@@ -23,7 +23,8 @@
  * Amend is intentionally NOT auto-handled — amend counters are approval-kind-
  * specific; those return pass_to_sonnet.
  *
- * Fails open: any miss/uncertainty/error → pass_to_sonnet. No turn ever breaks.
+ * Misses, uncertainty and classifier/resolver errors → pass_to_sonnet.
+ * The caller's pre-write cancellation check propagates to stop an aborted turn.
  *
  * What survives a decline (gh#bare-verb-binds-to-a-resolved-approval): when
  * the thread holds exactly ONE open approval, that identification is returned
@@ -222,6 +223,8 @@ export async function tryAutoResolveThreadBoundApproval(params: {
   ownerUserId: string;
   profile: UserProfile;
   app?: App;
+  /** Synchronous cancellation/write-start boundary; thrown errors propagate. */
+  onBeforeWrite?: () => void;
 }): Promise<AutoResolveResult> {
   const { message, threadTs, ownerUserId, profile, app } = params;
 
@@ -324,10 +327,13 @@ Rules:
   // colleague responding to a counter): resolvedByColleague:false so an owner
   // reject on an awaiting_colleague row closes it (doesn't bounce).
   const ctx: ResolveContext = { app, profile, resolvedByColleague: false };
+  const decision = verdict === 'approve'
+    ? { verdict: 'approve' as const, data: {} }
+    : { verdict: 'reject' as const, reason: 'owner short-form reject' };
+  // No await between the caller's cancellation/write-start check and resolve.
+  // Keep it outside the resolver catch: an interrupted turn must stop, not fall back.
+  params.onBeforeWrite?.();
   try {
-    const decision = verdict === 'approve'
-      ? { verdict: 'approve' as const, data: {} }
-      : { verdict: 'reject' as const, reason: 'owner short-form reject' };
     const result = await resolveRequest(bound.id, decision, ctx);
     if (!result.ok) {
       logger.warn('autoResolveThreadBound — resolveRequest not-ok, passing to Sonnet to recover', {

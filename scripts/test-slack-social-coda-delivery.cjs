@@ -17,7 +17,8 @@ function harness(options = {}) {
   const timer = (fn, delay) => { const t = { fn, delay, cancelled: false, unref() {} }; timers.push(t); return t; };
   const logger = Object.fromEntries(['info','warn','error','debug'].map(k => [k, (...args) => logs.push(args)]));
   function load(name, deps, dir = 'src/connectors/slack') {
-    const file = before ? path.resolve(before, `${name}.before.ts`) : path.join(root, dir, `${name}.ts`);
+    const boundedBefore = process.env.SLACK_BOUNDARY_SOURCE_ROOT && path.join(process.env.SLACK_BOUNDARY_SOURCE_ROOT, dir, `${name}.ts`);
+    const file = before ? path.resolve(before, `${name}.before.ts`) : boundedBefore && fs.existsSync(boundedBefore) ? boundedBefore : path.join(root, dir, `${name}.ts`);
     const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText;
     const exports = {};
     vm.runInNewContext(code, { exports, require: name => {
@@ -54,7 +55,7 @@ function harness(options = {}) {
     '../../config': { config: { OPENAI_API_KEY: 'fixture-only' } },
     '../../voice': { shouldRespondWithAudio: p => p.inputWasVoice, textToSpeech: async () => 'audio', sendAudioMessage: async () => {} },
     '../../utils/guards/runOutputGates': {
-      runDeliberationGuard: async text => text, runOutputGates: async text => text,
+      runDeliberationGuard: async text => text, runOutputGates: async text => { if (options.workGatePause) await options.workGatePause.promise; return text; },
       runCodaGates: async () => { gateCalls++; if (options.gatePause) await options.gatePause.promise; if (options.gateThrows) throw Error('gate unavailable'); return { ship: !options.gateDrop }; },
     },
     './inboundQueue': queue, '../../utils/threadActivity': threadActivity,
@@ -75,6 +76,8 @@ function harness(options = {}) {
       result: { reply: 'Work answer ready.', socialCoda: { personSlackId: person, directive: { mode: 'raise_new', categoryLabel: 'music' } } },
       say: async msg => {
         posts.push(msg);
+        if (msg.text === 'Work answer ready.' && options.workSendThrows) throw Error('unknown work delivery');
+        if (msg.text === 'Work answer ready.' && options.workSendRejects) return { ok: false, error: 'rejected' };
         if (msg.text === 'Social question?' && options.sendThrows) throw Error('timeout after acceptance');
         if (msg.text === 'Social question?' && options.sendExplicitFailure) return { ok: false, error: 'fixture_failure' };
         if (msg.text === 'Social question?' && options.sendReturnsVoid) return undefined;
@@ -94,6 +97,28 @@ function harness(options = {}) {
   function count() { assert.deepEqual(unexpected, []); return posts.filter(p => p.text === 'Social question?').length; }
   return { reply, fire, inbound, count, posts, history, stamps, subjectRaises, categoryRaises, mirrors, charged, replies, logs, get composeCalls() { return composeCalls; }, get gateCalls() { return gateCalls; } };
 }
+
+for (const mode of ['workSendThrows', 'workSendRejects']) {
+  test(`thread delivery: ${mode} leaves no phantom assistant answer`, async () => {
+    const h = harness({ [mode]: true }); let delivered = false;
+    await assert.rejects(h.reply({ onDelivered: () => { delivered = true; } }));
+    assert.equal(delivered, false);
+    assert.equal(h.history.length, 0);
+  });
+}
+test('thread delivery: superseded reply during gates cannot send or persist', async () => {
+  const pause = deferred(); const h = harness({ workGatePause: pause }); let superseded = false;
+  const reply = h.reply({ onBeforeDelivery: () => { if (superseded) throw Error('aborted_for_merge'); } });
+  await flush(); superseded = true; pause.resolve();
+  await assert.rejects(reply, /aborted_for_merge/);
+  assert.equal(h.posts.length, 0); assert.equal(h.history.length, 0);
+});
+test('thread delivery control: confirmed reply records gated answer once', async () => {
+  const h = harness(); let delivered = 0;
+  await h.reply({ onDelivered: () => { delivered++; } });
+  assert.equal(delivered, 1); assert.equal(h.history.length, 1);
+  assert.ok(h.history[0][2].content.includes('Work answer ready.'));
+});
 
 for (const phase of ['compose', 'gate']) {
   for (const kind of ['pending', 'completed-ack', 'completed-audio', 'completed-new-thread', 'failed-turn']) {

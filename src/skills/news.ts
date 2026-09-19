@@ -46,7 +46,7 @@ import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import { tavilySearch, type DomainFilterOpts } from './general';
-import { readSkillPreferences, formatSkillPreferencesBlock } from '../utils/skillPreferences';
+import { readSkillPreferencesSnapshot, formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 
@@ -59,7 +59,6 @@ const NEWS_MORNING_RECENCY_DAYS = 3;   // daily brief window — fresh. Re-pull 
                                        // stays in Tavily's top results; a fast-moving topic can
                                        // push it out within a day (no hard resurface guarantee).
 const NEWS_ONDEMAND_RECENCY_DAYS = 7;  // on-demand "catch me up": up to a week
-const NEWS_ONDEMAND_LOG_CEILING = 7;   // on-demand seen-log cap — matches the "up to 7" surface ceiling
 // Exported — this is the INNER budget tasks/briefs.ts derives its outer race
 // timeouts from (#166 / nested-news-timeout-not-derived-from-inner-budget).
 // Previously the outer/inner relationship was asserted only in a comment in
@@ -82,6 +81,8 @@ export interface GatherNewsOpts {
   topic?: string;
   /** Recency window in days; defaults to the morning edition window. */
   recencyDays?: number;
+  /** Effective source filters emitted by the existing on-demand tool call. */
+  sourcePolicy?: Pick<NewsPlan, 'preferredDomains' | 'avoidDomains'>;
 }
 
 const EMPTY_BUNDLE: NewsBundle = { goals: [], sources: [] };
@@ -101,34 +102,49 @@ interface ParsedNewsPrefs { interestsText: string }
  * breaks the "LLM-only — code doesn't parse" architecture invariant for
  * skillPreferences. Now the full file becomes the interest corpus; Sonnet
  * reads any source preferences mentioned in it and weighs results in the
- * compose pass. Tavily runs unsteered.
+ * compose pass, and the planner emits structured source filters for Tavily.
  */
 export function parseNewsPrefs(md: string): ParsedNewsPrefs {
   return { interestsText: md.trim() };
 }
 
-/**
- * Normalize a URL to host+path for shown-vs-gathered matching: lowercase host,
- * drop scheme, leading `www.`, query string, fragment, and a trailing slash.
- * So `https://www.x.com/a/?utm_source=rss` and `http://x.com/a` both reduce to
- * `x.com/a`. Pure string ops — no URL() parse (a malformed citation shouldn't
- * throw inside the seen-log writer).
- */
+/** Match citations without losing article identity: preserve path case and
+ * content query parameters; ignore only scheme, www, fragment, trailing slash
+ * and known tracking parameters. Invalid URLs never match one another. */
 function normalizeUrl(u: string): string {
-  return u
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .replace(/[?#].*$/, '')
-    .replace(/\/+$/, '');
+  try {
+    const parsed = new URL(u.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^utm_/i.test(key) || ['fbclid', 'gclid'].includes(key.toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    parsed.searchParams.sort();
+    const host = parsed.host.toLowerCase().replace(/^www\./, '');
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    return host + pathname + parsed.search;
+  } catch {
+    return '';
+  }
+}
+
+/** One source identity per candidate set, preserving distinct content URLs. */
+function uniqueSources(sources: NewsSource[]): NewsSource[] {
+  const seen = new Set<string>();
+  return sources.filter(source => {
+    const identity = normalizeUrl(source.url) || source.url;
+    if (!identity || seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }
 
 // ── Goal planning ────────────────────────────────────────────────────────────
 // One Haiku call turns the free-text interest corpus + today's meeting companies
 // into a capped set of concrete search goals, honoring "skip/ignore" instructions
-// the owner wrote in the file. Fail-open: on any error, fall back to a
-// deterministic line/company extraction so the gather still runs.
+// the owner wrote in the file. If planning fails, do not interpret his prose
+// as search terms. Company-only fallback is safe only without standing text.
 
 // M-7 (v3.3.x) — domain steer is EMITTED by the LLM planner as structured
 // output, never parsed out of the owner's free-text MD by code. news.md stays
@@ -147,7 +163,13 @@ function cleanEmittedDomain(raw: unknown): string | null {
   let d = raw.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
   d = d.split('/')[0].split('?')[0].trim();
   if (!d.includes('.') || /\s/.test(d)) return null;
-  return d;
+  try {
+    const parsed = new URL('https://' + d);
+    if (parsed.username || parsed.password || parsed.port) return null;
+    const host = parsed.hostname.replace(/\.$/, '');
+    if (!/^[a-z0-9.-]+$/.test(host) || host.split('.').some(part => !part || part.startsWith('-') || part.endsWith('-'))) return null;
+    return host;
+  } catch { return null; }
 }
 function cleanDomainList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -194,7 +216,7 @@ Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], 
       const goals = Array.isArray(parsed.goals)
         ? parsed.goals.filter((g): g is string => typeof g === 'string' && g.trim().length > 0).map(g => g.trim())
         : [];
-      if (goals.length > 0) {
+      if (Array.isArray(parsed.goals) && parsed.goals.every(g => typeof g === 'string' && g.trim().length > 0)) {
         return {
           goals: goals.slice(0, cap),
           preferredDomains: cleanDomainList(parsed.preferred_domains),
@@ -203,17 +225,15 @@ Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], 
       }
     }
   } catch (err) {
-    logger.warn('news — goal planning failed, using deterministic fallback', { err: String(err).slice(0, 160) });
+    logger.warn('news — goal planning failed', { err: String(err).slice(0, 160) });
   }
 
-  // Deterministic fallback: company goals + interest bullet lines, capped. No
-  // domain steer in the fallback (deriving it needs the LLM; broad is safe).
+  // Without a usable interpretation, any taught text may exclude a company,
+  // topic or source in any language. Withhold those searches rather than turn
+  // instructions into queries. An untaught profile keeps its company fallback.
+  if (interestsText.trim()) return empty;
   const companyGoals = meetingCompanies.map(c => `${c} company news`);
-  const interestGoals = interestsText
-    .split('\n')
-    .map(l => l.replace(/^[-*]\s*/, '').trim())
-    .filter(l => l.length > 0 && !/^skip\b|^ignore\b/i.test(l));
-  return { goals: [...new Set([...companyGoals, ...interestGoals])].slice(0, cap), preferredDomains: [], avoidDomains: [] };
+  return { goals: [...new Set(companyGoals)].slice(0, cap), preferredDomains: [], avoidDomains: [] };
 }
 
 // ── Per-goal lightweight search (efficiency) ─────────────────────────────────
@@ -243,7 +263,17 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
     );
     if (!r) return [];
     return (r.results ?? [])
-      .filter(it => !!it.url)
+      .filter(it => {
+        if (!it.url) return false;
+        if (!opts.includeDomains?.length && !opts.excludeDomains?.length) return true;
+        try {
+          const host = cleanEmittedDomain(new URL(it.url).hostname);
+          if (!host) return false;
+          const matches = (domain: string) => host === domain || host.endsWith('.' + domain);
+          return !opts.excludeDomains?.some(matches)
+            && (!opts.includeDomains?.length || opts.includeDomains.some(matches));
+        } catch { return false; }
+      })
       .map(it => ({
         title: it.title,
         url: it.url as string,
@@ -456,14 +486,19 @@ function filterUngroundedEntitySources(
 export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}): Promise<NewsBundle> {
   try {
     const recency = opts.recencyDays ?? NEWS_MORNING_RECENCY_DAYS;
-    const prefs = parseNewsPrefs(readSkillPreferences(profile, 'news'));
+    const snapshot = readSkillPreferencesSnapshot(profile, 'news');
+    if (!snapshot.ok) {
+      logger.warn('news - preferences unavailable; withholding search');
+      return { ...EMPTY_BUNDLE };
+    }
+    const prefs = parseNewsPrefs(snapshot.text);
     const ownerCompany = (profile.user.company ?? '').trim();
     // Tenant's own domain, derived from his work email — never hardcoded, so
     // this holds for any tenant (news-brief-admits-owner-own-published-sources).
     const ownDomain = (profile.user.email.split('@')[1] ?? '').trim().toLowerCase();
 
     // Goal set: a narrowed topic short-circuits the planner (the owner asked for
-    // ONE thing — search it broad, the compose weighs sources). Otherwise the LLM
+    // ONE thing, with effective source filters from the existing tool call). Otherwise the LLM
     // planner emits goals AND structured source steer (preferred/avoid domains)
     // from his free-text interests — code never parses the MD (M-7).
     let goals: string[];
@@ -472,17 +507,23 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     let steer: DomainFilterOpts = { maxResults: NEWS_MAX_RESULTS };
     if (opts.topic && opts.topic.trim()) {
       goals = [opts.topic.trim()];
+      steer = {
+        maxResults: NEWS_MAX_RESULTS,
+        includeDomains: opts.sourcePolicy?.preferredDomains.length ? opts.sourcePolicy.preferredDomains : undefined,
+        excludeDomains: opts.sourcePolicy?.avoidDomains.length ? opts.sourcePolicy.avoidDomains : undefined,
+      };
     } else {
       const plan = await planNewsGoals(prefs.interestsText, opts.meetingCompanies ?? [], NEWS_GOAL_CAP);
       goals = plan.goals;
+      const policy = opts.sourcePolicy ?? plan;
       steer = {
         maxResults: NEWS_MAX_RESULTS,
-        includeDomains: plan.preferredDomains.length ? plan.preferredDomains : undefined,
-        excludeDomains: plan.avoidDomains.length ? plan.avoidDomains : undefined,
+        includeDomains: policy.preferredDomains.length ? policy.preferredDomains : undefined,
+        excludeDomains: policy.avoidDomains.length ? policy.avoidDomains : undefined,
       };
     }
     if (goals.length === 0) {
-      logger.info('news — no goals (empty interests + no meeting companies); empty bundle');
+      logger.info('news — no usable or selected goals; empty bundle');
       return { ...EMPTY_BUNDLE };
     }
 
@@ -495,15 +536,7 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
       return filterUngroundedEntitySources(g, found, ownerCompany, ownDomain);
     }));
 
-    const sources: NewsSource[] = [];
-    const seenUrl = new Set<string>();
-    for (const list of perGoal) {
-      for (const s of list) {
-        if (!s.url || seenUrl.has(s.url)) continue;
-        seenUrl.add(s.url);
-        sources.push(s);
-      }
-    }
+    const sources = uniqueSources(perGoal.flat());
 
     // v4.7.3 (news-dedup-no-deterministic-backstop) — drop sources that are a
     // semantic repeat of something already in the rolling seen-log BEFORE they
@@ -567,13 +600,17 @@ async function withSeenLogLock<T>(profile: UserProfile, op: () => Promise<T>): P
   }
 }
 
-/** The last `SEEN_LOG_DAYS` of the seen-log, for the compose dedup rule. Returns
- *  '' when none. (The file is pruned on write, so we return it as-is.) */
+/** The last `SEEN_LOG_DAYS` of the seen-log, for gather and compose dedup.
+ * Recheck age on every read: a quiet period may leave old sections on disk. */
 export function readSeenLog(profile: UserProfile): string {
   try {
     const file = seenLogPath(profile);
     if (!existsSync(file)) return '';
-    return readFileSync(file, 'utf8').trim();
+    const keepFrom = DateTime.now()
+      .setZone(profile.user.timezone)
+      .minus({ days: SEEN_LOG_DAYS - 1 })
+      .toFormat('yyyy-MM-dd');
+    return pruneSeenLog(readFileSync(file, 'utf8'), keepFrom);
   } catch (err) {
     logger.warn('news — seen-log read failed', { err: String(err).slice(0, 160) });
     return '';
@@ -647,7 +684,7 @@ Which numbered sources report a story that is ALREADY in the covered list above 
 /** Turn a gathered bundle into one-line seen-log entries via a cheap Haiku pass.
  *  `alreadyLogged` is the existing 7-day log — the pass SKIPS any story already
  *  in it (semantic topic-match, the same judgment the compose step makes). This
- *  is what catches "same story, different wording" that the token-Jaccard
+ *  is what catches "same story, different wording" that exact-record
  *  backstop misses. Fail-open: on error, fall back to listing source titles. */
 async function summarizeBundleForSeenLog(bundle: NewsBundle, alreadyLogged: string): Promise<string[]> {
   const material = bundle.sources.slice(0, 8).map(s => {
@@ -678,6 +715,7 @@ If every item is already logged, output nothing. No preamble, max 6 lines.`,
       }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();
+    if (!text) return []; // The successful empty response means every story is already logged.
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('•') || l.startsWith('-'));
     if (lines.length > 0) return lines.map(l => l.replace(/^[-•]\s*/, '• '));
   } catch (err) {
@@ -691,33 +729,18 @@ If every item is already logged, output nothing. No preamble, max 6 lines.`,
   });
 }
 
-/** Drop near-duplicate bullet lines from the merged log (keeping the first of
- *  each). Without this, running news several times a day piled up the same story
- *  under slightly different wording — bloating the log AND degrading the
- *  topic-match dedup at compose time. Token-set Jaccard ≥ 0.6 counts as the same
- *  story (same heuristic as skillPreferences). Headers + blanks pass through. */
+/** Collapse exact repeated log records. Semantic story equivalence belongs
+ * to the existing summary/classifier calls: token overlap can conflate two
+ * distinct releases or dates and erase history that still prevents repeats. */
 function dedupeSeenLogBullets(md: string): string {
-  const norm = (s: string) =>
-    s.toLowerCase().replace(/^[-•]\s*/, '').replace(/\[[^\]]*\]\s*$/, '')
-      .replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-  const keptTokenSets: Set<string>[] = [];
-  const out: string[] = [];
-  for (const line of md.split('\n')) {
-    const t = line.trim();
-    if (!t.startsWith('•')) { out.push(line); continue; }
-    const tokens = new Set(norm(t).split(' ').filter(Boolean));
-    if (tokens.size === 0) { out.push(line); continue; }
-    let dup = false;
-    for (const prev of keptTokenSets) {
-      const inter = [...tokens].filter(x => prev.has(x)).length;
-      const union = new Set([...tokens, ...prev]).size;
-      if (union > 0 && inter / union >= 0.6) { dup = true; break; }
-    }
-    if (dup) continue;
-    keptTokenSets.push(tokens);
-    out.push(line);
-  }
-  return out.join('\n').trim();
+  const seen = new Set<string>();
+  return md.split('\n').filter(line => {
+    const record = line.trim();
+    if (!record.startsWith('•')) return true;
+    if (seen.has(record)) return false;
+    seen.add(record);
+    return true;
+  }).join('\n').trim();
 }
 
 /** Append today's SHOWN items to the seen-log and prune days >7d old.
@@ -729,8 +752,8 @@ function dedupeSeenLogBullets(md: string): string {
  *  seen-log is a "don't repeat what he SAW" list, so a gathered-but-unshown
  *  article is NOT marked seen and resurfaces on tomorrow's re-pull (deduped vs
  *  what he did see) until shown or it ages out of the recency window. Without
- *  briefText (the on-demand pull path) we log the bundle as before — the owner
- *  engaged with that topic, so suppressing repeats of it is correct. */
+ *  briefText, the caller must have independently established that the bundle
+ *  was shown. Production brief and on-demand delivery callers pass final text. */
 export async function writeSeenLog(
   profile: UserProfile,
   bundle: NewsBundle,
@@ -741,23 +764,23 @@ export async function writeSeenLog(
   let toLog = bundle;
   if (typeof opts.briefText === 'string') {
     const text = opts.briefText;
-    // Match by NORMALIZED url, not exact substring. Sonnet cites with the
-    // <url|label> Slack form and routinely trims a `?utm_…`, a trailing slash,
-    // or http→https — exact `text.includes(s.url)` then misses a shown item,
-    // so it's never logged and resurfaces tomorrow as a stale "new" story.
-    // Normalize both sides to host+path and compare; keep exact-includes as a
-    // fast first pass. (Machine URLs vs machine text — not owner free-text.)
+    // Compare complete citations, never substring prefixes: a link to /report-2
+    // must not mark /report seen, nor may /watch?v=A mark /watch?v=B seen.
     const textUrls = new Set(
-      (text.match(/https?:\/\/[^\s<>|)\]]+/gi) ?? []).map(normalizeUrl),
+      Array.from(
+        text.matchAll(/<(https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>|https?:\/\/[^\s<>|)\]]+/gi),
+        match => normalizeUrl(match[1] ?? match[0]),
+      ).filter(Boolean),
     );
     const shown = bundle.sources.filter(s => {
       if (!s.url) return false;
-      if (text.includes(s.url)) return true;
-      return textUrls.has(normalizeUrl(s.url));
+      const normalized = normalizeUrl(s.url);
+      return !!normalized && textUrls.has(normalized);
     });
     if (shown.length === 0) return; // nothing from this gather was shown → log nothing
     toLog = { ...bundle, sources: shown };
   }
+  toLog = { ...toLog, sources: uniqueSources(toLog.sources) };
   await withSeenLogLock(profile, async () => {
     try {
       const file = seenLogPath(profile);
@@ -776,7 +799,7 @@ export async function writeSeenLog(
 
       // Summarize ONLY the genuinely-new stories — the pass is shown the existing
       // 7-day log and skips anything already covered (semantic match, beats the
-      // token-Jaccard backstop on differently-worded repeats). `toLog` is the
+      // exact-record dedup on differently-worded repeats). `toLog` is the
       // shown-only subset on the brief path (see the header note).
       const lines = await summarizeBundleForSeenLog(toLog, pruned);
       if (lines.length === 0) return;
@@ -793,8 +816,8 @@ export async function writeSeenLog(
         const todaySection = `## ${today}\n${lines.join('\n')}`;
         next = pruned ? `${todaySection}\n\n${pruned}` : todaySection;
       }
-      // Collapse near-duplicate stories (re-runs in the same day, same story
-      // across outlets) so the log stays clean and the dedup context stays sharp.
+      // Collapse exact repeated records; semantic story dedup belongs to the
+      // existing model pass above, not a lossy similarity heuristic.
       next = dedupeSeenLogBullets(next);
 
       await fs.writeFile(file, `${next.trim()}\n`, 'utf8');
@@ -829,7 +852,7 @@ export class NewsSkill implements Skill {
         name: 'news',
         description: `Personalized, GROUNDED news. Use this — not web_search — when the owner asks "what's the latest / any news on X", "anything new with <company/topic>", or wants his news refreshed.
 
-What it does: builds search goals from his taught interests (+ an optional topic you pass), steers to his preferred/blocked sources, runs real grounded research, and returns the SOURCES + their content. It also respects the rolling 7-day "already covered" log so it doesn't hand you stale repeats.
+What it does: searches your topic or builds goals from his taught interests, applies source filters, and returns grounded SOURCES + their content. Pass BOTH preferred_domains and avoid_domains as the full effective source lists: use standing news preferences even for a specific topic; an explicit current-request source override changes only the conflicting filters, preserving the rest. Use bare hostnames clearly named or unambiguously implied; [] means that direction is unrestricted. Keep the lists disjoint. Temporary overrides apply to this call only; keep saved preferences unchanged. It also respects the rolling 7-day "already covered" log so it doesn't hand you stale repeats.
 
 Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER assert a current-events fact that isn't in the returned sources; if it comes back empty, say you couldn't find a source rather than writing from memory.`,
         input_schema: {
@@ -838,6 +861,18 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
             topic: {
               type: 'string',
               description: 'Optional. Narrow to a single topic/company (e.g. "Acme Corp" or "EU AI Act"). Omit to pull his standing interests.',
+            },
+            preferred_domains: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: DOMAIN_STEER_CAP,
+              description: 'Full effective preferred sources for this request, as bare hostnames; [] for unrestricted. Search may broaden when these return no eligible results.',
+            },
+            avoid_domains: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: DOMAIN_STEER_CAP,
+              description: 'Full effective source exclusions for this request, as bare hostnames; [] for none.',
             },
           },
           required: [],
@@ -852,7 +887,25 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
     context: SkillContext,
   ): Promise<unknown | null> {
     if (toolName !== 'news') return null;
-    const topic = (args.topic as string | undefined)?.trim() || undefined;
+    const topic = typeof args.topic === 'string' ? args.topic.trim() || undefined : undefined;
+    const snapshot = readSkillPreferencesSnapshot(context.profile, 'news');
+    if (!snapshot.ok) return { error: 'news_preferences_unavailable', reason: 'The saved news settings could not be read. No search was run.' };
+    const hasPolicy = args.preferred_domains !== undefined || args.avoid_domains !== undefined;
+    let sourcePolicy: GatherNewsOpts['sourcePolicy'];
+    if (hasPolicy || (topic && snapshot.text.trim())) {
+      const validList = (value: unknown): value is string[] => Array.isArray(value)
+        && value.length <= DOMAIN_STEER_CAP && value.every(domain => cleanEmittedDomain(domain) !== null);
+      if (!validList(args.preferred_domains) || !validList(args.avoid_domains)) {
+        return { error: 'invalid_news_source_policy', reason: 'Provide both effective preferred_domains and avoid_domains arrays from the standing news settings and this request. Use [] only when that direction is unrestricted. No search was run.' };
+      }
+      sourcePolicy = {
+        preferredDomains: cleanDomainList(args.preferred_domains),
+        avoidDomains: cleanDomainList(args.avoid_domains),
+      };
+      if (sourcePolicy.preferredDomains.some(include => sourcePolicy!.avoidDomains.some(exclude => include === exclude || include.endsWith('.' + exclude)))) {
+        return { error: 'invalid_news_source_policy', reason: 'The effective source filters conflict. Resolve only the explicit request override, preserving unrelated standing filters. No search was run.' };
+      }
+    }
 
     // No-topic on-demand asks: derive today's meeting companies from the
     // owner's calendar (READ-ONLY) so the gather mirrors the morning-brief
@@ -886,16 +939,9 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
     const bundle = await gatherNews(context.profile, {
       topic,
       meetingCompanies,
+      sourcePolicy,
       recencyDays: NEWS_ONDEMAND_RECENCY_DAYS,
     });
-    // Fire-and-forget: log what we surfaced so the next ask/brief dedupes it.
-    // The on-demand path can't pass briefText (Sonnet composes the reply AFTER
-    // this tool returns), so we can't shown-filter precisely. Cap the logged
-    // set to the same relevance ceiling Sonnet is told to surface (7) — logging
-    // the full ≤15-item bundle would suppress unshown items for 7 days, the
-    // inverse of the brief-path shown-only discipline.
-    const ondemandToLog = { ...bundle, sources: bundle.sources.slice(0, NEWS_ONDEMAND_LOG_CEILING) };
-    void writeSeenLog(context.profile, ondemandToLog).catch(() => { /* non-fatal */ });
     return {
       goals: bundle.goals,
       sources: bundle.sources,
@@ -915,8 +961,8 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
     // and saves nothing." A config message can scope anywhere (knowledge/general/
     // news), so the routing rule must NOT depend on the classifier picking 'news'.
     const routing = `NEWS ROUTING (read before acting on anything news-related):
-- When ${firstName} tells you what his news should COVER — topics, areas, companies to track, sources to prefer/avoid — even when worded as a request ("for my news, I want updates on X", "I want to know about Y", "include these companies: …", "track Z", "stop covering crypto", "I like stratechery.com") — that is CONFIGURING his news report, NOT a request to fetch news now. SAVE it in ONE call: when he gives several topics at once, write them as a single list and call update_my_preferences(skill='news', mode='replace', text='<the full list, his words>') ONCE. To add ONE new area later to an existing set, call it once with mode='add'. The tool is idempotent and dedupes — call it AT MOST ONCE per teach; never re-save the same topics or re-issue the save across steps. Then confirm what you saved in one line and ask if he wants a scan now. Do NOT run web_research/deep research and do NOT call news() to "answer" a configuration message — saving is the whole job.
-- To actually SHOW him news he asks for ("what's the latest on X", "catch me up"), the tool is news() — NEVER web_research for his news report.`;
+- When ${firstName} tells you what his news should COVER — topics, areas, companies to track, sources to prefer/avoid — even when worded as a request ("for my news, I want updates on X", "I want to know about Y", "include these companies: …", "track Z", "stop covering crypto", "I like stratechery.com") — that is CONFIGURING his news report, NOT a request to fetch news now. For an edit or replacement, FIRST call update_my_preferences(skill='news', mode='read'); apply his requested changes to the full returned text, preserving unrelated topics, source instructions, prose and formatting. Then save ONCE with mode='replace', the full edited text, and expected_revision from that read. If the revision conflicts, use the returned current text and revision to reapply only his requested changes. To add new areas without changing existing text, call mode='add' once with his additions. Reading is not a save; avoid duplicate successful writes across steps. Then confirm what you saved in one line and ask if he wants a scan now. Do NOT run web_research/deep research and do NOT call news() to "answer" a configuration message — saving is the whole job.
+- To actually SHOW him news he asks for ("what's the latest on X", "catch me up"), the tool is news() — NEVER web_research for his news report. A source instruction limited to this request ("this time go to X") belongs in that call, with saved preferences unchanged.`;
 
     // Scope-gate only the heavier guidance + seen-log so a non-news turn stays cheap.
     const inPlay = !scopes || scopes.includes('general') || scopes.includes('news');
@@ -928,6 +974,6 @@ Then YOU: write GROUNDED in what it returns and CITE the source links. NEVER ass
 
 NEWS
 - news(topic?) — grounded, cited news for ${firstName}. Pass a topic to narrow; omit it to use his standing interests + today's meetings. Call it ONCE per ask — it covers multiple topics; do NOT call it separately per company. It returns real SOURCES — write GROUNDED and CITE each with a Slack hyperlink <url|short label> (never a bare URL, never "[link]" + the URL). Keep it TIGHT: a few bullets, only genuinely NEW items, nothing older than 7 days. NEVER assert a current-events fact not in the returned bundle; if it returns nothing, say so in one plain line — no apology, no long explanation.
-- Source steer + interests live in his news.md (taught via update_my_preferences). The whole file is owner free-text — when his preferences (preferred outlets, sources to skip, focus areas) appear there, weigh them at compose time. Code does NOT parse the file.${seenLog}${prefs}`.trim();
+- Read his news.md preferences below to populate the news tool's source filters, including for a specific topic, and weigh his interests when composing. The file is free text; source interpretation belongs in your existing tool call.${seenLog}${prefs}`.trim();
   }
 }

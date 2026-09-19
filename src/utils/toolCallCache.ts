@@ -1,5 +1,5 @@
 /**
- * Tool-call cache (v2.9.2) — universal agent-loop guard against duplicate
+ * Tool-call cache (v2.9.2) — agent-loop guard against duplicate
  * tool firings within a short window.
  *
  * The pattern this exists for: owner sends a message that triggers a write
@@ -12,7 +12,9 @@
  * Instead of adding idempotent guards inside every write tool's handler
  * (brittle — every new tool needs to remember to add one), the orchestrator
  * checks this cache BEFORE dispatching every tool call. Hit → return the
- * prior result without re-firing. Universal across present and future tools.
+ * prior result without re-firing. Preference editing bypasses the cache:
+ * reads need the current revision, every call must recheck authorization, and
+ * writes check that revision under the store's lock, including identical retries.
  *
  * Cache key: (ownerUserId, threadTs, toolName, canonicalJson(args)).
  * Cache scope: per-process Map; not persisted. Survives a turn boundary,
@@ -85,6 +87,7 @@ export function lookupRecentToolCall(input: {
   toolName: string;
   args: Record<string, unknown>;
 }): { cachedResult: unknown; ageMs: number } | null {
+  if (input.toolName === 'update_my_preferences') return null;
   const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args);
   const entry = cache.get(key);
   if (!entry) return null;
@@ -112,6 +115,7 @@ export function recordToolCall(input: {
   result: unknown;
   writeTools: ReadonlySet<string>;
 }): void {
+  if (input.toolName === 'update_my_preferences') return;
   const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args);
   const now = Date.now();
   cache.set(key, {

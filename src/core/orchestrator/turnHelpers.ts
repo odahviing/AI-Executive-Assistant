@@ -144,6 +144,7 @@ function mutationDomain(toolName: string, result: unknown): MutationDomain | nul
   if (!domain) return null;
   if (result == null || typeof result !== 'object') return null;
   const r = result as Record<string, unknown>;
+  if (toolName === 'update_my_preferences' && r.mode === 'read') return null;
   // Any explicit negative — a thrown/refused call, or a skill's own no-op verdict
   // (resolve_approval's `{ok:false}`) — changed nothing.
   if (typeof r.error === 'string') return null;

@@ -13,10 +13,10 @@
  *      park a 'Finishing up' status in the assistant panel.
  *   3  Run the output gate stack (guard module). Owner path and colleague
  *      path are both decided in there; it returns the text to send.
- *   3b Save what the person will actually SEE to conversation history — the
- *      POST-gate text, so the record and the wire can never disagree.
+ *   3b Commit an unsuperseded reply and prepare its delivery record.
  *   4  Ack-class emoji replacement, then the colleague shadow-notify.
  *   5  Audio vs text branch based on the input modality + TTS availability.
+ *      A confirmed ack/audio/text delivery records the post-gate answer once.
  *   6  Social coda, if the turn produced one — its OWN in-thread message a beat
  *      after the reply lands, never a last line glued onto it. A send attempt
  *      closes the social cadence gate; confirmed posts mirror to the owner's shadow.
@@ -105,6 +105,8 @@ export interface PostReplyInput {
    * `markWrite`.
    */
   onDelivered?: () => void;
+  /** Commit delivery only if this queued turn was not superseded while gates ran. */
+  onBeforeDelivery?: () => void;
 }
 
 /**
@@ -442,7 +444,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName,
     senderId, channelId, threadTs,
     history, userMessage, inboundAttachmentNote, isMpim, isChannel, isOwnerInGroup, mpimMemberIds, voiceInput,
-    onDelivered,
+    onDelivered: onDeliveredCallback,
   } = input;
   const { assistant } = profile;
 
@@ -517,68 +519,36 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     role, colleagueName, isMpim, isChannel, isOwnerInGroup, mpimMemberIds,
   });
 
-  // Step 3b — persist history, and NOT one line above the gate stack, where this
-  // write used to live. Up there the record kept the PRE-gate draft while the person
-  // received the post-gate one: the owner leg papered over half of it (the claim
-  // rewriter and the date swapper each append their correction), but the colleague
-  // leg's rewriters — securityGate, humanGate — append nothing, so a leak the gates
-  // caught and scrubbed was stored intact and replayed three ways: the next turn's
-  // model context (processMessage.ts:getConversationHistory), `recall_interactions`
-  // (core/assistant.ts:591 — the getRecentChannelMessages call whose rows become
-  // `recent_exchange`), and the capture pass that mines the transcript for the
-  // social subjects the coda is built from (memory/capturePass.ts:461 and its
-  // reconciliation counterpart at :1030, both reading getConversationHistory —
-  // not :418, which is the DM-counterpart resolver, a different step of the
-  // same pass). The gates
-  // protected the wire and not the record — 2026-07-26 08:42:57, humanGate rewrote a
-  // colleague reply in thread 1784807021.443139; it also changed the QUESTION the
-  // draft asked, so history had Maelle asking something she never asked.
-  //
-  // A third corrective append was not the fix: appendToConversation only appends,
-  // then trims to the last 20 (db/conversations.ts:33-35), so the leaky row stays in
-  // the blob — still replayed, still feeding the capture pass — and evicts a real
-  // message to sit there. One write, of the vetted text, where the vetted text exists.
-  //
-  // Safe to move because nothing in between reads the stored blob: formatForSlack is
-  // a pure transform, setAssistantStatus is a Slack call, and the gate stack reads
-  // the `history` ARRAY it was handed — snapshotted at message arrival, before even
-  // this turn's user row — so it cannot see this write from either side of the move.
-  // Below the gates is also the more honest record twice over: when the leak gate is
-  // unavailable it SUBSTITUTES a fixed line for the draft rather than passing it
-  // through (Step 3), so a row written above the gates would preserve, and then
-  // replay, a draft that nothing vetted and that the colleague never saw — while the
-  // person holds the substitute; and `cleanReply` has been through formatForSlack, which is
-  // where scrubInternalLeakage runs — the pre-gate draft never was, so history also
-  // used to keep raw slack ids, Graph ids and verbatim tool names.
-  //
-  // The tool markers stay RAW on purpose: the claim-checker's truthful-recap shield
-  // reads `mutated=<domain>` out of prior assistant rows and the scrubber strips tool
-  // names, so formatting the action tape would erase the evidence the shield needs.
-  // Only the prose half is the scrubber's business.
-  //
-  // ABOVE Step 4.5, so the ack-reaction branch — which returns before Step 5 — still
-  // records the answer its 👍 stood in for, exactly as it did before.
+  // Prepare one delivery record after gates. Failed or unknown sends must not
+  // become an assistant answer in thread history. The ack/audio/text paths
+  // invoke this only when their transport operation confirms delivery.
+  // Keep raw tool summaries alongside vetted prose for later claim checks.
+  input.onBeforeDelivery?.();
+  let recordedDelivery = false;
+  const onDelivered = (confirmedText?: string) => {
+  if (recordedDelivery) return;
+  recordedDelivery = true;
+  // A successful Slack post/ack is the truth. Signal it before bookkeeping,
+  // so a history failure cannot trigger a second apology after a real answer.
+  onDeliveredCallback?.();
+  if (confirmedText && result.newsBundle && role === 'owner'
+      && senderId === profile.user.slack_user_id && !isMpim && !isChannel && !isOwnerInGroup) {
+    // Candidates become seen only if their citation survived the gates and a
+    // text send was confirmed. Bookkeeping cannot turn delivery into a retry.
+    void import('../../skills/news')
+      .then(({ writeSeenLog }) => writeSeenLog(profile, result.newsBundle!, { briefText: confirmedText }))
+      .catch(err => logger.warn('news - delivered seen-log write failed', { err: String(err).slice(0, 200) }));
+  }
   appendToConversation(threadTs, channelId, {
     role: 'assistant',
     content: result.toolSummaries?.length
       ? `${result.toolSummaries.join(' ')}\n${cleanReply}`
       : cleanReply,
-    // v4.4.10 — stamp a synthetic ts even though the real Slack ts isn't known
-    // yet (chat.postMessage hasn't run — that's Step 5, below). Wall-clock at
-    // write time, in Slack ts format (unix seconds, 6-decimal fraction).
-    //
-    // processMessage.ts's channel/MPIM catch-up merge sorts
-    // `[...dbHistory, ...missedMessages]` by `parseFloat(m.ts || '0')`. An
-    // un-stamped assistant row parses to 0 and the sort puts EVERY one of
-    // Maelle's own past replies at the very front of the merged history,
-    // ahead of every real message — scrambling the order the model sees on
-    // every catch-up merge, independent of (and in addition to) the
-    // duplication bug the `m.user !== ctx.botUserId` exclusion above already
-    // closed (processMessage.ts:appendToConversation). This write runs strictly after the
-    // user's message ts and strictly before this turn's real Slack post, so
-    // the synthetic value sorts correctly relative to both.
+    // A confirmed-delivery timestamp keeps the room merge chronological;
+    // ack reactions and audio do not provide a text-message Slack timestamp.
     ts: (Date.now() / 1000).toFixed(6),
   });
+  };
 
   // Step 4.5 (v2.6.2) — ack-class emoji replacement. When the cleaned reply
   // is a pure short ack ("Got it" / "On it" / "Done" / "Noted" / "Sure"),
@@ -736,7 +706,7 @@ async function sendReply(opts: {
   cleanReply: string;
   voiceInput: boolean;
   say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
-  onDelivered?: () => void;
+  onDelivered?: (confirmedText?: string) => void;
 }): Promise<void> {
   const useAudio = shouldRespondWithAudio({
     inputWasVoice: opts.voiceInput,
@@ -786,11 +756,12 @@ async function sendReply(opts: {
   // a wall of previews. Cited links stay clickable; they just don't auto-expand.
   const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false, unfurl_media: false }) as
     | { ts?: string; ok?: boolean } | undefined;
+  if (sayRes?.ok === false) throw new Error('Slack explicitly rejected the reply');
   // The answer is in the thread. Signalled here and not at the end of the
   // function on purpose — the threadActivity import below is a bookkeeping tail
   // that can still reject, and a reply the person is reading must never be
   // followed by an apology for it.
-  opts.onDelivered?.();
+  opts.onDelivered?.(sayRes?.ok === true || sayRes?.ts ? opts.cleanReply : undefined);
   if (sayRes?.ts) {
     const { recordMaelleMessage } = await import('../../utils/threadActivity');
     recordMaelleMessage(opts.threadTs, opts.channelId, sayRes.ts);

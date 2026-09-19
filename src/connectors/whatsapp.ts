@@ -375,6 +375,15 @@ async function handleWhatsAppMessage(
       responseText: cleanReply,
     });
 
+    const sendTextReply = async () => {
+      const sent = await message.reply(cleanReply);
+      if (sent?.id?._serialized && result.newsBundle) {
+        void import('../skills/news')
+          .then(({ writeSeenLog }) => writeSeenLog(profile, result.newsBundle!, { briefText: cleanReply }))
+          .catch(err => logger.warn('news - WhatsApp seen-log write failed', { err: String(err).slice(0, 200) }));
+      }
+    };
+
     if (useAudio && config.OPENAI_API_KEY) {
       try {
         const audioBuffer = await textToSpeech(cleanReply);
@@ -385,10 +394,10 @@ async function handleWhatsAppMessage(
         try { fs.unlinkSync(tmpAudio); } catch { /* best effort */ }
       } catch (audioErr) {
         logger.warn('WhatsApp audio reply failed — sending text', { err: String(audioErr) });
-        await message.reply(cleanReply);
+        await sendTextReply();
       }
     } else {
-      await message.reply(cleanReply);
+      await sendTextReply();
     }
   } catch (err) {
     logger.error('WhatsApp orchestrator error', { err: String(err) });

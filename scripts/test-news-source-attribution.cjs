@@ -47,7 +47,7 @@ function harness(results, { plannedGoal = 'Reflectiz mentions', failSearch = fal
       if (failSearch) throw new Error('Simulated search failure');
       return { results };
     } },
-    '../utils/skillPreferences': { readSkillPreferences: () => '', formatSkillPreferencesBlock: forbidden('format preferences') },
+    '../utils/skillPreferences': { readSkillPreferences: () => '', readSkillPreferencesSnapshot: () => ({ ok: true, text: '', exists: false, revision: 'fixture' }), formatSkillPreferencesBlock: forbidden('format preferences') },
     '../utils/logger': { info: () => {}, warn: (...args) => warnings.push(args) },
     '../utils/extractJson': { extractFirstJsonObject: text => text },
   };

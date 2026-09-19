@@ -302,6 +302,12 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // Stored WITHOUT the glyph — that is transport decoration, and the
       // interactive path stores the undecorated draft too.
       if (deliveredTs) {
+        if (result.newsBundle && routine.owner_user_id === profile.user.slack_user_id
+            && routine.owner_channel.startsWith('D')) {
+          void Promise.all([import('../../skills/news'), import('../../connections/slack/formatting')])
+            .then(([{ writeSeenLog }, { formatForSlack }]) => writeSeenLog(profile, result.newsBundle!, { briefText: formatForSlack(decorated) }))
+            .catch(err => logger.warn('news - routine seen-log write failed', { err: String(err).slice(0, 200) }));
+        }
         appendToConversation(deliveredTs, routine.owner_channel, {
           role: 'assistant',
           content: `[Scheduled routine: ${routine.title}]\n${cleaned}`,

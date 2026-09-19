@@ -23,6 +23,7 @@ Treat this as a lens, not a literal directory contract — `config/` (profile lo
 
 ---
 
+Current shared boundaries: `connections/slack/eligibility.ts` centralizes internal Slack audience eligibility; `connectors/slack/threadHistory.ts` owns recent thread history loading. The orchestrator carries ephemeral news bundles to existing delivery consumers, which advance seen history only after confirmed cited text delivery. Plain-text skill preferences remain in the existing store; no general-preference migration or durable delivery subsystem was introduced.
 ## The orchestrator turn loop
 
 `src/core/orchestrator/index.ts` — `runOrchestrator()` (line 213) wraps everything in a per-turn `AsyncLocalStorage` cache (`withTurnCache`, `utils/turnCache.ts`) and delegates to `runOrchestratorImpl` (line 225), which:

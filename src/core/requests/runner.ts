@@ -586,6 +586,11 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
         } else {
           delivered = (await sendTracked(conn, { dm: ownerId }, result.reply, undefined, 'runResearchRun result DM', row.id)).ok;
         }
+        if (delivered && result.newsBundle && rawRole === 'owner' && surface === 'owner_dm') {
+          void Promise.all([import('../../skills/news'), import('../../connections/slack/formatting')])
+            .then(([{ writeSeenLog }, { formatForSlack }]) => writeSeenLog(profile, result.newsBundle!, { briefText: formatForSlack(result.reply) }))
+            .catch(err => logger.warn('news - research seen-log write failed', { err: String(err).slice(0, 200) }));
+        }
       }
     }
   } catch (err) {

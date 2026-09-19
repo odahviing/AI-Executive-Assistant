@@ -59,6 +59,7 @@ import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
 import { colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
+import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 
 const anthropic = getAnthropicClient();
 
@@ -248,7 +249,7 @@ CRITICAL RULES:
 - Prefer 4-6 paragraphs. Avoid one-sentence paragraphs.
 - Owner of this meeting: ${params.ownerName} — never list them as an action-item assignee unless they are explicitly tasked OR the action is a jointly-agreed next step (see above).
 - If the owner's framing (above) specifies what to cover or what to de-emphasize, FOLLOW IT. Their framing overrides the default paragraph shape.
-${captionBlock}${calBlock}${styleBlock}${kbBlock}
+${captionBlock}${calBlock}${styleBlock}${formatSkillPreferencesBlock(params.profile, 'summary')}${kbBlock}
 
 TRANSCRIPT:
 """
@@ -931,7 +932,7 @@ Rules:
 - Apply the instruction precisely. If unclear, make the most reasonable interpretation.
 - Keep summary in English.
 - Don't invent attendees or action items not previously in the draft (unless the instruction explicitly adds one).
-- Preserve fields the instruction didn't touch.${styleBlock}
+- Preserve fields the instruction didn't touch.${styleBlock}${formatSkillPreferencesBlock(profile, 'summary')}
 
 Output the full updated draft JSON.`;
 

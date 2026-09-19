@@ -10,9 +10,12 @@ import logger from '../../utils/logger';
 import { detectMessageLanguage } from '../../utils/detectMessageLanguage';
 import { callClaude, mutationOutcome, summarizeToolCall, summarizeInternalAction } from './turnHelpers';
 import { buildTurnContext } from './buildTurnContext';
+import type { NewsBundle } from '../../skills/news';
 
 export interface OrchestratorInput {
   userMessage: string;
+  /** Human text before transport framing; includes every human text in a merged turn. */
+  rawUserMessage?: string;
   conversationHistory: Array<{ role: 'user' | 'assistant'; content: string; ts?: string }>;
   threadTs: string;
   channelId: string;
@@ -41,6 +44,8 @@ export interface OrchestratorInput {
   isChannel?: boolean;                // v2.6.6 — true if this is a public/private channel (vs DM/MPIM)
   isOwnerInGroup?: boolean;           // true when the owner sent this message in an MPIM
   mpimMemberIds?: string[];           // all non-bot member IDs when in MPIM
+  /** Observed thread participants, distinct from the full room membership. */
+  threadParticipantIds?: string[];
   /**
    * Optional forced tool on the FIRST Claude call of this run. Set by the
    * claim-checker retry path (v1.6.2) when the previous draft claimed to have
@@ -132,6 +137,8 @@ export interface OrchestratorInput {
 
 export interface OrchestratorOutput {
   reply: string;
+  /** Ephemeral owner-DM candidates; only confirmed, cited delivery marks them seen. */
+  newsBundle?: NewsBundle;
   /** True if a real calendar booking succeeded in this turn. Consumed by the
    *  post-hoc hallucination backstop in app.ts — when the LLM claims a booking
    *  but this is false, the reply is rewritten to a safe fallback. */
@@ -329,6 +336,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // tells Sonnet "to amend this booking, call move_meeting with id=X — don't
   // re-call create_meeting".
   const mutationActions: NonNullable<OrchestratorOutput['mutationActions']> = [];
+  const newsBundle: NewsBundle = { goals: [], sources: [] };
   let finalReply = '';
   // True if any tool in this turn actually performed a real calendar booking.
   // Consumed by the post-hoc hallucination backstop in app.ts — if the reply
@@ -733,7 +741,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // abort, buffer for follow-up turn. Calling onWriteExecuted from
       // INSIDE executeSkillTool would race the queue's read; flagging here
       // (just before dispatch) is the safe ordering.
-      if (input.onWriteExecuted && WRITE_TOOLS.has(toolUse.name)) {
+      const preferenceRead = toolUse.name === 'update_my_preferences'
+        && (toolUse.input as { mode?: string }).mode?.trim() === 'read';
+      if (input.onWriteExecuted && WRITE_TOOLS.has(toolUse.name) && !preferenceRead) {
         try { input.onWriteExecuted(toolUse.name); } catch (_) { /* never fail the turn over the callback */ }
       }
 
@@ -783,7 +793,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // empty mapping (internal classifiers / pre-passes) SKIPS the call so
           // the last meaningful status persists, instead of clobbering it with
           // a "Working" placeholder. Fire-and-forget — never await.
-          const toolStatus = statusForTool(toolUse.name, profile.user.name.split(' ')[0]);
+          const toolStatus = preferenceRead
+            ? 'Reading your preferences'
+            : statusForTool(toolUse.name, profile.user.name.split(' ')[0]);
           if (toolStatus) {
             void setAssistantStatus(input.app, input.profile.assistant.slack.bot_token, {
               channelId: input.channelId,
@@ -794,15 +806,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         } catch (_) { /* helper failure is non-fatal */ }
       }
 
-      // v2.9.2 — universal tool-call cache. Before executing the tool, check
+      // v2.9.2 — tool-call cache. Before executing the tool, check
       // if an identical call (same owner+thread+tool+args) fired recently.
       // Writes: 60s TTL — same write within a minute is almost always a bug
       // (buffered follow-up that confused Sonnet, claim-checker retry, etc.).
       // Reads: 5s TTL — same-turn duplicate reads return cached; cross-turn
       // fresh reads aren't masked. Returns prior result verbatim so Sonnet's
-      // narration is consistent. Closes the 8.2 double-fire class universally
-      // — works for every present and future write tool without per-handler
-      // changes.
+      // narration is consistent. The cache excludes preference editing so
+      // current reads, authorization and revision checks run on every call.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { lookupRecentToolCall, recordToolCall } = require('../../utils/toolCallCache') as
         typeof import('../../utils/toolCallCache');
@@ -1057,6 +1068,16 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           if (typeof touchedId === 'string' && touchedId) {
             resolveApprovalTouchedIdsThisTurn.add(touchedId);
           }
+        }
+      }
+
+      if (toolUse.name === 'news' && input.authority === 'owner'
+          && input.surface === 'owner_dm' && input.channel !== 'email'
+          && result && typeof result === 'object' && !('error' in result)) {
+        const bundle = result as Partial<NewsBundle>;
+        if (Array.isArray(bundle.goals) && Array.isArray(bundle.sources)) {
+          newsBundle.goals.push(...bundle.goals);
+          newsBundle.sources.push(...bundle.sources);
         }
       }
 
@@ -1429,7 +1450,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           share_summary: 'shared the summary',
           classify_summary_feedback: 'noted your feedback',
           // Memory
-          update_my_preferences: 'saved that as a standing preference',
           manage_preference: 'updated a preference', // v2.9 — merged learn/forget/recall_preferences; not in VERB_PRIORITY so never actually surfaces (same as the tools it replaced)
           recall_interactions: 'checked past interactions',
           note_about_person: 'made a note',
@@ -1819,6 +1839,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   const outgoingToolSummaries = [...availabilityPrecheckToolSummaries, ...toolCallSummaries];
   return {
     reply: finalReply,
+    newsBundle: newsBundle.sources.length > 0 ? newsBundle : undefined,
     bookingOccurred,
     availabilityQuestionDetected,
     toolSummaries: outgoingToolSummaries.length > 0 ? outgoingToolSummaries : undefined,

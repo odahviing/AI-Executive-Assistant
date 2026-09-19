@@ -97,6 +97,10 @@ function harness(options = {}) {
     // keyed presence paths must never invoke it; fail loudly if that changes.
     'src/memory/resolveAttendeeEmails.ts': { nameGenuinelyMatches: () => { throw Error('Unexpected name binding in Slack directory fixture'); } },
     'src/connections/slack/messaging.ts': {},
+    // Membership behavior is exercised by test-slack-thread-boundaries; this
+    // fixture isolates the existing directory projection and presence writes.
+    'src/connections/slack/eligibility.ts': { readInternalSlackConversation: async () => ({ is_im: true }) },
+    'src/connectors/slack/threadHistory.ts': { readSlackThread: async () => [] },
     'src/connections/slack/formatting.ts': { formatForSlack: t => t },
     'src/utils/genderDetect.ts': { detectAndSaveGender: p => { genderCalls.push(p); return Promise.resolve(); } },
     'src/core/orchestrator/index.ts': { runOrchestrator: async () => ({ reply: '' }) },

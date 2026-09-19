@@ -9,7 +9,7 @@ import {
   resolvePersonSlug,
   syncPersonOperationalSections,
 } from '../memory/peopleMemory';
-import { writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
+import { readSkillPreferencesSnapshot, writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
 import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
 import { describeEffectiveWorkingHours } from '../utils/workingHoursDefault';
@@ -454,9 +454,11 @@ Name-only lookup never creates a person; unresolved_person means resolve the ide
       },
       {
         name: 'update_my_preferences',
-        description: `Save or edit the OWNER's standing preferences for how Maelle should behave in a given AREA. These are free-text notes injected into that area's instructions — the owner's personal style, which overrides the defaults. The owner can put whatever he wants here.
+        description: `Read or edit the OWNER's standing preferences for how Maelle should behave in an AREA. These are free-text instructions in the owner's own words, overriding defaults within hard rules and safety guards.
 
-Use ONLY after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes.
+To edit or remove existing preferences, use mode='read' for that area first, even when its instructions are absent from this turn. Preserve the returned text except for the requested change; pass the full updated text and its revision as expected_revision to mode='replace'. Empty text clears the area. On a revision conflict, reconcile against the returned current text before retrying. mode='add' appends a new preference.
+
+Save after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes. Reading existing preferences needs no save confirmation.
 
 ABOUT A SPECIFIC PERSON — this is the right tool. A standing instruction from the owner concerning someone ("keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss", "never book Yael before 10", "Rita gets a call, not a thread") is HIS preference, not a fact about them. Save it here, naming the person inside the line, under the skill whose behavior it changes — meetings for booking style, general for how to address someone. That is what makes it fire at the moment it matters. FACTS about that person (where they live, their hours, what they use) still go to update_person_profile / update_person_memory.
 
@@ -478,15 +480,16 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
             },
             mode: {
               type: 'string',
-              enum: ['add', 'replace'],
-              description: "add = append this as one new preference line (de-duplicated — a near-identical line is a no-op). replace = overwrite ALL preferences for this area with `text`. If a similar preference already exists and the owner is CHANGING it, use replace with the full new list — don't 'add' a near-duplicate.",
+              enum: ['read', 'add', 'replace'],
+              description: "read = fetch the current full text and revision, without saving. add = append a new preference (near-identical lines are a no-op). replace = save the full edited text using expected_revision from a fresh read; preserve unrelated text. An empty replacement clears this area's preferences.",
             },
             text: {
               type: 'string',
-              description: "The preference in the owner's own words. mode=add: one line. mode=replace: the full new list, one preference per line.",
+              description: "The owner's free text. Required for add or replace, omitted for read. For replace, include the complete edited document, preserving unrelated content and formatting.",
             },
+            expected_revision: { type: 'string', description: 'For replace, the revision returned by read. A conflict returns the current text and revision; reapply only the requested edit to that text.' },
           },
-          required: ['skill', 'mode', 'text'],
+          required: ['skill', 'mode'],
         },
       },
     ];
@@ -1097,13 +1100,16 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const mode = (args.mode as string | undefined)?.trim();
         const text = args.text as string | undefined;
         if (!skill) return { error: 'empty_skill' };
-        if (mode !== 'add' && mode !== 'replace') return { error: 'invalid_mode', message: "mode must be 'add' or 'replace'." };
-        if (!text || !text.trim()) return { error: 'empty_text' };
+        if (mode === 'read') return { ...readSkillPreferencesSnapshot(context.profile, skill), skill, mode };
+        if (mode !== 'add' && mode !== 'replace') return { error: 'invalid_mode', message: "mode must be 'read', 'add', or 'replace'." };
+        if (typeof text !== 'string' || (mode === 'add' && !text.trim())) return { error: 'empty_text' };
 
-        const result = await writeSkillPreferences(context.profile, skill, mode, text);
+        const result = await writeSkillPreferences(context.profile, skill, mode, text, {
+          expectedRevision: typeof args.expected_revision === 'string' ? args.expected_revision : undefined,
+        });
         if (!result.ok) {
           logger.warn('update_my_preferences failed', { skill, mode, err: result.error });
-          return { ok: false, error: result.error };
+          return { ok: false, error: result.error, ...('current' in result ? { current: result.current } : {}) };
         }
         logger.info('update_my_preferences', { skill, mode, created: result.created, duplicate: result.duplicate });
         return {
@@ -1111,9 +1117,11 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           skill,
           mode,
           created: result.created,
+          revision: result.revision,
+          ...(result.unchanged ? { unchanged: true } : {}),
           ...(result.duplicate ? { duplicate: true, matched_line: result.matchedLine } : {}),
           _note: result.duplicate
-            ? `Not added — you already have a matching ${skill} preference: "${result.matchedLine ?? ''}". If the owner is REFINING or changing it, call again with mode='replace' passing the full updated list (it backs up the old file first). If it's genuinely the same, you're done — just tell him it's already in place.`
+            ? `Not added — a matching ${skill} preference is already saved: "${result.matchedLine ?? ''}". To refine or change it, read the full text and revision, then replace with the complete edited text and expected_revision.`
             : `Saved to your ${skill} preferences. It's in force from your next ${skill}-related turn — no need to repeat it.`,
         };
       }

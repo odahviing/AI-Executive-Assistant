@@ -4,6 +4,8 @@ import { runDueTasks } from '../tasks/runner';
 import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
 import logger from '../utils/logger';
+import { readInternalSlackConversation } from '../connections/slack/eligibility';
+import { readSlackThread } from '../connectors/slack/threadHistory';
 
 // v3.3.10 — recovery scope: DM + panel threads, gap-from-watermark (no time
 // cap — "since Maelle was last online", any length), one reply per distinct
@@ -11,22 +13,16 @@ import logger from '../utils/logger';
 // posted in-thread. The legacy 24h LOOKBACK_HOURS was removed — the watermark
 // IS the window.
 //
-// 2026-08-18 (S9, gh#downtime-catchup-groups) — widened off DM-only. A DM
-// counts any missed message (nothing else could have gated it live); an MPIM
-// or channel counts a missed message ONLY when it @-mentioned her — the same
-// bar S3 uses to decide whether she'd have been active on it at all. A group
-// message with no mention was never hers and stays untouched. Per-thread
-// "unanswered" now also treats a reply from a PERSON (not just from her) as
-// resolved — a colleague or the owner may have handled it in the room while
-// she was down, and S8 (one answer, ever) means she must not pile on.
+// Recovery covers DMs, MPIMs and joined channels. Each actual answer stays in
+// its original thread; room candidates reuse the live addressing boundary.
 
 // ── Background timer ─────────────────────────────────────────────────────────
 
 /**
  * #30 — expire slot holds past min(2 owner-workdays, slot-start). Releases each
- * as 'expired' and DMs the holder that the time was freed (threaded into the
- * conversation where the hold was made — decision 4: "always cancel after 2
- * days → DM the person"). Owner-parked holds with no holder slack_id are
+ * as 'expired' and DMs the holder that the time was freed (decision 4:
+ * "always cancel after 2 days → DM the person"). Reuse the origin thread only
+ * when it belongs to the holder's DM. Owner-parked holds with no holder slack_id are
  * released silently. Fire-and-forget via processSlotHoldsIfDue; never throws upward.
  */
 async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promise<void> {
@@ -53,11 +49,20 @@ async function sweepExpiredSlotHolds(profiles: Map<string, UserProfile>): Promis
         const when = DateTime.fromISO(h.start_iso).setZone(profile.user.timezone);
         const whenLabel = when.isValid ? when.toFormat('EEE d MMM HH:mm') : h.start_iso;
         const subj = h.subject ? ` for "${h.subject}"` : '';
-        await conn.sendDirect(
+        // A room or another person's DM has a different thread namespace.
+        // Unresolved ownership still permits a private, top-level notice.
+        const holderChannel = h.origin_channel && h.origin_thread_ts
+          ? await conn.resolveDirectChannelId?.(h.holder_slack_id).catch(() => null)
+          : null;
+        const threadTs = holderChannel && holderChannel === h.origin_channel
+          ? h.origin_thread_ts ?? undefined
+          : undefined;
+        const sent = await conn.sendDirect(
           h.holder_slack_id,
           `Freed up the ${whenLabel} hold${subj} — it had been pending a couple of days, so I let it go. Just say the word if you still want it.`,
-          h.origin_thread_ts ? { threadTs: h.origin_thread_ts } : undefined,
+          threadTs ? { threadTs } : undefined,
         );
+        if (!sent.ok) throw new Error(sent.detail ?? sent.reason);
       } catch (err) {
         logger.warn('sweepExpiredSlotHolds — holder DM failed (hold already released)', { id: h.id, err: String(err).slice(0, 150) });
       }
@@ -447,7 +452,7 @@ export async function initProfile(
  *     per-thread dedup).
  *   - Replies route through the live inbound path (replayMissedMessage), so
  *     voice/image/video are handled exactly as a live message; the posted
- *     reply carries a "↩ Catching up" caption.
+ *     reply itself is the delivery evidence; no preliminary caption is posted.
  */
 // The periodic heartbeat (every 10 min) scans all DMs and almost always finds
 // nothing — logging that scan each time floods the log (~144 lines/day of "I
@@ -527,27 +532,21 @@ export async function catchUpMissedMessages(
   const nowMs = Date.now();
   const oldest = String((sinceMs != null ? sinceMs : nowMs) / 1000);
 
-  // v3.2.x — scan ALL the bot's 1:1 DMs, not just the owner's. The old scope
-  // was owner-DM-only, so after an outage every colleague message sent while
-  // the bot was down was silently dropped (the 2026-06-04 all-day crash: she
-  // came back up and answered nobody). processIfMissed replies to at most the
-  // ONE latest-unanswered message per DM, so this stays bounded to ≤1 reply
-  // per conversation even across a long outage.
-  //
-  // 2026-08-18 — widened to MPIMs and channels the bot has joined (`is_member`),
-  // one combined `conversations.list` call across all four types. DMs keep the
-  // no-mention-needed scan below; MPIM/channel entries are scanned separately
-  // (mention-gated — see findUnansweredMentionInThread).
+  // Scan every listed surface, then verify internal eligibility before reading
+  // content. Recovery answers each distinct unanswered thread, not just the
+  // latest conversation in a DM. MPIM candidates reuse the live addressee gate;
+  // channel candidates require an explicit mention on that message.
   const dmChannels = new Set<string>([ownerChannel]);
   const mpimChannels = new Set<string>();
   const groupChannels = new Set<string>();
   try {
     let cursor: string | undefined;
-    let pages = 0;
+    const cursors = new Set<string>();
     do {
       const list = await app.client.conversations.list({
         token: botToken, types: 'im,mpim,public_channel,private_channel', limit: 200, cursor,
       });
+      if (!list.ok) throw new Error('Slack conversations unavailable');
       for (const c of (list.channels ?? []) as Array<Record<string, unknown>>) {
         if (typeof c.id !== 'string') continue;
         if (c.is_im === true) { if (!c.is_user_deleted) dmChannels.add(c.id); continue; }
@@ -555,8 +554,9 @@ export async function catchUpMissedMessages(
         if (c.is_member === true) groupChannels.add(c.id);
       }
       cursor = (list.response_metadata?.next_cursor as string | undefined) || undefined;
-      pages++;
-    } while (cursor && pages < 5);
+      if (cursor && cursors.has(cursor)) throw new Error('Slack conversation pagination repeated');
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
   } catch (err) {
     logger.warn('Catch-up: could not list conversations — falling back to owner DM only', { err: String(err) });
   }
@@ -575,6 +575,7 @@ export async function catchUpMissedMessages(
   ];
 
   await runWithConcurrency(entries, CATCHUP_SCAN_CONCURRENCY, async ({ channelId, surface }) => {
+    if (!await readInternalSlackConversation(app.client, botToken, channelId)) return;
     const opts: CheckOpts = {
       app, profile, botToken, botUserId,
       channelId,
@@ -595,13 +596,7 @@ export async function catchUpMissedMessages(
     const candidates: UnansweredCandidate[] = [];
     if (surface === 'dm') {
       try {
-        const top = await findUnansweredTopLevel(opts);
-        if (top) candidates.push(top);
-      } catch (err) {
-        logger.warn('Catch-up: per-DM error, continuing', { channelId, err: String(err).slice(0, 200) });
-      }
-      try {
-        for (const parentTs of await discoverThreadParents(app, botToken, channelId)) {
+        for (const parentTs of await discoverThreadParents(app, botToken, channelId, { oldest, includeUnmentioned: true })) {
           try {
             const c = await findUnansweredInThread(opts, parentTs);
             if (c) candidates.push(c);
@@ -615,12 +610,10 @@ export async function catchUpMissedMessages(
         logger.warn('Catch-up: panel discovery threw — continuing', { channelId, err: String(err).slice(0, 200) });
       }
     } else {
-      // MPIM / channel — mention-gated (S3): a group message was only ever
-      // hers to answer if it @-mentioned her. Roots are top-level messages
-      // that either mention her themselves (own ts becomes the thread, S2) or
-      // carry replies (a mention could be buried mid-thread).
+      // Channels require explicit mentions; MPIM top-level messages can be
+      // naturally addressed and are classified by the existing live gate.
       try {
-        const roots = await discoverThreadParents(app, botToken, channelId, { includeMentionsOf: botUserId, cap: 20 });
+        const roots = await discoverThreadParents(app, botToken, channelId, { includeMentionsOf: botUserId, oldest, includeUnmentioned: surface === 'mpim' });
         for (const rootTs of roots) {
           try {
             const c = await findUnansweredMentionInThread(opts, rootTs, surface);
@@ -687,39 +680,38 @@ function mentionsBot(text: unknown, botUserId: string): boolean {
 }
 
 /**
- * Find thread roots in a conversation by reading its recent top-level history
- * (NO registry, NO `oldest` — an active thread's parent can be old while its
- * replies are recent, so we must see old parents too). Returns their ts
- * (deduped), newest-first, capped.
- *
- *   - Default (no `opts`): assistant-panel discovery in a DM — a root is any
- *     message with replies. The reply-recency gate happens later via
- *     `oldest` inside findUnansweredInThread.
- *   - `includeMentionsOf` (MPIM/channel catch-up, 2026-08-18): ALSO treat a
- *     top-level message as a root when it @-mentions the bot itself, even
- *     with zero replies — its own ts becomes the thread the moment she
- *     replies (S2). Ordinary chatter with neither replies nor a mention is
- *     never a root, so the mention-gated scan below never even looks at it.
+ * Traverse top-level history without an oldest cutoff: an old parent may
+ * have new replies. Select roots by latest_reply within the gap, plus new
+ * directly addressed roots (all human roots for DMs/MPIMs, explicit mentions
+ * for channels). Do not silently stop after the first page or ten threads.
  */
 async function discoverThreadParents(
   app: App, botToken: string, channelId: string,
-  opts?: { includeMentionsOf?: string; cap?: number },
+  opts?: { includeMentionsOf?: string; oldest?: string; includeUnmentioned?: boolean },
 ): Promise<string[]> {
   try {
-    const res = await app.client.conversations.history({
-      token: botToken, channel: channelId, limit: opts?.includeMentionsOf ? 100 : 50,
-    });
-    const msgs = (res.messages ?? []) as Array<Record<string, unknown>>;
     const parents: string[] = [];
-    for (const m of msgs) {
+    let cursor: string | undefined;
+    const cursors = new Set<string>();
+    do {
+    const res = await app.client.conversations.history({ token: botToken, channel: channelId, limit: 200, cursor });
+    if (!res.ok) throw new Error('Slack history unavailable');
+    for (const m of (res.messages ?? []) as Array<Record<string, unknown>>) {
       if (typeof m.ts !== 'string') continue;
       const replyCount = typeof m.reply_count === 'number' ? m.reply_count : 0;
       const selfMention = opts?.includeMentionsOf ? mentionsBot(m.text, opts.includeMentionsOf) : false;
-      if (replyCount > 0 || selfMention) parents.push(m.ts);
+      const inGap = !opts?.oldest || Number(m.ts) >= Number(opts.oldest);
+      const activeReply = replyCount > 0 && (!opts?.oldest || typeof m.latest_reply !== 'string' || Number(m.latest_reply) >= Number(opts.oldest));
+      if (activeReply || (inGap && (selfMention || (opts?.includeUnmentioned && m.user && !m.bot_id)))) parents.push(m.ts);
     }
-    return parents.slice(0, opts?.cap ?? 10);  // bound — realistic DMs have 0-1 active panels
-  } catch {
-    return [];  // no access / no history — nothing to discover
+    cursor = res.response_metadata?.next_cursor || undefined;
+    if ((res.has_more && !cursor) || (cursor && cursors.has(cursor))) throw new Error('Slack history pagination incomplete');
+    if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return parents;
+  } catch (err) {
+    logger.warn('Catch-up: thread discovery unavailable', { channelId, err: String(err).slice(0, 160) });
+    return [];
   }
 }
 
@@ -731,60 +723,6 @@ interface CheckOpts {
   channelId: string;
   ownerId: string;
   oldest: string;
-}
-
-// Returns the DM top-level stream's latest unanswered user message as a
-// candidate, or null. (Was processIfMissed, which replayed directly; now
-// returns so the caller can pick ONE latest across all of a person's surfaces.)
-async function findUnansweredTopLevel(opts: CheckOpts): Promise<UnansweredCandidate | null> {
-  const { app, botToken, botUserId, channelId, oldest } = opts;
-
-  let messages: Array<Record<string, unknown>>;
-  try {
-    const result = await app.client.conversations.history({
-      token: botToken,
-      channel: channelId,
-      oldest,
-      limit: 200,
-    });
-    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
-  } catch (err) {
-    logger.debug('Catch-up: skipping channel (no access)', { channelId });
-    return null;
-  }
-
-  // DM-only catch-up — no mention gating; any top-level user message counts.
-  // Allow `file_share` (voice / video / image) — excluding it (the old
-  // `!m.subtype`) silently dropped every media message from recovery (the
-  // owner's video that never got answered). Still excludes true system
-  // subtypes (channel_join, bot_message, etc.).
-  const latestUserMsg = latestByTs(messages, m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share'));
-  if (!latestUserMsg?.ts) return null;
-
-  const userTs = parseFloat(latestUserMsg.ts as string);
-  const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
-  const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
-  if (userTs <= botTs) return null;
-
-  // The message could have been answered inside its OWN thread (history returns
-  // top-level only). Check replies before treating it as unanswered.
-  const msgTs = latestUserMsg.ts as string;
-  try {
-    const replies = await app.client.conversations.replies({
-      token: botToken,
-      channel: channelId,
-      ts: msgTs,
-      limit: 20,
-    });
-    const botThreadReply = (replies.messages ?? []).find(
-      m => (m.bot_id || m.user === botUserId) && parseFloat(m.ts as string) > userTs
-    );
-    if (botThreadReply) return null;
-  } catch {
-    // No replies or no access — proceed
-  }
-
-  return { message: latestUserMsg, postThreadTs: msgTs, source: 'dm', userTs };
 }
 
 // v3.2.6 (#122) — assistant-PANEL catch-up. Messages typed in the Slack
@@ -802,13 +740,7 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
 
   let messages: Array<Record<string, unknown>>;
   try {
-    const result = await app.client.conversations.replies({
-      token: botToken,
-      channel: channelId,
-      ts: threadTs,
-      limit: 200,
-    });
-    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
+    messages = await readSlackThread(app.client, botToken, channelId, threadTs, Infinity);
   } catch (err) {
     logger.debug('Catch-up: assistant thread not accessible', { channelId, threadTs });
     return null;
@@ -819,11 +751,12 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
     m => !!m.user && !m.bot_id && (!m.subtype || m.subtype === 'file_share') && m.user !== botUserId,
   );
   if (!latestUserMsg?.ts) return null;
+  if (hasAcknowledgement(latestUserMsg, botUserId)) return null;
 
   const userTs = parseFloat(latestUserMsg.ts as string);
   if (userTs < parseFloat(oldest)) return null;  // before the gap — leave it
 
-  const latestBotMsg = latestByTs(messages, m => !!m.bot_id || m.user === botUserId);
+  const latestBotMsg = latestByTs(messages, m => m.user === botUserId);
   const botTs = latestBotMsg?.ts ? parseFloat(latestBotMsg.ts as string) : 0;
   if (userTs <= botTs) return null;  // already answered in the panel
 
@@ -831,17 +764,10 @@ async function findUnansweredInThread(opts: CheckOpts, threadTs: string): Promis
   return { message: latestUserMsg, postThreadTs: threadTs, source: 'assistant_panel', userTs };
 }
 
-// 2026-08-18 (S9) — MPIM/channel mention-gated catch-up. A group message is
-// only "hers to answer" if it @-mentioned her — the same bar that would have
-// made her active on it live (S3's "quiet unless mentioned"). Scans one
-// thread (a root ts from discoverThreadParents) for the LATEST message that
-// mentions the bot; if anything landed in the thread after that mention —
-// her own reply OR a person's — someone already handled it and she must not
-// pile on (S8: one answer, ever; generalized here because a colleague or the
-// owner resolving it in the room counts the same as her own reply would).
-// Media is excluded (`!m.subtype`): MPIM's owner-only image rule and the
-// channel file owner-presence gate live in the live handlers, not re-derived
-// here — a mentioned image is left for a live re-mention.
+// Channel candidates require their own bot mention. MPIM candidates reuse the
+// live addressee gate, including active-thread continuation. A later human
+// clarification is context, never evidence that Maelle answered. Room media
+// remains excluded here; its existing ingestion policies own that surface.
 async function findUnansweredMentionInThread(
   opts: CheckOpts, rootTs: string, source: 'mpim' | 'channel',
 ): Promise<UnansweredCandidate | null> {
@@ -849,27 +775,44 @@ async function findUnansweredMentionInThread(
 
   let messages: Array<Record<string, unknown>>;
   try {
-    const result = await app.client.conversations.replies({
-      token: botToken, channel: channelId, ts: rootTs, limit: 200,
-    });
-    messages = (result.messages ?? []) as Array<Record<string, unknown>>;
+    messages = await readSlackThread(app.client, botToken, channelId, rootTs, Infinity);
   } catch {
     return null;  // no access / no history — nothing to discover
   }
 
-  const latestMention = latestByTs(
+  const explicitMention = latestByTs(
     messages,
-    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId && mentionsBot(m.text, botUserId),
+    m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId
+      && mentionsBot(m.text, botUserId),
   );
-  if (!latestMention?.ts) return null;  // never mentioned in this thread — never hers (S3)
+  const latestBot = latestByTs(messages, m => m.user === botUserId);
+  // An unanswered explicit request remains authoritative even when followed
+  // by a clarification. Replay that request with the current thread context;
+  // do not reclassify its last fragment as though the request never existed.
+  const pendingMention = explicitMention && !hasAcknowledgement(explicitMention, botUserId)
+    && Number(explicitMention.ts) >= Number(oldest)
+    && Number(explicitMention.ts) > Number(latestBot?.ts ?? 0);
+  const latestMention = source === 'channel' || pendingMention ? explicitMention : latestByTs(
+    messages, m => !!m.user && !m.bot_id && !m.subtype && m.user !== botUserId,
+  );
+  if (!latestMention?.ts) return null;
+  if (hasAcknowledgement(latestMention, botUserId)) return null;
 
   const mentionTs = parseFloat(latestMention.ts as string);
   if (mentionTs < parseFloat(oldest)) return null;  // the mention predates the downtime gap
 
-  const answeredAfter = messages.some(m => typeof m.ts === 'string' && parseFloat(m.ts) > mentionTs);
-  if (answeredAfter) return null;  // bot OR a person already handled it — don't pile on
+  const answeredAfter = messages.some(m => m.user === botUserId && typeof m.ts === 'string' && parseFloat(m.ts) > mentionTs);
+  if (answeredAfter) return null;  // Maelle already answered
 
   return { message: latestMention, postThreadTs: rootTs, source, userTs: mentionTs };
+}
+
+// An ack reaction is a delivered answer too (postReply's ack replacement).
+// Read receipts ('eyes'/'thread') do not complete a turn. Other people's
+// reactions, messages and other bots cannot stand in for Maelle's response.
+function hasAcknowledgement(message: Record<string, unknown>, botUserId: string): boolean {
+  return Array.isArray(message.reactions) && message.reactions.some(r =>
+    r && ['+1', 'white_check_mark', 'x'].includes(r.name) && Array.isArray(r.users) && r.users.includes(botUserId));
 }
 
 // Newest message matching `pred`, by ts. Order-independent — works for both
@@ -944,7 +887,7 @@ async function replayMissedMessage(
   // instead of reimplementing transcription / image-ingestion / orchestrator /
   // reply here. Voice & video get transcribed, images downloaded, then the SAME
   // processMessage answers — exactly as a live message would. The replay fn
-  // posts the "↩ Catching up" caption + the reply itself.
+  // posts only the actual answer; a cosmetic caption must never mark work answered.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getInboundReplay } = require('../connectors/slack/inboundReplayRegistry') as
     typeof import('../connectors/slack/inboundReplayRegistry');
@@ -971,4 +914,3 @@ async function replayMissedMessage(
     logger.error('Catch-up: inbound replay failed', { channelId, err: String(err) });
   }
 }
-

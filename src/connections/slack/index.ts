@@ -27,6 +27,7 @@ import {
 import { formatForSlack } from './formatting';
 import { searchPeopleMemory } from '../../db';
 import logger from '../../utils/logger';
+import { readInternalSlackConversation } from './eligibility';
 
 function toSendResult(outcome: SendOutcome): SendResult {
   if (outcome.ok) return { ok: true, ref: outcome.channel_id, ts: outcome.ts, attachments_failed: outcome.attachments_failed };
@@ -258,6 +259,7 @@ If you already have an email for the person, you don't need this tool to book a 
 
     async reactToMessage(channelRef, messageTs, emojiName) {
       try {
+        if (!await readInternalSlackConversation(app.client, botToken, channelRef)) return;
         await app.client.reactions.add({
           token: botToken,
           channel: channelRef,
