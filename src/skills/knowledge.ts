@@ -207,15 +207,18 @@ Output ONLY the JSON.`;
 // ── Write side — ingest pipeline (v2.0.2) ───────────────────────────────────
 
 /** Safe-path write, mkdir -p as needed. Rejects traversal / absolute paths. */
-async function writeSection(profile: UserProfile, sectionId: string, content: string): Promise<void> {
+async function writeSection(profile: UserProfile, sectionId: string, content: string): Promise<boolean> {
   if (sectionId.includes('..') || sectionId.startsWith('/') || sectionId.includes('\\')) {
     throw new Error('invalid_section_id');
   }
   const root = kbRootForProfile(profile);
   const full = path.resolve(root, `${sectionId}.md`);
   if (!full.startsWith(root)) throw new Error('path_outside_kb');
+  // Never acknowledge a saved section that our own reader will refuse.
+  if (Buffer.byteLength(content, 'utf-8') > MAX_SECTION_BYTES) return false;
   await fs.mkdir(path.dirname(full), { recursive: true });
   await fs.writeFile(full, content, 'utf-8');
+  return true;
 }
 
 async function sectionExists(profile: UserProfile, sectionId: string): Promise<boolean> {
@@ -413,21 +416,27 @@ No JSON. No code fences around the output. Just markdown.`;
     return { kind: 'rejected', reason: 'empty_condensed' };
   }
 
-  if (action === 'merge' && existingMatch && await sectionExists(params.profile, existingMatch)) {
+  if (action === 'merge') {
+    if (!existingMatch) return { kind: 'rejected', reason: 'merge_target_missing' };
     const prior = await readSection(params.profile, existingMatch);
     if ('content' in prior) {
       const stamp = new Date().toISOString().slice(0, 10);
       const appended = `${prior.content.trimEnd()}\n\n---\n\n## Update (${stamp}) — ${title}\n\n${condensed}\n`;
-      await writeSection(params.profile, existingMatch, appended);
+      if (!(await writeSection(params.profile, existingMatch, appended))) {
+        return { kind: 'rejected', reason: 'section_too_large' };
+      }
       logger.info('KB ingest — merged into existing', { section: existingMatch, source: params.sourceHint });
       return { kind: 'merged', sectionId: existingMatch, title, summary, mergedInto: existingMatch };
     }
+    return { kind: 'rejected', reason: `merge_target_unreadable: ${prior.error}` };
   }
 
   if (action === 'sibling' && existingMatch) {
     const siblingId = await nextSiblingId(params.profile, proposedId);
     const body = `# ${title}\n\n${summary ? `_${summary}_\n\n` : ''}${condensed}\n`;
-    await writeSection(params.profile, siblingId, body);
+    if (!(await writeSection(params.profile, siblingId, body))) {
+      return { kind: 'rejected', reason: 'section_too_large' };
+    }
     logger.info('KB ingest — sibling created', { section: siblingId, near: existingMatch, source: params.sourceHint });
     return { kind: 'sibling', sectionId: siblingId, title, summary };
   }
@@ -436,7 +445,9 @@ No JSON. No code fences around the output. Just markdown.`;
     ? await nextSiblingId(params.profile, proposedId)
     : proposedId;
   const body = `# ${title}\n\n${summary ? `_${summary}_\n\n` : ''}${condensed}\n`;
-  await writeSection(params.profile, finalId, body);
+  if (!(await writeSection(params.profile, finalId, body))) {
+    return { kind: 'rejected', reason: 'section_too_large' };
+  }
   logger.info('KB ingest — created', { section: finalId, source: params.sourceHint });
   return { kind: 'created', sectionId: finalId, title, summary };
 }
@@ -615,7 +626,7 @@ action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`o
     }
   }
 
-  getSystemPromptSection(profile: UserProfile, scopes?: string[]): string {
+  getSystemPromptSection(profile: UserProfile, scopes?: string[], isOwner?: boolean): string {
     // v3.x (Block 3 — prose lazy-load). Only relevant on a knowledge-lookup
     // turn. Ship the catalog only when 'knowledge' scope is active (owner-path);
     // undefined/general → render. Rides the same detection as the KB tools, and
@@ -626,7 +637,11 @@ action='ingest' — save a webpage into the KB. Required: \`url\`. Optional: \`o
     // listing on every prompt build (small filesystem op, fresh as the owner edits).
     // We don't fetch CONTENT here — only IDs. Content fetched on demand via tool.
     let catalogLine: string;
-    try {
+    if (isOwner !== true) {
+      // This prompt hook has no authenticated sender-domain context. The tool
+      // checks that before returning even section IDs, which can be private.
+      catalogLine = '(call manage_knowledge with action=get to request the catalog; access is checked by the tool)';
+    } else try {
       // Synchronous-ish version for prompt build path. We can't `await` here in
       // a sync function, so use the simpler sync fs API for the catalog only.
       // eslint-disable-next-line @typescript-eslint/no-require-imports

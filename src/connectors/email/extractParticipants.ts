@@ -67,10 +67,10 @@
  * about POSITION in the body then minted a wrong timezone at owner
  * authority — sticky, because no later auto-tier correction can ever outrank
  * it. Per the shared charter, a model classification may choose a VALUE,
- * never the TIER that value is written at. This module now returns only the
- * value; the caller derives the tier itself from Graph's own `uniqueBody` —
- * a structural fact about which text is provably the current sender's own,
- * never a classifier's guess about where in the body it sat.
+ * never the TIER that value is written at. This module returns the value
+ * and a verbatim person-linked statement. The caller checks that statement
+ * against Graph's own `uniqueBody` and the admitted participant identities
+ * before writing owner tier; a position claim alone cannot authorize it.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -100,6 +100,11 @@ export interface EmailTimezoneHint {
    *  authority structurally (Graph's uniqueBody), never from a classification
    *  this module would otherwise have to guess. */
   statedTimezone: string;
+  /** Verbatim name/address identifying this person inside sourceQuote. */
+  personReference: string;
+  /** Exact, minimal statement linking that person to this timezone. The
+   * caller checks it against Graph's uniqueBody before owner-tier writes. */
+  sourceQuote: string;
 }
 
 export interface ForwardedParticipant {
@@ -166,8 +171,10 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
                 properties: {
                   email: { type: 'string', description: 'The participant email this stated zone applies to.' },
                   stated_timezone: { type: 'string', description: 'The zone/location exactly as written, e.g. "EST", "Eastern", "New York", "GMT+2".' },
+                  person_reference: { type: 'string', description: 'The exact name or email identifying this participant in source_quote. Empty if only a pronoun or an uncertain association is available. Never substitute the hinted email for the person actually named in the statement.' },
+                  source_quote: { type: 'string', description: 'Copy the shortest complete verbatim statement that links this person and the stated timezone. Include the person reference and zone, without stitching separate passages together. Empty when no clear person-linked statement exists.' },
                 },
-                required: ['email', 'stated_timezone'],
+                required: ['email', 'stated_timezone', 'person_reference', 'source_quote'],
               },
             },
           },
@@ -193,7 +200,10 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
           `participants array rather than guessing.\n\n` +
           `Separately, note any timezone or location actually written for a participant — the sender's own new ` +
           `words, or the original chain's own words. Never infer one from a phone number, company name, or general ` +
-          `knowledge; omit anyone nothing is written for.\n\n` +
+          `knowledge; omit anyone nothing is written for. Copy each person's exact reference and the complete ` +
+          `minimal statement connecting that person to the timezone. Do not move a timezone between people: ` +
+          `if Alice is in Tokyo and Bob is in London, Alice's Tokyo statement cannot support Bob. ` +
+          `If the association is unclear, retain the timezone hint but leave person_reference and source_quote empty.\n\n` +
           `Email body:\n${bounded}`,
       }],
     });
@@ -219,6 +229,8 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
           .map(h => ({
             email: typeof h.email === 'string' ? h.email.trim().toLowerCase() : '',
             statedTimezone: typeof h.stated_timezone === 'string' ? h.stated_timezone.trim() : '',
+            personReference: typeof h.person_reference === 'string' ? h.person_reference.trim() : '',
+            sourceQuote: typeof h.source_quote === 'string' ? h.source_quote.trim() : '',
           }))
           .filter(h => EMAIL_RE.test(h.email) && h.statedTimezone.length > 0)
       : [];

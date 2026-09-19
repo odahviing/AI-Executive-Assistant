@@ -7,8 +7,52 @@ import { scrubInternalLeakage } from '../../utils/textScrubber';
 import { getConnection } from '../../connections/registry';
 import { DateTime } from 'luxon';
 import type { Routine } from '../crons';
+import type { UserProfile } from '../../config/userProfile';
 import type { TaskDispatcher } from './types';
 import logger from '../../utils/logger';
+
+/** Boot-only: an interrupted run may already have performed external actions.
+ * Stop it durably before notification; never replay its tools or alter its cadence.
+ */
+export async function stopInterruptedRoutineTasks(profile: UserProfile): Promise<void> {
+  const db = getDb();
+  const ownerId = profile.user.slack_user_id;
+  const interrupted = db.transaction(() => {
+    const rows = db.prepare(`
+      SELECT id, title, routine_id FROM tasks
+      WHERE owner_user_id = ? AND type = 'routine' AND status = 'in_progress'
+    `).all(ownerId) as Array<{ id: string; title: string; routine_id: string | null }>;
+    db.prepare(`
+      UPDATE tasks SET status = 'failed', updated_at = datetime('now')
+      WHERE owner_user_id = ? AND type = 'routine' AND status = 'in_progress'
+    `).run(ownerId);
+    for (const task of rows) {
+      db.prepare(`
+        UPDATE routines SET last_result = ?, updated_at = datetime('now')
+        WHERE id = ? AND owner_user_id = ?
+      `).run('Interrupted by restart; completion unknown; not replayed', task.routine_id, ownerId);
+    }
+    return rows;
+  })();
+
+  for (const task of interrupted) {
+    try {
+      const conn = getConnection(ownerId, 'slack');
+      if (!conn) throw new Error('no Slack connection registered');
+      const sent = await conn.sendDirect(ownerId,
+        `I restarted while your "${task.title}" routine was running. I stopped that run and won't replay it, ` +
+        `because some actions may already have happened. I left its schedule unchanged.`);
+      if (!sent.ok) throw new Error(sent.detail ?? sent.reason);
+      logger.info('Interrupted routine stopped; owner notified', { taskId: task.id, ownerId });
+    } catch (err) {
+      // The run remains terminal even if notification is unavailable/unknown.
+      // Do not replay either its work or an uncertain send on another startup.
+      logger.error('Interrupted routine stopped; owner notification unconfirmed', {
+        taskId: task.id, ownerId, err: String(err),
+      });
+    }
+  }
+}
 
 /**
  * Leading glyph for a routine's owner-facing post, so scheduled/automatic
@@ -102,6 +146,17 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
     return;
   }
 
+  // No delivery path means no safe run: the orchestrator may perform writes,
+  // and rerunning those later merely to recover a missing report can duplicate them.
+  if (!conn) {
+    getDb().prepare(
+      `UPDATE routines SET last_result = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run('Failed: no Slack connection registered', routine.id);
+    updateTask(task.id, { status: 'failed' });
+    logger.error('Routine not run — no Slack connection registered', { routineId: routine.id, taskId: task.id });
+    return;
+  }
+
   // System briefing cron is a special prompt sentinel
   if (routine.is_system && routine.prompt === '__system_briefing__') {
     try {
@@ -140,11 +195,9 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
   try {
     // Piece 2 — the placeholder is an outbound SEND, so it goes through the
     // Connection like every other send here. SendResult already carries the
-    // message ref (`ts`), which is all the threading below needs. No
-    // connection registered → no placeholder, and the synthetic-threadTs
-    // fallback right below carries the run (better than a "Working…" nobody
-    // can ever replace).
-    const placeholder = await conn?.postToChannel(routine.owner_channel, 'Working…');
+    // message ref (`ts`), which is all the threading below needs.
+    // A failed placeholder still permits the fresh final-post fallback.
+    const placeholder = await conn.postToChannel(routine.owner_channel, 'Working…');
     if (placeholder?.ok && placeholder.ts) {
       placeholderTs = placeholder.ts;
     } else {
@@ -248,6 +301,7 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
       // record below has to be keyed on the thread he'll reply into, not on
       // the ts we happened to run the orchestrator under.
       let deliveredTs: string | undefined;
+      let delivered = false;
       if (placeholderTs) {
         // Swap the placeholder for the final content. Same message id, no new
         // notification noise. Slack auto-clears the assistant-panel status
@@ -258,29 +312,32 @@ export const dispatchRoutine: TaskDispatcher = async (app, task, profile, ctx) =
         // `updateMessage` is optional on the interface: a transport without an
         // edit primitive returns undefined here and degrades exactly like a
         // failed edit — the fresh post below carries the result either way.
-        const upd = await conn?.updateMessage?.(routine.owner_channel, placeholderTs, decorated);
+        const upd = await conn.updateMessage?.(routine.owner_channel, placeholderTs, decorated);
         if (!upd || !upd.ok) {
           // No edit verb, or the edit failed — last-resort post a new top-level
           // message so the result isn't lost.
           logger.warn('dispatchRoutine — placeholder update failed, posting fresh message', {
             routineId: routine.id, detail: upd ? upd.detail : 'no_update_verb',
           });
-          const fresh = conn ? await conn.postToChannel(routine.owner_channel, decorated) : undefined;
-          if (fresh && fresh.ok) deliveredTs = fresh.ts;
+          const fresh = await conn.postToChannel(routine.owner_channel, decorated);
+          if (fresh.ok) { delivered = true; deliveredTs = fresh.ts; }
         } else {
           // Edit landed — the message still lives at the placeholder's ts.
           deliveredTs = upd.ts ?? placeholderTs;
+          delivered = true;
         }
-      } else if (conn) {
+      } else {
         // Placeholder path failed earlier — fall back to original behaviour.
         // v2.5.1 — no title prepend. The bot-style "*Routine title*\n..."
         // header read as machine framing. Routines that legitimately want
         // a header have Sonnet write one in the body. Most don't.
         const fresh = await conn.postToChannel(routine.owner_channel, decorated);
-        if (fresh.ok) deliveredTs = fresh.ts;
-      } else {
-        logger.warn('dispatchRoutine — no Slack connection registered, routine output dropped', { routineId: routine.id });
+        if (fresh.ok) { delivered = true; deliveredTs = fresh.ts; }
       }
+
+      // SendResult.ok owns delivery; a resolved promise is not confirmation,
+      // and a successful transport is allowed to omit a thread reference.
+      if (!delivered) throw new Error('Routine output delivery failed');
 
       // A routine ASKS things ("which category?", "want me to move it?"), and the
       // owner answers by replying in this thread. Pre-fix nothing wrote that

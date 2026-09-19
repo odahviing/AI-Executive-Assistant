@@ -6,6 +6,7 @@ import FormDataNode from 'form-data';
 import https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 const execFileAsync = promisify(execFile);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffmpegPath: string = require('ffmpeg-static');
@@ -53,7 +54,7 @@ export async function transcribeSlackAudio(
   };
   const baseType = (mimetype ?? '').split(';')[0].trim().toLowerCase();
   const ext = extMap[baseType] ?? 'webm';  // default webm — Slack's native voice format
-  const tmpPath = path.join(os.tmpdir(), `maelle_audio_${Date.now()}.${ext}`);
+  const tmpPath = path.join(os.tmpdir(), `maelle_audio_${randomUUID()}.${ext}`);
 
   await downloadFile(fileUrl, tmpPath, botToken);
 
@@ -62,7 +63,8 @@ export async function transcribeSlackAudio(
 
   // Convert to WAV first — Slack records in AAC-ELD which Whisper rejects even
   // though the mp4/m4a container is listed as supported. WAV always works.
-  const wavPath = tmpPath.replace(/\.[^.]+$/, '.wav');
+  // Keep the conversion output distinct even when the source is already WAV.
+  const wavPath = `${tmpPath}.wav`;
   let converted = false;
   try {
     await execFileAsync(ffmpegPath, [
@@ -130,7 +132,8 @@ export async function transcribeSlackAudio(
     return transcription.trim();
   } finally {
     try { fs.unlinkSync(tmpPath); } catch (_) {}
-    if (converted) try { fs.unlinkSync(wavPath); } catch (_) {}
+    // ffmpeg may leave a partial output even when conversion failed.
+    try { fs.unlinkSync(wavPath); } catch (_) {}
   }
 }
 
@@ -169,23 +172,15 @@ export async function sendAudioMessage(params: {
   filename?: string;
 }): Promise<void> {
   const filename = params.filename || 'maelle_response.mp3';
-  const tmpPath = path.join(os.tmpdir(), filename);
-
-  fs.writeFileSync(tmpPath, params.audioBuffer);
-
-  try {
-    await params.app.client.files.uploadV2({
-      token: params.botToken,
-      channel_id: params.channelId,
-      thread_ts: params.threadTs,
-      file: fs.createReadStream(tmpPath),
-      filename,
-      title: 'Voice message',
-    });
-    logger.info('Audio message sent', { channelId: params.channelId });
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch (_) {}
-  }
+  await params.app.client.files.uploadV2({
+    token: params.botToken,
+    channel_id: params.channelId,
+    thread_ts: params.threadTs,
+    file: params.audioBuffer,
+    filename,
+    title: 'Voice message',
+  });
+  logger.info('Audio message sent', { channelId: params.channelId });
 }
 
 // ── Response type detection ───────────────────────────────────────────────────

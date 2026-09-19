@@ -36,7 +36,7 @@ export interface VenueCandidate {
    * "HH:MM-HH:MM" ranges (overnight ranges allowed, e.g. "22:00-02:00"
    * means open from 22:00 until 02:00 the next day). Day names match
    * Luxon's `EEEE` format: Monday / Tuesday / ... / Sunday.
-   * Absent days mean closed.
+   * Absent days mean unknown; an explicit empty array means closed.
    */
   opening_hours_by_day?: Partial<Record<Weekday, string[]>>;
   notes?: string;                // e.g. "kosher Italian at the gas station"
@@ -50,8 +50,8 @@ export type HoursStatus = 'open' | 'closed' | 'unknown';
  * Deterministic "is this venue open at this time?" check. Returns:
  *   'open'    — meeting_time falls inside at least one of the day's ranges
  *   'closed'  — meeting_time is outside every range for that day (or the
- *               day has no ranges at all in the parsed hours)
- *   'unknown' — opening_hours_by_day not provided, or meeting_time invalid
+ *               day has an explicit empty array in the parsed hours)
+ *   'unknown' — hours for that day not provided, or meeting_time invalid
  *
  * Handles overnight ranges: "22:00-02:00" on Friday means a meeting at
  * 23:30 Friday is OPEN; a meeting at 01:00 Saturday is also OPEN under the
@@ -79,8 +79,8 @@ export function evaluateVenueHours(params: {
   const prevDay = dt.minus({ days: 1 }).toFormat('EEEE') as Weekday;
   const prevRanges = (params.openingHoursByDay[prevDay] ?? []).filter(isOvernight);
   if (insideAnyOvernightRange(minutes, prevRanges)) return 'open';
-  // No ranges for today AND no overnight carryover → closed.
-  return 'closed';
+  // A partial weekly schedule is not evidence that an omitted day is closed.
+  return params.openingHoursByDay[day] === undefined ? 'unknown' : 'closed';
 }
 
 function parseHHMM(s: string): number | null {

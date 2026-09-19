@@ -29,6 +29,10 @@ function harness(options={}){
   'src/voice.ts':{},'src/vision.ts':{},'src/utils/genderDetect.ts':{detectAndSaveGender:async()=>{}},
   'src/connectors/slack/app/helpers.ts':{is1on1DM:c=>c.startsWith('D'),buildGroupDmPreamble:()=>'',failureReply:()=> 'Something failed'},'src/connectors/slack/app/fileIngestion.ts':{},
   'src/tasks/runner.ts':{},'src/tasks/routineMaterializer.ts':{},'src/tasks/crons.ts':{},'src/tasks/briefs.ts':{},'src/core/briefIntent.ts':{isBriefRequest:async()=>false},'src/connectors/slack/socketWatermark.ts':{stampSocketAlive:()=>{}},
+  // Recovery tests have no interrupted routine work. The boot-only helper
+  // resolves without a send in that state; startup behavior has its own actual
+  // module/SQLite suite (test-routine-owner-rulings.cjs). Keep imports explicit.
+  'src/tasks/dispatchers/routine.ts':{stopInterruptedRoutineTasks:async()=>{}},
   'src/connectors/slack/coordinator.ts':{handleOutreachReply:async()=>({handled:false}),closeOutreachReplyIfResolvedThisTurn:async()=>{}},
   'src/connectors/slack/recentOutboundContext.ts':{closeFollowupForMessageTs:()=>null,findRecentOutboundContext:()=>null},
   'src/db/requests.ts':{getAwaitingOwnerRequests:()=>[{id:'req_fixture',kind:'approval',subkind:'book',subject:'Fixture meeting',requester_slack_id:'UOWNER',terminal_dm_msg_ts:'100.000001',details:{on_approve:{tool:'fixture'}}}]},

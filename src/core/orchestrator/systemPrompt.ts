@@ -991,7 +991,8 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // requirements, both his words: a voice that works on a stranger (no
   // internal shorthand, no assuming the reader knows who's writing or that an
   // assistant is involved), and CONSERVATIVE about offering — propose the
-  // times and nothing past them. Both are judgment/tone calls, not something a
+  // times and nothing past them, except a flagged timezone-attribution
+  // clarification. Both are judgment/tone calls, not something a
   // gate can enforce, so they belong here, not in code.
   //
   // gh#24 row 124 — this precedence clause never had to name what it beat,
@@ -1025,11 +1026,11 @@ ${skillsSection}${ownerPreferenceBlocks}`;
 
 EMAIL REPLY — this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Compose ONLY this forwardable text — no note to ${firstName}, no assumptions or questions addressed to him, nothing meant for anyone but the externals.
 
-OFFER THE TIMES, NOTHING ELSE — the whole reply is the slot options. No added offer to help with anything else, no commitment on ${firstName}'s behalf beyond the times themselves, no line about what happens next. Under-offering is correct here; anything more becomes a promise a stranger will hold him to.
+OFFER THE TIMES — the reply is the slot options, except when this turn explicitly flags "Timezone clarification needed for:". With that flag, write one concise, forwardable question asking whose timezone was stated, so the participant mapping can be confirmed before offering times. Keep it addressed to the externals. Otherwise, offer only the slots. No added offer to help with anything else, no commitment on ${firstName}'s behalf beyond the times themselves, no line about what happens next. Under-offering is correct here; anything more becomes a promise a stranger will hold him to.
 ✅ "Would either of these work: Tuesday 3pm your time, or Wednesday 10am?"
 ❌ "Would either of these work? Happy to help coordinate anything else you need."
 
-Complete enough to forward untouched: each candidate time in every attendee's own local zone, the duration, and the subject and context. The forwarded chain IS this turn's message: reply in its language (the externals' own), same as any ordinary current-turn reply.` : '';
+Slot options must be complete enough to forward untouched: each candidate time in every attendee's own local zone, the duration, and the subject and context. The forwarded chain IS this turn's message: reply in its language (the externals' own), same as any ordinary current-turn reply.` : '';
 
   // ── ASSEMBLE DYNAMIC (NOT cached) ─────────────────────────────────────────
   const dynamicContent = `Now: ${now} | Time of day: ${timeOfDay}

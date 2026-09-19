@@ -510,7 +510,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             return { ok: false, error: outcome.reason, detail: hint };
           }
           updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
-          if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
+          if (tickThreadTs && !outcome.attachments_failed) reactActivityComplete(userId, tickThreadTs, jobId);
           // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
           // fires only after the post is confirmed sent.
           logActivity({
@@ -532,7 +532,10 @@ Only send messages the user explicitly asks for — never reach out to people on
             posted_to_channel: args.channel_name ?? args.channel_id,
             colleague_mentioned: args.colleague_name,
             jobId,
-            _must_reply_with: `One short sentence acknowledging the post, e.g. "Posted to #${args.channel_name ?? 'the channel'} with ${args.colleague_name} tagged."`,
+            attachments_failed: outcome.attachments_failed ?? 0,
+            _must_reply_with: outcome.attachments_failed
+              ? `The text was posted, but ${outcome.attachments_failed} attachment(s) failed. Report this partial delivery; do not claim everything was sent or repeat the text.`
+              : `One short sentence acknowledging the post, e.g. "Posted to #${args.channel_name ?? 'the channel'} with ${args.colleague_name} tagged."`,
           };
         }
 
@@ -661,7 +664,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             }
           }
         }
-        if (tickThreadTs) reactActivityComplete(userId, tickThreadTs, jobId);
+        if (tickThreadTs && !outcome.attachments_failed) reactActivityComplete(userId, tickThreadTs, jobId);
         // shadow-dm-gap (2026-08-12) — mirror the OUTBOUND question to the
         // owner's shadow feed. Pre-fix, only a colleague's REPLY got mirrored
         // (postReply.ts Step 4.6) — the question that prompted it never did,
@@ -712,7 +715,10 @@ Only send messages the user explicitly asks for — never reach out to people on
           jobId,
           colleague_name: args.colleague_name,
           await_reply: !!args.await_reply,
-          _must_reply_with: args.await_reply
+          attachments_failed: outcome.attachments_failed ?? 0,
+          _must_reply_with: outcome.attachments_failed
+            ? `The text reached ${args.colleague_name}, but ${outcome.attachments_failed} attachment(s) failed. Report this partial delivery; do not claim everything was sent or repeat the text.`
+            : args.await_reply
             ? `One short sentence confirming the send and that you will report back, e.g. "Sent — I\'ll let you know when ${args.colleague_name} replies."`
             : `One short sentence confirming the send, e.g. "Sent to ${args.colleague_name}."`,
         };

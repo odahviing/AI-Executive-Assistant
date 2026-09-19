@@ -1,3 +1,30 @@
+## 4.9.12 - Reliable research, email, reminders and media handling
+
+Repairs 32 correction groups across internet search, email, reminders/routines, voice/image, knowledge and venues. All groups have independent verification; two additional component refs support those groups rather than adding to the count. No extra model call or runtime tier change was introduced.
+
+### Fixed
+
+- Internet search fallback has bounded fetching and preserves requested recency. Extraction no longer reports success when it has no readable content.
+- Email timezone hints stay within admitted participants and writes remain bound to the intended person. Delta polling merges repeated entities and publishes work only after its checkpoint persists. Uncertain sends remain unconfirmed instead of becoming false success or automatic duplicate sends.
+- Reminders preserve explicit time intent and reject unresolved daylight-saving ambiguity. Scheduled outreach distinguishes definitive failure, unknown delivery and partial attachment delivery.
+- Routines validate schedules, handle daylight-saving clocks, bound catch-up and honor refreshed briefing cadence after restart. Delivery must be confirmed before completion. Interrupted runs stop without replay, and missing monthly calendar dates are skipped, following the owner's decisions.
+- Voice processing isolates concurrent temporary files and upload buffers, cleans up partial conversion output, surfaces transcription failures and accepts valid single-character transcripts. Image safety verdicts reject malformed structured output.
+- Knowledge writes fit the readable limit, unreadable merge targets fail without creating a second record, and private catalogs are authorized before prompt inclusion.
+- Venue searches preserve saved avoid rankings and named venue intent, reconcile identity across address representations, and treat missing weekday hours as unknown.
+
+### Verification and limits
+
+- Release checkpoint: 120 suite/timezone executions, 3,524 passing checks, zero failures or skips, and typecheck passed. Independent accumulated-diff review and all 30 Golden paths passed, with moved anchors resolved against current code.
+- Four older test fixtures were reconciled with new dependencies and approved delivery semantics. Six affected executions were independently repeated; unchanged passing evidence and the original failed checkpoint were preserved. Runtime behavior was not changed by these fixture repairs.
+- Deterministic fixtures and prompt captures do not certify live provider behavior or model obedience. Full email context remains available under the owner's ruling; external-reader reply minimization remains model-dependent.
+- Uploaded-document permanent saving, Drive ingestion, Google Places integration, general multi-person tasks and broader memory/durable-Slack designs remain outside this release. Related roadmap issues remain open.
+
+### Framework
+
+- Four lane charters record the approved research, routine, reminder and email decisions. Workshop guidance and canonical architecture memory now emphasize authoritative code paths, dependent regression fixtures and attempted versus confirmed outcomes, while removing stale duplicated guidance.
+
+---
+
 ## 4.9.11 - Reliable Slack context, preferences and news history
 
 Repairs memory preference handling, Slack conversation boundaries and news delivery tracking. This release contains 21 correction groups reviewed across the combined code, with no additional model calls or memory-design migration.

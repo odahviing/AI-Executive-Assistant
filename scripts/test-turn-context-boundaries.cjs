@@ -123,6 +123,22 @@ test('owner DM gets freshly scoped private memory through real turn builder', as
   assert.equal(f.state.toolCalls.filter(args => args.length === 5).length, 2);
   assert.ok(f.state.toolCalls.filter(args => args.length === 5).every(args => args[1] === 'owner' && args[4] === 'owner'));
 });
+
+test('image blocks and their caption reach the current core turn together', async t => {
+  const f = fixture(t);
+  const images = [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'fixture-pixels' } }];
+  const r = await f.run({ userMessage: 'מה כתוב כאן?', images });
+  const current = r.messages.at(-1);
+  assert.equal(current.role, 'user');
+  assert.equal(current.content[0].source.data, 'fixture-pixels');
+  assert.equal(current.content[1].text, 'מה כתוב כאן?');
+});
+
+test('voice transcript remains source-language text in the core turn', async t => {
+  const f = fixture(t);
+  const r = await f.run({ userMessage: 'Проверь мой календарь на завтра.' });
+  assert.equal(r.messages.at(-1).content, 'Проверь мой календарь на завтра.');
+});
 for (const [name, input] of [
   ['owner MPIM', { isMpim: true, isOwnerInGroup: true, userId: 'UOWNER', authority: 'owner' }],
   ['owner channel', { isChannel: true, userId: 'UOWNER', authority: 'owner' }],

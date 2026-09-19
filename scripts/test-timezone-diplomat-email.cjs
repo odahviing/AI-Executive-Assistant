@@ -31,10 +31,11 @@ function harness(options = {}) {
   sqlite.prepare(`INSERT INTO people_memory(${Object.keys(row).join(',')}) VALUES(${Object.keys(row).map(k=>'@'+k).join(',')})`).run(row);
   const profile = {user:{name:'Owner',slack_user_id:'UOWNER',email:'owner@example.com',timezone:options.ownerTimezone || 'Asia/Jerusalem'},assistant:{name:'Maelle',email:'assistant@example.com'},channels:{email:{enabled:true,mailbox:'assistant@example.com',owner_aliases:['alias@example.com']}}};
   const message = {id:'mail_fixture',conversationId:'chain_fixture',from:options.sender || profile.user.email,replyTo:[],subject:'fixture',bodyContentType:'text',body:'Forwarded fixture',uniqueBodyContentType:'text',uniqueBody:options.uniqueBody || ''};
-  const counts = {extract:0,orchestrator:0,gate:0}, sends=[],notifications=[],history=[],logs=[],modules=new Map();
+  const counts = {extract:0,orchestrator:0,gate:0}, sends=[],notifications=[],history=[],logs=[],inputs=[],modules=new Map();
   let handler;
   const noop=()=>{};
-  const hints = options.hints ?? [{email:row.email,statedTimezone:options.statedTimezone || 'Tokyo'}];
+  const participants = options.participants ?? [{email:row.email,name:row.name}];
+  const hints = options.hints ?? [{email:row.email,statedTimezone:options.statedTimezone || 'Tokyo',personReference:row.name,sourceQuote:options.uniqueBody || ''}];
   const connection = {sendDirect:async (...args)=>{sends.push(args); return options.sendFailure ? {ok:false,reason:'fixture failure'} : {ok:true};}};
   const mocks = {
     'src/config.ts':{config:{}},
@@ -48,8 +49,8 @@ function harness(options = {}) {
     'src/connections/registry.ts':{registerConnection:noop,getConnection:()=>options.noSlack ? undefined : {sendDirect:async(...a)=>{notifications.push(a);return {ok:true};}}},
     'src/utils/offeredSlotsStash.ts':{EMAIL_KEY_PREFIX:'email:'},
     'src/memory/recordBooking.ts':{isNonHumanAttendee:()=>false},
-    'src/connectors/email/extractParticipants.ts':{extractForwardedParticipants:async()=>{counts.extract++;if(options.extractFailure)throw Error('fixture extraction failure');return {participants:[{email:row.email,name:null}],timezoneHints:hints};}},
-    'src/core/orchestrator.ts':{runOrchestrator:async input=>{counts.orchestrator++;assert.equal(input.channel,'email');assert.deepEqual(Array.from(input.extractedAttendeeEmails),[row.email]);return {reply:'Fixture reply'};}},
+    'src/connectors/email/extractParticipants.ts':{extractForwardedParticipants:async()=>{counts.extract++;if(options.extractFailure)throw Error('fixture extraction failure');return {participants,timezoneHints:hints};}},
+    'src/core/orchestrator.ts':{runOrchestrator:async input=>{counts.orchestrator++;inputs.push(input);assert.equal(input.channel,'email');assert.deepEqual(Array.from(input.extractedAttendeeEmails),participants.map(p=>p.email));return {reply:'Fixture reply'};}},
     'src/utils/guards/runOutputGates.ts':{runOutputGates:async(reply,args)=>{counts.gate++;assert.equal(args.transport,'email');return reply;}},
   };
   function load(rel) {
@@ -71,7 +72,7 @@ function harness(options = {}) {
   const person=()=>sqlite.prepare('SELECT * FROM people_memory WHERE person_id=?').get(row.person_id);
   const travel=()=>JSON.parse(person().currently_traveling || 'null');
   const onDay=day=>{const a=load('src/utils/attendeeAvailability.ts');const entries=a.loadAttendeeAvailabilityForEmails([row.email],profile.user.email,profile.user.timezone);assert.equal(entries.length,1);return a.attendeeTzForDay(entries[0],day);};
-  return {run:()=>handler(profile,message),person,travel,onDay,counts,sends,notifications,history,logs,load,sqlite,setNow:instant=>{now=Date.parse(instant);}};
+  return {run:()=>handler(profile,message),person,travel,onDay,counts,sends,notifications,history,logs,inputs,load,sqlite,setNow:instant=>{now=Date.parse(instant);}};
 }
 
 test('western destination final day survives UTC midnight without hint overwrite',async()=>{
@@ -103,7 +104,7 @@ test('expired trip can be replaced on ordinary matching-calendar day',async()=>{
  const h=harness({person:{currently_traveling:JSON.stringify({location:'Boston',from:'2026-09-01',until:'2026-09-10'})}});await h.run();assert.deepEqual(h.travel(),{location:'Tokyo',from:'2026-09-11',until:'2026-09-25',source:'auto'});
 });
 test('owner unique timezone correction remains permanent owner tier',async()=>{
- const h=harness({uniqueBody:'Tokyo'});await h.run();assert.equal(h.person().timezone,'Asia/Tokyo');assert.equal(h.person().timezone_set_by,'owner');assert.equal(h.travel(),null);
+ const h=harness({uniqueBody:'External is in Tokyo'});await h.run();assert.equal(h.person().timezone,'Asia/Tokyo');assert.equal(h.person().timezone_set_by,'owner');assert.equal(h.travel(),null);
 });
 test('empty permanent base receives first stated zone at auto tier',async()=>{
  const h=harness({person:{timezone:null,timezone_set_by:null}});await h.run();assert.equal(h.person().timezone,'Asia/Tokyo');assert.equal(h.person().timezone_set_by,'auto');assert.equal(h.travel(),null);
@@ -131,3 +132,45 @@ test('email protected known source ranks retain future trip windows',async()=>{f
 test('email expired eastern destination allows new auto trip before UTC midnight',async()=>{const h=harness({now:'2026-09-14T22:00Z',ownerTimezone:'America/Los_Angeles',person:{currently_traveling:JSON.stringify({location:'Tokyo',from:'2026-09-01',until:'2026-09-14',source:'owner'})},statedTimezone:'Boston'});await h.run();assert.deepEqual(h.travel(),{location:'Boston',from:'2026-09-14',until:'2026-09-28',source:'auto'});});
 test('email disposable legacy travel is replaced without confirmation or extra message',async()=>{for(const legacy of ['{legacy',JSON.stringify({location:'Boston',from:'2026-09-20',until:'2026-09-25'})]){const h=harness({person:{currently_traveling:legacy}});await h.run();assert.deepEqual(h.travel(),{location:'Tokyo',from:'2026-09-11',until:'2026-09-25',source:'auto'});assert.ok(h.logs.some(([message,data])=>message.includes('resolved as a bounded travel override')&&data.outcome==='applied'));assert.equal(h.notifications.length,0);assert.equal(h.sends.length,1);assert.equal(h.sends[0][1],'Fixture reply');}});
 test('email missing person at write does not claim saved trip or open a question',async()=>{const h=harness({removeBeforeTravelWrite:true});await h.run();assert.equal(h.person(),undefined);assert.ok(h.logs.some(([message,data])=>message.includes('stated timezone hint not saved')&&data.outcome==='no_person'));assert.equal(h.logs.some(([message])=>message.includes('resolved as a bounded travel override')),false);assert.equal(h.notifications.length,0);assert.equal(h.sends[0][1],'Fixture reply');});
+
+test('D6 quoted-only hint cannot create a person with permanent owner authority',async()=>{
+ const h=harness({uniqueBody:'Tokyo',hints:[{email:'quoted@other.example',statedTimezone:'Tokyo'}]});
+ await h.run();assert.equal(h.sqlite.prepare('SELECT * FROM people_memory WHERE email=?').get('quoted@other.example'),undefined);assert.equal(h.sends.length,1);assert.equal(h.notifications.length,0);
+});
+test('D6 quoted-only hint cannot replace an existing persons owner timezone',async()=>{
+ const h=harness({uniqueBody:'Tokyo',hints:[{email:'quoted@other.example',statedTimezone:'Tokyo'}]});
+ h.sqlite.prepare('INSERT INTO people_memory(person_id,email,name,timezone,timezone_set_by,kind,profile_json) VALUES(?,?,?,?,?,?,?)').run('quoted','quoted@other.example','Quoted','Europe/London','person','external','{}');
+ await h.run();assert.equal(h.sqlite.prepare('SELECT timezone FROM people_memory WHERE person_id=?').get('quoted').timezone,'Europe/London');assert.equal(h.sends.length,1);
+});
+test('D6 quoted-only auto hint cannot install travel on an existing unrelated person',async()=>{
+ const h=harness({hints:[{email:'quoted@other.example',statedTimezone:'Tokyo'}]});
+ h.sqlite.prepare('INSERT INTO people_memory(person_id,email,name,timezone,timezone_set_by,kind,profile_json) VALUES(?,?,?,?,?,?,?)').run('quoted','quoted@other.example','Quoted','Europe/London','person','external','{}');
+ await h.run();assert.equal(h.sqlite.prepare('SELECT currently_traveling FROM people_memory WHERE person_id=?').get('quoted').currently_traveling,null);assert.equal(h.sends.length,1);
+});
+
+const ALICE={email:'alice@other.example',name:'Alice'},BOB={email:'bob@other.example',name:'Bob'};
+function attribution(options={}){return harness({person:{email:BOB.email,name:BOB.name},participants:[ALICE,BOB],uniqueBody:'Alice is in Tokyo',hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Alice',sourceQuote:'Alice is in Tokyo'}],...options});}
+test('Alice owner statement cannot write permanent Tokyo onto Bob or fall through to travel',async()=>{
+ const h=attribution();await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);assert.match(h.inputs[0].userMessage,/Timezone clarification needed/);assert.equal(h.notifications.length,0);assert.equal(h.sends.length,1);
+});
+test('invented person quote cannot authorize an owner timezone write',async()=>{
+ const h=attribution({hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Bob',sourceQuote:'Bob is in Tokyo'}]});await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);
+});
+test('multi-person source quote refuses ambiguous owner attribution even when selected name appears',async()=>{
+ const h=attribution({uniqueBody:'Alice is in Tokyo; Bob is in London',hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Bob',sourceQuote:'Alice is in Tokyo; Bob is in London'}]});await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);
+});
+test('owner zone without a bound person flags uncertainty instead of guessing',async()=>{
+ const h=harness({uniqueBody:'Tokyo'});await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);assert.match(h.inputs[0].userMessage,/Timezone clarification needed/);assert.equal(h.notifications.length,0);
+});
+test('explicit Bob statement persists Tokyo at owner tier while Alice remains separate',async()=>{
+ const h=attribution({uniqueBody:'Alice is in London; Bob is in Tokyo',hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Bob',sourceQuote:'Bob is in Tokyo'}]});await h.run();assert.equal(h.person().timezone,'Asia/Tokyo');assert.equal(h.person().timezone_set_by,'owner');assert.doesNotMatch(h.inputs[0].userMessage,/Timezone clarification needed/);
+});
+test('multilingual exact person references bind owner statements without English parsing',async()=>{
+ for(const name of ['אליס','Алиса','愛麗絲']){const h=harness({person:{name},uniqueBody:`${name}: Tokyo`});await h.run();assert.equal(h.person().timezone,'Asia/Tokyo');assert.equal(h.person().timezone_set_by,'owner');}
+});
+test('shared first name cannot identify one of two participants for an owner write',async()=>{
+ const h=attribution({person:{email:BOB.email,name:'Alex Roe'},participants:[{...ALICE,name:'Alex Doe'},{...BOB,name:'Alex Roe'}],uniqueBody:'Alex is in Tokyo',hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Alex',sourceQuote:'Alex is in Tokyo'}]});await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);
+});
+test('name substring inside another name cannot bind owner timezone',async()=>{
+ const h=attribution({uniqueBody:'Bobby is in Tokyo',hints:[{email:BOB.email,statedTimezone:'Tokyo',personReference:'Bob',sourceQuote:'Bobby is in Tokyo'}]});await h.run();assert.equal(h.person().timezone,'Europe/London');assert.equal(h.travel(),null);
+});

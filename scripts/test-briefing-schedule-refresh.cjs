@@ -10,6 +10,7 @@ const { test, before, after } = require('node:test');
 const root = path.resolve(__dirname, '..');
 
 function loadCrons(existing) {
+  existing = { schedule_type: 'weekdays', schedule_day: null, ...existing };
   const revision = process.env.CRONS_SOURCE_REVISION;
   const source = revision
     ? cp.execFileSync('git', ['show', `${revision}:src/tasks/crons.ts`], { cwd: root, encoding: 'utf8' })

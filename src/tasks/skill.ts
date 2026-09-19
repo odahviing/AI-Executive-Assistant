@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Skill, SkillContext } from '../skills/types';
 import type { UserProfile } from '../config/userProfile';
 import { DateTime } from 'luxon';
+import { resolveStatedInstant, StatedTimeClarificationError } from '../utils/weTimeResolver';
 import { sendMorningBriefing } from './briefs';
 import {
   createRequest,
@@ -34,7 +35,7 @@ import {
   type MaelleEvent,
 } from '../db';
 import type { RequestKind, RequestRow, ApprovalSubkind as ApprovalSubkindCanonical } from '../core/requests/types';
-import { parseDetails, toTimerInstant, FREEFORM_OWNER_ASK_SUBKIND } from '../core/requests/types';
+import { parseDetails, toTimerInstant, reminderWorkTimeAtOrAfter, FREEFORM_OWNER_ASK_SUBKIND } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -43,10 +44,11 @@ import { logLlmUsage } from '../utils/usageLog';
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
 /** Exact task occurrence identity; amendments replace the same key atomically. */
 function taskOccurrenceKey(owner: string, requester: string | null, kind: string, title: string,
-  due: string, target: string | null, description: string | null, message: string | null): string {
+  due: string, target: string | null, description: string | null, message: string | null, explicitTime = true): string {
   return `task:${createHash('sha256').update(JSON.stringify([
     buildIdempotencyKey({ ownerUserId: owner, requesterSlackId: requester, kind, subject: title }),
     due, target ?? owner, description ?? '', message ?? '',
+    ...(explicitTime ? [] : [false]),
   ])).digest('hex')}`;
 }
 
@@ -1650,6 +1652,7 @@ Task types:
             title: { type: 'string', description: 'Plain English title of what Maelle is doing.' },
             description: { type: 'string', description: 'More detail if needed' },
             due_at: { type: 'string', description: 'ISO 8601 datetime when to execute this task.' },
+            explicit_time: { type: 'boolean', description: 'Required for reminder: true when the user specified a clock time or relative duration (honor that instant); false for a vague day/date such as "tomorrow" (use recipient work hours). Omit for other task types.' },
             target_slack_id: { type: 'string', description: 'If reminding someone else, their Slack user ID' },
             target_name: { type: 'string', description: 'Display name of the target person' },
             message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
@@ -1677,6 +1680,7 @@ For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_ta
             title: { type: 'string', description: 'edit: optional.' },
             description: { type: 'string', description: 'edit: optional.' },
             due_at: { type: 'string', description: 'edit: optional ISO 8601 datetime.' },
+            explicit_time: { type: 'boolean', description: 'Required when editing a reminder due_at: true for a user-specified clock time or relative duration (honor that instant); false for a vague day/date such as "tomorrow" (use recipient work hours). Supply together with due_at; other edits retain the existing intent. Omit for other task types.' },
             type: { type: 'string', enum: ['reminder', 'follow_up', 'research'], description: 'edit: optional task type.' },
             message: { type: 'string', description: 'edit: optional message body.' },
           },
@@ -1816,13 +1820,23 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
       case 'create_task': {
         const taskType = args.type as CreateTaskType;
         const title = args.title as string;
+        if (taskType === 'reminder' && typeof args.explicit_time !== 'boolean') {
+          return { error: 'missing_explicit_time', message: 'State whether the requester supplied an explicit reminder time or a vague day/date using explicit_time.' };
+        }
         // #149 — anchor the due time to a UTC instant HERE, the boundary where a
         // model-authored wall-clock becomes a spine timer and the only place the
         // owner's zone is in hand. Pre-fix `due_at` went onto next_check_at
         // verbatim, so a bare "2026-07-27T10:32:00" only satisfied the sweep's
         // `datetime(next_check_at) <= datetime('now')` (UTC) three hours later.
         const dueAtRaw = args.due_at as string;
-        const dueAt = toTimerInstant(dueAtRaw, profile.user.timezone);
+        let dueAt: string | null;
+        try {
+          dueAt = toTimerInstant(resolveStatedInstant({ startIso: dueAtRaw,
+            statedZone: 'home', homeTz: profile.user.timezone }).startIso, profile.user.timezone);
+        } catch (err) {
+          if (err instanceof StatedTimeClarificationError) return err.toToolResult();
+          throw err;
+        }
         if (!dueAt) {
           return {
             error: 'bad_due_at',
@@ -1833,6 +1847,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         const targetSlackId = args.target_slack_id as string | undefined;
         const targetName = args.target_name as string | undefined;
         const message = args.message as string | undefined;
+        const explicitTime = taskType === 'reminder' ? args.explicit_time !== false : true;
+        if (!explicitTime) dueAt = reminderWorkTimeAtOrAfter(dueAt, targetSlackId, profile);
 
         // Kind mapping: 'research' collapses to the research kind; every
         // other taskType maps straight onto its own RequestKind.
@@ -1849,7 +1865,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // Task identity includes its scheduled occurrence and destination. A
         // title alone must not reserve that title forever after the first use.
         const idempotencyKey = taskOccurrenceKey(ownerUserId, context.userId, kind, title, dueAt,
-          targetSlackId ?? null, description ?? null, message ?? null);
+          targetSlackId ?? null, description ?? null, message ?? null, explicitTime);
         return withRequestLock(idempotencyKey, async () => {
           let existing = getRequestByIdempotencyKey(idempotencyKey);
           if (!existing) {
@@ -1864,7 +1880,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
               ? toTimerInstant(legacyDetails.due_at, profile.user.timezone) : legacy?.next_check_at;
             if (legacy && legacyDue && taskOccurrenceKey(legacy.owner_user_id, legacy.requester_slack_id,
               legacy.kind, legacy.subject, legacyDue, legacy.target_slack_id, legacy.description,
-              typeof legacyDetails.message === 'string' ? legacyDetails.message : null) === idempotencyKey) {
+              typeof legacyDetails.message === 'string' ? legacyDetails.message : null,
+              legacy.kind !== 'reminder' || legacyDetails.explicit_time !== false) === idempotencyKey) {
               existing = legacy;
             }
           }
@@ -1921,7 +1938,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             expiresAt: undefined,
             nextCheckAt: dueAt,
             nextCheckHandler,
-            details: { message, due_at: dueAt },
+            details: { message, due_at: dueAt, ...(taskType === 'reminder' && typeof args.explicit_time === 'boolean'
+              ? { explicit_time: args.explicit_time } : {}) },
         });
 
         const dueDt = DateTime.fromISO(dueAt).setZone(profile.user.timezone);
@@ -1949,6 +1967,12 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           }
 
           const detailsCurrent = parseDetails(row) ?? {};
+          if (row.kind === 'reminder' && typeof args.due_at === 'string' && typeof args.explicit_time !== 'boolean') {
+            return { updated: false, error: 'missing_explicit_time', message: 'State whether the new reminder time was explicitly requested using explicit_time.' };
+          }
+          if (row.kind === 'reminder' && typeof args.explicit_time === 'boolean' && typeof args.due_at !== 'string') {
+            return { updated: false, error: 'explicit_time_requires_due_at', message: 'Supply the new due_at when changing whether a reminder time is explicit.' };
+          }
           const patch: Parameters<typeof updateRequest>[1] = {};
           if (typeof args.title === 'string') patch.subject = args.title;
           if (typeof args.description === 'string') patch.description = args.description;
@@ -1956,15 +1980,25 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           // can't re-acquire the naive-clock delay.
           let dueAtNormalized: string | null = null;
           if (typeof args.due_at === 'string') {
-            dueAtNormalized = toTimerInstant(args.due_at, profile.user.timezone);
+            try {
+              dueAtNormalized = toTimerInstant(resolveStatedInstant({ startIso: args.due_at,
+                statedZone: 'home', homeTz: profile.user.timezone }).startIso, profile.user.timezone);
+            } catch (err) {
+              if (err instanceof StatedTimeClarificationError) return err.toToolResult();
+              throw err;
+            }
             if (!dueAtNormalized) {
               return {
                 error: 'bad_due_at',
                 message: `due_at "${args.due_at}" isn't a parseable ISO 8601 datetime.`,
               };
             }
+            const explicitTime = row.kind !== 'reminder' || (typeof args.explicit_time === 'boolean'
+              ? args.explicit_time : detailsCurrent.explicit_time !== false);
+            if (!explicitTime) dueAtNormalized = reminderWorkTimeAtOrAfter(dueAtNormalized, row.target_slack_id, profile);
             patch.nextCheckAt = dueAtNormalized;
-            patch.details = { ...detailsCurrent, due_at: dueAtNormalized };
+            patch.details = { ...detailsCurrent, due_at: dueAtNormalized,
+              ...(row.kind === 'reminder' && typeof args.explicit_time === 'boolean' ? { explicit_time: args.explicit_time } : {}) };
           }
           if (typeof args.message === 'string') {
             patch.details = { ...detailsCurrent, ...(patch.details ?? {}), message: args.message };
@@ -1974,7 +2008,8 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             const due = dueAtNormalized ?? row.next_check_at;
             const key = taskOccurrenceKey(row.owner_user_id, row.requester_slack_id, row.kind, patch.subject ?? row.subject,
               due, row.target_slack_id, patch.description ?? row.description,
-              typeof patch.details?.message === 'string' ? patch.details.message : typeof detailsCurrent.message === 'string' ? detailsCurrent.message : null);
+              typeof patch.details?.message === 'string' ? patch.details.message : typeof detailsCurrent.message === 'string' ? detailsCurrent.message : null,
+              row.kind !== 'reminder' || (patch.details ?? detailsCurrent).explicit_time !== false);
             const existing = getRequestByIdempotencyKey(key);
             if (existing && existing.id !== id) return { updated: false, error: 'task_already_exists', task_id: existing.id,
               message: 'Another task already tracks that scheduled occurrence. No task was changed.' };

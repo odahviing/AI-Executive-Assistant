@@ -60,6 +60,23 @@ function parseScheduleTimes(scheduleTime: string): Array<{ h: number; m: number 
   return slots;
 }
 
+/** Validate structured tool input before it can become a durable schedule. */
+function scheduleError(type: unknown, time: unknown, day: unknown): string | null {
+  if (typeof type !== 'string' || !['daily', 'weekdays', 'weekly', 'monthly'].includes(type)) {
+    return 'schedule_type must be daily, weekdays, weekly, or monthly';
+  }
+  if (typeof time !== 'string' || !time.split(',').every(slot => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(slot.trim()))) {
+    return 'schedule_time must contain valid HH:MM times, separated by commas';
+  }
+  if (type === 'weekly' && (typeof day !== 'string' || !Object.hasOwn(WEEKDAY_MAP, day))) {
+    return 'schedule_day must be a weekday name, for example Monday';
+  }
+  if (type === 'monthly' && (typeof day !== 'string' || !/^(?:[1-9]|[12]\d|3[01])$/.test(day))) {
+    return 'schedule_day must be a day of month from 1 to 31';
+  }
+  return null;
+}
+
 /**
  * Compute the next UTC ISO datetime at which a routine should run.
  *
@@ -112,7 +129,9 @@ function computeNextRunAtForSlot(
 
   const snap = (dt: DateTime) =>
     dt.set({ hour: h, minute: m, second: 0, millisecond: 0 });
-  const nextDay = (dt: DateTime) => snap(dt).plus({ days: 1 });
+  // Move to the destination date before applying its clock time. Snapping on
+  // a DST-gap day first would carry its normalized hour into the next day.
+  const nextDay = (dt: DateTime) => snap(dt.plus({ days: 1 }));
 
   const luxonDayNames = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -145,9 +164,16 @@ function computeNextRunAtForSlot(
     }
     case 'monthly': {
       const targetDay = Math.max(1, parseInt(scheduleDay ?? '1', 10));
-      candidate = snap(base).set({ day: targetDay });
-      if (candidate <= base) {
-        candidate = snap(base.plus({ months: 1 })).set({ day: targetDay });
+      if (!Number.isInteger(targetDay) || targetDay > 31) throw new Error('Invalid monthly schedule day');
+      // Start each search at day 1 so date arithmetic cannot overflow a missing
+      // 29th/30th/31st into a different month. Missing dates skip that month.
+      let month = base.startOf('month');
+      while (month.isValid) {
+        if (targetDay <= month.daysInMonth!) {
+          candidate = snap(month.set({ day: targetDay }));
+          if (candidate > base) break;
+        }
+        month = month.plus({ months: 1 });
       }
       break;
     }
@@ -219,7 +245,7 @@ export function ensureBriefingCron(profile: UserProfile): void {
 
   if (existing) {
     const now = DateTime.utc();
-    const nextRunAt = computeNextRunAt('weekdays', scheduleTime, null, profile.user.timezone, now, workDays);
+    const nextRunAt = computeNextRunAt(existing.schedule_type, scheduleTime, existing.schedule_day, profile.user.timezone, now, workDays);
     const storedNext = existing.next_run_at
       ? DateTime.fromISO(existing.next_run_at, { zone: 'utc' })
       : null;
@@ -390,12 +416,8 @@ action='list' — list all routines (active and paused), each with its schedule.
         const scheduleDay = (args.schedule_day as string | undefined) ?? null;
         const title = (args.title as string | undefined) ?? '';
 
-        if (scheduleType === 'weekly' && !scheduleDay) {
-          return { error: 'schedule_day is required for weekly routines (e.g. "Monday")' };
-        }
-        if (scheduleType === 'monthly' && !scheduleDay) {
-          return { error: 'schedule_day is required for monthly routines (e.g. "1" for the 1st of the month)' };
-        }
+        const invalidSchedule = scheduleError(scheduleType, scheduleTime, scheduleDay);
+        if (invalidSchedule) return { error: invalidSchedule };
 
         // v1.6.10 — morning briefing is a core SYSTEM routine managed by
         // ensureBriefingCron (`system_briefing_<ownerId>`). Don't let the LLM
@@ -510,6 +532,8 @@ action='list' — list all routines (active and paused), each with its schedule.
         const reactivating    = args.status === 'active' && routine.status === 'paused';
 
         if (scheduleChanged || reactivating) {
+          const invalidSchedule = scheduleError(newType, newTime, newDay);
+          if (invalidSchedule) return { error: invalidSchedule };
           updates.schedule_type = newType;
           updates.schedule_time = newTime;
           updates.schedule_day  = newDay ?? null;

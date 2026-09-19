@@ -59,8 +59,8 @@ export async function downloadAndScanImageBatch(files: any[], opts: {
 }
 
   // ── Image file_share helper (v1.7.1) ──────────────────────────────────────
-  // Owner-only image input. Downloads each image, runs the injection guard
-  // (logs + shadow-notifies suspicious content but proceeds — owner is trusted),
+  // Downloads each image and applies the sender-role injection policy
+  // (owner proceeds; colleague images require a clean verdict),
   // builds Anthropic image blocks, then hands off to processMessage with the
   // images attached. Used by both the DM and MPIM handlers.
   //

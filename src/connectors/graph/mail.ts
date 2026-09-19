@@ -44,7 +44,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { Client } from '@microsoft/microsoft-graph-client';
+import { Client, RetryHandlerOptions } from '@microsoft/microsoft-graph-client';
 import type { AuthenticationProvider } from '@microsoft/microsoft-graph-client';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
@@ -171,6 +171,9 @@ function writeJsonFile(filePath: string, data: unknown): void {
     logger.error('mail.ts — failed to persist store file', {
       filePath, err: String(err).slice(0, 160),
     });
+    // Do not publish messages or cached credentials until their durable
+    // checkpoint exists. Otherwise a restart can replay already acted-on mail.
+    throw err;
   }
 }
 
@@ -273,11 +276,11 @@ async function refreshAccessToken(profileId: string): Promise<string> {
   // response is missing one (shouldn't happen with offline_access, but
   // never leave the state with an unusable token).
   const newRefreshToken: string = json.refresh_token || state.refreshToken;
+  writeStoredRefreshToken(profileId, newRefreshToken);
   state.accessToken = newAccessToken;
   // 60s safety margin so a request started right before expiry doesn't race it.
   state.accessTokenExpiresAt = Date.now() + Math.max(0, (json.expires_in ?? 0) - 60) * 1000;
   state.refreshToken = newRefreshToken;
-  writeStoredRefreshToken(profileId, newRefreshToken);
 
   return newAccessToken;
 }
@@ -410,10 +413,15 @@ export async function listNewMessages(profile: UserProfile): Promise<MailMessage
       ? await client.api(deltaLink).option('signal', signal).get()
       : await client.api('/me/mailFolders/inbox/messages/delta').select(MESSAGE_SELECT).option('signal', signal).get();
 
-    const messages: MailMessage[] = [];
+    // Delta is a change feed: one id may recur across pages, including read
+    // updates and removals. Merge the round before releasing any work so a
+    // repeated unread snapshot cannot run the handler twice.
+    const messages = new Map<string, any>();
     for (;;) {
       for (const raw of response.value ?? []) {
-        messages.push(normalizeMessage(raw));
+        if (!raw.id) continue;
+        if (raw['@removed']) messages.delete(raw.id);
+        else messages.set(raw.id, { ...messages.get(raw.id), ...raw });
       }
       const nextLink = response['@odata.nextLink'];
       if (nextLink) {
@@ -424,7 +432,7 @@ export async function listNewMessages(profile: UserProfile): Promise<MailMessage
       if (newDeltaLink) writeDeltaLink(profileId, newDeltaLink);
       break;
     }
-    return messages;
+    return [...messages.values()].map(normalizeMessage);
   };
 
   try {
@@ -530,17 +538,16 @@ export interface ReplyToMailOptions {
  * validated before this function is ever called, and how `to` now carries
  * that same validated address into the actual Graph write.
  *
- * CLEANUP ON FAILURE — the update/send steps below are wrapped so a failure
- * between createReply and send deletes the already-created draft rather than
- * leaving it behind: mailPoll's delta only watches /mailFolders/inbox, so a
- * draft left in Drafts is never revisited and would otherwise accumulate
- * forever, one per failed send.
+ * CLEANUP ON KNOWN FAILURE — preparation failure or explicit send rejection
+ * deletes the draft. A lost response after send begins is UNCONFIRMED:
+ * preserve the draft's possible sent state, never retry or claim non-delivery.
  */
-export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions): Promise<void> {
+export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions): Promise<'accepted' | 'unconfirmed'> {
   const client = getMailClient(profile);
   const draft: any = await client.api(`/me/messages/${encodeURIComponent(opts.messageId)}/createReply`).post({});
   const draftId: string = draft.id;
   const existingBody: string = draft?.body?.content ?? '';
+  let sendAttempted = false;
   try {
     await client.api(`/me/messages/${encodeURIComponent(draftId)}`).update({
       // Explicit recipient override — see the doc comment above for why this
@@ -550,15 +557,23 @@ export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions
       toRecipients: [{ emailAddress: { address: opts.to } }],
       body: { contentType: 'HTML', content: insertReplyHtml(opts.bodyHtml, existingBody) },
     });
-    await client.api(`/me/messages/${encodeURIComponent(draftId)}/send`).post({});
+    sendAttempted = true;
+    await client.api(`/me/messages/${encodeURIComponent(draftId)}/send`)
+      // SDK defaults retry buffered POSTs on 503/504. A send may already
+      // have been accepted, so automatic replay is not safe on this action.
+      .middlewareOptions([new RetryHandlerOptions(3, 0)])
+      .post({});
+    return 'accepted';
   } catch (err) {
-    // createReply already left a draft behind by the time update/send can
-    // fail — a bare rethrow here orphans it in the mailbox's Drafts folder
-    // forever (mailPoll only watches /mailFolders/inbox, so nothing ever
-    // revisits it). Best-effort delete so a transient Graph error doesn't
-    // accumulate dead drafts; the delete failing is logged but never
-    // swallows the original error, which is what sendDirect's catch turns
-    // into `send_failed` and inbound.ts treats as never-delivered.
+    const status = (err as { statusCode?: number })?.statusCode;
+    const explicitlyRejected = err instanceof MailAuthRevokedError
+      || (typeof status === 'number' && status >= 400 && status < 500 && status !== 408);
+    if (sendAttempted && !explicitlyRejected) {
+      logger.warn('mail.ts:replyToMail — send outcome unconfirmed; no retry or cleanup', { draftId });
+      return 'unconfirmed';
+    }
+    // The message was not submitted or was explicitly rejected. Best-effort
+    // cleanup must not swallow the original known failure.
     try {
       await client.api(`/me/messages/${encodeURIComponent(draftId)}`).delete();
     } catch (cleanupErr) {

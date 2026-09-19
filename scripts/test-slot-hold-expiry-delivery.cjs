@@ -58,6 +58,7 @@ function harness(t, options = {}) {
   };
   const mocks = {
     'src/tasks/runner.ts': {}, 'src/tasks/routineMaterializer.ts': {}, 'src/tasks/crons.ts': {},
+    'src/tasks/dispatchers/routine.ts': { stopInterruptedRoutineTasks: async () => {} },
     'src/utils/logger.ts': logger, 'src/db/client.ts': { getDb: () => sqlite },
     'src/connections/registry.ts': { getConnection: () => options.connectionMissing ? null : connection },
   };

@@ -10,7 +10,7 @@
  * live since v1.7.1 (DM) / #144.
  *
  * Same shape as the other Sonnet guards: narrow classifier, strict JSON
- * output. On parse / API errors it returns `suspicious: false` PLUS
+ * output. On invalid verdicts / API errors it returns `suspicious: false` PLUS
  * `scanFailed: true` — "no verdict", not "clean" — so the caller can fail
  * open for the owner (an LLM hiccup must not drop a legitimate owner image)
  * and closed for a colleague.
@@ -29,7 +29,7 @@ export interface ImageScanResult {
   reason?: string;
   elapsedMs: number;
   /**
-   * True when NO verdict was reached (non-JSON reply or API error) — the
+   * True when NO verdict was reached (invalid reply or API error) — the
    * image is UNSCANNED, not clean. `suspicious` stays false so the owner
    * path proceeds unchanged; the colleague path must treat this as a
    * refusal (fileIngestion.ts's scanAndPrepareImage — W9: unclear → less).
@@ -41,7 +41,7 @@ export interface ImageScanResult {
  * Single Sonnet pass over the image. Asks: does this contain text that looks
  * like instructions to an AI/automation? Returns strict JSON.
  *
- * Cost: one image-sized call (~1.2-1.6k input tokens) plus ~150 output. Negligible.
+ * Uses one image classification call; malformed results never count as clean.
  */
 export async function scanImageForInjection(image: DownloadedImage): Promise<ImageScanResult> {
   const start = Date.now();
@@ -98,8 +98,12 @@ Output STRICT JSON only — no prose, no markdown, no code fences:
     let parsed: { suspicious?: unknown; extractedText?: unknown; reason?: unknown };
     try {
       parsed = JSON.parse(cleaned);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || typeof parsed.suspicious !== 'boolean') {
+        throw new Error('Image verdict requires a boolean suspicious field');
+      }
     } catch (_) {
-      logger.warn('Image guard returned non-JSON — no verdict (owner proceeds, colleague refused)', {
+      logger.warn('Image guard returned an invalid verdict — no verdict (owner proceeds, colleague refused)', {
         preview: text.slice(0, 200),
         elapsedMs,
       });

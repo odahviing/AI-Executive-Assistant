@@ -12,8 +12,8 @@ const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
 // gh#191 piece 3 — tavilyExtract had NO timeout; a hung page's fetch could
 // block indefinitely. Per-call-site budgets, deliberately DIFFERENT: the
 // research READ loop runs inline in a live turn (someone's waiting) so it
-// gets a TIGHT budget; web_extract and KB-ingest are not time-critical
-// (nobody's waiting synchronously) so they keep this GENEROUS default —
+// gets a TIGHT budget; web_extract and KB-ingest keep the existing GENEROUS
+// default (these also run synchronously in tool dispatch) —
 // they never pass a second argument, so they get it automatically.
 const TAVILY_EXTRACT_DEFAULT_TIMEOUT_MS = 45_000;
 const TAVILY_EXTRACT_RESEARCH_TIMEOUT_MS = 8_000;
@@ -240,15 +240,15 @@ For a quick one-off fact (weather, exchange rate, is today a holiday), use web_s
         const hasContent = (result as any).answer || ((result as any).results?.length ?? 0) > 0;
         if (hasContent) return result;
         logger.info('Tavily returned empty — falling back to DuckDuckGo', { query });
-        return await duckduckgoSearch(query);
+        return await duckduckgoSearch(query, timeRangeDays);
       } else if (config.BRAVE_SEARCH_API_KEY) {
-        return await braveSearch(query);
+        return await braveSearch(query, timeRangeDays);
       } else {
-        return await duckduckgoSearch(query);
+        return await duckduckgoSearch(query, timeRangeDays);
       }
     } catch (err) {
       logger.warn('Web search failed', { query, err: String(err) });
-      return { error: 'Search unavailable right now. Answer from your knowledge if possible.' };
+      return { error: 'Search unavailable right now. Current information could not be verified.' };
     }
   }
 
@@ -581,14 +581,22 @@ export async function tavilySearch(
   };
 }
 
-export async function braveSearch(query: string): Promise<object> {
-  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8&summary=1`;
+export async function braveSearch(query: string, timeRangeDays?: number): Promise<object> {
+  let url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8&summary=1`;
+  if (typeof timeRangeDays === 'number' && timeRangeDays > 0) {
+    const days = Math.min(Math.max(Math.round(timeRangeDays), 1), 365);
+    const until = new Date();
+    const since = new Date(until);
+    since.setUTCDate(since.getUTCDate() - days);
+    url += `&freshness=${since.toISOString().slice(0, 10)}to${until.toISOString().slice(0, 10)}`;
+  }
   const res = await fetch(url, {
     headers: {
       'Accept': 'application/json',
       'Accept-Encoding': 'gzip',
       'X-Subscription-Token': config.BRAVE_SEARCH_API_KEY,
     },
+    signal: AbortSignal.timeout(TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS),
   });
 
   if (!res.ok) throw new Error(`Brave Search HTTP ${res.status}`);
@@ -604,9 +612,17 @@ export async function braveSearch(query: string): Promise<object> {
   return { summary: data.summary?.answer ?? null, results, query };
 }
 
-export async function duckduckgoSearch(query: string): Promise<object> {
+export async function duckduckgoSearch(query: string, timeRangeDays?: number): Promise<object> {
+  // Instant answers cannot enforce a publication window. Do not substitute
+  // undated background material for a failed/empty recent-news lookup.
+  if (typeof timeRangeDays === 'number' && timeRangeDays > 0) {
+    return { error: 'recency_filter_unavailable', query, message: 'No date-filtered results are available from this search provider.' };
+  }
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Maelle-Assistant/1.0' } });
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Maelle-Assistant/1.0' },
+    signal: AbortSignal.timeout(TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS),
+  });
 
   if (!res.ok) throw new Error(`DuckDuckGo HTTP ${res.status}`);
 
@@ -661,6 +677,7 @@ export async function tavilyExtract(url: string, timeoutMs: number = TAVILY_EXTR
   const page = results[0];
   // Truncate very long pages to avoid blowing up context
   const rawText: string = page.raw_content ?? page.text ?? '';
+  if (!rawText.trim()) return { error: 'No content could be extracted from this URL.', url: page.url ?? url };
   const content = rawText.length > 8000 ? rawText.slice(0, 8000) + '\n\n[Content truncated — page was very long]' : rawText;
 
   return {

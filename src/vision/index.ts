@@ -3,12 +3,12 @@
  *
  * Parallel to src/voice/ for the audio path. Where voice transcribes-then-discards,
  * vision keeps the image bytes live for the current turn so Sonnet sees the
- * actual pixels (exact error text, UI layout, log lines). The image is NOT
- * persisted in conversation history — see app.ts for the placeholder write.
+ * actual pixels (exact error text, UI layout, log lines). Bytes are not
+ * persisted; processMessage stores a description and the Slack URL in history,
+ * and may re-download a recent image on owner-DM follow-up turns.
  *
- * Owner-only in v1.7.1. When colleague paths open (issue #1 Connection work),
- * the image guard policy in src/utils/imageGuard.ts flips from log-and-proceed
- * to refuse-and-notify; this module itself stays transport-agnostic.
+ * fileIngestion applies owner/colleague scan policy before handing image blocks
+ * to the orchestrator; this module handles download and representation.
  */
 
 import type Anthropic from '@anthropic-ai/sdk';

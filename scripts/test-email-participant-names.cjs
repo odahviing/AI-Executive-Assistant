@@ -39,7 +39,7 @@ function harness(options = {}) {
     sqlite.prepare(`INSERT INTO people_memory(${Object.keys(row).join(',')}) VALUES(${Object.keys(row).map(k=>'@'+k).join(',')})`).run(row);
   }
   const profile = {user:{name:'Owner',slack_user_id:'UOWNER',email:'owner@example.com',timezone:'Asia/Jerusalem'},assistant:{name:'Maelle',email:'assistant@example.com'},channels:{email:{enabled:true,mailbox:'assistant@example.com',owner_aliases:['alias@example.com']}}};
-  const message = {id:'mail_fixture',conversationId:'chain_fixture',from:options.sender || profile.user.email,replyTo:[],subject:'Fw: Kevel / Reflectiz',bodyContentType:'text',body:BODY,uniqueBodyContentType:'text',uniqueBody:NOTE};
+  const message = {id:'mail_fixture',conversationId:'chain_fixture',from:options.sender || profile.user.email,replyTo:[],subject:'Fw: Kevel / Reflectiz',bodyContentType:'text',body:options.body || BODY,uniqueBodyContentType:'text',uniqueBody:options.uniqueBody ?? NOTE};
   const people = options.people ?? [NIKKI, OWNER_ON_HEADER];
   const counts = {haiku:0,orchestrator:0,gate:0}, mints=[], sends=[], notifications=[], history=[], haikuCalls=[], orchestratorInputs=[], modules=new Map();
   let handler;
@@ -56,7 +56,7 @@ function harness(options = {}) {
     counts.haiku++; haikuCalls.push(params);
     const items = params.tools[0].input_schema.properties.participants.items;
     const participants = items.type==='object' ? people.map(p=>({...p})) : people.map(p=>p.email);
-    return {content:[{type:'tool_use',name:'extract_participants',input:{participants,attendee_timezones:[]}}],usage:{}};
+    return {content:[{type:'tool_use',name:'extract_participants',input:{participants,attendee_timezones:options.hints || []}}],usage:{}};
   }}};
   const connection = {sendDirect:async (...args)=>{sends.push(args); return {ok:true};}};
   const mocks = {
@@ -91,7 +91,7 @@ function harness(options = {}) {
   }
   load('src/connectors/email/inbound.ts').startEmailChannel(profile);
   const rows=()=>sqlite.prepare('SELECT person_id,name,email,kind,name_set_by FROM people_memory ORDER BY rowid').all();
-  return {run:()=>handler(profile,message),rows,counts,mints,sends,notifications,history,haikuCalls,orchestratorInputs,load};
+  return {run:()=>handler(profile,message),rows,counts,mints,sends,notifications,history,haikuCalls,orchestratorInputs,load,person:email=>sqlite.prepare('SELECT * FROM people_memory WHERE email=?').get(email)};
 }
 
 test('forwarded display name reaches the mint call and names the fresh row',async()=>{
@@ -139,4 +139,38 @@ test('owner address on the forwarded header is filtered, never minted',async()=>
 test('non-owner sender remains silent before extraction or any mint',async()=>{
  const h=harness({sender:'outsider@example.net'});await h.run();
  assert.deepEqual(h.counts,{haiku:0,orchestrator:0,gate:0});assert.equal(h.mints.length,0);assert.equal(h.rows().length,0);assert.equal(h.sends.length,0);assert.equal(h.notifications.length,0);assert.equal(h.history.length,0);
+});
+
+test('real extraction parse and inbound reject Alice statement assigned to Bob',async()=>{
+ const people=[{email:'alice@other.example',name:'Alice'},{email:'bob@other.example',name:'Bob'}];
+ const h=harness({people,uniqueBody:'Alice is in Tokyo',body:'Alice is in Tokyo\nFrom: Alice <alice@other.example>\nTo: Bob <bob@other.example>\nForwarded chain stays available',hints:[{email:people[1].email,stated_timezone:'Tokyo',person_reference:'Alice',source_quote:'Alice is in Tokyo'}]});
+ await h.run();assert.equal(h.person(people[1].email).timezone,null);assert.equal(h.person(people[1].email).currently_traveling,null);assert.equal(h.counts.haiku,1);assert.equal(h.notifications.length,0);
+ const input=h.orchestratorInputs[0];assert.ok(input.userMessage.includes('Timezone clarification needed for: Bob.'));assert.ok(input.userMessage.includes('Forwarded chain stays available'));assert.deepEqual(input.extractedAttendeeEmails,people.map(p=>p.email));assert.equal(input.timezoneHints,undefined);assert.equal(input.participantHints,undefined);
+ const schema=h.haikuCalls[0].tools[0].input_schema.properties.attendee_timezones.items;assert.ok(schema.required.includes('person_reference'));assert.ok(schema.required.includes('source_quote'));
+ if(process.env.DIPLOMAT_CAPTURE)fs.writeFileSync(path.join(root,process.env.DIPLOMAT_CAPTURE,'uncertain-turn.json'),JSON.stringify(input,null,2));
+});
+test('real extraction parse preserves explicit person-linked owner timezone statement',async()=>{
+ const h=harness({people:[NIKKI],uniqueBody:'Nikki Hardee is in Tokyo',hints:[{email:NIKKI.email,stated_timezone:'Tokyo',person_reference:'Nikki Hardee',source_quote:'Nikki Hardee is in Tokyo'}]});
+ await h.run();assert.equal(h.person(NIKKI.email).timezone,'Asia/Tokyo');assert.equal(h.person(NIKKI.email).timezone_set_by,'owner');assert.equal(h.counts.haiku,1);assert.doesNotMatch(h.orchestratorInputs[0].userMessage,/Timezone clarification needed/);
+ if(process.env.DIPLOMAT_CAPTURE)fs.writeFileSync(path.join(root,process.env.DIPLOMAT_CAPTURE,'certain-turn.json'),JSON.stringify(h.orchestratorInputs[0],null,2));
+});
+
+test('Bouncer canonical Bob cannot be relabeled Alice by extraction to gain owner timezone authority',async()=>{
+ const h=harness({people:[{email:'bob@example.net',name:'Alice'}],seed:[{person_id:'bob',name:'Bob',email:'bob@example.net',timezone:'Europe/London',timezone_set_by:'person'}],body:'Alice is in Tokyo.\nFrom: Bob <bob@example.net>',uniqueBody:'Alice is in Tokyo.',hints:[{email:'bob@example.net',stated_timezone:'Tokyo',person_reference:'Alice',source_quote:'Alice is in Tokyo.'}]});
+ await h.run();assert.equal(h.person('bob@example.net').timezone,'Europe/London');assert.equal(h.person('bob@example.net').timezone_set_by,'person');assert.equal(h.person('bob@example.net').currently_traveling,null);assert.match(h.orchestratorInputs[0].userMessage,/Timezone clarification needed for: Bob/);assert.equal(h.notifications.length,0);
+ if(process.env.DIPLOMAT_CAPTURE)fs.writeFileSync(path.join(root,process.env.DIPLOMAT_CAPTURE,'identity-overturn-turn.json'),JSON.stringify(h.orchestratorInputs[0],null,2));
+});
+test('fresh model-only Alice name cannot launder authority through a newly minted Bob address',async()=>{
+ const h=harness({people:[{email:'bob@example.net',name:'Alice'}],body:'Alice is in Tokyo.\nFrom: Bob <bob@example.net>',uniqueBody:'Alice is in Tokyo.',hints:[{email:'bob@example.net',stated_timezone:'Tokyo',person_reference:'Alice',source_quote:'Alice is in Tokyo.'}]});
+ await h.run();assert.equal(h.person('bob@example.net').timezone,null);assert.equal(h.person('bob@example.net').currently_traveling,null);assert.notEqual(h.person('bob@example.net').name,'Alice');assert.match(h.orchestratorInputs[0].userMessage,/Timezone clarification needed/);
+});
+test('existing canonical Bob receives his explicit timezone despite an incorrect extracted display name',async()=>{
+ const h=harness({people:[{email:'bob@example.net',name:'Alice'}],seed:[{person_id:'bob',name:'Bob',email:'bob@example.net',timezone:'Europe/London',timezone_set_by:'person'}],body:'Bob is in Tokyo.\nFrom: Bob <bob@example.net>',uniqueBody:'Bob is in Tokyo.',hints:[{email:'bob@example.net',stated_timezone:'Tokyo',person_reference:'Bob',source_quote:'Bob is in Tokyo.'}]});
+ await h.run();assert.equal(h.person('bob@example.net').timezone,'Asia/Tokyo');assert.equal(h.person('bob@example.net').timezone_set_by,'owner');assert.doesNotMatch(h.orchestratorInputs[0].userMessage,/Timezone clarification needed/);
+});
+test('new multilingual source-bound display names retain valid owner timezone changes',async()=>{
+ for(const name of ['אליס','Алиса','愛麗絲']){const text=`${name}: Tokyo`,h=harness({people:[{email:'new@example.net',name}],body:`${text}\nFrom: ${name} <new@example.net>`,uniqueBody:text,hints:[{email:'new@example.net',stated_timezone:'Tokyo',person_reference:name,source_quote:text}]});await h.run();assert.equal(h.person('new@example.net').timezone,'Asia/Tokyo');assert.equal(h.person('new@example.net').timezone_set_by,'owner');}
+});
+test('new address referenced explicitly in owner text works without any display name',async()=>{
+ const text='new@example.net is in Tokyo',h=harness({people:[{email:'new@example.net'}],body:text,uniqueBody:text,hints:[{email:'new@example.net',stated_timezone:'Tokyo',person_reference:'new@example.net',source_quote:text}]});await h.run();assert.equal(h.person('new@example.net').timezone,'Asia/Tokyo');assert.equal(h.person('new@example.net').timezone_set_by,'owner');
 });

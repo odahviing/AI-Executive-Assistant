@@ -32,7 +32,6 @@ import {
   findVenueByNameAndOwner,
   updateVenue,
   insertVenue,
-  normalizeVenueName,
   type VenueRow,
 } from '../db/venues';
 import {
@@ -225,7 +224,7 @@ Use \`travel_time_minutes\` when the owner states how long it takes to get to a 
     // Case 1 — owner named a venue:
     //   If the catalog has it (or branches), surface those.
     //   If not, resolve fresh via Tavily and return the resolved venue.
-    if (hasNameHint && !hasAreaType) {
+    if (hasNameHint) {
       if (catalogHits.length > 0) {
         const filtered = applyHoursFilter(catalogHits.map(v => ({ row: v as VenueRow | null, cand: null as VenueCandidate | null })), meetingTimeIso, tz);
         return {
@@ -245,7 +244,11 @@ Use \`travel_time_minutes\` when the owner states how long it takes to get to a 
         };
       }
       const filtered = applyHoursFilter(
-        freshCandidates.map(c => ({ row: null, cand: c as VenueCandidate | null })),
+        freshCandidates.flatMap(c => {
+          const saved = findVenueByNameAndOwner(ownerUserId, c.name, { address: c.address, branchName: c.branch_name, areaTags: c.area_tags });
+          if (saved?.rank === 1 && args.include_hidden !== true) return [];
+          return [{ row: saved, cand: c as VenueCandidate | null }];
+        }),
         meetingTimeIso,
         tz,
       );
@@ -289,20 +292,18 @@ Use \`travel_time_minutes\` when the owner states how long it takes to get to a 
       });
     }
 
-    // Dedup against catalog using the head-only normalizer (same one the
-    // save-on-book path uses) so a catalog row with a composite name like
-    // "Coffee Landwer, HaShayetet 4..." dedups against a fresh candidate
-    // named just "Coffee Landwer". Without normalizing both sides, the
-    // same physical place showed up twice (once as catalog rank-N, once
-    // as fresh).
-    const catalogNames = new Set(catalogHits.map(v => normalizeVenueName(v.name)));
+    // Use the same reconciled identity for rank and dedup. A same-name
+    // branch at another address is a separate option, not a catalog hit.
+    const catalogIds = new Set(catalogHits.map(v => v.id));
     const freshDeduped = freshCandidates
-      .filter(c => !catalogNames.has(normalizeVenueName(c.name)))
+      .map(c => ({ row: findVenueByNameAndOwner(ownerUserId, c.name, { address: c.address, branchName: c.branch_name, areaTags: c.area_tags }), cand: c }))
+      .filter(e => !e.row || !catalogIds.has(e.row.id))
+      .filter(e => args.include_hidden === true || e.row?.rank !== 1)
       .slice(0, remaining);
 
     const merged: Array<{ row: VenueRow | null; cand: VenueCandidate | null }> = [
       ...catalogHits.map(v => ({ row: v as VenueRow | null, cand: null as VenueCandidate | null })),
-      ...freshDeduped.map(c => ({ row: null as VenueRow | null, cand: c })),
+      ...freshDeduped,
     ];
     const filtered = applyHoursFilter(merged, meetingTimeIso, tz);
 
@@ -446,7 +447,17 @@ function applyHoursFilter(
 }
 
 function serializeFiltered(e: FilteredEntry): Record<string, unknown> {
-  const base = e.row ? serializeVenue(e.row) : e.cand ? serializeCandidate(e.cand) : {};
+  // Fresh source fields describe the candidate the caller requested. A
+  // reconciled catalog record contributes only its identity and preferences.
+  const base = e.cand ? {
+    ...serializeCandidate(e.cand),
+    ...(e.row ? {
+      venue_id: e.row.id,
+      rank: e.row.rank,
+      travel_time_minutes: e.row.travel_time_minutes,
+      last_used_at: e.row.last_used_at,
+    } : {}),
+  } : e.row ? serializeVenue(e.row) : {};
   return { ...base, hours_status: e.hours_status };
 }
 

@@ -7,7 +7,8 @@
  *
  * This file replaces `runDueRoutines` from `crons.runner.ts`. The old 90-min
  * "are we in the window?" guard and the "I was offline at X — run now or skip?"
- * DM are gone. Lateness is decided by the task runner, not here.
+ * DM are gone. Materialization selects the latest viable firing; the task
+ * runner rechecks lateness when that task actually reaches execution.
  *
  * Catch-up semantics: if a routine has been missed multiple times (bot down for
  * days), we fast-forward `next_run_at` past the stale occurrences and insert
@@ -180,7 +181,22 @@ export async function materializeRoutineTasks(
       cursorIso = nextCursor;
     }
 
-    const nextFuture = cursorIso;  // first firing > now after the walk
+    // A bounded walk can stop before reaching the present on a dense schedule
+    // after long downtime. Persist only its progress and continue next tick;
+    // emitting each chunk's candidate would replay old work (never_stale too).
+    const cursorEnd = DateTime.fromISO(cursorIso, { zone: 'utc' });
+    if (!cursorEnd.isValid || cursorEnd <= now) {
+      if (cursorEnd.isValid && cursorEnd > DateTime.fromISO(routine.next_run_at!)) {
+        db.prepare(
+          `UPDATE routines SET next_run_at = @next, updated_at = datetime('now') WHERE id = @id`
+        ).run({ id: routine.id, next: cursorIso });
+      }
+      logger.warn('Routine catch-up has not reached a future firing — deferred without replay', {
+        routineId: routine.id, cursorIso, walkGuard,
+      });
+      continue;
+    }
+    const nextFuture = cursorIso;
 
     if (mostRecentViable) {
       try {
@@ -217,7 +233,12 @@ export async function materializeRoutineTasks(
         materialized++;
       } catch (err) {
         const msg = String(err);
-        if (msg.includes('UNIQUE') || msg.includes('constraint')) {
+        // A constraint error alone does not prove this firing exists: NOT NULL,
+        // foreign-key, or even another unique-key failure must retain the cursor.
+        const recorded = db.prepare(
+          'SELECT id FROM tasks WHERE routine_id = ? AND due_at = ?'
+        ).get(routine.id, mostRecentViable);
+        if (recorded) {
           logger.debug('Routine already materialized for this firing — skipping', {
             routineId: routine.id,
             scheduledAt: mostRecentViable,

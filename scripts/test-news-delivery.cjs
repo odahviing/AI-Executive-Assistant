@@ -156,7 +156,8 @@ for (const mode of ['edit', 'fresh', 'fallback', 'failed', 'unknown', 'silent', 
     });
     await mod.dispatchRoutine({}, { id: 'task1', routine_id: 'r1' }, f.profile, {}); await flush();
     assert.equal(f.state.writes.length, ['edit', 'fresh', 'fallback'].includes(mode) ? 1 : 0);
-    assert.ok(statuses.includes('complete')); f.check();
+    assert.ok(statuses.includes(mode === 'failed' ? 'failed' : 'complete'));
+    assert.equal(statuses.includes('complete'), mode !== 'failed'); f.check();
   });
 }
 for (const mode of ['channel', 'dm', 'failed', 'unknown', 'throw', 'room', 'colleague', 'stripped', 'write-failure']) {

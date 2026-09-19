@@ -21,6 +21,17 @@ import type { SlackAppContext } from './context';
 import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
 import { readSlackThread } from '../threadHistory';
 
+async function reportAudioFailure(client: SlackAppContext['app']['client'], botToken: string, channelId: string, threadTs: string): Promise<void> {
+  try {
+    await client.chat.postMessage({
+      token: botToken, channel: channelId, thread_ts: threadTs,
+      text: `I couldn't transcribe that audio. Please send it again or write your message.`,
+    });
+  } catch (err) {
+    logger.warn('Audio failure notice could not be delivered', { err: String(err) });
+  }
+}
+
   // On-restart catch-up routes missed messages THROUGH this live path instead
   // of reimplementing it. Register a replay fn (closure over processMessage +
   // the shared ingestion helpers) that core/background.ts calls per detected
@@ -58,9 +69,13 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     if (audioFile?.url_private) {
       try {
         const transcript = await transcribeSlackAudio(audioFile.url_private as string, assistant.slack.bot_token, undefined, audioFile.mimetype as string);
-        if (transcript && transcript.trim().length >= 2) { text = `[Voice message]: ${transcript}`; voiceInput = true; }
+        if (transcript && transcript.trim().length > 0) { text = `[Voice message]: ${transcript}`; voiceInput = true; }
       } catch (err) {
         logger.warn('inboundReplay — transcription failed, skipping media', { err: String(err).slice(0, 200) });
+      }
+      if (!voiceInput && !text.trim()) {
+        await reportAudioFailure(app.client, assistant.slack.bot_token, channelId, postThreadTs);
+        return;
       }
     } else if (imageFiles.length > 0) {
       // Route through the SAME injection-guarded path the live DM handler uses
@@ -336,6 +351,7 @@ export function registerDmHandler(ctx: SlackAppContext): void {
       }
       if (!config.OPENAI_API_KEY) {
         logger.warn('OPENAI_API_KEY not set — cannot transcribe');
+        await reportAudioFailure(client, assistant.slack.bot_token, channelId, threadTs);
         return;
       }
       logger.info('Audio messages received', { channel: channelId, user: message.user, count: audioFiles.length });
@@ -346,9 +362,19 @@ export function registerDmHandler(ctx: SlackAppContext): void {
         };
         for (let i = 0; i < audioFiles.length; i++) {
           const audioFile = audioFiles[i];
+          let text: string;
           try {
-            const text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
-            if (!text || text.length < 2) continue;
+            text = await transcribeSlackAudio(audioFile.url_private, assistant.slack.bot_token, undefined, audioFile.mimetype);
+          } catch (err) {
+            logger.error('Voice transcription error', { err: String(err), index: i });
+            await reportAudioFailure(client, assistant.slack.bot_token, channelId, threadTs);
+            continue;
+          }
+          if (!text.trim()) {
+            await reportAudioFailure(client, assistant.slack.bot_token, channelId, threadTs);
+            continue;
+          }
+          try {
             logger.info('Voice message transcribed', { preview: text.slice(0, 80), index: i });
             // Prefix with [Voice message]: so the orchestrator's VOICE LANGUAGE
             // OVERRIDE rule fires. processMessage persists the text via

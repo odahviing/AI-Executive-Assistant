@@ -18,7 +18,7 @@ function harness(options={}){
   'src/config.ts':{config:{}},
   'src/db/client.ts':{getDb:()=>({prepare:sql=>({all:()=>[person]})})},
   'src/db/socialSubjects.ts':{},'src/db/engagementRank.ts':{},'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:()=>undefined},
-  'src/db/venues.ts':{findVenuesByCriteria:()=>[],countHiddenVenues:()=>0},
+  'src/db/venues.ts':{findVenuesByCriteria:()=>[],countHiddenVenues:()=>0,findVenueByNameAndOwner:()=>null},
   'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{compositions++;return {content:[{type:'text',text:JSON.stringify({candidates})}]};}}})},
   'src/llm/models.ts':{},'src/skills/general.ts':{tavilySearch:async()=>{searches++;return {answer:'Fixture source with explicitly supplied opening hours'};},TAVILY_SEARCH_LIVE_TURN_TIMEOUT_MS:1000},
   'src/utils/locationResolver.ts':{resolveVenueLocation:async()=>({resolved:false})},

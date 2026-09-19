@@ -29,7 +29,7 @@ import { resolveStatedInstant } from '../../utils/weTimeResolver';
 import { closeRequest } from './closeRequest';
 import { withRequestLock, closeUnconfirmedExecution } from './resolver';
 import type { NextCheckHandler, RequestRow } from './types';
-import { parseDetails, deriveOriginSurface, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
+import { parseDetails, deriveOriginSurface, reminderWorkTimeAtOrAfter, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
 import { relayClosureToRequester, retryRequesterRelay } from './requesterRelay';
 import { getConnection } from '../../connections/registry';
 import type { SendOptions, SendResult } from '../../connections/types';
@@ -389,13 +389,20 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
  * Reminder fires — DM the owner (or target) with the reminder message,
  * then close the request.
  */
-async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'closed'> {
+async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'closed' | 'rearmed'> {
   const details = parseDetails<Record<string, unknown>>(row) ?? {};
   const message = typeof details.message === 'string' && details.message
     ? details.message
     : (row.subject ?? '');
   const ownerId = profile.user.slack_user_id;
   const targetSlackId = row.target_slack_id ?? ownerId;
+  if (row.kind === 'reminder' && details.explicit_time === false) {
+    const next = reminderWorkTimeAtOrAfter(new Date().toISOString(), targetSlackId, profile);
+    if (Date.parse(next) > Date.now() + 60_000) {
+      updateRequest(row.id, { nextCheckAt: next, nextCheckHandler: 'reminder_fire' });
+      return 'rearmed';
+    }
+  }
   const remindingSomeoneElse = targetSlackId !== ownerId;
   // Delivery outcome, tracked so the requester loop-close below (R3) tells
   // the truth about what actually happened rather than assuming success.
@@ -736,22 +743,9 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
 }
 
 /**
- * runSendScheduledOutreach's three give-up sites (below) all close 'cancelled'
- * with nobody told at that moment — the third member of runner.ts's
- * terminal-give-up family (runOutreachExpiryOrDecision DMs the owner,
- * runFreeformFlagRetry relays the requester) that had no notify at all. There
- * is no requester here to relay to — createOutreachJob's requests-bridge
- * (db/jobs.ts) never sets requester_slack_id on an outreach row, so
- * relayClosureToRequester would just bail — and the colleague never received
- * anything (the send itself is what failed), so there's nothing to tell them
- * either. The owner (or whoever asked Maelle to run this outreach — could be
- * a colleague-initiated message_colleague call too) is the only side waiting,
- * and `owner_dm_channel` is never populated for a SCHEDULED outreach (that
- * write only happens on outreach.ts's non-scheduled send path, which a future
- * send_at returns before reaching) — so this reads `origin_channel`/
- * `origin_thread_ts` instead: outreach.ts only repurposes those from "whoever
- * asked" to "the colleague's DM" AFTER a confirmed send, and every path that
- * reaches here never got one, so they still anchor the asker's own thread.
+ * Report scheduled delivery failures, uncertainty, and partial attachment delivery
+ * to the asker's original thread before origin_* is repurposed for the recipient.
+ * Scheduled outreach has no requester_slack_id; its origin is the return address.
  */
 async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: UserProfile, body: string): Promise<void> {
   if (!row.origin_channel) return;
@@ -800,6 +794,13 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     });
     return 'rearmed';
   }
+  let sendAttempted = false;
+  const closeUnconfirmedSend = async (): Promise<'closed'> => {
+    closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_unconfirmed', closedBy: 'system' });
+    await notifyAskerScheduledOutreachFailed(row, profile,
+      `I attempted your scheduled message to ${row.target_name ?? 'them'}, but couldn't confirm the full outcome. I won't resend it automatically because that could duplicate the message. Please check the conversation before trying again.`);
+    return 'closed';
+  };
   try {
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (!conn) throw new Error('Scheduled outreach has no Slack connection');
@@ -823,6 +824,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
 
     if (channelId) {
       const mention = `<@${targetSlackId}>`;
+      sendAttempted = true;
       const outcome = await sendTracked(
         conn,
         { channel: channelId },
@@ -832,6 +834,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
         row.id,
       );
       if (!outcome.ok) {
+        if (outcome.reason === 'error' || outcome.reason === 'send_threw') return closeUnconfirmedSend();
         logger.warn('runSendScheduledOutreach — scheduled channel post failed', {
           requestId: row.id, reason: outcome.reason, attempt: attempts, maxAttempts: MAX_SEND_ATTEMPTS,
         });
@@ -851,6 +854,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       }
       // Channel posts ignore await_reply — same rule as outreach.ts's
       // immediate path (no DM thread to await a reply in).
+      if (outcome.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile,
+        `Your scheduled message text was posted, but ${outcome.attachments_failed} attachment(s) failed. I haven't repeated the text.`);
       if (job) updateOutreachJob(job.id, { sent_at: new Date().toISOString(), dm_channel_id: outcome.ref, dm_message_ts: outcome.ts });
       logActivity({
         ownerUserId: ownerId,
@@ -872,6 +877,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       return 'closed';
     }
 
+    sendAttempted = true;
     const res = await sendTracked(
       conn,
       { dm: targetSlackId },
@@ -881,6 +887,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       row.id,
     );
     if (!res.ok) {
+      if (res.reason === 'error' || res.reason === 'send_threw') return closeUnconfirmedSend();
       // Same bounded retry as the channel branch above. A soft {ok:false}
       // (deactivated user / DM open failure — sendDM returns it without
       // throwing) must never be treated as sent: pre-fix this proceeded to
@@ -905,6 +912,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     }
     const sentTs = res.ts ?? null;
     const sentAt = new Date().toISOString();
+    if (res.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile,
+      `Your scheduled message text reached ${row.target_name ?? 'them'}, but ${res.attachments_failed} attachment(s) failed. I haven't repeated the text.`);
     if (job) updateOutreachJob(job.id, { sent_at: sentAt, dm_channel_id: res.ref, dm_message_ts: res.ts });
     // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
     // always true (0 !== false). Treat 0 as fire-and-forget; keep "missing = await".
@@ -936,13 +945,10 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     }
     return 'rearmed';
   } catch (err) {
-    // Bounded retry. Pre-fix this returned 'rearmed' WITHOUT touching
-    // next_check_at, so the row kept its past-due time and re-fired every
-    // 5-min tick FOREVER on a persistent throw (deactivated user, bad channel,
-    // a Slack exception rather than an {ok:false}) — infinite loop + a request
-    // that never closes (pollutes the brief). Now: back off and cap. A
-    // transient Slack hiccup still recovers (retry); a permanent failure
-    // closes after MAX_SEND_ATTEMPTS instead of looping.
+    // Once a transport call started, a thrown send or later bookkeeping error
+    // cannot prove non-delivery. Never repeat the mutation to discover receipt.
+    if (sendAttempted) return closeUnconfirmedSend();
+    // Failures before any transport attempt retain the bounded retry.
     const MAX_SEND_ATTEMPTS = 3;
     const attempts = (typeof details.send_attempts === 'number' ? details.send_attempts : 0) + 1;
     logger.warn('runSendScheduledOutreach — send threw', {

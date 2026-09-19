@@ -46,7 +46,7 @@ function compile(rel) {
   if (!compiled.has(rel)) {
     const source = before && laneFiles.has(rel)
       ? cp.execFileSync('git', ['show', `${baseline}:${rel}`], { cwd: root, encoding: 'utf8' })
-      : fs.readFileSync(path.join(sourceRoot, rel), 'utf8');
+      : fs.readFileSync((fs.existsSync(path.join(sourceRoot, rel)) ? path.join(sourceRoot, rel) : path.join(root, rel)), 'utf8');
     const exported = rel === 'src/core/requests/runner.ts' ? source + '\nexport { runSendScheduledOutreach };' : source;
     compiled.set(rel, ts.transpileModule(exported, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText);
   }
@@ -74,7 +74,7 @@ function harness(options = {}) {
     schedule: { work_hours: Object.fromEntries(IL_DAYS.map(day => [day, ['09:00-17:00']])), office_days: { days: IL_DAYS }, home_days: { days: [] } },
   };
   let row, job;
-  const sends = [], coreCalls = [], logs = [], closures = [], modules = new Map();
+  const sends = [], coreCalls = [], logs = [], closures = [], ticks = [], modules = new Map();
   const sendResults = [...(options.sendResults ?? [])];
   const noop = () => {};
   // The requests-spine row: one in-memory object, the way test-timezone-registrar-deadline.cjs holds it.
@@ -90,7 +90,7 @@ function harness(options = {}) {
   };
   // outreach_jobs is payload held in memory; every people_memory statement runs on the real store.
   const jobStatement = sql => ({
-    run: p => { if (sql.includes('INSERT INTO outreach_jobs')) job = JSON.parse(JSON.stringify(p)); else if (sql.includes('UPDATE outreach_jobs')) job = { ...job, ...p }; else throw Error('Unhandled SQL ' + sql); },
+    run: p => { if (sql.includes('INSERT INTO outreach_jobs')) job = JSON.parse(JSON.stringify(p)); else if (sql.includes('UPDATE outreach_jobs')) { if(options.jobUpdateThrows) throw Error('payload write failed'); job = { ...job, ...p }; } else throw Error('Unhandled SQL ' + sql); },
     get: () => job,
   });
   const db = { prepare: sql => sql.includes('outreach_jobs') ? jobStatement(sql) : sqlite.prepare(sql), transaction: fn => fn, exec: sql => sqlite.exec(sql) };
@@ -125,10 +125,10 @@ function harness(options = {}) {
     'src/connections/registry.ts': { getConnection: () => options.noConnection ? undefined : conn },
     // Capture the real callers' close requests; terminal persistence/cascade is
     // outside this harness and is not claimed as exercised here.
-    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); if (row) row.state = p.state; } },
+    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); if (row) { row.state = p.state; row.next_check_at=null; row.next_check_handler=null; } } },
     'src/core/requests/resolver.ts': { withRequestLock: (_id, fn) => fn(), closeUnconfirmedExecution: noop },
     'src/core/requests/logActivity.ts': { logActivity: noop },
-    'src/utils/threadActivity.ts': { reactActivityComplete: async () => {} },
+    'src/utils/threadActivity.ts': { reactActivityComplete: async (...args) => { ticks.push(args); } },
     'src/utils/resolveSlackId.ts': { resolveSlackId: id => ({ slack_id: id, was_hallucinated: false }) },
     'src/utils/ownerDailyThread.ts': { postOwnerDecision: async () => ({ ok: true }) },
     'src/db/scheduleOverrides.ts': { getScheduleOverride: () => undefined },
@@ -157,7 +157,7 @@ function harness(options = {}) {
     { profile, userId: OWNER, authority: 'owner', channelId: 'DOWNER', threadTs: 'owner.1', surface: 'owner_dm', ...options.context });
   const person = () => sqlite.prepare('SELECT * FROM people_memory WHERE slack_id = ?').get(COLLEAGUE);
   const fire = () => load('src/core/requests/runner.ts').runSendScheduledOutreach(row, profile);
-  return { tool, fire, person, sends, coreCalls, logs, closures, row: () => row, job: () => job, restart: () => modules.clear(), setNow: iso => { now = Date.parse(iso); } };
+  return { tool, fire, reminderFloor:(instant,target)=>load('src/core/requests/types.ts').reminderWorkTimeAtOrAfter(instant,target,profile), sweep:()=>load('src/core/requests/runner.ts').sweepDueRequests({profilesByUserId:new Map([[OWNER,profile]])}), person, sends, ticks, coreCalls, logs, closures, row: () => row, job: () => job, restart: () => modules.clear(), setNow: iso => { now = Date.parse(iso); } };
 }
 
 const NY_DEADLINE_FROM_MON_0600Z = '2026-09-16T21:00:00.000Z'; // 24 business hours, 09:00-17:00 America/New_York
@@ -419,3 +419,16 @@ test('preserved: invalid send time does not collect a profile or create a person
   assert.equal(h.person(), undefined);
   assert.equal(h.row(), undefined);
 });
+
+for(const channel of [false,true])for(const uncertain of ['error','throw'])test(`R-FULL-UNKNOWN ${channel?'room':'DM'} ${uncertain} closes without retry`,async()=>{const h=harness({sendResults:[uncertain==='throw'?new Error('post timeout'):{ok:false,reason:'error'}]});h.setNow('2026-09-14T06:00Z');await h.tool({send_at:NY_WORK_START_MON,...(channel?{channel_id:'CROOM'}:{})});h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.row().state,'cancelled');assert.equal(h.closures.at(-1).closureReason,'scheduled_send_unconfirmed');assert.equal(h.sends.length,2);assert.match(h.sends[1].body,/couldn't confirm/);assert.doesNotMatch(h.sends[1].body,/Nothing went out/);assert.equal(h.row().next_check_at,null);h.restart();await h.sweep();assert.equal(h.sends.length,2);});
+for(const channel of [false,true])test(`R-FULL-UNKNOWN control explicit ${channel?'room':'DM'} failure retries bounded`,async()=>{const h=harness({sendResults:[{ok:false,reason:'user_not_found'},{ok:false,reason:'user_not_found'},{ok:false,reason:'user_not_found'}]});h.setNow('2026-09-14T06:00Z');await h.tool({send_at:NY_WORK_START_MON,...(channel?{channel_id:'CROOM'}:{})});h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.row().state,'in_flight');assert.equal(JSON.parse(h.row().details_json).send_attempts,1);h.restart();await h.fire();await h.fire();assert.equal(h.row().state,'cancelled');assert.equal(h.sends.length,4);});
+for(const scheduled of [false,true])for(const channel of [false,true])test(`R-FULL-PARTIAL ${scheduled?'scheduled':'immediate'} ${channel?'room':'DM'} reports text success with failed attachments`,async()=>{const h=harness({sendResults:[{ok:true,ref:channel?'CROOM':'DCOLLEAGUE',ts:'out.1',attachments_failed:1}]});h.setNow(scheduled?'2026-09-14T06:00Z':NY_WORK_START_MON);const r=await h.tool({...(scheduled?{send_at:NY_WORK_START_MON}:{}),...(channel?{channel_id:'CROOM'}:{}),attachments:[{sourceUrl:'https://slack.test/file'}]});if(scheduled){h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.sends.length,2);assert.match(h.sends[1].body,/1 attachment\(s\) failed/);assert.equal(h.row().state,channel?'resolved':'awaiting_colleague');}else{assert.equal(r.ok,true);assert.equal(r.attachments_failed,1);assert.match(r._must_reply_with,/partial delivery/);assert.equal(h.sends.length,1);}});
+
+
+
+test('R-FULL-UNKNOWN control missing connection retries before any send',async()=>{const options={},h=harness(options);h.setNow('2026-09-14T06:00Z');await h.tool({send_at:NY_WORK_START_MON});options.noConnection=true;h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.row().state,'in_flight');assert.equal(JSON.parse(h.row().details_json).send_attempts,1);assert.equal(h.sends.length,0);options.noConnection=false;h.restart();await h.fire();assert.equal(h.row().state,'awaiting_colleague');assert.equal(h.sends.length,1);});
+test('R-FULL-UNKNOWN post-send bookkeeping failure never repeats confirmed text',async()=>{const options={},h=harness(options);h.setNow('2026-09-14T06:00Z');await h.tool({send_at:NY_WORK_START_MON});options.jobUpdateThrows=true;h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.row().state,'cancelled');assert.equal(h.row().next_check_handler,null);h.restart();await h.sweep();assert.equal(h.sends.filter(x=>x.id==='UCOLLEAGUE').length,1);assert.match(h.sends[1].body,/couldn't confirm the full outcome/);});
+for(const channel of [false,true])for(const partial of [false,true])test(`R-FULL-PARTIAL completion tick ${channel?'room':'DM'} ${partial?'suppressed':'preserved'}`,async()=>{const h=harness({sendResults:[{ok:true,ref:channel?'CROOM':'DCOLLEAGUE',ts:'out.1',attachments_failed:partial?1:0}]});h.setNow(NY_WORK_START_MON);await h.tool({...(channel?{channel_id:'CROOM'}:{}),await_reply:false,attachments:[{sourceUrl:'https://slack.test/file'}]});assert.equal(h.ticks.length,partial?0:1);});
+
+test('R-INTENT real recipient timezone and weekend choose local working interval',()=>{const h=harness({person:{timezone:'America/New_York',timezone_set_by:'owner',working_hours_auto:hours(WEEKDAYS)}});assert.equal(h.reminderFloor('2026-09-19T06:00:00Z','UCOLLEAGUE'),'2026-09-21T13:00:00.000Z');});
+test('R-INTENT real owner configured hours choose next working day',()=>{const h=harness();assert.equal(h.reminderFloor('2026-09-18T06:00:00Z','UOWNER'),'2026-09-20T06:00:00.000Z');});

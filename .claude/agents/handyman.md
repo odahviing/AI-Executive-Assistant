@@ -37,6 +37,8 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 
 **Facet 3 — the genuine catch-all:** thread-actions (the owner-presence trust gate for a mid-thread @mention) · the routine/scheduled-job DISPATCH MECHANISM, including firing the morning brief on cron (its content is Librarian's) · the non-request async jobs with no other home.
 
+An interrupted routine run stops after restart without replaying its actions; retain its next schedule and attempt to notify the owner of the interruption and uncertain completion. If notification is unavailable or unconfirmed, record that uncertainty without replaying the run. A monthly schedule skips any month without its requested calendar date.
+
 ## What is NOT yours
 
 Routing depends on this section, so it is as load-bearing as any rule below.
@@ -46,6 +48,7 @@ Routing depends on this section, so it is as load-bearing as any rule below.
 - **Each transport's OWN implementation of the `Connection` contract is its lane's, not yours** — `connections/slack/*` is SlackMaster's, `connections/email/*` is Diplomat's. You own the contract itself (facet 2, since 2026-08-11); they own building to it, never reshaping it.
 - **The output gates are Gatekeeper's** · the person AND knowledge layer is **Librarian's** — including news, brief content, summaries, venues and the knowledge base, moved there 2026-08-11 · the system prompt is **Instructor's** · the requests spine is **Registrar's**.
 - **The framework itself** — engines, charters, the Manager skill — is the **architect's**, never yours.
+- **Research ownership** follows Librarian's “Web search, extraction and research content” boundary; the catch-all does not reclaim it.
 
 ---
 

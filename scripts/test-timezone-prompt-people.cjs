@@ -138,3 +138,47 @@ test('dual-clock narration names the dated travel timezone without a present-ten
     "Tue 15 Sep 17:30 EDT Owner's travel timezone / Wed 16 Sep 00:30 Owner's home time",
   );
 });
+
+// Captured prompt inputs only; these assertions do not simulate model obedience.
+function emailPromptCapture(flagged, channel = 'email') {
+  rows = [];
+  const parts = load('src/core/orchestrator/systemPrompt.ts').buildSystemPromptParts(
+    profile('UTC', false), 'owner', 'Owner Example', false, undefined,
+    false, false, undefined, 'UOWNER', undefined, undefined, channel,
+  );
+  const fixtureUser = flagged
+    ? "Timezone clarification needed for: Alex Example. The stated timezone is accepted, but its participant mapping is unclear. Ask a concise, forwardable clarification about which person's timezone it is; do not guess an association or include internal notes to the owner.\nForwarded scheduling chain."
+    : 'Forwarded scheduling chain with confirmed participant timezones.';
+  const user = process.env.EMAIL_ATTRIBUTION_TURNS_DIR && channel === 'email'
+    ? JSON.parse(fs.readFileSync(path.join(process.env.EMAIL_ATTRIBUTION_TURNS_DIR, `${flagged ? 'uncertain' : 'certain'}-turn.json`), 'utf8')).userMessage
+    : fixtureUser;
+  const capture = { ...parts, user };
+  if (process.env.EMAIL_ATTRIBUTION_CAPTURE_DIR) {
+    fs.writeFileSync(path.join(process.env.EMAIL_ATTRIBUTION_CAPTURE_DIR, `${channel}-${flagged ? 'flagged' : 'ordinary'}.json`), JSON.stringify(capture, null, 2));
+  }
+  return capture;
+}
+
+test('email attribution flag has a forwardable clarification exception in actual prompt', () => {
+  const capture = emailPromptCapture(true);
+  assert.match(capture.user, /Timezone clarification needed for:/);
+  assert.match(capture.dynamic, /except when this turn explicitly flags "Timezone clarification needed for:"/);
+  assert.match(capture.dynamic, /With that flag, write one concise, forwardable question asking whose timezone was stated/);
+  assert.match(capture.dynamic, /Keep it addressed to the externals\. Otherwise, offer only the slots/);
+  assert.match(capture.dynamic, /Slot options must be complete enough to forward untouched/);
+});
+
+test('ordinary email preserves external-only slots language and no owner notes', () => {
+  const capture = emailPromptCapture(false);
+  assert.doesNotMatch(capture.user, /Timezone clarification needed for:/);
+  assert.match(capture.dynamic, /Compose ONLY this forwardable text — no note to Owner, no assumptions or questions addressed to him/);
+  assert.match(capture.dynamic, /No added offer to help with anything else/);
+  assert.match(capture.dynamic, /each candidate time in every attendee's own local zone, the duration, and the subject and context/);
+  assert.match(capture.dynamic, /reply in its language \(the externals' own\)/);
+});
+
+test('email clarification rule remains absent from Slack and cached prompt', () => {
+  const email = emailPromptCapture(true), slack = emailPromptCapture(false, 'slack');
+  assert.doesNotMatch(email.static, /Timezone clarification needed for:/);
+  assert.doesNotMatch(slack.dynamic, /EMAIL REPLY|Timezone clarification needed for:/);
+});

@@ -16,6 +16,7 @@
  */
 
 import { DateTime } from 'luxon';
+import type { UserProfile } from '../../config/userProfile';
 
 export type RequestKind =
   | 'approval'         // colleague→owner decision request (replaces approvals table)
@@ -351,4 +352,19 @@ export function deriveOriginSurface(
 export function toTimerInstant(raw: string, ownerTimezone: string): string | null {
   const dt = DateTime.fromISO(raw, { zone: ownerTimezone });
   return dt.isValid ? dt.toUTC().toISO() : null;
+}
+
+/** A vague reminder uses the recipient's next actual work interval. Explicit
+ * clocks and legacy promises bypass this helper at both creation and firing. */
+export function reminderWorkTimeAtOrAfter(instant: string, targetSlackId: string | null | undefined, profile: UserProfile): string {
+  if (targetSlackId && targetSlackId !== profile.user.slack_user_id) {
+    const { colleagueWorkTimeBaseFromNow } = require('../../utils/responseDeadline') as typeof import('../../utils/responseDeadline');
+    return colleagueWorkTimeBaseFromNow(profile.user.timezone, Date.parse(instant),
+      { slackId: targetSlackId, ownerTimezone: profile.user.timezone });
+  }
+  const { ownerWorkIntervalsBetween } = require('../../utils/workHours') as typeof import('../../utils/workHours');
+  const from = DateTime.fromISO(instant);
+  const next = ownerWorkIntervalsBetween(from, from.plus({ days: 60 }), profile)[0];
+  if (!next) throw new Error('No owner reminder work time within 60 calendar days');
+  return next.start.toUTC().toISO()!;
 }

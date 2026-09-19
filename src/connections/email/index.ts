@@ -106,7 +106,7 @@ export function createEmailConnection(profile: UserProfile): Connection {
         return { ok: false, reason: 'missing_reply_target' };
       }
       try {
-        await replyToMail(profile, {
+        const outcome = await replyToMail(profile, {
           messageId: opts.replyToMessageId,
           // recipientRef was already validated against `allowed` above —
           // passing it through as `to` is what makes the actual Graph send
@@ -115,6 +115,7 @@ export function createEmailConnection(profile: UserProfile): Connection {
           to: recipientRef.trim(),
           bodyHtml: formatForEmail(text),
         });
+        if (outcome === 'unconfirmed') return { ok: false, reason: 'send_unconfirmed' };
         return { ok: true };
       } catch (err) {
         logger.error('EmailConnection.sendDirect — send failed', {

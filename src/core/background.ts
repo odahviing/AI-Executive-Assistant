@@ -3,6 +3,7 @@ import type { UserProfile } from '../config/userProfile';
 import { runDueTasks } from '../tasks/runner';
 import { materializeRoutineTasks, backfillNullNextRunAt } from '../tasks/routineMaterializer';
 import { ensureBriefingCron, updateBriefingCronChannel } from '../tasks/crons';
+import { stopInterruptedRoutineTasks } from '../tasks/dispatchers/routine';
 import logger from '../utils/logger';
 import { readInternalSlackConversation } from '../connections/slack/eligibility';
 import { readSlackThread } from '../connectors/slack/threadHistory';
@@ -167,6 +168,17 @@ export function startBackgroundTimer(
   runningApps: Array<{ app: App; name: string }>,
   profiles: Map<string, UserProfile>,
 ): void {
+  // Called once after sockets open, before any routine tick can start. The
+  // helper terminalizes interrupted runs synchronously before awaiting DMs;
+  // notification latency must not block boot or re-enable abandoned work.
+  for (const profile of profiles.values()) {
+    void stopInterruptedRoutineTasks(profile).catch(err => {
+      logger.error('Interrupted routine startup recovery failed', {
+        ownerUserId: profile.user.slack_user_id, err: String(err),
+      });
+    });
+  }
+
   // v2.7.0 — orphan-backfill scripts deleted. The requests spine is correct
   // by construction; if it leaks we fix the leak, not patch with a sweeper.
 

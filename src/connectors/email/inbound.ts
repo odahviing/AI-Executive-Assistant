@@ -53,7 +53,7 @@ import { runOrchestrator } from '../../core/orchestrator';
 import { getConversationHistory, appendToConversation, resolvePerson, setPersonTimezoneByEmail, getPersonByEmail, setCurrentTravelById, getTravelRecordById } from '../../db';
 import { DateTime } from 'luxon';
 import { isNonHumanAttendee } from '../../memory/recordBooking';
-import { extractForwardedParticipants } from './extractParticipants';
+import { extractForwardedParticipants, type EmailTimezoneHint, type ForwardedParticipant } from './extractParticipants';
 import { htmlToPlainText } from './htmlToText';
 import { inferTimezoneFromStateStatic } from '../../utils/locationTz';
 import { runOutputGates } from '../../utils/guards/runOutputGates';
@@ -79,6 +79,36 @@ function statedZoneAppearsInUniqueBody(statedTimezone: string, uniqueBodyPlain: 
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`);
   return re.test(uniqueBodyPlain);
+}
+
+/** Literal identity boundaries, never an English-language interpretation. */
+function containsPersonReference(text: string, reference: string): boolean {
+  const escaped = reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return !!reference && new RegExp(`(?<![\\p{L}\\p{N}_@.+-])${escaped}(?![\\p{L}\\p{N}_@.+-])`, 'u').test(text);
+}
+
+/** The statement must be the owner's exact text and identify exactly the
+ * selected participant. Presence of the zone elsewhere in the note is not
+ * person attribution. Broad/missing/ambiguous statements do not write. */
+function ownerHintBindsToPerson(hint: EmailTimezoneHint, uniqueBody: string, participants: ForwardedParticipant[], claimedParticipants: ForwardedParticipant[]): boolean {
+  const quote = (hint.sourceQuote ?? '').trim().toLowerCase();
+  const reference = (hint.personReference ?? '').trim().toLowerCase();
+  if (!quote || !reference || !uniqueBody.includes(quote)
+    || !containsPersonReference(quote, reference)
+    || !statedZoneAppearsInUniqueBody(hint.statedTimezone, quote)) return false;
+  const aliases = (person: ForwardedParticipant): string[] => {
+    const name = person.name?.trim().toLowerCase();
+    return [person.email, ...(name ? [name, name.split(/\s+/u)[0]] : [])];
+  };
+  const selected = participants.filter(person => aliases(person).includes(reference));
+  if (selected.length !== 1 || selected[0].email !== hint.email) return false;
+  // Untrusted names may veto an ambiguous quote, but never authorize a
+  // write. The positive match above uses only canonical/source-bound names.
+  const mentioned = participants.filter(person => [
+    ...aliases(person),
+    ...aliases(claimedParticipants.find(p => p.email === person.email) ?? person),
+  ].some(alias => containsPersonReference(quote, alias)));
+  return mentioned.length === 1 && mentioned[0].email === hint.email;
 }
 
 /**
@@ -212,7 +242,21 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   const ownerDomain = profile.user.email.trim().toLowerCase().split('@')[1] ?? '';
   const isMeaningfulParticipant = (email: string): boolean =>
     !ownerAddresses.includes(email) && email !== mailboxEmail && email !== assistantEmail && !isNonHumanAttendee(email);
-  const externalParticipants = extracted.participants.filter(p => isMeaningfulParticipant(p.email));
+  const claimedParticipants = extracted.participants.filter(p => isMeaningfulParticipant(p.email));
+  // Establish identity BEFORE resolvePerson can mint/enrich a row from this
+  // extraction. A model's Alice label must never rename canonical Bob for
+  // authority checks. For a new address, accept a display name only when the
+  // original text literally binds it to that address in a mailbox pair.
+  const sourceLower = plainBody.toLowerCase();
+  const externalParticipants = claimedParticipants.map(person => {
+    const existing = getPersonByEmail(person.email);
+    if (existing) return { ...person, name: existing.name || null };
+    const name = person.name?.trim() || null;
+    const sourceBound = name && [
+      `${name} <${person.email}>`, `${name}<${person.email}>`, `"${name}" <${person.email}>`,
+    ].some(pair => containsPersonReference(sourceLower, pair.toLowerCase()));
+    return { ...person, name: sourceBound ? name : null };
+  });
   const externalParticipantEmails = externalParticipants.map(p => p.email);
 
   // ── Person store (#24) — resolve-or-create a row for each address on
@@ -224,7 +268,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // happens — because being addressed on the chain she was asked to act on
   // IS the engagement (L1).
   //
-  // The display name the header carried travels WITH the address (L11 — one
+  // The canonical or source-bound display name travels WITH the address (L11 — one
   // person, one record): a fresh row is named by the human, not the address's
   // local part, and the store's own name rule (resolvePerson, db/people.ts)
   // can bind this address onto a row it already holds for that person without
@@ -248,8 +292,8 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // anything, you assume my time. no asking in email routes."
   // `extracted.timezoneHints` carries the free-text zone; resolve to IANA
   // statically (never a live lookup on this leg) and persist through the
-  // identity chokepoint. Only for a hint whose email survived the
-  // meaningful-participant filter above (never stamp a "timezone" onto the
+  // identity chokepoint. Only for a hint whose email belongs to the admitted
+  // top-header participant set above (never stamp a "timezone" onto the
   // owner's own row or Maelle's own mailbox). An unresolvable string, or no
   // hint at all, means tier 3 applies — the existing owner-zone fallback in
   // attendeeAvailability.ts — and this loop deliberately does nothing further.
@@ -258,7 +302,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // classification: Graph's `uniqueBody` is its own server-side isolation of
   // the text unique to THIS message — the sender-gated owner's own new
   // words, excluding whatever it merely quotes from earlier in the chain. A
-  // stated zone earns owner-tier authority only when it is actually PRESENT
+  // stated zone is considered for owner-tier authority only when it is PRESENT
   // in that unique text — checked with a WORD-BOUNDARY match
   // (statedZoneAppearsInUniqueBody above), not a bare substring test, so a
   // short token like "ET" can't match incidentally inside an unrelated word
@@ -267,15 +311,21 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // note" and write that straight to owner authority — wrong once and it
   // stuck forever, because no later auto-tier correction can outrank an
   // owner-tier value. Reading Graph's own diff instead of a position guess
-  // closes that. An empty/unpopulated `uniqueBody` (Graph had nothing unique
+  // establishes the source, not which person it describes. The exact quoted
+  // statement must also bind that zone to the selected participant below.
+  // An empty/unpopulated `uniqueBody` (Graph had nothing unique
   // to report) fails safe here too — the helper returns false on an empty
   // haystack, so it can never escalate to owner-tier on missing data.
   const uniqueBodyPlain = (
     message.uniqueBodyContentType === 'text' ? message.uniqueBody : htmlToPlainText(message.uniqueBody)
   ).toLowerCase();
+  const uncertainTimezonePeople = new Set<string>();
 
   for (const hint of extracted.timezoneHints) {
-    if (!isMeaningfulParticipant(hint.email)) continue;
+    // Hints may read the whole chain, but only the admitted top-header set
+    // may receive writes. A quoted-only address must not mint a person or
+    // mutate an unrelated contact through the timezone setter.
+    if (!externalParticipantEmails.includes(hint.email)) continue;
     const iana = inferTimezoneFromStateStatic(hint.statedTimezone);
     if (!iana) {
       logger.info('Email inbound — stated timezone did not resolve to a known IANA zone, leaving the owner-zone fallback in place', {
@@ -285,6 +335,13 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     }
     const provablyOwnersOwnText = statedZoneAppearsInUniqueBody(hint.statedTimezone, uniqueBodyPlain);
     if (provablyOwnersOwnText) {
+      if (!ownerHintBindsToPerson(hint, uniqueBodyPlain, externalParticipants, claimedParticipants)) {
+        const person = externalParticipants.find(p => p.email === hint.email)!;
+        uncertainTimezonePeople.add(person.name || person.email);
+        // No automatic-tier fallback: that would still mutate the guessed
+        // person's travel/base field. Flag in the one forwardable reply.
+        continue;
+      }
       // The owner's own explicit words — his standing ruling: "if I tell you
       // in email the timezone, you know it." A stated correction from the
       // person who owns the fact is durable, same as owner-tier anywhere else
@@ -371,6 +428,11 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   const turnText = [
     `[Forwarded email — From: ${message.from}, Subject: "${message.subject}"]`,
     participantsLine,
+    ...(uncertainTimezonePeople.size > 0 ? [
+      `Timezone clarification needed for: ${[...uncertainTimezonePeople].join(', ')}. The stated timezone is accepted, `
+      + `but its participant mapping is unclear. Ask a concise, forwardable clarification about which person's timezone it is; `
+      + `do not guess an association or include internal notes to the owner.`,
+    ] : []),
     '',
     '--- Full email chain ---',
     plainBody,
@@ -390,7 +452,8 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     userId: profile.user.slack_user_id,
     senderRole: 'owner',
     // v4.4.x (#154) — the sender gate above (ownerEmailAddresses) is the ONLY
-    // party that can reach this call: an authenticated single-owner sender,
+    // party that can reach this call: a matching owner/alias From header,
+    // which remains spoofable on this transport (D2),
     // no colleague and no room. `owner_dm` reproduces today's behaviour
     // byte-for-byte (matches the other owner-only synthetic callers —
     // briefs.ts, routine.ts) and is never more trusting than that gate: email
@@ -445,6 +508,13 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // bypassed — see the comment above that check for exactly how.
   const sendRes = await connection.sendDirect(message.from, gatedReply, { replyToMessageId: message.id });
   if (!sendRes.ok) {
+    if (sendRes.reason === 'send_unconfirmed') {
+      // Terminal uncertainty, as ruled by the owner: no resend suggestion,
+      // reconciliation task, phantom history, or automatic retry. Return
+      // normally so polling marks this consumed message read.
+      await notifyOwnerOfMailFailure(profile, message, true);
+      return;
+    }
     // No reply reached the owner, and nothing below has run yet — throw.
     // mailPoll.ts leaves the message unread as its mailbox-side marker (no
     // retry follows this — see the file header); the caller's try/catch
@@ -455,7 +525,8 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
     throw new Error(`Email reply send failed: ${sendRes.reason}${sendRes.detail ? ' — ' + sendRes.detail : ''}`);
   }
 
-  // Record the turn only now that delivery is CONFIRMED. Wrapped in its own
+  // Record the turn only now that Graph has ACCEPTED the send. This is not
+  // recipient-delivery confirmation. Wrapped in its own
   // try/catch that logs instead of rethrowing: a DB hiccup here must degrade
   // to a lost history line, never reach the caller's catch and manufacture a
   // false "you weren't answered" alert for an email that just was.
@@ -471,10 +542,11 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
 
 /**
  * #24 row 120 — the owner-visible half of the failure wrapper in
- * `handleInboundMail`. The email path itself just failed, so Slack is the
+ * `handleInboundMail`, also used for terminal unconfirmed sends. The email path failed or
+ * has an unknown outcome, so Slack is the
  * one channel still known to be up; the DM names the subject/sender of the
- * forward that didn't get answered so "I'll send it again" is something the
- * owner can actually act on. Deliberate, owner-approved exception to "no
+ * forward. Only known failures suggest resending; an unconfirmed send ends
+ * with that fact alone. Deliberate, owner-approved exception to "no
  * Slack shadow DM on the email path" (see the file header) — never extend
  * this pattern to a path that isn't itself the one that just failed.
  *
@@ -490,7 +562,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
  * a lost failure-DM is recoverable, an unhandled rejection out of a notifier
  * is not.
  */
-async function notifyOwnerOfMailFailure(profile: UserProfile, message: MailMessage): Promise<void> {
+async function notifyOwnerOfMailFailure(profile: UserProfile, message: MailMessage, unconfirmed = false): Promise<void> {
   try {
     const slack = getConnection(profile.user.slack_user_id, 'slack');
     if (!slack) {
@@ -499,8 +571,10 @@ async function notifyOwnerOfMailFailure(profile: UserProfile, message: MailMessa
       });
       return;
     }
-    const text = `I couldn't answer your forwarded email — from ${message.from}, subject "${message.subject}". `
-      + `It won't be retried automatically; feel free to forward it again.`;
+    const text = unconfirmed
+      ? `The send outcome for my reply to your forwarded email is unconfirmed — from ${message.from}, subject "${message.subject}".`
+      : `I couldn't answer your forwarded email — from ${message.from}, subject "${message.subject}". `
+        + `It won't be retried automatically; feel free to forward it again.`;
     const res = await slack.sendDirect(profile.user.slack_user_id, text);
     if (!res.ok) {
       logger.error('Email inbound — Slack failure-notification send failed', {

@@ -171,12 +171,47 @@ export function normalizeVenueName(s: string): string {
   return head.trim().toLowerCase();
 }
 
-export function findVenueByNameAndOwner(ownerUserId: string, name: string): VenueRow | null {
+export function findVenueByNameAndOwner(
+  ownerUserId: string,
+  name: string,
+  location?: { address?: string; branchName?: string; areaTags?: string[] },
+): VenueRow | null {
   // Two passes: exact-name first (cheap, common case), then normalized
   // head-only match (catches Place API drift across visits to the same
   // venue). The normalized pass runs an in-memory filter over the
   // owner's venues — venues per owner stay bounded (dozens to low
   // hundreds), so the per-call cost is negligible vs adding a column.
+  // Fresh discovery can carry branch/address evidence that a name alone
+  // cannot distinguish. Never transfer a stored identity across a known
+  // location conflict. Existing name-only callers keep their lookup behavior.
+  const matchesLocation = (row: VenueRow): boolean => {
+    if (!location) return true;
+    const normalized = (value?: string | null) => value?.trim().toLowerCase() || '';
+    const branch = normalized(location?.branchName);
+    if (branch && row.branch_name && branch !== normalized(row.branch_name)) return false;
+    // save-on-book stores "Name, Street, City" in name, while discovery
+    // can separate the street-only address from the city. Compare complete
+    // comma-delimited components, not a partial field against a full display.
+    const parts = (value?: string | null) => (value ?? '').split(',').map(normalized).filter(Boolean);
+    const compatible = (a: string[], b: string[]) =>
+      a.slice(0, Math.min(a.length, b.length)).every((part, i) => part === b[i]);
+    const addressFor = (displayName: string, address?: string | null): string[] => {
+      const explicit = parts(address);
+      // An explicit address is the source of truth. A display-name suffix
+      // may be a city or branch label; only infer an address there when the
+      // structured field is missing, never contradict or extend that field.
+      if (explicit.length > 0) return explicit;
+      const comma = displayName.indexOf(',');
+      return comma < 0 ? [] : parts(displayName.slice(comma + 1));
+    };
+    const address = addressFor(name, location.address);
+    const savedAddress = addressFor(row.name, row.address);
+    if (!compatible(address, savedAddress)) return false;
+    if (address.length > 0 && address.length === savedAddress.length) return true;
+    const areas = (location?.areaTags ?? []).map(normalized).filter(Boolean);
+    const savedAreas = row.area_tags.map(normalized).filter(Boolean);
+    return areas.length === 0 || savedAreas.length === 0 || areas.some(area => savedAreas.includes(area));
+  };
   const db = getDb();
   const exact = db.prepare(`
     SELECT * FROM venues
@@ -184,7 +219,7 @@ export function findVenueByNameAndOwner(ownerUserId: string, name: string): Venu
     ORDER BY last_used_at DESC NULLS LAST
     LIMIT 1
   `).get(ownerUserId, name);
-  if (exact) return rowToVenue(exact);
+  if (exact && matchesLocation(rowToVenue(exact))) return rowToVenue(exact);
   const target = normalizeVenueName(name);
   if (!target) return null;
   const candidates = db.prepare(`
@@ -193,7 +228,7 @@ export function findVenueByNameAndOwner(ownerUserId: string, name: string): Venu
     ORDER BY last_used_at DESC NULLS LAST
   `).all(ownerUserId) as Array<{ name: string; [k: string]: unknown }>;
   for (const c of candidates) {
-    if (normalizeVenueName(c.name) === target) return rowToVenue(c);
+    if (normalizeVenueName(c.name) === target && matchesLocation(rowToVenue(c))) return rowToVenue(c);
   }
   return null;
 }
