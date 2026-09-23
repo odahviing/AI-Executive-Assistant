@@ -246,11 +246,13 @@ function approvalOwnerNotified(toolName: string, result: unknown): boolean {
  *   memory  — get_person_memory read a person's notes (which hold their
  *             stated hours); a `found:false` miss (assistant.ts:865-871, no
  *             `error` field) grounds nothing.
+ *   send_hold — message_colleague held a send because the recipient was
+ *             outside their own working hours (`held_for_recipient_work_hours`).
  * Tools that describe the OWNER's own availability (get_calendar,
  * check_join_availability, the `[availability_precheck …]` lines) never carry
  * it: the class this grounds is a finding about someone else.
  */
-function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'noted' | 'memory' | null {
+function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'noted' | 'memory' | 'send_hold' | null {
   if (result == null || typeof result !== 'object') return null;
   const r = result as Record<string, unknown>;
   const isAttendeeReason = (reason: unknown): boolean =>
@@ -311,6 +313,10 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
       // `error` field, so it fell through to 'memory' as though a lookup had
       // actually found something to ground a claim against.
       return (typeof r.error === 'string' || r.found === false) ? null : 'memory';
+    case 'message_colleague':
+      // outreach.ts sets this only when the recipient's own work time decided
+      // the hold, so "it's outside Chris's hours, scheduled for Monday" is backed.
+      return r.held_for_recipient_work_hours === true ? 'send_hold' : null;
     default:
       return null;
   }
@@ -421,6 +427,17 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
     // and the claim-checker shield treats it as success (silent-fail bug:
     // outreach DM never sent, draft "Sent the message" sneaks past the
     // checker because the tool is "in toolSummaries").
+    // chris-headsup-scheduled-claim-summary (2026-09-23, owner ruling A) — a
+    // send_now whose Slack call errored or threw after it was attempted has an
+    // UNKNOWN outcome: outreach.ts cancels the held copy and returns
+    // `delivery_unconfirmed:true` beside its error code. Stamping that FAILED
+    // would tell the checkers it definitely did not go out; it may have. No
+    // `mutated=` marker either (mutationDomain drops any `error` result), so it
+    // backs no "sent" claim. A definite failure (`scheduled_copy_kept`) stays FAILED.
+    if (toolName === 'message_colleague' && result && typeof result === 'object'
+      && (result as { delivery_unconfirmed?: unknown }).delivery_unconfirmed === true) {
+      return `[message_colleague UNCONFIRMED: ${(input as any).colleague_name} — may have been delivered; scheduled copy cancelled]`;
+    }
     if (result && typeof result === 'object' && typeof (result as { error?: unknown }).error === 'string') {
       const reason = String((result as { error: string }).error).replace(/\s+/g, ' ').trim().slice(0, 80);
       return `[${toolName} FAILED: ${reason}]`;
@@ -743,8 +760,23 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
       }
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;
-      case 'message_colleague':
-        return `[message_colleague: ${(input as any).colleague_name}]`;
+      case 'message_colleague': {
+        // chris-headsup-scheduled-claim-summary (2026-09-23) — a HELD send
+        // (outreach.ts's `_status:'scheduled_not_sent'` return: a send_at, or a
+        // no-send_at call outside the recipient's hours) used to render exactly
+        // like a delivered one, so the claim-checker could not tell "scheduled"
+        // from "sent" and a "sent / it went out" draft passed. Carry the outcome
+        // and the owner-local send time; a delivered send keeps its line.
+        const name = (input as any).colleague_name;
+        const r = (result && typeof result === 'object')
+          ? result as { _status?: unknown; scheduled_at?: unknown; held_for_recipient_work_hours?: unknown }
+          : {};
+        if (r._status !== 'scheduled_not_sent') return `[message_colleague: ${name}]`;
+        const at = typeof r.scheduled_at === 'string' ? DateTime.fromISO(r.scheduled_at).setZone(ownerTz) : null;
+        const when = at?.isValid ? ` — goes out ${at.toFormat('EEE d MMM HH:mm')}` : '';
+        const held = r.held_for_recipient_work_hours === true ? ` (outside ${name}'s working hours)` : '';
+        return `[message_colleague SCHEDULED, NOT sent yet: ${name}${when}${held}]`;
+      }
       // v2.2.5 — mutation tools: read the outcome so the claim-checker sees
       // FAILED vs OK rather than just "the call ran."
       case 'create_meeting':

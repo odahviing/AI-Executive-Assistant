@@ -75,8 +75,8 @@ export interface CloseMeetingArtifactsResult {
   /**
    * elan-hold-survives-the-move-that-resolved-it (2026-09-06) — the
    * `colleague_slack_id` of every colleague step 2a (`relayVoidedNotices`)
-   * ACTUALLY delivered a corrected time to (a strict subset of
-   * `correctionsRelayed`'s count — same population, just named). Exists so a
+   * ACTUALLY delivered a corrected time to (`correctionsRelayed`'s population,
+   * named) or holds one for (see the last sentence). Exists so a
    * caller that ALSO runs its own colleague-notify loop after calling this
    * function (autoMove.ts's `executeInternalAutoMove`, which DMs every
    * attendee "meeting moved" unconditionally) can skip re-notifying someone
@@ -88,7 +88,10 @@ export interface CloseMeetingArtifactsResult {
    * because relayVoidedNotices declined to speak. A colleague in that
    * population was told NOTHING by this function, so a caller skipping them
    * on this list's say-so would leave them with no notice at all — the exact
-   * silence R3 bars. Only a CONFIRMED delivery belongs here.
+   * silence R3 bars. Only a CONFIRMED delivery belongs here — or a correction
+   * durably held on the spine for the colleague's work hours (it will reach
+   * them; a second notice from the caller would be a duplicate). Held ones are
+   * not counted in `correctionsRelayed`.
    */
   correctedColleagueSlackIds: string[];
   /**
@@ -302,7 +305,12 @@ export async function closeMeetingArtifacts(params: {
           // inferredFromAbsence gate as step 5: the vanished-meeting sweep
           // infers a delete from a bare 404 and cannot vouch for the outcome,
           // so it stays silent same as everywhere else.
-          if (closureState === 'cancelled' && !params.inferredFromAbsence
+          // A still-unsent (held) notice gave this colleague nothing to retract;
+          // closing it silences a notice about a move that no longer exists, and
+          // the calendar's own cancellation reaches them as an attendee. (Pre-wave
+          // the FYI had already gone out and resolved at delivery, so it was never
+          // in this open set: no Maelle cancellation DM either way.)
+          if (closureState === 'cancelled' && !params.inferredFromAbsence && row.sent_at
               && row.colleague_slack_id && !toldCancelled.has(row.colleague_slack_id)) {
             const delivered = await relayCancellationToOutreachColleague(params, row);
             if (delivered) {
@@ -576,6 +584,22 @@ export async function closeMeetingArtifacts(params: {
  * writes exactly the time it states into `ctx.proposed_start`, so this is the
  * record of the claim Maelle made to that human.
  */
+/** A still-unsent automatic move FYI (informational, already_moved, no reply
+ * awaited), with the time the colleague still holds. Null for anything else. */
+function readHeldMoveFyi(row: OutreachJob): { start?: string; end?: string } | null {
+  if (row.sent_at || Number(row.await_reply) !== 0 || !row.context_json) return null;
+  try {
+    const p = JSON.parse(row.context_json) as { already_moved?: unknown; original_start?: unknown; original_end?: unknown };
+    if (p.already_moved !== true) return null;
+    return {
+      start: typeof p.original_start === 'string' ? p.original_start : undefined,
+      end: typeof p.original_end === 'string' ? p.original_end : undefined,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function readToldNotice(payloadJson: string | null | undefined): { start?: string; subject?: string } {
   if (!payloadJson) return {};
   try {
@@ -603,7 +627,7 @@ function readToldNotice(payloadJson: string | null | undefined): { start?: strin
  * (elan-hold-survives-the-move-that-resolved-it, 2026-09-06 — so a caller
  * that runs its own colleague-notify loop after this function can skip
  * anyone it just confirmed telling; see CloseMeetingArtifactsResult's
- * `correctedColleagueSlackIds` doc for why this is a CONFIRMED-delivery list
+ * `correctedColleagueSlackIds` doc for why this is a confirmed-or-held list
  * only, never every colleague this pass merely closed).
  */
 async function relayVoidedNotices(
@@ -630,29 +654,51 @@ async function relayVoidedNotices(
   // string compare would relay "corrections" that change nothing, which is exactly
   // the chasing the owner ruled against.
   const contradicted: Array<{ row: OutreachJob; told: string; subject?: string }> = [];
+  // A move FYI still HELD for the colleague's work hours told them nothing, so
+  // it is not corrected — it is REPLACED: one fresh notice stating the final
+  // start AND end (any change, an end-only edit included), through the same
+  // producer and the same recipient-hours hold, and the caller then closes the
+  // held row. When the final interval is the one the colleague already holds
+  // (the auto-move was reverted), there is nothing to tell: the caller closes
+  // it with no replacement. A held proposal (a reply-required ask) is not
+  // replaced: the owner's own move overtook the question, so closing it is the
+  // whole outcome.
+  const replaced: Array<{ row: OutreachJob; original: { start?: string; end?: string }; subject?: string }> = [];
+  const sameInstant = (a: string | undefined, b: string | undefined): boolean =>
+    !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
   for (const row of openNotices) {
     if (!row.colleague_slack_id) continue;
     const { start: told, subject } = readToldNotice(row.context_json);
     if (!told) continue;  // never stated a time → nothing to correct
+    if (!row.sent_at) {
+      const heldFyi = readHeldMoveFyi(row);
+      if (!heldFyi) continue;
+      const reverted = sameInstant(heldFyi.start, params.newStartIso)
+        && (!heldFyi.end || sameInstant(heldFyi.end, params.newEndIso));
+      if (!reverted) replaced.push({ row, original: heldFyi, subject });
+      continue;
+    }
     const toldMs = new Date(told).getTime();
     if (!Number.isFinite(toldMs) || toldMs === newMs) continue;
     contradicted.push({ row, told, subject });
   }
-  if (contradicted.length === 0) return none;
+  if (contradicted.length === 0 && replaced.length === 0) return none;
 
   // The owner's cap: at most ONE correction per event per day. Checked ONCE, before
   // the loop — a meeting with three notified attendees is one correction pass, not
   // three. Measured as a rolling 24h window so a flip-flop either side of midnight
   // can't slip a second correction through, and so the cap needs neither a new
-  // column nor the owner's timezone.
+  // column nor the owner's timezone. A replaced held FYI is not a correction (the
+  // colleague was told nothing) and is not capped: it is their first notice.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { countCorrectionNoticesSince } = require('../db/jobs') as typeof import('../db/jobs');
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  if (countCorrectionNoticesSince(params.ownerUserId, params.meetingId, since) > 0) {
+  if (contradicted.length && countCorrectionNoticesSince(params.ownerUserId, params.meetingId, since) > 0) {
     logger.info('closeMeetingArtifacts — correction already relayed for this event today, staying quiet', {
       meetingId: params.meetingId, wouldHaveTold: contradicted.length,
     });
-    return none;
+    contradicted.length = 0;
+    if (replaced.length === 0) return none;
   }
 
   // Profile carries the owner's name + timezone for the notice. Cached behind
@@ -663,7 +709,7 @@ async function relayVoidedNotices(
   const profile = [...loadAllProfiles().values()].find(p => p.user.slack_user_id === params.ownerUserId);
   if (!profile) {
     logger.warn('closeMeetingArtifacts — no profile for owner, voided notice NOT relayed', {
-      ownerUserId: params.ownerUserId, meetingId: params.meetingId, wouldHaveTold: contradicted.length,
+      ownerUserId: params.ownerUserId, meetingId: params.meetingId, wouldHaveTold: contradicted.length + replaced.length,
     });
     return none;
   }
@@ -680,6 +726,30 @@ async function relayVoidedNotices(
 
   let relayed = 0;
   const correctedColleagueSlackIds: string[] = [];
+  for (const { row, original, subject } of replaced) {
+    try {
+      const delivered = await notifyColleagueOfMove({
+        profile,
+        ownerChannel: row.owner_channel,
+        colleagueSlackId: row.colleague_slack_id,
+        colleagueName: row.colleague_name,
+        colleagueTz: row.colleague_tz ?? undefined,
+        meetingId: params.meetingId,
+        meetingSubject: subject ?? params.subject ?? 'our meeting',
+        // The time the colleague still holds — the held notice never changed it.
+        originalStartIso: original.start,
+        originalEndIso: original.end,
+        newStartIso: params.newStartIso,
+        newEndIso: params.newEndIso,
+      });
+      if (delivered === true) relayed++;
+      if (delivered) correctedColleagueSlackIds.push(row.colleague_slack_id);
+    } catch (err) {
+      logger.warn('closeMeetingArtifacts — held-notice replacement threw for one colleague, continuing', {
+        meetingId: params.meetingId, colleague: row.colleague_name, err: String(err).slice(0, 200),
+      });
+    }
+  }
   for (const { row, told, subject } of contradicted) {
     try {
       const delivered = await notifyColleagueOfMove({
@@ -700,11 +770,11 @@ async function relayVoidedNotices(
         correctsToldStartIso: told,
       });
       // Count only what actually landed — an undelivered notice cancels its own
-      // ask through the spine and must not be reported as a correction made.
-      if (delivered) {
-        relayed++;
-        correctedColleagueSlackIds.push(row.colleague_slack_id);
-      }
+      // ask through the spine and must not be reported as a correction made. A
+      // correction held for their work hours is not yet told, but it IS this
+      // colleague's notice for this write, so the caller must not add another.
+      if (delivered === true) relayed++;
+      if (delivered) correctedColleagueSlackIds.push(row.colleague_slack_id);
     } catch (err) {
       // One colleague failing must not silence the rest.
       logger.warn('closeMeetingArtifacts — voided-notice relay threw for one colleague, continuing', {

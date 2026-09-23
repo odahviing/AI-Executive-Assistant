@@ -33,6 +33,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
 import { renderClockInZone } from '../utils/timezoneConvert';
 import { resolveStatedInstant } from '../utils/weTimeResolver';
+import { isColleagueSendDeferred } from '../utils/responseDeadline';
 import { getPersonMemory } from '../db/people';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
@@ -562,8 +563,10 @@ async function handleRescheduleReplyLocked(
  * Explicit owner checks and actual proposals use message_colleague's required
  * await_reply argument instead; this automatic producer never invents one.
  * Best-effort; never throws (a notify failure must not unwind the move). Returns
- * whether the DM actually reached the colleague — v4.2.x, so the option-C
- * correction relay can't report a correction it never delivered.
+ * `true` when the DM actually reached the colleague, `'scheduled'` when it is
+ * held on the spine for their next work start (not yet delivered), `false`
+ * otherwise — v4.2.x, so the option-C correction relay can't report a
+ * correction it never delivered.
  *
  * No calendar action is retried to recover notice delivery.
  */
@@ -600,7 +603,7 @@ export async function notifyColleagueOfMove(params: {
    * ruled against.
    */
   correctsToldStartIso?: string;
-}): Promise<boolean> {
+}): Promise<boolean | 'scheduled'> {
   let jobId: string | undefined;
   try {
     const { profile } = params;
@@ -608,8 +611,9 @@ export async function notifyColleagueOfMove(params: {
     if (!conn) return false;
     const tz = profile.user.timezone;
     const recipient = loadAttendeeAvailabilityForPerson(getPersonMemory(params.colleagueSlackId) ?? undefined, params.colleagueTz ?? tz);
+    const instantOf = (iso: string): string => resolveStatedInstant({ startIso: iso, homeTz: tz, profile }).startIso;
     const localTime = (iso: string): string => {
-      const instant = resolveStatedInstant({ startIso: iso, homeTz: tz, profile }).startIso;
+      const instant = instantOf(iso);
       return renderClockInZone(instant, tz,
         recipient ? attendeeTzForDay(recipient, instant) : tz);
     };
@@ -635,6 +639,23 @@ export async function notifyColleagueOfMove(params: {
       ...(params.correctsToldStartIso ? { correction: true } : {}),
     };
 
+    // Owner ruling 2026-09-23: this automatic notice waits for the recipient's
+    // working hours like every ordinary outreach (the same gate + scheduled-send
+    // timer message_colleague uses). A notice held past the start of a time it
+    // names (old, new, or corrected) would arrive after the meeting it is
+    // about, so — owner ruling 2026-09-23 — such a notice goes out now.
+    const gate = isColleagueSendDeferred(params.colleagueTz ?? tz, { slackId: params.colleagueSlackId, ownerTimezone: tz });
+    const namedStarts = [params.originalStartIso, params.newStartIso, params.correctsToldStartIso]
+      .filter((iso): iso is string => typeof iso === 'string')
+      .map(iso => Date.parse(instantOf(iso)));
+    const heldUntil = gate.deferred && namedStarts.every(ms => Number.isFinite(ms) && ms >= Date.parse(gate.deferredTo))
+      ? gate.deferredTo : undefined;
+    if (gate.deferred && !heldUntil) {
+      logger.info('notifyColleagueOfMove — recipient outside work hours but the meeting starts first; sending now (owner ruling)', {
+        colleague: params.colleagueName, meetingId: params.meetingId, deferredTo: gate.deferredTo,
+      });
+    }
+
     jobId = createOutreachJob({
       owner_user_id: profile.user.slack_user_id,
       owner_channel: params.ownerChannel,
@@ -644,12 +665,21 @@ export async function notifyColleagueOfMove(params: {
       colleague_tz: params.colleagueTz,
       message,
       await_reply: 0,
-      status: 'sent',
+      status: heldUntil ? 'pending_scheduled' : 'sent',
+      // Held: the paired request's send_scheduled_outreach timer delivers it at
+      // the recipient's work start. Otherwise the bridge keeps unconfirmed
+      // delivery in_flight with a bounded timer; only a confirmed send may
+      // stamp sent_at and resolve.
+      scheduled_at: heldUntil,
       intent: 'meeting_reschedule',
-      // The existing bridge keeps unconfirmed delivery in_flight with a
-      // bounded timer. Only a confirmed send may stamp sent_at and resolve.
       context_json: JSON.stringify(ctx),
     });
+    if (heldUntil) {
+      logger.info('notifyColleagueOfMove — held for recipient work hours', {
+        jobId, colleague: params.colleagueName, meetingId: params.meetingId, scheduledAt: heldUntil,
+      });
+      return 'scheduled';
+    }
 
     const res = await conn.sendDirect(params.colleagueSlackId, message);
     if (!res.ok) {

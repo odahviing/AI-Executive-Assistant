@@ -751,11 +751,14 @@ async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: User
   if (!row.origin_channel) return;
   const conn = getConnection(profile.user.slack_user_id, 'slack');
   if (!conn) return;
+  // A held automatic move notice carries the health runner's pseudo thread key
+  // (`brief_health_<owner>`), never a Slack ts — post top-level then.
+  const threadTs = row.origin_thread_ts && row.origin_thread_ts !== `brief_health_${row.owner_user_id}` ? row.origin_thread_ts : undefined;
   await sendTracked(
     conn,
     { channel: row.origin_channel },
     body,
-    { threadTs: row.origin_thread_ts ?? undefined },
+    { threadTs },
     'runSendScheduledOutreach give-up asker tombstone',
     row.id,
   );

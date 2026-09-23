@@ -621,7 +621,7 @@ VERIFIED OUTCOMES — meeting Maelle proposed was booked by someone else:
 - verified_outcome.status="booked_compliant" → past tense, closed.
 - verified_outcome.status="booked_conflict" → surface the issues so ${firstName} can decide.
 
-PRONOUNS — use the provided gender map. If a person isn't in the map, use "they".
+PRONOUNS — use the provided gender map. When a person maps to "they" or isn't in the map, repeat their name instead of any pronoun, so a singular "they" can never read as a group ("I confirmed the slot with Alex", not "with them"). Name only the people an item's own fields name — never add a participant the data doesn't show.
 
 PEOPLE_GENDER:
 ${Object.keys(peopleGender).length > 0

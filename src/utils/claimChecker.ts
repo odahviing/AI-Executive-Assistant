@@ -849,6 +849,8 @@ Paraphrase, tense, and language don't matter. Judge by meaning. Hebrew, English,
 
 CRITICAL — tool-aware honesty:
 If TOOL ACTIVITY shows the matching tool already ran this turn — e.g. \`[message_colleague: <name>]\` for a "sent X" claim about that name, \`[create_meeting: ...]\` for a booking claim, \`[create_approval: ...]\` or \`[create_task: ...]\` for a "flagged it" claim — the claim is HONEST regardless of the verb tense or phrasing used. "On its way", "sending now", "I've reached out", "sent", "the message is going out", "on it — I'll send now" are ALL valid when the matching tool ran. Do NOT flag these.
+ONE exception — a HELD send: \`[message_colleague SCHEDULED, NOT sent yet: <name> — goes out <time>]\` means the message has NOT reached <name>; it only goes out at that time. It backs a "scheduled it / it will go out <time> / queued for <day>" claim (HONEST, do not flag). It does NOT back a claim that the message was already sent, delivered, went out, reached them, or that <name> was told — flag that: claimed_action=true, action_type="message", claim_specifics_mismatch=true, target_name=<name>.
+An UNCONFIRMED send: \`[message_colleague UNCONFIRMED: <name> — may have been delivered; scheduled copy cancelled]\` means the send was attempted and its outcome is UNKNOWN. It backs "it may have gone out / I couldn't confirm it / please check" (HONEST, do not flag). It does NOT back a claim that the message was sent / delivered / reached <name> — flag that: claimed_action=true, action_type="message", claim_specifics_mismatch=false, target_name=<name>.
 
 The whole point of these tools is to queue an action; the model is allowed to narrate the queued action as if it's happening. ONLY flag when the claim is about an action whose matching tool did NOT run this turn.
 
@@ -909,6 +911,8 @@ Calendar mutation tools each cover DIFFERENT fields:
 - \`book_floating_block\` — books a lunch / coffee / focus block.
 
 If the draft claims a SPECIFIC change that the tool that ran does NOT cover — e.g. "renamed it to X" or "added Yael to the invite" when only \`move_meeting\` ran (which doesn't touch subject or attendees), or "moved to a different room" when only \`update_meeting\` ran without a location change — flag claimed_action=true AND set claim_specifics_mismatch=true. The action partially happened, but the specific field claimed didn't.
+
+A held send is this class too: a "sent / went out" claim against a \`[message_colleague SCHEDULED, NOT sent yet …]\` line sets claim_specifics_mismatch=true (the send was queued; the delivery claimed did not happen yet).
 
 Set claim_specifics_mismatch=false when the overclaim is about whether the action happened AT ALL (e.g. "I sent X" but no \`message_colleague\` ran; "I booked it" but no booking tool ran). The default for honest drafts (claimed_action=false) is also false.
 
@@ -1413,6 +1417,8 @@ STEP 2 — Call verdict="rewrite" ONLY when the draft genuinely STATES a complet
 - Keep every other fact intact: names, times with their zone labels, dates, numbers, the rest of the message.
 - Sound like a real person owning a small slip — never a system/error message, no talk of tools or mechanism.
 - Match the language of the draft (Hebrew/English/etc).
+HELD SEND — \`[message_colleague SCHEDULED, NOT sent yet: <name> — goes out <time>]\` is a matching tool for "scheduled it", NOT for "sent it / it went out / told <name>". When the draft claims the message already went out and only such a line backs it, rewrite that claim to say it is scheduled for that time and has not gone out yet (keep any stated reason, such as their working hours) — not that it failed.
+UNCONFIRMED SEND — \`[message_colleague UNCONFIRMED: <name> — may have been delivered; …]\` means the outcome is UNKNOWN, not failed. A draft that already says it may have gone out / couldn't be confirmed is honest: keep. When the draft claims the message was sent, rewrite that claim to say it may have reached <name> but could not be confirmed, the scheduled copy was cancelled so they won't get it twice, and ${opts.ownerFirstName} should check the conversation before sending again. NEVER say it did not go out or that nothing reached them.
 
 SAFE-MISS — the hard rule. If you CANNOT tell from the tool activity whether the specific action happened (a related mutation ran but you are not sure it covers this exact claim), do NOT assert the opposite. NEVER invert a stated completed action into a confident "that didn't go through" / "I haven't done it yet", and NEVER manufacture a re-ask ("can you confirm the address?") for something that may already be done — inverting a TRUE statement is far worse than leaving a mild overclaim. When you are not sure the claim is false: verdict="keep". Only rewrite when the tool activity makes the false claim clear.
 

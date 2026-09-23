@@ -814,9 +814,11 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
       excludeEventIds: input.existingEventId ? [input.existingEventId] : [],
       allowRelaxed: !!input.allowRelaxed,
       isFloatingBlock: !!input.isFloatingBlock,
-      // Rule 1b — the owner's own "in person" (is_online=false). A colleague-path
-      // is_online carries no real request (v3.2.6), same gate detectCategory's
-      // ownerRequestedInPerson uses.
+      // Rule 1b — the owner's own "in person" (is_online=false), the same gate
+      // detectCategory's ownerRequestedInPerson uses. A colleague's create is
+      // checked for it earlier, in create_meeting's Guard B (the same meeting
+      // mode their search used), and refused there on a non-office day, so it
+      // never reaches this branch with that conflict.
       inPersonRequested: input.isOnlineHint === false && input.initiator !== 'colleague',
       // v4.1.x (M1) — the booking lead time is now a real rule in THE validator,
       // keyed on who is asking, so the write path enforces the same floor the

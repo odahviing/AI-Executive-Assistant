@@ -24,7 +24,7 @@ import { getPersonMemory } from '../../../../db';
 import { grantRelaxed } from '../../bookingRequest';
 import { reinterpretClockInZone, renderClockInZone } from '../../../../utils/timezoneConvert';
 import { resolveStatedInstant, resolveStatedSourceZone, statedClockPersonContext, StatedTimeClarificationError } from '../../../../utils/weTimeResolver';
-import { bookingLeadTimeHours, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
+import { bookingLeadTimeHours, compareByRulePriority, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
 import { singleAttendeePresentationZone, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
@@ -1580,13 +1580,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   viewer,
                   viewerEmail,
                   profile: context.profile,
-                  // No `minBufferHours` — it would be set-but-never-read. `relaxed`
-                  // is a TOTAL owner override in both places that consume the lead
-                  // time: the walker's pre-filter collapses to "not in the past"
-                  // and checkSlot rule 0b is bypassed. (It used to be passed with
-                  // a comment claiming "#128 must-be searches at HIS lead"; the
-                  // recovery has never honoured any lead floor, and the slots it
-                  // surfaces go to the OWNER as approval candidates anyway.)
+                  // `relaxed` never FILTERS on the lead time (the walker's pre-filter
+                  // collapses to "not in the past" and checkSlot rule 0b is
+                  // bypassed). On a colleague MUST-BE search the colleague's lead
+                  // time is read only by each candidate's strict `broken_rules`
+                  // listing, so a time inside it is named `within_lead_time` in
+                  // the owner's approval instead of looking clean. The owner's own
+                  // recovery passes none — his relaxed labels are unchanged.
+                  minBufferHours: mustBe ? leadHours : undefined,
                   relaxed: true,       // bypass focus / lunch / category — his soft day-load rules
                   keepWorkHours: true, // …but relaxing a soft block is not extending his day
                   excludeEventIds: excludeEventIdsForSearch,
@@ -1627,10 +1628,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
               // #128 part-2 — colleague MUST-BE with surfaced candidates. These
               // times are open ONLY because the recovery relaxed the owner's soft
-              // protections (booking lead-time / focus / buffer). The colleague
-              // must NOT see or book them — return them as OWNER approval
-              // candidates so Sonnet raises create_approval(policy_exception); the
-              // owner's single yes books via the existing resolver. (Owner-path
+              // rules — any of them, including in-person-on-a-home-day and
+              // lunch room, each candidate listing its own in `broken_rules`
+              // (the note once claimed "focus / buffer / booking lead-time" for
+              // all of them, and a home-day in-person clash reached the owner as
+              // a lunch problem, 2026-09-20). The colleague must NOT see or book
+              // them — return them as OWNER approval candidates so Sonnet raises
+              // create_approval(policy_exception); the owner's single yes books
+              // via the existing resolver. The one exception is a candidate
+              // whose only broken rule is in-person-on-a-home-day: online it is
+              // clean, so the note tells Sonnet to offer it remote. (Owner-path
               // recovery is unaffected — it falls through to the candidate logic
               // below as before.)
               if (mustBe && relaxedRecoverySlots.length > 0) {
@@ -1644,12 +1651,25 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   .map(s => {
                     const st = DateTime.fromISO(s.start).setZone(timezone);
                     const en = DateTime.fromISO(s.end).setZone(timezone);
-                    return { start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}` };
+                    return {
+                      start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}`,
+                      broken_rules: s.broken_rules ?? [],
+                      ...(s.disturbs_floating_block ? { disturbs_floating_block: true } : {}),
+                    };
                   });
+                // Owner ruling 2026-09-23 ("we have rules priority so priority
+                // win"): rule-bending options are ranked by the rules they break
+                // (checkSlot's ladder), time order only between equal bends.
+                // Array.prototype.sort is stable; the input is chronological.
+                candidates.sort((x, y) => compareByRulePriority(x.broken_rules, y.broken_rules));
+                // A candidate whose ONLY broken rule is the in-person/home-day one
+                // is a normal online slot: meeting remotely there needs no approval.
+                const remoteOnly = candidates.filter(c =>
+                  c.broken_rules.length === 1 && c.broken_rules[0] === 'in_person_on_home_day');
                 return {
                   slots: [],
                   owner_approval_candidates: candidates,
-                  _must_be_owner_approval_note: `No clean slot here — these times are open but sit inside ${ownerFirst}'s day-load protections (focus / buffer / booking lead-time), so they're his call. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason so ${ownerFirst} decides with a single yes. Never reveal these specific times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
+                  _must_be_owner_approval_note: `No clean slot here — these times are open only if ${ownerFirst} bends one or more of his own scheduling rules, so they're his call. Each candidate's \`broken_rules\` lists EVERY rule it breaks (\`disturbs_floating_block\`: it lands on his lunch/break as currently placed); they are listed in ${ownerFirst}'s rule-priority order (the fewest/least important bends first; time order only between equal bends), so propose the FIRST one — a requester's "as early as possible" never outranks that order — and never describe any as clean. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason, and name every rule in that candidate's \`broken_rules\` so ${ownerFirst} decides with a single yes.${remoteOnly.length > 0 ? ` In-person is not available that day (${ownerFirst} only meets in person on his office days, and that day isn't one), but ${remoteOnly.map(c => c.label).join(', ')} ${remoteOnly.length === 1 ? 'works' : 'work'} as an online meeting with no approval: tell the colleague that plainly and offer online there first; raise the approval only if they insist on meeting in person.` : ''} Never reveal the other candidates' times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
                   ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
                 };
               }

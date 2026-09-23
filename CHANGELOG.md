@@ -1,3 +1,27 @@
+## 4.9.13 - Honest meeting approvals and colleague-hours messaging
+
+Repairs six owner-reported conversations from 20 September: an in-person request on a home day, a replacement invite that asked for an address already on the original, a Sunday heads-up to a Boston colleague, a Hebrew gender correction that did not stick, a social reply that ended the conversation, and an unclear briefing pronoun. Thirteen independently verified refs; no extra model call or runtime tier change.
+
+### Fixed
+
+- A colleague's in-person request on a home day is now checked at booking, not only in search, and escalates to the owner. The approval names the home-day conflict and says whether the same time works online.
+- When every option bends a rule, each candidate carries the rules it actually breaks and candidates rank by the existing rule priority before time (owner ruling). The false "focus / buffer / lead-time" label is gone; the owner's own search is unchanged.
+- The owner's calendar view carries organizer and attendee email addresses (owner only, capped like names), so reproducing an invitation reuses the address already on it.
+- Ordinary outreach and automatic meeting-move notices wait for the recipient's working hours, in their own zone and workweek, unless the owner asks for immediate delivery. A notice about a meeting that starts before the recipient's next workday still goes out at once. A held notice made stale by a later manual move is replaced by one notice with the final time; a revert sends nothing.
+- A held message is reported as scheduled, never as sent — in the tool result, the claim check, the empty-reply fallback and the auto-move narration. An immediate send that replaces a held copy keeps it on a definite failure and, on an unconfirmed one, cancels it and tells the owner to check rather than risk a duplicate (owner ruling).
+- The owner's own confirmed gender reaches the prompt, and a correction is saved to his record.
+- A social reply no longer ends a live conversation with a promise to "flag it"; the fitness category no longer searches the bare word "exercise".
+- Briefings repeat a name instead of an ambiguous "they" and never add participants the facts do not name.
+
+### Verification and limits
+
+- Release checkpoint: 130/130 suite/timezone executions, 3,651 passing checks, zero failures or skips, typecheck passed. Independent accumulated-diff review passed after one repair round; Golden30 answered 30 — 16 pass, 14 stale anchors, 0 fail.
+- Each ref has an executed fail-before/pass-after regression with legitimate controls and an independent review. Three refs needed repair rounds; two were decided by the owner after a second overturn.
+- Hebrew address, the social reply and the briefing wording are prompt changes: inputs are proven, model obedience is not. The owner's stored gender is an unconfirmed guess, so his Hebrew stays neutral until he states it once.
+- Known limits, queued: a Slack failure before the send is attempted is still treated as unconfirmed (safe against duplicates, but the held copy is cancelled); an owner counter that changes only the time books a home-day meeting as in-person with a Teams link; a colleague's meeting move does not check the in-person rule; relaxed searches read the schedule-override table more often (590 vs 425 on the test fixture).
+
+---
+
 ## 4.9.12 - Reliable research, email, reminders and media handling
 
 Repairs 32 correction groups across internet search, email, reminders/routines, voice/image, knowledge and venues. All groups have independent verification; two additional component refs support those groups rather than adding to the count. No extra model call or runtime tier change was introduced.

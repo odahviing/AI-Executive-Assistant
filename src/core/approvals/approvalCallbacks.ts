@@ -247,8 +247,10 @@ function slotSignature(cb: ToolCallback | undefined): string | null {
  *      "X countered — approve, reject, or counter again?"). Optional; a first
  *      raise has none.
  *   1. `details.honest_hard_reason` (#142c) — checkSlot's owner-viewer label for
- *      a HARD double-book, written ONLY by the code path that PROVED it (never
- *      by the model). It LEADS the ask, above whatever soft framing the prose chose.
+ *      a HARD double-book, and/or an unmet in-person ask with the same time's
+ *      online verdict (create_approval's re-derivation, tasks/skill.ts), written
+ *      ONLY by the code path that PROVED it (never by the model). It LEADS the
+ *      ask, above whatever soft framing the prose chose.
  *   2. `askText` — the ask itself.
  *   3. the consequence (v2.9.1) — "If yes → I'll X", verbalized from the stored
  *      on_approve with any stored counter merged in exactly as the resolver

@@ -73,20 +73,25 @@ function harness(options = {}) {
     assistant: { name: 'Maelle' },
     schedule: { work_hours: Object.fromEntries(IL_DAYS.map(day => [day, ['09:00-17:00']])), office_days: { days: IL_DAYS }, home_days: { days: [] } },
   };
+  // Requests-spine rows by id; `row` is always the newest (the one this test's call created).
+  const rows = new Map();
   let row, job;
+  const put = r => { rows.set(r.id, r); if (!row || row.id === r.id) row = r; return r; };
+  const OPEN = ['awaiting_owner', 'awaiting_colleague', 'in_flight'];
   const sends = [], coreCalls = [], logs = [], closures = [], ticks = [], modules = new Map();
   const sendResults = [...(options.sendResults ?? [])];
   const noop = () => {};
-  // The requests-spine row: one in-memory object, the way test-timezone-registrar-deadline.cjs holds it.
   const update = (id, data) => {
-    row = { ...row, ...data };
-    for (const [k, v] of Object.entries({ nextCheckAt: 'next_check_at', nextCheckHandler: 'next_check_handler', originChannel: 'origin_channel', originThreadTs: 'origin_thread_ts' })) if (Object.hasOwn(data, k)) row[v] = data[k];
-    if (data.details) row.details_json = JSON.stringify(data.details);
+    // updateRequest leaves a field untouched when it is passed undefined.
+    const next = { ...(rows.get(id) ?? row), ...Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined)) };
+    for (const [k, v] of Object.entries({ nextCheckAt: 'next_check_at', nextCheckHandler: 'next_check_handler', originChannel: 'origin_channel', originThreadTs: 'origin_thread_ts' })) if (Object.hasOwn(data, k)) next[v] = data[k];
+    if (data.details) next.details_json = JSON.stringify(data.details);
+    put(next);
   };
   const requests = {
-    getOpenRequestsForColleague: () => [], getAwaitingOwnerRequests: () => options.pendingApproval ? [{ id: 'req_approval', kind: 'approval', requester_slack_id: COLLEAGUE, owner_dm_thread_ts: 'owner.1' }] : [], getRequest: () => row, getRequestByIdempotencyKey: () => undefined,
-    buildIdempotencyKey: () => 'key', getDueRequests: () => row ? [row] : [], updateRequest: update,
-    createRequest: p => { row = { id: 'req_test', owner_user_id: p.ownerUserId, target_slack_id: p.targetSlackId, target_name: p.targetName, kind: p.kind, state: p.state, phase: p.phase, subject: p.subject, description: p.description, origin_channel: p.originChannel, origin_thread_ts: p.originThreadTs, next_check_at: p.nextCheckAt, next_check_handler: p.nextCheckHandler, details_json: JSON.stringify(p.details) }; return row; },
+    getOpenRequestsForColleague: (_owner, colleague) => [...rows.values()].filter(r => (r.target_slack_id === colleague || r.requester_slack_id === colleague) && OPEN.includes(r.state)), getAwaitingOwnerRequests: () => options.pendingApproval ? [{ id: 'req_approval', kind: 'approval', requester_slack_id: COLLEAGUE, owner_dm_thread_ts: 'owner.1' }] : [], getRequest: id => rows.get(id) ?? row, getRequestByIdempotencyKey: () => undefined,
+    buildIdempotencyKey: () => 'key', getDueRequests: () => [...rows.values()], updateRequest: update,
+    createRequest: p => { row = undefined; return put({ id: rows.size ? `req_test_${rows.size + 1}` : 'req_test', owner_user_id: p.ownerUserId, target_slack_id: p.targetSlackId, target_name: p.targetName, kind: p.kind, state: p.state, phase: p.phase, subject: p.subject, description: p.description, origin_channel: p.originChannel, origin_thread_ts: p.originThreadTs, next_check_at: p.nextCheckAt, next_check_handler: p.nextCheckHandler, details_json: JSON.stringify(p.details) }); },
   };
   // outreach_jobs is payload held in memory; every people_memory statement runs on the real store.
   const jobStatement = sql => ({
@@ -96,6 +101,7 @@ function harness(options = {}) {
   const db = { prepare: sql => sql.includes('outreach_jobs') ? jobStatement(sql) : sqlite.prepare(sql), transaction: fn => fn, exec: sql => sqlite.exec(sql) };
   const send = async (id, body, opts) => {
     sends.push({ id, body, opts });
+    if (options.onSend) await options.onSend(id);
     const result = sendResults.shift();
     if (result instanceof Error) throw result;
     return result ?? (options.userNotFound ? { ok: false, reason: 'user_not_found' } : { ok: true, ref: id.startsWith('C') ? id : 'DCOLLEAGUE', ts: 'out.1' });
@@ -125,8 +131,9 @@ function harness(options = {}) {
     'src/connections/registry.ts': { getConnection: () => options.noConnection ? undefined : conn },
     // Capture the real callers' close requests; terminal persistence/cascade is
     // outside this harness and is not claimed as exercised here.
-    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); if (row) { row.state = p.state; row.next_check_at=null; row.next_check_handler=null; } } },
-    'src/core/requests/resolver.ts': { withRequestLock: (_id, fn) => fn(), closeUnconfirmedExecution: noop },
+    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); const r = rows.get(p.id) ?? row; if (!r) return { ok: false, request_id: p.id, state: p.state, reason: 'request not found' }; if (!OPEN.includes(r.state)) return { ok: true, request_id: r.id, state: r.state, reason: 'already terminal' }; put({ ...r, state: p.state, next_check_at: null, next_check_handler: null }); return { ok: true, request_id: r.id, state: p.state }; } },
+    // `lockWinner` models the sweep holding a request's lock first: it runs once, before the waiter's work.
+    'src/core/requests/resolver.ts': { withRequestLock: async (id, fn) => { const first = options.lockWinner; options.lockWinner = undefined; if (first) await first(id); return fn(); }, closeUnconfirmedExecution: noop },
     'src/core/requests/logActivity.ts': { logActivity: noop },
     'src/utils/threadActivity.ts': { reactActivityComplete: async (...args) => { ticks.push(args); } },
     'src/utils/resolveSlackId.ts': { resolveSlackId: id => ({ slack_id: id, was_hallucinated: false }) },
@@ -152,12 +159,12 @@ function harness(options = {}) {
     vm.runInNewContext('(function(require,module,exports){' + compile(rel) + '\n})', { Date: Clock, console, Set, Map, Buffer, setTimeout, Promise, Error, JSON }, { filename: rel })(req, mod, mod.exports);
     return mod.exports;
   }
-  const tool = async (args = {}) => new (load('src/skills/outreach.ts').OutreachCoreSkill)().executeToolCall('message_colleague',
+  const tool = async (args = {}, ctx = {}) => new (load('src/skills/outreach.ts').OutreachCoreSkill)().executeToolCall('message_colleague',
     { colleague_slack_id: COLLEAGUE, colleague_name: 'Colleague', message: 'Approved message', await_reply: true, ...args },
-    { profile, userId: OWNER, authority: 'owner', channelId: 'DOWNER', threadTs: 'owner.1', surface: 'owner_dm', ...options.context });
+    { profile, userId: OWNER, authority: 'owner', channelId: 'DOWNER', threadTs: 'owner.1', surface: 'owner_dm', ...options.context, ...ctx });
   const person = () => sqlite.prepare('SELECT * FROM people_memory WHERE slack_id = ?').get(COLLEAGUE);
-  const fire = () => load('src/core/requests/runner.ts').runSendScheduledOutreach(row, profile);
-  return { tool, fire, reminderFloor:(instant,target)=>load('src/core/requests/types.ts').reminderWorkTimeAtOrAfter(instant,target,profile), sweep:()=>load('src/core/requests/runner.ts').sweepDueRequests({profilesByUserId:new Map([[OWNER,profile]])}), person, sends, ticks, coreCalls, logs, closures, row: () => row, job: () => job, restart: () => modules.clear(), setNow: iso => { now = Date.parse(iso); } };
+  const fire = (id) => load('src/core/requests/runner.ts').runSendScheduledOutreach(id ? rows.get(id) : row, profile);
+  return { tool, fire, reminderFloor:(instant,target)=>load('src/core/requests/types.ts').reminderWorkTimeAtOrAfter(instant,target,profile), sweep:()=>load('src/core/requests/runner.ts').sweepDueRequests({profilesByUserId:new Map([[OWNER,profile]])}), person, sends, ticks, coreCalls, logs, closures, row: () => row, rowById: id => rows.get(id), job: () => job, restart: () => modules.clear(), setNow: iso => { now = Date.parse(iso); } };
 }
 
 const NY_DEADLINE_FROM_MON_0600Z = '2026-09-16T21:00:00.000Z'; // 24 business hours, 09:00-17:00 America/New_York
@@ -183,7 +190,7 @@ test('regression: never-engaged recipient — scheduled send floors to the Slack
 test('regression: never-engaged recipient — immediate awaited send arms the reply deadline in the recipient\'s zone', async () => {
   const h = harness();
   h.setNow('2026-09-14T06:00Z');
-  const r = await h.tool();
+  const r = await h.tool({ send_now: true });
   assert.equal(r.ok, true);
   assert.equal(h.sends.length, 1);
   assert.equal(h.job().reply_deadline, NY_DEADLINE_FROM_MON_0600Z);
@@ -228,7 +235,7 @@ test('preserved: known recipient with a stated zone — the Slack reading moves 
 test('preserved: known recipient — the reply deadline runs in the stored zone regardless of the tool\'s colleague_tz', async () => {
   const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', working_hours_auto: hours(WEEKDAYS) } });
   h.setNow('2026-09-14T06:00Z');
-  const r = await h.tool({ colleague_tz: 'Asia/Jerusalem' });
+  const r = await h.tool({ colleague_tz: 'Asia/Jerusalem', send_now: true });
   assert.equal(r.ok, true);
   assert.equal(h.job().reply_deadline, NY_DEADLINE_FROM_MON_0600Z);
 });
@@ -282,14 +289,22 @@ test('regression: Slack confirms the ref does not resolve — no row is minted a
   assert.equal(h.person(), undefined);
 });
 
-// ── the owner's immediate relay is never floored (R10) ──────────────────────
-test('preserved: immediate owner relay outside recipient hours still sends now', async () => {
+// ── only an explicit owner "now" skips the recipient's work window ──────────
+test('preserved: explicit send_now outside recipient hours still sends now', async () => {
   const h = harness();
   h.setNow('2026-09-14T06:00Z');
-  const r = await h.tool({ await_reply: false });
+  const r = await h.tool({ await_reply: false, send_now: true });
   assert.equal(r.ok, true);
   assert.equal(h.sends.length, 1);
   assert.equal(h.row().state, 'resolved');
+});
+test('regression: ordinary send outside recipient hours is held for their work start', async () => {
+  const h = harness();
+  h.setNow('2026-09-14T06:00Z');
+  const r = await h.tool({ await_reply: false });
+  assert.equal(r.scheduled, true);
+  assert.equal(r.scheduled_at, NY_WORK_START_MON);
+  assert.equal(h.sends.length, 0);
 });
 
 test('preserved: unavailable profile keeps a stored zone and temp reading through the scheduled send', async () => {
@@ -330,7 +345,7 @@ test('preserved: unavailable profile with no tool zone retains the owner-zone fa
 
 test('preserved: immediate Connection failure cancels the paired request without a delivery stamp', async () => {
   const h = harness({ sendResults: [{ ok: false, reason: 'cannot_dm' }] });
-  const r = await h.tool();
+  const r = await h.tool({ send_now: true });
   assert.equal(r.ok, false);
   assert.equal(r.error, 'cannot_dm');
   assert.equal(h.row().state, 'cancelled');
@@ -340,7 +355,7 @@ test('preserved: immediate Connection failure cancels the paired request without
 
 test('preserved: missing Connection cancels immediate outreach without sending', async () => {
   const h = harness({ noConnection: true });
-  const r = await h.tool();
+  const r = await h.tool({ send_now: true });
   assert.equal(r.error, 'connection_not_registered');
   assert.equal(h.row().state, 'cancelled');
   assert.equal(h.sends.length, 0);
@@ -432,3 +447,193 @@ for(const channel of [false,true])for(const partial of [false,true])test(`R-FULL
 
 test('R-INTENT real recipient timezone and weekend choose local working interval',()=>{const h=harness({person:{timezone:'America/New_York',timezone_set_by:'owner',working_hours_auto:hours(WEEKDAYS)}});assert.equal(h.reminderFloor('2026-09-19T06:00:00Z','UCOLLEAGUE'),'2026-09-21T13:00:00.000Z');});
 test('R-INTENT real owner configured hours choose next working day',()=>{const h=harness();assert.equal(h.reminderFloor('2026-09-18T06:00:00Z','UOWNER'),'2026-09-20T06:00:00.000Z');});
+
+// ── chris-headsup-outside-workdays-20260920: the recipient's own working day governs ──
+// Sun 20 Sep 2026 18:46Z = 21:46 owner (Asia/Jerusalem) = 14:46 Sunday for a Mon–Fri Boston recipient.
+const CHRIS = { timezone: 'America/New_York', timezone_set_by: 'owner', working_hours_auto: hours(WEEKDAYS) };
+const SUN_EVENING = '2026-09-20T18:46:38Z';
+const BOSTON_MON_START = '2026-09-21T13:00:00.000Z';
+test('CHRIS regression: Sunday heads-up to a Mon–Fri recipient is held to their Monday start and described as scheduled', async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  const r = await h.tool({ await_reply: false, message: 'Heads up about Tuesday' });
+  assert.equal(r.scheduled, true);
+  assert.equal(r.scheduled_at, BOSTON_MON_START);
+  assert.equal(r._status, 'scheduled_not_sent');
+  assert.equal(r.held_for_recipient_work_hours, true);
+  assert.match(r._note, /NOT sent yet/);
+  assert.equal(r.sent, undefined);
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.ticks.length, 0);
+  assert.equal(h.row().phase, 'outreach:scheduled');
+  assert.equal(h.row().next_check_handler, 'send_scheduled_outreach');
+  h.restart();
+  h.setNow(BOSTON_MON_START);
+  await h.sweep();
+  await h.sweep();
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.sends[0].id, COLLEAGUE);
+  assert.equal(h.row().state, 'resolved');
+});
+test("CHRIS regression: owner workday inside owner hours does not release a send on the recipient's Sunday", async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow('2026-09-20T07:00:00Z'); // 10:00 Sunday owner-local (a workday), 03:00 Sunday Boston
+  const r = await h.tool({ await_reply: false });
+  assert.equal(r.scheduled_at, BOSTON_MON_START);
+  assert.equal(h.sends.length, 0);
+});
+test("CHRIS preserved: recipient workday inside their hours sends now even on the owner's day off", async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow('2026-09-18T14:00:00Z'); // Friday 17:00 owner-local (not an owner workday), 10:00 Friday Boston
+  const r = await h.tool({ await_reply: false });
+  assert.equal(r.ok, true);
+  assert.equal(r.sent, true);
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.row().state, 'resolved');
+  assert.equal(h.ticks.length, 1);
+});
+test('CHRIS preserved: weekday inside recipient hours sends immediately', async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow('2026-09-21T14:00:00Z'); // Monday 10:00 Boston
+  const r = await h.tool({ await_reply: false });
+  assert.equal(r.sent, true);
+  assert.equal(h.sends.length, 1);
+});
+test("CHRIS preserved: owner explicit send_now on the recipient's Sunday sends immediately", async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  const r = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(r.sent, true);
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.row().state, 'resolved');
+});
+test('CHRIS preserved: an explicit send_at keeps the existing recipient-hours floor', async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  const r = await h.tool({ await_reply: false, send_at: '2026-09-20T22:00:00' }); // 15:00 Sunday Boston
+  assert.equal(r.scheduled_at, BOSTON_MON_START);
+  assert.equal(r.held_for_recipient_work_hours, undefined);
+  assert.match(r._note, /I've scheduled the message to Colleague/);
+  assert.equal(h.sends.length, 0);
+});
+test('CHRIS preserved: unavailable recipient profile with no known zone keeps the owner-zone fallback and fabricates no zone', async () => {
+  const h = harness({ readThrows: true });
+  h.setNow('2026-09-20T07:00:00Z'); // 10:00 Sunday in the owner-zone fallback's standard hours
+  const r = await h.tool({ await_reply: false });
+  assert.equal(r.sent, true);
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.person()?.timezone ?? null, null);
+});
+test('CHRIS regression: send_now in the holding thread replaces the held copy — the colleague gets it once', async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  const held = await h.tool({ await_reply: false });
+  assert.equal(held.scheduled, true);
+  const heldId = h.row().id;
+  h.setNow('2026-09-20T18:48:00Z');
+  const now = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(now.sent, true);
+  assert.equal(now.replaced_scheduled_copy, true);
+  assert.equal(h.rowById(heldId).state, 'cancelled');
+  assert.equal(h.closures.find(c => c.id === heldId)?.closureReason, 'superseded_by_send_now');
+  assert.equal(h.sends[0].opts?.threadTs, undefined); // never threaded into the owner-side ts of the held row
+  h.restart();
+  h.setNow(BOSTON_MON_START);
+  await h.sweep();
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+});
+test("CHRIS regression: send_now from a different owner thread leaves another thread's held message scheduled", async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  const r = await h.tool({ await_reply: false, send_now: true, message: 'Different topic' }, { threadTs: 'owner.2' });
+  assert.equal(r.sent, true);
+  assert.equal(r.replaced_scheduled_copy, undefined);
+  assert.equal(h.rowById(heldId).state, 'in_flight');
+  assert.equal(h.sends[0].opts?.threadTs, undefined);
+});
+test('CHRIS regression: an ordinary channel post tagging an off-day recipient is held too', async () => {
+  const h = harness({ person: CHRIS });
+  h.setNow(SUN_EVENING);
+  const r = await h.tool({ await_reply: false, channel_id: 'CROOM', channel_name: 'room' });
+  assert.equal(r.scheduled_at, BOSTON_MON_START);
+  assert.equal(h.sends.length, 0);
+  h.setNow(BOSTON_MON_START);
+  await h.fire();
+  assert.equal(h.sends[0].id, 'CROOM');
+});
+test('CHRIS regression: send_now racing the timer that holds the lock sends nothing more and says so', async () => {
+  const options = { person: CHRIS };
+  const h = harness(options);
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  h.setNow(BOSTON_MON_START);
+  options.lockWinner = async () => { await h.fire(heldId); };
+  const r = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(r.sent, false);
+  assert.equal(r.already_delivered_by_schedule, true);
+  assert.match(r._must_reply_with, /didn't send it a second time/);
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+});
+// Owner ruling #6 (attempt 4): a definite non-send restores the held copy; an
+// unknown outcome (Slack 'error' or a throw) counts as possibly delivered.
+for (const mode of ['definite', 'unavailable']) test(`CHRIS regression: send_now ${mode} non-send restores the held copy and it still delivers once`, async () => {
+  const options = { person: CHRIS, sendResults: mode === 'definite' ? [{ ok: false, reason: 'cannot_dm' }] : [] };
+  const h = harness(options);
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  if (mode === 'unavailable') options.noConnection = true;
+  h.setNow('2026-09-20T18:48:00Z');
+  const r = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.scheduled_copy_kept, true);
+  assert.match(r._must_reply_with, /still stands/);
+  const held = h.rowById(heldId);
+  assert.equal(held.state, 'in_flight');
+  assert.equal(held.next_check_handler, 'send_scheduled_outreach');
+  assert.equal(held.next_check_at, BOSTON_MON_START);
+  options.noConnection = false;
+  h.restart();
+  h.setNow(BOSTON_MON_START);
+  await h.fire(heldId);
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, mode === 'unavailable' ? 1 : 2);
+  assert.equal(h.rowById(heldId).state, 'resolved');
+});
+for (const mode of ['error', 'throw']) test(`CHRIS regression: send_now unknown outcome (${mode}) cancels the held copy, says it may have gone out, never resends`, async () => {
+  const options = { person: CHRIS, sendResults: [mode === 'throw' ? new Error('socket reset') : { ok: false, reason: 'error', detail: 'timeout' }] };
+  const h = harness(options);
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  h.setNow('2026-09-20T18:48:00Z');
+  const r = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.delivery_unconfirmed, true);
+  assert.equal(r.scheduled_copy_cancelled, true);
+  assert.match(r._must_reply_with, /may have reached them/);
+  assert.doesNotMatch(r._must_reply_with, /Nothing reached|still stands/);
+  assert.equal(h.rowById(heldId).state, 'cancelled');
+  assert.equal(h.closures.find(c => c.id === heldId)?.closureReason, 'superseded_by_unconfirmed_send_now');
+  h.restart();
+  h.setNow(BOSTON_MON_START);
+  await h.sweep();
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+});
+test('CHRIS regression: a due held copy cannot fire while the send_now is in flight', async () => {
+  const options = { person: CHRIS };
+  const h = harness(options);
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  h.setNow(BOSTON_MON_START); // the held copy is due right now
+  let during;
+  options.onSend = async id => { if (id !== COLLEAGUE || during) return; during = h.rowById(heldId).next_check_at; await h.sweep(); };
+  const r = await h.tool({ await_reply: false, send_now: true });
+  assert.equal(r.sent, true);
+  assert.ok(Date.parse(during) > Date.parse(BOSTON_MON_START));
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+  assert.equal(h.rowById(heldId).state, 'cancelled');
+});

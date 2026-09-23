@@ -831,8 +831,19 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 .map(a => (a.email ?? '').toLowerCase())
                 .filter(e => e && e !== ownerEmailLowerForGuardB && e !== requesterEmail
                   && !!ownerDomainForGuardB && e.endsWith('@' + ownerDomainForGuardB));
-              if (fromIso && toIso) {
-                const runSlotCheck = () => {
+              // Rule 1b — the colleague's own in-person ask (is_online=false),
+              // the SAME meeting-mode input their search was checked with, so a
+              // face-to-face request on a day he is not in the office is refused
+              // here too instead of booking silently (M1; 2026-09-20 Elan).
+              const inPersonRequested = args.is_online === false;
+              // One single-slot check, two uses: the booking verdict (the
+              // requested meeting mode, into `diagnostics`), and — when in person
+              // is what refused it — the same time as an online meeting.
+              const runSlotCheck = (
+                window: { from: string; to: string },
+                meetingMode: 'in_person' | undefined,
+                diagnosticsOut: typeof diagnostics,
+              ) => {
                   return findAvailableSlots({
                     userEmail,
                     timezone,
@@ -843,8 +854,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // a missing slot means an OWNER rule and nothing else.
                     tagAttendeeConflicts: true,
                     allowAttendeeOffHours: true, // exact requested booking, not a general offer
-                    searchFrom: fromIso,
-                    searchTo: toIso,
+                    searchFrom: window.from,
+                    searchTo: window.to,
                     profile: context.profile,
                     // v2.6 — pass category so colleague-path rule-check also
                     // enforces day_type / per_day / per_week limits. When a
@@ -853,6 +864,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // here; outer matches() returns false; Sonnet escalates
                     // to create_approval with the rule name (RULE-NAMING).
                     category: args.category as string | undefined,
+                    meetingMode,
                     // #165b — matches the masking `subjectViewerFor` already
                     // applied to the conflicting-event subject below; without it
                     // checkSlot's own occupancy scan falls back to its own
@@ -860,7 +872,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // not depend on happening to agree.
                     viewer: subjectViewerFor(context),
                     viewerEmail,
-                    diagnosticsOut: diagnostics,
+                    diagnosticsOut,
                     // v3.0.6 — single-slot yes/no validation. The window is
                     // exactly [start, end], so findAvailableSlots returns ≤1 slot →
                     // <3 → auto-expand would re-query the calendar 2-3 more times at
@@ -869,7 +881,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     // requested start). Disable it.
                     autoExpand: false,
                   });
-                };
+              };
+              const requestedMode = inPersonRequested ? 'in_person' as const : undefined;
+              if (fromIso && toIso) {
                 // v3.7.x (#137) — a transient Graph free/busy fault (e.g.
                 // ErrorInvalidMergedFreeBusyInterval) must NOT masquerade as a
                 // rule violation. A single blip on this verification fetch was
@@ -879,7 +893,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // REPEATED failure falls through to the outer catch (a genuine
                 // "couldn't verify" → honest escalation).
                 try {
-                  validSlots = await runSlotCheck();
+                  validSlots = await runSlotCheck({ from: fromIso, to: toIso }, requestedMode, diagnostics);
                 } catch (firstErr) {
                   // The owner-event read owns its OWN retry now
                   // (getOwnerEventsForDecision), so a CalendarOfflineError has
@@ -894,7 +908,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   delete diagnostics.rejectedCounts;
                   delete diagnostics.rejectedExamples;
                   delete diagnostics.conflictingEvent;
-                  validSlots = await runSlotCheck();
+                  validSlots = await runSlotCheck({ from: fromIso, to: toIso }, requestedMode, diagnostics);
                 }
               }
               // Whose free/busy this check could NOT actually read — a bad
@@ -1012,10 +1026,35 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                     ? `blocked all day by another commitment on ${ownerFirst}'s calendar`
                     : labelFor(brokenRule, brokenRuleUntilDisplay);
 
+                // The in-person rule refused it: say what the SAME time needs as an
+                // online meeting — nothing (offer that), or which other rule it
+                // also breaks — via the same check without the in-person input.
+                let remoteSameTime: { bookable: true } | { bookable: false; broken_rule: SearchRejectReason | 'unknown'; broken_rule_label: string } | undefined;
+                if (inPersonRequested && brokenRule === 'wrong_day_type' && fromIso && toIso) {
+                  const remoteDiag: typeof diagnostics = {};
+                  try {
+                    const remoteSlots = await runSlotCheck({ from: fromIso, to: toIso }, undefined, remoteDiag);
+                    const remoteMatched = remoteSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
+                    const remoteRule = firstRejectReason(remoteDiag.rejectedCounts);
+                    // `wrong_day_type` also labels an OFF day (rule 1). If the same
+                    // time fails the same way online, in person was never the
+                    // reason — keep the plain refusal instead of claiming it was.
+                    remoteSameTime = remoteMatched
+                      ? { bookable: true }
+                      : remoteRule === 'wrong_day_type'
+                        ? undefined
+                        : { bookable: false, broken_rule: remoteRule ?? 'unknown', broken_rule_label: labelFor(remoteRule) };
+                  } catch (err) {
+                    if (err instanceof CalendarOfflineError) throw err;
+                    logger.warn('create_meeting colleague-path — remote same-time check threw; refusing without it', { err: String(err).slice(0, 200) });
+                  }
+                }
+
                 logger.info('create_meeting colleague-path refused — slot breaks owner rules', {
                   start: args.start, end: args.end, requester: context.userId,
                   broken_rule: brokenRule ?? 'unknown',
                   broken_rule_label: brokenRuleLabel,
+                  ...(remoteSameTime ? { remote_same_time: remoteSameTime.bookable ? 'bookable' : remoteSameTime.broken_rule } : {}),
                   ...(conflictingEvent ? { conflicting_event_id: conflictingEvent.id, all_day: isAllDayCollision } : {}),
                 });
                 return {
@@ -1027,7 +1066,12 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   // meeting — an all-day collision omits existing_event_id so
                   // nothing invites "add someone to" a day-long block.
                   ...(conflictingEvent && !isAllDayCollision ? { existing_event_id: conflictingEvent.id, existing_subject: conflictingEvent.subject } : {}),
-                  message: brokenRuleLabel === 'unknown'
+                  ...(remoteSameTime ? { remote_same_time: remoteSameTime } : {}),
+                  message: remoteSameTime?.bookable === true
+                    ? `In person doesn't work then: ${brokenRuleLabel}. The same time works as an online meeting with no approval needed — tell them that plainly and offer it (re-call create_meeting with is_online=true if they take it). Only if they insist on meeting in person, call create_approval(kind=policy_exception) and pass "${brokenRuleLabel}" in ask_text, saying the same time is available online.`
+                  : remoteSameTime
+                    ? `In person doesn't work then: ${brokenRuleLabel}. Online at the same time would still be ${remoteSameTime.broken_rule_label}. I can't book it on my own — call create_approval(kind=policy_exception) and pass BOTH phrases in ask_text ("${brokenRuleLabel}"; online it would still be "${remoteSameTime.broken_rule_label}") so he knows everything he's overriding.`
+                  : brokenRuleLabel === 'unknown'
                     ? `That time doesn't pass ${ownerFirst}'s scheduling rules and I can't tell exactly which one flagged it. Call create_approval(kind=policy_exception) — describe the slot honestly and let him decide.`
                     : conflictingEvent && isAllDayCollision
                       ? `${ownerFirst}'s whole day is already taken by "${conflictingEvent.subject}"${conflictingEvent.allDayOutOfOffice ? ' — he is out of office' : ''}. I can't book on top of an all-day commitment, and there's no meeting there to add anyone to. Call create_approval(kind=policy_exception) if this genuinely needs to happen anyway, and pass "${brokenRuleLabel}" in ask_text.`

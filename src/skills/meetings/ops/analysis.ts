@@ -109,6 +109,12 @@ interface ProcessedEvent {
   // isOnlineMeeting=true on hybrid meetings (physical room + Teams link).
   location?: string;
   attendees?: string[];
+  // OWNER VIEWER ONLY — the invitation's own addresses: who sent it (omitted
+  // when he did) and every attendee's email. His own calendar data, so a task
+  // anchored on this event ("send Danny a new invite") reads the address off
+  // the event instead of asking him for it. Never set for any other viewer (W9).
+  organizer?: { name?: string; email: string };
+  attendee_emails?: string[];
   // Floating-block marker. When this event matches one of the profile's
   // configured floating blocks (lunch, coffee break, gym, thinking time,
   // etc.) the matching block's name is surfaced here. Computed against the
@@ -224,6 +230,17 @@ export function processCalendarEvents(
         .map(a => a.emailAddress.name)
         .filter(n => n && n.toLowerCase() !== ownerName.toLowerCase())
         .slice(0, 10);
+    const ownerEmailLower = ownerEmail.toLowerCase();
+    const organizerAddress = viewer === 'owner' ? organizerEmail.trim() : '';
+    const organizer = organizerAddress && organizerAddress.toLowerCase() !== ownerEmailLower
+      ? { ...(ev.organizer?.emailAddress?.name ? { name: ev.organizer.emailAddress.name } : {}), email: organizerAddress }
+      : undefined;
+    const attendeeEmails = viewer === 'owner'
+      ? (ev.attendees ?? [])
+        .map(a => (a?.emailAddress?.address ?? '').trim())
+        .filter(e => e && e.toLowerCase() !== ownerEmailLower)
+        .slice(0, 10)   // same cap as the names above
+      : [];
 
     result.push({
       id: ev.id,
@@ -243,6 +260,8 @@ export function processCalendarEvents(
       onlineMeetingUrl: ev.onlineMeetingUrl,
       location: ev.location?.displayName?.trim() || undefined,
       attendees: attendeeNames.length > 0 ? attendeeNames : undefined,
+      ...(organizer ? { organizer } : {}),
+      ...(attendeeEmails.length > 0 ? { attendee_emails: attendeeEmails } : {}),
       // Floating-block marker. Match goes against the RAW `ev.subject` —
       // NOT the masked `subject` computed above — because privacy masking
       // turns "Lunch" into "[Private]" for sensitivity=private/personal,

@@ -27,13 +27,14 @@ import {
   upsertPersonMemory,
   getPersonMemory,
 } from '../db';
-import { getLinkedRequestIdForOutreach } from '../db/jobs';
+import { getLinkedRequestIdForOutreach, getOutreachJobByRequestId } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
-import { updateRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
+import { updateRequest, getRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
 import { toTimerInstant } from '../core/requests/types';
 import { resolveStatedInstant, StatedTimeClarificationError } from '../utils/weTimeResolver';
 import { logActivity } from '../core/requests/logActivity';
-import { calcResponseDeadline, colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
+import { closeRequest } from '../core/requests/closeRequest';
+import { calcResponseDeadline, colleagueWorkTimeBaseFromNow, isColleagueSendDeferred } from '../utils/responseDeadline';
 import { getConnection } from '../connections/registry';
 import type { CoreInfoFromTransport } from '../connections/types';
 import logger from '../utils/logger';
@@ -94,7 +95,11 @@ Only send messages the user explicitly asks for — never reach out to people on
             },
             send_at: {
               type: 'string',
-              description: 'ISO 8601 datetime to send the message. Use when the user asks to reach out at a future time. Leave empty to send now.',
+              description: 'ISO 8601 datetime to send the message. Use when the user asks to reach out at a future time. Leave empty for the default: it goes out now if the recipient is inside their working hours, otherwise at their next work start.',
+            },
+            send_now: {
+              type: 'boolean',
+              description: 'true ONLY when the user explicitly asked for the message to go out right now, even outside the recipient\'s working hours. Omit otherwise.',
             },
             intent: {
               type: 'string',
@@ -294,37 +299,118 @@ Only send messages the user explicitly asks for — never reach out to people on
         const colleagueTzForDeadline = (args.colleague_tz as string | undefined) ?? context.profile.user.timezone;
         const recipientTime = { slackId: colleagueSlackId, ownerTimezone: context.profile.user.timezone };
 
-        // registrar fix (scheduled-first-outreach-send-not-gated-to-recipient-hours,
-        // wf_29a0d866-021, round 2 after bouncer overturn) — o#245/o#246 gated
-        // the RE-ASK/RE-ENGAGEMENT timers (runRescheduleReask,
-        // sendOofReengagement) to the colleague's own work hours+workweek.
-        // This gate is the SCHEDULED-send analogue: it applies ONLY when the
-        // caller actually asked for a future send_at, never to an immediate
-        // call (no send_at). Round 1 floored EVERY message_colleague call,
-        // including a real-time owner-typed relay with no send_at at all —
-        // o#245/o#246's ruling was answered for the three PROACTIVE timers
-        // only, and an immediate ask ("tell Yael the 08:00 is cancelled") is
-        // the owner's own explicit instruction, not a nudge Maelle chose to
-        // send — deferring it through this timer is the exact trade R10
-        // already refuses for an urgent escalation. So: no send_at, no floor,
-        // sent exactly as asked (unchanged from pre-fix behavior).
-        //
-        // The anchor for the floor search is also fixed here: it must walk
-        // forward from the REQUESTED instant (or now, whichever is later),
-        // not from "now" — searching from now only ever catches an overdue
-        // ask and lets a future send_at that lands on the colleague's
-        // non-work day (e.g. a Saturday for a Sun-Thu workweek) pass through
-        // unchanged, so the "I've scheduled it for Saturday" told to the
-        // owner would silently NOT be what actually fires (runner.ts
-        // re-floors at send time and would push it again).
-        // The shared business-time walk returns an instant >= anchorMs,
-        // resolving this recipient's stored zone and travel on each date.
+        // Owner rule (colleague-sends-respect-recipient-work-hours; 2026-08-19
+        // "check timezone when reaching to colleague, work week and time zone")
+        // — every message_colleague send lands in the RECIPIENT's working time,
+        // judged on their own local working day (stored zone, work hours and
+        // dated travel via the shared business-time walk), never the owner's.
+        //   - send_at: floored to the recipient's first work time at/after the
+        //     requested instant (or now, whichever is later), so a requested
+        //     time on their non-work day is never what the owner is told fires.
+        //   - no send_at: sent now inside their hours, otherwise held to their
+        //     next work start through the same scheduled-send timer.
+        //   - send_now=true (the owner explicitly asked for immediate delivery,
+        //     without a send_at): sent now, unfloored.
+        // A recipient with no known zone uses the existing fallback: the tool's
+        // colleague_tz, else the owner's zone with standard hours (#M3).
         let effectiveSendAt = sendAt;
+        const explicitImmediate = !sendAt && args.send_now === true;
         if (sendAt) {
           const anchorMs = Math.max(Date.parse(sendAt), Date.now());
           effectiveSendAt = colleagueWorkTimeBaseFromNow(colleagueTzForDeadline, anchorMs, recipientTime);
+        } else if (!explicitImmediate) {
+          const gate = isColleagueSendDeferred(colleagueTzForDeadline, recipientTime);
+          if (gate.deferred) effectiveSendAt = gate.deferredTo;
         }
+        const heldForRecipientHours = !sendAt && !!effectiveSendAt;
         const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
+        // An explicit "send it now" in the owner thread that is holding a
+        // scheduled message to this colleague replaces that held copy, so the ask
+        // never reaches them twice (R3) and is never lost. Under the same request
+        // lock the sweep fires it under, the held copy's timer is pushed out
+        // (SUSPEND_MS) BEFORE this send: if the sweep got there first, its copy
+        // is the delivery and this call sends nothing more; otherwise it cannot
+        // fire during this send. A confirmed send cancels it. A DEFINITE non-send
+        // (no connection, or Slack refused before delivering) restores its
+        // original timer, so the scheduled message still stands. An UNKNOWN
+        // outcome (Slack 'error' or a throw once the send was attempted — it may
+        // have landed) is treated as possibly delivered: the held copy is
+        // cancelled and the owner is told to check, never that nothing went out
+        // (owner ruling 2026-09-23; same never-resend-unconfirmed rule as
+        // runner.ts's closeUnconfirmedSend). The copy is never left timerless.
+        const OPEN_STATES = ['awaiting_owner', 'awaiting_colleague', 'in_flight'];
+        const SUSPEND_MS = 60 * 60 * 1000;
+        const suspended: Array<{ id: string; nextCheckAt: string | null }> = [];
+        const stillHeld = (id: string) => {
+          const current = getRequest(id);
+          return !!current && OPEN_STATES.includes(current.state) && current.next_check_handler === 'send_scheduled_outreach';
+        };
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const heldLock = () => (require('../core/requests/resolver') as typeof import('../core/requests/resolver')).withRequestLock;
+        const cancelHeld = async (closureReason = 'superseded_by_send_now'): Promise<string[]> => {
+          const replaced: string[] = [];
+          for (const copy of suspended.splice(0)) {
+            await heldLock()(copy.id, async () => {
+              if (!stillHeld(copy.id)) return;
+              const closed = closeRequest({ id: copy.id, state: 'cancelled', closureReason, closedBy: 'owner', skipChildren: true });
+              if (closed.ok && closed.state === 'cancelled' && closed.reason !== 'already terminal') replaced.push(copy.id);
+            });
+          }
+          return replaced;
+        };
+        const restoreHeld = async (): Promise<Record<string, unknown>> => {
+          const kept: string[] = [];
+          for (const copy of suspended.splice(0)) {
+            await heldLock()(copy.id, async () => {
+              if (!stillHeld(copy.id)) return;
+              updateRequest(copy.id, { nextCheckAt: copy.nextCheckAt, nextCheckHandler: 'send_scheduled_outreach' });
+              if (copy.nextCheckAt) kept.push(copy.nextCheckAt);
+            });
+          }
+          if (!kept.length) return {};
+          const when = DateTime.fromISO(kept[0]).setZone(context.profile.user.timezone).toFormat('EEEE \'at\' HH:mm');
+          return {
+            scheduled_copy_kept: true,
+            _must_reply_with: `Nothing reached ${args.colleague_name as string} just now; the message scheduled for ${when} still stands.`,
+          };
+        };
+        // The attempted send's outcome is unknown: cancel the held copy (never a
+        // second delivery) and say it may have gone out.
+        const unconfirmedHeld = async (): Promise<Record<string, unknown>> => {
+          const cancelled = await cancelHeld('superseded_by_unconfirmed_send_now');
+          if (!cancelled.length) return {};
+          return {
+            delivery_unconfirmed: true,
+            scheduled_copy_cancelled: true,
+            _must_reply_with: `I tried to send it to ${args.colleague_name as string} now but couldn't confirm it went through, so it may have reached them. I cancelled the scheduled copy so they won't get it twice — please check the conversation before sending again.`,
+          };
+        };
+        if (explicitImmediate) {
+          const held = getOpenRequestsForColleague(userId, colleagueSlackId).filter(r =>
+            r.kind === 'outreach' && r.next_check_handler === 'send_scheduled_outreach'
+            && r.target_slack_id === colleagueSlackId
+            && r.origin_channel === context.channelId && r.origin_thread_ts === context.threadTs);
+          let heldAlreadyDelivered = false;
+          for (const copy of held) {
+            await heldLock()(copy.id, async () => {
+              if (stillHeld(copy.id)) {
+                suspended.push({ id: copy.id, nextCheckAt: getRequest(copy.id)?.next_check_at ?? null });
+                updateRequest(copy.id, { nextCheckAt: new Date(Date.now() + SUSPEND_MS).toISOString(), nextCheckHandler: 'send_scheduled_outreach' });
+              } else if (getOutreachJobByRequestId(copy.id)?.sent_at) {
+                heldAlreadyDelivered = true;
+              }
+            });
+          }
+          if (heldAlreadyDelivered && suspended.length === 0) {
+            logger.info('message_colleague — held copy was delivered by its timer; not sending again', { colleagueSlackId });
+            return {
+              ok: true,
+              sent: false,
+              already_delivered_by_schedule: true,
+              _must_reply_with: `The scheduled message to ${args.colleague_name as string} went out just now, so I didn't send it a second time.`,
+            };
+          }
+        }
         // channelIdArg is resolved here (before deadline) so awaitReplyEffective
         // can zero it for channel posts — see the zeroing comment below.
         const channelIdArg = typeof args.channel_id === 'string' ? args.channel_id : undefined;
@@ -424,6 +510,8 @@ Only send messages the user explicitly asks for — never reach out to people on
           jobId,
           colleague: args.colleague_name,
           isFuture,
+          heldForRecipientHours,
+          explicitImmediate,
           await_reply: awaitReplyEffective,
           skill_origin: 'outreach',
         });
@@ -439,12 +527,16 @@ Only send messages the user explicitly asks for — never reach out to people on
           // getOpenRequestsForOwner), so the row it was supposedly "for" was
           // never read there; all it added was a second due_at with no
           // dispatcher behind it.
+          const colleagueName = args.colleague_name as string;
           return {
             scheduled: true,
             jobId,
             scheduled_at: effectiveSendAt,
             _status: 'scheduled_not_sent',
-            _note: `Message is scheduled for ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} — NOT sent yet. Tell the user exactly this: "I've scheduled the message to ${args.colleague_name as string} for ${scheduledDt.toFormat('EEEE at HH:mm')}."`,
+            ...(heldForRecipientHours ? { held_for_recipient_work_hours: true } : {}),
+            _note: heldForRecipientHours
+              ? `${colleagueName} is outside their working hours, so the message is scheduled for their next work start, ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} the user's time — NOT sent yet. Tell the user exactly this: "It's outside ${colleagueName}'s working hours, so I've scheduled it for ${scheduledDt.toFormat('EEEE at HH:mm')}, when their day starts." If the user then asks for it to go now, call message_colleague in this thread with send_now=true; that replaces this scheduled copy.`
+              : `Message is scheduled for ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} — NOT sent yet. Tell the user exactly this: "I've scheduled the message to ${colleagueName} for ${scheduledDt.toFormat('EEEE at HH:mm')}."`,
           };
         }
 
@@ -483,7 +575,7 @@ Only send messages the user explicitly asks for — never reach out to people on
         if (!connection) {
           logger.error('message_colleague — Slack Connection not registered for profile', { userId });
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Connection not registered' });
-          return { ok: false, error: 'connection_not_registered' };
+          return { ok: false, error: 'connection_not_registered', ...(await restoreHeld()) };
         }
 
         // Channel post branch: prepend @mention so the colleague is pinged
@@ -497,18 +589,26 @@ Only send messages the user explicitly asks for — never reach out to people on
           // while the sibling DM branch below (sendOpts) already carried it.
           // Same defect the deferred-send fix (runner.ts:685-689) closed on
           // the scheduled-channel-post path — mirrored here.
-          const outcome = await connection.postToChannel(
-            args.channel_id as string,
-            fullText,
-            attachmentsArg?.length ? { attachments: attachmentsArg } : undefined,
-          );
+          let outcome: Awaited<ReturnType<typeof connection.postToChannel>>;
+          try {
+            outcome = await connection.postToChannel(
+              args.channel_id as string,
+              fullText,
+              attachmentsArg?.length ? { attachments: attachmentsArg } : undefined,
+            );
+          } catch (err) {
+            if (!suspended.length) throw err;
+            updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Channel post outcome unknown' });
+            return { ok: false, error: 'send_threw', detail: String(err).slice(0, 200), ...(await unconfirmedHeld()) };
+          }
           if (!outcome.ok) {
             updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Channel post failed: ${outcome.reason}` });
             const hint = outcome.reason === 'not_in_channel_private'
               ? `That channel is private and I haven't been invited. Ask an admin to add me, then try again.`
               : `Channel post failed: ${outcome.detail ?? outcome.reason}`;
-            return { ok: false, error: outcome.reason, detail: hint };
+            return { ok: false, error: outcome.reason, detail: hint, ...(await (outcome.reason === 'error' ? unconfirmedHeld() : restoreHeld())) };
           }
+          const replacedScheduled = await cancelHeld();
           updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
           if (tickThreadTs && !outcome.attachments_failed) reactActivityComplete(userId, tickThreadTs, jobId);
           // gh#52 (52-U2) — history/undo record of the send itself. Fail-soft,
@@ -526,12 +626,14 @@ Only send messages the user explicitly asks for — never reach out to people on
             jobId,
             channel: args.channel_name ?? args.channel_id,
             colleague: args.colleague_name,
+            replacedScheduled,
           });
           return {
             ok: true,
             posted_to_channel: args.channel_name ?? args.channel_id,
             colleague_mentioned: args.colleague_name,
             jobId,
+            ...(replacedScheduled.length ? { replaced_scheduled_copy: true } : {}),
             attachments_failed: outcome.attachments_failed ?? 0,
             _must_reply_with: outcome.attachments_failed
               ? `The text was posted, but ${outcome.attachments_failed} attachment(s) failed. Report this partial delivery; do not claim everything was sent or repeat the text.`
@@ -594,6 +696,9 @@ Only send messages the user explicitly asks for — never reach out to people on
             // the current outreach's request was created just above with
             // origin set to the owner's channel (will be updated post-send).
             && r.id !== linkedRequestId
+            // A still-scheduled send has never reached the colleague, so its
+            // origin is still the OWNER's thread — never a colleague-side anchor.
+            && r.next_check_handler !== 'send_scheduled_outreach'
             // Sanity: the recorded origin channel should look like a DM
             // (starts with 'D'). Owner-side origins are also 'D' so we
             // can't fully disambiguate, but coupled with "open colleague
@@ -618,15 +723,23 @@ Only send messages the user explicitly asks for — never reach out to people on
           ...(threadTsForSend ? { threadTs: threadTsForSend } : {}),
           ...(attachmentsArg ? { attachments: attachmentsArg } : {}),
         };
-        const outcome = await connection.sendDirect(
-          colleagueSlackId,
-          args.message as string,
-          Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
-        );
+        let outcome: Awaited<ReturnType<typeof connection.sendDirect>>;
+        try {
+          outcome = await connection.sendDirect(
+            colleagueSlackId,
+            args.message as string,
+            Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
+          );
+        } catch (err) {
+          if (!suspended.length) throw err;
+          updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Send outcome unknown' });
+          return { ok: false, error: 'send_threw', detail: String(err).slice(0, 200), ...(await unconfirmedHeld()) };
+        }
         if (!outcome.ok) {
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: `Send failed: ${outcome.reason}` });
-          return { ok: false, error: outcome.reason, detail: outcome.detail };
+          return { ok: false, error: outcome.reason, detail: outcome.detail, ...(await (outcome.reason === 'error' ? unconfirmedHeld() : restoreHeld())) };
         }
+        const replacedScheduled = await cancelHeld();
         updateOutreachJob(jobId, { sent_at: new Date().toISOString() });
         // v2.1.5 — record the Slack ts + DM channel so follow-up sends
         // (post-approval confirmation, relay replies) can thread back
@@ -707,6 +820,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           jobId,
           colleague: args.colleague_name,
           await_reply: !!args.await_reply,
+          replacedScheduled,
           preview: (args.message as string).slice(0, 80),
         });
         return {
@@ -715,6 +829,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           jobId,
           colleague_name: args.colleague_name,
           await_reply: !!args.await_reply,
+          ...(replacedScheduled.length ? { replaced_scheduled_copy: true } : {}),
           attachments_failed: outcome.attachments_failed ?? 0,
           _must_reply_with: outcome.attachments_failed
             ? `The text reached ${args.colleague_name}, but ${outcome.attachments_failed} attachment(s) failed. Report this partial delivery; do not claim everything was sent or repeat the text.`

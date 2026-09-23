@@ -118,6 +118,14 @@ type SlotCandidate = {
    * colleague must never see.
    */
   broken_rule_label?: string;
+  /**
+   * EVERY owner rule this slot breaks, as checkSlot kind codes
+   * (brokenOwnerRules) — set on any `relaxed` pass, for every viewer. Codes,
+   * never labels: no owner mechanism detail (caps, windows, floors) rides on
+   * them. A relaxed-pass slot can break several rules at once; a single first
+   * verdict hid which options needed one bend and which needed two.
+   */
+  broken_rules?: import('../../utils/scheduleRules').RuleViolationKind[];
   // Every attendee this slot doesn't work for (AttendeeConflictTag, above) —
   // complete, never just the first one.
   attendee_conflicts?: AttendeeConflictTag[];
@@ -617,7 +625,7 @@ export async function findAvailableSlots(params: {
     // search can never offer a slot the book path then refuses. Lazy-required to
     // match this file's idiom and sidestep the type-only cycle with scheduleRules.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { checkSlot, isAllDayOutOfOffice, computeOofSpan, formatOofUntilDisplay } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
+    const { checkSlot, brokenOwnerRules, isAllDayOutOfOffice, computeOofSpan, formatOofUntilDisplay } = require('../../utils/scheduleRules') as typeof import('../../utils/scheduleRules');
     // v3.7.x (#143) — the per-date effective work context, so the walker gates +
     // hours + tz come from the SAME accessor checkSlot validates against.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1444,6 +1452,7 @@ export async function findAvailableSlots(params: {
       // whatever the caller asked for. ──
       let verdictOverOptional: string | undefined;
       let verdictBrokenRuleLabel: string | undefined;
+      let verdictBrokenRules: import('../../utils/scheduleRules').RuleViolationKind[] | undefined;
       if (profile) {
         const slotCheckInput = {
           profile,
@@ -1541,6 +1550,10 @@ export async function findAvailableSlots(params: {
           const strictVerdict = checkSlot({ ...slotCheckInput, allowRelaxed: false });
           if (!strictVerdict.passes) verdictBrokenRuleLabel = strictVerdict.violation_label;
         }
+        if (params.relaxed) {
+          const broken = brokenOwnerRules(slotCheckInput);
+          if (broken.length > 0) verdictBrokenRules = broken;
+        }
       } else {
         // No-profile fallback (degenerate callers with no UserProfile): only
         // the work-hours window + owner busy can be evaluated. Lead time was
@@ -1581,6 +1594,7 @@ export async function findAvailableSlots(params: {
           disturbs_floating_block: disturbsBlock,
           ...(verdictOverOptional ? { over_optional: verdictOverOptional } : {}),
           ...(verdictBrokenRuleLabel ? { broken_rule_label: verdictBrokenRuleLabel } : {}),
+          ...(verdictBrokenRules ? { broken_rules: verdictBrokenRules } : {}),
           ...(attendeeConflicts.length ? { attendee_conflicts: attendeeConflicts } : {}),
           ...(packingDense ? { density: scoreSlotDensity(slotStartMs, slotEndMs, ownerBusyMs, densityCfg).score } : {}),
         },

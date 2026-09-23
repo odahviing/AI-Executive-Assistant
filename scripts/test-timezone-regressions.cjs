@@ -13,7 +13,7 @@ const suites = [
   {name: 'librarian-venue-contacts', script: 'scripts/test-timezone-venue-contacts.cjs', args: ['--test'], expected: 16},
   {name: 'instructor-prompt-people', script: 'scripts/test-timezone-prompt-people.cjs', args: ['--test'], expected: 4},
   {name: 'instructor-slot-narration', script: 'scripts/test-timezone-slot-narration.cjs', args: ['--test'], expected: 4},
-  {name: 'registrar', script: 'scripts/test-timezone-registrar-deadline.cjs', args: ['--test'], expected: 33},
+  {name: 'registrar', script: 'scripts/test-timezone-registrar-deadline.cjs', args: ['--test'], expected: 38},
   {name: 'registrar-approval-interval', script: 'scripts/test-timezone-approval-interval.cjs', args: ['--test'], expected: 37},
   {name: 'gatekeeper', script: 'scripts/test-timezone-gatekeeper-precheck.cjs', args: [], expected: 42},
   {name: 'gatekeeper-reverify', script: 'scripts/test-timezone-gatekeeper-reverify.cjs', args: ['--test'], expected: 10},

@@ -39,6 +39,7 @@ function fixture(t) {
     'src/db.ts': {
       formatPreferencesCatalog: () => 'OWNER-DB-SECRET', formatPeopleMemoryForPrompt: () => 'OWNER-PEOPLE-SECRET',
       formatThreadPeopleBlock: () => 'COLLEAGUE-CONTACT', getPersonMemory: person,
+      authoritativeGender: () => 'unknown', // fixture rows carry no gender; real people.ts reads that as unknown
       buildPersonWorkContextBlock: () => 'COLLEAGUE-WORK-SECRET', buildSocialContextBlock: () => 'COLLEAGUE-SOCIAL-SECRET',
       getSummarySessionByThread: () => null, getOutreachLifecycle: () => null,
       getDb: () => ({ prepare: () => ({ all: () => [] }) }),

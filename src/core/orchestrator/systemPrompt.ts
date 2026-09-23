@@ -4,7 +4,7 @@ import type { ChannelId } from '../../skills/types';
 import { getActiveSkills, getSkillTools } from '../../skills/registry';
 import { formatSystemPromptPreferenceBlocks } from '../../utils/skillPreferences';
 import logger from '../../utils/logger';
-import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory } from '../../db';
+import { formatPreferencesCatalog, formatPeopleMemoryForPrompt, formatThreadPeopleBlock, getPersonMemory, authoritativeGender } from '../../db';
 import { getAwaitingOwnerRequests, getOpenRequestsForThread, getUnrelayedTerminalRequestForThread } from '../../db/requests';
 import { parseDetails } from '../requests/types';
 import { formatAssistantSelfForPrompt } from '../assistantSelf';
@@ -373,8 +373,15 @@ The colleague's current reply is responding to ${firstName}'s counter offer. Pic
     return `\nSTATUS OF THE REQUEST IN THIS THREAD — ${subj} is CLOSED: ${why}. Nothing is pending with ${firstName} on it. Lead with that honest status in your reply now, whatever the colleague just said — a question, "thanks", or just acknowledging all get the same truth, never "still waiting on ${firstName}." If they still want it, offer to take it back to ${firstName}, and if they say yes, raise it again with create_approval — a fresh ask reaches him.${languageNote}`;
   })();
 
+  // The owner's own row is excluded from WORKSPACE CONTACTS
+  // (formatPeopleMemoryForPrompt), so this line is the only place his gender
+  // reaches the prompt for HEBREW GENDERED FORMS — same human-authority filter
+  // as every contact line (authoritativeGender: an `auto` guess reads unknown),
+  // plus his slack_id so confirm_gender can lock what he states about himself.
+  const ownerRow = isOwner ? getPersonMemory(user.slack_user_id) : null;
   const ownerContextSection = isOwner ? `
 WHAT YOU KNOW ABOUT ${user.name.toUpperCase()} (learned over time):
+${user.name} (slack_id: ${user.slack_user_id}), gender: ${ownerRow ? authoritativeGender(ownerRow) : 'unknown'}
 ${prefsSection}
 ${peopleSection ? '\n' + peopleSection : ''}
 ${peopleCatalog ? '\n' + peopleCatalog : ''}
@@ -767,9 +774,9 @@ NON-LATIN OUTPUT (Hebrew — and the SAME rule for any non-Latin script: Cyrilli
 - No markdown (asterisks/underscores/backticks) — RTL renders them garbled. Plain text only.
 - If ${firstName} corrects a date, re-query with the corrected date before answering.
 
-HEBREW GENDERED FORMS — apply by the contact's gender field, second-person AND third-person.
+HEBREW GENDERED FORMS — apply by the gender field of whoever you address or mention (${firstName}'s own is under WHAT YOU KNOW), second-person AND third-person.
 - gender: unknown/unconfirmed → write gender-NEUTRALLY, never default to masculine. Restructure to avoid gendered 2nd/3rd-person forms — plural / infinitive / impersonal phrasing, or address by name. No slash forms (את/ה). Only if a gendered form is genuinely unavoidable, ask ONCE: "סליחה, רק לוודא — אתה או את?".
-- When they answer (or volunteer), call confirm_gender(slack_id, gender) to lock it. Ambiguous/joking replies → don't confirm, ask again.
+- When they answer, volunteer or correct you (${firstName} included), call confirm_gender(slack_id, gender) to lock it. Ambiguous/joking replies → don't confirm, ask again.
 - Gender already set → use it. Never re-ask.
 
 SKILLS & CHANNELS

@@ -531,7 +531,7 @@ export function formatDirectiveForPromptBlock(directive: SocialDirective): strin
     // progress-and-stay-open. See closingAck's doc comment above.
     lines.push('- engage: this is a closing turn. Acknowledge briefly what they just said, then let the goodbye stand — no follow-up question, nothing new introduced, no invitation to keep talking.');
   } else {
-    lines.push('- engage: follow the thread naturally. Your reply must PROGRESS the subject — react with something specific, share back, or ask a follow-up that gives the person somewhere to go. A reply that only says "wow cool" is not progress. If YOU just asked a social question and they answered with any substance, stay on that subject — never pivot to "anything work-related" or "let me know if you need anything." The subject stays open until THEY close it.');
+    lines.push('- engage: PROGRESS the subject in THIS reply — react to what they said with something specific (a detail from what you shared earlier is ideal), share back, or ask a follow-up that gives them somewhere to go. "Good to know" or "wow cool" alone is not progress, nor is a promise to update them later. If YOU asked and they answered with any substance, stay on that subject until THEY close it, no pivot to work.');
   }
   lines.push('- continue: one short follow-up on a subject from a prior day. Don\'t overdo it. Same rule as engage — progress the subject, never pivot to work.');
   // v4.5.9 (#198-LIB-1) — no `raise_new` rule line: this block only ever
@@ -539,7 +539,7 @@ export function formatDirectiveForPromptBlock(directive: SocialDirective): strin
   // can never select raise_new any more (answer 2) — only the coda can, and
   // the coda composes its own prompt (generateCoda.ts), never this one.
   lines.push('');
-  lines.push('ABOVE ALL: speak like a person, not a service desk. Celebration, empathy, or genuine curiosity IS the response. Don\'t tack "let me know if you need anything" onto social turns.');
+  lines.push('ABOVE ALL: speak like a person, not a service desk. Celebration, empathy, or genuine curiosity IS the response: end on it, not a service closer ("let me know if you need anything", "I\'ll flag it your way").');
   logger.info('Social directive produced', {
     mode: directive.mode, subject: directive.subjectLabel, category: directive.categoryLabel,
   });

@@ -26,6 +26,7 @@ import { composeOwnerAskText, extractCallbacks } from '../core/approvals/approva
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
+import type { RuleCheckInput, RuleViolationKind } from '../utils/scheduleRules';
 import { judgeRequestDedup } from '../utils/requestDedup';
 import { messageReferencesRequest } from '../utils/closeLoopOnOwnerHandled';
 import {
@@ -955,8 +956,10 @@ export async function createApprovalRequest(
           // owner_busy_collision is surfaced verbatim to the owner (Rule 7 — the
           // hard conflict is always NAMED, never hidden behind a soft label);
           // genuine soft escalations (focus floor / work hours / category) keep
-          // their honest soft label AND their ask prose unchanged. Skipped for an
-          // existing-event change (edit / reschedule / cancel) — no slot to re-derive.
+          // their honest soft label AND their ask prose unchanged — except an unmet
+          // in-person ask (rule 1b, from the stored action's is_online=false), which
+          // is named to him in code with the same time's online verdict. Skipped for
+          // an existing-event change (edit / reschedule / cancel) — no slot to re-derive.
           //
           // This is a LABEL pass, never a gate — the deviation was already proven
           // upstream by the tool refusal gateApprovalAsk requires. That is why a
@@ -975,7 +978,7 @@ export async function createApprovalRequest(
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             const { getCalendarEvents } = require('../connectors/graph/calendar') as typeof import('../connectors/graph/calendar');
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { checkSlot } = require('../utils/scheduleRules') as typeof import('../utils/scheduleRules');
+            const { checkSlot, brokenOwnerRules } = require('../utils/scheduleRules') as typeof import('../utils/scheduleRules');
             const tz = profile.user.timezone;
             const startDt = DateTime.fromISO(payload.start as string, { zone: tz, setZone: true }).setZone(tz);
             const events = await getCalendarEvents(
@@ -984,27 +987,59 @@ export async function createApprovalRequest(
               startDt.endOf('week').toFormat("yyyy-MM-dd'T'23:59:59"),
               tz,
             );
-            const check = checkSlot({
+            const deferredArgs = (payload.deferred_action as { args?: Record<string, unknown> } | undefined)?.args;
+            const ruleInput = {
               profile,
               slotStartIso: payload.start as string,
               slotEndIso: payload.end as string,
               category: typeof payload.category === 'string' ? payload.category : null,
               events,
+              // Rule 1b — the same meeting-mode input the refusing create_meeting
+              // was checked with, read off the stored action a ✅ replays.
+              inPersonRequested: deferredArgs?.is_online === false,
               // M10 — this label is OWNER-BOUND by construction: it lands on
-              // payload.rule_label and, for a hard collision, leads his approval
-              // DM. Nothing colleague-facing reads it (the colleague-path prompt
+              // payload.rule_label and, as `honest_hard_reason`, leads his
+              // approval DM. Nothing colleague-facing reads it (the colleague-path prompt
               // block surfaces subject/slots only, and the requester relay reads
               // details.subject/question). Without the explicit viewer it takes
               // the safe default and masks the colliding meeting's subject —
               // hiding his own calendar from him at the exact moment he's being
               // asked to book over it.
-              viewer: 'owner',
-            });
+              viewer: 'owner' as const,
+            };
+            const check = checkSlot(ruleInput);
+            // Every overridable rule the slot breaks, each with the validator's
+            // own owner-viewer label — a first-violation verdict alone hides what
+            // the approval exists to show (Elan 2026-09-20: 12:30 read as "lunch"
+            // only, though it was also face-to-face on a home day).
+            const labelsFor = (kinds: RuleViolationKind[], input: RuleCheckInput): string[] => kinds.map(kind =>
+              checkSlot({ ...input, allowRelaxed: false, onlyKinds: new Set([kind]) }).violation_label ?? kind);
+            const brokenKinds = brokenOwnerRules(ruleInput);
             if (!check.passes && check.violation_label) {
               hardReasonReDerived = true;
               const sonnetRule = typeof payload.rule === 'string' ? payload.rule : null;
               payload.rule = check.violation_kind ?? payload.rule;
-              payload.rule_label = check.violation_label;
+              const brokenLabels = labelsFor(brokenKinds, ruleInput);
+              payload.rule_label = brokenLabels.includes(check.violation_label)
+                ? brokenLabels.join('; ')
+                : [check.violation_label, ...brokenLabels].join('; ');
+              // An unmet face-to-face ask is named to the owner in code, with what
+              // the SAME time needs as an online meeting — the alternative the
+              // requester was offered.
+              if (brokenKinds.includes('in_person_on_home_day')) {
+                const remoteInput = { ...ruleInput, inPersonRequested: false };
+                const remote = checkSlot(remoteInput);
+                const remoteLabels = remote.passes ? [] : [
+                  ...(remote.violation_kind === 'owner_busy_collision' && remote.violation_label ? [remote.violation_label] : []),
+                  ...labelsFor(brokenOwnerRules(remoteInput), remoteInput),
+                ];
+                payload.honest_hard_reason = [
+                  `In person, this time breaks: ${brokenLabels.join('; ')}.`,
+                  remote.passes
+                    ? 'The same time works as an online meeting with no rule broken.'
+                    : `Online at the same time would still break: ${remoteLabels.join('; ') || check.violation_label}.`,
+                ].join(' ');
+              }
               // Rule 7 — a HARD busy collision MUST be named to the owner. Persist it
               // as its own structured field so the DM leads with the real reason (soft
               // rules leave the ask as-is) — and so does every LATER surface that puts
@@ -1014,7 +1049,7 @@ export async function createApprovalRequest(
               // the dedup judge, the runner and get_my_tasks, and an owner-voiced
               // sentence naming a private meeting's subject must not enter those.
               if (check.violation_kind === 'owner_busy_collision') {
-                payload.honest_hard_reason = check.violation_label;
+                payload.honest_hard_reason = [check.violation_label, payload.honest_hard_reason].filter(Boolean).join('\n');
 
                 // gh#194-c — the collision may be a meeting THIS SAME requester
                 // already had booked. create_meeting's own advisory steer
@@ -1055,7 +1090,7 @@ export async function createApprovalRequest(
               if (sonnetRule !== (check.violation_kind ?? null)) {
                 logger.info('create_approval — re-derived policy_exception reason differs from Sonnet-supplied', {
                   subject: payload.subject, start: payload.start,
-                  sonnetRule, derivedRule: check.violation_kind,
+                  sonnetRule, derivedRule: check.violation_kind, brokenKinds,
                 });
               }
             } else if (check.passes) {

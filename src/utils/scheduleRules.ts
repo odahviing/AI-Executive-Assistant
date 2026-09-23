@@ -160,17 +160,23 @@ export type BookingLevel = 'free' | 'optional' | 'unfiltered';
  * search-path surface additionally needs `mapVerdictToRejectLabel` (below) to
  * translate a kind into the walker's own relabeled vocabulary before it can
  * compare against `rejectedCounts` keys.
+ *
+ * DECLARED IN checkSlot's LADDER ORDER (header, EVALUATION ORDER: 0b, 1b, 2-4,
+ * 5, 6, 7, 9) — the owner's "priority of reasons" (#128, 2026-07-26), most
+ * important first. `compareByRulePriority` ranks by this order;
+ * `brokenOwnerRules` derives the same order from checkSlot itself, so a drift
+ * between the two is a visible disagreement, not a silent re-rank.
  */
 export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<RuleViolationKind>([
-  'focus_time_floor',
-  'floating_block_overlap',
   'within_lead_time',
-  'travel_buffer_collision',
-  'outside_working_hours',
+  'in_person_on_home_day',
+  'category_day_type',
   'category_per_day',
   'category_per_week',
-  'category_day_type',
-  'in_person_on_home_day',
+  'outside_working_hours',
+  'floating_block_overlap',
+  'travel_buffer_collision',
+  'focus_time_floor',
 ]);
 
 /**
@@ -401,7 +407,8 @@ export interface RuleCheckInput {
   isFloatingBlock?: boolean;
   /**
    * The caller asked for an IN-PERSON meeting (search: meeting_mode='in_person';
-   * booking: the owner's is_online=false). Feeds rule 1b — read together with
+   * booking: is_online=false — planMeeting on the owner path, create_meeting's
+   * colleague Guard B on the colleague path). Feeds rule 1b — read together with
    * `meetings.physical_meetings_require_office_day`, which had no code reader
    * from 2.0.7 until 2026-09-14 while the search walker hard-excluded home days
    * on its own. One predicate now, here, soft and owner-overridable.
@@ -465,10 +472,14 @@ export interface RuleCheckInput {
    * the rules you named is broken". Every other rule is UNEVALUATED. It is
    * therefore only ever correct for re-validating an edit to an ALREADY-BOOKED
    * slot, where the rules the edit cannot affect were settled when the meeting
-   * was booked and re-imposing them would refuse a harmless edit. The one
-   * caller today is `update_meeting`'s colleague-path gate
-   * (ops/handlers/moveMeeting.ts's `colleagueUpdateRuleGate`); a caller
-   * deciding WHETHER to book must pass a full, unscoped input.
+   * was booked and re-imposing them would refuse a harmless edit. Three callers
+   * today: `update_meeting`'s colleague-path gate
+   * (ops/handlers/moveMeeting.ts's `colleagueUpdateRuleGate`); `brokenOwnerRules`
+   * below; and create_approval's reason re-derivation (tasks/skill.ts
+   * `labelsFor`), which labels each kind `brokenOwnerRules` found. The last two
+   * ask one rule at a time only to LIST or LABEL what a slot breaks and never
+   * read `passes` as bookable. A caller deciding WHETHER to book must pass a
+   * full, unscoped input.
    *
    * The M2 facts on `RuleCheckResult` (`level`, `overCommitment`,
    * `overOptional`, `outsideWorkHours`) are computed unconditionally and are
@@ -876,6 +887,52 @@ export function buildDayQualityBusyBlocks(
     });
   }
   return busyBlocks;
+}
+
+/**
+ * EVERY owner-overridable rule this slot breaks, in checkSlot's own ladder
+ * (priority) order — not just the first one `checkSlot` reports. A slot surfaced by a relaxed pass can break
+ * several at once (the 2026-09-20 Elan search: 12:30 Tuesday was both an
+ * in-person-on-a-home-day slot AND the only room left for lunch; 13:45 was only
+ * the first), and a first-violation verdict hides the difference an approval
+ * exists to show. The ladder is peeled: ask `checkSlot` for its first
+ * violation among the kinds not yet found (`onlyKinds`), record it, remove it,
+ * ask again — the same validator deciding both WHICH rules and in what ORDER,
+ * never a second copy of any rule, and one call per broken rule plus one.
+ * `allowRelaxed` is forced off: the question is what a strict check would
+ * object to.
+ */
+export function brokenOwnerRules(input: RuleCheckInput): RuleViolationKind[] {
+  const broken: RuleViolationKind[] = [];
+  const remaining = new Set(OWNER_OVERRIDABLE_KINDS);
+  while (remaining.size > 0) {
+    const verdict = checkSlot({ ...input, allowRelaxed: false, onlyKinds: remaining });
+    const kind = verdict.violation_kind;
+    if (verdict.passes || !kind || !remaining.has(kind)) break;
+    broken.push(kind);
+    remaining.delete(kind);
+  }
+  return broken;
+}
+
+/**
+ * Rank two rule-bending options by the owner's rule priority (owner ruling
+ * 2026-09-23: "we have rules priority so priority win"). Each list is in ladder
+ * order (`brokenOwnerRules`). Compared position by position: the option whose
+ * rule there sits HIGHER in the ladder (more important) ranks later; an option
+ * that has run out of broken rules ranks first. Equal lists return 0, so a
+ * stable sort keeps them in time order — "as early as possible" only ever
+ * decides between equal bends.
+ */
+export function compareByRulePriority(a: readonly RuleViolationKind[], b: readonly RuleViolationKind[]): number {
+  const rank = [...OWNER_OVERRIDABLE_KINDS];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue;
+    if (a[i] === undefined) return -1;
+    if (b[i] === undefined) return 1;
+    return rank.indexOf(b[i]) - rank.indexOf(a[i]);
+  }
+  return 0;
 }
 
 export function checkSlot(input: RuleCheckInput): RuleCheckResult {

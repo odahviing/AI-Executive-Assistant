@@ -153,6 +153,20 @@ const TZ_COUNTRY: Record<string, string> = {
   'Europe/Rome': 'Italy',
 };
 
+// A category label is a filing key, not always a usable search phrase. Bare
+// "exercise" grounded a raise for Simon Arazi on a military-exercise article
+// (2026-09-20: query "exercise — what's new or trending right now, Israel" →
+// an armoured-vehicle protection-system test), so the coda opened a topic the
+// category never meant. Only the SEARCH wording changes here; the category
+// the raise is recorded under stays the stored label.
+const CATEGORY_SEARCH_TOPIC: Record<string, string> = {
+  exercise: 'fitness and exercise',
+};
+
+function searchTopicForCategory(label: string): string {
+  return CATEGORY_SEARCH_TOPIC[label] ?? label;
+}
+
 function resolvePersonLocationForSearch(personSlackId: string): string | null {
   try {
     const person = getPersonMemory(personSlackId);
@@ -190,9 +204,10 @@ async function groundCoda(params: {
   // holds the top spot for a while gets served back nearly verbatim each
   // time. `raise_new` has no subject yet, so category-first stays correct
   // and unchanged there.
+  const categoryTopic = directive.categoryLabel ? searchTopicForCategory(directive.categoryLabel) : null;
   const topicHint = directive.mode === 'continue'
-    ? (directive.subjectLabel ?? directive.categoryLabel ?? null)
-    : (directive.categoryLabel ?? directive.subjectLabel ?? null);
+    ? (directive.subjectLabel ?? categoryTopic)
+    : (categoryTopic ?? directive.subjectLabel ?? null);
   const location = resolvePersonLocationForSearch(personSlackId);
   const query = topicHint
     ? `${topicHint} — what's new or trending right now${location ? `, ${location}` : ''}`

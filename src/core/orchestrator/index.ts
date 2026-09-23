@@ -1326,12 +1326,20 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // Only triggers when toolCallSummaries.length > 0 (we don't fabricate
       // "Done." for nothing-happened turns).
       if (toolCallSummaries.length > 0) {
-        // Build a compact human-ish summary of what fired
-        const toolNames = toolCallSummaries.map(s => {
-          // Tool summaries look like "[tool_name: short detail]" or "[tool_name]"
-          const m = s.match(/^\[([a-z0-9_]+)/);
-          return m ? m[1] : 'something';
-        });
+        // Build a compact human-ish summary of what fired.
+        // Tool summaries look like "[tool_name: short detail]" or "[tool_name]".
+        // chris-headsup-fallback-verb-20260920 — a held send renders as
+        // `[message_colleague SCHEDULED, NOT sent yet: …]` and a send_now with an
+        // unknown outcome as `[message_colleague UNCONFIRMED: …]`
+        // (renderToolSummary, turnHelpers.ts) — outcomes distinct from a
+        // delivered send, so the stamp is part of the key: each earns its own
+        // verbMap verb below instead of "sent the message". Anchored at
+        // position 0 for the same reason as isFailedLine — caller text follows the name.
+        const outcomeKey = (s: string): string | null => {
+          const m = s.match(/^\[([a-z0-9_]+)(?: (SCHEDULED|UNCONFIRMED)\b)?/);
+          return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : null;
+        };
+        const toolNames = toolCallSummaries.map(s => outcomeKey(s) ?? 'something');
         // log-grounded-fallback-ignores-tool-failure (2026-09-07) — the
         // fallback used to build `distinct` from raw tool NAMES with no
         // success check, so a tool that failed every time it was called this
@@ -1358,16 +1366,14 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         const failedOccurrenceNames = new Set(
           toolCallSummaries
             .filter(isFailedLine)
-            .map(s => s.match(/^\[([a-z0-9_]+)/))
-            .filter((m): m is RegExpMatchArray => m !== null)
-            .map(m => m[1]),
+            .map(outcomeKey)
+            .filter((k): k is string => k !== null),
         );
         const nonFailedOccurrenceNames = new Set(
           toolCallSummaries
             .filter(s => !isFailedLine(s))
-            .map(s => s.match(/^\[([a-z0-9_]+)/))
-            .filter((m): m is RegExpMatchArray => m !== null)
-            .map(m => m[1]),
+            .map(outcomeKey)
+            .filter((k): k is string => k !== null),
         );
         const attempted = [...new Set(toolNames)];
         const distinct = attempted.filter(
@@ -1481,6 +1487,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           manage_calendar_issue: 'updated the calendar issue',
           // Outreach
           message_colleague: 'sent the message',
+          'message_colleague SCHEDULED': 'scheduled the message',
+          'message_colleague UNCONFIRMED': "tried to send the message but couldn't confirm it went through",
           find_slack_channel: 'found the channel',
           find_slack_user: 'found the person',
           // Search / knowledge
@@ -1510,7 +1518,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'create_approval', 'resolve_approval',
           'create_task', 'update_task',
           // Tier 3 — outreach + briefings
-          'message_colleague', 'send_briefing_now',
+          'message_colleague', 'message_colleague SCHEDULED', 'message_colleague UNCONFIRMED', 'send_briefing_now',
           // Tier 4 — calendar health
           'check_calendar_health', 'set_event_category', 'manage_calendar_issue',
           // Tier 5 — knowledge / routines (rarely standalone)

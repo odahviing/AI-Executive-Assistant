@@ -340,6 +340,9 @@ export async function executeInternalAutoMove(params: {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getPersonByEmail } = require('../../db') as typeof import('../../db');
   const notified: string[] = [];
+  // Notices held for the recipient's working hours ('scheduled'): not yet told.
+  // The return carries no send time, so none is stated.
+  const heldNotices: string[] = [];
   for (const a of participantsRaw) {
     if (!cascadeComplete) break;
     const email = a.emailAddress.address;
@@ -357,7 +360,7 @@ export async function executeInternalAutoMove(params: {
       newStartIso, newEndIso, conflictReason,
     });
     if (!delivered) throw new Error('Attendee notification was not confirmed.');
-    notified.push((a.emailAddress.name || row.name || email).split(' ')[0]);
+    (delivered === 'scheduled' ? heldNotices : notified).push((a.emailAddress.name || row.name || email).split(' ')[0]);
     } catch (err) {
       followUpFailures.push(`I couldn't confirm the notification to ${a.emailAddress.name || email}.`);
       logger.warn('auto-move attendee notice failed — move already confirmed', { eventId: movable.id, err: String(err).slice(0, 160) });
@@ -367,6 +370,7 @@ export async function executeInternalAutoMove(params: {
   issue.fix_detail = notified.length > 0
     ? `Moved "${subj}" (was ${mStart.toFormat('HH:mm')}–${mEnd.toFormat('HH:mm')}) to ${newLocal} ${moveVerb}, and let ${notified.join(' and ')} know — I'll loop you in if they push back.`
     : `Moved "${subj}" to ${newLocal} ${moveVerb}.`;
+  if (heldNotices.length) issue.fix_detail += ` I'll let ${heldNotices.join(' and ')} know when ${heldNotices.length === 1 ? 'their' : 'each of their'} workday starts.`;
   if (followUpFailures.length) issue.fix_detail += ` ${followUpFailures.join(' ')}`;
 
   try {
