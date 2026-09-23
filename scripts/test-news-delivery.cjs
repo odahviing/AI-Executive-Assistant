@@ -13,7 +13,7 @@ const evidence = 'artifacts/workshop-verification/news-20260919/delivery';
 const captures = [];
 const flush = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)); };
 function fixture(options = {}) {
-  const state = { searches: [], models: [], writes: [], posts: [], history: [], unexpected: [], cached: 0, delivered: 0, log: '' };
+  const state = { searches: [], models: [], writes: [], posts: [], history: [], unexpected: [], cached: 0, delivered: 0, ttsCalls: 0, audioUploads: 0, log: '' };
   const logger = { info() {}, warn() {}, error() {}, debug() {} };
   const profile = { user: { name: 'News Fixture', slack_user_id: 'U_OWNER', email: 'owner@example.test', timezone: 'UTC' }, assistant: { slack: { bot_token: 'fixture' } } };
   function load(rel, deps, globals = {}, instrument = text => text) {
@@ -69,7 +69,11 @@ function fixture(options = {}) {
     '../../utils/logger': logger, '../../db': { appendToConversation: (...args) => { state.history.push(args); if (options.historyFail) throw Error('history unavailable'); } },
     '../../connections/slack/formatting': { formatForSlack: text => text }, '../../connections/slack/messaging': { setAssistantStatus: async () => {} },
     '../../config': { config: { OPENAI_API_KEY: 'fixture' } },
-    '../../voice': { shouldRespondWithAudio: p => p.inputWasVoice, textToSpeech: async () => 'audio', sendAudioMessage: async () => { if (options.audioFail) throw Error('audio failed'); } },
+    '../../voice': {
+      shouldRespondWithAudio: p => p.inputWasVoice,
+      textToSpeech: async () => { state.ttsCalls++; if (options.ttsPreparationFail) throw Error('TTS preparation failed'); return 'audio'; },
+      sendAudioMessage: async () => { state.audioUploads++; if (options.uploadUnknown) throw Error('upload outcome unknown'); },
+    },
     '../../utils/guards/runOutputGates': { runDeliberationGuard: async text => text, runOutputGates: async text => options.rewrite ?? text, runCodaGates: async () => ({ ship: false }) },
     './inboundQueue': { getThreadInboundRevision: () => 0, isThreadActive: () => false },
     '../../utils/threadActivity': { getLastMaelleMessage: () => null, recordMaelleMessage() {} },
@@ -118,9 +122,26 @@ for (const [name, overrides] of [['MPIM', { isMpim: true }], ['channel', { isCha
   test(`delivery refuses seen metadata on ${name}`, async () => { const f = fixture(); await f.gather(); await f.deliver(overrides); assert.equal(f.state.writes.length, 0); f.check(); });
 }
 test('tool failure has no candidate metadata', async () => { const f = fixture({ toolError: true }); assert.equal((await f.gather()).newsBundle, undefined); await f.deliver(); assert.equal(f.state.writes.length, 0); f.check(); });
-test('audio lacks displayed citations; failed audio falling back to text records cited text', async () => {
-  const audio = fixture(); await audio.gather(); await audio.deliver({ voiceInput: true }); assert.equal(audio.state.writes.length, 0); audio.check();
-  const text = fixture({ audioFail: true }); await text.gather(); await text.deliver({ voiceInput: true }); assert.equal(text.state.writes.length, 1); text.check();
+test('confirmed audio records delivery and history without marking undisplayed citations seen', async () => {
+  const f = fixture(); await f.gather(); await f.deliver({ voiceInput: true });
+  assert.equal(f.state.ttsCalls, 1); assert.equal(f.state.audioUploads, 1);
+  assert.equal(f.state.posts.length, 0); assert.equal(f.state.delivered, 1); assert.equal(f.state.history.length, 1);
+  assert.equal(f.state.writes.length, 0); assert.equal(f.state.models.length, 0);
+  await f.duplicateCallback(); assert.equal(f.state.writes.length, 0); assert.equal(f.state.delivered, 1); f.check();
+});
+test('unknown audio upload sends no second response and records no confirmed history or seen citations', async () => {
+  const f = fixture({ uploadUnknown: true }); await f.gather(); await f.deliver({ voiceInput: true });
+  assert.equal(f.state.ttsCalls, 1); assert.equal(f.state.audioUploads, 1);
+  assert.equal(f.state.posts.length, 0); assert.equal(f.state.delivered, 0); assert.equal(f.state.history.length, 0);
+  assert.equal(f.state.writes.length, 0); assert.equal(f.state.models.length, 0); f.check();
+});
+test('TTS preparation failure falls back to confirmed cited text and records seen exactly once', async () => {
+  const f = fixture({ ttsPreparationFail: true }); await f.gather(); await f.deliver({ voiceInput: true });
+  assert.equal(f.state.ttsCalls, 1); assert.equal(f.state.audioUploads, 0);
+  assert.equal(f.state.posts.length, 1); assert.ok(f.state.posts[0].text.includes('https://daily.example/report'));
+  assert.equal(f.state.delivered, 1); assert.equal(f.state.history.length, 1); assert.equal(f.state.writes.length, 1);
+  assert.equal(f.state.models.length, 1); assert.ok(!JSON.stringify(f.state.models[0]).includes('UNSHOWN'));
+  await f.duplicateCallback(); assert.equal(f.state.writes.length, 1); assert.equal(f.state.delivered, 1); f.check();
 });
 test('bookkeeping failure cannot retry successful delivery', async () => { const f = fixture({ writeFail: true }); await f.gather(); await f.deliver(); assert.equal(f.state.posts.length, 1); assert.equal(f.state.delivered, 1); assert.equal(f.state.writes.length, 0); f.check(); });
 test('history bookkeeping failure still records confirmed news without a second post', async () => { const f = fixture({ historyFail: true }); await f.gather(); await assert.rejects(f.deliver()); await flush(); assert.equal(f.state.posts.length, 1); assert.equal(f.state.delivered, 1); assert.equal(f.state.writes.length, 1); f.check(); });

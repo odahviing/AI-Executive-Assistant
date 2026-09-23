@@ -35,6 +35,7 @@ function harness() {
     } },
     '../../db': {
       getPersonMemory: () => ({ name: 'Recipient Test', timezone: 'Asia/Jerusalem' }),
+      authoritativeGender: () => 'unknown', // fixture rows carry no gender
       getRecentChannelMessages: () => [],
     },
     '../../db/socialSubjects': {

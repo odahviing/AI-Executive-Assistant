@@ -541,15 +541,21 @@ export interface ReplyToMailOptions {
  * CLEANUP ON KNOWN FAILURE — preparation failure or explicit send rejection
  * deletes the draft. A lost response after send begins is UNCONFIRMED:
  * preserve the draft's possible sent state, never retry or claim non-delivery.
+ * Each provider operation is bounded by the existing generous Graph budget.
+ * A preparation timeout is a known no-send failure; a send timeout is
+ * unconfirmed. Cleanup has its own budget so it cannot hide the original
+ * failure forever. The budget is not evidence of recipient delivery.
  */
 export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions): Promise<'accepted' | 'unconfirmed'> {
   const client = getMailClient(profile);
-  const draft: any = await client.api(`/me/messages/${encodeURIComponent(opts.messageId)}/createReply`).post({});
+  const draft: any = await client.api(`/me/messages/${encodeURIComponent(opts.messageId)}/createReply`)
+    .option('signal', AbortSignal.timeout(LIST_MESSAGES_TIMEOUT_MS)).post({});
   const draftId: string = draft.id;
   const existingBody: string = draft?.body?.content ?? '';
   let sendAttempted = false;
   try {
-    await client.api(`/me/messages/${encodeURIComponent(draftId)}`).update({
+    await client.api(`/me/messages/${encodeURIComponent(draftId)}`)
+      .option('signal', AbortSignal.timeout(LIST_MESSAGES_TIMEOUT_MS)).update({
       // Explicit recipient override — see the doc comment above for why this
       // is load-bearing and not defensive redundancy: it replaces whatever
       // Graph's own createReply would have inferred (From or Reply-To) with
@@ -559,6 +565,7 @@ export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions
     });
     sendAttempted = true;
     await client.api(`/me/messages/${encodeURIComponent(draftId)}/send`)
+      .option('signal', AbortSignal.timeout(LIST_MESSAGES_TIMEOUT_MS))
       // SDK defaults retry buffered POSTs on 503/504. A send may already
       // have been accepted, so automatic replay is not safe on this action.
       .middlewareOptions([new RetryHandlerOptions(3, 0)])
@@ -575,7 +582,8 @@ export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions
     // The message was not submitted or was explicitly rejected. Best-effort
     // cleanup must not swallow the original known failure.
     try {
-      await client.api(`/me/messages/${encodeURIComponent(draftId)}`).delete();
+      await client.api(`/me/messages/${encodeURIComponent(draftId)}`)
+        .option('signal', AbortSignal.timeout(LIST_MESSAGES_TIMEOUT_MS)).delete();
     } catch (cleanupErr) {
       logger.warn('mail.ts:replyToMail — draft cleanup after send failure also failed, orphan draft may remain', {
         draftId,

@@ -59,10 +59,13 @@ function fixture() {
   const external = {
     fs: disk, path, os: { tmpdir: () => '/fixture' }, 'form-data': Form,
     'ffmpeg-static': '/fixture/ffmpeg', openai: class {},
-    child_process: { execFile(_bin, args, callback) {
+    child_process: { execFile(_bin, args, options, callback) {
+      if (typeof options === 'function') callback = options;
+      const child = new EventEmitter();
       state.conversionPaths.push([args[1], args.at(-1)]);
       if (!state.convertError || state.partialConversion) disk.writeFileSync(args.at(-1), disk.readFileSync(args[1]));
-      queueMicrotask(() => callback(state.convertError ? Error('conversion failed') : null, '', ''));
+      queueMicrotask(() => { callback(state.convertError ? Error('conversion failed') : null, '', ''); child.emit('close'); });
+      return child;
     } },
     https: { request(_opts, callback) {
       const req = new EventEmitter();
@@ -100,7 +103,7 @@ function fixture() {
         arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
     };
     vm.runInNewContext(`(function(require,module,exports){${code}\n})`, {
-      Buffer, Date: FixedDate, fetch, setTimeout, clearTimeout, setImmediate: fn => state.jobs.push(fn),
+      Buffer, AbortController, Date: FixedDate, fetch, setTimeout, clearTimeout, setImmediate: fn => state.jobs.push(fn),
     }, { filename: rel })(req, mod, mod.exports);
     return mod.exports;
   }
@@ -261,9 +264,9 @@ async function main() {
     const fn = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'sendReply');
     assert.ok(fn); const code = ts.transpileModule(`export ${fn.getText(ast)}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
     const mod = { exports: {} }; const posts = [], uploads = [], delivered = [];
-    vm.runInNewContext(code, { exports: mod.exports, config: f.config, logger: { warn() {}, debug() {} },
+    vm.runInNewContext(code, { exports: mod.exports, config: f.config, logger: { warn() {}, debug() {}, error() {} },
       shouldRespondWithAudio: voice.shouldRespondWithAudio, sendAudioMessage: voice.sendAudioMessage,
-      textToSpeech: async () => { if (variant === 'tts-failure') throw Error('TTS failed'); return Buffer.from('spoken reply'); },
+      textToSpeech: async () => { if (variant === 'tts-failure' || variant === 'text-failure') throw Error('TTS failed'); return Buffer.from('spoken reply'); },
       require: name => { assert.equal(name, '../../utils/threadActivity'); return { recordMaelleMessage() {} }; },
     });
     const run = mod.exports.sendReply({ app: { client: { files: { uploadV2: async p => { uploads.push(p); if (variant.includes('failure') && variant !== 'callback-failure') throw Error('upload failed'); } } } },
@@ -271,9 +274,9 @@ async function main() {
       say: async p => { posts.push(p); if (variant === 'text-failure') throw Error('text failed'); return { ok: true, ts: 'A1' }; },
       onDelivered: () => { delivered.push(true); if (variant === 'callback-failure') throw Error('callback failed'); },
     });
-    if (variant === 'text-failure' || variant === 'callback-failure') await assert.rejects(run); else await run;
-    assert.equal(posts.length, ['tts-failure', 'upload-failure', 'text-failure'].includes(variant) ? 1 : 0);
-    assert.equal(delivered.length, variant === 'text-failure' ? 0 : 1);
+    if (['text-failure', 'callback-failure'].includes(variant)) await assert.rejects(run); else assert.equal(await run,variant!=='upload-failure');
+    assert.equal(posts.length, ['tts-failure', 'text-failure'].includes(variant) ? 1 : 0);
+    assert.equal(delivered.length, ['upload-failure', 'text-failure'].includes(variant) ? 0 : 1);
     if (posts.length) assert.equal(posts[0].thread_ts, 'P1');
     if (uploads.length) assert.equal(uploads[0].thread_ts, 'P1');
   });

@@ -186,8 +186,8 @@ export function startBackgroundTimer(
   // timers (outreach send/expiry, coord nudge/abandon, approval expiry/reminder)
   // moved off the tasks table onto the requests spine — they fire via
   // sweepDueRequests (called inside runDueTasks). The tasks table now carries
-  // only non-back-and-forth work: routine, calendar_fix, social_*, reminder,
-  // follow_up, research. Materialize first so newly inserted routine tasks are
+  // only non-back-and-forth work: routine and calendar_fix. Materialize first
+  // so newly inserted routine tasks are
   // visible to the runner in the same tick.
   //
   // v2.9.3 (#103) — end-of-chat capture pass piggybacks on the same loop.
@@ -306,10 +306,8 @@ export function startBackgroundTimer(
 // ── Startup initialisation ───────────────────────────────────────────────────
 
 /**
- * Runs at startup for each profile:
- * 1. Ensures the system briefing cron exists
- * 2. Sends any missed briefing from today
- * 3. Catches up on missed messages (last 48h)
+ * Runs local per-profile startup setup: briefing cadence, migrations, seeds
+ * and retired-task cleanup. Catch-up runs separately after the socket opens.
  */
 export async function initProfile(
   app: App,
@@ -375,6 +373,27 @@ export async function initProfile(
     rank.migrateLegacyEngagementLevel();
   } catch (err) {
     logger.warn('Legacy engagement_level migration threw — continuing', { err: String(err) });
+  }
+
+  // Owner retirement: automatic summary action-item followups are removed.
+  // Cancel their exact legacy type without replaying work or claiming that an
+  // interrupted send did/did not happen. Keep terminal history and unrelated
+  // outreach intact; the dispatcher has also been removed from the registry.
+  try {
+    const { getDb } = require('../db') as typeof import('../db');
+    const res = getDb().prepare(`
+      UPDATE tasks SET status = 'cancelled', updated_at = datetime('now')
+      WHERE type = 'summary_action_followup'
+        AND owner_user_id = ?
+        AND status IN ('new', 'scheduled', 'in_progress', 'pending_owner', 'pending_colleague')
+    `).run(profile.user.slack_user_id);
+    if (res.changes > 0) {
+      logger.info('Summary action followup retirement cancelled legacy tasks', {
+        ownerUserId: profile.user.slack_user_id, cancelled: res.changes,
+      });
+    }
+  } catch (err) {
+    logger.warn('Summary action followup retirement failed — continuing', { err: String(err) });
   }
 
   // gh#198 (2026-08-15) — the weekly social_decay seed is REMOVED (answer 5:

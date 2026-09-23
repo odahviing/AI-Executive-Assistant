@@ -34,8 +34,6 @@ export interface SummaryDraft {
 export interface SummaryActionItem {
   assignee_text: string;            // raw label as Sonnet extracted ("Brett", "Speaker 2")
   assignee_slack_id?: string;       // resolved internal Slack ID (null for externals/unmatched)
-  assignee_name?: string;
-  assignee_internal?: boolean;
   description: string;              // English description of what they committed to
   deadline_iso?: string;            // ISO 8601 if a deadline was extracted
   deadline_label?: string;          // human form: "by tomorrow", "Friday morning"

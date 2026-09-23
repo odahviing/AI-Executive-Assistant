@@ -16,7 +16,9 @@
  * reads need the current revision, every call must recheck authorization, and
  * writes check that revision under the store's lock, including identical retries.
  *
- * Cache key: (ownerUserId, threadTs, toolName, canonicalJson(args)).
+ * Cache key includes the authenticated caller, data scope and transport surface
+ * as well as owner/thread/tool/args. A hit bypasses dispatch authorization, so
+ * results must never cross those boundaries even inside the same room thread.
  * Cache scope: per-process Map; not persisted. Survives a turn boundary,
  * not a process restart — which is the right scope (the failure mode is
  * within-conversation rapid retries; restarts are rare and reset state).
@@ -27,8 +29,8 @@
  *                  resolve under this window.
  *   read tools  → 5s. Reads can legitimately re-query for fresh data
  *                  (calendar moved in Outlook, etc.). 5s suppresses
- *                  same-turn duplicate calls; doesn't mask cross-turn
- *                  fresh reads.
+ *                  duplicate calls; an identical read by the same caller can
+ *                  also be reused across a turn boundary within that window.
  *
  * "Which tools are writes" is NOT declared here. It used to be a second,
  * hand-typed Set that quietly drifted from the real classification in
@@ -45,6 +47,10 @@
 
 import crypto from 'crypto';
 import logger from './logger';
+import type { SkillContext } from '../skills/types';
+
+type CallerContext = Pick<SkillContext, 'userId' | 'senderRole' | 'authority' | 'surface'
+  | 'channel' | 'channelId' | 'inboundConnectionId' | 'isMpim' | 'isOwnerInGroup' | 'mpimMemberIds'>;
 
 const WRITE_TTL_MS = 60 * 1000;
 const READ_TTL_MS = 5 * 1000;
@@ -68,9 +74,16 @@ function canonicalJson(v: unknown): string {
   return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalJson((v as Record<string, unknown>)[k])).join(',') + '}';
 }
 
-function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: string, args: Record<string, unknown>): string {
+function buildKey(ownerUserId: string, threadTs: string | undefined, toolName: string, args: Record<string, unknown>, context: CallerContext): string {
   const argsHash = crypto.createHash('sha256').update(canonicalJson(args)).digest('hex').slice(0, 16);
-  return `${ownerUserId}|${threadTs ?? '-'}|${toolName}|${argsHash}`;
+  const scope = canonicalJson({
+    userId: context.userId, senderRole: context.senderRole, authority: context.authority,
+    surface: context.surface, channel: context.channel, channelId: context.channelId,
+    inboundConnectionId: context.inboundConnectionId,
+    isMpim: context.isMpim, isOwnerInGroup: context.isOwnerInGroup,
+    mpimMemberIds: context.mpimMemberIds ? [...context.mpimMemberIds].sort() : undefined,
+  });
+  return `${ownerUserId}|${threadTs ?? '-'}|${toolName}|${argsHash}|${scope}`;
 }
 
 function ttlFor(toolName: string, writeTools: ReadonlySet<string>): number {
@@ -86,9 +99,10 @@ export function lookupRecentToolCall(input: {
   threadTs?: string;
   toolName: string;
   args: Record<string, unknown>;
+  context: CallerContext;
 }): { cachedResult: unknown; ageMs: number } | null {
   if (input.toolName === 'update_my_preferences') return null;
-  const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args);
+  const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args, input.context);
   const entry = cache.get(key);
   if (!entry) return null;
   const now = Date.now();
@@ -112,11 +126,12 @@ export function recordToolCall(input: {
   threadTs?: string;
   toolName: string;
   args: Record<string, unknown>;
+  context: CallerContext;
   result: unknown;
   writeTools: ReadonlySet<string>;
 }): void {
   if (input.toolName === 'update_my_preferences') return;
-  const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args);
+  const key = buildKey(input.ownerUserId, input.threadTs, input.toolName, input.args, input.context);
   const now = Date.now();
   cache.set(key, {
     result: input.result,

@@ -5,13 +5,12 @@ import os from 'os';
 import FormDataNode from 'form-data';
 import https from 'https';
 import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { randomUUID } from 'crypto';
-const execFileAsync = promisify(execFile);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffmpegPath: string = require('ffmpeg-static');
 import { config } from '../config';
 import logger from '../utils/logger';
+import { readInternalSlackConversation } from '../connections/slack/eligibility';
 
 let openaiClient: OpenAI | null = null;
 
@@ -24,6 +23,10 @@ function getOpenAI(): OpenAI {
 }
 
 // ── Transcription ─────────────────────────────────────────────────────────────
+
+// Owner-approved total budget: download/body + conversion + Whisper share one
+// deadline. Cancellation never transcribes the original as a fallback or retries a paid call.
+const TRANSCRIPTION_TIMEOUT_MS = 180_000;
 
 /**
  * Download a Slack audio file and transcribe it with Whisper.
@@ -55,36 +58,43 @@ export async function transcribeSlackAudio(
   const baseType = (mimetype ?? '').split(';')[0].trim().toLowerCase();
   const ext = extMap[baseType] ?? 'webm';  // default webm — Slack's native voice format
   const tmpPath = path.join(os.tmpdir(), `maelle_audio_${randomUUID()}.${ext}`);
-
-  await downloadFile(fileUrl, tmpPath, botToken);
-
-  const fileSize = fs.statSync(tmpPath).size;
-  logger.info('Transcribing audio', { ext, mimetype: baseType, size: fileSize });
-
-  // Convert to WAV first — Slack records in AAC-ELD which Whisper rejects even
-  // though the mp4/m4a container is listed as supported. WAV always works.
-  // Keep the conversion output distinct even when the source is already WAV.
   const wavPath = `${tmpPath}.wav`;
-  let converted = false;
+  const controller = new AbortController();
+  const { signal } = controller;
+  const deadline = setTimeout(() => controller.abort(new Error('Voice transcription timed out after 180 seconds')), TRANSCRIPTION_TIMEOUT_MS);
   try {
-    await execFileAsync(ffmpegPath, [
-      '-i', tmpPath,
-      '-ar', '16000',  // 16 kHz — optimal for Whisper
-      '-ac', '1',       // mono
-      '-f', 'wav', '-y',
-      wavPath,
-    ]);
-    converted = true;
-    logger.info('Audio converted to WAV', { wavSize: fs.statSync(wavPath).size });
-  } catch (convErr) {
-    logger.warn('ffmpeg conversion failed — sending original', { err: String(convErr) });
-  }
+    await downloadFile(fileUrl, tmpPath, botToken, signal);
+    signal.throwIfAborted();
+    const fileSize = fs.statSync(tmpPath).size;
+    logger.info('Transcribing audio', { ext, mimetype: baseType, size: fileSize });
 
-  const sendPath = converted ? wavPath : tmpPath;
-  const sendExt  = converted ? 'wav'  : ext;
-  const sendType = converted ? 'audio/wav' : (baseType || 'audio/mp4');
+    // Slack AAC-ELD needs conversion even inside a supported mp4 container.
+    // Wait for the child to close before cleanup: an abort can reject execFile
+    // before its killed process has stopped writing a partial WAV file.
+    let converted = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let conversionError: Error | null = null;
+        const child = execFile(ffmpegPath, [
+          '-i', tmpPath,
+          '-ar', '16000',
+          '-ac', '1',
+          '-f', 'wav', '-y',
+          wavPath,
+        ], { signal, killSignal: 'SIGKILL' }, err => { conversionError = err; });
+        child.once('close', () => conversionError ? reject(conversionError) : resolve());
+      });
+      signal.throwIfAborted();
+      converted = true;
+      logger.info('Audio converted to WAV', { wavSize: fs.statSync(wavPath).size });
+    } catch (convErr) {
+      signal.throwIfAborted();
+      logger.warn('ffmpeg conversion failed — sending original', { err: String(convErr) });
+    }
 
-  try {
+    const sendPath = converted ? wavPath : tmpPath;
+    const sendExt  = converted ? 'wav'  : ext;
+    const sendType = converted ? 'audio/wav' : (baseType || 'audio/mp4');
     const fileBuffer = fs.readFileSync(sendPath);
 
     // Use form-data + https directly — Node's native FormData+Blob builds
@@ -102,11 +112,13 @@ export async function transcribeSlackAudio(
     const formBuffer = form.getBuffer();
     const formHeaders = form.getHeaders();
 
+    signal.throwIfAborted();
     const transcription = await new Promise<string>((resolve, reject) => {
       const req = https.request({
         hostname: 'api.openai.com',
         path: '/v1/audio/transcriptions',
         method: 'POST',
+        signal, // Node destroys the request/response on deadline, including body reads.
         headers: {
           Authorization: `Bearer ${config.OPENAI_API_KEY}`,
           'Content-Length': formBuffer.length,
@@ -114,6 +126,8 @@ export async function transcribeSlackAudio(
         },
       }, (res) => {
         let body = '';
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error('Whisper response aborted')));
         res.on('data', (chunk) => { body += chunk; });
         res.on('end', () => {
           if (res.statusCode === 200) {
@@ -128,9 +142,11 @@ export async function transcribeSlackAudio(
       req.end();
     });
 
+    signal.throwIfAborted();
     logger.info('Audio transcribed', { length: transcription.length, preview: transcription.slice(0, 80) });
     return transcription.trim();
   } finally {
+    clearTimeout(deadline);
     try { fs.unlinkSync(tmpPath); } catch (_) {}
     // ffmpeg may leave a partial output even when conversion failed.
     try { fs.unlinkSync(wavPath); } catch (_) {}
@@ -171,6 +187,11 @@ export async function sendAudioMessage(params: {
   audioBuffer: Buffer;
   filename?: string;
 }): Promise<void> {
+  // Generation can outlive membership/sharing changes. Like text delivery,
+  // audio must recheck the destination immediately before releasing bytes.
+  if (!await readInternalSlackConversation(params.app.client, params.botToken, params.channelId)) {
+    throw new Error('Slack audio delivery withheld: conversation eligibility unavailable');
+  }
   const filename = params.filename || 'maelle_response.mp3';
   await params.app.client.files.uploadV2({
     token: params.botToken,
@@ -212,9 +233,10 @@ export function shouldRespondWithAudio(params: {
 // Uses native fetch (Node 18+) which follows redirects automatically.
 // https.get does NOT follow 302 redirects — Slack's url_private can redirect
 // to a CDN signed URL, which would cause https.get to download an HTML page.
-async function downloadFile(url: string, destPath: string, token: string): Promise<void> {
+async function downloadFile(url: string, destPath: string, token: string, signal: AbortSignal): Promise<void> {
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   });
 
   if (!response.ok) {
@@ -223,6 +245,7 @@ async function downloadFile(url: string, destPath: string, token: string): Promi
 
   const contentType = response.headers.get('content-type') ?? '';
   const arrayBuffer = await response.arrayBuffer();
+  signal.throwIfAborted();
   const buf = Buffer.from(arrayBuffer);
   // Log first 16 bytes as hex so we can verify it's actually audio (not HTML/JSON)
   const header = buf.slice(0, 16).toString('hex');

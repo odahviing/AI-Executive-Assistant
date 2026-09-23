@@ -21,6 +21,7 @@
 import type { App } from '@slack/bolt';
 import logger from '../../utils/logger';
 import { isInternalSlackUser, readInternalSlackConversation } from './eligibility';
+import { nameGenuinelyMatches } from '../../memory/resolveAttendeeEmails';
 
 /**
  * v3.1 (audit fix LATENT-2) — only pass a `thread_ts` that looks like a real
@@ -381,7 +382,9 @@ export async function deleteMessage(
 // ── Lookups ──────────────────────────────────────────────────────────────────
 
 /**
- * Find Slack workspace users by display/real name. Returns up to 200 matches.
+ * Resolve genuine workspace name/alias matches before the Connection adapter
+ * projects canonical names. Keep every matching identity for caller ambiguity
+ * checks; partial directory reads must never look like a unique match.
  */
 export async function findUserByName(
   app: App,
@@ -389,19 +392,25 @@ export async function findUserByName(
   name: string,
 ): Promise<SlackUserSearchResult[]> {
   try {
-    const result = await app.client.users.list({ token: botToken, limit: 200 });
-    const members = (result.members ?? []) as any[];
     const query = name.toLowerCase().trim();
     if (!query) return [];
+    const members: any[] = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    do {
+      const result = await app.client.users.list({ token: botToken, limit: 200, cursor });
+      if (result.ok === false) return [];
+      members.push(...(result.members ?? []));
+      cursor = result.response_metadata?.next_cursor?.trim() || undefined;
+      if (cursor && seenCursors.has(cursor)) return [];
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
 
-    return members
+    return [...new Map(members
       .filter(m =>
         !m.deleted && !m.is_bot &&
-        (
-          m.real_name?.toLowerCase().includes(query) ||
-          m.name?.toLowerCase().includes(query) ||
-          m.profile?.display_name?.toLowerCase().includes(query)
-        ),
+        [m.real_name, m.name, m.profile?.display_name].some(alias =>
+          nameGenuinelyMatches(alias, m.profile?.email, query)),
       )
       .map(m => ({
         id: m.id,
@@ -409,7 +418,7 @@ export async function findUserByName(
         real_name: m.real_name ?? m.name,
         email: m.profile?.email ?? undefined,
         tz: m.tz || undefined,
-      }));
+      })).map(m => [m.id, m])).values()];
   } catch (err) {
     logger.error('findUserByName failed', { err: String(err), name });
     return [];

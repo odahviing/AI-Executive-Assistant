@@ -11,7 +11,6 @@ import type { TaskDispatcher } from './types';
 
 import { dispatchRoutine } from './routine';
 import { dispatchCalendarFix } from './calendarFix';
-import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 
 // create_task work (reminder / follow_up / research) lives on the requests
 // spine now — create_task creates a request whose next_check_handler is fired
@@ -29,5 +28,4 @@ import { dispatchSummaryActionFollowup } from './summaryActionFollowup';
 export const DISPATCHERS: Partial<Record<Task['type'], TaskDispatcher>> = {
   routine:                  dispatchRoutine,
   calendar_fix:             dispatchCalendarFix,
-  summary_action_followup:  dispatchSummaryActionFollowup,
 };

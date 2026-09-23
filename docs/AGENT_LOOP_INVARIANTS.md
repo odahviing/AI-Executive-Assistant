@@ -2,23 +2,23 @@
 
 This doc captures the silent invariants the orchestrator + transport + gate stack rely on. Each one is "this works because X" — break X and the system drifts in a way that won't typecheck-fail or grep-find. If you're refactoring, read this first.
 
-Last refresh: v3.3.x (after the post-3.3.0 audit wave).
+Originally recorded after the v3.3.x audit; current-source corrections below were reconciled during V5 readiness. Historical incident descriptions are provenance, not current line-number or runtime guarantees.
 
 ---
 
-## 1. `turnLeftWorkPending` is **sticky once set**
+## 1. Coda eligibility follows unresolved work, not the last tool result
 
-Where: `core/orchestrator/index.ts`. Inside the tool loop, when Maelle calls a tool that "parks" work for someone else (coordinate_meeting initiating, message_colleague with await_reply, create_approval, outreach_send), `turnLeftWorkPending` flips to `true` and **stays true** for the remainder of the turn.
+Where: `src/core/orchestrator/index.ts`: `pendingTurnWork`, `sameRetriedWork`, `bookedOfferedWork`. The tool loop retains separate unresolved work items; a matching successful retry or booking can discharge its own item without clearing unrelated work. The old sticky `turnLeftWorkPending` description is superseded.
 
-Why it matters: this flag is the gate for whether a social coda fires at end-of-turn (`v3.2.5`). If Maelle is mid-flight (returned a question to a participant, pending approval, etc.), no coda. Clearing it mid-turn would let an unrelated tool call reset it and produce a coda after-the-fact attached to mid-flight work — the "btw that Samuel L. Jackson movie…" non-sequitur class.
+Why it matters: coda eligibility requires no remaining `pendingTurnWork` and no open question at the end of the reply. An unrelated successful tool must not clear an unresolved decision; a completed matching retry need not suppress the coda forever.
 
-**Don't**: re-initialize per tool call. **Do**: only set true, never set false within the turn.
+Preservation checks: `scripts/test-orchestrator-coda-workstate.cjs`.
 
 ---
 
 ## 2. `cache_control` is attached ONLY to the static prompt block
 
-Where: `core/orchestrator/index.ts:905-910`. The system prompt is split into `promptParts.static` (skills + rules) and `promptParts.dynamic` (date, people, threadContext, action tape, etc.). Only `static` gets `cache_control: { type: 'ephemeral' }`.
+Where: `src/core/orchestrator/buildTurnContext.ts` (`systemBlocks`). The system prompt is split into `promptParts.static` (skills + rules) and `promptParts.dynamic` (date, people, threadContext, action tape, etc.). Only `static` gets `cache_control: { type: 'ephemeral' }`.
 
 Why it matters: Anthropic caches based on cumulative byte equality. If the static block accidentally becomes dynamic (a date interpolated into the skills section, a turn-specific signal mixed in), every turn invalidates the cache → cost explodes silently. No test currently asserts the static block stays static.
 
@@ -30,15 +30,15 @@ Why it matters: Anthropic caches based on cumulative byte equality. If the stati
 
 Where: `connectors/slack/app/processMessage.ts:111-123` (moved out of the orchestrator by gh#154's permission layer, v4.5.0 — this used to be a mutation of `input.senderRole` inside `core/orchestrator/index.ts`; now `role` is resolved once at the Slack transport boundary and handed to the orchestrator already clamped). When an MPIM message arrives, `role` is clamped to `'colleague'` even for the owner, while `isOwnerInGroup` is computed separately and stays `true`. Downstream code has TWO senderRole-ish signals: `input.senderRole === 'colleague'` AND `input.isOwnerInGroup === true`. The COMBO means "owner-in-MPIM, gets colleague tools."
 
-Why it matters: any code that reads `input.senderRole` alone gets a misleading answer on owner-in-MPIM. Permission checks that read both fields work; checks that read only senderRole silently downgrade the owner.
+Why it matters: senderRole is the DATA scope, while existing `authority` carries action authority. Owner participation does not authorize disclosure of owner-private data into a room.
 
-**Don't**: rely on `senderRole` alone for permission gates. **Do**: check `(senderRole === 'owner' || isOwnerInGroup === true)` for owner-tier intent.
+Use the existing registry authorization path (`src/skills/registry.ts::executeSkillTool`); do not reconstruct permission from `isOwnerInGroup` or message text alone.
 
 ---
 
 ## 4. Tool-call cache treats `{ error: string }` as not-cacheable; `summarizeToolCall` treats same shape as FAILED — consistent by accident
 
-Where: `utils/toolCallCache.ts` + `utils/orchestratorTurnSummary.ts`. Tools returning `{ error: 'rule_violation', message: '...' }` are NOT cached (would poison retries) AND are stamped `FAILED` in the tool-summary for the claim-checker.
+Where: `src/utils/toolCallCache.ts` + `src/core/orchestrator/turnHelpers.ts`. Tools returning `{ error: 'rule_violation', message: '...' }` are NOT cached (would poison retries) AND are stamped `FAILED` in the tool-summary for the claim-checker. The cache also scopes hits by authenticated caller/data role/authority/transport/surface and group context; it is volatile across process restart.
 
 Why it matters: a future tool that returns `{ error: 'unrecoverable' }` legitimately (terminal state, not retryable) would still be marked FAILED and flagged by the claim-checker. The two consumers happen to agree on the `{error}` shape; if one drifts, retries leak through.
 
@@ -52,11 +52,11 @@ Where: `connectors/slack/processedDedup.ts:28` + `core/background.ts:483` + `ind
 
 The TTL covers: (a) Slack re-delivering the same event within a single live process (the original use case); (b) **also** the gap between catch-up posting a reply (and stamping ts) and Slack flushing the queued event to the live socket after `app.start()`. Without (b), the live handler would re-process the event and double-reply.
 
-This works because **`index.ts` Phase 2 (catch-up) runs BEFORE Phase 3 (`app.start()`)**. Catch-up populates the dedup Set; socket flush hits the populated Set.
+Current boot ordering is **socket-first**: `src/index.ts` captures the pre-boot watermark during setup, starts apps in Phase 3, then launches catch-up in Phase 5. Both paths share the same atomic message claim.
 
-Why it matters: re-ordering Phase 2 and Phase 3 silently breaks (b). The Phase comments in `index.ts` explain this — keep them, and don't fire-and-forget catch-up (the `await` in Phase 2 is load-bearing).
+Why it matters: the captured watermark and shared claim prevent the two paths from independently processing the same event during the in-memory retention window. Recovery also reads Slack history; this is not durable exactly-once delivery.
 
-**Don't**: race catch-up against `app.start()`. **Do**: keep the await + phase order.
+Preserve the current watermark/claim contract rather than restoring the obsolete catch-up-before-socket ordering.
 
 ---
 
@@ -74,9 +74,9 @@ Why it matters: pre-v3.3.x audit, ~23 sites cast `(ev as unknown as { categories
 
 Where: `skills/news.ts:parseNewsPrefs`. The function returns `{ interestsText: md }` and that's it. Earlier versions regex'd `Preferred sources:` / `Blocked sources:` lines into Tavily include/exclude_domains; that was deleted in v3.3.x because (a) it was an implicit format contract on free-text owner content (any other phrasing silently dropped) and (b) it violated the skillPreferences architecture invariant ("free-text — LLM reads, code doesn't parse").
 
-Why it matters: Tavily now runs unsteered; source preferences live in the LLM compose pass via the prompt context. If anyone re-introduces a parser to "re-enable source filtering," they'll re-create the silent-drop bug.
+Why it matters: free text is still not parsed into rules by code. The existing planner/tool path can translate that text into structured source filters, which are validated before Tavily use; composition also receives the preferences. Tavily is therefore not necessarily unsteered.
 
-**Don't**: parse news.md in code. **Do**: trust the compose pass to weigh sources based on the free text the owner wrote.
+Keep the existing free-text-to-model boundary and structured filter validation; do not recreate an English-header parser.
 
 ---
 
@@ -110,7 +110,7 @@ MPIM thread mentions are handled by the MPIM owner-in-group authority model else
 
 Where: `core/background.ts:875` (inside `replayMissedMessage`, which starts at `:838`). The mark happens before dispatch through the registered live inbound replay path. If we re-ordered (mark after post), Slack's at-least-once re-delivery in the window between post and mark could double-reply.
 
-Why it matters: even with C-4's Phase-2-before-Phase-3 ordering, the dedup Set is the line of defense against any future race where catch-up + live overlap.
+Why it matters: current socket-first boot allows catch-up and live delivery to overlap. Both must acquire the shared claim before processing; the replay handoff preserves that claim when entering the live handler.
 
 **Don't**: move the `markProcessed` call after the post. **Do**: keep it pre-post.
 

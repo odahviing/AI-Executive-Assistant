@@ -122,8 +122,8 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * mutation, a booking, or a fresh approval) — every other reply still takes
  * the re-arm path from (1). So coordinator.ts is NOT a zero-producer site;
  * it is a conditional one.
- * Current producers: 'sent' (tasks/dispatchers/summaryActionFollowup.ts:166,
- * skills/meetingReschedule.ts:591, core/requests/colleagueOofReengage.ts:404,
+ * Current producers: 'sent' (skills/meetingReschedule.ts:591,
+ * core/requests/colleagueOofReengage.ts:404,
  * skills/outreach.ts:548 — the isFuture ternary there also produces
  * 'pending_scheduled', so it belongs in both lists),
  * 'pending_scheduled' (skills/outreach.ts:548), 'replied' (several sites in

@@ -770,15 +770,14 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     }
     // gh#203-3/203-5 — venue-sourced travel minutes. The venue catalog only
     // exists per-owner when the `venue` skill is on (same gate the
-    // save-on-book hook uses) — gated to a genuine outside venue: physical
-    // (not online), not a company space/Teams string (so a "Microsoft Teams
+    // save-on-book hook uses) — gated to a genuine outside venue, including
+    // one with a Teams link: not a company space/Teams string (so a "Microsoft Teams
     // Meeting" location can never match a catalog row), and not a bare
     // phone-dial location. `preserve_existing` counts too — a move that
     // keeps the same day-type keeps the same physical venue.
     if (
       (profile.skills as any)?.venue === true &&
       (locationVerdict.kind === 'resolved' || locationVerdict.kind === 'preserve_existing') &&
-      !locationVerdict.isOnline &&
       locationVerdict.location.trim().length > 0 &&
       !isPhoneLocationString(locationVerdict.location) &&
       !isCompanyLocation(locationVerdict.location, profile.meetings.office_location ?? {})

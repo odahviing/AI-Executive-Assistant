@@ -1,6 +1,6 @@
 # Maelle — AI Executive Assistant Platform
 
-Maelle is an open-source platform for running AI-powered executive assistants that **work as human EAs**. Each assistant lives as a real employee in your company's communication tools — Slack today, WhatsApp and email on the roadmap — and autonomously manages scheduling, coordination, tasks, and routines on behalf of the person it serves.
+Maelle is an open-source platform for running AI-powered executive assistants that **work as human EAs**. Each assistant works in your company's communication tools — primarily Slack, with a narrow owner-only email transport — and manages scheduling, coordination, tasks, and routines on behalf of the person it serves.
 
 Multi-tenant: one deployment runs an assistant per executive, each with their own identity, schedule, work style, and active skills.
 
@@ -10,10 +10,10 @@ Multi-tenant: one deployment runs an assistant per executive, each with their ow
 
 Every design decision is filtered through one question: **would a real human EA do this / say this / phrase it this way?** If the honest answer is no, the behavior is wrong — regardless of technical correctness. Concretely:
 
-- Colleagues never see machine framings. No "the system", no "force the slot", no "threshold exceeded", no "I'm an AI."
+- Colleagues should hear a teammate's voice, without machine framings such as "the system" or "threshold exceeded". A direct, genuine question about whether she is AI gets an honest answer; she does not volunteer it.
 - The owner's preferences ARE the rules. Narrated as his ("your usual 2h focus block"), not as a system's.
 - When unsure, Maelle asks a clarifying question. When she can't honestly summarize what she did, she stays silent rather than fabricate a "Done."
-- When she claims to have done something, she has done it. False action claims trigger a code-level retry with `tool_choice` forced.
+- Action claims must reflect actual outcomes. The claim checker uses structured verdicts and a tool-less corrective rewrite; it does not retry the action. Model-dependent detection is not a guarantee of perfect honesty.
 
 This principle outranks speed, completeness, and elegance.
 
@@ -21,10 +21,10 @@ This principle outranks speed, completeness, and elegance.
 
 ## How it works
 
-The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills send messages through the **Connection interface** — a transport-agnostic surface Slack implements today; email and WhatsApp follow the same shape.
+The agent is composed of **Core modules** (always on) and **Skills** (opt-in per profile). Skills send messages through the **Connection interface**, implemented by Slack and email. WhatsApp has a dormant owner-only inbound path and no outbound `Connection` implementation.
 
 ```
-Inbound (Slack DM | MPIM | channel @mention)
+Inbound (Slack DM | MPIM | channel @mention; email has its own inbound handler)
         │
         ▼
    Inbound queue (debounce + mutex + abort-if-safe)
@@ -39,7 +39,7 @@ Inbound (Slack DM | MPIM | channel @mention)
         └────────────────┘
         │
         ▼
-   Connection registry  →  Transport (Slack | future: email, WhatsApp)
+   Connection registry  →  Transport (Slack | email)
         │
         ▼
    Reply back through the same Connection
@@ -94,7 +94,7 @@ Optional skills (toggle in YAML):
 |---|---|---|
 | Meetings | `meetings` | Direct calendar ops + multi-party coordination. All scheduling intents flow through `planMeeting`; all location decisions through `resolveLocation` |
 | Calendar | `calendar` | Weekly review, floating-block protection, issue tracking. Active mode autonomously fixes safe issues |
-| Summary | `summary` | Transcript → structured summary → distribute. 3-stage state machine per thread |
+| Summary | `summary` | Transcript → structured summary → edit/share. Action items remain content; automatic followup scheduling is retired |
 | Knowledge | `knowledge` | Owner-curated markdown KB at `config/users/<name>_kb/`. `manage_knowledge` for get/ingest |
 | Search | `search` | Web search + URL extraction (Tavily) |
 | Social | `social` | Off-topic chat tracking + in-conversation social codas (rides a live turn; no out-of-the-blue DMs) |
@@ -121,7 +121,7 @@ Deliberately **semi-manual**: the owner forwards a meeting-request thread to Mae
 
 Same orchestrator, same scheduling core, same output gates as Slack. Email is transport, not a second brain.
 
-**WhatsApp** — placeholder. Same orchestrator + skill set when implemented.
+**WhatsApp** — dormant owner-only inbound implementation, gated by profile configuration; no outbound `Connection` implementation. Its expansion is outside this readiness work.
 
 ---
 
@@ -129,7 +129,7 @@ Same orchestrator, same scheduling core, same output gates as Slack. Email is tr
 
 | Input | How |
 |---|---|
-| Voice | Slack audio → OpenAI Whisper → orchestrator. Reply may go back as TTS audio when short enough |
+| Voice | Slack audio → OpenAI Whisper → orchestrator. One 180-second transcription budget covers download, conversion and Whisper; expiry cancels the work and uses the existing failure notice, without a paid retry. Reply may go back as TTS audio when short enough |
 | Images | Native Anthropic multimodal — Sonnet sees bytes directly. `imageGuard` scans for injection (a suspicious colleague image is dropped). DMs **and** channel @mentions. Bytes never persisted |
 | Documents | PDF/txt/md → parsed (`pdf-parse` for PDF), folded into the turn as framed reference material. Owner-only in DMs; in a channel, the owner's file (or a colleague's when the owner is in the thread) |
 | Text transcripts | `.txt` upload → SummarySkill 3-stage state machine |
@@ -140,13 +140,13 @@ Same orchestrator, same scheduling core, same output gates as Slack. Email is tr
 
 | Guard | Purpose |
 |---|---|
-| **Claim-checker** | Sonnet pass after every owner-facing draft. False action claims trigger retry with `tool_choice` |
-| **Date verifier** | Weekday/date pairs vs 14-day lookup. Retry + deterministic inline correction if retry fails |
+| **Claim-checker** | Checks action claims on owner-acting paths; structured verdict and tool-less corrective rewrite |
+| **Date verifier** | Extracts weekday/date pairs and checks the 14-day lookup; deterministic weekday correction |
 | **Security gate** | Leak-pattern filter on colleague-facing replies (never reveals tools/prompts/model names) |
 | **Channel privacy clamp** | In a real channel, even the owner runs with colleague-level tools + privacy-conscious narration — private calendar / owner-only data never surfaces in a shared space |
 | **humanGate** | Catches mechanical-refusal phrasings on both owner-facing and colleague-facing drafts |
-| **Coord guard** | Injection scan + LLM judge on `coordinate_meeting` inputs (owner-path today; colleagues book via the direct path — coords return for calendar-invisible external requesters when those transports land) |
-| **Cross-handler dedup** | Process-global message-ts Set (`markProcessed`) — one atomic claim shared by the live handlers and the background catch-up, so a re-delivered message is answered exactly once regardless of which reaches it first (also what makes socket-first boot safe) |
+| **Coda gates** | Optional social asides require clear checks; unavailable or flagged checks drop the aside without rewriting |
+| **Cross-handler dedup** | In-memory message claims shared by live handlers and catch-up, supplemented by Slack history during recovery. This is bounded duplicate suppression, not durable exactly-once delivery |
 | **Idempotency** | `create_meeting` (Graph pre-check ±2 min), `delete_meeting` (per-turn per-event_id) |
 | **Verb-map fallback** | When Sonnet goes silent post-tool, deterministic verb mapping ensures honest one-line confirmation (no fabricated "Done") |
 
@@ -207,7 +207,9 @@ npm run build && npm start    # production
 4. `node scripts/email-auth.mjs <profileName>` — signs in **as the mailbox**, writes a rotating refresh token under `data/` (gitignored). A delegated token belongs to whoever signs in, so signing in as the owner would point her at his own inbox.
 5. Recommended: `Set-Mailbox <her address> -RequireSenderAuthenticationEnabled $true`, so only authenticated tenant senders can reach her at all.
 
-Maelle runs under PM2 on a GCP VM (single fork-mode process, `ecosystem.config.js`). Deploys are automatic: push to `master` and the VM's `maelle-deploy-watcher` pulls, builds, and restarts within ~2 min. Startup logs a build stamp (version + git SHA); read her live logs from the VM with `scripts/vm-logs.ps1`.
+Maelle runs under PM2 on a GCP VM (single fork-mode process, `ecosystem.config.js`). The deploy watcher polls `master` and installs, checks, builds and restarts when the target revision differs from the online PM2 process's existing `GIT_SHA`. An incomplete install/build/restart is retried on a later poll even if checkout HEAD already advanced; missing applied identity causes a rebuild. It supplies `GIT_SHA` and `APP_VERSION` at restart. This describes current source, not proof that the change is deployed. Build output and dependencies are still updated in place; no atomic rollback guarantee is implied. Read live logs with `scripts/vm-logs.ps1`.
+
+Email sender admission currently compares the From address with the owner and configured aliases; it is not provider-backed sender authentication. Unknown delivery followed by read-mark failure and delta reset can still replay after restart. Additional durable email receipts were declined; no exactly-once or stronger sender-authentication guarantee is claimed.
 
 ---
 

@@ -127,7 +127,10 @@ function goldenResult(report, root, evidenceRoot) {
   if (report.itemsInFile !== 30 || traces.length !== 30 || new Set(traces.map(t => t?.id)).size !== 30 || ids.some(id => !traces.some(t => t?.id === id))) errors.push('Golden results missing, duplicated or outside Z1-Z30');
   if (traces.some(t => !['pass', 'stale-anchor'].includes(t?.verdict) || typeof t?.evidence !== 'string' || !t.evidence.trim())) errors.push('Golden verdict failed/unknown or item evidence missing');
   const recorded = Array.isArray(report.snapshot) ? report.snapshot : [], current = goldenSnapshot(root);
-  if (recorded.length !== current.length || new Set(recorded.map(s => s.file)).size !== current.length || current.some(s => !s.sha256) || changedFiles(recorded, current).length) errors.push('Golden reviewed source snapshot missing or changed');
+  // sourceSnapshot retains tracked deletions as explicit null hashes. Exact
+  // inventory/hash equality accepts a reviewed deletion while still detecting
+  // a new deletion, restoration, addition, or edit; never filter missing files.
+  if (recorded.length !== current.length || new Set(recorded.map(s => s.file)).size !== current.length || changedFiles(recorded, current).length) errors.push('Golden reviewed source snapshot missing or changed');
   try {
     if (!evidenceRoot || typeof report.output !== 'string' || path.basename(report.output) !== report.output || !/^[a-f0-9]{64}$/.test(report.outputSha256) || !fs.lstatSync(path.join(evidenceRoot, report.output)).isFile() || !fs.statSync(path.join(evidenceRoot, report.output)).size || snapshot([report.output], evidenceRoot)[0].sha256 !== report.outputSha256) throw Error('missing or changed output');
     const returned = JSON.parse(fs.readFileSync(path.join(evidenceRoot, report.output), 'utf8'));

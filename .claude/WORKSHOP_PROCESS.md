@@ -1,6 +1,6 @@
 # The Workshop, process side — shared bars for the non-builders
 
-**This is the one source for the quality bars every non-builder is held to.** `WORKSHOP.md` is the equivalent file for the eight builder lanes; this is its counterpart for the agents that find the work, shape it, gate it and sweep it — `editor`, `framer`, `bouncer`, `cleaner`, and (once its own charter review is done — see note at the end) `architect`.
+**This is the one source for the quality bars every non-builder is held to.** `WORKSHOP.md` is the equivalent file for the eight builder lanes; this is its counterpart for the agents that find the work, shape it, gate it, sweep it and maintain the framework — `editor`, `framer`, `bouncer`, `cleaner`, and `architect`.
 
 Until now each hand-copied its own version of this into its own "Bars" footer — edited separately, drifted separately. Confirmed drift: "report your own numbers, including zero" was explicit in the editor, folded into a bare "never a reason to report fewer findings" in the cleaner, and absent from the bouncer altogether. Nobody decided any of that; four charters just diverged one small edit at a time. **One file means there is nowhere wrong to edit: change a bar here and every charter that points here carries the new version on its next dispatch.**
 

@@ -20,7 +20,7 @@ You own the checks that run between "the orchestrator produced a draft" and "a m
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
 ## First — orient (every dispatch)
-Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — nothing lane-specific to add here.
+Follow `.claude/WORKSHOP.md`'s **Who you are, and how to orient** section every dispatch — nothing lane-specific to add here.
 
 ---
 
@@ -57,11 +57,11 @@ The output-time gate stack + the tool log the checkers read + the gate orchestra
 
 ### Orchestration — whether a guard even gets its turn
 - **G11 · Which gates run at all is decided before any gate runs; govern that decision, not just the gates.**
-  - **What decides it:** three values (`runOutputGates.ts:226-238`) — is the owner the one acting, can a colleague read this reply, which voice frame applies. These decide whether the leak gate and the phantom-action check run **at all**, not just how they behave.
+  - **What decides it:** three values (`runOutputGates.ts`: `ownerIsActing`, `colleagueReadable`, `audience`) — is the owner the one acting, can a colleague read this reply, which voice frame applies. These decide whether the leak gate and the phantom-action check run **at all**, not just how they behave.
   - **Why it's the highest-risk spot in this lane:** a wrong derivation doesn't make a gate misfire — it makes the gate not exist for that turn. G5's safe-miss test can't catch this, because a turn where a gate silently never ran looks identical in the log to a clean turn. It's already shipped twice: a group DM went out with no leak gate and the wrong voice frame; a channel path skipped the phantom-action check entirely. Both fixed after the fact — nothing prevented a third, because the reasoning lived in comments, not a rule.
   - **Requirement 1 — fail closed.** An unknown sender or an unrecognized room gets the strictest frame and every gate. Never the permissive default.
   - **Requirement 2 — log all three values, every turn.** A gate that silently didn't run is the one failure this lane can't find after the fact any other way.
-  - **Current state, verified today: requirement 2 is still not built.** No `logger` call in `runOutputGates.ts` emits any of the three values. The observable this rule requires doesn't exist yet — a silent no-gate turn is still invisible right now.
+  - **Current implementation:** `runOutputGates.ts` emits `Output gate policy` with all three values before the Slack gates and before the fixed external-reader email leg. This establishes policy observability in source; deployment and live log observation are separate evidence stages.
 
 ### Verification — trusting a claim vs. trusting the record
 - **G12 · A claimed permission or decision is checked against the actual resolved state, never trusted at face value.** When a reply asserts a decision was already made or permission already granted ("the owner already approved this"), that claim is checked against whether a real request for it actually resolved — never shipped on the strength of the assertion alone. (Carried over from Registrar's review — the concept is theirs, the verification-at-output-time is yours.)
@@ -72,4 +72,4 @@ The output-time gate stack + the tool log the checkers read + the gate orchestra
 2. **Is it a guard bug or a CODE/DATA bug?** Usually the guard is fine and the *data it reads* is stale/wrong. Fix the source (G2); don't patch the guard to guess.
 3. **If a guard must change, keep the shape.** Detect freely (LLM, multilingual), act destructively only on a deterministic trigger OR a tool-less miss-safe path (G3); the failure must be a safe MISS (G5); read structured fields only (G4).
 4. **Fewest, strongest, cheapest** (G1/G10) — reuse an existing guard, fix at the root, prefer upstream/compute-before-draft over post-hoc police-and-retry.
-5. **Paper-trace to 100%** (W8) — especially "if this fires wrong, is it a safe miss?" — then report per the return contract.
+5. **Verify under W8 and the Workshop evidence contract** — especially "if this fires wrong, is it a safe miss?" — then report per the return contract.

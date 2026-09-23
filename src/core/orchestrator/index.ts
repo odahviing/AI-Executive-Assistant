@@ -808,11 +808,12 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       }
 
       // v2.9.2 — tool-call cache. Before executing the tool, check
-      // if an identical call (same owner+thread+tool+args) fired recently.
+      // if an identical call in the same authenticated caller/data/surface
+      // context fired recently. A cache hit bypasses dispatch authorization.
       // Writes: 60s TTL — same write within a minute is almost always a bug
       // (buffered follow-up that confused Sonnet, claim-checker retry, etc.).
-      // Reads: 5s TTL — same-turn duplicate reads return cached; cross-turn
-      // fresh reads aren't masked. Returns prior result verbatim so Sonnet's
+      // Reads: 5s TTL — identical reads can be reused across a turn boundary
+      // within that window. Returns prior result verbatim so Sonnet's
       // narration is consistent. The cache excludes preference editing so
       // current reads, authorization and revision checks run on every call.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -823,6 +824,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         threadTs: input.threadTs,
         toolName: toolUse.name,
         args: toolInputForCall,
+        context: skillContext,
       });
       let result: unknown;
       if (cached) {
@@ -852,6 +854,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
             threadTs: input.threadTs,
             toolName: toolUse.name,
             args: toolInputForCall,
+            context: skillContext,
             result,
             writeTools: WRITE_TOOLS,
           });

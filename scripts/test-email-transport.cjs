@@ -6,7 +6,7 @@ const profile = {user:{email:'owner@example.com',slack_user_id:'UOWNER',timezone
 const raw = (id,extra={}) => ({id,conversationId:'chain',from:{emailAddress:{address:'owner@example.com'}},body:{contentType:'text',content:'full chain'},uniqueBody:{contentType:'text',content:'new text'},isRead:false,...extra});
 const plain = x => JSON.parse(JSON.stringify(x));
 function harness(options={}) {
- const files = options.files || new Map(), calls=[], handled=[], notices=[], history=[], modules=new Map(); let timer,auth;
+ const files = options.files || new Map(), calls=[], handled=[], notices=[], history=[], inputs=[], gates=[], modules=new Map(); let timer,auth;
  let now=Date.parse('2026-09-19T12:00Z');
  class Clock extends Date {constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
  const disk={existsSync:f=>files.has(f),mkdirSync:()=>{},readFileSync:f=>{if(!files.has(f))throw Error('ENOENT');return files.get(f);},writeFileSync:(f,v)=>{if(options.diskFailure)throw Error('fixture disk full');files.set(f,v);},unlinkSync:f=>files.delete(f)};
@@ -17,12 +17,12 @@ function harness(options={}) {
   'src/utils/logger.ts':{__esModule:true,default:logger},
   'src/utils/textScrubber.ts':{scrubInternalLeakage:x=>x},
   'src/connections/registry.ts':{registerConnection:()=>{},getConnection:()=>options.noSlack?undefined:{sendDirect:async(...args)=>{notices.push(args);return {ok:true};}}},
-  'src/db/index.ts':{getConversationHistory:()=>[],appendToConversation:(...args)=>history.push(args)},
+  'src/db/index.ts':{getConversationHistory:()=>[],appendToConversation:(...args)=>{if(options.historyFailure)throw Error('history fixture');history.push(args);}},
   'src/memory/recordBooking.ts':{isNonHumanAttendee:()=>false},
   'src/connectors/email/extractParticipants.ts':{extractForwardedParticipants:async()=>({participants:[],timezoneHints:[]})},
   'src/utils/locationTz.ts':{inferTimezoneFromStateStatic:()=>null},
-  'src/core/orchestrator/index.ts':{runOrchestrator:async()=>({reply:'Fixture reply'})},
-  'src/utils/guards/runOutputGates.ts':{runOutputGates:async reply=>reply},
+  'src/core/orchestrator/index.ts':{runOrchestrator:async input=>{inputs.push(input);if(options.orchestratorFailure)throw Error('orchestrator fixture');return {reply:'Fixture reply',socialCoda:'Private rapport fixture'};}},
+  'src/utils/guards/runOutputGates.ts':{runOutputGates:async(reply,input)=>{gates.push(input);return reply;}},
  };
  function load(rel){
   if(Object.hasOwn(mocks,rel))return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
@@ -31,12 +31,12 @@ function harness(options={}) {
   const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const mod={exports:{}};modules.set(rel,mod);
   function req(s){if(s==='fs'||s==='node:fs')return disk;if(s==='@microsoft/microsoft-graph-client')return {...require(s),Client:{initWithMiddleware:o=>{auth=o.authProvider;return graph;}}};if(s.startsWith('.')){let f=path.posix.normalize(path.posix.join(path.posix.dirname(rel),s));return load(fs.existsSync(path.join(root,f+'.ts'))?f+'.ts':f+'/index.ts');}return require(s);}
-  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{process:{cwd:()=>'/fixture'},Date:Clock,console,Map,Set,URLSearchParams,AbortSignal,fetch:options.fetch||(()=>{throw Error('unexpected token fetch');}),setInterval:f=>{timer=f;}},{filename:rel})(req,mod,mod.exports);
+  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{process:{cwd:()=>'/fixture'},Date:Clock,console,Map,Set,URLSearchParams,AbortSignal:options.abortSignal||AbortSignal,fetch:options.fetch||(()=>{throw Error('unexpected token fetch');}),setInterval:f=>{timer=f;}},{filename:rel})(req,mod,mod.exports);
   return mod.exports;
  }
  const registry=load('src/connectors/graph/mailInboundRegistry.ts');
  if(!options.noHandler)registry.registerMailInbound(profile.user.slack_user_id,async(...args)=>{handled.push(args[1]);if(options.handlerFailure)throw Error('handler fixture failure');});
- return {load,files,calls,handled,notices,history,auth:()=>auth,advance:ms=>{now+=ms;},startInbound:()=>load('src/connectors/email/inbound.ts').startEmailChannel(profile),start:()=>load('src/connectors/graph/mailPoll.ts').startMailPollTimer(new Map([['fixture',profile]])),tick:async()=>{timer();for(let i=0;i<20;i++)await new Promise(setImmediate);}};
+ return {load,files,calls,handled,notices,history,inputs,gates,auth:()=>auth,advance:ms=>{now+=ms;},startInbound:()=>load('src/connectors/email/inbound.ts').startEmailChannel(profile),start:()=>load('src/connectors/graph/mailPoll.ts').startMailPollTimer(new Map([['fixture',profile]])),tick:async()=>{timer();for(let i=0;i<20;i++)await new Promise(setImmediate);}};
 }
 test('delta duplicate unread entries across pages trigger one handler and one read mark',async()=>{
  const h=harness({graph:c=>c.method==='get'?(c.url==='page2'?{value:[raw('m')],'@odata.deltaLink':'done'}:{value:[raw('m')],'@odata.nextLink':'page2'}):undefined});h.start();await h.tick();assert.equal(h.handled.length,1);assert.equal(h.calls.filter(c=>c.method==='update').length,1);
@@ -133,3 +133,49 @@ test('send disables Graph SDK retry middleware for ambiguous HTTP responses',asy
  const retry=new RetryHandler();let writes=0;retry.sleep=async()=>{};retry.setNext({execute:async ctx=>{writes++;ctx.response={status:503,headers:new Headers()};}});
  await retry.execute({request:'https://graph.microsoft.com/v1.0/me/messages/draft/send',options:{method:'POST',headers:new Headers()},middlewareControl:new MiddlewareControl(call.middlewareOptions)});assert.equal(writes,1);
 });
+
+// Exercise real poll -> inbound -> connection -> Graph transitions. Only
+// provider I/O and the existing model/gate services are fixtures. A stalled
+// provider waits for the actual request signal; it never invents an error.
+for(const stage of ['create','prepare','send','cleanup'])test(`hung ${stage} reaches its terminal email outcome`,async()=>{
+ const budgets=[];
+ const h=harness({abortSignal:{timeout:ms=>{budgets.push(ms);return AbortSignal.timeout(5);}},graph:c=>{
+  if(c.method==='get')return {value:c.url==='done'?[]:[raw('m')],'@odata.deltaLink':'done'};
+  const here=c.url.endsWith('/createReply')?'create':c.url.endsWith('/send')?'send':c.method==='delete'?'cleanup':c.url==='/me/messages/draft'?'prepare':'read';
+  if(here===stage)return new Promise((_resolve,reject)=>{
+   if(c.options.signal?.aborted)reject(c.options.signal.reason);
+   else c.options.signal?.addEventListener('abort',()=>reject(c.options.signal.reason),{once:true});
+  });
+  if(here==='create')return {id:'draft',body:{content:'quote'}};
+  if(here==='prepare'&&stage==='cleanup')throw Error('known prepare failure');
+ }});
+ h.startInbound();h.start();await h.tick();await new Promise(resolve=>setTimeout(resolve,50));await h.tick();
+ assert.equal(h.notices.length,1,'stalled provider must settle and notify the owner');
+ assert.equal(h.history.length,0);
+ assert.match(h.notices[0][1],stage==='send'?/unconfirmed/:/couldn't answer/);
+ assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,stage==='send'?1:0);
+ assert.equal(h.calls.some(c=>c.url==='/me/messages/m'&&c.method==='update'),stage==='send');
+ if(stage==='send'){assert.equal(h.calls.filter(c=>c.method==='delete').length,0);assert.doesNotMatch(h.notices[0][1],/forward it again/);}
+ assert.ok(budgets.length>=2);
+});
+
+test('rejected sender is consumed silently before the model and gates',async()=>{
+ const h=harness({graph:c=>c.method==='get'?{value:[raw('m',{from:{emailAddress:{address:'stranger@example.net'}}})],'@odata.deltaLink':'done'}:undefined});
+ h.startInbound();h.start();await h.tick();assert.equal(h.inputs.length,0);assert.equal(h.gates.length,0);assert.equal(h.notices.length,0);assert.equal(h.history.length,0);assert.equal(h.calls.filter(c=>c.method==='post').length,0);assert.ok(h.calls.some(c=>c.url==='/me/messages/m'&&c.method==='update'));
+});
+test('authorized inbound keeps full chain, external transport gate and single forwardable artifact',async()=>{
+ const h=inboundSendFixture();h.startInbound();h.start();await h.tick();
+ assert.match(h.inputs[0].userMessage,/full chain/);assert.equal(h.inputs[0].channel,'email');assert.equal(h.inputs[0].authority,'owner');assert.equal(h.gates[0].transport,'email');
+ const body=h.calls.find(c=>c.url==='/me/messages/draft'&&c.method==='update').body.body.content;assert.match(body,/Fixture reply/);assert.match(body,/quote/);assert.doesNotMatch(body,/Private rapport fixture/);
+});
+test('orchestrator failure notifies once and is consumed across restart',async()=>{
+ const graph=c=>c.method==='get'?{value:c.url==='done'?[]:[raw('m')],'@odata.deltaLink':'done'}:undefined;
+ const h=harness({graph,orchestratorFailure:true});h.startInbound();h.start();await h.tick();assert.equal(h.notices.length,1);assert.equal(h.history.length,0);assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+ const r=harness({graph,files:h.files});r.startInbound();r.start();await r.tick();assert.equal(r.inputs.length,0);assert.equal(r.calls[0].url,'done');
+});
+test('history failure after accepted send never manufactures a send failure notice',async()=>{
+ const h=harness({historyFailure:true,graph:c=>{if(c.method==='get')return {value:[raw('m')],'@odata.deltaLink':'done'};if(c.url.endsWith('/createReply'))return {id:'draft',body:{content:'quote'}};}});
+ h.startInbound();h.start();await h.tick();assert.equal(h.notices.length,0);assert.equal(h.history.length,0);assert.equal(h.calls.filter(c=>c.url.endsWith('/send')).length,1);assert.ok(h.calls.some(c=>c.url==='/me/messages/m'&&c.method==='update'));
+});
+
+module.exports={harness,raw,profile};

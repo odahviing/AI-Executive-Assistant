@@ -1,0 +1,63 @@
+// Actual voice, handlers and timestamp dedup; controlled clock/native I/O fixtures.
+// SLACK_TIMEOUT_BEFORE=1 selects the frozen a4 voice source only.
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript'),{EventEmitter}=require('node:events');
+const root=path.resolve(__dirname,'..');
+const micro=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
+function harness(options={}){
+ const s={now:0,timers:[],jobs:[],files:new Map(),posts:[],turns:[],requests:[],signals:[],kills:[],destroyed:[],settled:0,errors:[],late:[],callbacks:0};
+ const setTimer=(fn,ms)=>{const timer={fn,at:s.now+ms,ms,cancelled:false};s.timers.push(timer);return timer;};
+ const clearTimer=t=>{if(t)t.cancelled=true;};
+ async function advance(ms){const target=s.now+ms;await micro();let iterations=0;while(true){const t=s.timers.filter(t=>!t.cancelled&&t.at<=target).sort((a,b)=>a.at-b.at)[0];if(!t)break;assert.ok(++iterations<100,'clock spin');s.now=t.at;t.cancelled=true;t.fn();await micro();}s.now=target;await micro();}
+ const delay=stage=>options[stage]??0;
+ function schedule(stage,fn){s.late.push({stage,fn});if(delay(stage)!==Infinity)setTimer(fn,delay(stage));}
+ function boundary(stage,signal,value){s.signals.push({stage,signal});return new Promise((resolve,reject)=>{let settled=false;const abort=()=>{if(settled)return;settled=true;s.destroyed.push(stage);reject(signal.reason||Error('aborted'));};const finish=()=>{if(settled)return;settled=true;signal?.removeEventListener('abort',abort);if(options.failure===stage)reject(Error(stage+' failed'));else resolve(value);};if(signal?.aborted)return abort();signal?.addEventListener('abort',abort,{once:true});schedule(stage,finish);});}
+ const disk={writeFileSync:(p,b)=>s.files.set(p,Buffer.from(b)),readFileSync:p=>{if(!s.files.has(p))throw Error('ENOENT');return s.files.get(p);},statSync:p=>({size:s.files.get(p).length}),unlinkSync:p=>s.files.delete(p)};
+ class Form{constructor(){this.fields={};}append(k,v){this.fields[k]=v;}getBuffer(){return this.fields.file;}getHeaders(){return {};}}
+ const external={fs:disk,path,os:{tmpdir:()=>'/fixture'},'form-data':Form,'ffmpeg-static':'/fixture/ffmpeg',openai:class{},
+  child_process:{execFile(_file,args,opts,cb){if(typeof opts==='function'){cb=opts;opts={};}const child=new EventEmitter();let ended=false;const wav=args.at(-1);disk.writeFileSync(wav,'partial');s.signals.push({stage:'ffmpeg',signal:opts.signal});
+   const finish=err=>{if(ended)return;ended=true;opts.signal?.removeEventListener('abort',abort);s.callbacks++;cb(err,'','');if(options.delayedClose){setTimer(()=>{disk.writeFileSync(wav,'last bytes before child close');child.emit('close');},1);}else child.emit('close');};
+   const abort=()=>{s.kills.push(opts.killSignal);finish(Error('conversion aborted'));};opts.signal?.addEventListener('abort',abort,{once:true});
+   schedule('ffmpeg',()=>{if(ended)return;if(options.failure!=='ffmpeg')disk.writeFileSync(wav,disk.readFileSync(args[1]));finish(options.failure==='ffmpeg'?Error('conversion failed'):null);});return child;
+  }},
+  https:{request(opts,callback){const req=new EventEmitter();let closed=false,res; s.requests.push(opts);s.signals.push({stage:'whisper',signal:opts.signal});
+   const abort=()=>req.destroy(opts.signal.reason||Error('aborted'));
+   req.destroy=err=>{if(closed)return;closed=true;opts.signal?.removeEventListener('abort',abort);s.destroyed.push('request');if(res){s.destroyed.push('response');res.emit('aborted');res.emit('error',err);}req.emit('error',err);};
+   opts.signal?.addEventListener('abort',abort,{once:true});req.write=b=>{req.bytes=b;};
+   req.end=()=>schedule('whisperHeaders',()=>{if(closed)return;res=new EventEmitter();res.statusCode=options.failure==='whisper'?500:200;callback(res);schedule('whisperBody',()=>{if(closed)return;closed=true;opts.signal?.removeEventListener('abort',abort);if(options.failure==='response-aborted'){res.emit('aborted');return;}if(options.failure==='response-error'){res.emit('error',Error('socket response error'));return;}res.emit('data',options.empty?'':req.bytes);res.emit('end');});});return req;
+  }},
+ };
+ const mocks={
+  'src/config.ts':{config:{OPENAI_API_KEY:'fixture'}},'src/utils/logger.ts':{__esModule:true,default:{info(){},warn(){},debug(){},error(){}}},
+  'src/connections/slack/eligibility.ts':{readInternalSlackConversation:async()=>true},
+  'src/llm/client.ts':{},'src/core/threadActions.ts':{},'src/db.ts':{},'src/vision/index.ts':{},
+  'src/connectors/slack/app/helpers.ts':{is1on1DM:id=>id.startsWith('D')},'src/connectors/slack/threadHistory.ts':{},
+  'src/connectors/slack/app/fileIngestion.ts':{isSlackDocFile:()=>false,isSlackImageFile:()=>false},
+  'src/connectors/slack/inboundReplayRegistry.ts':{registerInboundReplay:(_id,fn)=>{s.replay=fn;}},
+ };
+ const actual=['src/voice/index.ts','src/connectors/slack/app/handlers.ts','src/connectors/slack/processedDedup.ts'],cache=new Map();
+ function load(rel){if(mocks[rel])return mocks[rel];if(cache.has(rel))return cache.get(rel).exports;assert.ok(actual.includes(rel),rel);const selected=process.env.SLACK_TIMEOUT_BEFORE==='1'&&rel==='src/voice/index.ts'?path.join(root,'artifacts/workshop-verification/v5-readiness-20260923/slackmaster/attempt-4/snapshot',rel):path.join(process.env.SLACK_TIMEOUT_SOURCE_ROOT||root,rel);const source=fs.readFileSync(selected,'utf8');const mod={exports:{}};cache.set(rel,mod);const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;const req=p=>{if(!p.startsWith('.'))return external[p]||require(p);const resolved=path.posix.normalize(path.posix.join(path.posix.dirname(rel),p));return load(actual.includes(resolved+'/index.ts')||mocks[resolved+'/index.ts']?resolved+'/index.ts':resolved+'.ts');};
+  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{Buffer,AbortController,setTimeout:setTimer,clearTimeout:clearTimer,setImmediate:fn=>s.jobs.push(fn),fetch:async(_url,opts)=>{await boundary('download',opts.signal);return {ok:options.failure!=='http',status:403,statusText:'fixture',headers:{get:()=>options.failure==='content-type'?'text/html':'audio/webm'},arrayBuffer:()=>boundary('body',opts.signal,Buffer.from('שלום'))};}},{filename:rel})(req,mod,mod.exports);return mod.exports;}
+ const app={message:fn=>{s.dm=fn;},client:{chat:{postMessage:async p=>{s.posts.push(p);if(options.noticeFailure)throw Error('Slack unavailable');return {ok:true,ts:'3.1'};}}}};
+ const ctx={app,profile:{user:{slack_user_id:'UOWNER'},assistant:{slack:{bot_token:'fixture'}}},getSenderRole:id=>id==='UOWNER'?'owner':'colleague',resolveSlackMentions:async t=>t,processMessage:async p=>s.turns.push(p)};
+ const handlers=load('src/connectors/slack/app/handlers.ts');handlers.registerDmHandler(ctx);handlers.registerInboundReplayHandler(ctx);
+ function track(p){void p.then(()=>s.settled++,err=>{s.settled++;s.errors.push(String(err));});}
+ async function start({ts='2.2',peer=false,replay=false,caption=''}={}){const message={user:peer?'UPEER':'UOWNER',channel:'D1',ts,thread_ts:'1.1',text:caption,subtype:'file_share',files:[{mimetype:'audio/webm',url_private:'audio:fixture'}]};if(replay)track(s.replay({message,channelId:'D1',postThreadTs:'1.1'}));else{await s.dm({message,client:app.client});while(s.jobs.length)track(s.jobs.shift()());}await advance(0);}
+ return {s,start,advance,options,late:async()=>{for(const t of s.late)t.fn();await advance(0);},activeDeadlines:()=>s.timers.filter(t=>!t.cancelled&&t.ms===180000),dedup:load('src/connectors/slack/processedDedup.ts')};
+}
+for(const stage of ['download','body','ffmpeg','whisperHeaders','whisperBody'])for(const peer of [false,true])test(`180s total deadline cancels ${stage} for ${peer?'colleague':'owner'} with one notice and cleanup`,async()=>{
+ const h=harness({[stage]:Infinity});await h.start({peer});await h.advance(179999);assert.equal(h.s.settled,0);assert.equal(h.s.posts.length,0);await h.advance(1);
+ assert.equal(h.s.settled,1,'pending operation must settle on deadline');assert.equal(h.s.posts.length,1);assert.equal(h.s.posts[0].thread_ts,'1.1');assert.equal(h.s.turns.length,0);assert.equal(h.s.files.size,0);assert.equal(h.activeDeadlines().length,0);
+ assert.equal(h.s.signals[0].signal.aborted,true);assert.ok(h.s.signals.every(p=>p.signal===h.s.signals[0].signal),'one signal across stages');if(stage==='ffmpeg'){assert.deepEqual(h.s.kills,['SIGKILL']);assert.equal(h.s.requests.length,0,'aborted conversion cannot fall back to paid Whisper');}if(stage.startsWith('whisper'))assert.ok(h.s.destroyed.includes('request'));if(stage==='whisperBody')assert.ok(h.s.destroyed.includes('response'));
+ const requestCount=h.s.requests.length;await h.late();assert.equal(h.s.requests.length,requestCount,'no late paid request');assert.equal(h.s.posts.length,1);assert.equal(h.s.turns.length,0);assert.equal(h.s.files.size,0);await h.start({peer});assert.equal(h.s.posts.length,1,'same TS remains handled');assert.equal(h.s.timers.filter(t=>t.ms===180000).length,1,'one deadline, no restart');
+});
+test('combined stage elapsed time shares one180s budget',async()=>{const h=harness({download:60000,body:30000,ffmpeg:60000,whisperHeaders:60000});await h.start();await h.advance(179999);assert.equal(h.s.posts.length,0);await h.advance(1);assert.equal(h.s.posts.length,1);assert.equal(h.s.requests.length,1);assert.equal(h.s.files.size,0);});
+test('legitimate slow success just below total deadline is preserved',async()=>{const h=harness({download:60000,body:30000,ffmpeg:60000,whisperBody:29999});await h.start();await h.advance(179999);assert.equal(h.s.turns.length,1);assert.equal(h.s.posts.length,0);assert.equal(h.s.files.size,0);await h.advance(1);assert.equal(h.s.posts.length,0);});
+test('child close precedes cleanup even when abort callback is earlier',async()=>{const h=harness({ffmpeg:Infinity,delayedClose:true});await h.start();await h.advance(180000);assert.equal(h.s.settled,0);await h.advance(1);assert.equal(h.s.settled,1);assert.equal(h.s.files.size,0);await h.late();assert.equal(h.s.files.size,0);});
+for(const replay of [false,true])test(`preserved ${replay?'replay':'live'} success clears timer and preserves source language`,async()=>{const h=harness();await h.start({replay});assert.equal(h.s.turns[0].text,'[Voice message]: שלום');assert.equal(h.s.turns[0].voiceInput,true);assert.equal(h.s.posts.length,0);assert.equal(h.s.files.size,0);assert.equal(h.activeDeadlines().length,0);await h.advance(180000);assert.equal(h.s.posts.length,0);});
+for(const failure of ['download','body','http','content-type','whisper','response-aborted','response-error'])test(`preserved ${failure} error cleans scratch and sends one failure notice`,async()=>{const h=harness({failure});await h.start();assert.equal(h.s.settled,1);assert.equal(h.s.posts.length,1);assert.equal(h.s.turns.length,0);assert.equal(h.s.files.size,0);assert.equal(h.activeDeadlines().length,0);});
+test('ordinary conversion failure still transcribes original once',async()=>{const h=harness({failure:'ffmpeg'});await h.start();assert.equal(h.s.turns.length,1);assert.equal(h.s.requests.length,1);assert.equal(h.s.files.size,0);assert.equal(h.s.kills.length,0);});
+test('deadline replay retains existing caption fallback',async()=>{const h=harness({whisperBody:Infinity});await h.start({replay:true,caption:'Please help'});await h.advance(180000);assert.equal(h.s.turns.length,1);assert.equal(h.s.turns[0].text,'Please help');assert.equal(h.s.turns[0].voiceInput,false);assert.equal(h.s.posts.length,0);assert.equal(h.s.files.size,0);});
+test('deadline replay without caption reports existing failure once',async()=>{const h=harness({body:Infinity});await h.start({replay:true});await h.advance(180000);assert.equal(h.s.posts.length,1);assert.equal(h.s.turns.length,0);});
+test('failed failure-notice send still settles and cleans without retry',async()=>{const h=harness({body:Infinity,noticeFailure:true});await h.start();await h.advance(180000);assert.equal(h.s.posts.length,1);assert.equal(h.s.settled,1);assert.equal(h.s.files.size,0);await h.start();assert.equal(h.s.posts.length,1);});
+test('fresh message may retry; handled original expires only at existing10min TTL',async()=>{const h=harness({body:Infinity});await h.start();await h.advance(180000);assert.equal(h.s.posts.length,1);h.options.body=0;await h.start({ts:'2.3'});assert.equal(h.s.turns.length,1);await h.start();assert.equal(h.s.turns.length,1);await h.advance(419999);assert.equal(h.dedup.markProcessed('2.2'),false);await h.advance(1);assert.equal(h.dedup.markProcessed('2.2'),true);});

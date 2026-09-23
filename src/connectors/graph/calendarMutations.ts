@@ -101,7 +101,7 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
   if (params.attendees !== undefined) {
     patch.attendees = params.attendees.map(a => ({
       emailAddress: { name: a.name ?? a.email, address: a.email },
-      type: a.optional ? 'optional' : 'required',
+      type: a.resource ? 'resource' : a.optional ? 'optional' : 'required',
     }));
   }
 

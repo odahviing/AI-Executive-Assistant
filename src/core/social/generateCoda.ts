@@ -48,7 +48,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { SocialDirective } from './stateMachine';
 import logger from '../../utils/logger';
 import { tavilySearch } from '../../skills/general';
-import { getPersonMemory, getRecentChannelMessages } from '../../db';
+import { authoritativeGender, getPersonMemory, getRecentChannelMessages } from '../../db';
 import {
   getActiveSubjectsForPersonCategory,
   getCategoryByLabel,
@@ -290,6 +290,7 @@ async function generateSocialCoda(params: {
    * English when omitted.
    */
   language?: 'he' | 'en';
+  recipientGender: ReturnType<typeof authoritativeGender>;
 }): Promise<string | null> {
   const { profile, directive, senderRole, senderFirstName, grounding, otherCategorySubjectLabels, language } = params;
   if (directive.mode === 'none') return null;
@@ -369,7 +370,7 @@ async function generateSocialCoda(params: {
   // v2.2.4 (bug 1A) — language hint. Coda matches the conversation language,
   // not the prompt language.
   const langLine = language === 'he'
-    ? 'Write the coda in Hebrew. The conversation has been in Hebrew; an English coda would jar. Match the gendered forms to the person.'
+    ? 'Write the coda in Hebrew throughout. Use the supplied authoritative gender for inflected address; if unknown, use neutral phrasing (plural, infinitive, impersonal, or the person’s name), without masculine defaults or slash forms.'
     : language === 'en'
     ? 'Write the coda in English.'
     : '';
@@ -404,6 +405,8 @@ async function generateSocialCoda(params: {
   // Folded into the existing "real human EA" bullet below rather than a new
   // one (same category — sounding like a colleague, not software).
   const prompt = `You're ${profile.assistant.name}, ${ownerFirst}'s executive assistant. ${audienceLine}
+
+Recipient's authoritative gender: ${params.recipientGender}.
 
 The task you just handled is either closed, or handed off and you're waiting on someone else. Either way it's off your plate for now and there's a quiet moment.
 
@@ -566,6 +569,14 @@ export async function composeSocialCoda(
       }
     }
 
+    // Read the person-of-turn once for both composition and claim context.
+    // Only human-authorized gender may steer inflection; guesses stay unknown.
+    let personRow: ReturnType<typeof getPersonMemory> = null;
+    try {
+      personRow = getPersonMemory(pending.personSlackId);
+    } catch (err) {
+      logger.warn('Coda person lookup unavailable — gender unknown', { err: String(err).slice(0, 200) });
+    }
     const coda = await generateSocialCoda({
       profile,
       directive: pending.directive,
@@ -574,6 +585,7 @@ export async function composeSocialCoda(
       grounding,
       otherCategorySubjectLabels,
       language: pending.language,
+      recipientGender: personRow ? authoritativeGender(personRow) : 'unknown',
     });
     if (!coda || coda.trim().length === 0) {
       // The compose call itself already logged WHY it produced nothing; this
@@ -629,7 +641,6 @@ export async function composeSocialCoda(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { checkReplyClaims } = require('../../utils/claimChecker') as
         typeof import('../../utils/claimChecker');
-      const personRow = getPersonMemory(pending.personSlackId);
       // A compact text snapshot of what we know about the recipient — the inputs
       // Sonnet should have been riffing on. Built and consumed inside this
       // function; it is never returned.

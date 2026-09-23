@@ -53,8 +53,7 @@ export function getLastMaelleMessage(threadTs: string | null | undefined): Maell
  * for in here is done."
  *
  * Called by whichever code finished the work:
- *   - tasks/completeTask, for the task-table dispatchers (routine, calendar_fix,
- *     summary_action_followup, social_*).
+ *   - tasks/completeTask, for the routine and calendar_fix dispatchers.
  *   - the message_colleague send path, for a fire-and-forget send (v4.2.x). That
  *     send used to mint a throwaway `tasks` row with status='completed' purely so
  *     createTask's react hook would fire; the row is gone (no dispatcher owned

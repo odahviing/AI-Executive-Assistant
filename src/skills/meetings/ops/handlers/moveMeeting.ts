@@ -417,17 +417,8 @@ async function colleagueUpdateRuleGate(
       // catalog lookup planMeeting uses on create/move, so one venue's stated
       // travel time means the same thing on all three paths.
       //
-      // ONE deliberate difference from planMeeting's gate, which also requires
-      // `!isOnline`: there it reads a FRESH location verdict, where an explicit
-      // physical venue always comes back isOnline=false, so the clause only ever
-      // excluded the hybrid room-plus-Teams shape — which `isCompanyLocation`
-      // below excludes anyway. Here `isOnline` is the EVENT's existing flag, and
-      // an explicit `location` edit doesn't clear it: a meeting that still
-      // carries a Teams link would have skipped the lookup and been padded with
-      // the category default instead of the venue's real (possibly larger)
-      // travel time — under-padding the one check this is for. Physicality is
-      // decided by the location string, which is what the other two clauses
-      // already test.
+      // A Teams link can coexist with an outside physical venue. All three
+      // paths decide travel from the location, not the online-meeting flag.
       let venueTravelMinutes: number | undefined;
       if ((profile.skills as Record<string, unknown> | undefined)?.venue === true
           && postLocation.length > 0) {
@@ -932,10 +923,9 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // add/remove) or re-places the venue (which may add the room mailbox).
           // Never on a bare explicit-`location` edit: Graph replaces the WHOLE
           // array on an attendees PATCH (calendarMutations.ts updateMeeting),
-          // and the read-back in getEventForAttendeeUpdate maps every non-
-          // 'optional' type — including the room's 'resource' — to
-          // optional:false, so an unchanged roster would be re-sent with the
-          // room mailbox as 'required'. `attendeesAfterEdit` still feeds the
+          // so a location-only edit need not resend an unchanged roster.
+          // Existing resource and optional roles survive roster edits.
+          // `attendeesAfterEdit` still feeds the
           // shape signals and detectCategory below on every path.
           mergedAttendees = (hasAttendeeChange || venueChangeRequested) ? attendeesAfterEdit : undefined;
 
@@ -1202,7 +1192,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           // THREE outcomes now degrade to notice-and-proceed, never a silent
           // substitution: free → say nothing, room invited (unchanged); busy +
           // small group → tell him plainly the room's taken AND that the
-          // small room is free, but do NOT rewrite the location — the venue
+          // small room is an alternative whose availability was not checked,
+          // but do NOT rewrite the location — the venue
           // text stays exactly what he asked for, and he says "use the small
           // one" / "leave it" on his own next turn; busy + 6+
           // (`room_busy_too_big`) has no fallback to name, so it's the same
@@ -1224,8 +1215,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
               if (mergedAttendees && roomEmailLc) {
                 mergedAttendees = mergedAttendees.filter(a => a.email.toLowerCase() !== roomEmailLc);
               }
-              ownerRoomBusyNotice = `the meeting room is already taken then; ${roomVerdict.smallLabel} is free if he'd rather use that instead — updated without inviting the room or changing the location`;
-              logger.info('update_meeting owner room check — room busy, small room free (notice only, no auto-swap)', {
+              ownerRoomBusyNotice = `the meeting room is already taken then; ${roomVerdict.smallLabel} is an alternative, but its availability was not checked — updated without inviting the room or changing the location`;
+              logger.info('update_meeting owner room check — room busy, small room unverified (notice only, no auto-swap)', {
                 meetingId: args.meeting_id, smallLabel: roomVerdict.smallLabel, participantCount: postEditParticipantCount,
               });
             } else if (roomVerdict.kind === 'room_busy_too_big') {
@@ -2183,6 +2174,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         let movePlanLocation: string | undefined;
         let movePlanIsOnline: boolean | undefined;
         let movePlanCategories: string[] | undefined;
+        let movePlanAttendees: NonNullable<Awaited<ReturnType<typeof getEventForAttendeeUpdate>>>['attendees'] | undefined;
         let movePlanPreserveExisting = false;
         let movePlanOverrideNotice: string | undefined;   // #A — attendee-busy heads-up, surfaced on the move result
         try {
@@ -2466,6 +2458,20 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             if (!movePlanPreserveExisting) {
               movePlanLocation = movePlan.location;
               movePlanIsOnline = movePlan.isOnline;
+              // A re-placed venue and its configured room invitation are one
+              // decision. Patch the roster only when room membership changes;
+              // preserve every other attendee and their Graph role.
+              const roomEmail = context.profile.meetings.room_email?.trim();
+              if (roomEmail) {
+                const roomLc = roomEmail.toLowerCase();
+                const hasRoom = moveAttendees.some(a => a.email.toLowerCase() === roomLc);
+                if (movePlan.addRoomEmail && !hasRoom) {
+                  movePlanAttendees = [...moveAttendees, { email: roomEmail, name: movePlan.location, optional: true }];
+                } else if (hasRoom && (movePlan.addRoomEmail === false
+                    || (!movePlan.addRoomEmail && movePlan.location !== existingLocation))) {
+                  movePlanAttendees = moveAttendees.filter(a => a.email.toLowerCase() !== roomLc);
+                }
+              }
             }
             if (movePlan.category) {
               // Preserve any non-yaml-category labels already on the event
@@ -2564,6 +2570,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           location: movePlanLocation,
           isOnline: movePlanIsOnline,
           categories: movePlanCategories,
+          attendees: movePlanAttendees,
         });
 
         // v3.6.x — the post-move Teams-URL-as-location patch was REMOVED (same

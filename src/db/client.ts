@@ -12,7 +12,7 @@ import { runCalendarIssuesAxisMigration } from './migrations/v4_5_3_calendar_iss
 import { runPurgeWorkShapedSocialSubjects } from './migrations/v4_5_9_purge_work_subjects';
 import { runSocialCategoryScoreRebase } from './migrations/v4_5_9_social_category_scores';
 
-let db: Database.Database;
+let db: Database.Database | undefined;
 
 export function getDb(): Database.Database {
   if (!db) {
@@ -20,84 +20,93 @@ export function getDb(): Database.Database {
     if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
     db = new Database(config.DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    initSchema(db);
-    // v2.0.7 — one-shot migration: back up + drop pending_requests + approval_queue.
-    // Runs AFTER initSchema so new installs (that never had the tables) don't
-    // create-then-drop; existing installs back up first, then drop. Idempotent.
     try {
-      runV207ConsolidateRequests(db, config.DB_PATH);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      initSchema(db);
+      // v2.0.7 — one-shot migration: back up + drop pending_requests + approval_queue.
+      // Runs AFTER initSchema so new installs (that never had the tables) don't
+      // create-then-drop; existing installs back up first, then drop. Idempotent.
+      try {
+        runV207ConsolidateRequests(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v2.0.7 consolidate-requests migration threw — continuing', { err: String(err) });
+      }
+      // v3.2.0 — Unified Person Store: rebuild people_memory onto a surrogate
+      // person_id PK with nullable slack_id/email + kind, so externals live in
+      // the same table. Idempotent; backs up + asserts row parity before any
+      // destructive step. Runs AFTER initSchema so all legacy columns exist.
+      try {
+        runPersonStoreMigration(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v3.2.0 person-store migration threw — continuing', { err: String(err) });
+      }
+      // v3.2.6 — is_vip on people_memory. Owner-marked VIP: their calendar is
+      // ALWAYS pulled into a thread-booking free/busy search; non-VIPs are
+      // invite-only (annotated, never gating). Default 0 — VIP only when the owner
+      // explicitly says so. Seed for the full VIP feature (#58). Added AFTER the
+      // person-store rebuild (which carries a fixed column list) so it lands on the
+      // final table shape in one boot; idempotent via try/catch.
+      try { db.exec(`ALTER TABLE people_memory ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
+      // Owner ruling 2026-09-11: failed social capture is unknown, never silence.
+      // Add after the fixed-column person-store rebuild. Existing rows stay NULL;
+      // capture records the watermark only when it observes a failure.
+      if (!(db.pragma('table_info(people_memory)') as Array<{ name: string }>).some(c => c.name === 'last_social_capture_unknown_at')) {
+        db.exec(`ALTER TABLE people_memory ADD COLUMN last_social_capture_unknown_at TEXT`);
+      }
+      // v4.0.4 — one human, one row. Collapse any people_memory rows that share an
+      // email (the pre-4.0.4 upsertPersonMemory could mint a second row for someone
+      // already on file from the calendar). Runs LAST so the merge writes against
+      // the final column shape (is_vip included). Cheap grouped scan; no-ops on a
+      // clean table. Backs up every affected row before touching anything.
+      try {
+        runDedupePeopleByEmail(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v4.0.4 people-dedupe migration threw — continuing', { err: String(err) });
+      }
+      // v4.4.9 — backfill social_subjects/social_topics rows mis-stamped
+      // created_by='owner' by the pre-cc7d4ce reconciliation writer (gh#154-R7). Runs
+      // AFTER the tables exist (initSchema, above); idempotent, no-ops once clean.
+      try {
+        runSocialProvenanceBackfill(db);
+      } catch (err) {
+        logger.error('v4.4.9 social-provenance backfill threw — continuing', { err: String(err) });
+      }
+      // calendar-issues-schema-lacks-axis-column — widen UNIQUE(owner_user_id,
+      // event_id) to include axis, so a conflict-axis row and a question-axis
+      // row can coexist on the same event. Rebuild (SQLite can't ALTER a
+      // UNIQUE constraint); idempotent, no-ops once calendar_issues.axis exists
+      // (including every fresh install, which gets it straight from initSchema).
+      try {
+        runCalendarIssuesAxisMigration(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v4.5.3 calendar-issues axis migration threw — continuing', { err: String(err) });
+      }
+      // v4.5.9 (#198) — Social Engine redesign. Purge work-shaped social_subjects
+      // rows FIRST (they must not seed the new per-person category score
+      // table), then rebase engagement_score onto social_person_category_scores
+      // and drop the superseded scoring columns. Idempotent; no-ops on a fresh
+      // install (which gets the final shape straight from initSchema) and on
+      // every boot after the first successful run.
+      try {
+        runPurgeWorkShapedSocialSubjects(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v4.5.9 purge-work-subjects migration threw — continuing', { err: String(err) });
+      }
+      try {
+        runSocialCategoryScoreRebase(db, config.DB_PATH);
+      } catch (err) {
+        logger.error('v4.5.9 social-category-score rebase migration threw — continuing', { err: String(err) });
+      }
+      logger.info('Database initialized', { path: config.DB_PATH });
     } catch (err) {
-      logger.error('v2.0.7 consolidate-requests migration threw — continuing', { err: String(err) });
+      // A failed schema/pragma setup is not an initialized singleton. Release
+      // the failed connection and let the next caller retry the existing setup.
+      const failed = db;
+      db = undefined;
+      try { failed.close(); } catch { /* preserve the initialization error */ }
+      throw err;
     }
-    // v3.2.0 — Unified Person Store: rebuild people_memory onto a surrogate
-    // person_id PK with nullable slack_id/email + kind, so externals live in
-    // the same table. Idempotent; backs up + asserts row parity before any
-    // destructive step. Runs AFTER initSchema so all legacy columns exist.
-    try {
-      runPersonStoreMigration(db, config.DB_PATH);
-    } catch (err) {
-      logger.error('v3.2.0 person-store migration threw — continuing', { err: String(err) });
-    }
-    // v3.2.6 — is_vip on people_memory. Owner-marked VIP: their calendar is
-    // ALWAYS pulled into a thread-booking free/busy search; non-VIPs are
-    // invite-only (annotated, never gating). Default 0 — VIP only when the owner
-    // explicitly says so. Seed for the full VIP feature (#58). Added AFTER the
-    // person-store rebuild (which carries a fixed column list) so it lands on the
-    // final table shape in one boot; idempotent via try/catch.
-    try { db.exec(`ALTER TABLE people_memory ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
-    // Owner ruling 2026-09-11: failed social capture is unknown, never silence.
-    // Add after the fixed-column person-store rebuild. Existing rows stay NULL;
-    // capture records the watermark only when it observes a failure.
-    if (!(db.pragma('table_info(people_memory)') as Array<{ name: string }>).some(c => c.name === 'last_social_capture_unknown_at')) {
-      db.exec(`ALTER TABLE people_memory ADD COLUMN last_social_capture_unknown_at TEXT`);
-    }
-    // v4.0.4 — one human, one row. Collapse any people_memory rows that share an
-    // email (the pre-4.0.4 upsertPersonMemory could mint a second row for someone
-    // already on file from the calendar). Runs LAST so the merge writes against
-    // the final column shape (is_vip included). Cheap grouped scan; no-ops on a
-    // clean table. Backs up every affected row before touching anything.
-    try {
-      runDedupePeopleByEmail(db, config.DB_PATH);
-    } catch (err) {
-      logger.error('v4.0.4 people-dedupe migration threw — continuing', { err: String(err) });
-    }
-    // v4.4.9 — backfill social_subjects/social_topics rows mis-stamped
-    // created_by='owner' by the pre-cc7d4ce reconciliation writer (gh#154-R7). Runs
-    // AFTER the tables exist (initSchema, above); idempotent, no-ops once clean.
-    try {
-      runSocialProvenanceBackfill(db);
-    } catch (err) {
-      logger.error('v4.4.9 social-provenance backfill threw — continuing', { err: String(err) });
-    }
-    // calendar-issues-schema-lacks-axis-column — widen UNIQUE(owner_user_id,
-    // event_id) to include axis, so a conflict-axis row and a question-axis
-    // row can coexist on the same event. Rebuild (SQLite can't ALTER a
-    // UNIQUE constraint); idempotent, no-ops once calendar_issues.axis exists
-    // (including every fresh install, which gets it straight from initSchema).
-    try {
-      runCalendarIssuesAxisMigration(db, config.DB_PATH);
-    } catch (err) {
-      logger.error('v4.5.3 calendar-issues axis migration threw — continuing', { err: String(err) });
-    }
-    // v4.5.9 (#198) — Social Engine redesign. Purge work-shaped social_subjects
-    // rows FIRST (they must not seed the new per-person category score
-    // table), then rebase engagement_score onto social_person_category_scores
-    // and drop the superseded scoring columns. Idempotent; no-ops on a fresh
-    // install (which gets the final shape straight from initSchema) and on
-    // every boot after the first successful run.
-    try {
-      runPurgeWorkShapedSocialSubjects(db, config.DB_PATH);
-    } catch (err) {
-      logger.error('v4.5.9 purge-work-subjects migration threw — continuing', { err: String(err) });
-    }
-    try {
-      runSocialCategoryScoreRebase(db, config.DB_PATH);
-    } catch (err) {
-      logger.error('v4.5.9 social-category-score rebase migration threw — continuing', { err: String(err) });
-    }
-    logger.info('Database initialized', { path: config.DB_PATH });
   }
   return db;
 }
@@ -1025,9 +1034,8 @@ function initSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE requests ADD COLUMN requester_notified_at TEXT`); } catch (_) {}
 
   // ── v1.7.2 — tasks: target_slack_id / target_name ─────────────────────────
-  // Lets owner ask "what's open with Brett?" and get every 1:1 task back in
-  // one query. Populated for outreach tasks (1:1) and summary_action_followup
-  // tasks. Coord tasks (multi-party) leave these NULL.
+  // Historical counterpart fields remain on existing task rows after the
+  // outreach and automatic summary-followup task types were retired.
   try { db.exec(`ALTER TABLE tasks ADD COLUMN target_slack_id TEXT`); } catch (_) {}
   try { db.exec(`ALTER TABLE tasks ADD COLUMN target_name TEXT`); } catch (_) {}
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_target ON tasks(target_slack_id, status)`); } catch (_) {}

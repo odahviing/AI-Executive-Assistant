@@ -65,6 +65,7 @@ function harness({ results = [source], messages = [], subjects = [], category = 
       return { results };
     } },
     '../../db': {
+      authoritativeGender: () => 'unknown', // fixture rows carry no gender
       getPersonMemory: () => ({ name: 'Recipient Test' }),
       getRecentChannelMessages: (...args) => {
         historyReads.push(args);
@@ -380,8 +381,9 @@ test('composer payload: colleague continue receives metadata and retains languag
   assert.ok(prompt.includes(`source title: ${JSON.stringify(source.title)}`));
   assert.ok(prompt.includes(`source URL: ${JSON.stringify(source.url)}`));
   assert.ok(prompt.includes("You're writing TO Recipient, not to Owner"));
-  assert.ok(prompt.includes('Write the coda in Hebrew.'));
-  assert.ok(prompt.includes('Match the gendered forms to the person.'));
+  assert.match(prompt, /Write the coda in Hebrew\b/);
+  assert.ok(prompt.includes('Use the supplied authoritative gender for inflected address'));
+  assert.ok(prompt.includes('if unknown, use neutral phrasing'));
 });
 
 test('composer payload: capped excerpts exclude tails while title and URL remain available', async () => {

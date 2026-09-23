@@ -11,9 +11,9 @@
  *   2. Multiple Bolt handlers for the same message (DM / MPIM / app_mention)
  *      can race on the same ts — one would win, the other would also post.
  *
- * This module hoists the Set to process-global and exposes mark/has/unmark.
- * Both catch-up and all live handlers share it. Short TTL (60s) — same as
- * before — enough to cover Slack retry windows without leaking memory.
+ * This module hoists the Set to process-global and exposes mark operations.
+ * Both catch-up and live handlers share it. Handled message timestamps expire
+ * after ten minutes; there is no early release after a delivered failure notice.
  */
 
 const processedTs: Set<string> = new Set();

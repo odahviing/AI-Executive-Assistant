@@ -20,7 +20,7 @@ You own every async owner-facing work item, end to end: **raise → track → de
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
 ## First — orient (every dispatch)
-Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — it is not restated here. **Your slice of the map** is `project_architecture.md`'s *"The requests spine"* section and the task-runner split below it — both verified against the code 2026-08-15, no known drift.
+Follow `.claude/WORKSHOP.md`'s **Who you are, and how to orient** section every dispatch — it is not restated here. **Your slice of the map** is `project_architecture.md`'s *"The requests spine"* section and the task-runner split below it — verify relevant callers against current code.
 
 ---
 
@@ -36,7 +36,7 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 - `src/utils/{ownerDailyThread,threadBoundApprovalAutoResolve,closeMeetingArtifacts}.ts` · `src/skills/meetingReschedule.ts` · outreach reply classification — the decision logic (`isOutreachReplyByContext`, `closeOutreachReplyIfResolvedThisTurn`) is yours to rule on even though it physically lives in `src/connectors/slack/coordinator.ts`, a file SlackMaster maintains. Shared-boundary file, not a clean split — don't move it without cause, but don't defer to SlackMaster on what it decides either.
 - **`src/skills/outreach.ts`** — the `message_colleague` / `find_slack_channel` tool surface. Owner-assigned 2026-07-26: it is the **raise end of this spine** (every `message_colleague` opens a request), and until now **no lane owned it at all**, so no audit had ever checked it. Expect drift.
 
-**The boundary that keeps this lane coherent: you own the WORK-ITEM's lifecycle; the domain lane owns what the item DOES when it fires.** A reminder's scheduling, expiry and closure are yours; what it says is not. Likewise **NOT yours:** the meeting planner core (`matchmaker`) · the output guard stack (`gatekeeper`) · the system prompt (`instructor`) · Slack delivery, threading and the reaction *event* (`slackmaster` — you own what a ✅ *means*, not how it arrives) · person data (`librarian`) · the non-request dispatchers (`calendarFix` → `matchmaker`, `routine` → `handyman`, `summaryActionFollowup` → `librarian` — `socialDecay`/`socialPingRankCheck` no longer exist, deleted outright in 4.6.0).
+**The boundary that keeps this lane coherent: you own the WORK-ITEM's lifecycle; the domain lane owns what the item DOES when it fires.** A reminder's scheduling, expiry and closure are yours; what it says is not. Likewise **NOT yours:** the meeting planner core (`matchmaker`) · the output guard stack (`gatekeeper`) · the system prompt (`instructor`) · Slack delivery, threading and the reaction *event* (`slackmaster` — you own what a ✅ *means*, not how it arrives) · person data (`librarian`) · the non-request dispatchers (`calendarFix` → `matchmaker`, `routine` → `handyman`). Automatic summary followups and their dispatcher are retired by owner ruling; existing generic outreach retains this lane's lifecycle. `socialDecay`/`socialPingRankCheck` were deleted outright in 4.6.0.
 
 ## Your rules
 
@@ -71,4 +71,4 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 1. **Follow the request.** Pull the `req_…` row and its state transitions — `node scripts/db-query.cjs "SELECT … FROM requests WHERE …"` — plus the log for that turn. State the root as `file:line — what actually happens`.
 2. **Is it spine or payload?** The lifecycle and timers live on the request row; `outreach_jobs` and friends are detail. A bug that looks like "lost state" is often a side table being treated as state (R1).
 3. **Fix on the spine and delete the fragile path** — prefer removing a parallel flow over adding a branch (R1, W1, W5).
-4. **Paper-trace to 100%** (W8) — include the close-loop: who was told, once, and what they were told. Then report per the return contract.
+4. **Verify under W8 and the Workshop evidence contract** — include the close-loop: who was told, once, and what they were told. Then report per the return contract.

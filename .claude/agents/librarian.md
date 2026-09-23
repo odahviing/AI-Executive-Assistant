@@ -24,7 +24,7 @@ The knowledge base's future-RAG role is named once, under "What you own" — not
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
 ## First — orient (every dispatch)
-Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — it is not restated here. **Your slice of `project_architecture.md`:** the "Person store / social engine" section — where the store sits and what runs on top of it.
+Follow `.claude/WORKSHOP.md`'s **Who you are, and how to orient** section every dispatch — it is not restated here. **Your slice of `project_architecture.md`:** the "Person store / social engine" section — where the store sits and what runs on top of it.
 
 ---
 
@@ -42,7 +42,7 @@ Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — i
 **Knowledge beyond people — moved here from Handyman 2026-08-11:**
 - **News:** `src/skills/news.ts` — calendar-aware external news, deduped against a rolling seen-log. Judgment about what's worth surfacing, not a scheduled query.
 - **The brief's content:** `src/tasks/briefs.ts` (`sendMorningBriefing` and friends) — what goes in, freshness, don't-repeat. **Only the scheduled TRIGGER stays with Handyman** — `src/tasks/dispatchers/routine.ts` fires it on cron like every other routine, and it reads the tasks spine to do it; don't fork that read. You own what it says; Handyman owns that it fires.
-- **Meeting summaries:** `src/skills/summary.ts` + its table layer `src/db/summarySessions.ts` — transcript → structured summary → distribute. Keeps date, subject, attendees and outcome forever; deliberately discards the transcript. An archival catalog entry, not a full-text record. `src/tasks/dispatchers/summaryActionFollowup.ts` rides here too — it composes off a meeting summary's action item to DM the assignee for a status update, so it lives with the summary it follows up on, not with Registrar's request-lifecycle spine (the outreach DM it sends still opens a `requests` row, same as any `message_colleague` call).
+- **Meeting summaries:** `src/skills/summary.ts` + its table layer `src/db/summarySessions.ts` — transcript → structured summary → distribute. Keeps date, subject, attendees and outcome forever; deliberately discards the transcript. An archival catalog entry, not a full-text record. The owner retired automatic action-item followups on 2026-09-23: drafting, editing, sharing and action-item content remain; the scheduling producer and `summaryActionFollowup.ts` dispatcher are removed. Exact legacy summary task retirement belongs to Handyman's startup plumbing; generic outreach already sent remains on Registrar's existing lifecycle.
 - **Venues:** `src/skills/venue.ts` (`saveOrBumpVenueOnBook`) + its table layer `src/db/venues.ts` — place discovery and memory; one record per venue, ranked favorite/good/avoid, auto-saved on booking.
 - **The knowledge base:** `src/skills/knowledge.ts` (`selectRelevantKbForMeeting`, `ingestKnowledgeDoc`) — the file-based markdown catalog, on-demand section loading. The literal seed of the future RAG/data layer.
 - **Web search, extraction and research content:** `tavilySearch`, `tavilyExtract` and `runResearch` in `src/skills/general.ts` — knowledge gathering, grounding and source content belong here. Research requests use Registrar's ordinary request lifecycle (R1); Handyman owns only shared plumbing between those systems.
@@ -92,4 +92,4 @@ The rules below are the concepts that recur across every kind of knowledge this 
 1. **Identify the record.** Pull the actual rows — `node scripts/db-query.cjs "SELECT … FROM people_memory WHERE …"` (or the venue/knowledge-log equivalent) — before theorizing. Duplicate / drifting rows are the #1 root class here, and they are visible in the data.
 2. **Reproduce from code + logs** (`powershell -File scripts/vm-logs.ps1 [term] [lines]` — W2; the local `logs/` dir is stale); state the root as `file:line — what actually happens`. Confirm the path (owner vs non-owner — they get different reads, L6).
 3. **Fix at the store, not at the consumer.** If several lanes work around the same person- or knowledge-layer defect, the fix belongs here — and say so in your report so those workarounds can be removed.
-4. **Paper-trace to 100%** (W8), then report per the return contract.
+4. **Verify under W8 and the Workshop evidence contract**, then report per the return contract.

@@ -57,7 +57,8 @@ function harness(surface, mode = 'success') {
     files: { uploadV2: async p => { calls.uploads.push(p); if (currentMode === 'upload-failed') throw Error('upload timeout'); return { ok: true }; } },
   } };
   const eligibility = load('src/connections/slack/eligibility.ts', { '../../utils/logger': log });
-  const messaging = load('src/connections/slack/messaging.ts', { '../../utils/logger': log, './eligibility': eligibility }, {
+  const identity = load('src/memory/resolveAttendeeEmails.ts', { '../utils/logger': log });
+  const messaging = load('src/connections/slack/messaging.ts', { '../../utils/logger': log, './eligibility': eligibility, '../../memory/resolveAttendeeEmails': identity }, {
     fetch: async () => ({ ok: currentMode !== 'download-failed', status: 503, arrayBuffer: async () => new Uint8Array([1, 2]).buffer }),
   });
   const adapter = load('src/connections/slack/index.ts', {

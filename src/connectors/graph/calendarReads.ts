@@ -1262,7 +1262,7 @@ export async function getEventForAttendeeUpdate(
   userEmail: string,
   meetingId: string,
 ): Promise<{
-  attendees: Array<{ name?: string; email: string; optional?: boolean }>;
+  attendees: Array<{ name?: string; email: string; optional?: boolean; resource?: boolean }>;
   startIso?: string;
   endIso?: string;
   isAllDay?: boolean;
@@ -1283,6 +1283,7 @@ export async function getEventForAttendeeUpdate(
         name: a.emailAddress?.name as string | undefined,
         email: String(a.emailAddress.address).toLowerCase(),
         optional: a.type === 'optional',
+        resource: a.type === 'resource',
       }));
     return {
       attendees,

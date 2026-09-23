@@ -224,6 +224,26 @@ function isAiIdentityTrigger(name: string): boolean {
   return name.startsWith('self_ai_claim');
 }
 
+/** Every generated security reply and failed-rewrite draft uses the same
+ * deterministic exit check. A successful model call is not a clean verdict.
+ * Reuse the canonical scanner and identifier-only redaction; other residual
+ * leaks or an empty result use the caller's existing safe fallback. */
+function finalizeSecurityReply(reply: string, fallback: string, aiIdentityCleared = false): string {
+  const remainingLeaks = (text: string) => scanForLeaks(text)
+    .filter(name => !(aiIdentityCleared && isAiIdentityTrigger(name)));
+  const residual = remainingLeaks(reply);
+  if (reply.trim().length > 0 && residual.length === 0) return reply;
+  if (allTriggersAreIdentifiers(residual)) {
+    const redacted = redactIdentifiers(reply, residual);
+    if (redacted.length > 0 && remainingLeaks(redacted).length === 0) {
+      logger.warn('Security reply identifiers stripped deterministically', { triggers: residual });
+      return redacted;
+    }
+  }
+  logger.warn('Security reply retained leakage or no content — using safe fallback', { triggers: residual });
+  return fallback;
+}
+
 /**
  * v4.5.6 — the AI-identity trigger's judge. `self_ai_claim*` firing on the draft
  * only proves the WORDS are there; whether that is an honest answer to a genuine
@@ -617,7 +637,7 @@ export async function filterColleagueReply(opts: {
         const firstName = opts.colleagueName.split(/\s+/)[0];
         const fallback = `Just want to make sure — as far as I can see you're ${firstName}. If this is for someone else, ask them to message me directly.`;
         return {
-          reply: composed ?? fallback,
+          reply: finalizeSecurityReply(composed ?? fallback, fallback),
           filtered: true,
           triggers: ['identity_mismatch_email'],
           aiIdentityCleared: false,
@@ -699,71 +719,20 @@ export async function filterColleagueReply(opts: {
         rewritePreview: rewritten.slice(0, 120),
       });
     } else {
-      logger.info('Security rewriter produced clean reply', {
+      const reply = finalizeSecurityReply(rewritten, SAFE_FALLBACK(opts.ownerFirstName), aiIdentityCleared);
+      logger.info('Security rewriter output checked before return', {
         triggers,
         colleagueSlackId: opts.colleagueSlackId,
       });
-      return { reply: rewritten, filtered: true, triggers, aiIdentityCleared };
+      return { reply, filtered: true, triggers, aiIdentityCleared };
     }
   }
 
-  // v4.2.x (G3/G5) — the rewriter failed. What ships now depends on the trigger
-  // CLASS, because the two classes have different REMEDIES available:
-  //   identifier-only → strip the tokens deterministically and ship the answer, and
-  //     fall back to the canned line only when that can't be done cleanly. The reply
-  //     is otherwise correct and in the colleague's own language, the only thing wrong
-  //     with it is an opaque token, and removing a token that means nothing to the
-  //     reader takes no fact away — so this keeps the answer without keeping the leak.
-  //     Until 4.2.x this branch shipped the draft UNCHANGED, on the stated grounds
-  //     that textScrubber re-wraps the token on the way out: a no-op for every token
-  //     that can actually reach here, which made it a fail-open on a detected id.
-  //   any disclosure trigger → canned line, unchanged. There the original IS the
-  //     leak and there is no token to strip, so losing the answer is the right price.
-  if (allTriggersAreIdentifiers(triggers)) {
-    const redacted = redactIdentifiers(opts.reply, triggers);
-    // The strip is verified, not trusted. Nothing this gate detected as an internal
-    // identifier may leave it still carrying one — so an empty result (the draft was
-    // nothing BUT the token) or a residual hit (structurally shouldn't happen: the
-    // patterns we ran are the patterns that fired) both take the canned line. Losing
-    // an answer is a bad outcome; shipping an id we KNOW is there is the leak this
-    // branch existed to prevent, and it is not a choice between them anywhere a strip
-    // is possible.
-    //
-    // 2026-08-14 (bouncer overturn) — this re-scan uses the FULL pattern list, so
-    // an already-CLEARED self_ai_claim* (judged a genuine answer above, and by
-    // definition still literally present in the text — clearing it never rewrites
-    // a word) would re-match here and reach the canned fallback anyway, discarding
-    // the honest answer the judge just confirmed was fine to ship. Filter out the
-    // AI-identity names when that clearance already happened: this branch only
-    // exists to verify redactIdentifiers actually stripped the IDENTIFIER tokens
-    // that fired (slack ids, req_/task_ ids) — it was never meant to re-litigate a
-    // disclosure trigger that was already judged upstream.
-    const residual = scanForLeaks(redacted)
-      .filter(name => !(aiIdentityCleared && isAiIdentityTrigger(name)));
-    if (redacted.length === 0 || residual.length > 0) {
-      logger.warn('⚠ SECURITY — identifier-only draft could not be stripped clean; using the safe canned line', {
-        triggers,
-        residual,
-        colleagueSlackId: opts.colleagueSlackId,
-        replyPreview: opts.reply.slice(0, 120),
-      });
-      return { reply: SAFE_FALLBACK(opts.ownerFirstName), filtered: true, triggers, aiIdentityCleared };
-    }
-    logger.warn('Security rewriter unfixable on identifier-only triggers — identifiers stripped deterministically, answer preserved', {
-      triggers,
-      colleagueSlackId: opts.colleagueSlackId,
-      before: opts.reply.slice(0, 120),
-      after: redacted.slice(0, 120),
-    });
-    return { reply: redacted, filtered: true, triggers, aiIdentityCleared };
-  }
-
-  logger.warn('Security rewriter unfixable — using safe canned fallback', {
-    triggers,
-    colleagueSlackId: opts.colleagueSlackId,
-  });
+  // Failed, unavailable or fact-dropping rewrite: check the original through
+  // the same boundary. Identifier-only drafts keep their facts/language;
+  // disclosure or empty results retain the existing canned fallback policy.
   return {
-    reply: SAFE_FALLBACK(opts.ownerFirstName),
+    reply: finalizeSecurityReply(opts.reply, SAFE_FALLBACK(opts.ownerFirstName), aiIdentityCleared),
     filtered: true,
     triggers,
     aiIdentityCleared,

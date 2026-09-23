@@ -8,9 +8,8 @@
  *   Stage 2 — Iterating:   owner replies are absorbed as draft edits, style
  *                          rules (persisted to user_preferences), or share
  *                          intent. Classic chat-LLM iteration — small or large.
- *   Stage 3 — Sharing:     final summary distributed to named recipients;
- *                          action items with deadlines spawn summary_action_followup
- *                          tasks targeting internal Slack users.
+ *   Stage 3 — Sharing:     final summary distributed to named recipients.
+ *                          Action items and deadlines remain summary content.
  *
  * Persistence rule (per design): the full summary text is NEVER kept after share.
  * `summary_sessions.current_draft` is nulled on share (and after 7 days idle).
@@ -46,7 +45,6 @@ import {
   type SummaryAttendee,
   type SummaryActionItem,
 } from '../db';
-import { createTask } from '../tasks';
 // v1.8.10 — SummarySkill is the reference consumer for the Connection
 // interface. Instead of importing messaging.ts primitives directly, we
 // resolve the registered Slack Connection at call time. Future recipients
@@ -57,8 +55,6 @@ import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calen
 import { selectRelevantKbForMeeting } from './knowledge';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
-import { attendeeTzForDay, loadAttendeeAvailabilityForPerson } from '../utils/attendeeAvailability';
-import { colleagueWorkTimeBaseFromNow } from '../utils/responseDeadline';
 import { formatSkillPreferencesBlock } from '../utils/skillPreferences';
 
 const anthropic = getAnthropicClient();
@@ -77,40 +73,23 @@ function isInternalEmail(email: string | undefined, profile: UserProfile): boole
   return email.toLowerCase().endsWith(`@${domain}`);
 }
 
-// v1.8.8 — infer summary type from the draft subject so type-specific style
-// preferences can be loaded on top of the global ones. Keyword-based; returns
-// null for ambiguous/general meetings (use global rules only).
-export function inferSummaryType(subject: string | undefined | null): string | null {
-  if (!subject) return null;
-  const s = subject.toLowerCase();
-  if (/\binterview\b/.test(s)) return 'interview';
-  if (/\b(1:1|one.?on.?one)\b/.test(s)) return 'one_on_one';
-  if (/\b(standup|stand.?up|daily)\b/.test(s)) return 'standup';
-  if (/\bretro(spective)?\b/.test(s)) return 'retro';
-  if (/\b(biweekly|bi.?weekly|weekly)\b/.test(s)) return 'weekly';
-  if (/\b(quarterly|q[1-4])\b/.test(s)) return 'quarterly';
-  return null;
-}
-
-function summaryStylePromptBlock(ownerUserId: string, summaryType?: string | null): string {
-  // v1.8.8 — layered preferences: global ('summary' category, backward-compat)
-  // + optional type-specific ('summary_type_<type>' category). Type rules are
-  // rendered AFTER global so Sonnet sees them last — last-wins in attention.
+function summaryStylePromptBlock(ownerUserId: string): string {
+  // Meeting type is semantic and multilingual. Supply conditional groups to
+  // the existing composition call instead of filtering by English keywords.
   const allPrefs = getPreferences(ownerUserId);
   const globalPrefs = allPrefs.filter(p => p.category === 'summary');
-  const typePrefs = summaryType
-    ? allPrefs.filter(p => p.category === `summary_type_${summaryType}`)
-    : [];
+  const typePrefs = allPrefs.filter(p => p.category.startsWith('summary_type_'));
   if (globalPrefs.length === 0 && typePrefs.length === 0) return '';
 
   const sections: string[] = [];
   if (globalPrefs.length > 0) {
     sections.push(`GLOBAL (apply to every summary):\n${globalPrefs.map(p => `- ${p.value}`).join('\n')}`);
   }
-  if (typePrefs.length > 0) {
-    sections.push(`SPECIFIC TO ${summaryType!.toUpperCase().replace(/_/g, ' ')} SUMMARIES (these win over global on conflict):\n${typePrefs.map(p => `- ${p.value}`).join('\n')}`);
+  for (const category of new Set(typePrefs.map(p => p.category))) {
+    const label = category.slice('summary_type_'.length).toUpperCase().replace(/_/g, ' ');
+    sections.push(`ONLY FOR ${label} SUMMARIES (apply only when this is the meeting's type; then these win over global on conflict):\n${typePrefs.filter(p => p.category === category).map(p => `- ${p.value}`).join('\n')}`);
   }
-  return `\n\nOWNER'S SUMMARY STYLE PREFERENCES (apply unless the owner overrides for this specific summary):\n\n${sections.join('\n\n')}`;
+  return `\n\nOWNER'S SUMMARY STYLE PREFERENCES (apply unless the owner overrides for this specific summary):\nDetermine the meeting type from its actual subject, transcript and owner framing in any language. Apply only matching type-specific groups. If the type is unknown, apply global rules only.\n\n${sections.join('\n\n')}`;
 }
 
 /**
@@ -133,6 +112,27 @@ async function lookupNearbyEvents(
 }
 
 // ── Sonnet calls ────────────────────────────────────────────────────────────
+
+/** Reject malformed model fields before a draft can replace durable state. */
+function validateDraftResponse(value: unknown): asserts value is Partial<SummaryDraft> {
+  const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  const optionalString = (v: Record<string, unknown>, key: string) => v[key] === undefined || typeof v[key] === 'string';
+  const optionalBoolean = (v: Record<string, unknown>, key: string) => v[key] === undefined || typeof v[key] === 'boolean';
+  if (!record(value)) throw new Error('Invalid summary draft object');
+  const array = (key: string, valid: (v: unknown) => boolean) => value[key] === undefined
+    || (Array.isArray(value[key]) && (value[key] as unknown[]).every(valid));
+  const attendee = (v: unknown) => record(v) && typeof v.name === 'string' && v.name.trim().length > 0
+    && optionalString(v, 'email') && optionalString(v, 'slackId') && optionalBoolean(v, 'internal')
+    && (v.source === undefined || (typeof v.source === 'string' && ['calendar', 'transcript', 'owner'].includes(v.source)));
+  const action = (v: unknown) => record(v) && typeof v.assignee_text === 'string'
+    && typeof v.description === 'string' && v.description.trim().length > 0
+    && ['assignee_slack_id', 'deadline_iso', 'deadline_label'].every(key => optionalString(v, key));
+  if (!optionalString(value, 'subject') || !optionalString(value, 'main_topic') || !optionalBoolean(value, 'is_external')
+    || !array('attendees', attendee) || !array('action_items', action)
+    || !array('paragraphs', v => typeof v === 'string') || !array('speakers_unresolved', v => typeof v === 'string')) {
+    throw new Error('Invalid summary draft fields');
+  }
+}
 
 /**
  * Classify what an uploaded file looks like — a fresh transcript (new meeting)
@@ -191,8 +191,7 @@ async function draftSummaryFromTranscript(params: {
     ? `\n\nOWNER'S FRAMING FOR THIS SUMMARY (the owner typed this alongside the transcript upload — these instructions override defaults):\n"""\n${params.ownerCaption.trim()}\n"""`
     : '';
 
-  const inferredType = inferSummaryType(params.calendarEvent?.subject);
-  const styleBlock = summaryStylePromptBlock(params.ownerUserId, inferredType);
+  const styleBlock = summaryStylePromptBlock(params.ownerUserId);
 
   // v1.7.4 — when the KnowledgeBaseSkill is active, run a tiny relevance
   // pre-pass to pull any company/team context that would help ground this
@@ -268,7 +267,8 @@ ${params.transcript}
   });
   const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-  const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
+  const parsed: unknown = JSON.parse(cleaned);
+  validateDraftResponse(parsed);
 
   // Defensive defaults so a partial reply doesn't crash render
   return {
@@ -333,7 +333,8 @@ ${params.summaryText}
   });
   const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-  const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
+  const parsed: unknown = JSON.parse(cleaned);
+  validateDraftResponse(parsed);
   return {
     subject: String(parsed.subject ?? params.existing?.subject ?? 'Meeting summary'),
     main_topic: String(parsed.main_topic ?? params.existing?.main_topic ?? ''),
@@ -430,7 +431,7 @@ function renderDraftForShare(draft: SummaryDraft, profile: UserProfile): string 
 //   one-off topic correction).
 // - Saves under category='summary' for global rules, 'summary_type_<type>'
 //   for type-specific rules (interview/one_on_one/standup/retro/weekly/
-//   quarterly). Type inferred from the current draft's subject.
+//   quarterly). The existing classifier reads the subject and feedback.
 // - Dedup/merge (gh#189): the already-saved rules for both categories are
 //   listed in the same classification prompt, and the model is told to reuse
 //   an existing rule's exact key when the new feedback is a near-duplicate or
@@ -449,7 +450,6 @@ async function classifyAndSaveStylePreference(params: {
   anthropic: Anthropic;
 }): Promise<void> {
   const { feedback, draftBefore, draftAfter, ownerUserId, anthropic } = params;
-  const currentType = inferSummaryType(draftAfter.subject ?? params.draftSubjectBefore);
 
   // gh#189 — feed the rules already saved so the same call can catch a
   // near-duplicate or a conflict, instead of always minting a fresh rule_key
@@ -478,7 +478,7 @@ DRAFT AFTER EDIT (abridged):
 Paragraphs: ${draftAfter.paragraphs.length}
 Action items: ${draftAfter.action_items.length}
 
-${currentType ? `INFERRED TYPE: ${currentType}` : 'INFERRED TYPE: (general / not categorized)'}
+UPDATED SUBJECT: ${draftAfter.subject ?? params.draftSubjectBefore}
 
 ALREADY-SAVED STYLE RULES (check for duplicates, near-duplicates or conflicts before deciding a key):
 ${existingRulesBlock}
@@ -585,8 +585,8 @@ Output strict JSON only (no prose, no fences):
 /**
  * Best-effort resolve action-item assignees to internal Slack IDs.
  * Strategy:
- *   1. Try to match the assignee_text to an existing draft attendee with internal=true
- *   2. If no attendee match, try findUserByName against the workspace and verify internal email
+ *   1. Refuse ambiguous/external draft attendees.
+ *   2. Resolve the current label through the workspace and verify internal email.
  *   3. External names: leave unresolved (no slack_id)
  */
 async function resolveActionItemAssignees(
@@ -596,47 +596,49 @@ async function resolveActionItemAssignees(
 ): Promise<SummaryDraft> {
   if (!app) return draft;
   const updatedItems: SummaryActionItem[] = [];
-  // v1.8.10 — resolve via the registered Slack Connection. Falls back to
-  // direct messaging.ts if the registry doesn't have Slack yet (shouldn't
-  // happen once sub-phase A is deployed — fails open).
+  // Resolve only an unambiguous person through the registered Connection.
   const slackConn = getConnection(profile.user.slack_user_id, 'slack');
 
-  for (const item of draft.action_items) {
-    if (item.assignee_slack_id) {
-      updatedItems.push(item);
-      continue;
-    }
+  for (const storedItem of draft.action_items) {
+    // Draft editing can change the label while retaining a former derived ID.
+    // Re-resolve the current label; cached/model-produced IDs are not identity.
+    const item: SummaryActionItem = {
+      assignee_text: storedItem.assignee_text,
+      description: storedItem.description,
+      deadline_iso: storedItem.deadline_iso,
+      deadline_label: storedItem.deadline_label,
+    };
 
     // 1) Try draft attendees first — whole-token match, never a loose substring
     // and never an empty assignee_text ("".includes → true would bind the FIRST
     // internal attendee, DMing a colleague about a commitment they don't own).
     // "Dan" must not silently bind "Daniel".
     const assigneeText = (item.assignee_text ?? '').trim();
-    const attendeeMatch = assigneeText
-      ? draft.attendees.find(a => a.internal && nameGenuinelyMatches(a.name, undefined, assigneeText))
-      : undefined;
-    if (attendeeMatch?.slackId) {
-      updatedItems.push({
-        ...item,
-        assignee_slack_id: attendeeMatch.slackId,
-        assignee_name: attendeeMatch.name,
-        assignee_internal: true,
-      });
+    const attendeeMatches = assigneeText
+      ? [...new Map(draft.attendees.filter(a => nameGenuinelyMatches(a.name, a.email, assigneeText))
+        .map(a => [a.slackId ?? a.email?.toLowerCase() ?? a.name, a])).values()]
+      : [];
+    // A named external or multiple distinct attendees cannot become the first
+    // internal directory result. Leave the action as text for owner correction.
+    if (!assigneeText || attendeeMatches.length > 1 || attendeeMatches.some(a => !a.internal)) {
+      updatedItems.push(item);
       continue;
     }
-
-    // 2) Try Slack workspace lookup via Connection
+    // Attendee IDs are also model-editable derived fields. Resolve from the
+    // current label at the directory, never a stale attendee ID in the draft.
     try {
       const candidates = slackConn
         ? await slackConn.findUserByName(item.assignee_text)
         : [];
-      const internalCandidate = candidates.find(c => isInternalEmail(c.email, profile));
+      // Connection lookup already matches all directory aliases before its
+      // canonical-name projection; re-filtering here loses valid alias hits.
+      const genuine = [...new Map(candidates.map(c => [c.id, c])).values()];
+      const internalCandidate = genuine.length === 1 && isInternalEmail(genuine[0].email, profile)
+        ? genuine[0] : undefined;
       if (internalCandidate) {
         updatedItems.push({
           ...item,
           assignee_slack_id: internalCandidate.id,
-          assignee_name: internalCandidate.name,
-          assignee_internal: true,
         });
         continue;
       }
@@ -645,10 +647,7 @@ async function resolveActionItemAssignees(
     }
 
     // 3) Leave unresolved — external or unknown
-    updatedItems.push({
-      ...item,
-      assignee_internal: false,
-    });
+    updatedItems.push(item);
   }
 
   return { ...draft, action_items: updatedItems };
@@ -659,7 +658,7 @@ async function resolveActionItemAssignees(
 export class SummarySkill implements Skill {
   id = 'summary' as const;
   name = 'Summary';
-  description = 'Drafts meeting summaries from transcripts, iterates with the owner, distributes to recipients, and creates follow-up tasks for action items.';
+  description = 'Drafts meeting summaries from transcripts, iterates with the owner, and distributes them with action items to named recipients.';
 
   getTools(_profile: UserProfile): Anthropic.Tool[] {
     return [
@@ -713,14 +712,13 @@ The instruction is your interpretation of what the owner asked for. Be specific 
       },
       {
         name: 'share_summary',
-        description: `Stage 3 — distribute the final summary. Sends to each named recipient and creates summary_action_followup tasks for action items with deadlines.
+        description: `Stage 3 — distribute the final summary to each named recipient.
 
 Recipients are explicit and named — never inferred. The owner says "send to Brett and Moshe" → call with two user recipients. "Post in #leadership" → channel recipient. "Group DM with Brett, Moshe, and Sarah" → mpim recipient.
 
 External attendees are excluded from the default-allowed set in v1.7.2 (they're not in Slack). To include an external in distribution, the owner must explicitly name them — and they'd need a Slack account to receive it (rare). For external sharing via email, the email Connection (planned) will handle it.
 
-Action items WITH deadlines and a resolvable internal Slack ID → create a summary_action_followup task starting at 2pm in the assignee's dated timezone on the deadline date, deferred to their next working time if needed.
-Action items WITHOUT deadlines or with external/unmatched assignees → stay as text in the shared summary; no task.`,
+Action items and deadlines remain content in the shared summary. Sharing does not schedule reminders or follow-ups.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -919,8 +917,7 @@ ${ownerMessage}
         const instruction = String(args.instruction ?? '').trim();
         if (!instruction) return { ok: false, reason: 'missing_instruction' };
 
-        const currentType = inferSummaryType(draft.subject);
-        const styleBlock = summaryStylePromptBlock(ownerUserId, currentType);
+        const styleBlock = summaryStylePromptBlock(ownerUserId);
         const prompt = `You are revising an in-progress meeting summary based on the owner's instruction. Output the COMPLETE updated summary as STRICT JSON in the same shape — no prose, no markdown, no fences.
 
 INSTRUCTION: ${instruction}
@@ -947,7 +944,8 @@ Output the full updated draft JSON.`;
           });
           const raw = ((resp.content.find(b => b.type === 'text') as Anthropic.TextBlock | undefined)?.text ?? '').trim();
           const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-          const parsed = JSON.parse(cleaned) as Partial<SummaryDraft>;
+          const parsed: unknown = JSON.parse(cleaned);
+          validateDraftResponse(parsed);
           const updated: SummaryDraft = {
             subject: String(parsed.subject ?? draft.subject),
             main_topic: String(parsed.main_topic ?? draft.main_topic),
@@ -1027,6 +1025,7 @@ Output the full updated draft JSON.`;
         // (user/channel/mpim); when email lands as a recipient type, this
         // loop will route externals through the EmailConnection instead.
         const slackConn = getConnection(ownerUserId, 'slack');
+        if (!slackConn) return { ok: false, reason: 'slack_connection_unregistered' };
 
         // Resolve recipients to concrete IDs
         const resolved: Array<{ type: 'user' | 'channel' | 'mpim'; id: string; name: string; ids?: string[] }> = [];
@@ -1038,27 +1037,25 @@ Output the full updated draft JSON.`;
               resolved.push({ type: 'user', id: r.id_or_name, name: r.display_name ?? r.id_or_name });
               continue;
             }
-            const matches = slackConn
-              ? await slackConn.findUserByName(r.id_or_name)
-              : [];
-            const first = matches.find(m => isInternalEmail(m.email, profile)) ?? matches[0];
+            const matches = await slackConn.findUserByName(r.id_or_name);
+            const genuine = [...new Map(matches.map(m => [m.id, m])).values()];
+            const first = genuine.length === 1 ? genuine[0] : undefined;
             if (first) {
               resolved.push({ type: 'user', id: first.id, name: first.name });
             } else {
-              refused.push({ original: r.id_or_name, reason: 'user not found in workspace' });
+              refused.push({ original: r.id_or_name, reason: genuine.length > 1 ? 'ambiguous user — specify a Slack ID' : 'user not found in workspace' });
             }
           } else if (r.type === 'channel') {
             if (/^C[A-Z0-9]+$/.test(r.id_or_name)) {
               resolved.push({ type: 'channel', id: r.id_or_name, name: r.display_name ?? r.id_or_name });
               continue;
             }
-            const matches = slackConn
-              ? await slackConn.findChannelByName(r.id_or_name)
-              : [];
-            if (matches.length > 0) {
+            const matches = [...new Map((await slackConn.findChannelByName(r.id_or_name))
+              .map(m => [m.id, m])).values()];
+            if (matches.length === 1) {
               resolved.push({ type: 'channel', id: matches[0].id, name: `#${matches[0].name}` });
             } else {
-              refused.push({ original: r.id_or_name, reason: 'channel not found' });
+              refused.push({ original: r.id_or_name, reason: matches.length > 1 ? 'ambiguous channel — specify a channel ID' : 'channel not found' });
             }
           } else if (r.type === 'mpim') {
             // Expect comma-separated slack IDs in id_or_name
@@ -1086,10 +1083,6 @@ Output the full updated draft JSON.`;
         const sentTo: Array<{ type: 'user' | 'channel' | 'mpim'; id: string; name: string }> = [];
         const sendFailures: Array<{ name: string; reason: string }> = [];
         for (const r of resolved) {
-          if (!slackConn) {
-            sendFailures.push({ name: r.name, reason: 'slack_connection_unregistered' });
-            continue;
-          }
           let outcome;
           if (r.type === 'user') outcome = await slackConn.sendDirect(r.id, shareText);
           else if (r.type === 'channel') outcome = await slackConn.postToChannel(r.id, shareText);
@@ -1102,65 +1095,10 @@ Output the full updated draft JSON.`;
           }
         }
 
-        // Create summary_action_followup tasks for items WITH deadlines AND resolved internal Slack IDs
-        const followupTasksCreated: Array<{ task_id: string; target: string; description: string; due_at: string }> = [];
-        const followupSkipped: Array<{ description: string; reason: string }> = [];
-        for (const item of draft.action_items) {
-          if (!item.deadline_iso) {
-            followupSkipped.push({ description: item.description, reason: 'no_deadline' });
-            continue;
-          }
-          if (!item.assignee_slack_id || !item.assignee_internal) {
-            followupSkipped.push({ description: item.description, reason: 'assignee_external_or_unmatched' });
-            continue;
-          }
-          // Skip if assignee IS the owner — Maelle DMing the owner about his own commitment is weird
-          if (item.assignee_slack_id === ownerUserId) {
-            followupSkipped.push({ description: item.description, reason: 'assignee_is_owner' });
-            continue;
-          }
-
-          // Compute fire time = 2pm in target's timezone on the deadline date
-          // Falls back to owner timezone if target's tz unknown
-          const targetPersonRaw = item.assignee_slack_id;
-          const dueAtForFire = computeFireTime({
-            deadlineIso: item.deadline_iso,
-            targetSlackId: targetPersonRaw,
-            ownerTimezone: profile.user.timezone,
-          });
-          if (!dueAtForFire) {
-            followupSkipped.push({ description: item.description, reason: 'invalid_deadline' });
-            continue;
-          }
-
-          const taskId = createTask({
-            owner_user_id: ownerUserId,
-            owner_channel: channelId,
-            owner_thread_ts: threadTs,
-            type: 'summary_action_followup',
-            status: 'new',
-            title: `Check in with ${item.assignee_name ?? item.assignee_text} — ${item.description.slice(0, 60)}`,
-            due_at: dueAtForFire.iso,
-            skill_ref: String(session.id),
-            context: JSON.stringify({
-              summary_session_id: session.id,
-              target_slack_id: item.assignee_slack_id,
-              target_name: item.assignee_name ?? item.assignee_text,
-              action_description: item.description,
-              meeting_subject: draft.subject,
-            }),
-            who_requested: ownerUserId,
-            target_slack_id: item.assignee_slack_id,
-            target_name: item.assignee_name ?? item.assignee_text,
-            skill_origin: 'summary',
-            created_context: 'dm',
-          });
-          followupTasksCreated.push({
-            task_id: taskId,
-            target: item.assignee_name ?? item.assignee_text,
-            description: item.description,
-            due_at: dueAtForFire.iso,
-          });
+        // Nothing was attempted: keep the editable draft. Unknown or partial
+        // delivery must not enter this safely-retryable branch.
+        if (sentTo.length === 0 && sendFailures.every(f => f.reason === 'not_attempted')) {
+          return { ok: false, reason: 'summary_not_sent', sent_to: sentTo, refused, send_failures: sendFailures };
         }
 
         // Mark session as shared (clears current_draft per persistence rule)
@@ -1171,7 +1109,6 @@ Output the full updated draft JSON.`;
           summarySessionId: session.id,
           subject: draft.subject,
           recipientCount: sentTo.length,
-          taskCount: followupTasksCreated.length,
           refused: refused.length,
           sendFailures: sendFailures.length,
           skill_origin: 'summary',
@@ -1180,11 +1117,9 @@ Output the full updated draft JSON.`;
         return {
           ok: true,
           sent_to: sentTo,
-          tasks_created: followupTasksCreated,
-          tasks_skipped: followupSkipped,
           refused,
           send_failures: sendFailures,
-          _must_reply_with: 'Reply to the owner with a short confirmation: who got it (names from sent_to), how many follow-up tasks were created (and to whom), and any refusals/failures. Be human and brief — one or two sentences. Do NOT end this turn without writing this confirmation.',
+          _must_reply_with: 'Reply to the owner with a short confirmation: who got it (names from sent_to) and any refusals/failures. Be human and brief — one or two sentences. Do NOT end this turn without writing this confirmation.',
         };
       }
 
@@ -1217,10 +1152,7 @@ STAGE 3 — Sharing:
   - "Post in #leadership" → type=channel recipient
   - "DM the three of us — me, Brett, Sarah" → type=mpim with comma-joined slack IDs
 - External attendees (not in our Slack workspace) CANNOT receive the summary — there's no Slack account to send to. Email distribution is planned but not yet built. If the owner asks to share with an external person, say so plainly: "I can't DM John from CompanyX yet — he's not in our Slack. We're adding email distribution; for now you'd need to forward it yourself."
-- Action items in the summary:
-  - With a deadline + internal Slack assignee → I'll DM that person at 2pm their local time on the deadline to check status; their reply comes back to you.
-  - Without a deadline OR external/unmatched assignee → stays as text in the shared summary, no task.
-  - Don't promise specific follow-up timing for items I won't actually track.
+- Action items and deadlines stay in the shared summary as content. Sharing does not schedule reminders or follow-ups.
 
 UNRESOLVED SPEAKERS:
 - The draft may have "Speaker 2" / "Speaker 4" placeholders if the transcript didn't name them. Call list_speaker_unknowns if ${ownerFirst} asks who's still unnamed. Treat naming corrections from him as DRAFT_EDIT.
@@ -1237,31 +1169,6 @@ WHAT GETS PERSISTED:
 }
 
 // ── Helpers (private) ───────────────────────────────────────────────────────
-
-function computeFireTime(params: {
-  deadlineIso: string;
-  targetSlackId: string;
-  ownerTimezone: string;
-}): { iso: string; usedTimezone: string } | null {
-  const { getPersonMemory } = require('../db') as typeof import('../db');
-  const ownerDate = DateTime.fromISO(params.deadlineIso, { zone: params.ownerTimezone });
-  if (!ownerDate.isValid) return null;
-  const person = getPersonMemory(params.targetSlackId);
-  const entry = loadAttendeeAvailabilityForPerson(person ?? undefined, params.ownerTimezone);
-  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(params.deadlineIso);
-  const tz = entry ? attendeeTzForDay(entry, hasOffset ? ownerDate.toISO()! : params.deadlineIso.slice(0, 10)) : params.ownerTimezone;
-  // A bare deadline is a calendar date in the assignee's frame; an explicit
-  // offset is an instant whose date is rendered there. Neither uses host TZ.
-  const datePart = DateTime.fromISO(params.deadlineIso, { zone: tz }).toISODate();
-  const fireAtLocal = DateTime.fromISO(`${datePart}T14:00:00`, { zone: tz });
-  if (!fireAtLocal.isValid) return null;
-  return {
-    iso: colleagueWorkTimeBaseFromNow(tz, fireAtLocal.toMillis(), {
-      slackId: params.targetSlackId, ownerTimezone: params.ownerTimezone,
-    }),
-    usedTimezone: tz,
-  };
-}
 
 // ── Public helpers used by the Slack file_share branch ──────────────────────
 

@@ -6,7 +6,7 @@ const ts = require('typescript'), Database = require('better-sqlite3');
 const root = path.resolve(__dirname, '..');
 const sourceRoot = process.env.HOLD_EXPIRY_SOURCE_ROOT || root;
 const profile = { user: { slack_user_id: 'UOWNER', timezone: 'UTC' } };
-const actual = new Set(['src/core/background.ts', 'src/db/slotHolds.ts', 'src/connections/slack/messaging.ts', 'src/connections/slack/eligibility.ts', 'src/connectors/slack/threadHistory.ts']);
+const actual = new Set(['src/core/background.ts', 'src/db/slotHolds.ts', 'src/connections/slack/messaging.ts', 'src/connections/slack/eligibility.ts', 'src/connectors/slack/threadHistory.ts', 'src/memory/resolveAttendeeEmails.ts']);
 function harness(t, options = {}) {
   const sqlite = new Database(':memory:');
   t.after(() => sqlite.close());

@@ -25,7 +25,7 @@ model: sonnet
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
 ## First — orient (every dispatch)
-Follow `.claude/WORKSHOP.md`'s **First — orient** section every dispatch — it is not restated here. **Your slice of `project_architecture.md`:** the "Directory layout" section — 12 real directories under `src/`, sorted into a core/skills/connections-and-connectors/utils mental grouping that the doc itself warns not to take as literal. You span many subsystems, so read the specific one's code deeply before you fix.
+Follow `.claude/WORKSHOP.md`'s **Who you are, and how to orient** section every dispatch — it is not restated here. **Your slice of `project_architecture.md`:** the "Directory layout" section — 12 real directories under `src/`, sorted into a core/skills/connections-and-connectors/utils mental grouping that the doc itself warns not to take as literal. You span many subsystems, so read the specific one's code deeply before you fix.
 
 ---
 
@@ -95,7 +95,7 @@ This is what "she runs in the cloud" actually means day to day — every piece e
 1. **Locate the subsystem** from the architecture map + `git grep` — where does this bug actually live? Confirm it's not a specialist's lane (if it is → `needs-dependency`).
 2. **Reproduce from code + logs** (`powershell -File scripts/vm-logs.ps1 [term] [lines]` — W2; the local `logs/` dir is stale); state the root as `file:line — what happens`.
 3. **Fix at the chokepoint**, deep not patch; remove any rotting prior layer.
-4. **Paper-trace to 100%** (W8), then report per the return contract.
+4. **Verify under W8 and the Workshop evidence contract**, then report per the return contract.
 
 ## Verdicts
 

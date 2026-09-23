@@ -196,6 +196,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // configured aliases). See runEmailLegGates' own doc comment for what runs
   // and, as importantly, what does NOT.
   if (ctx.transport === 'email') {
+    logger.info('Output gate policy', {
+      senderId, channelId, threadTs: ctx.threadTs, transport: 'email',
+      ownerIsActing: true, colleagueReadable: true, audience: 'external',
+    });
     return runEmailLegGates(ctx, cleanReply);
   }
 
@@ -261,6 +265,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
   // identical across the two frames, so on a group reply the 'owner' frame could
   // only ever rewrite correct text — a G5 corruption, not a safe miss.
   const audience: HumanGateAudience = colleagueReadable ? 'internal' : 'owner';
+  logger.info('Output gate policy', {
+    senderId, channelId, threadTs: ctx.threadTs, transport: 'slack',
+    ownerIsActing, colleagueReadable, audience,
+  });
 
   // ── The availability floor — BOTH legs, before every rewriter ─────────────
   // A time the rule-aware check ESTABLISHED as unavailable may not be described as
@@ -634,10 +642,10 @@ export async function runOutputGates(draft: string, ctx: OutputGateContext): Pro
       // v2.9 — Slack-side colleagues are same-domain by definition (workspace
       // membership), so `audience` resolves to 'internal' here. When
       // EmailConnection lands, its sendReply path will pass 'external' for
-      // off-domain recipients. `aiDisclosureCleared` is the ONLY path that may
-      // pass true — see runHumanGate's own doc comment for why every other
-      // caller in this file stays at the false default.
-      const verdict = await runHumanGate(cleanReply, profile, audience, channelId, aiDisclosureCleared);
+      // off-domain recipients. Recent questions also let this existing check
+      // judge honest identity answers outside securityGate's English prefilter.
+      // Owner-private/email/coda callers supply no identity-question context.
+      const verdict = await runHumanGate(cleanReply, profile, audience, channelId, aiDisclosureCleared, false, aiIdentityContextMessages);
       if (!verdict.ok && verdict.rewrite && verdict.rewrite.trim().length > 0) {
         cleanReply = formatForSlack(verdict.rewrite);
       }
@@ -883,7 +891,7 @@ export async function runCodaGates(
     // Fail-closed on role, same convention as the reply stack: anything that is
     // not the authenticated owner gets the colleague-strict frame.
     const audience: HumanGateAudience = ctx.role === 'owner' ? 'owner' : 'internal';
-    const verdict = await runHumanGate(text, ctx.profile, audience);
+    const verdict = await runHumanGate(text, ctx.profile, audience, undefined, false, true);
     // verdict.rewrite is deliberately IGNORED. A fact-preserving rewrite is the
     // right remedy for a reply that must land; for an optional social line the
     // rewrite is pure downside — it can only produce a stranger second message

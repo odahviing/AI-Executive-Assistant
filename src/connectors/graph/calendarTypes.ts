@@ -115,7 +115,7 @@ export interface UpdateMeetingParams {
   // the event's attendees array. Caller is responsible for assembling the
   // FINAL list (existing - removed + added) before passing — Graph does not
   // diff. Omit entirely to leave attendees untouched.
-  attendees?: Array<{ name?: string; email: string; optional?: boolean }>;
+  attendees?: Array<{ name?: string; email: string; optional?: boolean; resource?: boolean }>;
 }
 
 export type VerifyResult =

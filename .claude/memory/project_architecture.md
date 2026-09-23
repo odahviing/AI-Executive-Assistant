@@ -6,7 +6,7 @@ type: project
 
 **Canonical architecture memory:** maintain architecture facts here; other memory locations link here. Historical copies belong in archives, never a second current authority. Verify relevant code before using dated facts.
 
-Deep architecture reference for Maelle, rewritten 2026-08-03 against the code on disk (current shipped version: the `version` field in `package.json`; `CHANGELOG.md` is the canonical version-by-version history, not duplicated here). The directory/file counts below are historical observations from that rewrite, not current inventory measurements.
+Deep architecture reference for Maelle, originally rewritten 2026-08-03 and reconciled against current source during V5 readiness. The `version` field in `package.json` identifies the checkout version, not proof of deployment; `CHANGELOG.md` is the canonical version-by-version history. Dated counts and line numbers are observations, not current inventory guarantees.
 
 **Reference layers:** `.claude/SESSION_STARTER.md` carries operational orientation and `.claude/ARCHITECTURE_MAP.md` the diagram; this file maps implementation. Lane charters own rules. Paths below identify current implementations, not a guarantee that every caller uses them: verify producers and consumers in the tree before changing a shared behavior.
 
@@ -34,9 +34,9 @@ Treat this as a lens, not a literal directory contract — `config/` (profile lo
    - **Same-turn idempotency**: `message_colleague` twice to the same colleague (line 500-520) and `delete_meeting` twice on the same event id (line 553-574) are both short-circuited with an explicit `_note` so the model narrates honestly instead of claiming a second action.
    - **Reverse-order double-notify guard** (v3.4.7): if `resolve_approval` already relayed an outcome to a requester this turn, a later `message_colleague` to that same person is suppressed (`relayedRequestersThisTurn`, line 527-545).
    - **Colleague rate limiting** (line 577+): `utils/rateLimit.ts` checks `colleague_any_tool` per `userId:threadTs`; over budget → the tool call is deflected with a synthetic "let me check with the owner" result, never a throw.
-   - **Universal tool-call cache** (line 681-730): `utils/toolCallCache.ts` — a write within 60s or a read within 5s of an identical call (same owner+thread+tool+args) returns the cached result instead of re-firing.
+   - **Tool-call cache**: `utils/toolCallCache.ts` — a write within 60s or a read within 5s of an identical call can return the cached result instead of re-firing. The key includes owner/thread/tool/args plus authenticated caller, role, authority, surface, channel and group context. Preference editing bypasses it. This process-local cache does not provide durable write idempotency across restart.
    - **`deferred_action_hint` capture-and-attach**: a meeting tool's `rule_violation` result stashes the hint (line 956-972); a later `create_approval(kind=policy_exception)` this same turn auto-attaches it to the payload (line 624-648) — the "redirect-token" pattern that lets the resolver replay the exact original booking call on owner approve.
-   - **Mutation tape** (`mutationActions`, line 261, pushed at 941) and **coda-pending flag** (`turnLeftWorkPending`, line 256, set at 1036) both feed downstream consumers: the claim-checker's retry hint and the end-of-turn social coda's "is this turn still mid-exchange" check, respectively.
+   - **Mutation tape** (`mutationActions`) and **unresolved work collection** (`pendingTurnWork`) feed outcome checking and end-of-turn coda eligibility. Matching successful retries discharge only their own work; unrelated pending work remains.
    - **`maybeOpenInFlightMeetingRequest`** (line 1047-1060, `core/requests/maybeOpenInFlightMeetingRequest.ts`) — opens a request-spine row when owner-initiated meeting work spills past the current turn (a rule violation, an unresolved pick), purely an orchestrator-level tracking hook, no new tool.
 4. No LLM "recovery pass" exists any more (deleted v2.8.1) — an empty `finalReply` after real tool activity falls through to a deterministic verb-mapped confirmation (`toolCallSummaries`), never a second speculative Sonnet call.
 
@@ -94,16 +94,16 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 
 **Email leg** (`runEmailLegGates`, line 746): claim-check (unconditional — the sender gate upstream already restricts this whole leg to the owner) → `humanGate('external')` → date-verify (mandatory: a forwarded scheduling reply is almost entirely date claims). Deliberately skips the availability floor and the security gate — both assume Slack-specific state that doesn't exist on this leg (documented at line 701-729).
 
-**The gate primitives themselves**, each its own file under `utils/`, dynamically imported so a clean reply never loads them:
+**The gate primitives themselves**, dynamically imported as needed:
 - `claimChecker.ts` — narrow JSON classifier for false action claims ("I sent it" when no tool fired), owner-path only; remedy is a tool-less "own the miss" rewrite, never a re-run of the orchestrator.
 - `dateVerifier.ts` — language-agnostic weekday/date mismatch detection (Haiku extracts pairs, code judges against a 14-day lookup, code performs the literal swap).
 - `humanGate.ts` — voice/persona consistency (no "I have a backend issue" self-as-infrastructure framing, no mechanical refusal phrasing), runs on both owner and colleague drafts.
 - `securityGate.ts` — colleague-facing leak filter (regex triggers + Haiku rewriter) plus the identity-spoof check (is the sender claiming to be someone else).
 - `addresseeGate.ts` — MPIM "is this message even for Maelle" classifier (Haiku), fast-pathed by an explicit @-mention.
-- `imageGuard.ts` — Sonnet image-text injection scanner, owner-only today (log + shadow-notify; documented to flip to refuse-and-notify once colleague image paths open).
+- `imageGuard.ts` — image-text injection scanner used by Slack image ingestion; colleague images with rejected or unavailable safety verdicts are dropped. This is an inbound check, not an output gate.
 - `availabilityPreCheck.ts` / `availabilityGate.ts` — the "don't eyeball free/busy" fix: a colleague-path availability question runs the SAME `checkSlot` rule engine the booking path runs, so a narrated verdict can never disagree with what booking would actually do.
 
-**Everything fails open except the leak gate**, which fails SAFE (substitutes a fixed, undraftable line rather than ship an unvetted colleague-facing reply) — the file's own header states this is deliberate and names the one place a throw used to silently eat a colleague's entire reply (fixed in v4.2.x).
+**Failure behavior is path-specific.** Ordinary replies preserve the existing owner/colleague fallback distinction in `humanGate`; a fallback that may keep a reply is not a clear check for an optional coda. `runCodaGates` requests an actual clear human verdict and drops flagged, malformed or unavailable results without rewriting. `runOutputGates` logs `Output gate policy` (`ownerIsActing`, `colleagueReadable`, `audience`) for Slack and the fixed email leg before their checks; this is source-level observability, not proof of live logging.
 
 **Tool-level defense in depth**, in `skills/registry.ts`:
 - `COLLEAGUE_ALLOWED_TOOLS` (line 368-450) — the positive allowlist a colleague-path Sonnet ever sees.
@@ -140,7 +140,7 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 
 ## Transport layer — `connections/` (outbound) + `connectors/` (inbound)
 
-**`connections/types.ts`** defines the `Connection` interface (line 120) every transport implements: `sendDirect`, `sendBroadcast`, `sendGroupConversation`, `postToChannel`, `findUserByName`, `findChannelByName`, plus optional `collectCoreInfo`, `getTools`/`executeToolCall` (transport-owned tools), `reactToMessage`, `updateMessage`/`deleteMessage`, `resolveDirectChannelId`/`resolveChannelCounterpart`. `SendResult` (line 35-37) is the uniform outcome shape every transport returns. Skills import ONLY from here and from `connections/registry.ts` — never from `connectors/*`.
+**`connections/types.ts`** defines the `Connection` interface every transport implements: `sendDirect`, `sendBroadcast`, `sendGroupConversation`, `postToChannel`, `findUserByName`, `findChannelByName`, plus optional transport capabilities. `SendResult` is the shared delivery-result shape. Skills send messages through this interface and `connections/registry.ts`, never directly through `connectors/slack/*`; calendar and other service adapters remain separate imports.
 
 **`connections/registry.ts`** — a per-profile `Map<ConnectionId, Connection>` (line 16); `registerConnection` / `getConnection` / `listConnections`. There is **no `connections/router.ts`** in the current tree (zero hits — confirmed removed) — routing "which transport does a reply go out on" is handled by callers passing the turn's `inboundConnectionId` through and calling `getConnection(profileId, channel)` directly, not by a separate policy-routing file.
 
@@ -149,11 +149,13 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 - Outbound: `connections/slack/index.ts` (`SlackConnection`) + `connections/slack/messaging.ts` (raw primitives).
 - Delivery pipeline: `connectors/slack/postReply.ts` (normalize → gate stack → send → persist history once).
 - Supporting: `inboundQueue.ts` (debounce + abort-if-safe), `processedDedup.ts`, `socketWatermark.ts` (recovery watermark), `coordinator.ts` (outreach reply classification — despite the filename, this is the outreach-reply handler, not the deleted meeting-coordination subsystem).
+- Voice transcription (`src/voice/index.ts`) has one owner-approved 180-second total invocation budget across download headers/body, conversion and Whisper headers/body. Expiry aborts I/O and kills ffmpeg; completion waits for child close before scratch cleanup, so 180 seconds is the cancellation deadline rather than a guarantee that all cleanup is finished then. No paid retry or original-format fallback follows cancellation. Existing handler failure notices and ten-minute handled-message dedup remain. Fresh audio messages can retry; invisible accepted outbound audio may still replay after restart or dedup expiry because no durable receipt was added.
 
 **Email** (v4.3.0+, live but narrow):
 - Inbound: `connectors/graph/mailPoll.ts` (the poller — delta/isRead dedup, loop-guard against Maelle's own outgoing mail) hands surviving messages to `connectors/email/inbound.ts` (`registerMailInbound`), which owns the sender-authorization gate (owner + configured aliases only), forwarded-header participant extraction (`extractParticipants.ts`), HTML→text (`htmlToText.ts`), and the orchestrator call.
 - Outbound: `connections/email/index.ts` (`createEmailConnection`) — a **one-address transport by construction**: `sendDirect` hard-caps every reachable field (`recipientRef`, `cc`, `bcc`) against `ownerEmailAddresses(profile)` (line 88-96) and REPLIES ONLY (`opts.replyToMessageId` required, no fresh-compose path — line 97-107), using Graph's native reply action (`connectors/graph/mail.ts:replyToMail`) with the validated address PATCHed onto `to` explicitly rather than trusted from Graph's own Reply-To inference (a real gap closed 2026-07-29, documented in the file's own header).
 - Gated by `CHANNEL_TOOL_CLAMP.email` in `skills/registry.ts` (see Security posture above) and by the dedicated `runEmailLegGates` output leg.
+- **Limits retained by owner decision:** From/alias admission is not provider-backed authentication; the existing provider contract did not establish a reliable simple sender-auth repair. Unknown send plus failed read marking and delta reset after restart can replay. Additional durable per-message email receipts were declined. Current bounded history and delta handling do not imply exactly-once delivery or external-reader context minimization.
 
 **WhatsApp** (`connectors/whatsapp.ts`) — **dormant, not removed.** Its own header (line 1-27) states Steps 1-2 are built and wired: `src/index.ts` calls `startWhatsApp(profile)` at boot for every profile, but it is a no-op — byte-identical to Slack-only — unless that profile's YAML sets `user.whatsapp_phone`. No profile in this deployment sets it today. Inbound is owner-phone-only; anyone else is silently dropped before any content work. There is no `WhatsAppConnection` implementing the outbound `Connection` interface yet (Steps 3-6 of `.claude/WHATSAPP_PROJECT.md` are unbuilt) — this matches `ARCHITECTURE_MAP.md`'s "Dormant" classification.
 
@@ -171,9 +173,17 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 
 ## Task pipeline
 
-`src/tasks/runner.ts::runDueTasks` sweeps request timers first, then due `tasks` rows through `src/tasks/dispatchers/index.ts` (`routine`, `calendar_fix`, `summary_action_followup`). `src/tasks/routineMaterializer.ts` materializes recurring work; dispatchers own task terminal states. Reminders/follow-ups/research execute through the requests spine while linked task rows supply owner-visible tracking. The stores coexist; neither is a universal lifecycle authority.
+`src/tasks/runner.ts::runDueTasks` sweeps request timers first, then due `tasks` rows through `src/tasks/dispatchers/index.ts` (`routine`, `calendar_fix`). `src/tasks/routineMaterializer.ts` materializes recurring work; dispatchers own task terminal states. Reminders/follow-ups/research execute through the requests spine. The stores coexist; neither is a universal lifecycle authority.
+
+**Meeting summaries:** `src/skills/summary.ts` and `src/db/summarySessions.ts` retain transcript ingestion, classification, drafting, editing and sharing, with action items as content. Automatic action-item followup scheduling and its dispatcher are removed by the owner's 2026-09-23 ruling. Startup cancels only exact `summary_action_followup` rows in `new`, `scheduled`, `in_progress`, `pending_owner` or `pending_colleague` state for that owner. It preserves terminal history and generic outreach, whose existing rows do not reliably identify summary origin; uncertain sends are not replayed. No live database cleanup is established by these source changes.
 
 `src/core/background.ts::startBackgroundTimer` drives `materializeRoutineTasks → runDueTasks → processSlotHoldsIfDue` on the guarded five-minute pipeline, plus capture and slot-hold retention. Requests are not pruned by age. Startup recovers interrupted routine tasks; the separate ten-minute catch-up loop handles missed messages. Verify these background/restart consumers alongside interactive entry points.
+
+## Prompt and operational boundaries
+
+`systemPrompt.ts` returns static and dynamic blocks. The current `LANGUAGE — CURRENT TURN WINS` and `HEBREW GENDERED FORMS` guidance remains in `staticContent`, contrary to I8/I9's intended dynamic placement; that deviation is not a policy relaxation. The later NON-LATIN block no longer overrides the common title-translation and brand rules. Coda composition receives authoritative recipient gender through the existing call; structural captures prove inputs, not model obedience.
+
+`scripts/deploy-watcher.mjs::appliedRevision` reads the online PM2 process's existing `GIT_SHA`; checkout HEAD alone no longer establishes deployment completion. Missing identity triggers rebuild, and install/build/restart failures retry on subsequent ticks; restart supplies `GIT_SHA` and `APP_VERSION`. Build and dependencies remain in-place, so partial output after interruption has no atomic rollback guarantee. `src/db/client.ts::getDb` clears and closes a connection after initialization failure so a later caller can retry. These describe current source; the observed running baseline for this readiness run remains 4.9.14 / ea5e69c until a separate authorized release.
 
 ---
 

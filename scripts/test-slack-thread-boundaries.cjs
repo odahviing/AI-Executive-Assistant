@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),sourceRoot=process.env.SLACK_BOUNDARY_SO
 const plain=x=>JSON.parse(JSON.stringify(x)),flush=()=>new Promise(r=>setImmediate(r));
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject};};
 const profile={user:{slack_user_id:'UOWNER',name:'Owner',timezone:'UTC'},assistant:{name:'Maelle',slack:{bot_token:'fixture'}},skills:{},advanced:{}};
-const actual=new Set(['src/connectors/slack/app/handlers.ts','src/connectors/slack/app/processMessage.ts','src/connectors/slack/inboundQueue.ts','src/connectors/slack/processedDedup.ts','src/connectors/slack/inboundReplayRegistry.ts','src/connectors/slack/threadHistory.ts','src/connections/slack/messaging.ts','src/connections/slack/eligibility.ts','src/core/background.ts','src/utils/threadBoundApprovalAutoResolve.ts']);
+const actual=new Set(['src/connectors/slack/app/handlers.ts','src/connectors/slack/app/processMessage.ts','src/connectors/slack/inboundQueue.ts','src/connectors/slack/processedDedup.ts','src/connectors/slack/inboundReplayRegistry.ts','src/connectors/slack/threadHistory.ts','src/connections/slack/messaging.ts','src/connections/slack/eligibility.ts','src/core/background.ts','src/utils/threadBoundApprovalAutoResolve.ts','src/memory/resolveAttendeeEmails.ts']);
 const compiled=new Map();
 function harness(options={}){
  const jobs=[],timers=[],unexpected=[],runs=[],posts=[],received=[],calls=[],classifications=[],events={},db=new Map(),logs=[],released=[],resolutions=[];let classifierCalls=0;
@@ -44,7 +44,7 @@ function harness(options={}){
   'src/core/orchestrator.ts':{runOrchestrator:async p=>{runs.push(p);return options.orchestrator?options.orchestrator(p,runs.length):{reply:'Completed action',toolSummaries:['mutated=calendar']};}},
   // Delivery/model behavior is separate from queue ownership. Preserve actual
   // postReply's confirmed history + commit contract for processor integration.
-  'src/connectors/slack/postReply.ts':{postOrchestratorReply:async p=>{if(options.deliveryPause)await options.deliveryPause.promise;p.onBeforeDelivery?.();await p.say({text:p.result.reply,thread_ts:p.threadTs});p.onDelivered();append(p.threadTs,p.channelId,{role:'assistant',content:'mutated=calendar '+p.result.reply,ts:'500.000001'});}}
+  'src/connectors/slack/postReply.ts':{postOrchestratorReply:async p=>{if(options.postReply)return options.postReply(p);if(options.deliveryPause)await options.deliveryPause.promise;p.onBeforeDelivery?.();await p.say({text:p.result.reply,thread_ts:p.threadTs});p.onDelivered();append(p.threadTs,p.channelId,{role:'assistant',content:'mutated=calendar '+p.result.reply,ts:'500.000001'});}}
  };
  const modules=new Map();
  function load(rel){
@@ -71,6 +71,8 @@ function harness(options={}){
  return {load,ctx,client,app,db,append,turn,event,handlers,drain,fire,runs,posts,received,calls,classifications,events,checkOpts,timers,unexpected,channels,logs,released,resolutions};
 }
 
+module.exports={harness};
+if(require.main===module){
 for(const [kind,channel] of [['app_mention','CSHARED'],['message','GSHARED'],['dm','DEXTERNAL']])test(`S1 rejects external ${kind}`,async()=>{const h=harness();await h.event(kind,{channel,user:channel==='DEXTERNAL'?'UEXTERNAL':'UOWNER'});assert.equal(h.received.length,0);assert.equal(h.posts.length,0);});
 for(const option of ['infoFails','userFails','authFails'])test(`S1 ${option} withholds inbound`,async()=>{const h=harness({[option]:true});await h.event('app_mention');assert.equal(h.received.length,0);});
 for(const [kind,channel,user] of [['dm','DOWNER','UOWNER'],['dm','DCOLLEAGUE','UCOLLEAGUE'],['message','GROOM','UCOLLEAGUE'],['message','CMODERN','UOWNER'],['app_mention','CROOM','UOWNER']])test(`control internal ${kind} ${channel}`,async()=>{const h=harness();await h.event(kind,{channel,user});assert.equal(h.received.length,1);});
@@ -123,3 +125,4 @@ test('S7 integrated queue plus actual approval classifier cannot resolve a super
 test('S7 integrated approval write start prevents abort while resolver awaits',async()=>{const pause=deferred();const h=harness({autoResolve:true,resolvePause:pause});await h.turn({text:'Approve'});await h.fire();assert.equal(h.resolutions.length,1);await h.turn({text:'Next question',ts:'102.000001'});assert.equal(h.resolutions.length,1);assert.ok(h.logs.some(l=>String(l[1]).includes('buffering message')));assert.equal(h.logs.some(l=>String(l[1]).includes('aborting in-flight')),false);pause.resolve();await flush();await flush();await h.fire();assert.equal(h.resolutions.length,1);assert.equal(h.runs.length,1);assert.equal(h.runs[0].userMessage,'Next question');});
 test('control own bot reply prevents channel recovery duplicate',async()=>{const h=harness({replies:()=>({ok:true,messages:[{user:'UOWNER',ts:'100.000001',text:'<@UBOT> help'},{user:'UBOT',bot_id:'B',ts:'101.000001',text:'Answered'}]})});assert.equal(await h.load('src/core/background.ts').boundaryProbe.findUnansweredMentionInThread(h.checkOpts,'100.000001','channel'),null);});
 test('S8 another bot does not answer a DM on Maelle behalf',async()=>{const h=harness({replies:()=>({ok:true,messages:[{user:'UOWNER',ts:'100.000001',text:'help'},{user:'UOTHERBOT',bot_id:'BOTHER',ts:'101.000001',text:'Unrelated automation'}]})});assert.ok(await h.load('src/core/background.ts').boundaryProbe.findUnansweredInThread(h.checkOpts,'100.000001'));});
+}

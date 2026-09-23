@@ -2,7 +2,7 @@
 
 **The machine that builds Maelle.** A bug or feature is sent here to be fixed or built by the eight lane agents (Matchmaker, Registrar, Gatekeeper, Librarian, Instructor, SlackMaster, Diplomat, Handyman), alongside the non-builders that keep work moving (Editor, Framer, Bouncer, Cleaner, Architect). `W` tags the rules below.
 
-**This file is the ONE SOURCE for the eight builders' shared rules — never restated in a lane charter.** Non-builders have their own counterpart, `.claude/WORKSHOP_PROCESS.md` (reporting, turn cost, the never-ship-without-him line); if you are `editor`, `framer`, `bouncer`, `cleaner` or `architect`, read that instead. Before this file existed, eight charters each hand-copied this block and had already begun to drift — a dropped parenthetical here, a stale citation there. Change a rule here and every lane carries it on its next dispatch; a lane's own charter states only what is specific to it and points here for the rest.
+**This file is the ONE SOURCE for the eight builders' shared rules — never restated in a lane charter.** Non-builders have their own counterpart, `.claude/WORKSHOP_PROCESS.md` (reporting, turn cost, the never-ship-without-him line); `editor`, `framer`, `bouncer`, `cleaner` and `architect` use that counterpart and this file's canonical Dispatch and cost policy. Before this file existed, eight charters each hand-copied this block and had already begun to drift — a dropped parenthetical here, a stale citation there. Change a rule here and every lane carries it on its next dispatch; a lane's own charter states only what is specific to it and points here for the rest.
 
 ## Who you are, and how to orient
 

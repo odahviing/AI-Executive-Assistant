@@ -1726,7 +1726,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
         // v2.8.2 — for office-day internal ≥4, planMeeting flagged addRoomEmail.
         // Add profile.meetings.room_email as an OPTIONAL attendee on the create
         // call. Room mailbox auto-accepts the slot when free.
-        if (planAddRoomEmail && context.profile.meetings.room_email) {
+          if (planAddRoomEmail && context.profile.meetings.room_email) {
           const roomEmail = context.profile.meetings.room_email.toLowerCase();
           const already = attendees.some(a => (a.email ?? '').toLowerCase() === roomEmail);
           if (!already) {
@@ -1734,9 +1734,17 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               email: context.profile.meetings.room_email,
               name: planLocation,           // "Meeting Room"
               optional: true,
-            } as typeof attendees[number]);
+              } as typeof attendees[number]);
+            }
+          } else if (plan.addRoomEmail === false && context.profile.meetings.room_email) {
+            // The busy-room verdict also owns a room pre-added by the caller.
+            // Retaining it would invite the unavailable room after choosing
+            // the fallback venue or promising to book without that resource.
+            const roomEmail = context.profile.meetings.room_email.toLowerCase().trim();
+            for (let index = attendees.length - 1; index >= 0; index--) {
+              if (attendees[index].email?.toLowerCase().trim() === roomEmail) attendees.splice(index, 1);
+            }
           }
-        }
 
         // #30 — hold-conflict gate. Never book over a slot tentatively held for
         // SOMEONE ELSE. Owner → confirm once ("X reserved that — book anyway?"),
@@ -2210,8 +2218,9 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               const { isCompanyLocation } = require('../../../../db/venues') as typeof import('../../../../db/venues');
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { saveOrBumpVenueOnBook } = require('../../../venue') as typeof import('../../../venue');
+              const { isPhoneLocationString } = require('../../../../utils/resolveLocation') as typeof import('../../../../utils/resolveLocation');
               const officeLoc = context.profile.meetings.office_location ?? {};
-              if (!isCompanyLocation(planLocation, officeLoc)) {
+              if (!isPhoneLocationString(planLocation) && !isCompanyLocation(planLocation, officeLoc)) {
                 saveOrBumpVenueOnBook({
                   ownerUserId: context.profile.user.slack_user_id,
                   name: planLocation,

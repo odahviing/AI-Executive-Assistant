@@ -2,8 +2,7 @@
  * The engine-internal task table. NOT the work-item spine — everything an owner
  * or a colleague is actually waiting on lives in `requests` (one state machine,
  * one timer via next_check_handler, one closure). What is left here is the set of
- * background jobs that fire on their own due_at and answer to nobody: routines,
- * calendar re-checks, summary action follow-ups, the social maintenance passes.
+ * background jobs that fire on their own due_at: routines and calendar re-checks.
  *
  * A type belongs in this union ONLY if something creates rows of it AND
  * `dispatchers/index.ts` has an entry to execute it. A type with no dispatcher is
@@ -33,11 +32,7 @@ export type TaskType =
   // outreach send/expiry/decision, coord nudge/abandon, approval expiry/reminder.
   // The legacy task-type dispatchers for these were deleted; the values are
   // gone so nothing can re-create a parallel timer.
-  | 'calendar_fix'       // re-check a calendar issue marked to_resolve
-  // v1.7.2 — Summary skill action-item follow-ups. At due_at the dispatcher
-  // DMs the assignee asking for a status update; the reply flows back to the
-  // owner via the existing outreach reply pipeline.
-  | 'summary_action_followup';
+  | 'calendar_fix';      // re-check a calendar issue marked to_resolve
   // gh#198 (2026-08-15) — 'social_decay' (the weekly per-subject decay pass)
   // and 'social_ping_rank_check' (RETIRED v3.2.6, a no-op drain) are both
   // REMOVED. Subjects no longer carry a score to decay — a subject now dies
@@ -78,6 +73,6 @@ export interface Task {
   routine_id?: string;         // links to routine that spawned this task
   skill_origin?: string;       // v1.6.0 — which skill created this task (e.g. 'summary', 'calendar_health', 'system')
   // v1.7.2 — counterpart resolution for "what's open with X?" queries
-  target_slack_id?: string;    // 1:1 counterpart for summary_action_followup tasks
+  target_slack_id?: string;    // historical counterpart metadata, retained on existing rows
   target_name?: string;        // display name of the counterpart
 }

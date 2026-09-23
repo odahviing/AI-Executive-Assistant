@@ -22,12 +22,15 @@
  * `too_many_connections` fight). Do not change this to reload.
  */
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const REPO = process.cwd(); // PM2 runs with cwd = repo root (ecosystem `cwd`)
 const BRANCH = process.env.DEPLOY_BRANCH || 'master';
 const POLL_MS = Math.max(30, Number(process.env.DEPLOY_POLL_SECONDS || 120)) * 1000;
 
 let deploying = false;
+let savePending = true;
 
 function sh(cmd, opts = {}) {
   return execSync(cmd, {
@@ -41,6 +44,12 @@ function sh(cmd, opts = {}) {
 function run(cmd) { sh(cmd, { stdio: ['ignore', 'inherit', 'inherit'] }); }
 function log(msg, extra) { console.log(`[deploy-watcher] ${msg}${extra ? ' — ' + extra : ''}`); }
 
+function appliedRevision() {
+  const apps = JSON.parse(sh('pm2 jlist'));
+  const app = apps.find(app => app.name === 'maelle');
+  return app?.pm2_env?.status === 'online' ? app.pm2_env.GIT_SHA : undefined;
+}
+
 function tick() {
   if (deploying) return;
 
@@ -51,30 +60,46 @@ function tick() {
     return;
   }
 
-  let local, remote;
+  let local, remote, applied;
   try {
     local = sh(`git rev-parse HEAD`).trim();
     remote = sh(`git rev-parse origin/${BRANCH}`).trim();
+    applied = appliedRevision();
   } catch (e) {
-    log('rev-parse failed — skipping', String(e?.message || e).slice(0, 120));
+    log('revision or PM2 state unavailable — skipping', String(e?.message || e).slice(0, 120));
     return;
   }
-  if (local === remote) return; // already up to date
+  // Checkout HEAD advances before installation/build/restart. Only the live
+  // process's existing build identity proves that revision was applied.
+  if (local === remote && applied === remote) {
+    if (savePending) {
+      try { run('pm2 save'); savePending = false; }
+      catch (e) { log('PM2 persistence failed — will retry', String(e?.message || e).slice(0, 120)); }
+    }
+    return;
+  }
 
   deploying = true;
   try {
-    log('new commits detected', `${local.slice(0, 7)} → ${remote.slice(0, 7)}`);
+    log('revision needs deployment', `${applied || 'unknown'} → ${remote.slice(0, 7)}`);
 
     // Decide whether deps need reinstalling BEFORE pulling (diff old→new).
     // Only the LOCKFILE signals a real dependency change — a bare version bump
     // touches package.json alone and must NOT trigger a reinstall.
-    let depsChanged = false;
-    try {
-      const changed = sh(`git diff --name-only HEAD origin/${BRANCH}`).split('\n');
-      depsChanged = changed.includes('package-lock.json');
-    } catch { /* fall through — treat as no dep change */ }
+    let depsChanged = true;
+    // The last applied revision also anchors dependency recovery after npm ci
+    // fails. Unknown/unreadable history cannot prove dependencies are current.
+    if (typeof applied === 'string' && /^[a-f0-9]{40}$/.test(applied)) {
+      try {
+        const changed = sh(`git diff --name-only ${applied} ${remote}`).split(/\r?\n/);
+        depsChanged = changed.includes('package-lock.json');
+      } catch { /* install when the prior dependency state cannot be established */ }
+    }
 
-    run(`git pull --ff-only origin ${BRANCH}`);
+    if (local !== remote) run(`git pull --ff-only origin ${BRANCH}`);
+    // pull fetches again. If origin advanced since this tick's snapshot, retry
+    // against that revision before choosing dependencies or stamping the build.
+    if (sh('git rev-parse HEAD').trim() !== remote) throw new Error('Checkout changed during pull; retrying with a fresh revision');
 
     if (depsChanged) {
       log('dependencies changed — running npm ci (dev deps included, Chromium skipped)');
@@ -99,10 +124,18 @@ function tick() {
     }
 
     run(`npm run build`);
-    run(`pm2 restart maelle --update-env`);
-    log('deployed + restarted maelle', `now at ${sh(`git rev-parse --short HEAD`).trim()}`);
+    const version = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
+    sh('pm2 restart maelle --update-env', {
+      stdio: ['ignore', 'inherit', 'inherit'],
+      env: { ...process.env, GIT_SHA: remote, APP_VERSION: version },
+    });
+    if (appliedRevision() !== remote) throw new Error('PM2 has not confirmed the target revision online');
+    savePending = true;
+    run('pm2 save');
+    savePending = false;
+    log('deployed + restarted maelle', `now at ${remote.slice(0, 7)}`);
   } catch (e) {
-    log('DEPLOY FAILED — Maelle left running on the previous build', String(e?.message || e).slice(0, 200));
+    log('DEPLOY FAILED — completion unconfirmed; will retry', String(e?.message || e).slice(0, 200));
   } finally {
     deploying = false;
   }

@@ -672,7 +672,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   });
 
   // Step 5 — audio vs text. The answer itself; everything below is a trailer.
-  await sendReply({
+  const confirmedReply = await sendReply({
     app, botToken: assistant.slack.bot_token,
     channelId, threadTs,
     cleanReply,
@@ -680,6 +680,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     say,
     onDelivered,
   });
+  if (!confirmedReply) return; // unknown audio delivery: no coda or failure reply
 
   // Step 6 — the social coda, as its own message. LAST on purpose: everything
   // this turn owes the person is already in Slack, so the coda can only ever
@@ -696,7 +697,9 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
 
 /**
  * Audio branch: voice input + TTS available + short-enough reply → audio.
- * Anything else → text via say(). Never block text on audio failure.
+ * Preparation failure falls back to text. Once upload starts, an error can
+ * mean Slack accepted the audio: return false without confirming delivery or
+ * triggering the processor's failure reply. True means the send completed.
  */
 async function sendReply(opts: {
   app: App;
@@ -707,39 +710,36 @@ async function sendReply(opts: {
   voiceInput: boolean;
   say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
   onDelivered?: (confirmedText?: string) => void;
-}): Promise<void> {
+}): Promise<boolean> {
   const useAudio = shouldRespondWithAudio({
     inputWasVoice: opts.voiceInput,
     responseText: opts.cleanReply,
   });
 
   if (useAudio && config.OPENAI_API_KEY) {
-    // `audioSent` rather than a `return` inside the try, because the delivery
-    // callback has to fire OUTSIDE it: anything thrown between here and the
-    // return gets read as "audio failed" and falls through to a text send, so a
-    // callback raising in there would post the same answer twice.
-    let audioSent = false;
+    let audioBuffer: Buffer | undefined;
     try {
-      const audioBuffer = await textToSpeech(opts.cleanReply);
-      await sendAudioMessage({
-        app: opts.app,
-        botToken: opts.botToken,
-        channelId: opts.channelId,
-        threadTs: opts.threadTs,
-        audioBuffer,
-      });
-      audioSent = true;
+      audioBuffer = await textToSpeech(opts.cleanReply);
     } catch (audioErr) {
-      if (opts.voiceInput) {
-        logger.warn('Audio response failed — falling back to text', { err: String(audioErr) });
-      } else {
-        logger.debug('Audio TTS unavailable — using text', { err: String(audioErr) });
-      }
-      // Fall through to text.
+      logger.warn('Audio preparation failed — falling back to text', { err: String(audioErr) });
     }
-    if (audioSent) {
+    if (audioBuffer) {
+      // No fallback after submission: uploadV2 can throw after Slack accepted
+      // the file. This is unknown delivery, not proof that text is safe to send.
+      try {
+        await sendAudioMessage({
+          app: opts.app,
+          botToken: opts.botToken,
+          channelId: opts.channelId,
+          threadTs: opts.threadTs,
+          audioBuffer,
+        });
+      } catch (err) {
+        logger.error('Audio delivery unconfirmed — withholding a second reply', { err: String(err), channelId: opts.channelId, threadTs: opts.threadTs });
+        return false;
+      }
       opts.onDelivered?.();
-      return;
+      return true;
     }
   }
   // v2.6.5 — capture the posted message ts and record it on threadActivity.
@@ -766,4 +766,5 @@ async function sendReply(opts: {
     const { recordMaelleMessage } = await import('../../utils/threadActivity');
     recordMaelleMessage(opts.threadTs, opts.channelId, sayRes.ts);
   }
+  return true;
 }

@@ -19,7 +19,7 @@ You own ONE thing: the meeting planner's deterministic core. Nothing else.
 
 **Carry the proof:** every result you return sets `workshopRead: true`. That is the one place this is reported — not a summary of the rules in your own words.
 
-**First — orient:** follow that file's **First — orient** section every dispatch. **Your slice of `project_architecture.md`:** the "Skills (togglable)" section — the meeting planner, the direct-op handlers, and the Graph calendar layer.
+**First — orient:** follow that file's **Who you are, and how to orient** section every dispatch. **Your slice of `project_architecture.md`:** the "Scheduling / booking engine" section — the meeting planner, the direct-op handlers, and the Graph calendar layer.
 
 ---
 
@@ -88,4 +88,4 @@ Search / validate / book-decision / timezone + Working-Elsewhere / floating bloc
 1. **Reproduce from the log.** `powershell -File scripts/vm-logs.ps1 [term] [lines]` (W2 — that reads the VM's log; the local `logs/` dir is stale) — pull the turn's tool calls, the `find_available_slots` / `checkSlot` / `getFreeBusy` results, the rejection breakdowns, the verdicts. State the root as `file:line — what actually happens`. If you can't see it in the log, say so and add a definitive log line before guessing (W2).
 2. **Is this an old root resurfacing?** Most "new" bugs here are — check `git log` and the rules above before treating it as novel.
 3. **Fix at the chokepoint, deterministically** — a return value the model reacts to, a single validator, a code-owned resolution. If a prior layer patched this, *remove* it.
-4. **Paper-trace to 100%** (W8), then report per the return contract.
+4. **Verify under W8 and the Workshop evidence contract**, then report per the return contract.

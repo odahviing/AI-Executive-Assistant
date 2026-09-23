@@ -1,3 +1,27 @@
+## 5.0.0 — Reliable summaries, bounded recovery and safer delivery
+
+Twenty-four independently verified correction groups strengthen summaries, identity and privacy boundaries, location handling, email and Slack voice. Deployment retries now follow the revision PM2 actually runs, and voice transcription has one owner-approved three-minute cancellation budget. This release also removes unused automatic summary followups for a later rebuild.
+
+### Fixed
+- Preserve genuine Slack aliases and ambiguity, reject stale edited-attendee identities, validate summary drafts, retain unattempted drafts, and pass multilingual summary preferences through existing model calls.
+- Scope cached tool results to the authenticated caller and surface; scan successful security rewrites and generated identity refusals for residual internal identifiers.
+- Keep room membership and Graph resource roles consistent, preserve hybrid venue travel, avoid claiming unchecked room availability, and exclude phone-only places from the venue catalog.
+- Bound outbound email provider operations and distinguish unknown sends from confirmed failures.
+- Recheck Slack audio eligibility, avoid duplicate fallback after uncertain upload, and cancel stalled transcription work with cleanup and no paid retry.
+- Require an actual clear verdict for optional Codas, carry direct-identity context and authoritative gender into existing checks, and remove conflicting language instructions.
+- Recover failed database initialization and retry deployment until the pulled revision is applied.
+
+### Removed
+- Automatic summary action-item followup scheduling and dispatch. Summary drafting, editing, sharing, action text and deadlines remain. Startup retires the exact obsolete task type; unrelated outreach remains intact.
+
+### Framework
+- Reconcile 18 maintained documentation pages and Golden source references without restructuring lanes or changing product policy.
+- Accept intentional tracked-file absence in Golden snapshots while preserving exact inventory and hash drift checks.
+
+### Verification and limits
+- 130 suites across 157 suite/timezone executions: 4,201 assertions passed, zero failed/skipped, TypeScript passed; independent Golden30 and exact-attempt reviews passed within their recorded scope.
+- Email sender authentication, uncertain-send replay, invisible accepted-audio recovery and model-dependent semantics retain documented limits. No new durable email receipts or broader redesign was introduced. Local checks do not establish universal live-model or provider behavior.
+
 ## 4.9.14 — Reliable meeting changes and original-message delivery tracking
 
 Twenty independently verified repair packages strengthen meeting validation, counteroffers and delivery reporting. Lunch now outranks short notice when comparing owner-approved compromises; a confirmed-delivered original message is reported as already sent when its exact request is supplied.

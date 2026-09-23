@@ -31,3 +31,53 @@ test('native snapshot/report commands avoid metadata reconstruction and reject p
   fs.writeFileSync(path.join(root, 'scripts/added.cjs'), '// postcapture edit'); assert.equal(cli(args).status, 1); fs.unlinkSync(path.join(root, 'scripts/added.cjs'));
   const bad = base(); bad.goldenTraces[0].verdict = 'fail'; retain(bad); assert.equal(cli(args).status, 1);
 });
+
+function withTrackedSource(body) {
+  const relative = 'src/retired.ts', file = path.join(root, relative);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '// original source');
+  assert.equal(cp.spawnSync('git', ['add', '--', relative], { cwd: root }).status, 0);
+  try { body({ file, relative }); }
+  finally {
+    assert.equal(cp.spawnSync('git', ['rm', '--cached', '--force', '--', relative], { cwd: root }).status, 0);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+}
+test('intentional tracked deletion is retained as null and accepted by native Golden snapshot/report/check', () => withTrackedSource(({ file, relative }) => {
+  fs.unlinkSync(file);
+  const cli = args => cp.spawnSync(process.execPath, ['scripts/workshop-release.cjs', ...args], { cwd: root, encoding: 'utf8' });
+  const captured = cli(['--golden-snapshot']); assert.equal(captured.status, 0, captured.stderr);
+  assert.deepEqual(JSON.parse(captured.stdout).find(s => s.file === relative), { file: relative, sha256: null });
+  fs.writeFileSync(path.join(root, 'evidence/deleted-snapshot.json'), captured.stdout);
+  retain(base());
+  const report = cli(['--golden-report', 'evidence/deleted-snapshot.json', 'evidence/return.json']);
+  assert.equal(report.status, 0, report.stderr);
+  assert.equal(check(JSON.parse(report.stdout)).status, 0);
+}));
+test('new tracked deletion after review remains blocked', () => withTrackedSource(({ file }) => {
+  const reviewed = retain(base()); fs.unlinkSync(file);
+  assert.equal(check(reviewed).status, 1);
+}));
+test('restoring a reviewed deleted file remains blocked', () => withTrackedSource(({ file }) => {
+  fs.unlinkSync(file); const reviewed = retain(base());
+  fs.writeFileSync(file, '// original source');
+  assert.equal(check(reviewed).status, 1);
+}));
+test('omitting or corrupting the explicit deletion marker remains blocked', () => withTrackedSource(({ file, relative }) => {
+  fs.unlinkSync(file); const reviewed = retain(base());
+  assert.equal(check({ ...reviewed, snapshot: reviewed.snapshot.filter(s => s.file !== relative) }).status, 1);
+  assert.equal(check({ ...reviewed, snapshot: reviewed.snapshot.map(s => s.file === relative ? { file: relative } : s) }).status, 1);
+}));
+test('new source added beside a reviewed deletion remains blocked', () => withTrackedSource(({ file }) => {
+  fs.unlinkSync(file); const reviewed = retain(base()), added = path.join(root, 'src/added.ts');
+  try { fs.writeFileSync(added, '// new source'); assert.equal(check(reviewed).status, 1); }
+  finally { fs.unlinkSync(added); }
+}));
+test('source content changed beside a reviewed deletion remains blocked', () => withTrackedSource(({ file }) => {
+  fs.unlinkSync(file);
+  const changed = path.join(root, 'src/existing.ts');
+  try {
+    fs.writeFileSync(changed, '// original'); const reviewed = retain(base());
+    fs.writeFileSync(changed, '// modified'); assert.equal(check(reviewed).status, 1);
+  } finally { fs.unlinkSync(changed); }
+}));
