@@ -200,7 +200,7 @@ const at = (slots, hhmm) => slots.find(s => DateTime.fromISO(s.start).setZone(zo
     // lead time (0b) + in person (1b) + lunch (6): peeled in the validator's own order.
     const r = rules.brokenOwnerRules({ profile, slotStartIso: '2026-09-22T12:30:00+03:00', slotEndIso: '2026-09-22T12:55:00+03:00', category: null, events, inPersonRequested: true, leadTimeHours: 72 });
     eq(r, ['within_lead_time', 'in_person_on_home_day', 'floating_block_overlap'], 'ladder order');
-    eq(rules.compareByRulePriority(['floating_block_overlap'], ['within_lead_time']) < 0, true, 'lunch-only before lead-time-only');
+    eq(rules.compareByRulePriority(['within_lead_time'], ['floating_block_overlap']) < 0, true, 'owner ruling: short notice before disturbing lunch');
   });
   await check('regression', 'must-be-candidate-carries-its-rules-and-lunch-flag', () => {
     eq(cand('12:30')?.broken_rules, ['in_person_on_home_day', 'floating_block_overlap'], '12:30');

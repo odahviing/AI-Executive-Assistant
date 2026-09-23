@@ -564,8 +564,8 @@ async function handleRescheduleReplyLocked(
  * await_reply argument instead; this automatic producer never invents one.
  * Best-effort; never throws (a notify failure must not unwind the move). Returns
  * `true` when the DM actually reached the colleague, `'scheduled'` when it is
- * held on the spine for their next work start (not yet delivered), `false`
- * otherwise — v4.2.x, so the option-C correction relay can't report a
+ * held on the spine for their next work start (not yet delivered), `'unconfirmed'`
+ * after a possibly delivered attempt, and `false` before delivery — so the correction relay can't report a
  * correction it never delivered.
  *
  * No calendar action is retried to recover notice delivery.
@@ -603,8 +603,9 @@ export async function notifyColleagueOfMove(params: {
    * ruled against.
    */
   correctsToldStartIso?: string;
-}): Promise<boolean | 'scheduled'> {
+}): Promise<boolean | 'scheduled' | 'unconfirmed'> {
   let jobId: string | undefined;
+  let sendAttempted = false;
   try {
     const { profile } = params;
     const conn = getConnection(profile.user.slack_user_id, 'slack');
@@ -617,7 +618,7 @@ export async function notifyColleagueOfMove(params: {
       return renderClockInZone(instant, tz,
         recipient ? attendeeTzForDay(recipient, instant) : tz);
     };
-    const newLocal = localTime(params.newStartIso);
+    const newLocal = `${localTime(params.newStartIso)} – ${localTime(params.newEndIso)}`;
     const ownerFirst = profile.user.name.split(' ')[0];
     const colleagueFirst = params.colleagueName.split(' ')[0];
     const because = params.conflictReason ? ` — it clashed with ${params.conflictReason}` : '';
@@ -681,6 +682,7 @@ export async function notifyColleagueOfMove(params: {
       return 'scheduled';
     }
 
+    sendAttempted = true;
     const res = await conn.sendDirect(params.colleagueSlackId, message);
     if (!res.ok) {
       const requestId = getLinkedRequestIdForOutreach(jobId);
@@ -690,7 +692,7 @@ export async function notifyColleagueOfMove(params: {
       logger.warn('notifyColleagueOfMove — delivery not confirmed, notice closed (move stands)', {
         jobId, colleague: params.colleagueName, meetingId: params.meetingId, reason: res.reason,
       });
-      return false;
+      return res.reason === 'error' ? 'unconfirmed' : false;
     }
     // Stamping confirmed delivery closes this informational request through
     // the existing bridge, while retaining conversational follow-up context.
@@ -713,6 +715,6 @@ export async function notifyColleagueOfMove(params: {
       logger.warn('notifyColleagueOfMove — could not persist notice outcome; existing timer retained', { jobId, err: String(closeErr).slice(0, 200) });
     }
     logger.warn('notifyColleagueOfMove threw — move stands, notice unconfirmed', { err: String(err).slice(0, 200) });
-    return false;
+    return sendAttempted ? 'unconfirmed' : false;
   }
 }

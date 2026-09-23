@@ -75,8 +75,8 @@ export interface CloseMeetingArtifactsResult {
   /**
    * elan-hold-survives-the-move-that-resolved-it (2026-09-06) — the
    * `colleague_slack_id` of every colleague step 2a (`relayVoidedNotices`)
-   * ACTUALLY delivered a corrected time to (`correctionsRelayed`'s population,
-   * named) or holds one for (see the last sentence). Exists so a
+   * delivered a corrected time to, holds one for, or attempted with an unknown
+   * outcome. Exists so a
    * caller that ALSO runs its own colleague-notify loop after calling this
    * function (autoMove.ts's `executeInternalAutoMove`, which DMs every
    * attendee "meeting moved" unconditionally) can skip re-notifying someone
@@ -88,12 +88,15 @@ export interface CloseMeetingArtifactsResult {
    * because relayVoidedNotices declined to speak. A colleague in that
    * population was told NOTHING by this function, so a caller skipping them
    * on this list's say-so would leave them with no notice at all — the exact
-   * silence R3 bars. Only a CONFIRMED delivery belongs here — or a correction
+   * silence R3 bars. Confirmed delivery belongs here — or a correction
    * durably held on the spine for the colleague's work hours (it will reach
    * them; a second notice from the caller would be a duplicate). Held ones are
-   * not counted in `correctionsRelayed`.
+   * not counted in `correctionsRelayed`. Unknown attempts belong here too:
+   * repeating them could duplicate delivery; the separate list below preserves
+   * uncertainty for the caller's owner-facing outcome.
    */
   correctedColleagueSlackIds: string[];
+  unconfirmedColleagueSlackIds?: string[];
   /**
    * vanished-sweep-request-close-invisible (2026-08-31) — step 5's spine
    * request closures (closeMatchedRequestWithRelay, both the direct
@@ -270,6 +273,7 @@ export async function closeMeetingArtifacts(params: {
         const voidedRelay = await relayVoidedNotices(params, matchingOutreach);
         result.correctionsRelayed = voidedRelay.relayedCount;
         result.correctedColleagueSlackIds = voidedRelay.correctedColleagueSlackIds;
+        if (voidedRelay.unconfirmedColleagueSlackIds?.length) result.unconfirmedColleagueSlackIds = voidedRelay.unconfirmedColleagueSlackIds;
 
         // v3.1.1 — close the linked REQUEST for each match: the request owns the
         // lifecycle, so closing it IS closing the outreach, and it is what drops the
@@ -639,7 +643,7 @@ async function relayVoidedNotices(
     newEndIso?: string;
   },
   openNotices: OutreachJob[],
-): Promise<{ relayedCount: number; correctedColleagueSlackIds: string[] }> {
+): Promise<{ relayedCount: number; correctedColleagueSlackIds: string[]; unconfirmedColleagueSlackIds?: string[] }> {
   const none = { relayedCount: 0, correctedColleagueSlackIds: [] as string[] };
   // FAIL-SAFE. A call site that supplies no executed time cannot tell us whether
   // anything was voided, so nothing is said. This is what makes the two halves of
@@ -726,6 +730,7 @@ async function relayVoidedNotices(
 
   let relayed = 0;
   const correctedColleagueSlackIds: string[] = [];
+  const unconfirmedColleagueSlackIds: string[] = [];
   for (const { row, original, subject } of replaced) {
     try {
       const delivered = await notifyColleagueOfMove({
@@ -743,6 +748,7 @@ async function relayVoidedNotices(
         newEndIso: params.newEndIso,
       });
       if (delivered === true) relayed++;
+      if (delivered === 'unconfirmed') unconfirmedColleagueSlackIds.push(row.colleague_slack_id);
       if (delivered) correctedColleagueSlackIds.push(row.colleague_slack_id);
     } catch (err) {
       logger.warn('closeMeetingArtifacts — held-notice replacement threw for one colleague, continuing', {
@@ -774,6 +780,7 @@ async function relayVoidedNotices(
       // correction held for their work hours is not yet told, but it IS this
       // colleague's notice for this write, so the caller must not add another.
       if (delivered === true) relayed++;
+      if (delivered === 'unconfirmed') unconfirmedColleagueSlackIds.push(row.colleague_slack_id);
       if (delivered) correctedColleagueSlackIds.push(row.colleague_slack_id);
     } catch (err) {
       // One colleague failing must not silence the rest.
@@ -792,7 +799,8 @@ async function relayVoidedNotices(
   // meeting (two prior corrections, say), and `relayed` above intentionally
   // still counts each row told; but a caller consuming this to decide
   // "skip re-notifying this person" wants each id once.
-  return { relayedCount: relayed, correctedColleagueSlackIds: [...new Set(correctedColleagueSlackIds)] };
+  return { relayedCount: relayed, correctedColleagueSlackIds: [...new Set(correctedColleagueSlackIds)],
+    ...(unconfirmedColleagueSlackIds.length ? { unconfirmedColleagueSlackIds: [...new Set(unconfirmedColleagueSlackIds)] } : {}) };
 }
 
 /**

@@ -18,7 +18,7 @@ const failed = { ok: false, error: 'connection_not_registered' };
 const unconfirmed = { ok: false, error: 'send_threw', detail: 'socket hang up', delivery_unconfirmed: true, scheduled_copy_cancelled: true };
 const msg = (name, result) => ({ name: 'message_colleague', args: { colleague_name: name, colleague_slack_id: `U_${name}`, message: 'heads-up' }, result });
 
-async function run(steps) {
+async function run(steps, options = {}) {
   const unexpected = [], logs = [];
   let modelCalls = 0, executions = 0;
   const profile = { user: { name: 'Owner Person', slack_user_id: 'U_OWNER', timezone: 'Asia/Jerusalem' }, assistant: {} };
@@ -45,10 +45,13 @@ async function run(steps) {
     'node:util': require('node:util'), 'luxon': { DateTime }, '../../utils/logger': logger,
     '../../utils/detectMessageLanguage': { detectMessageLanguage: () => 'English' },
     '../../skills/registry': { WRITE_TOOLS: new Set(), executeSkillTool: async name => {
-      const next = steps[executions++]; assert.equal(name, next.name); return structuredClone(next.result);
+      const next = steps[modelCalls - 1]; executions++; assert.equal(name, next.name);
+      return next.execute ? await next.execute() : structuredClone(next.result);
     } },
     '../../db': { auditLog() {}, recordSocialMoment() {} },
-    './turnHelpers': { ...helpers, callClaude: async () => {
+    '../../db/requests': { getRequest: () => options.request },
+    './turnHelpers': { ...helpers, callClaude: async request => {
+      options.observeModelInput?.(structuredClone(request));
       const next = steps[modelCalls++];
       return { stop_reason: next ? 'tool_use' : 'end_turn', content: next
         ? [{ type: 'tool_use', id: `tool-${modelCalls}`, name: next.name, input: structuredClone(next.args) }]
@@ -72,8 +75,8 @@ async function run(steps) {
     authority: 'owner', surface: 'owner_dm', profile });
   await new Promise(r => setImmediate(r));
   assert.deepEqual(unexpected, []);
-  assert.equal(executions, steps.length);
-  return result.reply;
+  assert.equal(executions, options.expectedExecutions ?? steps.length);
+  return options.details ? result : result.reply;
 }
 
 const cases = [

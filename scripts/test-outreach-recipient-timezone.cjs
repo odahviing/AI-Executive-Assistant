@@ -91,7 +91,7 @@ function harness(options = {}) {
   const requests = {
     getOpenRequestsForColleague: (_owner, colleague) => [...rows.values()].filter(r => (r.target_slack_id === colleague || r.requester_slack_id === colleague) && OPEN.includes(r.state)), getAwaitingOwnerRequests: () => options.pendingApproval ? [{ id: 'req_approval', kind: 'approval', requester_slack_id: COLLEAGUE, owner_dm_thread_ts: 'owner.1' }] : [], getRequest: id => rows.get(id) ?? row, getRequestByIdempotencyKey: () => undefined,
     buildIdempotencyKey: () => 'key', getDueRequests: () => [...rows.values()], updateRequest: update,
-    createRequest: p => { row = undefined; return put({ id: rows.size ? `req_test_${rows.size + 1}` : 'req_test', owner_user_id: p.ownerUserId, target_slack_id: p.targetSlackId, target_name: p.targetName, kind: p.kind, state: p.state, phase: p.phase, subject: p.subject, description: p.description, origin_channel: p.originChannel, origin_thread_ts: p.originThreadTs, next_check_at: p.nextCheckAt, next_check_handler: p.nextCheckHandler, details_json: JSON.stringify(p.details) }); },
+    createRequest: p => { row = undefined; return put({ id: rows.size ? `req_test_${rows.size + 1}` : 'req_test', owner_user_id: p.ownerUserId, parent_request_id: p.parentRequestId, target_slack_id: p.targetSlackId, target_name: p.targetName, kind: p.kind, state: p.state, phase: p.phase, subject: p.subject, description: p.description, origin_channel: p.originChannel, origin_thread_ts: p.originThreadTs, next_check_at: p.nextCheckAt, next_check_handler: p.nextCheckHandler, details_json: JSON.stringify(p.details) }); },
   };
   // outreach_jobs is payload held in memory; every people_memory statement runs on the real store.
   const jobStatement = sql => ({
@@ -131,7 +131,7 @@ function harness(options = {}) {
     'src/connections/registry.ts': { getConnection: () => options.noConnection ? undefined : conn },
     // Capture the real callers' close requests; terminal persistence/cascade is
     // outside this harness and is not claimed as exercised here.
-    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); const r = rows.get(p.id) ?? row; if (!r) return { ok: false, request_id: p.id, state: p.state, reason: 'request not found' }; if (!OPEN.includes(r.state)) return { ok: true, request_id: r.id, state: r.state, reason: 'already terminal' }; put({ ...r, state: p.state, next_check_at: null, next_check_handler: null }); return { ok: true, request_id: r.id, state: p.state }; } },
+    'src/core/requests/closeRequest.ts': { closeRequest: p => { closures.push(p); const r = rows.get(p.id) ?? row; if (!r) return { ok: false, request_id: p.id, state: p.state, reason: 'request not found' }; if (!OPEN.includes(r.state)) return { ok: true, request_id: r.id, state: r.state, reason: 'already terminal' }; put({ ...r, state: p.state, next_check_at: null, next_check_handler: null }); if (!p.skipChildren) for (const child of rows.values()) if (child.parent_request_id === r.id && OPEN.includes(child.state)) put({ ...child, state: 'cancelled', next_check_at: null, next_check_handler: null }); return { ok: true, request_id: r.id, state: p.state }; } },
     // `lockWinner` models the sweep holding a request's lock first: it runs once, before the waiter's work.
     'src/core/requests/resolver.ts': { withRequestLock: async (id, fn) => { const first = options.lockWinner; options.lockWinner = undefined; if (first) await first(id); return fn(); }, closeUnconfirmedExecution: noop },
     'src/core/requests/logActivity.ts': { logActivity: noop },
@@ -622,6 +622,43 @@ for (const mode of ['error', 'throw']) test(`CHRIS regression: send_now unknown 
   await h.sweep();
   assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
 });
+for (const immediate of [true, false]) test(`restart after ${immediate ? 'send_now' : 'scheduled'} transport begins reports unknown without repeating`, async () => {
+  let started;
+  const atSend = new Promise(r => { started = r; });
+  const options = { person: CHRIS, onSend: async () => { started(); await new Promise(() => {}); } };
+  const h = harness(options);
+  h.setNow(SUN_EVENING);
+  await h.tool({ await_reply: false });
+  const heldId = h.row().id;
+  if (immediate) h.tool({ await_reply: false, send_now: true });
+  else { h.setNow(BOSTON_MON_START); h.fire(heldId); }
+  await atSend;
+  h.restart(); options.onSend = undefined;
+  h.setNow('2026-09-21T15:00:00Z'); await h.sweep();
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+  assert.equal(h.rowById(heldId).state, 'cancelled');
+  assert.ok(h.sends.some(x => x.id === 'DOWNER' && /can't confirm whether it went out/.test(x.body)));
+  h.setNow('2026-09-28T15:00:00Z'); await h.sweep();
+  assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
+  assert.equal(h.sends.filter(x => x.id === 'DOWNER').length, 1);
+});
+
+for (const channel of [false, true]) for (const mode of ['error', 'throw']) test(`first immediate ${channel ? 'channel' : 'DM'} ${mode} is unconfirmed, terminal and never retried`, async () => {
+  const h = harness({ person: CHRIS, sendResults: [mode === 'throw' ? new Error('socket reset') : { ok: false, reason: 'error' }] });
+  h.setNow(SUN_EVENING);
+  const result = await h.tool({ await_reply: true, send_now: true, ...(channel ? { channel_id: 'CROOM' } : {}) });
+  assert.equal(result.delivery_unconfirmed, true);
+  assert.equal(result.scheduled_copy_cancelled, undefined);
+  assert.match(result._must_reply_with, /may have reached them/);
+  assert.doesNotMatch(result._must_reply_with, /cancelled the scheduled/);
+  assert.equal(h.row().state, 'cancelled');
+  assert.equal(h.row().next_check_at, null);
+  h.restart();
+  h.setNow('2026-09-28T13:00:00Z');
+  await h.sweep();
+  assert.equal(h.sends.filter(x => x.id === (channel ? 'CROOM' : COLLEAGUE)).length, 1);
+});
+
 test('CHRIS regression: a due held copy cannot fire while the send_now is in flight', async () => {
   const options = { person: CHRIS };
   const h = harness(options);

@@ -149,6 +149,8 @@ function mutationDomain(toolName: string, result: unknown): MutationDomain | nul
   // (resolve_approval's `{ok:false}`) — changed nothing.
   if (typeof r.error === 'string') return null;
   if (r.ok === false || r.success === false) return null;
+  // An exact original-request lookup confirms an earlier delivery, not a new send.
+  if (toolName === 'message_colleague' && r.already_sent === true) return null;
   // Calendar mutations carry a rich outcome (needs_confirmation / needs_owner_approval
   // / unclear shapes are all NOT a completed write) — reuse the one reader for it.
   if (domain === 'book' && !mutationOutcome(result).ok) return null;
@@ -428,15 +430,17 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
     // outreach DM never sent, draft "Sent the message" sneaks past the
     // checker because the tool is "in toolSummaries").
     // chris-headsup-scheduled-claim-summary (2026-09-23, owner ruling A) — a
-    // send_now whose Slack call errored or threw after it was attempted has an
-    // UNKNOWN outcome: outreach.ts cancels the held copy and returns
+    // send whose Slack call errored or threw after it was attempted has an
+    // UNKNOWN outcome: outreach.ts cancels any held copy and returns
     // `delivery_unconfirmed:true` beside its error code. Stamping that FAILED
     // would tell the checkers it definitely did not go out; it may have. No
     // `mutated=` marker either (mutationDomain drops any `error` result), so it
     // backs no "sent" claim. A definite failure (`scheduled_copy_kept`) stays FAILED.
     if (toolName === 'message_colleague' && result && typeof result === 'object'
       && (result as { delivery_unconfirmed?: unknown }).delivery_unconfirmed === true) {
-      return `[message_colleague UNCONFIRMED: ${(input as any).colleague_name} — may have been delivered; scheduled copy cancelled]`;
+      const cancellation = (result as { scheduled_copy_cancelled?: unknown }).scheduled_copy_cancelled === true
+        ? '; scheduled copy cancelled' : '';
+      return `[message_colleague UNCONFIRMED: ${(input as any).colleague_name} — may have been delivered${cancellation}]`;
     }
     if (result && typeof result === 'object' && typeof (result as { error?: unknown }).error === 'string') {
       const reason = String((result as { error: string }).error).replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -769,13 +773,18 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // and the owner-local send time; a delivered send keeps its line.
         const name = (input as any).colleague_name;
         const r = (result && typeof result === 'object')
-          ? result as { _status?: unknown; scheduled_at?: unknown; held_for_recipient_work_hours?: unknown }
+          ? result as { _status?: unknown; scheduled_at?: unknown; held_for_recipient_work_hours?: unknown; request_id?: unknown; already_sent?: unknown }
           : {};
-        if (r._status !== 'scheduled_not_sent') return `[message_colleague: ${name}]`;
+        // The owner-only tool's real spine identity survives in compact history
+        // for an exact later follow-up. Never copy a requested identity from input.
+        const request = typeof r.request_id === 'string' && /^req_[a-zA-Z0-9_]+$/.test(r.request_id)
+          ? `; request_id=${r.request_id}` : '';
+        if (r.already_sent === true) return `[message_colleague ALREADY_SENT: ${name} — original message already delivered; no new send${request}]`;
+        if (r._status !== 'scheduled_not_sent') return `[message_colleague: ${name}${request}]`;
         const at = typeof r.scheduled_at === 'string' ? DateTime.fromISO(r.scheduled_at).setZone(ownerTz) : null;
         const when = at?.isValid ? ` — goes out ${at.toFormat('EEE d MMM HH:mm')}` : '';
         const held = r.held_for_recipient_work_hours === true ? ` (outside ${name}'s working hours)` : '';
-        return `[message_colleague SCHEDULED, NOT sent yet: ${name}${when}${held}]`;
+        return `[message_colleague SCHEDULED, NOT sent yet: ${name}${when}${held}${request}]`;
       }
       // v2.2.5 — mutation tools: read the outcome so the claim-checker sees
       // FAILED vs OK rather than just "the call ran."

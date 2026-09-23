@@ -1659,7 +1659,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                 // Owner ruling 2026-09-23 ("we have rules priority so priority
                 // win"): rule-bending options are ranked by the rules they break
-                // (checkSlot's ladder), time order only between equal bends.
+                // (scheduleRules' priority list), time order only between equal bends.
                 // Array.prototype.sort is stable; the input is chronological.
                 candidates.sort((x, y) => compareByRulePriority(x.broken_rules, y.broken_rules));
                 // A candidate whose ONLY broken rule is the in-person/home-day one

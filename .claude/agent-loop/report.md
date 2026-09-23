@@ -1,6 +1,1 @@
-# Report
-
-**43 rows await you** — v4.9.13 wrapped, 0 new product decisions from this wrap.
-board: 48 open rows — 24 still-real — 14 need a re-read — 10 cite no file — 43 rulable — 5 waiting on a verb (node scripts/ledger-stats.cjs --open)
-
-This wrap's seven owner rulings are recorded on the shipped refs. Five non-blocking discoveries from its reviews are queued for the next build.
+**38 rows await you** — v4.9.14 wrap in progress, 0 new from this wrap. Ledger: 43 open rows (22 still-real, 11 need a re-read, 10 cite no file); 38 rulable, 5 waiting on a verb; 6 queued. All 20 meeting repair packages (21 refs) independently verified. Detailed report: artifacts/workshop-verification/meetings-astra-20260923/HANDOFF.md.

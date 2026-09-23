@@ -369,6 +369,10 @@ async function colleagueUpdateRuleGate(
     || (pending.patchIsOnline !== undefined && pending.patchIsOnline !== existing?.isOnline);
 
   const riskKinds = new Set<RuleViolationKind>();
+  // Switching to an explicitly requested in-person meeting reopens rule 1b,
+  // even when the resolved venue keeps a Teams link for hybrid attendance.
+  const inPersonRequested = locationChanged && args.is_online === false;
+  if (inPersonRequested) riskKinds.add('in_person_on_home_day');
   if (categoryChanged) {
     // The three rules that are FUNCTIONS OF THE CATEGORY. All of them live only
     // inside checkSlot, which update_meeting never called — so re-tagging a
@@ -450,6 +454,7 @@ async function colleagueUpdateRuleGate(
         // move_meeting excludes it, moveMeeting.ts's own search call).
         excludeEventIds: [meetingId],
         onlyKinds: riskKinds,
+        inPersonRequested,
         travelBufferMinutes: venueTravelMinutes,
         // M10 — the label can embed a neighbouring meeting's subject and, for a
         // cap, the owner's own arithmetic. Scoped at the producer for the
@@ -621,16 +626,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // subject). Unconditional — every authority. `updateProbeSubject` feeds
         // the success narration below (already MASKED — see below) so it
         // never echoes an unverified OR unmasked claim.
-        // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: if the
-        // probe throws (transient Graph fault), BOTH the seriesMaster refusal
-        // AND the wrong-event subject-mismatch guard are skipped for this
-        // call, not just the seriesMaster check — `updateProbeSubject` stays
-        // undefined and the success narration falls back to narrating the
-        // caller's unverified `args.meeting_subject` claim, i.e. the exact
-        // original incident behavior for this one call. Accepted trade-off
-        // (failing closed on every transient read error has its own cost:
-        // every update_meeting would refuse whenever Graph blips) — not
-        // silent; see the catch below.
+        // An unreadable preflight cannot authorize a write: a metadata-only
+        // PATCH could otherwise alter a whole series or the wrong event.
         let updateProbeSubject: string | undefined;
         try {
           const { getEventType } = await import('../../../../connectors/graph/calendar');
@@ -684,10 +681,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
           }
           updateProbeSubject = maskedProbeSubject;
         } catch (err) {
-          // Fail-open — see the comment above this try block. Both the
-          // seriesMaster check AND the wrong-event subject-mismatch guard are
-          // skipped for this call, not just the recurring-series check.
-          logger.warn('update_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
+          logger.warn('update_meeting recurring-preflight failed — withholding update', { err: String(err) });
+          throw err;
         }
 
         // gh#154-W1 (2026-08-06) — requester-controls gate, moved OUT of the
@@ -1152,7 +1147,7 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
         // gate ends up blessing a different venue than the one that ships.
         let patchLocation: string | undefined = venueChangeRequested
           ? (newLocationFromShape ?? (explicitIsOnline === true ? '' : undefined))
-          : (explicitIsOnline === true ? '' : (explicitLocation ?? newLocationFromShape));
+          : (explicitLocation ?? (explicitIsOnline === true ? '' : newLocationFromShape));
         const patchIsOnline: boolean | undefined = venueChangeRequested
           ? (newIsOnlineFromShape ?? explicitIsOnline)
           : (explicitIsOnline ?? newIsOnlineFromShape);
@@ -1448,16 +1443,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // success narration and the audit/history rows further down.
         // preMoveSubject is already MASKED (see below) so that narration can
         // never render a private meeting's real title.
-        // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: if
-        // the probe throws (transient Graph fault), BOTH the seriesMaster
-        // refusal AND the wrong-event subject-mismatch guard are skipped for
-        // this call, not just the seriesMaster check — preMoveSubject stays
-        // undefined and `movedSubject` further down falls back to narrating
-        // the caller's unverified args.meeting_subject claim, i.e. the exact
-        // original incident behavior for this one call. Accepted trade-off
-        // (failing closed on every transient read error has its own cost:
-        // every move_meeting would refuse whenever Graph blips) — not
-        // silent; see the catch below.
+        // A failed read withholds the move rather than skipping the event
+        // identity and series protections or narrating an unverified subject.
         let ownerDecisionWarning: string | undefined;
         let preMoveStartIso: string | undefined;
         let preMoveEndIso: string | undefined;
@@ -1476,7 +1463,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             const { getEventType } = await import('../../../../connectors/graph/calendar');
             moveProbe = await getEventType(userEmail, args.meeting_id as string);
           } catch (err) {
-            logger.warn('move_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
+            logger.warn('move_meeting recurring-preflight failed — withholding move', { err: String(err) });
+            throw err;
           }
           // o#216 (bouncer fix, 2026-08-12) — mask the probed subject ONCE, off
           // the raw Graph value, before it reaches ANY caller-facing payload
@@ -1534,7 +1522,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // derive it from the moving event's existing duration read just above —
         // so the model never has to supply (or re-ask the owner for) a length
         // it already knows. 30-min fallback when the probe above didn't
-        // resolve start/end (unreadable / threw).
+        // resolve start/end (metadata had no readable interval).
         if ((typeof args.new_end !== 'string' || (args.new_end as string).length === 0) && typeof args.new_start === 'string') {
           let durMin = 30;
           if (preMoveStartIso && preMoveEndIso) {
@@ -1769,6 +1757,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                     searchFrom: fromIso,
                     searchTo: toIso,
                     profile: context.profile,
+                    meetingMode: args.is_online === false ? 'in_person' : undefined,
                     // v2.6 — pass category so move_meeting colleague-path also
                     // enforces day_type / per_day / per_week limits at
                     // the destination. findAvailableSlots widens its event

@@ -44,6 +44,14 @@ function normalizeForGraph(iso: string, tz: string, isAllDay: boolean): { dateTi
   return { dateTime: dt.setZone(timeZone).toISO({ includeOffset: false, suppressMilliseconds: true })!, timeZone };
 }
 
+// These existing symbolic locations request Graph's native Teams location;
+// physical venue strings must coexist with the online link unchanged.
+const isTeamsSentinel = (s?: string): boolean => {
+  if (!s) return false;
+  const n = s.trim().toLowerCase();
+  return n === 'teams' || n === 'ms teams' || n === 'microsoft teams' || n === 'teams meeting' || n === 'microsoft teams meeting';
+};
+
 export async function updateMeeting(params: UpdateMeetingParams): Promise<void> {
   const client = getClient();
   const ownerUserId = resolveOwnerUserId(params.userEmail);
@@ -83,7 +91,7 @@ export async function updateMeeting(params: UpdateMeetingParams): Promise<void> 
   // moves to Teams-only with no physical address). Explicit undefined skips
   // the field entirely so existing location is preserved.
   if (params.location !== undefined) {
-    patch.location = { displayName: params.location };
+    patch.location = { displayName: params.isOnline && isTeamsSentinel(params.location) ? '' : params.location };
   }
   if (params.isOnline !== undefined) {
     patch.isOnlineMeeting = params.isOnline;
@@ -272,11 +280,6 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Create
   // label (utils/resolveLocation.ts HUDDLE_LABEL — a plain string, not a
   // Teams meeting) — passes through unchanged so the location pill still
   // shows it (alongside the auto-generated Teams link when isOnline).
-  const isTeamsSentinel = (s?: string): boolean => {
-    if (!s) return false;
-    const n = s.trim().toLowerCase();
-    return n === 'teams' || n === 'ms teams' || n === 'microsoft teams' || n === 'teams meeting' || n === 'microsoft teams meeting';
-  };
   const effectiveLocation = (params.isOnline && isTeamsSentinel(params.location))
     ? undefined
     : params.location;

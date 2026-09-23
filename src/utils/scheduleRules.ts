@@ -25,6 +25,7 @@
  *                               (bookingLeadTimeHours: owner vs colleague)
  *   1.  vacation_or_off_day     an off day in the profile. THE ONE RULE WITH NO
  *                               allow_relaxed GATE — see below.
+ *   1b. in_person_on_home_day   explicitly in-person on a non-office day [relax]
  *   2.  category_day_type       category requires office_days, slot is a home day
  *   3.  category_per_day        at the category's per-day limit
  *   4.  category_per_week       at the category's per-ISO-week limit
@@ -161,20 +162,21 @@ export type BookingLevel = 'free' | 'optional' | 'unfiltered';
  * translate a kind into the walker's own relabeled vocabulary before it can
  * compare against `rejectedCounts` keys.
  *
- * DECLARED IN checkSlot's LADDER ORDER (header, EVALUATION ORDER: 0b, 1b, 2-4,
- * 5, 6, 7, 9) — the owner's "priority of reasons" (#128, 2026-07-26), most
- * important first. `compareByRulePriority` ranks by this order;
- * `brokenOwnerRules` derives the same order from checkSlot itself, so a drift
- * between the two is a visible disagreement, not a silent re-rank.
+ * Declared in compromise-ranking priority, most important first. Owner ruling
+ * 2026-09-23: short notice is less important than lunch; prefer a meeting one
+ * hour away that preserves lunch. Lead time therefore follows floating blocks;
+ * all other relative priorities stay unchanged. This is NOT checkSlot's
+ * evaluation order: `brokenOwnerRules` retains that diagnostic order, and
+ * `compareByRulePriority` normalizes both inputs to this ranking order.
  */
 export const OWNER_OVERRIDABLE_KINDS: ReadonlySet<RuleViolationKind> = new Set<RuleViolationKind>([
-  'within_lead_time',
   'in_person_on_home_day',
   'category_day_type',
   'category_per_day',
   'category_per_week',
   'outside_working_hours',
   'floating_block_overlap',
+  'within_lead_time',
   'travel_buffer_collision',
   'focus_time_floor',
 ]);
@@ -890,8 +892,8 @@ export function buildDayQualityBusyBlocks(
 }
 
 /**
- * EVERY owner-overridable rule this slot breaks, in checkSlot's own ladder
- * (priority) order — not just the first one `checkSlot` reports. A slot surfaced by a relaxed pass can break
+ * EVERY owner-overridable rule this slot breaks, in checkSlot's evaluation
+ * order — not just the first one `checkSlot` reports. A slot surfaced by a relaxed pass can break
  * several at once (the 2026-09-20 Elan search: 12:30 Tuesday was both an
  * in-person-on-a-home-day slot AND the only room left for lunch; 13:45 was only
  * the first), and a first-violation verdict hides the difference an approval
@@ -917,15 +919,18 @@ export function brokenOwnerRules(input: RuleCheckInput): RuleViolationKind[] {
 
 /**
  * Rank two rule-bending options by the owner's rule priority (owner ruling
- * 2026-09-23: "we have rules priority so priority win"). Each list is in ladder
- * order (`brokenOwnerRules`). Compared position by position: the option whose
- * rule there sits HIGHER in the ladder (more important) ranks later; an option
+ * 2026-09-23: "we have rules priority so priority win"). Diagnostic lists from
+ * `brokenOwnerRules` are normalized to the priority list above without changing
+ * their annotations. Compared position by position: the option whose
+ * rule there has HIGHER priority (more important) ranks later; an option
  * that has run out of broken rules ranks first. Equal lists return 0, so a
  * stable sort keeps them in time order — "as early as possible" only ever
  * decides between equal bends.
  */
 export function compareByRulePriority(a: readonly RuleViolationKind[], b: readonly RuleViolationKind[]): number {
   const rank = [...OWNER_OVERRIDABLE_KINDS];
+  a = [...a].sort((x, y) => rank.indexOf(x) - rank.indexOf(y));
+  b = [...b].sort((x, y) => rank.indexOf(x) - rank.indexOf(y));
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     if (a[i] === b[i]) continue;
     if (a[i] === undefined) return -1;

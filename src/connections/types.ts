@@ -31,6 +31,10 @@ export type ConnectionId = 'slack' | 'email' | 'whatsapp' | string;
  * text landed and the file silently didn't. Omitted (or 0) means every
  * attachment uploaded, or none were requested; transports that don't
  * implement attachments never set it.
+ * A failure reason `not_attempted` means the transport established that no
+ * delivery attempt began (for example, preparation failed before posting).
+ * `error` must retain uncertainty once delivery may have been attempted;
+ * callers must not treat it as proof that retrying cannot duplicate a send.
  */
 export type SendResult =
   | { ok: true; ref?: string; ts?: string; attachments_failed?: number }

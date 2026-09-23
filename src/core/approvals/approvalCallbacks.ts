@@ -370,7 +370,9 @@ export async function composeOwnerAskText(input: {
 /**
  * Merge owner's amend counter into on_approve.args. The counter shape is
  * approval-kind-specific (freeform: arbitrary keys, etc.). We do a shallow
- * spread: counter wins on key conflict. Meeting interval aliases are normalized
+ * spread: counter wins on key conflict. Explicit remote amendments replace an
+ * inherited physical venue; an explicitly supplied venue remains authoritative.
+ * Meeting interval aliases are normalized
  * to executor fields below. The full owner profile is required so preserved
  * duration and explicit duration amendments use execution's dated clock source.
  */
@@ -380,6 +382,15 @@ export function mergeAmendIntoApprove(
   profile: UserProfile,
 ): ToolCallback {
   const args = { ...approveCallback.args, ...counter };
+  // The counter identifies the terms being changed, unlike the merged action
+  // where an inherited location looks newly chosen. An explicit online counter
+  // with no venue uses the existing Teams sentinel so internal-meeting defaults
+  // cannot restore the old office. A supplied venue + online remains hybrid.
+  if (['create_meeting', 'move_meeting', 'update_meeting'].includes(approveCallback.tool)
+      && counter.is_online === true
+      && !(typeof counter.location === 'string' && counter.location.trim())) {
+    args.location = 'Microsoft Teams';
+  }
   // R2: normalize the counter to fields the executor actually reads. A new
   // start preserves duration; a duration change computes end in code.
   if (approveCallback.tool === 'create_meeting' || approveCallback.tool === 'move_meeting') {

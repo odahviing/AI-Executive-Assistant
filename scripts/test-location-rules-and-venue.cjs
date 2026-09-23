@@ -170,7 +170,7 @@ test('L2 · the search walker no longer clamps days itself and feeds the rule (s
   assert.match(walker, /inPersonRequested: meetingMode === 'in_person'/);
   const plan = one(collect(source('src/skills/meetings/planMeeting.ts'), n => ts.isPropertyAssignment(n)
     && n.name.getText() === 'inPersonRequested'), 'planMeeting inPersonRequested');
-  assert.equal(plan.initializer.getText(), "input.isOnlineHint === false && input.initiator !== 'colleague'");
+  assert.equal(plan.initializer.getText(), "input.isOnlineHint === false");
 });
 
 // ── L3 · create_meeting's Graph location is plan.location only ────────────

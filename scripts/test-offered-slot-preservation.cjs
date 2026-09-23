@@ -362,7 +362,7 @@ test('Graph readers normalize UTC / explicit offset / named zone and reject bad 
     { dateTime: '2026-09-16T14:00:00+03:00', timeZone: 'UTC' },
     { dateTime: '2026-09-16T14:00:00', timeZone: zone },
   ]) {
-    const event = { start: part, end: { dateTime: '2026-09-16T11:40:00', timeZone: 'UTC' }, attendees: [] };
+    const event = { type: 'singleInstance', start: part, end: { dateTime: '2026-09-16T11:40:00', timeZone: 'UTC' }, attendees: [] };
     const chain = { api(url) { assert.match(url, /^\/users\/owner@example\.test\/events\/fixture$/); return chain; }, select() { return chain; }, async get() { return event; } };
     const reader = compile(code, { DateTime, logger, getClient: () => chain });
     const detail = await reader.getEventType('owner@example.test', 'fixture');

@@ -29,8 +29,8 @@ import {
 } from '../db';
 import { getLinkedRequestIdForOutreach, getOutreachJobByRequestId } from '../db/jobs';
 import { reactActivityComplete } from '../utils/threadActivity';
-import { updateRequest, getRequest, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
-import { toTimerInstant } from '../core/requests/types';
+import { updateRequest, getRequest, getChildRequests, getOpenRequestsForColleague, getAwaitingOwnerRequests } from '../db/requests';
+import { toTimerInstant, parseDetails } from '../core/requests/types';
 import { resolveStatedInstant, StatedTimeClarificationError } from '../utils/weTimeResolver';
 import { logActivity } from '../core/requests/logActivity';
 import { closeRequest } from '../core/requests/closeRequest';
@@ -101,6 +101,10 @@ Only send messages the user explicitly asks for — never reach out to people on
               type: 'boolean',
               description: 'true ONLY when the user explicitly asked for the message to go out right now, even outside the recipient\'s working hours. Omit otherwise.',
             },
+            original_request_id: {
+              type: 'string',
+              description: 'For a send-now follow-up to an EXISTING message, pass its request_id from the earlier message_colleague result/history with send_now=true. This checks that exact original and sends its stored message only if still held; if already delivered, reports already sent without sending again. Omit for a genuinely new message or an explicitly requested intentional new send, even to the same person in the same thread. Never guess an ID or substitute a jobId.',
+            },
             intent: {
               type: 'string',
               enum: ['meeting_reschedule'],
@@ -157,6 +161,26 @@ Only send messages the user explicitly asks for — never reach out to people on
     args: Record<string, unknown>,
     context: SkillContext,
   ): Promise<unknown | null> {
+    if (toolName === 'message_colleague' && args.original_request_id !== undefined) {
+      if (context.authority !== 'owner' || context.userId !== context.profile.user.slack_user_id
+          || typeof args.original_request_id !== 'string' || !args.original_request_id.trim()
+          || args.send_now !== true || args.send_at) {
+        return { ok: false, error: 'invalid_original_request', _must_reply_with: 'I could not use that original message reference. No message was sent.' };
+      }
+      // The same lock covers lookup, held replacement and confirmed outcome.
+      // A retry waits for this exact operation rather than starting another send.
+      const { withRequestLock } = await import('../core/requests/resolver');
+      return withRequestLock(args.original_request_id, () => this.executeOutreach(toolName, args, context, args.original_request_id as string));
+    }
+    return this.executeOutreach(toolName, args, context);
+  }
+
+  private async executeOutreach(
+    toolName: string,
+    args: Record<string, unknown>,
+    context: SkillContext,
+    originalRequestId?: string,
+  ): Promise<unknown | null> {
     const userId = context.profile.user.slack_user_id;
 
     switch (toolName) {
@@ -188,6 +212,47 @@ Only send messages the user explicitly asks for — never reach out to people on
           };
         }
         const colleagueSlackId = idResolution.slack_id;
+
+        if (originalRequestId) {
+          const original = getRequest(originalRequestId);
+          const job = original && getOutreachJobByRequestId(original.id);
+          const details = original ? parseDetails<Record<string, unknown>>(original) ?? {} : {};
+          const destination = typeof args.channel_id === 'string' ? args.channel_id : undefined;
+          if (!original || original.kind !== 'outreach' || original.owner_user_id !== userId
+              || original.target_slack_id !== colleagueSlackId || !job
+              || job.owner_user_id !== userId || job.colleague_slack_id !== colleagueSlackId
+              || (details.channel_id || undefined) !== destination) {
+            return { ok: false, error: 'invalid_original_request', _must_reply_with: 'I could not use that original message reference. No message was sent.' };
+          }
+          // A send-now replacement is already linked by parent_request_id.
+          // Follow only that exact successful replacement, never same-person history.
+          const replacement = original.closure_reason === 'superseded_by_send_now'
+            ? getChildRequests(original.id).filter(r => r.kind === 'outreach' && r.owner_user_id === userId
+              && r.target_slack_id === colleagueSlackId
+              && (parseDetails<Record<string, unknown>>(r)?.channel_id || undefined) === destination).map(r => getOutreachJobByRequestId(r.id))
+              .find(j => j?.owner_user_id === userId && j.colleague_slack_id === colleagueSlackId && j.sent_at)
+            : undefined;
+          const sentAt = job.sent_at || replacement?.sent_at;
+          if (sentAt) return {
+            ok: true, sent: false, already_sent: true, request_id: original.id, sent_at: sentAt,
+            _must_reply_with: `That message to ${job.colleague_name} was already sent; I didn't send it again.`,
+          };
+          if (original.state !== 'in_flight' || original.phase !== 'outreach:scheduled'
+              || original.next_check_handler !== 'send_scheduled_outreach') {
+            return {
+              ok: false, error: 'original_request_not_sendable', request_id: original.id,
+              _must_reply_with: 'That original message is no longer held for sending. I cannot confirm it was delivered, so I did not send it again. Check the conversation before requesting a new send.',
+            };
+          }
+          // This reference denotes the existing operation: replay its stored
+          // decision, including channel/files, instead of reconstructing its text.
+          args = { ...args, message: job.message, await_reply: job.await_reply === 1,
+            intent: job.intent, context: job.context_json ? JSON.parse(job.context_json) : undefined,
+            proposed_slots: job.proposed_slots ? JSON.parse(job.proposed_slots) : undefined,
+            subject_keyword: job.subject_keyword,
+            attachments: Array.isArray(details.attachments) ? (details.attachments as Array<{sourceUrl: string; filename?: string}>).map(a => ({ slack_file_url: a.sourceUrl, filename: a.filename })) : undefined,
+          };
+        }
 
         // gh#Yael-25min — an owner reply in the SAME thread as an approval THIS
         // colleague raised is presumptively about deciding that approval, never
@@ -326,9 +391,11 @@ Only send messages the user explicitly asks for — never reach out to people on
         const isFuture = effectiveSendAt ? Date.parse(effectiveSendAt) > Date.now() : false;
         // An explicit "send it now" in the owner thread that is holding a
         // scheduled message to this colleague replaces that held copy, so the ask
-        // never reaches them twice (R3) and is never lost. Under the same request
-        // lock the sweep fires it under, the held copy's timer is pushed out
-        // (SUSPEND_MS) BEFORE this send: if the sweep got there first, its copy
+        // never reaches them twice (R3); an interrupted attempt is reported as
+        // uncertain, including a crash immediately before the transport call.
+        // Under the same request
+        // lock the sweep fires it under, the held copy's timer changes to an
+        // outcome-only expiry (SUSPEND_MS) BEFORE this send: if the sweep got there first, its copy
         // is the delivery and this call sends nothing more; otherwise it cannot
         // fire during this send. A confirmed send cancels it. A DEFINITE non-send
         // (no connection, or Slack refused before delivering) restores its
@@ -338,15 +405,18 @@ Only send messages the user explicitly asks for — never reach out to people on
         // cancelled and the owner is told to check, never that nothing went out
         // (owner ruling 2026-09-23; same never-resend-unconfirmed rule as
         // runner.ts's closeUnconfirmedSend). The copy is never left timerless.
-        const OPEN_STATES = ['awaiting_owner', 'awaiting_colleague', 'in_flight'];
         const SUSPEND_MS = 60 * 60 * 1000;
         const suspended: Array<{ id: string; nextCheckAt: string | null }> = [];
         const stillHeld = (id: string) => {
           const current = getRequest(id);
-          return !!current && OPEN_STATES.includes(current.state) && current.next_check_handler === 'send_scheduled_outreach';
+          return !!current && current.state === 'in_flight' && current.phase === 'outreach:scheduled'
+            && (current.next_check_handler === 'send_scheduled_outreach' || current.next_check_handler === 'outreach_expiry');
         };
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const heldLock = () => (require('../core/requests/resolver') as typeof import('../core/requests/resolver')).withRequestLock;
+        const heldLock = () => originalRequestId
+          ? async <T>(id: string, work: () => Promise<T>): Promise<T> => id === originalRequestId ? work()
+            : (require('../core/requests/resolver') as typeof import('../core/requests/resolver')).withRequestLock(id, work)
+          : (require('../core/requests/resolver') as typeof import('../core/requests/resolver')).withRequestLock;
         const cancelHeld = async (closureReason = 'superseded_by_send_now'): Promise<string[]> => {
           const replaced: string[] = [];
           for (const copy of suspended.splice(0)) {
@@ -374,28 +444,27 @@ Only send messages the user explicitly asks for — never reach out to people on
             _must_reply_with: `Nothing reached ${args.colleague_name as string} just now; the message scheduled for ${when} still stands.`,
           };
         };
-        // The attempted send's outcome is unknown: cancel the held copy (never a
-        // second delivery) and say it may have gone out.
+        // Every attempted send with an unknown outcome may have landed, including
+        // a first send with no held copy. Cancel any held copy and report uncertainty.
         const unconfirmedHeld = async (): Promise<Record<string, unknown>> => {
           const cancelled = await cancelHeld('superseded_by_unconfirmed_send_now');
-          if (!cancelled.length) return {};
           return {
             delivery_unconfirmed: true,
-            scheduled_copy_cancelled: true,
-            _must_reply_with: `I tried to send it to ${args.colleague_name as string} now but couldn't confirm it went through, so it may have reached them. I cancelled the scheduled copy so they won't get it twice — please check the conversation before sending again.`,
+            ...(cancelled.length ? { scheduled_copy_cancelled: true } : {}),
+            _must_reply_with: `I tried to send it to ${args.colleague_name as string} now but couldn't confirm it went through, so it may have reached them. ${cancelled.length ? "I cancelled the scheduled copy so they won't get it twice — please" : 'Please'} check the conversation before sending again.`,
           };
         };
         if (explicitImmediate) {
-          const held = getOpenRequestsForColleague(userId, colleagueSlackId).filter(r =>
+          const held = (originalRequestId ? [getRequest(originalRequestId)!] : getOpenRequestsForColleague(userId, colleagueSlackId)).filter(r =>
             r.kind === 'outreach' && r.next_check_handler === 'send_scheduled_outreach'
             && r.target_slack_id === colleagueSlackId
-            && r.origin_channel === context.channelId && r.origin_thread_ts === context.threadTs);
+            && (originalRequestId || (r.origin_channel === context.channelId && r.origin_thread_ts === context.threadTs)));
           let heldAlreadyDelivered = false;
           for (const copy of held) {
             await heldLock()(copy.id, async () => {
               if (stillHeld(copy.id)) {
                 suspended.push({ id: copy.id, nextCheckAt: getRequest(copy.id)?.next_check_at ?? null });
-                updateRequest(copy.id, { nextCheckAt: new Date(Date.now() + SUSPEND_MS).toISOString(), nextCheckHandler: 'send_scheduled_outreach' });
+                updateRequest(copy.id, { nextCheckAt: new Date(Date.now() + SUSPEND_MS).toISOString(), nextCheckHandler: 'outreach_expiry' });
               } else if (getOutreachJobByRequestId(copy.id)?.sent_at) {
                 heldAlreadyDelivered = true;
               }
@@ -465,6 +534,9 @@ Only send messages the user explicitly asks for — never reach out to people on
         const channelNameArg = typeof args.channel_name === 'string' ? args.channel_name : undefined;
 
         const jobId = createOutreachJob({
+          // If this process dies during the replacement send, the held row's
+          // outcome-only expiry closes this child too and tells the owner once.
+          parentRequestId: suspended[0]?.id,
           owner_user_id: userId,
           owner_channel: context.channelId,
           owner_thread_ts: context.threadTs,
@@ -486,12 +558,9 @@ Only send messages the user explicitly asks for — never reach out to people on
           context_json: contextPayload,
           proposed_slots: proposedSlotsJson,
           subject_keyword: subjectKeywordArg,
-          // registrar fix (scheduled-first-outreach-send-not-gated-to-
-          // recipient-hours, wf_29a0d866-021 round 2) — only relevant when
-          // this is actually a scheduled send; runSendScheduledOutreach reads
-          // these back at fire time so a deferred channel-post/attachment
-          // replays literally instead of degrading to a plain DM.
-          channel_id: isFuture ? channelIdArg : undefined,
+          // The existing channel field also scopes exact-original references
+          // after immediate delivery. Deferred files/name replay at timer fire.
+          channel_id: channelIdArg,
           channel_name: isFuture ? channelNameArg : undefined,
           attachments: isFuture ? attachmentsArg : undefined,
         });
@@ -531,11 +600,12 @@ Only send messages the user explicitly asks for — never reach out to people on
           return {
             scheduled: true,
             jobId,
+            request_id: getLinkedRequestIdForOutreach(jobId),
             scheduled_at: effectiveSendAt,
             _status: 'scheduled_not_sent',
             ...(heldForRecipientHours ? { held_for_recipient_work_hours: true } : {}),
             _note: heldForRecipientHours
-              ? `${colleagueName} is outside their working hours, so the message is scheduled for their next work start, ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} the user's time — NOT sent yet. Tell the user exactly this: "It's outside ${colleagueName}'s working hours, so I've scheduled it for ${scheduledDt.toFormat('EEEE at HH:mm')}, when their day starts." If the user then asks for it to go now, call message_colleague in this thread with send_now=true; that replaces this scheduled copy.`
+              ? `${colleagueName} is outside their working hours, so the message is scheduled for their next work start, ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} the user's time — NOT sent yet. Tell the user exactly this: "It's outside ${colleagueName}'s working hours, so I've scheduled it for ${scheduledDt.toFormat('EEEE at HH:mm')}, when their day starts." For a send-now follow-up, pass this result's request_id as original_request_id with send_now=true.`
               : `Message is scheduled for ${scheduledDt.toFormat('EEEE d MMM \'at\' HH:mm')} — NOT sent yet. Tell the user exactly this: "I've scheduled the message to ${colleagueName} for ${scheduledDt.toFormat('EEEE at HH:mm')}."`,
           };
         }
@@ -597,7 +667,6 @@ Only send messages the user explicitly asks for — never reach out to people on
               attachmentsArg?.length ? { attachments: attachmentsArg } : undefined,
             );
           } catch (err) {
-            if (!suspended.length) throw err;
             updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Channel post outcome unknown' });
             return { ok: false, error: 'send_threw', detail: String(err).slice(0, 200), ...(await unconfirmedHeld()) };
           }
@@ -624,6 +693,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           });
           logger.info('message_colleague — channel post sent', {
             jobId,
+            request_id: getLinkedRequestIdForOutreach(jobId),
             channel: args.channel_name ?? args.channel_id,
             colleague: args.colleague_name,
             replacedScheduled,
@@ -633,6 +703,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             posted_to_channel: args.channel_name ?? args.channel_id,
             colleague_mentioned: args.colleague_name,
             jobId,
+            request_id: getLinkedRequestIdForOutreach(jobId),
             ...(replacedScheduled.length ? { replaced_scheduled_copy: true } : {}),
             attachments_failed: outcome.attachments_failed ?? 0,
             _must_reply_with: outcome.attachments_failed
@@ -699,6 +770,7 @@ Only send messages the user explicitly asks for — never reach out to people on
             // A still-scheduled send has never reached the colleague, so its
             // origin is still the OWNER's thread — never a colleague-side anchor.
             && r.next_check_handler !== 'send_scheduled_outreach'
+            && !(r.state === 'in_flight' && r.phase === 'outreach:scheduled')
             // Sanity: the recorded origin channel should look like a DM
             // (starts with 'D'). Owner-side origins are also 'D' so we
             // can't fully disambiguate, but coupled with "open colleague
@@ -731,7 +803,6 @@ Only send messages the user explicitly asks for — never reach out to people on
             Object.keys(sendOpts).length > 0 ? sendOpts : undefined,
           );
         } catch (err) {
-          if (!suspended.length) throw err;
           updateOutreachJob(jobId, { status: 'cancelled', reply_text: 'Send outcome unknown' });
           return { ok: false, error: 'send_threw', detail: String(err).slice(0, 200), ...(await unconfirmedHeld()) };
         }
@@ -827,6 +898,7 @@ Only send messages the user explicitly asks for — never reach out to people on
           ok: true,
           sent: true,
           jobId,
+          request_id: linkedRequestId,
           colleague_name: args.colleague_name,
           await_reply: !!args.await_reply,
           ...(replacedScheduled.length ? { replaced_scheduled_copy: true } : {}),

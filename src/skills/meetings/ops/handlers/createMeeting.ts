@@ -1259,7 +1259,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
             };
           }
         } catch (err) {
-          logger.warn('create_meeting idempotency pre-check failed — proceeding with create', { err: String(err) });
+          logger.warn('create_meeting idempotency pre-check failed — withholding create', { err: String(err) });
+          throw err;
         }
 
         // v2.7.0 — single pipeline through planMeeting: category detection,
@@ -1316,7 +1317,8 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               };
             }
           } catch (err) {
-            logger.warn('create_meeting — reschedulable-sibling check threw, proceeding with create', { err: String(err).slice(0, 160) });
+            logger.warn('create_meeting — reschedulable-sibling check threw, withholding create', { err: String(err).slice(0, 160) });
+            throw err;
           }
         }
         const bookingRequest = await normalizeBookingRequest('create_meeting', args, context);

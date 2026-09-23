@@ -981,8 +981,8 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
           // `[delete_meeting FAILED: The specified object was not found in the
           // store]` — a leaked mechanism string (M9) that the model then
           // folded into "all 11 declined". Stop here with the real reason and
-          // change nothing. Only NOT-FOUND takes this exit; a transient Graph
-          // fault still falls through so a live meeting is never reported gone.
+          // change nothing. Only NOT-FOUND takes this exit; any other read
+          // failure propagates without attempting a cancellation.
           //
           // gh#delete-meeting-invalid-id-cascades — a model-invented placeholder
           // id ("event_id_from_calendar_placeholder", never a real Graph id) is
@@ -1020,18 +1020,10 @@ export async function handleDeleteMeeting(args: Record<string, unknown>, ctx: Op
               message: `"${args.meeting_subject}" is not on the calendar under that id — it was already cancelled, or the id is stale. Nothing was changed by this call. Do NOT count it as one you just cancelled; if it should still exist, re-read the day with get_calendar and use the id from there.`,
             };
           }
-          // (bouncer objection 3, 2026-08-12) — FAIL-OPEN, stated plainly: a
-          // non-404 (transient Graph) failure here skips BOTH the
-          // seriesMaster refusal AND the wrong-event subject-mismatch guard
-          // for this call, not just the recurring-series check —
-          // preDeleteSubject/preDeleteSubjectMasked stay undefined and
-          // `cancelledSubject` further down falls back to narrating the
-          // caller's unverified args.meeting_subject claim, i.e. the exact
-          // original incident behavior for this one call. Accepted trade-off
-          // (failing closed on every transient read error has its own cost:
-          // every delete_meeting would refuse whenever Graph blips) — not
-          // silent, logged here.
-          logger.warn('delete_meeting recurring-preflight failed — proceeding (seriesMaster check AND wrong-event subject-mismatch guard both skipped for this call)', { err: String(err) });
+          // Unknown identity/type is not permission to cancel. Retrying the
+          // read is safe; cancelling an unchecked series or wrong id is not.
+          logger.warn('delete_meeting recurring-preflight failed — withholding cancellation', { err: String(err) });
+          throw err;
         }
 
         // ── Which Graph verb, and therefore who Outlook notifies ────────────

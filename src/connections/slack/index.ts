@@ -128,7 +128,8 @@ export function createSlackConnection(app: App, botToken: string, profile: UserP
         const outcome = await sendDM(app, botToken, ref, formatted, { threadTs: opts?.threadTs });
         const result = toSendResult(outcome);
         if (result.ok) anyOk = true;
-        else lastErr = result;
+        // A later preflight refusal cannot erase an earlier uncertain send.
+        else if (lastErr?.ok !== false || lastErr.reason !== 'error') lastErr = result;
       }
       return anyOk ? { ok: true } : (lastErr ?? { ok: false, reason: 'all_failed' });
     },

@@ -1,3 +1,24 @@
+## 4.9.14 — Reliable meeting changes and original-message delivery tracking
+
+Twenty independently verified repair packages strengthen meeting validation, counteroffers and delivery reporting. Lunch now outranks short notice when comparing owner-approved compromises; a confirmed-delivered original message is reported as already sent when its exact request is supplied.
+
+### Fixed
+- Enforce physical/home-day rules on meeting moves and updates, preserve explicit hybrid venues, require fresh duplicate checks, and stop mutations when required metadata is unavailable.
+- Carry amended modality through counteroffers and approval replay without losing time-only or physical-location intent.
+- Preserve confirmed, held, uncertain and failed delivery outcomes through restart, summaries and fallback replies; avoid retrying a possibly delivered message.
+- Include the final meeting end time in change notices and keep duplicate-send suppression honest.
+- Retain original outreach identity for scheduled and immediate DM/channel sends, so exact follow-ups can report prior delivery without another send.
+- Align cancellation, reschedule and outcome instructions with their actual tool contracts.
+
+### Changed
+- Record lunch/floating blocks above minimum notice in the existing compromise-priority list; retain other priorities and approval requirements.
+
+### Verification
+- 142 suite/time-zone runs, 3,910 passing checks, zero failures/skips, and passing typecheck. All 20 repair packages have independent reviews; 21 ledger refs include one shared child repair.
+- Golden30 covers all thirty paths: thirteen pass and seventeen outdated anchors re-traced, with no behavioral failures. One immediate-channel identity omission found in review was repaired and independently rechecked.
+- Optional-reference selection, checker judgment and generated wording remain model-dependent; fixture tests do not prove live conversation behavior. No new runtime model call or tier was added.
+
+---
 ## 4.9.13 - Honest meeting approvals and colleague-hours messaging
 
 Repairs six owner-reported conversations from 20 September: an in-person request on a home day, a replacement invite that asked for an address already on the original, a Sunday heads-up to a Boston colleague, a Hebrew gender correction that did not stick, a social reply that ended the conversation, and an unclear briefing pronoun. Thirteen independently verified refs; no extra model call or runtime tier change.

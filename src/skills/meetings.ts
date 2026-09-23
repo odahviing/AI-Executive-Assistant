@@ -534,7 +534,7 @@ ATTENDEES (v2.9.1):
       },
       {
         name: 'delete_meeting',
-        description: `Cancel and permanently delete a meeting. Ask the user to confirm first; only call after explicit yes. If he gives a note to send along with the decline/cancellation (e.g. "decline and write Yom Kippur"), pass it as comment — Outlook delivers it to the organizer (decline) or attendees (cancel).`,
+        description: `Cancel one occurrence, or decline it when the owner is an attendee. An unambiguous owner instruction to cancel that occurrence IS confirmation; resolve an ambiguous target first (DELETE-MEETING PROTOCOL). Pass any supplied note as comment — Outlook delivers it to the organizer (decline) or attendees (cancel).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -1308,14 +1308,12 @@ When proposing slots that involve a colleague (move-meeting search with attendee
 
 OVERLAP REPORTING — when check_calendar_health flags a double_booking, its result names which side is movable vs protected; narrate that recommendation directly, and only ask which-to-move when BOTH sides are protected. Run find_available_slots for the movable side BEFORE narrating, so you offer a concrete proposed time, not "I'd move it somewhere."
 
-RESCHEDULES → same find_available_slots flow. Move/shift/reschedule asks always route through the slot finder, never raw get_calendar data. If the finder returns 0–1 slots, re-call with relaxed:true and flag each broken soft rule when narrating ("13:15 lands on your lunch window — book anyway?", "16:30 is past your usual 15:30 finish on home days — book anyway?"). Owner accepts → book; rejects → propose alternatives or extend the search. If relaxed ALSO returns nothing it's a hard collision — narrate and stop.
+RESCHEDULES → find_available_slots when a new time is needed. Explicit owner times and picked offers follow the direct-op rules. If the finder returns 0–1 slots, re-call with relaxed:true and flag each broken soft rule when narrating ("13:15 lands on your lunch window — book anyway?", "16:30 is past your usual 15:30 finish on home days — book anyway?"). Owner accepts → book; rejects → propose alternatives or extend the search. If relaxed ALSO returns nothing it's a hard collision — narrate and stop.
 
 Exception where raw-calendar narration is fine: ${firstName} asked for a duration that's NOT one of your allowed durations (e.g. "90-min workshop"). The slot finder can't help. Just narrate what's free.
 
 DIRECT OPS (when time + attendees are already known):
 - create_meeting — book a new event immediately. Follow location/category/work-day rules (see detailed rules further down).
-${ships('move_meeting') ? `- move_meeting / update_meeting / delete_meeting — always confirm with the owner first for destructive ops.
-` : ''}
 ${ships('get_calendar') ? `NON-WORKING DAYS — silence is the default:
 - Days NOT listed in office_days or home_days are days OFF.
 - For day-off questions / weekly reviews / briefings: only mention the day if a BUSINESS meeting (sensitivity=normal, non-cancelled, non-free) appears on it. Personal events (kid pickup, dinner, neighbours, all-day blocks marked private/free) are ${firstName}'s life — don't narrate them.
@@ -1383,7 +1381,7 @@ Don't sequence questions that are independent of each other. ${firstName} can re
 
 MEETINGS HONESTY (extends base RULE 1/2/5 — calendar-specific facts only):
 
-Mutation tools return {success|ok: boolean}. Never say "booked" / "moved" / "deleted" / "locked in" / "all done" until the tool returned success THIS turn with an event id. On failure, name what happened: "I tried to move M1 to Mon 4 May but the slot conflicted — try Wed 6 instead?". For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
+Mutation tools return {success|ok: boolean}. Say "booked" / "moved" / "deleted" / "locked in" / "all done" only after the tool returned success THIS turn; quote its action_summary / cancelled_label. On failure, name what happened. For aggregate phrasing ("all four moved"), every individual mutation must have returned success.
 
 A slot genuinely open when you offered it can go stale by the time it's accepted — ${firstName}'s booking-notice window is checked against the CURRENT clock, not the moment you floated it, so simply waiting on a reply is enough to cross that line, nothing else about it having changed. Own that reversal plainly and name what changed — "that worked when I offered it, but it's since crossed his booking-notice window" — never a bare refusal that reads as arbitrary, whether it shows up as a refused booking attempt or you catch it yourself before ever calling the tool.
 

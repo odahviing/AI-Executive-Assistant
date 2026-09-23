@@ -591,10 +591,11 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
               ok: false,
               reason: 'already_messaged_this_turn',
               colleague_slack_id: colleagueSlackId,
-              _note: 'You already called message_colleague for this person earlier in THIS turn. Do NOT call again. The first message is queued — your reply should reference what you ALREADY did, not pretend a second send is happening.',
+              _note: 'You already called message_colleague for this person earlier in THIS turn. Do NOT call again. Refer to that original result for whether it was sent, scheduled, unconfirmed, or failed; this skipped call changes nothing.',
             }),
           });
-          toolCallSummaries.push(`[message_colleague] ${colleagueSlackId} — already messaged this turn, skipped`);
+          // A skipped call adds no action: retain the original result's outcome
+          // for the fallback and output gates, without inventing a delivered send.
           continue;
         }
         // v3.4.7 — DOUBLE-NOTIFY guard. If resolve_approval already relayed the
@@ -619,7 +620,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
               _note: 'resolve_approval ALREADY closed the loop with this person this turn — they received the outcome DM in their existing thread. Do NOT message them again; a second DM lands in a new thread and reads as a duplicate. Your reply should reference the close-loop that already went out.',
             }),
           });
-          toolCallSummaries.push(`[message_colleague] ${colleagueSlackId} — requester already notified by resolver, skipped`);
+          // The resolver's existing summary owns the action; no message tool ran.
           continue;
         }
       }
@@ -1330,13 +1331,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         // Tool summaries look like "[tool_name: short detail]" or "[tool_name]".
         // chris-headsup-fallback-verb-20260920 — a held send renders as
         // `[message_colleague SCHEDULED, NOT sent yet: …]` and a send_now with an
-        // unknown outcome as `[message_colleague UNCONFIRMED: …]`
-        // (renderToolSummary, turnHelpers.ts) — outcomes distinct from a
-        // delivered send, so the stamp is part of the key: each earns its own
+        // unknown outcome as `[message_colleague UNCONFIRMED: …]`; ALREADY_SENT
+        // records prior confirmed delivery without a new send (turnHelpers.ts).
+        // These are distinct from a fresh delivery, so the stamp is part of the key: each earns its own
         // verbMap verb below instead of "sent the message". Anchored at
         // position 0 for the same reason as isFailedLine — caller text follows the name.
         const outcomeKey = (s: string): string | null => {
-          const m = s.match(/^\[([a-z0-9_]+)(?: (SCHEDULED|UNCONFIRMED)\b)?/);
+          const m = s.match(/^\[([a-z0-9_]+)(?: (SCHEDULED|UNCONFIRMED|ALREADY_SENT)\b)?/);
           return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : null;
         };
         const toolNames = toolCallSummaries.map(s => outcomeKey(s) ?? 'something');
@@ -1489,6 +1490,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           message_colleague: 'sent the message',
           'message_colleague SCHEDULED': 'scheduled the message',
           'message_colleague UNCONFIRMED': "tried to send the message but couldn't confirm it went through",
+          'message_colleague ALREADY_SENT': 'the original message was already sent',
           find_slack_channel: 'found the channel',
           find_slack_user: 'found the person',
           // Search / knowledge
@@ -1518,7 +1520,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'create_approval', 'resolve_approval',
           'create_task', 'update_task',
           // Tier 3 — outreach + briefings
-          'message_colleague', 'message_colleague SCHEDULED', 'message_colleague UNCONFIRMED', 'send_briefing_now',
+          'message_colleague', 'message_colleague SCHEDULED', 'message_colleague UNCONFIRMED', 'message_colleague ALREADY_SENT', 'send_briefing_now',
           // Tier 4 — calendar health
           'check_calendar_health', 'set_event_category', 'manage_calendar_issue',
           // Tier 5 — knowledge / routines (rarely standalone)

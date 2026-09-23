@@ -109,6 +109,55 @@ const hoursVerdict = { claimed_action: true, action_type: 'invented_third_party_
 const cleanVerdict = { claimed_action: false, action_type: null, target_name: null, claim_specifics_mismatch: false, action_summary: null };
 
 const cases = [
+  ['regression', 'scheduled and confirmed sends retain actual request identity in compact history', () => {
+    for (const r of [held, sentNow]) {
+      const line = summarize({ ...r, request_id: 'req_original_1' });
+      assert.match(line, /request_id=req_original_1\]/);
+      assert.deepEqual(Array.from(turn.toolLinesMatching(line + '\nI handled it.', /^\[message_colleague\b/)), [line.slice(0, line.indexOf(']') + 1)]);
+    }
+  }],
+  ['regression', 'already sent summary states prior confirmed delivery with no new mutation', () => {
+    const line = summarize({ ok: true, sent: false, already_sent: true, request_id: 'req_original_1', sent_at: '2026-09-21T06:00:00Z' });
+    assert.equal(line, '[message_colleague ALREADY_SENT: Chris — original message already delivered; no new send; request_id=req_original_1]');
+    assert.equal(turn.extractActionTape([{ role: 'assistant', content: line }]).length, 0);
+  }],
+  ['preserved', 'summary never copies an unvalidated request identity from input', () => {
+    const line = turn.summarizeToolCall('message_colleague', { ...input, original_request_id: 'req_wrong' }, sentNow, OWNER_TZ);
+    assert.equal(line, '[message_colleague: Chris] mutated=message');
+  }],
+  ['regression', 'checker and rewrite inputs distinguish prior delivery from a fresh resend', async () => {
+    const { mod, captured } = loadChecker();
+    const line = summarize({ ok: true, sent: false, already_sent: true, request_id: 'req_original_1' });
+    await mod.checkReplyClaims({ reply: 'I sent Chris that same message again just now.', toolSummaries: [line], ownerFirstName: 'Idan' });
+    assert.match(captured[0], /ALREADY_SENT.*prior confirmed delivery/);
+    assert.match(captured[0], /new send or resend.*claim_specifics_mismatch=true/);
+    await mod.rewriteOwningTheMiss({ draft: 'I sent Chris the message again.', actionType: 'message', targetName: 'Chris', ownerFirstName: 'Idan', toolSummaries: [line] });
+    assert.match(JSON.stringify(captured[1]), /ALREADY SENT.*original message was already delivered and no new send occurred/);
+  }],
+  ['regression', 'already sent without prior history cannot shield a claimed new send', async () => {
+    const g = loadGate(misflagVerdict);
+    const line = summarize({ ok: true, sent: false, already_sent: true, request_id: 'req_original_1' });
+    assert.equal(await g.run(ownerCtx(line), 'I sent Chris the same message again.'), 'REWRITTEN');
+    assert.equal(g.calls.rewrite, 1);
+  }],
+  ['preserved', 'prior scheduled history keeps honest already-sent verdict but cannot shield resend specifics mismatch', async () => {
+    const line = summarize({ ok: true, sent: false, already_sent: true, request_id: 'req_original_1' });
+    const ctx = { ...ownerCtx(line), history: [{ role: 'assistant', content: summarize(held) + '\nScheduled it.' }] };
+    const good = loadGate(cleanVerdict), bad = loadGate(sentVerdict);
+    const honest = 'That original message was already sent; I did not send it again.';
+    assert.equal(await good.run(ctx, honest), honest);
+    assert.equal(await bad.run(ctx, 'I sent Chris the same message again.'), 'REWRITTEN');
+  }],
+  ['regression', 'first unconfirmed send never invents a cancelled scheduled copy', () => {
+    for (const scheduled_copy_cancelled of [undefined, false, 'true']) {
+      assert.equal(summarize({ ...unconfirmed, scheduled_copy_cancelled }), '[message_colleague UNCONFIRMED: Chris — may have been delivered]');
+    }
+  }],
+  ['regression', 'unconfirmed rewrite instructions require explicit cancellation evidence', async () => {
+    const { mod, captured } = loadChecker();
+    await mod.rewriteOwningTheMiss({ draft: 'Sent Chris the heads-up.', actionType: 'message', targetName: 'Chris', ownerFirstName: 'Idan', toolSummaries: [summarize({ ...unconfirmed, scheduled_copy_cancelled: undefined })] });
+    assert.match(JSON.stringify(captured[0]), /Only if the activity line explicitly says .*scheduled copy cancelled.* mention that cancellation/);
+  }],
   ['regression', 'held result renders SCHEDULED, NOT sent, with owner-local send time', () => {
     const line = summarize(held);
     assert.match(line, /^\[message_colleague SCHEDULED, NOT sent yet: Chris — goes out Mon 21 Sep 09:00 \(outside Chris's working hours\)\]/);

@@ -696,13 +696,22 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
 }
 
 /**
- * Outreach awaiting_colleague past window → close as expired + tombstone DM.
- * For await_reply=false outreach this never fires (request goes resolved
- * immediately on send).
+ * Awaiting-colleague outreach expires with its reply outcome. An in-flight
+ * send whose completion was never confirmed expires as unknown, without resend.
+ * Confirmed fire-and-forget delivery already resolved and has no timer.
  */
 async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile): Promise<'closed'> {
-  // If colleague meanwhile replied (state changed off awaiting_colleague),
-  // this is a stale timer — just clear it.
+  // A send claimed this timer before entering the transport. After a restart
+  // we cannot tell whether the call began or landed. Expire the unknown outcome,
+  // never repeat delivery; definite non-sends restore their send timer instead.
+  if (row.state === 'in_flight') {
+    closeRequest({ id: row.id, state: 'cancelled', closureReason: 'outreach_send_unconfirmed', closedBy: 'system' });
+    await notifyAskerScheduledOutreachFailed(row, profile,
+      `A send to ${row.target_name ?? 'them'} was interrupted and I can't confirm whether it went out. I won't resend it automatically because that could duplicate the message. Please check the conversation before trying again.`);
+    return 'closed';
+  }
+  // The sweep already excludes terminal rows. Any other live state here is an
+  // invalid timer transition and follows its existing failure closure.
   if (row.state !== 'awaiting_colleague') {
     throw new Error('Outreach expired before delivery was confirmed');
   }
@@ -824,6 +833,11 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     const attachments = Array.isArray(details.attachments)
       ? details.attachments as Array<{ sourceUrl: string; filename?: string }>
       : undefined;
+
+    // Persist the no-resend recovery path before the transport call. The request
+    // lock prevents a live sweep racing this attempt; after a process death the
+    // existing expiry reports uncertainty instead of replaying the mutation.
+    updateRequest(row.id, { state: 'in_flight', nextCheckAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), nextCheckHandler: 'outreach_expiry' });
 
     if (channelId) {
       const mention = `<@${targetSlackId}>`;

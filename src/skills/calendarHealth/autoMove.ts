@@ -314,6 +314,9 @@ export async function executeInternalAutoMove(params: {
     ...(autoMoveReq ? { fulfillingRequestId: autoMoveReq.id } : {}),
   });
   correctedColleagueSlackIds = new Set(artifactsResult.correctedColleagueSlackIds);
+  if (artifactsResult.unconfirmedColleagueSlackIds?.length) {
+    followUpFailures.push("I couldn't confirm some attendee notifications; they may have arrived, so I did not send them again.");
+  }
   cascadeComplete = true;
   } catch (err) {
     // The cascade can have partially notified people before failing. Do not
@@ -359,7 +362,7 @@ export async function executeInternalAutoMove(params: {
       originalStartIso: mStart.toISO()!, originalEndIso: mEnd.toISO()!,
       newStartIso, newEndIso, conflictReason,
     });
-    if (!delivered) throw new Error('Attendee notification was not confirmed.');
+    if (!delivered || delivered === 'unconfirmed') throw new Error('Attendee notification was not confirmed.');
     (delivered === 'scheduled' ? heldNotices : notified).push((a.emailAddress.name || row.name || email).split(' ')[0]);
     } catch (err) {
       followUpFailures.push(`I couldn't confirm the notification to ${a.emailAddress.name || email}.`);

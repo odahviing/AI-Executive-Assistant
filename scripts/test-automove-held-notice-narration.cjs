@@ -20,6 +20,7 @@ let src = fs.readFileSync(path.join(__dirname, 'test-calendar-health-audit.cjs')
 src = src.slice(0, src.indexOf('async function test('));
 const swap = (a, b) => { if (src.split(a).length !== 2) throw Error('harness anchor moved: ' + a.slice(0, 60)); src = src.replace(a, b); };
 swap("return !opts.noticeFalse; } };", "return opts.noticeResult !== undefined ? opts.noticeResult : !opts.noticeFalse; } };");
+swap("return { correctedColleagueSlackIds: [] };", "return opts.cascadeResult ?? { correctedColleagueSlackIds: [] };");
 swap("const file = ['meetingProtection', 'attendeeScope'].includes(name)",
   "const file = (name === 'autoMove' && SNAPSHOT && require('node:fs').existsSync(require('node:path').join(SNAPSHOT, 'src/skills/calendarHealth/autoMove.ts'))) ? require('node:path').join(SNAPSHOT, 'src/skills/calendarHealth/autoMove.ts') : ['meetingProtection', 'attendeeScope'].includes(name)");
 src += '\nmodule.exports = { harness };';
@@ -35,6 +36,17 @@ async function check(kind, name, fn) {
 const ok = (c, m) => { if (!c) throw Error(m); };
 
 (async () => {
+  await check('regression', 'direct-unknown-never-claims-sent', async () => {
+    const r = await harness({ noticeResult: 'unconfirmed' }).move();
+    ok(r.issue.fixed === true && /couldn.t confirm the notification/.test(r.issue.fix_detail), r.issue.fix_detail);
+    ok(!/and let Peer know/.test(r.issue.fix_detail), 'unknown notice claimed sent');
+  });
+  await check('regression', 'cascade-unknown-reported-without-second-send', async () => {
+    const h = harness({ cascadeResult: { correctedColleagueSlackIds: ['peer'], unconfirmedColleagueSlackIds: ['peer'] } });
+    const r = await h.move();
+    ok(r.issue.fixed === true && /couldn.t confirm/.test(r.issue.fix_detail), r.issue.fix_detail);
+    ok(!h.calls.some(c => c[0] === 'notice'), 'duplicate notification attempted');
+  });
   await check('regression', 'held-notice-gets-scheduled-wording', async () => {
     const r = await harness({ noticeResult: 'scheduled' }).move();
     ok(r.issue.fixed === true, 'move not confirmed');

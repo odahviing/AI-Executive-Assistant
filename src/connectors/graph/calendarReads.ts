@@ -507,7 +507,9 @@ export async function findDuplicateEvent(
   const wantSubject = subject.trim().toLowerCase();
   const startMs = startDt.toMillis();
   const probeDate = startDt.toFormat('yyyy-MM-dd');
-  const events = await getCalendarEvents(userEmail, probeDate, probeDate, timezone);
+  // A write retry may follow a POST whose response was lost. Neither the
+  // cross-turn cache nor that turn's memoized absence proves no invite exists.
+  const events = await getCalendarEvents(userEmail, probeDate, probeDate, timezone, 'force');
   return events.find(ev => {
     if (ev.isCancelled) return false;
     if ((ev.subject ?? '').trim().toLowerCase() !== wantSubject) return false;
@@ -557,7 +559,7 @@ export async function findReschedulableSibling(params: {
   // bounded to keep this one extra fetch cheap.
   const from = startDt.minus({ days: 7 }).toFormat('yyyy-MM-dd');
   const to = startDt.plus({ days: 14 }).toFormat('yyyy-MM-dd');
-  const events = await getCalendarEvents(params.userEmail, from, to, params.timezone);
+  const events = await getCalendarEvents(params.userEmail, from, to, params.timezone, 'force');
   const evMsOf = (ev: CalendarEvent): number =>
     DateTime.fromISO(ev.start.dateTime, { zone: ev.start.timeZone ?? 'utc' }).toMillis();
   const matches = events.filter(ev => {
@@ -1326,6 +1328,9 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     .api(`/users/${userEmail}/events/${meetingId}`)
     .select('id,type,subject,seriesMasterId,start,end,isAllDay,sensitivity,categories,organizer,attendees')
     .get();
+  if (!['singleInstance', 'occurrence', 'exception', 'seriesMaster'].includes(event?.type)) {
+    throw new Error('Cannot determine the calendar event type');
+  }
   return {
     type: event?.type,
     subject: event?.subject,
