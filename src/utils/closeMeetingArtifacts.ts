@@ -850,22 +850,18 @@ async function relayCancellationToOutreachColleague(
       return false;
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { requesterRelayLanguage, usableRelaySubject } = require('../core/requests/requesterRelay') as
+    const { requesterRelayLanguage, usableRelaySubject, relayNotice } = require('../core/requests/requesterRelay') as
       typeof import('../core/requests/requesterRelay');
     const lang = requesterRelayLanguage(row.colleague_slack_id);
     const first = row.colleague_name?.split(/\s+/)[0] ?? '';
-    const hi = first
-      ? (lang === 'he' ? `היי ${first}` : `Hi ${first}`)
-      : (lang === 'he' ? 'היי' : 'Hi there');
+    const hi = relayNotice(lang, 'greeting', { name: first }).trim();
     // The name he actually SAW, read off the notice's own stored payload —
     // never re-derived (R2). Quoted only when a real title survived the leak
     // filter; the generic fallback must not read as a quoted title.
     const real = [readToldNotice(row.context_json).subject, params.subject]
       .map(usableRelaySubject).find(Boolean);
-    const subject = real ? `"${real}"` : (lang === 'he' ? 'הפגישה' : 'that meeting');
-    const body = lang === 'he'
-      ? `${hi}, עדכון על ${subject} — היא בוטלה, אז אין צורך לחזור אליי לגבי המועד. סליחה על הבלגן.`
-      : `${hi}, update on ${subject} — it's been cancelled, so no need to come back to me about the time. Sorry for the noise.`;
+    const subject = real ? `"${real}"` : relayNotice(lang, 'meeting');
+    const body = relayNotice(lang, 'reschedule_cancelled', { hi, subject });
     // Threads into the original outreach DM when we recorded it, same routing
     // handleRescheduleReply uses for its own colleague confirmations; legacy
     // rows with no captured ts fall back to a fresh DM.
@@ -1065,26 +1061,14 @@ async function closeMatchedRequestWithRelay(
       // stamp-ONLY-on-a-confirmed-ok-send retry behavior, all checked fresh
       // inside.
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { relayClosureToRequester } = require('../core/requests/requesterRelay') as
+      const { relayClosureToRequester, relayNotice } = require('../core/requests/requesterRelay') as
         typeof import('../core/requests/requesterRelay');
       relayed = await relayClosureToRequester({
         row: r,
         label: 'closeMeetingArtifacts close-loop',
         subjectCandidates: [params.subject],
         subjectFallback: { en: positiveBooking ? 'the meeting' : 'that meeting', he: 'הפגישה' },
-        compose: ({ lang, hi, subject }) => positiveBooking
-          ? (lang === 'he'
-              ? `${hi}, סגרנו על "${subject}" — הזימון בדרך.`
-              : `${hi}, locked in "${subject}" — calendar invite is on its way.`)
-          // Unquoted on the cancelled branch on purpose: this wording is the
-          // one that most often runs on the generic fallback (a colleague-
-          // raised approval's row.subject is usually the internal "<subkind>
-          // needs your input", which usableRelaySubject strips), and
-          // `"that meeting" has been cancelled` reads as a quoted title that
-          // does not exist.
-          : (lang === 'he'
-              ? `${hi}, ${subject} בוטלה — אין צורך בפעולה נוספת מצידך.`
-              : `${hi}, ${subject} has been cancelled — nothing further needed from you.`),
+        compose: ({ lang, hi, subject }) => relayNotice(lang, positiveBooking ? 'booked' : 'meeting_cancelled', { hi, subject }),
       });
     } catch (err) {
       logger.warn('closeMeetingArtifacts — requester notify path threw, continuing to close', {

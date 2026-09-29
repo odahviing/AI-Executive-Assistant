@@ -343,6 +343,25 @@ If you already have an email for the person, you don't need this tool to book a 
             });
           }
 
+          // Memory preserves history, not current Slack reachability. Validate
+          // cached identities just as users.list excludes deleted users/bots.
+          // Keep guests; directory listing may omit them. Provider uncertainty
+          // must reach the tool's error result, never masquerade as absence.
+          const active: DirectoryMatch[] = [];
+          for (const match of found) {
+            let result;
+            try {
+              result = await app.client.users.info({ token: botToken, user: match.slack_id });
+            } catch (err: any) {
+              if (err?.data?.error === 'user_not_found') continue;
+              throw err;
+            }
+            if (result.ok === false || !result.user) throw new Error('Slack user eligibility unavailable');
+            if (!result.user.deleted && !result.user.is_bot) active.push(match);
+          }
+          found = active;
+          if (found.length === 0) source = 'slack';
+
           // Paginate through all workspace members — avoids missing people in
           // large workspaces. A READ, nothing more: this used to upsert every
           // substring match (up to 20) into people_memory and fire gender
@@ -363,6 +382,7 @@ If you already have an email for the person, you don't need this tool to book a 
                 limit: 200,
                 ...(cursor ? { cursor } : {}),
               });
+              if (result.ok === false || !Array.isArray(result.members)) throw new Error('Slack directory unavailable');
               const members = (result.members as any[]) ?? [];
               for (const m of members) {
                 if (

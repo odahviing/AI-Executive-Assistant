@@ -52,9 +52,9 @@ function storeDb(snapshot){
   // Dense consolidation could move lunch first, but coffee must not depend on that vacated range.
   const p=profile(blocks);p.meetings.packing_preference='dense';
   const r=await h.rebalanceFloatingBlocksAfterMutation({profile:p,affectedSlotIso:`${date}T12:00:00+03:00`,ownerSlackId:'owner',preloadedDayEvents:[...events,event('anchor','10:00','11:15')],consolidateDense:true});
-  assert.equal(h.writes.some(w=>w.meetingId==='coffee'),false);assert.equal(r.overlapping,1);assert.ok(r.ownerQuestions?.length);
+  assert.equal(h.writes.some(w=>w.meetingId==='coffee'),false);assert.equal(r.overlapping,1);assert.equal(r.ownerQuestions,undefined);
  });
- await test('unresolved-block-question-reaches-health-result',async()=>{const h=health.harness({blocks:[],rebalanceResult:{moved:0,movedBlockEventIds:[],ownerQuestions:[{eventId:'block',peerEventId:'other',blockName:'lunch',description:'Would you like to rearrange these events?'}]}});const r=await h.scan({mode:'active'});assert.ok(r.issues.some(i=>i.eventIds?.includes('block')&&i.suggestion?.includes('rearrange')));assert.equal(r.vacuous,false);});
+ await test('no-slot-notice-does-not-duplicate-health-question',async()=>{const h=health.harness({blocks:[],rebalanceResult:{moved:0,movedBlockEventIds:[],ownerQuestions:[{eventId:'block',peerEventId:'other',blockName:'lunch',description:'Would you like to rearrange these events?'}]}});const r=await h.scan({mode:'active'});assert.equal(r.issues.some(i=>i.eventIds?.includes('block')),false);});
  for(const status of ['dismissed','approved']) await test(`durable-${status}-reader-and-restart-no-expiry`,()=>{let h=storeDb();h.insert('a','lunch',status);assert.ok(h.mod.getSuppressedEventIds('owner').has('lunch'));const saved=h.db.serialize();h.db.close();h=storeDb(saved);assert.ok(h.mod.getSuppressedEventIds('owner').has('lunch'));assert.equal(h.mod.getSuppressedEventIds('other').size,0);h.db.close();});
  await test('durable-waived-day-survives-expiry-only-same-day',()=>{const h=storeDb();h.insert('a','floating-lunch-2026-10-04','dismissed','conflict','missing_floating_block');const ids=h.mod.getWaivedFloatingBlockEventIds('owner');assert.ok(ids.has('floating-lunch-2026-10-04'));assert.equal(ids.has('floating-lunch-2026-10-05'),false);h.db.close();});
  await test('durable-upsert-does-not-reopen-expired-rejection',()=>{const h=storeDb();h.insert('a','lunch');const r=h.mod.upsertCluster('owner',{events:new Set(['lunch']),anchor_class:'overlap',anchor_event_id:'lunch',event_date:date,event_end_ms:Date.now()+86400000});assert.equal(r.action,'suppressed');h.db.close();});
@@ -111,12 +111,12 @@ function storeDb(snapshot){
   const mod=compile(`const {DateTime,...fb}=require('bindings');const {getFloatingBlocks,isFloatingBlockEvent,hasOtherHumanAttendee,blockAppliesOnDay,windowMsForDay,findAlignedSlotForBlock}=fb;${production}exports.run=checkCompliance;`,n=>n==='bindings'?{DateTime,...floating}:{getEffectiveWorkDayForInstant:()=>({hasOverride:false,windows:[{startMin:540,endMin:1080}]}),ownerWorkSegmentsBetween:()=>[{effectiveDay:{isWorkday:true,windows:[{startMin:540,endMin:1080}]},fitsWorkHours:true}]});
   const issue=mod.run(event('meeting','11:00','14:00'),[human(event('lunch','12:00','12:30'))],profile([block('lunch')]));assert.equal(issue.some(x=>x.includes('no room')),false);
  });
- for(const file of ['createMeeting','moveMeeting'])for(const actor of ['owner','colleague'])await test(`unresolved-${file}-question-${actor}-privacy`,async()=>{
+ for(const file of ['createMeeting','moveMeeting'])for(const actor of ['owner','colleague'])await test(`unresolved-${file}-notice-${actor}-no-duplicate-question`,async()=>{
   const src=source(`src/skills/meetings/ops/handlers/${file}.ts`),sf=ts.createSourceFile('op.ts',src,ts.ScriptTarget.Latest,true);let attempt;
   function walk(n){if(ts.isTryStatement(n)&&n.tryBlock.getText(sf).includes('rebalanceFloatingBlocksAfterMutation')&&!n.tryBlock.getText(sf).includes('planMeeting')){if(!attempt||n.getText(sf).length<attempt.length)attempt=n.getText(sf);}ts.forEachChild(n,walk);}walk(sf);assert.ok(attempt);
   const hasOutput=src.includes('floating_block_questions: floatingBlockQuestions');
   const value=await compile(`exports.run=async function(){const context={senderRole:'${actor}',profile:{user:{slack_user_id:'owner'}}},args={start:'${date}T12:00:00+03:00'},effectiveStart=args.start,logger={warn(){}};let blocksMoved=[],floatingBlockQuestions=[];${attempt}return {success:true,...(blocksMoved.length?{blocks_moved:blocksMoved}:{}),${hasOutput?'...(floatingBlockQuestions.length?{floating_block_questions:floatingBlockQuestions}:{})':''}};}`,()=>({rebalanceFloatingBlocksAfterMutation:async()=>({moves:['moved coffee'],ownerQuestions:[{description:'Private owner question'}]})})).run();
-  assert.equal(value.success,true);assert.equal(value.floating_block_questions?.length??0,actor==='owner'?1:0);assert.equal(value.blocks_moved.length,1);
+  assert.equal(value.success,true);assert.equal(value.floating_block_questions?.length??0,0);assert.equal(value.blocks_moved.length,1);
  });
  await test('correction-storage-unavailable-does-not-fail-calendar-success',async()=>{
   const src=source('src/skills/meetings/ops/handlers/moveMeeting.ts');

@@ -88,6 +88,7 @@ import type { UserProfile } from '../../config/userProfile';
 import type { SenderRole } from '../../connectors/slack/postReply';
 import type { HumanGateAudience } from '../humanGate';
 import type { OrchestratorOutput } from '../../core/orchestrator';
+import type { ConversationMessage } from '../../db/conversations';
 import { toolLinesMatching } from '../../core/orchestrator/turnHelpers';
 import { formatForSlack } from '../../connections/slack/formatting';
 import logger from '../logger';
@@ -101,7 +102,7 @@ import { logLlmUsage } from '../usageLog';
 export interface OutputGateContext {
   profile: UserProfile;
   result: OrchestratorOutput;
-  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  history: ConversationMessage[];
   userMessage: string;
   senderId: string;
   channelId: string;
@@ -1493,6 +1494,11 @@ function priorTurnAvailabilityLines(ctx: OutputGateContext): string[] {
  * front of a colleague ("a phone call from the car works for him", asserted
  * with zero tool calls and zero grounding anywhere — the proven incident).
  *
+ * #206 also checks a categorical denial of an earlier attendee calendar read
+ * against the latest persisted search receipt. Same judge and veto rewrite;
+ * the denial remedy permits only a verbatim deletion and fails open otherwise.
+ * This does not establish current access or the correctness of any slot.
+ *
  * Runs on EVERY colleague-readable turn regardless of who is acting — see
  * this file's call site for why that is deliberately independent of RULE A's
  * own ownerIsActing/approvalGrantContext scoping. Uses claimChecker's
@@ -1540,6 +1546,21 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // `recentHistorySnippet` doc comment.
     const recentHistorySnippet = buildRecentHistorySnippet(ctx);
 
+    // #206: provenance is carried separately from model-authored text. Legacy
+    // or malformed assistant rows cannot authorize a destructive rewrite.
+    // Explicit no-tool rows may be crossed; the newest actual result wins.
+    let latestSummaries: string[] = [];
+    for (const row of (ctx.history ?? []).slice(-12).filter(h => h.role === 'assistant').reverse()) {
+      if (!Array.isArray(row.toolSummaries) || row.toolSummaries.some(s => typeof s !== 'string')) break;
+      if (row.toolSummaries.length) {
+        latestSummaries = row.toolSummaries;
+        break;
+      }
+    }
+    const priorCalendarReadLines = !(result.toolSummaries?.length)
+      ? latestSummaries.slice(-1).filter(line => /^\[find_available_slots(?:\s|\])/.test(line)
+        && !/^\[find_available_slots FAILED:/.test(line) && / calendars_read=/.test(line))
+      : [];
     const verdict = await checkReplyClaims({
       reply: cleanReply,
       toolSummaries: result.toolSummaries ?? [],
@@ -1547,16 +1568,28 @@ async function runOwnerFactCheckAndMaybeRewrite(
       ownerFirstName: profile.user.name.split(' ')[0],
       mode: 'owner_fact',
       recentHistorySnippet,
+      priorCalendarReadLines,
     });
 
     if (!verdict.claimed_action) return cleanReply;
+
+    let rewriteSummaries = result.toolSummaries ?? [];
+    if (verdict.action_type === 'denied_calendar_read') {
+      // The semantic judge cannot manufacture a receipt or target identity.
+      const target = verdict.target_name?.toLowerCase();
+      const matching = priorCalendarReadLines.filter(line =>
+        line.match(/ calendars_read=([^\s\]]+)/)?.[1].split('+').includes(target ?? ''));
+      if (!target || !matching.length) return cleanReply;
+      rewriteSummaries = matching;
+    }
 
     // owner-fact-check-deletes-true-attendee-availability-clause (2026-09-09)
     // — do NOT add an `attendee_check=` shield here. That marker means "a real
     // check evaluated someone OTHER than the owner" (turnHelpers.ts
     // attendeeCheckSource, which explicitly never stamps owner-availability
-    // tools), so it is not ground truth for anything this mode judges: a claim
-    // about the OWNER's own hours, timezone or freeness. It is also carried by
+    // tools), so it is not grounding for the owner's personal-fact class.
+    // The historical-denial class above requires calendars_read instead.
+    // The attendee_check marker is also carried by
     // every ordinary `find_available_slots` call with an attendee — measured on
     // the live VM over the 14 days to 2026-09-09, ALL of this check's firings
     // (06:25:57 / 12:00:37 / 12:03:32 on 09-07, each a genuine ungrounded claim
@@ -1565,10 +1598,11 @@ async function runOwnerFactCheckAndMaybeRewrite(
     // turn — the 2026-08-14 incident shape included. The tool-grounding this
     // mode actually needs is already in its prompt (condition (a): a matching
     // read in TOOL ACTIVITY THIS TURN makes the claim grounded).
-    logger.warn('Owner-fact check: invented personal fact about the owner in a colleague-facing reply — rewriting to hedge/drop it (no tool re-fire)', {
+    logger.warn('Colleague fact check: flagged claim routed to tool-less veto rewrite', {
       senderId: ctx.senderId,
       threadTs: ctx.threadTs,
       action_summary: verdict.action_summary,
+      action_type: verdict.action_type,
     });
 
     const rewritten = await rewriteOwningTheMiss({
@@ -1577,7 +1611,7 @@ async function runOwnerFactCheckAndMaybeRewrite(
       actionType: verdict.action_type,
       targetName: verdict.target_name,
       ownerFirstName: profile.user.name.split(' ')[0],
-      toolSummaries: result.toolSummaries ?? [],
+      toolSummaries: rewriteSummaries,
       isOwnerAudience: isOwnerDirectAudience(ctx),
     });
     if (rewritten && rewritten.trim().length > 0) {

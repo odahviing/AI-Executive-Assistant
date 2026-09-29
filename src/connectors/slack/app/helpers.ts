@@ -71,14 +71,11 @@ export async function resolveSlackMentions(ctx: SlackAppContext, text: string): 
             // zone for this person, not that the lookup failed or was skipped.
             timezoneReadingAbsent: !u?.tz,
           });
-          // Fire-and-forget gender detection: pronouns first, then profile image
-          const imageUrl = u?.profile?.image_192 || u?.profile?.image_72 || undefined;
+          // Fire-and-forget detection from declared profile pronouns only.
           detectAndSaveGender({
             slackId:   userId,
             name,
             pronouns:  u?.profile?.pronouns || undefined,
-            imageUrl,
-            botToken:  assistant.slack.bot_token,
           }).catch(() => {});
         }
       } catch (_) {

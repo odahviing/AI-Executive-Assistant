@@ -61,7 +61,7 @@ function harness(options = {}) {
   // (core modules before the Connection) is observable.
   class Core extends Passive { executeToolCall(tool) { return Promise.resolve(tool === 'get_person_memory' ? { handled: 'core' } : null); } }
   const optional = { 'src/skills/meetings.ts': 'MeetingsSkill', 'src/skills/general.ts': 'SearchSkill', 'src/skills/calendarHealth.ts': 'CalendarHealthSkill', 'src/skills/summary.ts': 'SummarySkill', 'src/skills/knowledge.ts': 'KnowledgeBaseSkill', 'src/skills/social.ts': 'SocialSkill', 'src/skills/venue.ts': 'VenueSkill', 'src/skills/news.ts': 'NewsSkill' };
-  const app = { client: { users: { list: async () => ({ members: [], response_metadata: {} }) } } };
+  const app = { client: { users: { info: async () => ({ ok: true, user: { id: PAUL.slack_id, deleted: false } }), list: async () => ({ members: [], response_metadata: {} }) } } };
   const mocks = {
     'src/utils/logger.ts': logger,
     'src/core/assistant.ts': { AssistantSkill: Core },

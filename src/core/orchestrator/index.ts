@@ -11,12 +11,13 @@ import { detectMessageLanguage } from '../../utils/detectMessageLanguage';
 import { callClaude, mutationOutcome, summarizeToolCall, summarizeInternalAction } from './turnHelpers';
 import { buildTurnContext } from './buildTurnContext';
 import type { NewsBundle } from '../../skills/news';
+import type { ConversationMessage } from '../../db/conversations';
 
 export interface OrchestratorInput {
   userMessage: string;
   /** Human text before transport framing; includes every human text in a merged turn. */
   rawUserMessage?: string;
-  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string; ts?: string }>;
+  conversationHistory: ConversationMessage[];
   threadTs: string;
   channelId: string;
   userId: string;

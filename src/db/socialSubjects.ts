@@ -795,14 +795,17 @@ export function updateSubjectRelevantUntil(subjectId: string, relevantUntil: str
  * path is what fires, not recordSubjectAnswered), that touch is real
  * engagement and must clear the count — otherwise a late answer never resets
  * it and a subject that WAS eventually answered can still die on its next
- * unrelated pivot.
+ * unrelated pivot. Also clears this subject's older pending raise: an observed
+ * match resolves it even when another subject was raised more recently. The
+ * person's UNKNOWN watermark stays intact for unrelated pending subjects.
  */
 export function recordSubjectTouch(subjectId: string, touchedBy: SubjectToucher): SocialSubject | null {
   const db = getDb();
   db.prepare(`
     UPDATE social_subjects
     SET last_touched_at = datetime('now'), last_touched_by = @touched_by,
-        unanswered_raises = 0, updated_at = datetime('now')
+        unanswered_raises = 0, last_assistant_initiated_at = NULL,
+        updated_at = datetime('now')
     WHERE id = @id
   `).run({ id: subjectId, touched_by: touchedBy });
   return getSubjectById(subjectId);

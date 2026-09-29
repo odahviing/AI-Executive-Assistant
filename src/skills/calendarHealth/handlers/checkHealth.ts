@@ -1298,11 +1298,6 @@ export async function handleCheckHealth(args: Record<string, unknown>, ctx: OpCt
                 consolidateDense: true,
                 preloadedDayEvents: dayEvents,   // #143c — batched read
               });
-              for (const question of result.ownerQuestions ?? []) {
-                issues.push({ type: 'double_booking', date: dt.toFormat('yyyy-MM-dd'),
-                  eventIds: [question.eventId, question.peerEventId],
-                  description: question.description, suggestion: question.description });
-              }
               for (const id of result.movedBlockEventIds) consolidatedBlockIds.add(id);
               if (result.moved > 0) {
                 internalActions.push({

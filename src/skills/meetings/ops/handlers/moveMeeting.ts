@@ -1096,12 +1096,8 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
                   if (loc.isOnline !== existing.isOnline) newIsOnlineFromShape = loc.isOnline;
                 }
               }
-              // A trip day needs no override here: the builder's
-              // `anyParticipantRemote` carries the owner's own travel and
-              // resolveLocation answers online — the lodging is never a venue,
-              // exactly as create/move behave. (A v3.4.2 block here used to
-              // stamp the trip place instead — a second decision create never
-              // made.)
+              // Owner day/location comes from config and dated overrides in
+              // resolveLocation; person travel signals describe other attendees.
               // preserve_existing / skip_stamp — leave the event's location
               // alone. Category change still applies if any.
             } catch (err) {
@@ -2794,7 +2790,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // slides inside its own window. The real moves ride the success return
         // (`blocks_moved`) — awaited-and-discarded until 2026-09-14.
         let blocksMoved: string[] = [];
-        let floatingBlockQuestions: string[] = [];
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { rebalanceFloatingBlocksAfterMutation } = require('../../../../utils/rebalanceFloatingBlocks') as
@@ -2805,7 +2800,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
             ownerSlackId: context.profile.user.slack_user_id,
           });
             blocksMoved = floatingResult.moves;
-            if (context.senderRole === 'owner') floatingBlockQuestions = (floatingResult.ownerQuestions ?? []).map(q => q.description);
         } catch (err) {
           logger.warn('rebalance after move_meeting threw — continuing', { err: String(err).slice(0, 200) });
         }
@@ -2865,7 +2859,6 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // The floating block(s) this move actually slid (same shape as
           // check_join_availability's field) — state it, never silently.
           ...(blocksMoved.length > 0 ? { blocks_moved: blocksMoved } : {}),
-          ...(floatingBlockQuestions.length > 0 ? { floating_block_questions: floatingBlockQuestions } : {}),
           // #A (2026-07-19) — non-blocking attendee-busy heads-up. The move already went
           // through (owner override is total), but a colleague-requested move can re-land
           // on a time that attendee is busy — surface it so Maelle flags it, never re-asks.

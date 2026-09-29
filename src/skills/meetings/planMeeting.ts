@@ -274,7 +274,7 @@ export type PlanAction =
 
 /**
  * The party-shape signals resolveLocation reads — has-external, external-in-a-
- * different-zone, anyone-remote (owner travel, a travelling participant, a
+ * different-zone, anyone-remote (a travelling participant, a
  * cross-zone colleague) — plus the tz-assumption hedges collected on the way.
  * ONE builder for every caller that re-places a venue: planMeeting (create /
  * move) and update_meeting's attendee-shape re-evaluation (ops/handlers/
@@ -324,15 +324,7 @@ export function locationSignalsFor(
   const ownerEmail = profile.user.email;
   const nonOwnerParticipants = participants.filter(p =>
     !p.isOwner && (p.email ?? '').toLowerCase() !== ownerEmail.toLowerCase());
-  // Travel state lookup
-  // v4.8.x (2026-09-02, gh owner-own-trip-read-is-not-date-scoped-books-online-
-  // after-trip-ends) — resolve the OWNER's own travel by the MEETING's date,
-  // not "today", same fix as the per-attendee loop below
-  // (gh hedge-suppression-is-trip-scoped-not-meeting-date-scoped) applied to
-  // every attendee but missed the owner: the read here answered "is he
-  // traveling right now", so booking a date AFTER a trip that's active today
-  // still read the trip as active and forced the meeting online. `meetingIsoDate`
-  // and `travelForMeetingDay` are defined right below and reused by that loop.
+  // Person travel records describe non-owner attendees; resolve by meeting date.
   const meetingIsoDate = slotStartIso
     ? DateTime.fromISO(slotStartIso, { zone: profile.user.timezone }).toISODate()
     : null;
@@ -348,9 +340,10 @@ export function locationSignalsFor(
       : meetingIsoDate ?? at.setZone(profile.user.timezone).toISODate()!;
     return (day >= t.from && day <= t.until) ? t : null;
   };
-  const ownerPersonId = personIdForSlackId(profile.user.slack_user_id);
-  const ownerTravel = ownerPersonId ? travelForMeetingDay(ownerPersonId) : null;
-  let anyParticipantRemote = !!ownerTravel;
+
+
+  // Owner location is resolved only from home configuration and dated overrides.
+  let anyParticipantRemote = false;
   const ownerDomain = ownerEmail.split('@')[1].toLowerCase();
   // v4.8.x (o#262/o#265, owner ruling 2026-08-31) — a participant currently on
   // a TEMP timezone reading (a later auto-tier value — Slack sync or chat
@@ -384,17 +377,8 @@ export function locationSignalsFor(
     return !!travelTz && travelTz !== homeTz;
   };
   // v4.8.x (2026-09-02, gh hedge-suppression-is-trip-scoped-not-meeting-date-
-  // scoped) — `meetingIsoDate` and `travelForMeetingDay` (both resolve travel
-  // by the MEETING's own date, not "today") are defined above, right next to
-  // the owner's own travel read, and reused here for every attendee.
-  // v4.8.x (2026-09-01, gh full-maayan-symptom) — this loop used to `break` the
-  // instant `anyParticipantRemote` went true (whether that arrived pre-set from
-  // the owner's OWN travel above, or from an earlier participant in this same
-  // loop), which skipped every tempDiffering check after that point — on an
-  // owner-travel booking it skipped ALL of them, since the flag is already true
-  // before the first iteration. `anyParticipantRemote` only needs to be
-  // DETERMINED once; it must never gate whether a participant's tzAssumptionNotes
-  // are collected. Every non-owner participant is now checked, always.
+  // scoped) — resolve every participant against the meeting date. Keep
+  // collecting timezone assumptions even after a remote participant is found.
   for (const p of nonOwnerParticipants) {
     const pEmail = (p.email ?? '').trim().toLowerCase();
     // v4.8.x (o#262) — resolve person_id from slack_id OR email so a

@@ -37,6 +37,7 @@
  */
 
 import { DateTime } from 'luxon';
+import { relayNotice, requesterRelayLanguage } from './requesterRelay';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getAnthropicClient } from '../../llm/client';
@@ -322,11 +323,11 @@ async function closeSafetyValveExpired(row: RequestRow, profile: UserProfile, de
   if (conn) {
     try {
       await conn.sendDirect(details.colleague_slack_id,
-        `Hi ${colleagueFirst}, ${profile.user.name.split(' ')[0]} is still away and it's been a while, so I've closed this one out rather than keep you waiting. Feel free to ask again any time.`);
+        relayNotice(requesterRelayLanguage(details.colleague_slack_id), 'oof_expired', { name: colleagueFirst, owner: profile.user.name.split(' ')[0] }));
     } catch (err) { logger.warn('closeSafetyValveExpired — colleague DM failed', { err: String(err).slice(0, 150) }); }
     try {
       await conn.sendDirect(profile.user.slack_user_id,
-        `Stopped tracking ${details.colleague_name}'s ask about ${details.subject} — you've been away past the point I keep checking. Worth a manual ping if it still matters.`);
+        relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'oof_owner_expired', { target: details.colleague_name, subject: details.subject }));
     } catch (err) { logger.warn('closeSafetyValveExpired — owner DM failed', { err: String(err).slice(0, 150) }); }
   }
   logger.warn('runColleagueOofRecheck — safety valve tripped while still away, closed honestly', { requestId: row.id });
@@ -340,11 +341,11 @@ async function closeUnreachable(row: RequestRow, profile: UserProfile, details: 
   if (conn) {
     try {
       await conn.sendDirect(details.colleague_slack_id,
-        `Hi ${colleagueFirst}, sorry — I've been having trouble confirming when things freed up, so I've closed this one out. Feel free to ask again any time.`);
+        relayNotice(requesterRelayLanguage(details.colleague_slack_id), 'oof_unreachable', { name: colleagueFirst }));
     } catch (err) { logger.warn('closeUnreachable — colleague DM failed', { err: String(err).slice(0, 150) }); }
     try {
       await conn.sendDirect(profile.user.slack_user_id,
-        `Couldn't confirm your calendar to reach back out to ${details.colleague_name} about ${details.subject} — closed the tracking after repeated failures. Worth a manual ping if it still matters.`);
+        relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'oof_owner_unreachable', { target: details.colleague_name, subject: details.subject }));
     } catch (err) { logger.warn('closeUnreachable — owner DM failed', { err: String(err).slice(0, 150) }); }
   }
   logger.warn('runColleagueOofRecheck — gave up verifying owner calendar, closed', { requestId: row.id });
@@ -364,7 +365,8 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
   const colleagueName = details.colleague_name || row.requester_name || 'there';
   const colleagueFirst = colleagueName.split(/\s+/)[0] || 'there';
   const ownerFirst = profile.user.name.split(' ')[0];
-  const subjectLabel = details.subject && details.subject !== 'a meeting' ? `"${details.subject}"` : 'time with him';
+  const lang = requesterRelayLanguage(colleagueSlackId);
+  const subjectLabel = details.subject && details.subject !== 'a meeting' ? `"${details.subject}"` : relayNotice(lang, 'meeting');
 
   if (!conn) {
     throw new Error('OOF reengagement has no Slack connection');
@@ -390,7 +392,7 @@ async function sendOofReengagement(row: RequestRow, profile: UserProfile, detail
     return 'rearmed';
   }
 
-  const message = `Hi ${colleagueFirst}, ${ownerFirst} is back now — still want me to find a time for ${subjectLabel}? Let me know and I'll get it set up.`;
+  const message = relayNotice(lang, 'oof_return', { name: colleagueFirst, owner: ownerFirst, subject: subjectLabel });
   const ownerChannel = (await conn.resolveDirectChannelId?.(profile.user.slack_user_id)) ?? profile.user.slack_user_id;
 
   const jobId = createOutreachJob({
@@ -489,9 +491,10 @@ export async function runOofReengageReask(row: RequestRow, profile: UserProfile)
   }
   let ctx: OofReengageContext = {};
   try { ctx = job.context_json ? JSON.parse(job.context_json) : {}; } catch { /* generic fallback below */ }
-  const subjectLabel = ctx.subject && ctx.subject !== 'a meeting' ? `"${ctx.subject}"` : 'grabbing time';
+  const lang = requesterRelayLanguage(job.colleague_slack_id);
+  const subjectLabel = ctx.subject && ctx.subject !== 'a meeting' ? `"${ctx.subject}"` : relayNotice(lang, 'meeting');
   const first = (job.colleague_name ?? '').split(/\s+/)[0] || 'there';
-  const msg = `Hi ${first}, just circling back — still want to find time for ${subjectLabel}? No rush, just want to close the loop.`;
+  const msg = relayNotice(lang, 'oof_reask', { name: first, subject: subjectLabel });
   try {
     if (job.dm_channel_id) await conn.postToChannel(job.dm_channel_id, msg, { threadTs: job.dm_message_ts });
     else await conn.sendDirect(job.colleague_slack_id, msg);
@@ -630,7 +633,7 @@ export async function handleOofReengageReply(
     updateOutreachJob(job.id, { status: 'cancelled', reply_text: replyText, conversation_json: JSON.stringify(conversation) });
     try {
       await conn.sendDirect(profile.user.slack_user_id,
-        `${job.colleague_name} said they no longer need time with you — I've closed that one out.`);
+        relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'oof_declined', { target: job.colleague_name }));
     } catch (err) { logger.warn('oof_reengage owner heads-up (no) failed', { err: String(err).slice(0, 150) }); }
     logger.info('oof_reengage reply = no — closed cleanly', { jobId: job.id });
     return true;

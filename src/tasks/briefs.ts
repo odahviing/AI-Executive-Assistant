@@ -12,7 +12,7 @@ import {
   getRequest,
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
-import { relayClosureToRequester } from '../core/requests/requesterRelay';
+import { relayClosureToRequester, relayNotice } from '../core/requests/requesterRelay';
 import type { RequestRow } from '../core/requests/types';
 import { parseDetails } from '../core/requests/types';
 import { getCalendarEvents, type CalendarEvent } from '../connectors/graph/calendar';
@@ -183,6 +183,39 @@ function recentColleagueContext(slackId: string | null | undefined, limit = 3): 
 
 // ── Item builders by kind ────────────────────────────────────────────────────
 
+/** Notification receipts are separate from the action's outcome. Only bounded
+ * delivery facts reach the brief; stored message bodies and arbitrary outcome
+ * payloads remain out of its context. A timeout is unknown, never failed. */
+function requesterNotificationForBrief(r: RequestRow): Record<string, unknown> | undefined {
+  let relay: Record<string, unknown> | undefined;
+  try {
+    const outcome = JSON.parse(r.outcome_json || '{}');
+    const value = outcome?.requester_relay;
+    if (value && typeof value === 'object' && !Array.isArray(value)) relay = value;
+  } catch { /* no usable notification evidence */ }
+  if (!relay && !r.requester_notified_at) return undefined;
+  const count = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const delivery = r.requester_notified_at ? 'sent'
+    : ['failed', 'exhausted', 'unconfirmed'].includes(String(relay?.delivery)) ? String(relay!.delivery) : 'unknown';
+  const missingBody = typeof relay?.body !== 'string' || !relay.body.trim();
+  const status = delivery === 'sent' ? 'confirmed_notified'
+    : delivery === 'failed' || delivery === 'exhausted' ? 'not_notified' : 'delivery_unknown';
+  const nextAction = delivery === 'sent' ? 'none'
+    : delivery === 'unconfirmed' || delivery === 'unknown' ? 'check_delivery_before_contact'
+    : delivery === 'failed' && !missingBody && r.next_check_handler === 'requester_relay_retry' && r.next_check_at
+      ? 'retry_pending' : 'manual_contact_needed';
+  return {
+    delivery, status, missing_body: missingBody, send_attempts: count(relay?.send_attempts),
+    next_action: nextAction,
+    ...(relay?.owner_delivery !== undefined || relay?.owner_send_attempts !== undefined ? {
+      owner_delivery: ['sent', 'failed', 'unconfirmed'].includes(String(relay?.owner_delivery))
+        ? String(relay!.owner_delivery) : 'unknown',
+      owner_send_attempts: count(relay?.owner_send_attempts),
+    } : {}),
+  };
+}
+
 function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
   const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
@@ -202,6 +235,7 @@ function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
     winning_slot: det.winning_slot ?? null,
     slots: slotsArr,
     payload: det,
+    requester_notification: requesterNotificationForBrief(r),
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
     closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
@@ -269,6 +303,7 @@ function buildOutreachItem(
     theyReplied: !!replyPreview,
     replyPreview: replyPreview ?? undefined,
     awaitsReply,
+    requester_notification: requesterNotificationForBrief(r),
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
     closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
@@ -298,6 +333,7 @@ function buildTaskItem(r: RequestRow, timezone: string): RichItem {
     dueAt: r.next_check_at ? relativeTime(r.next_check_at, timezone) : undefined,
     context: det.message ?? det.subject ?? undefined,
     target_name: r.target_name,
+    requester_notification: requesterNotificationForBrief(r),
     closure_reason: r.closure_reason,
     closed_at: r.closed_at,
     closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
@@ -587,6 +623,7 @@ WHAT GETS SURFACED:
 - calendar_unavailable means the calendar could not be checked. Say so plainly; never infer an empty or free day from missing calendar data.
 - Everything still open AND every closure ${firstName} hasn't been informed about yet. Don't hide stuff he should know about.
 - Prefer OUTCOME / current state over activity.
+- requester_notification is separate from the action outcome: not_notified means the requester was NOT notified; manual_contact_needed means tell the owner manual contact is needed. delivery_unknown means receipt is UNKNOWN, never claim failure or retry blindly; check first. retry_pending means a notification retry is scheduled. Preserve the action state: a completed action can still have an undelivered notification. owner_delivery describes only the separate owner notice, never the requester delivery. Do not expose stored counters or internal field names.
 - Skip internal plumbing.
 
 TONE + PHRASING:
@@ -608,7 +645,8 @@ TASK OWNERSHIP:
 - ONE-PLACE RULE — every item belongs in ONE spot in the brief. Don't narrate the same conflict / approval / status twice (once as a freestanding line and again inside a per-person paragraph, or vice versa). Pick the surface that reads most naturally and put it only there.
 - MULTI-CONFLICT AGGREGATION — bundle, don't enumerate.
 - outreach awaiting_colleague with no decision → "X hasn't replied — want me to try again or drop it?"
-- approval in state="awaiting_colleague" → ${firstName}'s counter was RELAYED to requester_name and they have NOT replied yet. Say "waiting to hear back from <name> on <subject>". NEVER state or imply the requester said something, pushed back, or rejected the counter — there is no reply on record. "Relayed your counter to Eli, no word back yet" ✅. "Eli said the counter doesn't work" ❌ (you have no message from them). When expires_at_relative is set and close (today/tomorrow), anchor the nudge to it — "waiting on Mike; this lapses tomorrow if he doesn't come back, worth a poke" — so ${firstName} knows it's about to time out, not open indefinitely.
+- approval in state="awaiting_colleague" with requester_notification.status="not_notified" or "delivery_unknown" → report that notification status; do not claim the counter was relayed or that the requester is ignoring it.
+- Otherwise, approval in state="awaiting_colleague" → ${firstName}'s counter was RELAYED to requester_name and they have NOT replied yet. Say "waiting to hear back from <name> on <subject>". NEVER state or imply the requester said something, pushed back, or rejected the counter — there is no reply on record. "Relayed your counter to Eli, no word back yet" ✅. "Eli said the counter doesn't work" ❌ (you have no message from them). When expires_at_relative is set and close (today/tomorrow), anchor the nudge to it — "waiting on Mike; this lapses tomorrow if he doesn't come back, worth a poke" — so ${firstName} knows it's about to time out, not open indefinitely.
 - kind="tombstoned_colleague" → ONE passive past-tense line about the PERSON in plain human words. ✅ "I'll stop pinging Yael for now — she hasn't replied to a few of my pings, will pick it back up when she's around." ❌ "Yael is no longer active in the system" / "removed from my working list" / "deactivated her record" / any phrasing that exposes internal tracking, system state, or bot framing.
 - kind="auto_categorized":
   - For events in \`applied\` (categories Maelle figured out) → ONE informational past-tense line, NOT a question. ("Tagged 'X' as Weekly.")
@@ -996,9 +1034,7 @@ export async function sendMorningBriefing(
             row: r,
             profile,
             label: 'briefs stale requester loop-close',
-            compose: ({ lang, hi, ownerFirst, subject }) => lang === 'he'
-              ? `${hi} — לא הצלחתי לקבל תשובה מ${ownerFirst} לגבי ${subject}. סוגרת את זה בינתיים — אפשר לנסות שוב מתי שתרצו.`
-              : `${hi} — I couldn't get a read from ${ownerFirst} on ${subject}. Closing this for now; ping me when you want to try again.`,
+            compose: ({ lang, hi, ownerFirst, subject }) => relayNotice(lang, 'owner_unanswered', { hi, owner: ownerFirst, subject }),
           });
         }
       });

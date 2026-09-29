@@ -29,7 +29,7 @@ function harness(tool,counter,opts={}){
  'src/core/requests/closeRequest.ts':{closeRequest:p=>{row.state=p.state;}},
  'src/core/requests/logActivity.ts':{logActivity:noop},
  'src/db/conversations.ts':{appendToConversation:noop},
- 'src/core/requests/requesterRelay.ts':{usableRelaySubject:x=>x,requesterRelayLanguage:()=> 'en'},
+ 'src/core/requests/requesterRelay.ts':{ relayNotice: require('./fixtures/relay-copy.cjs').relayNotice,usableRelaySubject:x=>x,requesterRelayLanguage:()=> 'en'},
  'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForEmails:emails=>emails.map(email=>({email,timezone:opts.personTimezone??'Asia/Shanghai'})),attendeeKnownTimezoneForDay:entry=>entry.timezone},'src/llm/models.ts':{},
  'src/connections/registry.ts':{getConnection:()=>({sendDirect:async()=>({ok:true}),postToChannel:async()=>({ok:true})})},
  'src/skills/registry.ts':{executeApprovedSkillTool:async(kind,args,context)=>{

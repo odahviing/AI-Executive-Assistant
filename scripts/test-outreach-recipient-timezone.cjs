@@ -143,7 +143,7 @@ function harness(options = {}) {
     'src/utils/scheduleRules.ts': {}, 'src/connectors/graph/calendarReads.ts': {}, 'src/connectors/graph/calendar.ts': {},
     'src/llm/client.ts': { getAnthropicClient: () => ({ messages: { create: async () => ({ content: [{ text: '' }] }) } }) }, 'src/llm/models.ts': {},
     'src/utils/shadowNotify.ts': { shadowNotify: async () => {} }, 'src/utils/extractJson.ts': {},
-    'src/core/requests/requesterRelay.ts': { relayClosureToRequester: async () => {}, usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => 'en', completeRequesterRelay: noop, isRequesterSendUnconfirmed: () => false, recordRequesterRelayFailure: noop, retryRequesterRelay: async () => {} },
+    'src/core/requests/requesterRelay.ts': { relayNotice: require('./fixtures/relay-copy.cjs').relayNotice, relayClosureToRequester: async () => {}, usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => 'en', completeRequesterRelay: noop, beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed: () => false, recordRequesterRelayFailure: noop, retryRequesterRelay: async () => {} },
     'src/core/requests/deferredActionReplay.ts': {}, 'src/utils/textScrubber.ts': { INTERNAL_WORK_ITEM_ID_RE: /req_\w+/ },
     'src/db/conversations.ts': { appendToConversation: noop, getConversationHistory: () => [] }, 'src/utils/usageLog.ts': {},
     'src/connectors/slack/recentOutboundContext.ts': {}, 'src/connections/slack/formatting.ts': { formatForSlack: x => x },
@@ -637,7 +637,7 @@ for (const immediate of [true, false]) test(`restart after ${immediate ? 'send_n
   h.setNow('2026-09-21T15:00:00Z'); await h.sweep();
   assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
   assert.equal(h.rowById(heldId).state, 'cancelled');
-  assert.ok(h.sends.some(x => x.id === 'DOWNER' && /can't confirm whether it went out/.test(x.body)));
+  assert.ok(h.sends.some(x => x.id === 'DOWNER' && /couldn't confirm the full outcome/.test(x.body)));
   h.setNow('2026-09-28T15:00:00Z'); await h.sweep();
   assert.equal(h.sends.filter(x => x.id === COLLEAGUE).length, 1);
   assert.equal(h.sends.filter(x => x.id === 'DOWNER').length, 1);

@@ -7,6 +7,10 @@ export interface ConversationMessage {
   role: MessageRole;
   content: string;
   ts?: string;
+  /** Trusted runtime receipts on a confirmed delivered assistant turn only.
+   * [] means a confirmed no-tool turn; absent means legacy/unknown. Never
+   * populate from message prose, remote history, or user-supplied metadata. */
+  toolSummaries?: string[];
 }
 
 export function getConversationHistory(threadTs: string): ConversationMessage[] {
@@ -30,7 +34,13 @@ export function appendToConversation(
 ): void {
   const db = getDb();
   const existing = getConversationHistory(threadTs);
-  existing.push(message);
+  const { toolSummaries, ...plainMessage } = message;
+  existing.push({
+    ...plainMessage,
+    ...(message.role === 'assistant' && Array.isArray(toolSummaries)
+      && toolSummaries.every(line => typeof line === 'string')
+      ? { toolSummaries: [...toolSummaries] } : {}),
+  });
   // Keep last 20 messages in DB — orchestrator further trims by character count before sending
   const trimmed = existing.slice(-20);
 

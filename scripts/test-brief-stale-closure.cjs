@@ -95,13 +95,16 @@ test('Hebrew requester receives shared Hebrew closure copy',async()=>{
 test('English requester keeps truthful no-owner-response copy',async()=>{
   const h=harness();await h.run();assert.match(h.effects.requester[0].body,/I couldn't get a read from Owner on Contact review/);assert.equal(h.row().state,'cancelled');
 });
+for (const [lang, phrase] of [['de','keine Antwort'],['es','respuesta'],['ar','رد'],['ru','ответ']]) test(`stored ${lang} receives localized stale closure`,async()=>{
+  const h=harness({lang});await h.run();assert.equal(h.effects.requester.length,1);assert.ok(h.effects.requester[0].body.includes(phrase));assert.ok(h.row().requester_notified_at);
+});
 test('room requester retains originating thread',async()=>{
   const h=harness({row:{origin_is_mpim:1,origin_channel:'CROOM'}});await h.run();
   assert.equal(h.effects.requester[0].id,'CROOM');assert.equal(h.effects.requester[0].opts.threadTs,'origin.1');
 });
 test('internal approval question is replaced by canonical safe subject fallback',async()=>{
   const h=harness({row:{subject:'Can Owner share private contact details?'}});await h.run();
-  assert.ok(!h.effects.requester[0].body.includes('private contact'));assert.match(h.effects.requester[0].body,/on that ask/);
+  assert.ok(!h.effects.requester[0].body.includes('private contact'));assert.match(h.effects.requester[0].body,/on that (ask|request)/);
 });
 test('brief waits for closure send result before completing',async()=>{
   let release;const pendingSend=new Promise(r=>{release=r;});const h=harness({pendingSend});let done=false;

@@ -74,6 +74,7 @@ function fixture(options = {}) {
     },
   };
   const dependencies = {
+    '../core/requests/requesterRelay': {requesterRelayLanguage:()=> 'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
     luxon: { DateTime },
     './effectiveToday': { getEffectiveToday: () => DateTime.fromISO('2026-09-10T12:00:00+03:00', { setZone: true }) },
     '../db/client': { getDb: () => db },

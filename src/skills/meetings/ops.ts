@@ -23,9 +23,8 @@
 import type { SkillContext } from '../types';
 
 // v3.7.x (pass B) — the direct-ops case bodies now live in ./ops/handlers/*;
-// executeToolCall is a thin dispatcher. The only value this file still owns is
-// the analysis re-export below (a public export other modules consume). All
-// other former top-level imports moved with the case bodies to the handlers.
+// executeToolCall dispatches handlers and scopes email results before the model
+// receives them. Analysis remains a public re-export for other consumers.
 export { processCalendarEvents, analyzeCalendar } from './ops/analysis';
 import { handleFindAvailableSlots } from './ops/handlers/findAvailableSlots';
 import { handleCreateMeeting } from './ops/handlers/createMeeting';
@@ -105,47 +104,21 @@ export class SchedulingSkill {
     // here, the one point every direct op returns through, rather than gate
     // each handler's attach site individually. Rule 10: when the audience is
     // unclear, return less.
-    if (context.channel === 'email' && typeof result === 'object' && result !== null && !Array.isArray(result)) {
+    if (context.channel === 'email' && typeof result === 'object' && result !== null) {
       const r = result as Record<string, unknown>;
       delete r.override_notice;
-      // gh#4.8.7 attendee-signal-dropped-on-create-refusal — `_attendee_busy_note`
-      // used to be move_meeting-only, and move_meeting is absent from
-      // CHANNEL_TOOL_CLAMP.email (registry.ts), so stripping it here was
-      // previously dead code (a key that could never be present). It is no
-      // longer dead: create_meeting's FAILED confirm_override return carries it
-      // (createMeeting.ts, sourced from planMeeting's `attendeeBusyLabel`), and
-      // so do its ask_location_mode / room_unavailable_large returns when the
-      // attendee gate co-fired.
-      // create-refusal-colleague-availability-rides-email-leg (2026-09-10) —
-      // the note was never the only carrier of that prose, so deleting it alone
-      // stopped nothing: on the SAME return `violation_label` IS the identical
-      // string (planMeeting.ts sets `violationLabel: attendeeBusyLabel ?? '...'`
-      // for exactly this gate), `suggested_ask_text` embeds it ("Heads up —
-      // <name> is busy at <when>. Book anyway…"), and `open_questions` /
-      // `_ask_all_at_once` repeat it when a location or room gate co-fired. All
-      // of it reached the model's context (orchestrator/index.ts stringifies the
-      // post-scrub result) on the one leg whose whole reply the owner forwards
-      // verbatim to an external. The note's PRESENCE is the structured signal
-      // that this refusal is the attendee-collision gate (createMeeting.ts
-      // attaches it only then — never parsed, same convention turnHelpers'
-      // attendeeCheckSource keys on), so key on it here before it goes:
-      // `violation_label` becomes a name-free equivalent that still explains
-      // the "no" (M9); the owner-directed asks are dropped — a question to the
-      // owner has no side channel on this leg (gh#175a), the return's `_note`
-      // already says what is open, and the joined ask cannot be rebuilt
-      // name-free without parsing it (W4). Internal legs (Slack DM / room) are
-      // untouched: there a colleague's busy state is legitimately shown to the
-      // owner and to that colleague. Dropping the note itself also withholds the
-      // field attendeeCheckSource keys on for `attendee_check=noted` — right on
-      // this leg, where the reply is OFFER THE TIMES AND NOTHING ELSE, never a
-      // colleague-availability narration.
-      if (typeof r._attendee_busy_note === 'string') {
+      // Email is forwardable, even though delivery is capped to the owner.
+      // Scope every refusal carrier, not just refusals with attendee collisions.
+      // The actual owner soft-rule booking path uses override_notice (above);
+      // these fields also serve past-time and combined-ask refusal paths.
+      if (typeof r.violation_label === 'string' || typeof r._attendee_busy_note === 'string') {
         if (typeof r.violation_label === 'string') {
-          r.violation_label = `that time isn't confirmed to work for everyone on ${context.profile.user.name.split(' ')[0]}'s side`;
+          r.violation_label = "that time isn't confirmed to work";
         }
         delete r.suggested_ask_text;
         delete r.open_questions;
         delete r._ask_all_at_once;
+        r._note = 'Nothing was booked. Offer another time or ask for confirmation of the requested time.';
       }
       delete r._attendee_busy_note;
       // floating-block-impact-preflight (2026-08-27) — same class of leak as
@@ -200,33 +173,40 @@ export class SchedulingSkill {
       // as `over_optional` pre-rendered into a quotable string) carries the
       // identical leak and is stripped alongside it — deleting `over_optional`
       // alone would leave the same subject text sitting one field over.
-      if (Array.isArray(r.slots)) {
-        for (const s of r.slots as Array<Record<string, unknown>>) {
-          delete s.over_optional;
-          delete s.less_preferred_label;
-          delete s.attendee_conflicts;
-          delete s.attendee_status;
-        }
+      // Search returns either a bare array or a wrapped result. Owner-authored
+      // email searches still use the owner's validator, so its diagnostics must
+      // be scoped here BEFORE the orchestrator serializes the result for the model.
+      const scopeSlot = (slot: Record<string, unknown>) => {
+        const needsConfirmation = typeof slot.broken_rule_label === 'string'
+          || (Array.isArray(slot.broken_rules) && slot.broken_rules.length > 0);
+        delete slot.over_optional;
+        delete slot.less_preferred_label;
+        delete slot.attendee_conflicts;
+        delete slot.attendee_status;
+        delete slot.broken_rule;
+        delete slot.broken_rule_label;
+        delete slot.broken_rules;
+        delete slot.attendee_hours_note;
+        delete slot.disturbs_floating_block;
+        delete slot.density;
+        delete slot.day_type;
+        if (needsConfirmation) slot.less_preferred_label = 'requires confirmation';
+      };
+      const slots = Array.isArray(result) ? result : r.slots;
+      if (Array.isArray(slots)) {
+        for (const slot of slots) scopeSlot(slot as Record<string, unknown>);
       }
-      // email-siblings-not-stripped-results-branch — the SAME leak, the
-      // candidate_validation branch's shape (findAvailableSlots.ts, taken
-      // when the caller checks specific proposed times rather than searching):
-      // no top-level `slots`, so the walk above never reaches it. Each
-      // `results[]` item's `broken_rule` is the RAW per-attendee reason string
-      // (`outside_attendee_work_hours:<email>` / `attendee_busy_collision:<email>`)
-      // and `attendee_hours_note` spells out that same colleague's stated
-      // working hours verbatim (attendeeHoursGroundingNotes) — both left in
-      // place for the owner's own view; `broken_rule_label`
-      // is the clean, human, name-free equivalent and stays. `travelers`
-      // (top-level — not nested in `slots`, so the
-      // per-slot walk above never reached it either) is a colleague's email + travel
-      // location, same shape of fact as `attendee_status`.
       if (Array.isArray(r.results)) {
-        for (const item of r.results as Array<Record<string, unknown>>) {
-          delete item.broken_rule;
-          delete item.attendee_hours_note;
-        }
+        for (const item of r.results as Array<Record<string, unknown>>) scopeSlot(item);
       }
+      if (r.preferred_slot_status && typeof r.preferred_slot_status === 'object') {
+        const preferred = r.preferred_slot_status as Record<string, unknown>;
+        scopeSlot(preferred);
+        // This prose repeats the diagnostic deleted above. The structured
+        // available flag and computed clocks retain the actionable outcome.
+        delete preferred._note;
+      }
+      delete r._relaxed_recovery;
       delete r.travelers;
       // Same family, main-branch sibling (`_attendee_unverified_note`): a
       // second-person aside attached when no slot survived attendee filtering
@@ -297,6 +277,7 @@ export class SchedulingSkill {
           delete day.blocked_by;
           delete day.attendee_partial_conflicts;
           delete day.attendee_hours_note;
+          delete day.top_reasons;
         }
       }
     }

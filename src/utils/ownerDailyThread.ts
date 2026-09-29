@@ -1,12 +1,11 @@
 /**
  * Owner daily decision thread (v3.4.6).
  *
- * Maelle reaches out to the owner for essentially one reason: she needs a
- * decision — an approval. Instead of opening a fresh top-level DM per approval
- * (the "tons of threads" sprawl), every owner-facing ask of a given day nests
+ * Instead of opening a fresh top-level DM per approval or standalone notice
+ * (the "tons of threads" sprawl), owner-facing asks and notices of a given day nest
  * under ONE lazily-created thread: "Discussions — Sat 21 Jun". Owner direction
- * (2026-06-21): one thread per day, opened only by the FIRST approval that
- * actually needs him that day — a quiet day opens nothing.
+ * (2026-06-21): one thread per day. With the notice scope below, the first
+ * approval or notice opens it — a quiet day opens nothing.
  *
  * Day-key = `getEffectiveToday(profile)` so it reuses the owner's configured
  * late-night boundary (`schedule.day_boundary_hour`): a 1am "approve this" still
@@ -19,7 +18,8 @@
  * Typed replies (which carry the daily-root ts, not a per-message ts) route to
  * content attribution in threadBoundApprovalAutoResolve.
  *
- * Scope: approvals PLUS context-less shadow notices (shadowNotify route 3, e.g.
+ * Scope: approvals, ordinary informational no-slot notices from
+ * rebalanceFloatingBlocks, and context-less shadow notices (shadowNotify route 3, e.g.
  * "Floating block rebalanced" — owner ruling 2026-09-15: a new top-level thread
  * per notice a couple of times a day is spam). Kept separate: the morning brief,
  * the calendar-health report thread, and colleague-conversation shadows (those
@@ -37,6 +37,7 @@
  */
 
 import { DateTime } from 'luxon';
+import { relayNotice, requesterRelayLanguage } from '../core/requests/requesterRelay';
 import type { UserProfile } from '../config/userProfile';
 import type { Connection } from '../connections/types';
 import type { CreateRequestInput } from '../core/requests/types';
@@ -102,8 +103,9 @@ async function createOwnerDailyThread(
 
   // Lazily create: post the dated header to the owner's DM. sendDirect returns
   // ref=channel, ts=root.
-  const label = getEffectiveToday(profile).setLocale('en').toFormat('cccc d MMM');
-  const header = `🗓️ Discussions — ${label}`;
+  const lang = requesterRelayLanguage(ownerUserId);
+  const label = getEffectiveToday(profile).setLocale(lang).toFormat('cccc d MMM');
+  const header = relayNotice(lang, 'discussions', { time: label });
   let res;
   try {
     res = await conn.sendDirect(ownerUserId, header);

@@ -1,3 +1,27 @@
+## 5.0.1 — Scheduling across home regions and reliable request notices
+
+Corrected scheduling defaults that could change colleagues’ workweeks when the owner moves, and exercised the proposed Boston schedule across office/home days and US/Israel daylight-saving transitions. The tests use November 3, 2026, Monday–Friday: office Monday/Tuesday/Thursday 09:00–17:00 and home Wednesday/Friday 08:00–17:00. This release does not change the live profile or schedule a future permanent move; permanent YAML changes still require application reload and existing scheduled work must be assessed separately.
+
+### Fixed
+- Independent regional workweek defaults: Israel Sunday–Thursday, elsewhere Monday–Friday, while explicit person schedules retain precedence. Malformed inferred hours no longer break roster reads.
+- Dated owner schedule/location authority over stale person travel when planning meetings.
+- Unmovable floating-block overlaps notify the owner through the ordinary daily thread, without creating a redundant approval question (#204).
+- Stored language preference for initiated request notices and English when unknown. Current-turn reply-language instructions were corrected; model-dependent adherence and unchanged immediate acknowledgments remain outside that deterministic guarantee. Static notices add no model invocation; arbitrary stored text remains unchanged. Deterministic notice templates cover English, Hebrew, German, Spanish, Arabic and Russian; unavailable known-language wording does not replay a completed calendar action.
+- Trusted calendar-read receipts survive conversation history and ground the existing gate’s checks for invented no-access claims (#206). Confirmed voice/image replies retain the same receipts. Model-dependent interpretation remains a bounded gate, not a guarantee about all future wording.
+- Requester notification attempts are capped at three with truthful owner visibility; uncertain sends are not replayed as confirmed failures. Unknown WhatsApp audio completion no longer falls through to a duplicate text reply.
+- Email scheduling output omits internal owner mechanics before composing the outward-facing prose; the existing owner-only email recipient limit remains.
+- Cached Slack lookups recheck current account eligibility; pending social-capture state can clear after uncertainty.
+
+### Removed
+- Gender inference from profile photos; explicitly declared data remains supported.
+
+### Maintenance
+- Updated affected comments/citations and made the new regression harnesses independent of ignored local artifacts.
+
+### Verification and limits
+- 17 tracked source correction/maintenance refs independently verified. Original full checkpoint: 179 suite/timezone executions and 4,559 reported passing cases; subsequent bounded repairs: 543 independent passing cases and fresh TypeScript check. Golden30: 19 passes and 11 stale catalog anchors traced against current source, zero failures. Original and replacement evidence retained.
+- Model-dependent wording and provider delivery remain bounded by the recorded tests; no universal live-behavior guarantee. Broader external email coordination and other owner-held work remain deferred.
+
 ## 5.0.0 — Reliable summaries, bounded recovery and safer delivery
 
 Twenty-four independently verified correction groups strengthen summaries, identity and privacy boundaries, location handling, email and Slack voice. Deployment retries now follow the revision PM2 actually runs, and voice transcription has one owner-approved three-minute cancellation budget. This release also removes unused automatic summary followups for a later rebuild.

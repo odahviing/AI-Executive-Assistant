@@ -41,9 +41,10 @@ export interface PersonProfile {
 
   // When they're typically reachable — the record of what was SAID, as said.
   // e.g. "Israel 9am–6pm" or "US Eastern, responds mornings"
-  // Free-text legacy: nothing reads it. Scheduling clips to
+  // Free-text legacy: capture still writes it and assistantSelf renders it for
+  // Maelle's own row. Person scheduling clips to
   // working_hours_structured / the timezone default (getEffectiveWorkingHours),
-  // and every model-facing read either renders that effective window (owner
+  // and person model-facing reads either render that effective window (owner
   // roster line, get_person_memory) or no hours at all (#135, colleague work
   // block) — never this prose, which is how a stale "Mon/Thu only" once
   // outranked the corrected structured window (Isaac, 2026-05-26).
@@ -1301,13 +1302,9 @@ export function confirmPersonGenderById(personId: string, gender: PersonGender, 
 
 // ── v3.5.x — derived outbound language ───────────────────────────────────────
 //
-// Outbound composition TO a person (relay / outreach / coord) should speak the
-// language they're ACTUALLY writing in, not a frozen one-off preference that
-// never self-corrects (the Ayala bug: stored language_preference=Hebrew, she
-// writes English, got a Hebrew relay). We stamp the dominant script of each
-// inbound human message and derive outbound from the most recent one; default
-// English. The owner can still pin a language via update_person_profile, which
-// wins for contacts we haven't heard from inside the recency window.
+// Initiated contact uses the known preference, with recent inbound as a
+// fallback when no preference is stored. Replies follow the current incoming
+// message in the turn's language directive, independently of this resolver.
 
 const LANG_RECENCY_DAYS = 45;
 
@@ -1335,11 +1332,11 @@ export function setLastInboundLang(slackId: string, lang: string): void {
 }
 
 /**
- * The language to WRITE TO this person in. Precedence:
- *   1. recent inbound (within LANG_RECENCY_DAYS) — the live signal wins
- *   2. stored language_preference (owner pin / legacy) — fallback for contacts
- *      we haven't heard from recently
- * Returns a short code ('he' | 'ru' | 'ar' | 'en' | <stored pref lowercased>),
+ * The language to INITIATE contact with this person in. Precedence:
+ *   1. stored language_preference (authority ranked by the profile writer)
+ *   2. recent inbound (within LANG_RECENCY_DAYS), when preference is unknown
+ * Returns a canonical code for supported language names/tags, otherwise the
+ * stored preference lowercased,
  * or **null when nothing is known** — no live signal and no stored
  * preference. v4.4.x (#170): this used to return 'en' for that case too, so a
  * genuine "he writes to her in English" and a bare "we've never heard from
@@ -1351,7 +1348,20 @@ export function setLastInboundLang(slackId: string, lang: string): void {
  */
 export function resolveOutboundLanguageForPerson(person: PersonMemory | null | undefined): string | null {
   if (!person) return null;
-  // 1. Live signal — most recent inbound, if fresh.
+  // 1. Known preference for initiated contact.
+  try {
+    const pj = JSON.parse(person.profile_json || '{}');
+    const pref = ((pj?.language_preference as string | undefined) ?? '').toLowerCase().trim();
+    if (pref) {
+      if (pref === 'he' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) return 'he';
+      const names: Record<string, string> = { german: 'de', spanish: 'es', arabic: 'ar', russian: 'ru', english: 'en' };
+      if (names[pref]) return names[pref];
+      const primaryTag = pref.split('-')[0];
+      if (['he', 'de', 'es', 'ar', 'ru', 'en'].includes(primaryTag)) return primaryTag;
+      return pref;
+    }
+  } catch { /* fall through */ }
+  // 2. Most recent inbound is a fallback, never an override of a preference.
   if (person.last_inbound_lang && person.last_inbound_lang_at) {
     const iso = person.last_inbound_lang_at.replace(' ', 'T') + 'Z'; // SQLite datetime() is UTC, no marker
     const ageDays = (Date.now() - Date.parse(iso)) / 86_400_000;
@@ -1359,15 +1369,6 @@ export function resolveOutboundLanguageForPerson(person: PersonMemory | null | u
       return person.last_inbound_lang;
     }
   }
-  // 2. Stored preference (owner pin / legacy) for contacts not recently active.
-  try {
-    const pj = JSON.parse(person.profile_json || '{}');
-    const pref = ((pj?.language_preference as string | undefined) ?? '').toLowerCase().trim();
-    if (pref) {
-      if (pref === 'he' || pref === 'he-il' || pref.startsWith('hebrew') || pref.includes('עברית')) return 'he';
-      return pref;
-    }
-  } catch { /* fall through */ }
   // 3. Nothing known.
   return null;
 }

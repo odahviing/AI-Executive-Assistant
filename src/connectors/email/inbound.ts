@@ -532,7 +532,7 @@ async function handleAuthorizedMail(profile: UserProfile, connection: Connection
   // false "you weren't answered" alert for an email that just was.
   try {
     appendToConversation(channelKey, channelKey, { role: 'user', content: turnText });
-    appendToConversation(channelKey, channelKey, { role: 'assistant', content: gatedReply });
+    appendToConversation(channelKey, channelKey, { role: 'assistant', content: gatedReply, toolSummaries: result.toolSummaries ?? [] });
   } catch (err) {
     logger.error('Email inbound — appendToConversation failed after a successful send; history for this turn is lost', {
       profileId: profile.user.slack_user_id, channelKey, err: String(err).slice(0, 200),

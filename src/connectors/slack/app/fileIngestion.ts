@@ -181,7 +181,7 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
 
     const sayFn = async (msgOrText: any) => {
       const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
-      await client.chat.postMessage({
+      return client.chat.postMessage({
         token: assistant.slack.bot_token,
         channel: channelId,
         thread_ts: threadTs,

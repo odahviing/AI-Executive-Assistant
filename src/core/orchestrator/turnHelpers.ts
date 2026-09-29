@@ -246,7 +246,7 @@ function approvalOwnerNotified(toolName: string, result: unknown): boolean {
  *             structured busy/hours field on the result would make this exact;
  *             until one exists, presence.
  *   memory  — get_person_memory read a person's notes (which hold their
- *             stated hours); a `found:false` miss (assistant.ts:865-871, no
+ *             stated hours); a `found:false` miss (assistant.ts's get_person_memory case, no
  *             `error` field) grounds nothing.
  *   send_hold — message_colleague held a send because the recipient was
  *             outside their own working hours (`held_for_recipient_work_hours`).
@@ -311,7 +311,7 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
     }
     case 'get_person_memory':
       // check-claimed-that-never-ran (2026-09-06) — the miss shape
-      // (assistant.ts:865-871) is `{found:false, person, message}`, no
+      // (assistant.ts's get_person_memory case) is `{found:false, person, message}`, no
       // `error` field, so it fell through to 'memory' as though a lookup had
       // actually found something to ground a claim against.
       return (typeof r.error === 'string' || r.found === false) ? null : 'memory';

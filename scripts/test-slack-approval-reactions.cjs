@@ -22,7 +22,8 @@ function harness(options = {}) {
     postToChannel: async (channel, text, opts) => { effects.posts.push({ channel, text, opts }); return options.postFails ? { ok: false, reason: 'post unavailable' } : { ok: true, ts: 'recovery.1' }; },
     sendDirect: async (user, text) => { effects.directs.push({ user, text }); return options.dmFails ? { ok: false, reason: 'DM unavailable' } : { ok: true, ref: 'DOWNER', ts: 'fallback.1' }; },
   };
-  const mocks = {
+  const mocks={
+ 'src/core/requests/requesterRelay.ts':{requesterRelayLanguage:()=> 'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
     'src/config.ts': {}, 'src/llm/client.ts': {}, 'src/core/threadActions.ts': {}, 'src/voice.ts': {},
     'src/db.ts': { appendToConversation: append },
     'src/utils/logger.ts': { __esModule: true, default: Object.fromEntries(['info', 'warn', 'error', 'debug'].map(level => [level, (...args) => effects.logs.push({ level, args })])) },

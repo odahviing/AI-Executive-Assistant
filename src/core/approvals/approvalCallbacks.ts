@@ -27,6 +27,7 @@
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../../config/userProfile';
+import { relayNotice, requesterRelayLanguage } from '../requests/requesterRelay';
 import type { OwnerTravelContext } from '../../utils/workingElsewhere';
 import { renderWeDualClock, resolveStatedInstant, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../utils/weTimeResolver';
 import logger from '../../utils/logger';
@@ -112,6 +113,7 @@ export function buildConsequenceText(
   travel?: OwnerTravelContext,
 ): string | null {
   if (!callbacks.on_approve) return null;
+  const lang = requesterRelayLanguage(profile.user.slack_user_id);
   const { tool, args } = callbacks.on_approve;
   const fmtTime = (iso: string | undefined): string => {
     if (!iso) return '';
@@ -125,7 +127,7 @@ export function buildConsequenceText(
         timeZone: profile.user.timezone,
       };
       // Best-effort render in the owner's zone.
-      return new Intl.DateTimeFormat('en-GB', opts).format(dt);
+      return new Intl.DateTimeFormat(lang === 'en' ? 'en-GB' : lang, opts).format(dt);
     } catch { return iso; }
   };
   // WE-aware time render for the ISO-start tools: dual trip/home clock when
@@ -137,12 +139,12 @@ export function buildConsequenceText(
   };
   switch (tool) {
     case 'create_meeting': {
-      const subj = (args.subject as string) ?? 'this meeting';
+      const subj = (args.subject as string) ?? relayNotice(lang, 'meeting');
       const start = fmtStart(args.start as string | undefined, args.end as string | undefined);
-      return start ? `If yes → I'll book "${subj}" at ${start}.` : `If yes → I'll book "${subj}".`;
+      return relayNotice(lang, 'consequence_book', { subject: subj, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' });
     }
     case 'move_meeting': {
-      const subj = (args.meeting_subject as string) ?? 'the meeting';
+      const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
       const newStart = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
       // A TIME-LESS move is the open calendar-conflict anchor (skill.ts's
       // create_approval stamp — options offered, no single time chosen): a bare
@@ -150,21 +152,21 @@ export function buildConsequenceText(
       // pick-a-time recovery), so the consequence line must ask for the pick,
       // not promise a move a yes can't perform.
       return newStart
-        ? `If yes → I'll move "${subj}" to ${newStart}.`
-        : `Reply with the time you pick → I'll move "${subj}" to it (or say no to leave it as is).`;
+        ? relayNotice(lang, 'consequence_move', { subject: subj, time: newStart })
+        : relayNotice(lang, 'consequence_pick', { subject: subj });
     }
     case 'delete_meeting': {
-      const subj = (args.meeting_subject as string) ?? 'the meeting';
-      return `If yes → I'll cancel "${subj}".`;
+      const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
+      return relayNotice(lang, 'consequence_cancel', { subject: subj });
     }
     case 'book_floating_block': {
       const blockName = (args.is_floating_block as { name?: string } | undefined)?.name ?? 'this block';
       const start = (args.start_time as string | undefined) ?? '';
-      return start ? `If yes → I'll book ${blockName} at ${start}.` : `If yes → I'll book ${blockName}.`;
+      return relayNotice(lang, 'consequence_book', { subject: blockName, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' });
     }
     case 'update_meeting': {
-      const subj = (args.meeting_subject as string) ?? 'the meeting';
-      return `If yes → I'll update "${subj}".`;
+      const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
+      return relayNotice(lang, 'consequence_update', { subject: subj });
     }
     // pre-existing-clobbered-tz-now-locked-wrong-forever (2026-09-02) — the
     // TZ-persistence ask's on_approve (core/requests/runner.ts's
@@ -173,10 +175,10 @@ export function buildConsequenceText(
     // on_approve so the owner still sees what a yes actually does.
     case PROMOTE_TIMEZONE_TEMP_TOOL: {
       const val = (args.expected_value as string) ?? 'that timezone';
-      return `If yes → I'll update their stored timezone to ${val}.`;
+      return relayNotice(lang, 'consequence_zone', { value: val });
     }
     default:
-      return `If yes → I'll run ${tool}.`;
+      return relayNotice(lang, 'consequence_run', { value: tool });
   }
 }
 
@@ -288,6 +290,7 @@ export async function composeOwnerAskText(input: {
   reSurface?: { raisedAt: string | null };
 }): Promise<string> {
   const { askText, details, profile, requestId, lead, reSurface } = input;
+  const lang = requesterRelayLanguage(profile.user.slack_user_id);
 
   // Repeat context comes from the preserved decision chain on EVERY delivery,
   // including timer retries after the first owner post failed.
@@ -306,7 +309,7 @@ export async function composeOwnerAskText(input: {
     parentId = parent.parent_request_id;
   }
   const repeatHistory = refusals.length
-    ? `Repeated request after ${refusals.length} prior refusal${refusals.length === 1 ? '' : 's'}: ${refusals.join('; ')}. The requester confirmed they want you asked again.`
+    ? relayNotice(lang, 'repeat_history', { count: String(refusals.length), plural: refusals.length === 1 ? '' : 's', quote: refusals.join('; ') })
     : undefined;
 
   // A stored counter is what a ✅ ACTUALLY replays: resolveRequest merges
@@ -343,7 +346,7 @@ export async function composeOwnerAskText(input: {
     consequence = buildConsequenceText(effective, profile, travel);
   } catch (err) {
     if (err instanceof StatedTimeClarificationError) {
-      consequence = `Before this can run: ${err.message}`;
+      consequence = relayNotice(lang, 'clarification', { quote: err.message });
     } else {
     logger.warn('composeOwnerAskText — consequence build threw; sending the ask without the "if yes" line', {
       requestId, err: String(err).slice(0, 200),
@@ -361,7 +364,7 @@ export async function composeOwnerAskText(input: {
       ? DateTime.fromSQL(reSurface.raisedAt, { zone: 'utc' }).setZone(profile.user.timezone)
       : null;
     const when = raised?.isValid ? ` (${raised.toFormat('EEE d MMM, HH:mm')})` : '';
-    hardReason = `Checked when I raised this${when}: ${honest}`;
+    hardReason = relayNotice(lang, 'checked_reason', { time: when, quote: honest });
   }
 
   return [repeatHistory, lead, hardReason, askText, consequence].filter(Boolean).join('\n\n');

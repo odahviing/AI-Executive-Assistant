@@ -77,9 +77,9 @@ function harness(options = {}) {
       },
     },
     'src/core/requests/logActivity.ts': { logActivity: data => effects.activity.push(clone(data)) },
-    'src/core/requests/requesterRelay.ts': { isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: text => typeof text === 'string' ? text : '', requesterRelayLanguage: () => options.lang || 'en' },
+    'src/core/requests/requesterRelay.ts': { relayNotice: require('./fixtures/relay-copy.cjs').relayNotice, beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: text => typeof text === 'string' ? text : '', requesterRelayLanguage: () => options.lang || 'en' },
     'src/db/conversations.ts': { appendToConversation: (...args) => effects.history.push(clone(args)), getConversationHistory: () => [] },
-    'src/db/people.ts': { getPersonMemory: () => ({ timezone: options.requesterZone || 'America/Los_Angeles', timezone_set_by: options.zoneSetBy || 'person' }) },
+    'src/db/people.ts': { resolveOutboundLanguageForPerson:()=>options.lang||null, getPersonMemory: () => ({ timezone: options.requesterZone || 'America/Los_Angeles', timezone_set_by: options.zoneSetBy || 'person' }) },
     'src/db/jobs.ts': { createOutreachJob: args => effects.outbound.push(clone(args)) },
     'src/connections/registry.ts': { getConnection: () => ({
       sendDirect: async (id, body, opts) => { effects.sends.push({ id, body, opts }); return { ok: !options.sendFail, ref: 'DPAUL' }; },

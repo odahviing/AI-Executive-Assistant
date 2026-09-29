@@ -26,7 +26,7 @@ import {
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
-import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed } from './requesterRelay';
+import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, relayNotice, recordRequesterCompositionFailure, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed, requesterRelayStopped, beginRequesterRelayAttempt } from './requesterRelay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
@@ -1182,7 +1182,7 @@ export async function notifyRequesterOfDecision(
   // ("Can Idan find 10 minutes…?") so neither leaks into the requester relay.
   // (Pre-fix only row.subject was filtered; details.question — the raw internal
   // question — fell straight through and leaked to Dina, 2026-06-14.)
-  const subject =
+  let subject =
     usableRelaySubject(executed?.subject) ||
     usableRelaySubject(deferredSubject) ||
     usableRelaySubject(details.subject) ||
@@ -1190,10 +1190,9 @@ export async function notifyRequesterOfDecision(
     usableRelaySubject(row.subject) ||
     'that ask';
 
-  // v2.9.4 (#107d) — language-aware relay body, derived from the requester's
-  // most recent inbound (the Ayala fix). One derivation for every requester
-  // relay, not a per-site copy — see requesterRelay.ts.
-  const requesterLang: 'he' | 'en' = requesterRelayLanguage(requesterSlackId);
+  // Initiated notices use the stored person preference, then the existing
+  // recent inbound fallback, then English when neither is known.
+  const requesterLang = requesterRelayLanguage(requesterSlackId);
 
   // Format start time in the requester's timezone if known, else owner's.
   // Counter instants also retain their structured source-offset clock when it
@@ -1242,9 +1241,16 @@ export async function notifyRequesterOfDecision(
 
   const ownerFirst = ctx.profile.user.name.split(' ')[0];
   const requesterFirst = requesterName ? requesterName.split(' ')[0] : undefined;
-  const hi = requesterFirst
+  const fallbackHi = requesterFirst
     ? (requesterLang === 'he' ? `היי ${requesterFirst}` : `Hey ${requesterFirst}`)
     : (requesterLang === 'he' ? 'היי' : 'Hey');
+  // A failed static rendering leaves no sendable body. Existing model-composed
+  // paths still support languages beyond the static catalog without extra calls.
+  const notice = (kind: Parameters<typeof relayNotice>[1], values: Record<string, string>): string => {
+    try { return relayNotice(requesterLang, kind, values); } catch { return ''; }
+  };
+  const hi = notice('greeting', { name: requesterFirst ?? '' }).trim() || fallbackHi;
+  if (subject === 'that ask') subject = notice('subject', {}) || subject;
   // #153-followup — the amend relay's classified parts, lifted out of the branch
   // that builds them so the language composer below can PIN them. `pinned` is
   // machine-labelled decision data (a duration, an instant, a venue) that must
@@ -1308,9 +1314,7 @@ export async function notifyRequesterOfDecision(
       ? `${hi} — ${ownerFirst} דחה את הבקשה לגבי ${subject}${reasonTail}. הפעולה המבוקשת לא בוצעה.`
       : `${hi} — ${ownerFirst} declined the request about ${subject}${reasonTail}. The requested action was not carried out.`;
   } else if (verdict === 'expired') {
-    body = requesterLang === 'he'
-      ? `${hi} — לא הגענו להסכמה לגבי ${subject} אחרי שתי הצעות, אז סגרתי את הבקשה. כדאי לפנות ישירות ל${ownerFirst} להמשך התיאום.`
-      : `${hi} — we did not reach agreement about ${subject} after two proposals, so I've closed the request. Please contact ${ownerFirst} directly to work out the next step.`;
+    body = notice('proposals_expired', { hi, owner: ownerFirst, subject });
   } else if (verdict === 'closed_by_owner') {
     // Scanner path — never "approved" (nothing was granted) and never "can't
     // make it work" (nothing was declined): just that it's closed, and why.
@@ -1329,9 +1333,7 @@ export async function notifyRequesterOfDecision(
     // The quote keeps explicit labels verbatim without guessing their meaning.
     const rationale = reason && reason.trim() ? reason.trim() : '';
     amendRationale = rationale && rationale !== (isQuestion ? counterText : '')
-      ? (requesterLang === 'he'
-          ? `הניסוח המקורי של ${ownerFirst}: “${rationale}”`
-          : `${ownerFirst}'s original wording: “${rationale}”`)
+      ? notice('original', { owner: ownerFirst, quote: rationale })
       : '';
     // A verbatim duplicate in a prose field is already carried by the quote.
     // Keep it out of the composer too; structured values are never removed.
@@ -1348,9 +1350,7 @@ export async function notifyRequesterOfDecision(
       );
       amendWithheld = rest.withheld;
       const tail = rest.text;
-      body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} שאל: ${counterText}${tail ? ` (${tail})` : ''}`
-        : `${hi} — ${ownerFirst} asked: ${counterText}${tail ? ` (${tail})` : ''}`;
+      body = notice('question', { hi, owner: ownerFirst, quote: counterText, tail: tail ? ` (${tail})` : '' });
     } else {
       const rendered = renderCounter(counterForRelay, { audience: 'requester', formatInstant: formatStart });
       amendWithheld = rendered.withheld;
@@ -1358,9 +1358,11 @@ export async function notifyRequesterOfDecision(
       const counterSummary = rendered.text;
       amendProse = rendered.prose;
       const detail = counterSummary;
-      body = requesterLang === 'he'
-        ? `${hi} — ${ownerFirst} הציע משהו אחר${detail ? ': ' + detail : ''}. זה עובד לך?`
-        : `${hi} — ${ownerFirst} suggested a different approach${detail ? ': ' + detail : ''}. Does that work for you?`;
+      body = amendPinned.length > 0
+        ? (requesterLang === 'he'
+          ? `${hi} — ${ownerFirst} הציע משהו אחר${detail ? ': ' + detail : ''}. זה עובד לך?`
+          : `${hi} — ${ownerFirst} suggested a different approach${detail ? ': ' + detail : ''}. Does that work for you?`)
+        : notice('proposal', { hi, owner: ownerFirst, quote: detail });
     }
   }
 
@@ -1380,7 +1382,7 @@ export async function notifyRequesterOfDecision(
   // reads as "okayed cancelling it", never "approved {meeting}" (which reads as
   // approving the meeting itself; Yael: "you mean approved to cancel?", 2026-06-15)
   // — and (b) writes in the requester's actual language instead of the rigid
-  // he/en branch. Fails open to `body`.
+  // he/en branch. The template is usable only for supported or unknown languages.
   //
   // #153-followup — AMEND composes too, and that closes the last relay that could
   // not speak the reader's language. Its template interpolates machine-built ENGLISH
@@ -1392,12 +1394,15 @@ export async function notifyRequesterOfDecision(
   //
   // The reason amend was excluded is kept — in code, not by abstention: the decided
   // values are handed over PRE-RENDERED and pinned, and a composition that dropped
-  // or altered one is discarded in favour of the template (amendCompositionFault).
+  // or altered one is discarded (amendCompositionFault); fallback must match the language.
   // The LLM owns the phrasing, code owns the decision, so the number cannot drift.
   // Two amend shapes deliberately stay on the template: a counter with no
   // machine-labelled part (pure owner prose — already human words, nothing to
   // relabel) and a question-shaped counter (his question must travel verbatim).
   const composeAmend = verdict === 'amend' && amendPinned.length > 0;
+  let requiresComposedLanguage = (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend)
+    && requesterLang !== 'en' && requesterLang !== 'he';
+  let composedSuccessfully = false;
   if (verdict === 'approve' || verdict === 'reject' || verdict === 'closed_by_owner' || composeAmend) {
     try {
       const rawAsk =
@@ -1413,13 +1418,17 @@ export async function notifyRequesterOfDecision(
             : (deferredTool === 'create_meeting') ? 'a booking'
               : undefined;
       // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getPersonMemory, resolveOutboundLanguageForPerson } = require('../../db/people') as typeof import('../../db/people');
+      const initiatedLanguage = resolveOutboundLanguageForPerson(getPersonMemory(requesterSlackId));
+      requiresComposedLanguage = !!initiatedLanguage && initiatedLanguage !== 'he' && initiatedLanguage !== 'en';
       const { getAnthropicClient } = require('../../llm/client') as typeof import('../../llm/client');
       const anthropic = getAnthropicClient();
       const assistantName = ctx.profile.assistant?.name ?? 'the assistant';
       // One definition of the language rule for both prompts.
-      const langRule = requesterLang === 'he'
+      const langRule = initiatedLanguage === 'he'
         ? 'write in Hebrew'
-        : 'match the language of their request below (English / Spanish / etc.)';
+        : initiatedLanguage ? `write in ${initiatedLanguage}`
+          : 'write in English';
       // S4 (2026-08-03 ruling) — threading this DM into origin_thread_ts (below)
       // only fixes WHERE it lands; this is what fixes what it KNOWS. Bounded
       // recent window (last 6 messages) off the same DB-backed store every other
@@ -1480,18 +1489,30 @@ RULES:
       if (composed) {
         const fault = composeAmend ? amendCompositionFault(composed, amendPinned) : null;
         if (fault) {
-          logger.warn('notifyRequesterOfDecision — amend composition rejected, keeping the deterministic template', {
+          logger.warn('notifyRequesterOfDecision — amend composition rejected', {
             id: row.id, fault, composedPreview: composed.slice(0, 120),
           });
         } else {
           body = composed;
+          composedSuccessfully = true;
         }
       }
     } catch (err) {
-      logger.warn('notifyRequesterOfDecision — LLM relay compose failed, using template', { id: row.id, err: String(err).slice(0, 150) });
+      logger.warn('notifyRequesterOfDecision — LLM relay compose failed', { id: row.id, err: String(err).slice(0, 150) });
     }
   }
 
+  // A failed composition cannot turn a known language into an English notice.
+  // Keep the existing delivery failure visible to the owner. No transport was
+  // attempted, so preserve its attempt count and never record an uncertain send.
+  if (!body || (requiresComposedLanguage && !composedSuccessfully)) {
+    const current = getRequest(row.id) ?? row;
+    if (current.requester_notified_at) return 'sent';
+    if (requesterRelayStopped(current)) return 'failed';
+    recordRequesterCompositionFailure(current);
+    logger.warn('notifyRequesterOfDecision — composition unavailable in recipient language; notification failed', { id: row.id });
+    return 'failed';
+  }
   if (amendRationale) body = `${body}\n${amendRationale}`;
 
   // v3.1 (115a/115b) — single-notification idempotency + owner shadow.
@@ -1609,13 +1630,15 @@ RULES:
     }
   };
 
+  if (verdict !== 'amend' && requesterRelayStopped(row)) return 'failed';
   if (!conn) {
-    if (verdict !== 'amend') recordRequesterRelayFailure(row, body, false);
+    if (verdict !== 'amend' && beginRequesterRelayAttempt(row, body)) recordRequesterRelayFailure(row, body, false);
     return 'failed';
   }
   // MPIM origin → post back in MPIM thread; else 1:1 DM.
   try {
     if (row.origin_is_mpim && row.origin_channel) {
+      if (verdict !== 'amend' && !beginRequesterRelayAttempt(row, body)) return 'failed';
       const res = await conn.postToChannel(row.origin_channel, body, { threadTs: row.origin_thread_ts ?? undefined });
       if (res.ok) {
         logger.info('notifyRequesterOfDecision — posted in MPIM origin', { id: row.id, channel: row.origin_channel });
@@ -1631,6 +1654,10 @@ RULES:
         if (verdict !== 'amend') recordRequesterRelayFailure(row, body, true);
         return 'failed';
       }
+      if (verdict !== 'amend') {
+        recordRequesterRelayFailure(row, body, false);
+        if (requesterRelayStopped(row)) return 'failed';
+      }
     }
     // v2.9.4 (#107ef) — thread the relay DM into the ORIGINAL conversation
     // when known. Pre-fix sendDirect was called without opts, so the message
@@ -1643,6 +1670,7 @@ RULES:
     // continues the same thread; Sonnet sees the full booking conversation —
     // now genuinely true (see recordRelayInHistory above), since that thread
     // continuation reads the DB-backed store this send writes into.
+    if (verdict !== 'amend' && !beginRequesterRelayAttempt(row, body)) return 'failed';
     const res = await conn.sendDirect(requesterSlackId, body, {
       threadTs: row.origin_thread_ts ?? undefined,
     });
@@ -1694,16 +1722,16 @@ export async function closeUnconfirmedExecution(row: RequestRow, ctx: ResolveCon
   closeRequest({ id: row.id, state: 'resolved', closureReason: 'approved_action_attempted_unconfirmed', closedBy: 'owner',
     outcomeJson: { approved: true, replayed: tool, verified: false } });
   const sent = await relayClosureToRequester({ row, profile: ctx.profile, label: 'unconfirmed action requester outcome',
-    compose: ({ lang, hi, subject }) => lang === 'he'
-      ? `${hi} — נעשה ניסיון לבצע את הבקשה לגבי ${subject}, אבל לא ניתן לאשר שהוא הצליח. הפעולה לא בוצעה שוב ואין בדיקה אוטומטית נוספת בהמתנה.`
-      : `${hi} — I tried to carry out the request about ${subject}, but I couldn't confirm it worked. I have not repeated the action, and no further automatic check is pending.` });
-  if (ctx.wasAwaitingColleague || ctx.resolvedByColleague) {
-    const { getConnection } = await import('../../connections/registry');
-    const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
-    const conn = getConnection(row.owner_user_id, 'slack');
-    if (conn) await postOwnerDecision({ profile: ctx.profile, conn, text: reason, label: 'unconfirmed action owner outcome',
+    compose: ({ lang, hi, subject }) => relayNotice(lang, 'action_unconfirmed', { hi, subject }) });
+  const { getConnection } = await import('../../connections/registry');
+  const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
+  const conn = getConnection(row.owner_user_id, 'slack');
+  try {
+    const lang = requesterRelayLanguage(row.owner_user_id);
+    const text = relayNotice(lang, 'action_unconfirmed', { hi: relayNotice(lang, 'greeting', { name: ctx.profile.user.name.split(' ')[0] }), subject: row.subject });
+    if (conn) await postOwnerDecision({ profile: ctx.profile, conn, text, label: 'unconfirmed action owner outcome',
       inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
-  }
+  } catch { updateRequest(row.id, { informed: 0 }); }
   return { ok: false, request_id: row.id, state: 'resolved', effect: 'approve_replay_unconfirmed', reason,
     requester_notify_outcome: sent ? 'sent' : 'failed' };
 }
@@ -1716,7 +1744,8 @@ async function closeCounterLimit(row: RequestRow, ctx: ResolveContext): Promise<
     const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
     const conn = getConnection(row.owner_user_id, 'slack');
     if (conn) await postOwnerDecision({ profile: ctx.profile, conn,
-      text: `No agreement after two proposals on "${row.subject}". I've closed the request${requesterNotified === 'sent' ? ' and asked the requester to contact you directly' : '; I could not confirm the requester was told'}.`,
+      text: relayNotice(requesterRelayLanguage(row.owner_user_id), 'counter_limit', { subject: row.subject,
+        status: relayNotice(requesterRelayLanguage(row.owner_user_id), requesterNotified === 'sent' ? 'requester_told' : 'requester_untold') }),
       label: 'counter limit outcome',
       inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null,
     });
@@ -1737,14 +1766,15 @@ async function notifyOwnerOfColleaguePushback(
     const details = parseDetails<Record<string, unknown>>(fresh) ?? {};
     const requesterName = fresh.requester_name?.split(' ')[0] ?? 'the colleague';
     const subject = fresh.subject || 'the ask';
+    const lang = requesterRelayLanguage(row.owner_user_id);
     let lead: string;
     if (verdict === 'reject') {
       const tail = reason && reason.trim() ? ` (${reason.trim()})` : '';
-      lead = `${requesterName} said the counter doesn't work${tail}. Back to you on "${subject}" — want to suggest something else, or drop it?`;
+      lead = relayNotice(lang, 'bounce_reject', { target: requesterName, subject, reason: tail });
     } else if (verdict === 'time_clarification') {
-      lead = `${requesterName} accepted your counter on "${subject}". No action was executed because the time needs clarification; the accepted counter is unchanged.\n${reason ?? ''}`;
+      lead = relayNotice(lang, 'bounce_time', { target: requesterName, subject, quote: reason ?? '' });
     } else if (verdict === 'approve_failed') {
-      lead = `${requesterName} accepted your counter on "${subject}", but I could not confirm the action completed. Check its current state before retrying; the accepted counter is unchanged.\n${reason ?? ''}`;
+      lead = relayNotice(lang, 'bounce_failed', { target: requesterName, subject, quote: reason ?? '' });
     } else {
       const stored = details.counter && typeof details.counter === 'object' && !Array.isArray(details.counter)
         ? details.counter as Record<string, unknown>
@@ -1769,7 +1799,7 @@ async function notifyOwnerOfColleaguePushback(
           }
         },
       }).text;
-      lead = `${requesterName} countered with ${cnt || 'an alternative'} on "${subject}". Approve, reject, or counter again?`;
+      lead = relayNotice(lang, 'bounce_counter', { target: requesterName, subject, quote: cnt });
     }
     const body = await composeOwnerAskText({
       askText: fresh.description ?? fresh.subject,

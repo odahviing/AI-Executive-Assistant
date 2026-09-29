@@ -20,7 +20,7 @@ import {
 } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, withRequestLock, notifyRequesterOfDecision, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
-import { requesterRelayLanguage, relayClosureToRequester } from '../core/requests/requesterRelay';
+import { requesterRelayLanguage, relayClosureToRequester, relayNotice } from '../core/requests/requesterRelay';
 import { logActivity } from '../core/requests/logActivity';
 import { composeOwnerAskText, extractCallbacks } from '../core/approvals/approvalCallbacks';
 import { isDeepStrictEqual } from 'node:util';
@@ -1578,9 +1578,9 @@ export async function createApprovalRequest(
         // composer; a second assembly site is how that class of drift returns.
         if (priorDecline) {
           const ownerFirst = profile.user.name.split(' ')[0];
-          const question = requesterRelayLanguage(requesterSlackId!) === 'he'
-            ? `אתם מבקשים שוב אחרי ש${ownerFirst} אמר לא. האם לפנות אליו שוב עם הבקשה?`
-            : `You're asking again after ${ownerFirst} said no. Should I go to him with it again?`;
+          let question: string;
+          try { question = relayNotice(requesterRelayLanguage(requesterSlackId!), 'repeat_question', { owner: ownerFirst }); }
+          catch { question = ''; }
           const notified = await notifyRequesterOfDecision(row, 'amend', { question }, undefined, { profile });
           return { ok: true, approval_id: row.id, created: true, state: 'awaiting_colleague', owner_notified: false,
             requester_notify_outcome: notified, awaiting_requester_confirmation: true,
@@ -2180,9 +2180,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           const hasRequester = !!current.requester_slack_id && current.requester_slack_id !== ownerUserId;
           const notified = hasRequester ? await relayClosureToRequester({ row: current, profile,
             label: 'cancel_task requester closure',
-            compose: ({ lang, hi, ownerFirst, subject }) => lang === 'he'
-              ? `${hi} — ${ownerFirst} ביטל את הבקשה לגבי ${subject}.`
-              : `${hi} — ${ownerFirst} cancelled the request about ${subject}.`,
+            compose: ({ lang, hi, ownerFirst, subject }) => relayNotice(lang, 'cancelled', { hi, owner: ownerFirst, subject }),
           }) : false;
           return { cancelled: true, title: current.subject,
             ...(hasRequester ? { requester_notify_outcome: notified ? 'sent' : 'failed' } : {}) };

@@ -1,7 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { SONNET, MODEL_HAIKU } from '../llm/models';
-import { config } from '../config';
+import { MODEL_HAIKU } from '../llm/models';
 import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
 import type { PersonGender, CoreFieldSetBy } from '../db';
 import { detectMessageLanguage } from './detectMessageLanguage';
@@ -21,77 +20,9 @@ export function detectGenderFromPronouns(pronouns: string | undefined): PersonGe
   return 'unknown';
 }
 
-// ── Step 2: Profile image via Claude vision ───────────────────────────────────
+// Photo and name inference are retired. Only a person's declarations are signals.
 
-async function fetchImageAsBase64(
-  url: string,
-  botToken?: string,
-): Promise<{ data: string; mediaType: string } | null> {
-  try {
-    const headers: Record<string, string> = {};
-    // Slack CDN URLs sometimes need the bot token as Bearer auth
-    if (botToken && url.includes('slack')) {
-      headers['Authorization'] = `Bearer ${botToken}`;
-    }
-    const res = await fetch(url, { headers });
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    const data = Buffer.from(buf).toString('base64');
-    const ct = res.headers.get('content-type') || 'image/jpeg';
-    const mediaType = ct.split(';')[0].trim();
-    return { data, mediaType };
-  } catch {
-    return null;
-  }
-}
-
-async function detectGenderFromImage(
-  imageUrl: string,
-  name: string,
-  botToken?: string,
-): Promise<PersonGender> {
-  if (!config.ANTHROPIC_API_KEY) return 'unknown';
-
-  const image = await fetchImageAsBase64(imageUrl, botToken);
-  if (!image) return 'unknown';
-
-  try {
-    const anthropic = getAnthropicClient();
-    const response = await anthropic.messages.create({
-      ...SONNET,
-      max_tokens: 5,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: image.mediaType as any, data: image.data },
-          },
-          {
-            type: 'text',
-            text: `Profile photo of "${name}". Reply with ONLY one word: male, female, or unknown.`,
-          },
-        ],
-      }],
-    });
-
-    const answer = ((response.content[0] as any)?.text ?? '').toLowerCase().trim();
-    if (answer === 'male')   return 'male';
-    if (answer === 'female') return 'female';
-    return 'unknown';
-  } catch (err) {
-    logger.debug('Gender image detection failed', { name, err: String(err) });
-    return 'unknown';
-  }
-}
-
-// v3.5.x — the name-based LLM gender guess was REMOVED. It mis-cast a female
-// "Daniel" as male and shipped masculine Hebrew before any real signal existed
-// (2026-06-29). Guessing gender from a name is unsafe in any language; we now
-// rely only on a self-declaration (pronouns) or a weak image signal, and stay
-// 'unknown' otherwise (the reply goes gender-neutral; ask only if unavoidable).
-
-// ── Step 3: first-person morphology in the person's OWN message (#51) ────────
+// Step 2: first-person morphology in the person's OWN message.
 
 // Slack renders a quoted/forwarded line with a leading "> " — strip those
 // lines before judging self-declaration. This is a STRUCTURAL strip (Slack
@@ -134,7 +65,7 @@ export async function detectGenderFromSelfDeclaredMorphology(
   text: string,
   language: string,
 ): Promise<PersonGender> {
-  // No ANTHROPIC_API_KEY-only guard here (unlike detectGenderFromImage above):
+  // No ANTHROPIC_API_KEY-only guard here:
   // that check assumes Anthropic-direct and would silently no-op this tier
   // under LLM_PROVIDER=vertex, where the key is legitimately blank and
   // getAnthropicClient() routes to Vertex instead. The try/catch below
@@ -174,25 +105,12 @@ export async function detectGenderFromSelfDeclaredMorphology(
 /**
  * Detect and persist gender for a workspace contact.
  *
- * Priority (each tier is a tentative auto-detection — NEVER overrides a
- * gender_confirmed=1 row, enforced in people.ts). Ordered strongest-and-
- * cheapest first, so a stronger 'person'-tier signal is never pre-empted by
- * the weaker 'auto' photo guess just because the photo happened to be checked
- * first:
- *   1. Slack pronouns field   → self-declaration → recorded as 'person' (steers)
- *   2. First-person Hebrew    → a self-declaration in the person's OWN message
- *      morphology (#51)         ("אני שמח"/"אני שמחה") → recorded as 'person',
- *                               same authority as pronouns. Opt-in
- *                               (`advanced.self_declared_gender_detection`,
- *                               default off) and only lit when the CALLER
- *                               passes `selfText` — that must be this same
- *                               slackId's own message, never a colleague's
- *                               directory profile text or someone else's words.
- *   3. Profile photo vision   → a weak guess, tried LAST → recorded as 'auto'
- *                               (does NOT steer gendered forms until confirmed
- *                               — people.ts).
- *   4. Stays 'unknown'        → reply stays gender-neutral; ask only if a gendered
- *                               form is unavoidable. We NEVER guess from the name.
+ * Slack pronouns and opt-in first-person Hebrew morphology are declarations,
+ * recorded at person authority. Store provenance prevents either from
+ * overwriting the owner's decision. Photo/name guesses are never made.
+ * Morphology requires selfText from this exact person's live message and the
+ * existing advanced.self_declared_gender_detection opt-in at the caller.
+ * Without a declaration, gender remains unknown.
  *
  * Runs fire-and-forget in the background — never blocks message handling.
  * Known gender skips the model tiers; deterministic pronoun corrections still run.
@@ -202,8 +120,6 @@ export async function detectAndSaveGender(params: {
   slackId: string;
   name: string;
   pronouns?: string;
-  imageUrl?: string;
-  botToken?: string;
   /** #51 — this slackId's OWN message text, passed only when the tenant has
    *  opted into `advanced.self_declared_gender_detection`. Omit entirely at
    *  call sites that aren't a live message from this exact person (directory
@@ -211,11 +127,11 @@ export async function detectAndSaveGender(params: {
    *  person's text here would attribute their words to this slackId. */
   selfText?: string;
 }): Promise<void> {
-  const { slackId, name, pronouns, imageUrl, botToken, selfText } = params;
+  const { slackId, name, pronouns, selfText } = params;
 
   const existing = getPersonMemory(slackId);
   // Deterministic declarations can correct an old guess without spending an
-  // additional model call. Known values still skip morphology and vision.
+  // additional model call. Known values still skip morphology.
   const pronounGender = detectGenderFromPronouns(pronouns);
   if (existing?.gender && existing.gender !== 'unknown' && pronounGender === 'unknown') return;
 
@@ -224,33 +140,14 @@ export async function detectAndSaveGender(params: {
   // can't clobber it (owner can still override).
   let gender = pronounGender;
   let setBy: CoreFieldSetBy = 'person';
-  let source: 'pronouns' | 'image' | 'self_declaration' = 'pronouns';
+  let source: 'pronouns' | 'self_declaration' = 'pronouns';
 
-  // Step 2 — first-person Hebrew morphology self-declaration (#51). Tried
-  // BEFORE the photo guess below — it's a self-declaration at the same
-  // 'person' authority as pronouns, so a weaker 'auto' photo read must never
-  // pre-empt it just by being checked first. Gated deterministically (zero
-  // model calls) on detectMessageLanguage returning 'Hebrew' before the one
-  // Haiku call this can spend. Hebrew-only for now —
-  // detectGenderFromSelfDeclaredMorphology itself is language-generic, this
-  // gate is the only Hebrew-specific line, so widening to Arabic/Russian
-  // later is a one-line change here, not a signature change there.
-  //
+  // Existing opt-in morphology classifier: only the same person's own Hebrew
+  // message can supply a declaration. No model call is added by photo removal.
   if (gender === 'unknown' && selfText && detectMessageLanguage(selfText) === 'Hebrew') {
     gender = await detectGenderFromSelfDeclaredMorphology(selfText, 'Hebrew');
     setBy = 'person';
     source = 'self_declaration';
-  }
-
-  // Step 3 — profile image. A guess, not a declaration → 'auto', and tried
-  // LAST — only when neither pronouns nor a self-declaration resolved it.
-  // Under the people.ts render gate an 'auto' gender does NOT steer Hebrew
-  // forms until confirmed, so a wrong photo read can't reproduce the
-  // masculine-default bug.
-  if (gender === 'unknown' && imageUrl) {
-    gender = await detectGenderFromImage(imageUrl, name, botToken);
-    setBy = 'auto';
-    source = 'image';
   }
 
   if (gender !== 'unknown') {

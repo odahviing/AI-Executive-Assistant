@@ -363,8 +363,6 @@ async function handleWhatsAppMessage(
       profile,
     });
 
-    appendToConversation(threadTs, channelId, { role: 'assistant', content: result.reply });
-
     const cleanReply = result.reply
       .replace(/\*\*/g, '')
       .replace(/##+ /g, '')
@@ -375,8 +373,19 @@ async function handleWhatsAppMessage(
       responseText: cleanReply,
     });
 
+    let sendAttempted = false;
+    const recordConfirmedReply = (sent: Message | undefined) => {
+      if (!sent?.id?._serialized) return;
+      try {
+        appendToConversation(threadTs, channelId, { role: 'assistant', content: result.reply, toolSummaries: result.toolSummaries ?? [] });
+      } catch (err) {
+        logger.error('WhatsApp history write failed after confirmed send', { err: String(err) });
+      }
+    };
     const sendTextReply = async () => {
+      sendAttempted = true;
       const sent = await message.reply(cleanReply);
+      recordConfirmedReply(sent);
       if (sent?.id?._serialized && result.newsBundle) {
         void import('../skills/news')
           .then(({ writeSeenLog }) => writeSeenLog(profile, result.newsBundle!, { briefText: cleanReply }))
@@ -390,14 +399,28 @@ async function handleWhatsAppMessage(
         const tmpAudio = path.join(os.tmpdir(), `wa_reply_${profile.user.slack_user_id}_${Date.now()}.mp3`);
         fs.writeFileSync(tmpAudio, audioBuffer);
         const media = MessageMedia.fromFilePath(tmpAudio);
-        await client.sendMessage(message.from, media, { sendAudioAsVoice: true });
+        sendAttempted = true;
+        const sent = await client.sendMessage(message.from, media, { sendAudioAsVoice: true });
+        recordConfirmedReply(sent);
         try { fs.unlinkSync(tmpAudio); } catch { /* best effort */ }
       } catch (audioErr) {
+        if (sendAttempted) {
+          logger.warn('WhatsApp audio send unconfirmed; no automatic resend', { err: String(audioErr) });
+          return;
+        }
         logger.warn('WhatsApp audio reply failed — sending text', { err: String(audioErr) });
-        await sendTextReply();
+        try {
+          await sendTextReply();
+        } catch (err) {
+          logger.warn('WhatsApp text send unconfirmed; no automatic resend', { err: String(err) });
+        }
       }
     } else {
-      await sendTextReply();
+      try {
+        await sendTextReply();
+      } catch (err) {
+        logger.warn('WhatsApp text send unconfirmed; no automatic resend', { err: String(err) });
+      }
     }
   } catch (err) {
     logger.error('WhatsApp orchestrator error', { err: String(err) });

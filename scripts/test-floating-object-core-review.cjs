@@ -37,6 +37,7 @@ function rebalanceHarness(opts = {}) {
   const mod = compile(source('src/utils/rebalanceFloatingBlocks.ts'), n => {
     if (n === 'luxon') return luxon;
     if (n === '../db/calendarIssues') return {getSuppressedEventIds:()=>new Set(opts.suppressed ?? [])};
+    if (n === '../connections/registry') return { getConnection: () => undefined };
     if (n === './floatingBlocks') return floating;
     if (n === './calendarDensity') return density;
     if (n === './workHours') return { getEffectiveWorkDay: () => ({ hasOverride: !!opts.override }) };

@@ -35,6 +35,7 @@ import { renderClockInZone } from '../utils/timezoneConvert';
 import { resolveStatedInstant } from '../utils/weTimeResolver';
 import { isColleagueSendDeferred } from '../utils/responseDeadline';
 import { getPersonMemory } from '../db/people';
+import { relayNotice, requesterRelayLanguage } from '../core/requests/requesterRelay';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { getConnection } from '../connections/registry';
@@ -207,15 +208,18 @@ async function handleRescheduleReplyLocked(
   const finishHandledAction = () => updateOutreachJob(job.id, {
     status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation),
   });
-  const notifyHandledOwner = async (text: string, remember = false) => {
+  const notifyHandledOwner = async (compose: () => string, remember = false) => {
     try {
-      await conn.postToChannel(job.owner_channel, text, { threadTs: job.owner_thread_ts ?? undefined });
+      const text = compose();
+      const receipt = await conn.postToChannel(job.owner_channel, text, { threadTs: job.owner_thread_ts ?? undefined });
+      if (!receipt.ok) throw new Error("Owner notification delivery unconfirmed");
       if (remember && job.owner_thread_ts) {
         appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: text });
       }
     } catch (err) {
       // A notification failure cannot authorize replaying a completed or
       // already-attempted calendar action through the generic reply path.
+      if (requestId) updateRequest(requestId, { informed: 0 });
       logger.warn('Reschedule handled; owner notification failed', { jobId: job.id, err: String(err).slice(0, 200) });
     }
   };
@@ -238,11 +242,6 @@ async function handleRescheduleReplyLocked(
     const reason = observed ? 'reschedule_desired_state_observed'
       : status === 'different_state_observed' ? 'reschedule_requested_state_not_observed'
       : 'reschedule_action_attempted_unconfirmed';
-    const ownerMsg = observed
-      ? `I tried to move "${ctx.meeting_subject}". A read-only check confirms the requested time is now on the calendar, but does not establish which attempt produced it. I have not repeated the action.`
-      : status === 'different_state_observed'
-        ? `I tried to move "${ctx.meeting_subject}", but a read-only check did not find the requested calendar state. I have not repeated the action, and no further automatic check is pending.`
-        : `I tried to move "${ctx.meeting_subject}", but could not confirm whether it worked. I have not repeated the action, and no further automatic check is pending.`;
     // Persist an honest outcome BEFORE fallible delivery. closeRequest sets
     // informed=0 so the existing owner brief can surface this exact reason
     // even when the immediate warning fails. No unresolved calendar retry.
@@ -252,7 +251,7 @@ async function handleRescheduleReplyLocked(
         closureReason: reason, closedBy: 'system', skipChildren: true,
         outcomeJson: { replayed: 'move_meeting', verified: observed } });
     }
-    await notifyHandledOwner(ownerMsg);
+    await notifyHandledOwner(() => relayNotice(requesterRelayLanguage(profile.user.slack_user_id), observed ? 'move_observed' : status === 'different_state_observed' ? 'move_not_observed' : 'move_unknown', { subject: ctx.meeting_subject }));
     return true;
   };
 
@@ -270,7 +269,7 @@ async function handleRescheduleReplyLocked(
         else await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
       } catch (err) { logger.warn('reschedule (already_moved approve) colleague DM failed', { err: String(err).slice(0, 160) }); }
       await notifyHandledOwner(
-        `${job.colleague_name} is fine with the moved time for "${ctx.meeting_subject}" (${proposedStartLocal}).`);
+        () => relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'move_ok', { target: job.colleague_name, subject: ctx.meeting_subject, time: proposedStartLocal }));
       return true;
     }
     try {
@@ -318,8 +317,7 @@ async function handleRescheduleReplyLocked(
     }
 
     // Report to owner
-    const ownerMsg = `${job.colleague_name} confirmed, moved "${ctx.meeting_subject}" to ${proposedStartLocal}–${proposedEndLocal}.`;
-    await notifyHandledOwner(ownerMsg, true);
+    await notifyHandledOwner(() => relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'move_done', { target: job.colleague_name, subject: ctx.meeting_subject, time: `${proposedStartLocal}–${proposedEndLocal}` }), true);
     return true;
   }
 
@@ -333,11 +331,6 @@ async function handleRescheduleReplyLocked(
   // open outreach job + the linked request's next_check.
   if (decision.status === 'checking') {
     const alreadyNudged = job.request_id ? getRequest(job.request_id)?.phase === 'outreach:nudged' : false;
-    const ownerMsg = `${job.colleague_name} is checking on "${ctx.meeting_subject}" — nothing decided yet, so I'm keeping the current time. ${alreadyNudged ? 'The one reminder was already sent; this will close at the existing deadline if there is no answer.' : "If I don't hear back I'll nudge once tomorrow."}`;
-    await conn.postToChannel(job.owner_channel, ownerMsg, { threadTs: job.owner_thread_ts ?? undefined });
-    if (job.owner_thread_ts) {
-      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
-    }
     // Persist the colleague reply; DO NOT set a terminal status → job stays open.
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
     // Re-arm the existing request timer for one re-ask at +24h.
@@ -353,6 +346,11 @@ async function handleRescheduleReplyLocked(
         phase: 'outreach:re_engaged',
       });
     }
+    await notifyHandledOwner(() => {
+      const ownerLang = requesterRelayLanguage(profile.user.slack_user_id);
+      return relayNotice(ownerLang, 'move_checking', { target: job.colleague_name, subject: ctx.meeting_subject,
+        status: relayNotice(ownerLang, alreadyNudged ? 'reminder_already' : 'reminder_tomorrow') });
+    }, true);
     logger.info('Reschedule reply = checking — kept open, armed reschedule_reask +24h', {
       jobId: job.id, requestId: job.request_id ?? null,
     });
@@ -366,20 +364,9 @@ async function handleRescheduleReplyLocked(
     // WITH the revert option; his next-turn reply ("revert" / "leave it" / a new
     // time) is handled by the orchestrator — same lightweight pattern as the
     // counter fallback below.
-    const ownerMsg = ctx.already_moved
-      ? `${job.colleague_name} says the time I moved "${ctx.meeting_subject}" to (${proposedStartLocal}) doesn't work — I'd shifted it to clear a clash. Want me to move it back to ${ctx.original_start ? formatLocalTime(ctx.original_start, timezone) : 'the original time'} (back into the clash), or find another slot? Reply preview: "${replyText.slice(0, 120)}"`
-      : `${job.colleague_name} declined moving "${ctx.meeting_subject}". Keeping the original time. Reply preview: "${replyText.slice(0, 120)}"`;
-    await conn.postToChannel(job.owner_channel, ownerMsg, {
-      threadTs: job.owner_thread_ts ?? undefined,
-    });
-    if (job.owner_thread_ts) {
-      appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: ownerMsg });
-    }
-    updateOutreachJob(job.id, {
-      status: 'replied',
-      reply_text: replyText,
-      conversation_json: JSON.stringify(conversation),
-    });
+    finishHandledAction();
+    await notifyHandledOwner(() => relayNotice(requesterRelayLanguage(profile.user.slack_user_id), ctx.already_moved ? 'moved_declined' : 'move_declined',
+      { target: job.colleague_name, subject: ctx.meeting_subject, time: proposedStartLocal, old: ctx.original_start ? formatLocalTime(ctx.original_start, timezone) : '', quote: replyText.slice(0, 120) }), true);
     return true;
   }
 
@@ -501,7 +488,7 @@ async function handleRescheduleReplyLocked(
                   channel: job.owner_channel,
                   threadTs: job.owner_thread_ts ?? undefined,
                   action: 'Auto-accepted counter',
-                  detail: `${job.colleague_name} countered "${ctx.meeting_subject}" to ${counterStartDt.toFormat('EEEE d MMM HH:mm')} — same week, within your rules, so I moved it. Say the word if you'd rather I hadn't.`,
+                  detail: relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'auto_counter', { target: job.colleague_name, subject: ctx.meeting_subject, time: counterStartDt.toFormat('EEEE d MMM HH:mm') }),
                 });
 
                 } catch (err) {
@@ -523,10 +510,18 @@ async function handleRescheduleReplyLocked(
     // never an untracked question. The classifier supplies only a clock, not
     // an authoritative date, so use the existing open-conflict move anchor:
     // the owner's exact choice must arrive before anything can be replayed.
+    // Preserve the actual counter even when its optional localized wrapper is unavailable.
+    updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
+    let askText = replyText;
+    try {
+      askText = relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'counter_ask', { target: job.colleague_name, subject: ctx.meeting_subject, time: proposedStartLocal, value: counterDesc, quote: replyText });
+    } catch (err) {
+      logger.warn('Counter wrapper unavailable; preserving original colleague reply', { jobId: job.id, err: String(err).slice(0, 200) });
+    }
     const { createApprovalRequest } = await import('../tasks/skill');
     const raised = await createApprovalRequest({
       kind: 'policy_exception',
-      ask_text: `${job.colleague_name} can't do ${proposedStartLocal}, and offers ${counterDesc} for "${ctx.meeting_subject}". Their reply: "${replyText}". Which exact date and time should I use?`,
+      ask_text: askText,
       payload: {
         meeting_id: ctx.meeting_id,
         subject: ctx.meeting_subject,
@@ -621,13 +616,13 @@ export async function notifyColleagueOfMove(params: {
     const newLocal = `${localTime(params.newStartIso)} – ${localTime(params.newEndIso)}`;
     const ownerFirst = profile.user.name.split(' ')[0];
     const colleagueFirst = params.colleagueName.split(' ')[0];
-    const because = params.conflictReason ? ` — it clashed with ${params.conflictReason}` : '';
+    const lang = requesterRelayLanguage(params.colleagueSlackId);
+    const because = params.conflictReason ? relayNotice(lang, 'source_reason', { quote: params.conflictReason }) : '';
     const toldLocal = params.correctsToldStartIso
       ? localTime(params.correctsToldStartIso)
       : null;
-    const message = toldLocal
-      ? `Hi ${colleagueFirst}, quick correction on "${params.meetingSubject}" — I told you ${toldLocal}, and that's changed: it's now ${newLocal}. Sorry for the back-and-forth. If the new time doesn't work for you, say the word and I'll sort it out with ${ownerFirst}.`
-      : `Hi ${colleagueFirst}, I moved our "${params.meetingSubject}" to ${newLocal}${because}. If that doesn't work for you, just say the word and I'll sort it out with ${ownerFirst}.`;
+    const message = relayNotice(lang, toldLocal ? 'move_correction' : 'move_notice',
+      { name: colleagueFirst, owner: ownerFirst, subject: params.meetingSubject, time: newLocal, old: toldLocal ?? '', reason: because });
 
     const ctx: RescheduleContext = {
       meeting_id: params.meetingId,

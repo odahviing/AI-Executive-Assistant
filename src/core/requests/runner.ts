@@ -30,7 +30,7 @@ import { closeRequest } from './closeRequest';
 import { withRequestLock, closeUnconfirmedExecution } from './resolver';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface, reminderWorkTimeAtOrAfter, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
-import { relayClosureToRequester, retryRequesterRelay } from './requesterRelay';
+import { relayClosureToRequester, retryRequesterRelay, relayNotice, requesterRelayLanguage } from './requesterRelay';
 import { getConnection } from '../../connections/registry';
 import type { SendOptions, SendResult } from '../../connections/types';
 import { logActivity } from './logActivity';
@@ -128,14 +128,15 @@ export async function sweepDueRequests(opts: {
       const fresh = getRequest(row.id);
       if (fresh && ['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(fresh.state)) {
         closeRequest({ id: fresh.id, state: 'cancelled', closureReason: 'request_handler_failed', closedBy: 'system' });
-        const message = `I couldn't complete "${fresh.subject}" because a background step failed. I've closed that request; it needs a fresh check before trying again.`;
         const conn = getConnection(fresh.owner_user_id, 'slack');
-        if (conn) await postOwnerDecision({ profile, conn, text: message, label: 'request failure outcome',
-          inThread: fresh.owner_dm_channel && fresh.owner_dm_thread_ts ? { channel: fresh.owner_dm_channel, threadTs: fresh.owner_dm_thread_ts } : null });
+        try {
+          const lang = requesterRelayLanguage(fresh.owner_user_id);
+          const message = relayNotice(lang, 'failure', { hi: relayNotice(lang, 'greeting', { name: profile.user.name.split(' ')[0] }), subject: fresh.subject });
+          if (conn) await postOwnerDecision({ profile, conn, text: message, label: 'request failure outcome',
+            inThread: fresh.owner_dm_channel && fresh.owner_dm_thread_ts ? { channel: fresh.owner_dm_channel, threadTs: fresh.owner_dm_thread_ts } : null });
+        } catch { updateRequest(fresh.id, { informed: 0 }); }
         await relayClosureToRequester({ row: fresh, profile, label: 'request failure requester outcome',
-          compose: ({ lang, hi, subject }) => lang === 'he'
-            ? `${hi} — לא הצלחתי להשלים את הבקשה לגבי ${subject}. סגרתי אותה; צריך לבדוק אותה מחדש לפני ניסיון נוסף.`
-            : `${hi} — I couldn't complete the request about ${subject}. I've closed it; it needs a fresh check before trying again.` });
+          compose: ({ lang, hi, subject }) => relayNotice(lang, 'failure', { hi, subject }) });
         closed++;
       }
     }
@@ -237,9 +238,7 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
       const conn = getConnection(profile.user.slack_user_id, 'slack');
       if (conn) {
         const who = row.requester_name?.split(' ')[0] ?? 'They';
-        const what = waitingOnColleague
-          ? `${who} never came back on what you suggested for "${subject}". I've closed it without agreement.`
-          : `I never heard back on the approval I asked about. I've closed it, let me know if you want to try again.`;
+        const what = relayNotice(requesterRelayLanguage(row.owner_user_id), waitingOnColleague ? 'owner_counter_expired' : 'owner_expired', { target: who, subject });
         await postOwnerDecision({ profile, conn, text: what, label: 'runExpiry owner tombstone',
           inThread: row.owner_dm_channel && row.owner_dm_thread_ts
             ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
@@ -261,16 +260,9 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
       row,
       profile,
       label: 'runExpiry requester loop-close',
-      compose: ({ lang, hi, ownerFirst, subject: relaySubject }) => repeatConfirmation
-        ? (lang === 'he' ? `${hi} — לא התקבל אישור לפנות שוב ל${ownerFirst} לגבי ${relaySubject}. סגרתי את הבקשה ולא העליתי אותה שוב.`
-          : `${hi} — I didn't get confirmation to ask ${ownerFirst} again about ${relaySubject}. I've closed this without raising it again.`)
-        : waitingOnColleague
-        ? (lang === 'he'
-          ? `${hi} — לא קיבלתי תשובה על מה ש${ownerFirst} הציע לגבי ${relaySubject}, אז סגרתי את זה ללא הסכמה. כדי להמשיך, פנו ישירות ל${ownerFirst}.`
-          : `${hi} — I never heard back on what ${ownerFirst} suggested for ${relaySubject}, so I've closed this without agreement. Please contact ${ownerFirst} directly to continue.`)
-        : (lang === 'he'
-          ? `${hi} — לא הצלחתי לקבל תשובה מ${ownerFirst} לגבי ${relaySubject}. סוגרת את זה בינתיים — אפשר לנסות שוב מתי שתרצו.`
-          : `${hi} — I couldn't get a read from ${ownerFirst} on ${relaySubject}. Closing this for now; ping me when you want to try again.`),
+      compose: ({ lang, hi, ownerFirst, subject }) => relayNotice(lang,
+        repeatConfirmation ? 'repeat_unconfirmed' : waitingOnColleague ? 'colleague_unanswered' : 'owner_unanswered',
+        { hi, owner: ownerFirst, subject }),
     });
   }
   return 'closed';
@@ -366,11 +358,12 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
     if (conn) {
       const expiresLocal = DateTime.fromISO(row.expires_at, { zone: 'utc' })
         .setZone(profile.user.timezone);
-      const expLabel = expiresLocal.toFormat("EEEE 'at' HH:mm");
+      const lang = requesterRelayLanguage(profile.user.slack_user_id);
+      const expLabel = expiresLocal.setLocale(lang).toFormat('EEEE HH:mm');
       await sendTracked(
         conn,
         { channel: row.owner_dm_channel },
-        `Still waiting on your call here: "${row.subject}". Closing it on ${expLabel} if I don't hear back.`,
+        relayNotice(lang, 'approval_reminder', { subject: row.subject, time: expLabel }),
         { threadTs: row.owner_dm_thread_ts ?? undefined },
         'runApprovalReminder nag',
         row.id,
@@ -420,11 +413,11 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
           ? profile.user.name.split(' ')[0]
           : getPersonMemory(row.initiated_by)?.name?.split(' ')[0] ?? 'A colleague';
         const targetName = row.target_name ?? 'them';
-        const framed = `${initiatorName} asked me to remind you: ${message}`;
+        const framed = relayNotice(requesterRelayLanguage(targetSlackId), 'reminder_content', { target: initiatorName, quote: message });
         const res = await sendTracked(conn, { dm: targetSlackId }, framed, undefined, 'runReminderFire colleague DM', row.id);
         delivered = res.ok;
         if (res.ok) {
-          await sendTracked(conn, { dm: ownerId }, `Reminded ${targetName} about "${row.subject ?? message}".`, undefined, 'runReminderFire owner report', row.id);
+          await sendTracked(conn, { dm: ownerId }, relayNotice(requesterRelayLanguage(ownerId), 'reminded_owner', { target: targetName, subject: row.subject ?? message }), undefined, 'runReminderFire owner report', row.id);
           // runReminderFire-same-invisibility-as-research (2026-08-14) — a
           // colleague DM is one of logActivity's own four canonical
           // outward-effect categories ("a colleague DM, a resolved approval, a
@@ -446,7 +439,7 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
             targetName: row.target_name ?? undefined,
           });
         } else {
-          await sendTracked(conn, { dm: ownerId }, `I couldn't reach ${targetName} to send that reminder — you may want to ping them directly.`, undefined, 'runReminderFire owner unreachable report', row.id);
+          await sendTracked(conn, { dm: ownerId }, relayNotice(requesterRelayLanguage(ownerId), 'reminder_owner_failed', { target: targetName }), undefined, 'runReminderFire owner unreachable report', row.id);
         }
       } else {
         // Remind me — DM the owner the message.
@@ -488,24 +481,9 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
       row,
       profile,
       label: 'runReminderFire requester loop-close',
-      compose: ({ lang, hi, ownerFirst, subject: relaySubject }) => {
-        if (remindingSomeoneElse) {
-          return delivered
-            ? (lang === 'he'
-              ? `${hi} — העברתי את התזכורת ל${targetName} לגבי ${relaySubject}.`
-              : `${hi} — passed the reminder on to ${targetName} about ${relaySubject}.`)
-            : (lang === 'he'
-              ? `${hi} — לא הצלחתי להשיג את ${targetName} כדי להעביר את התזכורת. שווה לפנות אליו/אליה ישירות.`
-              : `${hi} — couldn't reach ${targetName} to pass the reminder along. Worth pinging them directly.`);
-        }
-        return delivered
-          ? (lang === 'he'
-            ? `${hi} — זה הגיע ל${ownerFirst}, הוא/היא רואה את זה עכשיו.`
-            : `${hi} — this reached ${ownerFirst}, he's/she's got it now.`)
-          : (lang === 'he'
-            ? `${hi} — ניסיתי להעביר את זה ל${ownerFirst} אבל לא הצלחתי לוודא שזה הגיע. שווה לוודא ישירות.`
-            : `${hi} — I tried to get this to ${ownerFirst} but couldn't confirm it landed. Worth checking with him directly.`);
-      },
+      compose: ({ lang, hi, ownerFirst, subject }) => relayNotice(lang,
+        remindingSomeoneElse ? (delivered ? 'reminder_sent' : 'reminder_failed') : (delivered ? 'owner_reached' : 'owner_unconfirmed'),
+        { hi, owner: ownerFirst, target: targetName, subject }),
     });
   }
   return 'closed';
@@ -667,16 +645,17 @@ async function runRescheduleReask(row: RequestRow, profile: UserProfile): Promis
   let ctx: { meeting_subject?: string; proposed_start?: string } = {};
   try { ctx = job!.context_json ? JSON.parse(job!.context_json) : {}; } catch { /* fall back to generic */ }
   const tz = profile.user.timezone;
+  const lang = requesterRelayLanguage(job.colleague_slack_id);
   const recipient = loadAttendeeAvailabilityForPerson(getPersonMemory(job.colleague_slack_id) ?? undefined, colleagueTz);
   const proposedInstant = ctx.proposed_start
     ? resolveStatedInstant({ startIso: ctx.proposed_start, homeTz: tz, profile }).startIso : undefined;
   const whenLocal = proposedInstant
     ? renderClockInZone(proposedInstant, tz, recipient
       ? attendeeTzForDay(recipient, proposedInstant) : tz)
-    : 'the new time';
-  const subj = ctx.meeting_subject ?? 'the meeting';
+    : relayNotice(lang, 'new_time');
+  const subj = ctx.meeting_subject ?? relayNotice(lang, 'meeting');
   const first = (job!.colleague_name ?? '').split(/\s+/)[0] || 'there';
-  const msg = `Hi ${first}, just circling back on "${subj}" — were you able to check on moving it to ${whenLocal}? No rush, just want to lock it in when you can.`;
+  const msg = relayNotice(lang, 'reschedule_reask', { name: first, subject: subj, time: whenLocal });
   if (job!.dm_channel_id) {
     await sendTracked(conn, { channel: job!.dm_channel_id }, msg, { threadTs: job!.dm_message_ts ?? undefined }, 'reschedule_reask re-ping', row.id);
   } else {
@@ -706,8 +685,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
   // never repeat delivery; definite non-sends restore their send timer instead.
   if (row.state === 'in_flight') {
     closeRequest({ id: row.id, state: 'cancelled', closureReason: 'outreach_send_unconfirmed', closedBy: 'system' });
-    await notifyAskerScheduledOutreachFailed(row, profile,
-      `A send to ${row.target_name ?? 'them'} was interrupted and I can't confirm whether it went out. I won't resend it automatically because that could duplicate the message. Please check the conversation before trying again.`);
+    await notifyAskerScheduledOutreachFailed(row, profile, 'scheduled_unconfirmed');
     return 'closed';
   }
   // The sweep already excludes terminal rows. Any other live state here is an
@@ -735,9 +713,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (conn) {
       const targetName = row.target_name ?? 'them';
-      const what = repliedThenWentQuiet
-        ? `${targetName} replied but never came back with a real answer — I've closed that one out. Tell me if you want to try again.`
-        : `${targetName} never replied to the message I sent — I've closed that one out. Tell me if you want to try again.`;
+      const what = relayNotice(requesterRelayLanguage(profile.user.slack_user_id), repliedThenWentQuiet ? 'outreach_no_decision' : 'outreach_no_reply', { target: targetName });
       await sendTracked(
         conn,
         row.owner_dm_channel ? { channel: row.owner_dm_channel } : { dm: profile.user.slack_user_id },
@@ -756,10 +732,17 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
  * to the asker's original thread before origin_* is repurposed for the recipient.
  * Scheduled outreach has no requester_slack_id; its origin is the return address.
  */
-async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: UserProfile, body: string): Promise<void> {
+async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: UserProfile,
+  kind: 'scheduled_failed' | 'scheduled_unconfirmed' | 'attachments_failed', values: Record<string, string> = {}): Promise<void> {
   if (!row.origin_channel) return;
   const conn = getConnection(profile.user.slack_user_id, 'slack');
   if (!conn) return;
+  let body: string;
+  try { body = relayNotice(requesterRelayLanguage(row.initiated_by || row.owner_user_id), kind, { target: row.target_name ?? row.target_slack_id ?? '', ...values }); }
+  catch {
+    updateRequest(row.id, { informed: 0 });
+    return;
+  }
   // A held automatic move notice carries the health runner's pseudo thread key
   // (`brief_health_<owner>`), never a Slack ts — post top-level then.
   const threadTs = row.origin_thread_ts && row.origin_thread_ts !== `brief_health_${row.owner_user_id}` ? row.origin_thread_ts : undefined;
@@ -809,8 +792,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
   let sendAttempted = false;
   const closeUnconfirmedSend = async (): Promise<'closed'> => {
     closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_unconfirmed', closedBy: 'system' });
-    await notifyAskerScheduledOutreachFailed(row, profile,
-      `I attempted your scheduled message to ${row.target_name ?? 'them'}, but couldn't confirm the full outcome. I won't resend it automatically because that could duplicate the message. Please check the conversation before trying again.`);
+    await notifyAskerScheduledOutreachFailed(row, profile, 'scheduled_unconfirmed');
     return 'closed';
   };
   try {
@@ -858,8 +840,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
         if (attempts >= MAX_SEND_ATTEMPTS) {
           closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_channel_post_failed', closedBy: 'system' });
           const channelLabel = typeof details.channel_name === 'string' ? `#${details.channel_name}` : 'the channel';
-          await notifyAskerScheduledOutreachFailed(row, profile,
-            `Couldn't post your scheduled message to ${row.target_name ?? 'them'} in ${channelLabel} — it kept failing, so I've given up. Nothing went out; let me know if you want to try again.`);
+          await notifyAskerScheduledOutreachFailed(row, profile, 'scheduled_failed', { target: channelLabel });
           return 'closed';
         }
         updateRequest(row.id, {
@@ -871,8 +852,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       }
       // Channel posts ignore await_reply — same rule as outreach.ts's
       // immediate path (no DM thread to await a reply in).
-      if (outcome.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile,
-        `Your scheduled message text was posted, but ${outcome.attachments_failed} attachment(s) failed. I haven't repeated the text.`);
+      if (outcome.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile, 'attachments_failed', { count: String(outcome.attachments_failed) });
       if (job) updateOutreachJob(job.id, { sent_at: new Date().toISOString(), dm_channel_id: outcome.ref, dm_message_ts: outcome.ts });
       logActivity({
         ownerUserId: ownerId,
@@ -916,8 +896,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
       });
       if (attempts >= MAX_SEND_ATTEMPTS) {
         closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_failed', closedBy: 'system' });
-        await notifyAskerScheduledOutreachFailed(row, profile,
-          `Couldn't send your scheduled message to ${row.target_name ?? 'them'} — it kept failing, so I've given up. Nothing went out; let me know if you want to try again.`);
+        await notifyAskerScheduledOutreachFailed(row, profile, 'scheduled_failed');
         return 'closed';
       }
       updateRequest(row.id, {
@@ -929,8 +908,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     }
     const sentTs = res.ts ?? null;
     const sentAt = new Date().toISOString();
-    if (res.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile,
-      `Your scheduled message text reached ${row.target_name ?? 'them'}, but ${res.attachments_failed} attachment(s) failed. I haven't repeated the text.`);
+    if (res.attachments_failed) await notifyAskerScheduledOutreachFailed(row, profile, 'attachments_failed', { count: String(res.attachments_failed) });
     if (job) updateOutreachJob(job.id, { sent_at: sentAt, dm_channel_id: res.ref, dm_message_ts: res.ts });
     // await_reply is stored NUMERIC (0/1) in details, so a bare `!== false` is
     // always true (0 !== false). Treat 0 as fire-and-forget; keep "missing = await".
@@ -974,8 +952,7 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
     });
     if (attempts >= MAX_SEND_ATTEMPTS) {
       closeRequest({ id: row.id, state: 'cancelled', closureReason: 'scheduled_send_failed', closedBy: 'system' });
-      await notifyAskerScheduledOutreachFailed(row, profile,
-        `Hit a repeated error trying to send your scheduled message to ${row.target_name ?? 'them'} — I've given up after ${attempts} tries. Nothing went out; let me know if you want to try again.`);
+      await notifyAskerScheduledOutreachFailed(row, profile, 'scheduled_failed');
       return 'closed';
     }
     // Re-arm with linear backoff (10m, 20m), bump the attempt counter.
@@ -1072,9 +1049,7 @@ async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Prom
         row,
         profile,
         label: 'runFreeformFlagRetry requester loop-close',
-        compose: ({ lang, hi, ownerFirst }) => lang === 'he'
-          ? `${hi} — סימנתי את הבקשה שלך ל${ownerFirst} כגיבוי, אבל לא הצלחתי להעביר לו אותה גם אחרי כמה ניסיונות. שווה לפנות אליו ישירות אם זה עדיין פתוח.`
-          : `${hi} — I flagged your ask for ${ownerFirst} as a backstop, but couldn't actually get it to him after several tries. Worth reaching him directly if it's still open.`,
+        compose: ({ lang, hi, ownerFirst }) => relayNotice(lang, 'backstop_failed', { hi, owner: ownerFirst }),
       });
     }
     return 'closed';

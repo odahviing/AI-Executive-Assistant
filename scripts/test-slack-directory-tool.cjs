@@ -152,7 +152,7 @@ test('regression: room surface returns identity only from the people_memory pull
   assert.equal(r.count, 1);
   assert.deepEqual(keys(r.matches[0]), IDENTITY);
   assert.equal(r.matches[0].slack_id, 'UPAUL0001');
-  assert.equal(h.slackCalls.length, 0);
+  assert.deepEqual(h.slackCalls.map(c => c[0]), ['users.info']);
 });
 test('regression: a call carrying no surface fails closed to identity only', async () => {
   const h = harness({ rows: [memoryPaul] });

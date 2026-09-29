@@ -1,0 +1,13 @@
+// Actual prompt assembly structural capture, and actual category validator behavior.
+const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),assert=require('node:assert/strict');const {test}=require('node:test'),{createRequire}=require('node:module');
+// Optional producer export; default runs use their own temporary directory.
+const dir=process.env.TEST_ARTIFACT_DIR?path.resolve(process.env.TEST_ARTIFACT_DIR):fs.mkdtempSync(path.join(require('node:os').tmpdir(),'maelle-boston-priority-'));
+fs.mkdirSync(dir,{recursive:true});
+const file=path.join(__dirname,'test-instructor-meetings-contract.cjs'),m={exports:{}};
+vm.runInNewContext(fs.readFileSync(file,'utf8').split('const tools = skill.getTools(profile);')[0]+'\nmodule.exports={skill,profile};',{require:createRequire(file),module:m,exports:m.exports,__dirname,process,console});
+const p=m.exports.profile;p.user.timezone='America/New_York';p.schedule.office_days.days=['Monday','Tuesday','Thursday'];p.schedule.home_days.days=['Wednesday','Friday'];p.schedule.work_hours={Monday:['09:00-17:00'],Tuesday:['09:00-17:00'],Wednesday:['08:00-17:00'],Thursday:['09:00-17:00'],Friday:['08:00-17:00']};p.schedule.timezone_preferences={local_participants:'morning',remote_participants:'15:00-19:00'};
+test('actual generated prompt retains old cross-timezone preference in Boston owner clock',()=>{const text=m.exports.skill.getSystemPromptSection(p,undefined,true,'slack');assert.ok(text.includes('own timezone (America/New_York): lean toward morning'));assert.ok(text.includes('lean toward 15:00-19:00 Owner\'s time'));assert.ok(text.includes('Never refuse on a soft preference alone'));fs.writeFileSync(path.join(dir,'priority-prompt.txt'),text);});
+const f=path.join(__dirname,'test-timezone-owner-interval.cjs'),n={exports:{}};
+vm.runInNewContext(fs.readFileSync(f,'utf8').split('if(require.main===module)')[0].replace("'src/utils/categoryRules.ts':","'unused-categoryRules':")+'\nmodule.exports={harness};',{require:createRequire(f),module:n,exports:n.exports,__dirname,process,console,Date,Buffer,setTimeout,clearTimeout});
+test('actual category office/home rule follows Boston dates and changed profile day type',()=>{const h=n.exports.harness();Object.assign(h.profile,{...p,user:{...h.profile.user,...p.user}});h.profile.categories=[{name:'Office fixture',day_type:'office_days'}];const check=d=>h.check(`${d}T10:00:00-05:00`,`${d}T10:25:00-05:00`,{category:'Office fixture'});assert.equal(check('2026-11-03').passes,true);assert.equal(check('2026-11-04').violation_kind,'category_day_type');h.profile.schedule.office_days.days.push('Wednesday');h.profile.schedule.home_days.days=['Friday'];assert.equal(check('2026-11-04').passes,true);});
+

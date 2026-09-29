@@ -38,6 +38,8 @@ const profile = {
   schedule: { office_days: { days: ['Sunday'] }, home_days: { days: ['Monday'] }, day_boundary_hour: '00:00' },
   skills: {}, channels: {},
 };
+const ownerLanguageAt = process.argv.indexOf('--owner-language');
+if (ownerLanguageAt >= 0) profile.user.language = process.argv[ownerLanguageAt + 1];
 Settings.now = () => Date.UTC(2026, 8, 24, 12);
 const surfaces = [
   ['owner-dm', 'owner', false, false, 'slack', 'UOWNER'],

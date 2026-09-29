@@ -7,7 +7,7 @@
  * today, or the owner placed it outside its window (counts as placed). A block
  * a meeting now overlaps is re-placed inside its window at the event's own
  * span (blockSizedToEvent); with no in-window slot it is left where it is,
- * `overlapping` is counted and the owner is shadow-DM'd once per overlap
+ * `overlapping` is counted and the owner receives an informational notice once per overlap
  * (process-lifetime dedup). With `consolidateDense` (the calendar-health
  * sweep only) a non-overlapped block sitting in a dead sliver on a dense
  * calendar is slid to abut a neighbour. Every move writes a `move_meeting`
@@ -310,22 +310,23 @@ export async function dryRunFloatingBlockRelocation(params: {
   return results;
 }
 
-// Process-lifetime dedup cache for "floating block overlap" shadows.
-// Same (date, blockName, overlappingEventId) fingerprint within the TTL
+// Process-lifetime dedup cache for floating-block notices.
+// Same (owner, date, blockEventId, overlappingEventId) fingerprint within the TTL
 // is collapsed to one DM so the owner doesn't get pinged twice a day,
-// every day, until they resolve the overlap. Restarts reset the cache —
+// every day, until they resolve the overlap. Confirmed/unknown sends retain
+// the reservation; not-attempted sends release it. Restarts reset the cache —
 // acceptable trade-off (no persistent state, no DB schema; suppressing
 // forever would risk silencing a real recurrence).
-const OVERLAP_SHADOW_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
-const overlapShadowDedup = new Map<string, number>();
-function shouldSkipOverlapShadow(fingerprint: string): boolean {
+const OVERLAP_NOTICE_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+const overlapNoticeDedup = new Map<string, number>();
+function shouldSkipOverlapNotice(fingerprint: string): boolean {
   const now = Date.now();
   // Drop expired entries on every check (cheap, bounded by TTL × call rate).
-  for (const [k, expiresAt] of overlapShadowDedup) {
-    if (expiresAt <= now) overlapShadowDedup.delete(k);
+  for (const [k, expiresAt] of overlapNoticeDedup) {
+    if (expiresAt <= now) overlapNoticeDedup.delete(k);
   }
-  if ((overlapShadowDedup.get(fingerprint) ?? 0) > now) return true;
-  overlapShadowDedup.set(fingerprint, now + OVERLAP_SHADOW_DEDUP_TTL_MS);
+  if ((overlapNoticeDedup.get(fingerprint) ?? 0) > now) return true;
+  overlapNoticeDedup.set(fingerprint, now + OVERLAP_NOTICE_DEDUP_TTL_MS);
   return false;
 }
 
@@ -342,7 +343,6 @@ export interface RebalanceResult {
    * this and discarded the count.
    */
   moves: string[];
-  ownerQuestions: Array<{ eventId: string; peerEventId: string; blockName: string; description: string }>;
 }
 
 export async function rebalanceFloatingBlocksAfterMutation(params: {
@@ -375,7 +375,7 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
   // show the block's OLD position — acting on it would move a meeting to close a
   // sliver consolidation already closed. Deferring to the next sweep (settled
   // data) is correct and churn-free.
-  const result: RebalanceResult = { moved: 0, overlapping: 0, movedBlockEventIds: [], moves: [], ownerQuestions: [] };
+  const result: RebalanceResult = { moved: 0, overlapping: 0, movedBlockEventIds: [], moves: [] };
   const { profile, affectedSlotIso } = params;
 
   try {
@@ -656,29 +656,54 @@ export async function rebalanceFloatingBlocksAfterMutation(params: {
           overlappingEvent: overlapping.subject,
         });
       } else {
-        // No in-window slot — leave overlapping and tell the owner once; moving
-        // it outside the window is his call (move_meeting, one-step).
+        // No independent placement: inform the owner without asking or moving a chain.
         result.overlapping++;
-        result.ownerQuestions.push({ eventId: blockEvent.id, peerEventId: overlapping.id, blockName: block.name,
-          description: `Your ${block.name.replace(/_/g, ' ')} overlaps "${overlapping.subject}". There is no independent move inside its window. Would you like to rearrange the events or leave this overlap?` });
-        // Dedupe shadows on a stable fingerprint so the same overlap
-        // doesn't DM the owner twice a day until it resolves. Lives
-        // process-lifetime — restarts reset (acceptable; we just want
-        // to collapse same-run repeats, not suppress forever).
-        const fingerprint = `floating-overlap:${dateStr}:${block.name}:${overlapping.id}`;
-        if (!shouldSkipOverlapShadow(fingerprint)) {
+        const fingerprint = `floating-overlap:${profile.user.slack_user_id}:${dateStr}:${blockEvent.id}:${overlapping.id}`;
+        if (!shouldSkipOverlapNotice(fingerprint)) {
+          const { getConnection } = await import('../connections/registry');
+          const conn = getConnection(profile.user.slack_user_id, 'slack');
+          if (!conn) {
+            overlapNoticeDedup.delete(fingerprint);
+            logger.warn('Floating block notice not attempted — no owner connection', { fingerprint });
+            continue;
+          }
+          let text: string;
           try {
-            await shadowNotify(profile, {
-              channel: '',
-              icon: '🔧',
-              action: 'Floating block overlap',
-              // v3.7.x (#140c) — name the block, the conflicting event, and the
-              // window so the owner knows WHAT is moving and WHY (his #140
-              // complaint: "I didn't know the reason, or what I'm moving").
-              // Owner-facing shadow → no subject masking needed.
-              detail: `Your ${block.name.replace(/_/g, ' ')} on ${slotDt.toFormat('EEE d MMM')} overlaps "${overlapping.subject}" and there's no free spot left inside its ${block.preferred_start}–${block.preferred_end} window. Want me to bump the ${block.name.replace(/_/g, ' ')} outside that window?`,
+            const { relayNotice, requesterRelayLanguage } = await import('../core/requests/requesterRelay');
+            text = relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'floating_overlap_notice', {
+              block: block.name.replace(/_/g, ' '), date: slotDt.toFormat('EEE d MMM'),
+              subject: overlapping.subject, start: block.preferred_start, end: block.preferred_end,
             });
-          } catch { /* shadow failure non-fatal */ }
+          } catch (err) {
+            // Composition failed before any send: permit a later sweep to retry.
+            overlapNoticeDedup.delete(fingerprint);
+            logger.warn('Floating block notice not attempted — composition unavailable', { fingerprint, err: String(err) });
+            continue;
+          }
+          try {
+            const { getOrCreateOwnerDailyThread } = await import('./ownerDailyThread');
+            const daily = await getOrCreateOwnerDailyThread({ profile, conn });
+            // One attempt only: error/throw can mean the notice already landed.
+            const sent = daily
+              ? await conn.postToChannel(daily.channel, text, { threadTs: daily.rootTs })
+              : await conn.sendDirect(profile.user.slack_user_id, text);
+            if (!sent.ok) {
+              if (sent.reason === 'not_attempted') overlapNoticeDedup.delete(fingerprint);
+              logger.warn('Floating block notice unconfirmed', { fingerprint, reason: sent.reason });
+              continue;
+            }
+            logger.info('Floating block notice confirmed', { fingerprint, ts: sent.ts });
+            // Recording failure must not replay a confirmed delivery.
+            try {
+              const { appendToConversation } = await import('../db/conversations');
+              const threadTs = daily?.rootTs ?? sent.ts;
+              if (threadTs) appendToConversation(threadTs, daily?.channel ?? sent.ref ?? '', { role: 'assistant', content: text, ts: sent.ts });
+            } catch (err) {
+              logger.warn('Floating block notice history append failed', { fingerprint, err: String(err) });
+            }
+          } catch (err) {
+            logger.warn('Floating block notice completion unknown', { fingerprint, err: String(err) });
+          }
         }
       }
     }

@@ -32,7 +32,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // crowded, and this branch's own condition (mpimWithOthers && senderRole
   // === 'owner') could never come out false. `role`/`senderRole` is now
   // clamped to 'colleague' in every MPIM at the single front door
-  // (processMessage.ts:139) before the orchestrator is ever called, so
+  // (processMessage.ts's isMpim/isChannel role clamp) before the orchestrator is called, so
   // there is nothing left for a second clamp here to reconcile.
   // isOwnerInGroup still carries "the owner is the one typing" through to
   // social classification + people-memory unchanged.
@@ -1036,19 +1036,22 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // v3.3.x (RC3) — per-turn reply-language reinforcement. The static
   // CURRENT-TURN-WINS language rule decays across a thread (drifts to Hebrew
   // when Hebrew tool-results / memory bleed in). Re-stamping the detected
-  // language into the UNCACHED dynamic block every turn can't decay. Fires only
-  // for scripts that actually drift (Hebrew/Cyrillic/Arabic); Latin-script input
-  // returns null and falls through to the static rule. Voice messages are
-  // exempt — they reply in English regardless (systemPrompt VOICE rule, #12).
+  // language into the UNCACHED dynamic block reinforces the current message,
+  // including voice transcripts. Latin is a script sentinel, not an English guess.
+  // Exclude the transport marker from detection only; keep the audio input intact.
+  const languageText = (text: string): string => {
+    const trimmed = text.trimStart();
+    const marker = '[Voice message]:';
+    return trimmed.startsWith(marker) ? trimmed.slice(marker.length) : text;
+  };
   let languageDirectiveBlock = '';
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { detectMessageLanguage } = require('../../utils/detectMessageLanguage') as
       typeof import('../../utils/detectMessageLanguage');
-    const isVoice = typeof userMessage === 'string' && userMessage.trimStart().startsWith('[Voice message]');
-    let lang = isVoice ? null : detectMessageLanguage(userMessage);
-    if (!lang && !isVoice) {
-      // A contentless reply — "11:15", "yes", "ok", an emoji — carries no
+    let lang = detectMessageLanguage(languageText(userMessage));
+    if (!lang) {
+      // A contentless reply — "11:15" or an emoji — carries no
       // language signal, so detectMessageLanguage returns null and the per-turn
       // LANGUAGE override vanishes. That let a stored/attendee language_pref pull
       // the reply into another language (English booking → Hebrew confirmation on
@@ -1058,7 +1061,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       for (let i = conversationHistory.length - 1; i >= 0; i--) {
         const m = conversationHistory[i];
         if (m.role !== 'user') continue;
-        const prior = detectMessageLanguage(m.content);
+        const prior = detectMessageLanguage(languageText(m.content));
         if (prior) { lang = prior; break; }
       }
     }
@@ -1076,17 +1079,16 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
 
   // v3.5.x (person-memory rebuild) — persist the colleague's inbound language as
   // a derived signal. Outbound composition TO them (relay / outreach / coord)
-  // reads the most recent inbound (people.resolveOutboundLanguageForPerson),
-  // default English — so an English-writing colleague never gets a Hebrew DM off
-  // a stale one-off pref (the Ayala bug). Stamp the RAW current-message script
-  // only (not the carried-forward value): a contentless "yes" detects null and
+  // uses the stored preference first, then recent inbound as fallback
+  // (people.resolveOutboundLanguageForPerson). Stamp the current transcript's script
+  // only (not the carried-forward value): contentless input detects null and
   // leaves the prior signal intact. Colleague senders only; best-effort.
   try {
     if (input.senderRole === 'colleague' && input.userId) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { detectMessageLanguage } = require('../../utils/detectMessageLanguage') as
         typeof import('../../utils/detectMessageLanguage');
-      const raw = detectMessageLanguage(userMessage);
+      const raw = detectMessageLanguage(languageText(userMessage));
       const code = raw === 'Hebrew' ? 'he'
         : raw === 'Russian' ? 'ru'
         : raw === 'Arabic' ? 'ar'

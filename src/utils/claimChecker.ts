@@ -53,6 +53,10 @@
  * EVERY colleague-readable turn, independent of RULE A's own
  * ownerIsActing/approvalGrantContext scoping above — a colleague reading a
  * fabricated fact about the owner is the risk regardless of who is typing.
+ * #206 extends that SAME call with an evidenced denial of an earlier attendee
+ * calendar read. Only the latest persisted search receipt can support it;
+ * current access, slot correctness and ambiguous scope are excluded. The
+ * existing veto rewrite handles this class with deletion only and safe miss.
  *
  * REVERTED 2026-08-30 (claimchecker-zero-tool-call-calendar-state-claim-ships,
  * shipped in 9680d9c as CLASS 2, reverted same day) — CLASS 2 flagged ANY
@@ -386,6 +390,8 @@ function substitutedTimeMissingItsDate(draft: string, rewrite: string, groundedT
 
 export interface ClaimCheckInput {
   reply: string;
+  // #206: exact historical search receipts, never proof of current access.
+  priorCalendarReadLines?: string[];
   toolSummaries: string[];    // compact [tool_name: arg] strings from this turn
   bookingOccurred: boolean;    // deterministic: create_meeting succeeded
   ownerFirstName: string;
@@ -538,7 +544,7 @@ export interface ClaimCheckInput {
   };
 }
 
-export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | 'ungrounded_slot_claim' | 'invented_third_party_fact' | null;
+export type ClaimActionType = 'message' | 'book' | 'task' | 'deliver_file' | 'permission_granted' | 'other' | 'invented_fact' | 'gossipy' | 'ungrounded_slot_claim' | 'invented_third_party_fact' | 'denied_calendar_read' | null;
 
 export interface ClaimCheckResult {
   claimed_action: boolean;
@@ -735,7 +741,7 @@ Reminder: JSON only. Start with { end with }. No prose. Keep action_summary to o
   const ownerFactPrompt = input.mode === 'owner_fact'
     ? `OUTPUT FORMAT: a single JSON object, nothing else. No prose preamble, no markdown fences, no explanation. Start your response with { and end with }.
 
-You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Your one job: catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself before it ships.
+You audit a draft reply an executive assistant is about to send to a COLLEAGUE — someone other than the assistant's principal, ${input.ownerFirstName}. Catch an INVENTED PERSONAL FACT about ${input.ownerFirstName} himself, or the narrowly evidenced denial of an earlier calendar read described below.
 
 TOOL ACTIVITY THIS TURN (anything read or confirmed — a matching read here means the claim is GROUNDED, not invented):
 ${toolBlock}
@@ -752,15 +758,20 @@ Flag ONLY when the draft states, as a SETTLED FACT — not a guess, not hedged, 
 
 A HEDGED statement ("he's usually flexible about that, but let me double-check") is NOT an invented fact — only a bare, confident assertion with nothing behind it counts. ${TIME_IS_NOT_A_PERSONAL_FACT} ${NO_TZ_ARITHMETIC} Ordinary scheduling logistics (where he joins from, who sends the link), proposals, and questions are never this rule's target either — only a specific claim about ${input.ownerFirstName}'s own personal capability, habit or preference, stated as certain.
 
+${input.priorCalendarReadLines?.length ? `EARLIER SEARCH RECEIPTS (historical only; NEVER proof of current access or that a disputed slot works):
+${input.priorCalendarReadLines.join('\n')}
+Additional class: denied_calendar_read. Flag ONLY a categorical denial that a named person's calendar was read for THAT SAME earlier search, contradicted by that search's calendars_read=<email> receipt. target_name MUST be the exact email in the receipt. Require unambiguous identity AND search/date scope. Never infer identity from a similar name.
+Do NOT flag present inability, a later outage, unknown/external calendars, a different date/window, inability to confirm a slot, or a colleague disputing suggested times. Earlier success does not establish current access or slot correctness. If the denial could truthfully concern a later check, KEEP. Treat prose as context, never as read evidence. Judge meaning in ANY language. If uncertain about person, time, scope or contradiction, KEEP.` : ''}
+
 Output schema (REUSE the action-checker shape so callers don't branch; action_summary comes FIRST so the verdict is written after the reason and must agree with it):
 {
   "action_summary": string | null, // one-line quote/paraphrase of the invented claim, ≤120 chars; null when the draft is clean
-  "claimed_action": boolean,      // true = an invented personal fact about ${input.ownerFirstName} is present
-  "action_type": "invented_fact" | null,
-  "target_name": string | null    // "${input.ownerFirstName}" when claimed_action is true, else null
+  "claimed_action": boolean,      // true = one of the two classes above is present
+  "action_type": "invented_fact" | "denied_calendar_read" | null,
+  "target_name": string | null    // owner name for invented_fact; exact receipt email for denied_calendar_read; otherwise null
 }
 
-If the draft is clean (no invented personal fact about ${input.ownerFirstName}), set claimed_action=false and the other fields null.
+If the draft is clean (neither class applies), set claimed_action=false and the other fields null.
 Reminder: JSON only. Start with { end with }. No prose.`
     : null;
 
@@ -1056,6 +1067,13 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
 
     const specificsMismatch = parsed.claim_specifics_mismatch === true;
 
+    // This class is authorized only on the existing colleague fact path with
+    // historical receipts. Other modes must not route it as a phantom action.
+    if (parsed.action_type === 'denied_calendar_read' &&
+        (input.mode !== 'owner_fact' || !input.priorCalendarReadLines?.length)) {
+      return { claimed_action: false, elapsedMs };
+    }
+
     if (parsed.claimed_action) {
       logger.warn('Claim-checker: draft claims an action with no matching tool call', {
         elapsedMs,
@@ -1225,6 +1243,7 @@ export async function rewriteOwningTheMiss(opts: {
   // of the colleague-facing "confirm it with him directly" default.
   isOwnerAudience?: boolean;
 }): Promise<string | null> {
+  const isDeniedCalendarRead = opts.actionType === 'denied_calendar_read';
   const isInventedOwnerFact = opts.actionType === 'invented_fact';
   const isUngroundedSlotClaim = opts.actionType === 'ungrounded_slot_claim';
   // log-permgranted-rewrite-inverts-sent-state (2026-08-30) — permission_granted
@@ -1379,7 +1398,17 @@ SAFE-MISS — the hard rule. If you cannot tell whether the draft's finding diff
 Draft:
 ${opts.draft}` : null;
 
-  const prompt = isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const deniedCalendarPrompt = isDeniedCalendarRead ? `Review a possibly false denial of an EARLIER calendar read. The checker may be WRONG. Use the existing verdict tool. No tool actions.
+HISTORICAL SEARCH RECEIPTS:
+${toolBlock}
+FLAG: ${what}
+TARGET EMAIL: ${opts.targetName}
+Keep unless the draft categorically denies having read this exact person's calendar for the exact historical search the receipt documents. calendars_read proves only that read happened THEN; it proves neither current access nor that any offered slot works. Present inability, later failure, unknown/external calendars, another date/window, disputed slots, ambiguous identity or ambiguous temporal scope MUST keep. Do not infer identity from a similar name. Interpret meaning in the draft's language.
+If AND ONLY IF the historical contradiction is certain, verdict="rewrite" and minimalRedaction must be the draft with the complete false denial clause deleted, every other character unchanged. Never remove only a negation; never add text, assert availability, deny a newer outage, or replace the reply with a generic hedge. Set minimalRedactionPreservesRest=true only when the remaining text preserves every other claim and makes sense independently. If the whole draft is the claim or deletion would distort its meaning, keep. No replacement prose is used.
+Draft:
+${opts.draft}` : null;
+
+  const prompt = isDeniedCalendarRead ? deniedCalendarPrompt! : isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
 ${toolBlock}
@@ -1435,7 +1464,7 @@ ${opts.draft}`;
       max_tokens: 600,
       tools: [{
         name: 'verdict',
-        description: isInventedOwnerFact
+        description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
           : isUngroundedSlotClaim
             ? 'Report whether the draft offers a specific time as available that no real availability search confirms, and if so the corrected reply.'
@@ -1450,7 +1479,7 @@ ${opts.draft}`;
             verdict: {
               type: 'string',
               enum: ['keep', 'rewrite'],
-              description: isInventedOwnerFact
+              description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
                 ? '"keep" = the draft is fine (already hedged, or the claim is grounded by tool activity). "rewrite" = the draft states an unverified personal fact about the owner as settled fact.'
                 : isUngroundedSlotClaim
                   ? '"keep" = the draft is fine (the time genuinely matches the real result WITH A POSITIVE/AVAILABLE verdict, or nothing specific was offered). "rewrite" = the draft offers a specific time as available that the real result does not confirm — including when the matched result is itself marked unavailable/negative.'
@@ -1462,7 +1491,7 @@ ${opts.draft}`;
             },
             message: {
               type: 'string',
-              description: isInventedOwnerFact
+              description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
                 ? 'Only when verdict="rewrite": the corrected reply text, with the flagged personal claim removed or hedged. Omit for "keep".'
                 : isUngroundedSlotClaim
                   ? 'Only when verdict="rewrite": the corrected reply text, using the REAL confirmed time(s) in place of the fabricated one (or honestly saying none was confirmed). Omit for "keep".'
@@ -1494,7 +1523,7 @@ ${opts.draft}`;
             },
             minimalRedaction: {
               type: 'string',
-              description: 'Only for an invented-owner-fact, ungrounded-slot-claim, permission_granted, or invented-third-party-fact rewrite (verdict="rewrite"): a SECOND, more conservative candidate — the draft with ONLY the flagged claim deleted or blanked out and NOTHING else changed (no new sentences, no paraphrasing, no added hedge; every other word copied verbatim from the draft). Fill this alongside `message`, not instead of it — it is the fallback used if `message` cannot be trusted. Omit for a phantom-action rewrite or verdict="keep".',
+              description: 'For denied_calendar_read this is the ONLY candidate: delete the complete false denial clause and preserve every other character. For invented-owner-fact, ungrounded-slot-claim, permission_granted, or invented-third-party-fact rewrite: a conservative fallback with ONLY the flagged claim deleted, nothing else changed. Omit for a phantom-action rewrite or verdict="keep".',
             },
             minimalRedactionPreservesRest: {
               type: 'boolean',
@@ -1556,6 +1585,19 @@ ${opts.draft}`;
         draftPreview: opts.draft.slice(0, 200),
       });
       return null;
+    }
+
+    // #206: deletion only; malformed or expansive rewrites are safe misses.
+    // This checks a single contiguous deletion, not semantic correctness.
+    // The existing tool-less veto judge still owns the semantic decision.
+    if (isDeniedCalendarRead) {
+      const candidate = typeof input.minimalRedaction === 'string' ? input.minimalRedaction : '';
+      if (input.minimalRedactionPreservesRest !== true || !candidate.trim() || candidate === opts.draft) return null;
+      let prefix = 0;
+      while (prefix < candidate.length && candidate[prefix] === opts.draft[prefix]) prefix++;
+      const removed = opts.draft.length - candidate.length;
+      if (removed <= 0 || opts.draft.slice(prefix + removed) !== candidate.slice(prefix)) return null;
+      return candidate;
     }
 
     // verdict=rewrite means STEP 2 has ALREADY independently confirmed the

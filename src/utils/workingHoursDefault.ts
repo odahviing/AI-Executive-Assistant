@@ -1,28 +1,12 @@
 /**
- * Default working-hours derivation from a person's IANA timezone (v2.2.2, #46;
- * generalized off the single hardcoded Israel case in #cloneable-default).
- *
- * A person whose timezone matches a configured tenant's OWN timezone
- * (`user.timezone` in `config/users/<tenant>.yaml`) gets that tenant's
- * own workweek — the union of `office_days` + `home_days` — with generic
- * business hours. Anywhere else → Mon–Fri, 09:00–17:00 (Western default).
- * This used to hardcode `iana === 'Asia/Jerusalem'` → Sun–Thu, which only
- * ever generalized for THIS deployment (Reflectiz/Israel); a clone run for
- * a tenant on a different Sun–Thu (or any non-Western) workweek got the
- * Western default regardless of their own configured schedule. Deriving the
- * workday SET from config (never the exact hours — a tenant's own split
- * shifts are a personal habit, not a regional convention) keeps this correct
- * for whichever tenant(s) are actually configured, no code change needed.
- *
- * Persisted into `people_memory.working_hours_auto` whenever the timezone is
- * set or updated. Distinct from `PersonProfile.working_hours_structured` which
- * is the manual override path. Code paths that need working hours should call
- * `getEffectiveWorkingHours(person)` — manual wins, auto is fallback.
+ * Inferred workweeks use the person's own timezone region, never a tenant's
+ * personal schedule: Israel Sunday–Thursday, elsewhere Monday–Friday.
+ * Explicit structured working hours always win. Auto weekdays are re-derived
+ * on read so stored tenant-derived defaults cannot survive a policy change.
  */
 
 import { getDb } from '../db/client';
 import type { PersonMemory } from '../db/people';
-import { getTenantWorkdaysForTimezone } from '../config/userProfile';
 import logger from './logger';
 import { isStrictIana } from './timezoneValidator';
 
@@ -40,42 +24,16 @@ export interface WorkingHours {
 const WEEK_ORDER: WeekDay[] =
   ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-// Generic business hours applied whenever a person's timezone matches a
-// configured tenant's own — a coarse fallback (superseded the moment a real
-// value is known), never the tenant's actual (possibly split-shift) hours.
-const TENANT_MATCH_HOURS = { hoursStart: '09:00', hoursEnd: '18:00' };
-
 const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {
-  workdays:   ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-  hoursStart: '09:00',
-  hoursEnd:   '17:00',
+  workdays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+  hoursStart: '09:00', hoursEnd: '17:00',
 };
 
 export function defaultWorkingHoursForTz(iana: string | null | undefined): Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> {
-  if (!iana) return WESTERN_DEFAULT;
-
-  // v4.4.x — utils no longer reaches for the raw multi-tenant loader
-  // (`loadAllProfiles`) and re-derives the office/home-day union itself; that
-  // was a utils -> config runtime dependency the wave's own sibling fix
-  // (cloneable-default) was specifically about avoiding. The one fact this
-  // needs — "does any configured tenant's own timezone match, and if so what
-  // are their workdays" — comes from a single cache-backed accessor config
-  // itself owns (getTenantWorkdaysForTimezone, same posture as
-  // getProfileByEmail), never from utils loading and scanning every profile.
-  try {
-    const tenantDays = getTenantWorkdaysForTimezone(iana);
-    if (tenantDays && tenantDays.length > 0) {
-      const workdays = WEEK_ORDER.filter(d => tenantDays.includes(d));
-      if (workdays.length > 0) {
-        return { workdays, ...TENANT_MATCH_HOURS };
-      }
-    }
-  } catch (err) {
-    logger.debug('defaultWorkingHoursForTz — tenant profile lookup failed, using Western default', {
-      iana, err: String(err).slice(0, 200),
-    });
+  // IANA's historical Tel_Aviv link denotes the same Israeli region.
+  if (iana === 'Asia/Jerusalem' || iana === 'Asia/Tel_Aviv') {
+    return { workdays: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'], hoursStart: '09:00', hoursEnd: '18:00' };
   }
-
   return WESTERN_DEFAULT;
 }
 
@@ -159,8 +117,12 @@ export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | n
   if (person.working_hours_auto) {
     try {
       const auto = JSON.parse(person.working_hours_auto) as Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'>;
-      if (auto.workdays?.length) {
-        return { ...auto, source: 'auto' };
+      const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+      if (Array.isArray(auto?.workdays) && auto.workdays.length > 0
+          && auto.workdays.every(d => WEEK_ORDER.includes(d))
+          && typeof auto.hoursStart === 'string' && clock.test(auto.hoursStart)
+          && typeof auto.hoursEnd === 'string' && clock.test(auto.hoursEnd)) {
+        return { ...auto, ...(person.timezone ? { workdays: defaultWorkingHoursForTz(person.timezone).workdays } : {}), source: 'auto' };
       }
     } catch { /* ignore */ }
   }

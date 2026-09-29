@@ -1,1 +1,5 @@
-**41 rows await you** — v5.0.0 wrapped;24 correction groups,1 feature removal and2 framework packages independently verified. Ledger: 46 open rows (25 still-real, 10 need a re-read, 11 cite no file); 41 rulable, 5 waiting on a verb. Detailed release evidence: artifacts/workshop-verification/v5-readiness-20260923/RELEASE-COMPLETE.md.
+**25 rows await you** — v5.0.1 prepared for release, 0 new product decisions from this wrap.
+
+26 open rows — 14 still-real · 3 need a re-read · 9 cite no file · 25 rulable · 1 waiting on a verb (node scripts/ledger-stats.cjs --open).
+
+Held backlog remains held. The authorized source batch is independently verified; Sharon's approved duplicate merge is complete.

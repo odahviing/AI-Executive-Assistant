@@ -253,14 +253,11 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // `.tz` means Slack reported no zone, not that the lookup failed.
           timezoneReadingAbsent: !colleagueSenderUser?.tz,
         });
-        // Detect gender in background if not yet known
-        const colImageUrl = colleagueSenderUser?.profile?.image_192 || colleagueSenderUser?.profile?.image_72 || undefined;
+        // Detect declared gender in background if not yet known.
         detectAndSaveGender({
           slackId:  senderId,
           name:     senderName,
           pronouns: colleagueSenderUser?.profile?.pronouns || undefined,
-          imageUrl: colImageUrl,
-          botToken: assistant.slack.bot_token,
           // #51 — first-person Hebrew morphology self-declaration tier. Opt-in
           // (default off); `text` here is genuinely senderId's OWN message, the
           // one condition detectAndSaveGender requires before reading it as a
@@ -431,9 +428,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // comment above, v3.5.x) is recovering INBOUND messages the addressee
         // gate filtered before she ever saw them — that concept doesn't apply to
         // her own replies, she always knows what she said. But assistant rows
-        // written by appendToConversation (postReply.ts Step 3b) never carry a
-        // ts (they're persisted before the Slack send returns one), so every one
-        // of her own past replies failed the `dbTimestamps.has(m.ts)` check and
+        // written by appendToConversation carry a local delivery timestamp,
+        // not necessarily the Slack message timestamp, so her own past replies
+        // can fail the `dbTimestamps.has(m.ts)` check and
         // was funneled back in here as a "missed" message: reprocessed through
         // resolveSlackMentions (meant for fresh inbound text, not her own
         // already-resolved output) and duplicated alongside the identical
@@ -448,7 +445,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           })));
 
         if (missedMessages.length > 0) {
-          // Merge: combine DB history (has tool summaries) with missed Slack messages
+          // Preserve trusted DB receipt metadata; remote prose is only user text.
           const merged = [...dbHistory, ...missedMessages].sort((a, b) => {
             const tsA = parseFloat(a.ts || '0');
             const tsB = parseFloat(b.ts || '0');

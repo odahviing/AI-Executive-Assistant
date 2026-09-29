@@ -25,6 +25,7 @@
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { appendToConversation } from '../../db';
+import type { ConversationMessage } from '../../db/conversations';
 import type { OrchestratorOutput } from '../../core/orchestrator';
 import { formatForSlack } from '../../connections/slack/formatting';
 import { config } from '../../config';
@@ -58,7 +59,7 @@ export interface PostReplyInput {
   // Turn inputs the gate stack reads (prior-turn mutation markers for the
   // claim-checker shield, the spoof scan, the date verifier's anchor). Passed
   // straight to runOutputGates.
-  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  history: ConversationMessage[];
   /**
    * The sender's OWN words for this turn — transport framing excluded (see
    * `ProcessMessageParams.framing` in app/context.ts). Handed to the gate stack,
@@ -541,6 +542,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   }
   appendToConversation(threadTs, channelId, {
     role: 'assistant',
+    toolSummaries: [...(result.toolSummaries ?? [])],
     content: result.toolSummaries?.length
       ? `${result.toolSummaries.join(' ')}\n${cleanReply}`
       : cleanReply,
@@ -757,6 +759,10 @@ async function sendReply(opts: {
   const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false, unfurl_media: false }) as
     | { ts?: string; ok?: boolean } | undefined;
   if (sayRes?.ok === false) throw new Error('Slack explicitly rejected the reply');
+  if (sayRes?.ok !== true && !sayRes?.ts) {
+    logger.warn('Text delivery unconfirmed — withholding history receipt', { channelId: opts.channelId, threadTs: opts.threadTs });
+    return false;
+  }
   // The answer is in the thread. Signalled here and not at the end of the
   // function on purpose — the threadActivity import below is a bookkeeping tail
   // that can still reject, and a reply the person is reading must never be

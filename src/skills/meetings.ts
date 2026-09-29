@@ -1167,7 +1167,7 @@ ${(() => {
   const lines: string[] = [];
   if (tp) {
     lines.push(`- When everyone is in ${firstName}'s own timezone (${profile.user.timezone}): lean toward ${tp.local_participants}.`);
-    lines.push(`- When ANY attendee is in a DIFFERENT timezone from ${firstName}: lean toward ${tp.remote_participants} ${firstName}'s time — it overlaps better with their working day.`);
+    lines.push(`- When ANY attendee is in a DIFFERENT timezone from ${firstName}: lean toward ${tp.remote_participants} ${firstName}'s time within the available overlap — the configured soft preference.`);
     if (tp.note) lines.push(`- Note from ${firstName}: "${tp.note}"`);
   }
   if (ns) {

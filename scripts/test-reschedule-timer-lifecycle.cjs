@@ -9,6 +9,7 @@ function fixture(o={}){
  const profile={user:{slack_user_id:'OWNER',email:'owner@example.com',name:'Owner',timezone:'UTC'},assistant:{name:'Maelle'},behavior:{calendar_health_mode:o.active?'active':'passive'}};
  const send=async(id,body)=>{effects.sends.push({id,body});if(id===job.owner_channel)effects.ownerRows.push(JSON.parse(JSON.stringify(row)));if(id===job.owner_channel&&o.ownerThrows)throw Error('owner transport unavailable');return {ok:true};};
  const mocks={
+ 'src/core/requests/requesterRelay.ts':{requesterRelayLanguage:()=> 'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
  'src/tasks/skill.ts':{createApprovalRequest:async(args,context,handoff)=>{if(o.ownerThrows)throw Error('owner transport unavailable');effects.approvals.push({args,context,handoff});return {ok:true,approval_id:'req_approval'};}},
  'src/core/requests/resolver.ts':{withRequestLock:async(_id,work)=>work()},
  'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{effects.classifications++;return {content:[{type:'text',text:JSON.stringify({status:o.status||'approved',counter_start:'09:15',summary:'fixture'})}]};}}})},'src/llm/models.ts':{SONNET:{}},

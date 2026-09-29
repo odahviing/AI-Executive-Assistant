@@ -8,19 +8,20 @@ function fixture(o={}){
  const profile={user:{slack_user_id:'OWNER',name:'Owner Example',timezone:'UTC'},assistant:{name:'Maelle'}};
  const effects={sends:[],events:[],orchestrator:0,classifications:0,updates:[],unexpected:[]},modules=new Map();
  const send=async(id,body,opts)=>{effects.sends.push({id,body,opts});return {ok:true};};
- const jobs={getOutreachJobsByColleague:()=>[job],getLinkedRequestIdForOutreach:()=>row.id,logEvent:e=>effects.events.push(e),updateOutreachJob:(id,p)=>{if(o.closeThrows&&p.status)throw Error('fixture closure failed');effects.updates.push(p);Object.assign(job,p);if(!o.closeNoop&&(p.status==='replied'||p.status==='cancelled')){row.state=p.status==='replied'?'resolved':'cancelled';row.next_check_at=null;row.next_check_handler=null;}}};
+ const jobs={getOutreachJobByRequestId:()=>job,getOutreachJobsByColleague:()=>[job],getLinkedRequestIdForOutreach:()=>row.id,logEvent:e=>effects.events.push(e),updateOutreachJob:(id,p)=>{if(o.closeThrows&&p.status)throw Error('fixture closure failed');effects.updates.push(p);Object.assign(job,p);if(!o.closeNoop&&(p.status==='replied'||p.status==='cancelled')){row.state=p.status==='replied'?'resolved':'cancelled';row.next_check_at=null;row.next_check_handler=null;}}};
  const mocks={
+ 'src/core/requests/requesterRelay.ts':{requesterRelayLanguage:()=> o.lang||'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
  'src/db.ts':jobs,'src/db/jobs.ts':jobs,'src/db/requests.ts':{getRequest:()=>row,getOpenRequestsForThread:()=>o.freshApproval?[{kind:'approval',state:'awaiting_owner',created_at:'2026-09-19 10:00:01'}]:[],updateRequest:(_id,p)=>{for(const[k,v]of Object.entries(p))row[{nextCheckAt:'next_check_at',nextCheckHandler:'next_check_handler',phase:'phase'}[k]||k]=v;}},
  'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{effects.classifications++;return {content:[{type:'tool_use',input:{status:o.status||'yes'}}]};}}})},'src/llm/models.ts':{},
  'src/connections/registry.ts':{getConnection:()=>({sendDirect:send,postToChannel:send})},'src/connections/slack/formatting.ts':{formatForSlack:x=>x},
  'src/core/requests/resolver.ts':{withRequestLock:async(_id,fn)=>fn()},
- 'src/utils/responseDeadline.ts':{calcResponseDeadline:()=> '2026-12-02T00:00:00Z'},
+ 'src/utils/responseDeadline.ts':{isColleagueSendDeferred:()=>({deferred:false}),calcResponseDeadline:()=> '2026-12-02T00:00:00Z'},
  'src/db/people.ts':{},'src/connectors/graph/calendarReads.ts':{},'src/utils/scheduleRules.ts':{},'src/core/requests/logActivity.ts':{},'src/core/requests/closeRequest.ts':{},'src/utils/attendeeAvailability.ts':{},
  'src/core/orchestrator.ts':{runOrchestrator:async()=>{effects.orchestrator++;if(o.orchestratorThrows)throw Error('fixture failure');return {reply:'Pick one of the available slots'};}},'src/utils/guards/runOutputGates.ts':{runOutputGates:async x=>x},
  'src/utils/logger.ts':{__esModule:true,default:{info(){},warn(){},error(){}}},
  };
  function load(file){if(mocks[file])return mocks[file];if(modules.has(file))return modules.get(file).exports;assert.ok(['src/connectors/slack/coordinator.ts','src/core/requests/colleagueOofReengage.ts','src/core/requests/types.ts','src/utils/timezoneConvert.ts','src/utils/weTimeResolver.ts'].includes(file),'unmocked '+file);const p=fs.existsSync(path.join(source,file))?path.join(source,file):path.join(root,file),m={exports:{}};modules.set(file,m);const code=ts.transpileModule(fs.readFileSync(p,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{Date,Map,Set})(name=>name==='luxon'?{DateTime}:name==='@anthropic-ai/sdk'?{}:load(path.posix.normalize(path.posix.join(path.posix.dirname(file),name))+'.ts'),m,m.exports);return m.exports;}
- const coordinator=load('src/connectors/slack/coordinator.ts');return {row,job,effects,reply:()=>coordinator.handleOutreachReply({}, {senderId:'COLLEAGUE',text:'yes',profile,bot_token:'fixture',messageTs:'reply.2',threadTs:'source.1'}),finish:result=>coordinator.closeOutreachReplyIfResolvedThisTurn({ownerUserId:'OWNER',threadTs:'source.1',jobId:job.id,turnStartedAt:'2026-09-19T10:00:00Z',result})};
+ const coordinator=load('src/connectors/slack/coordinator.ts');return {row,job,effects,reask:()=>load('src/core/requests/colleagueOofReengage.ts').runOofReengageReask(row,profile),reply:()=>coordinator.handleOutreachReply({}, {senderId:'COLLEAGUE',text:'yes',profile,bot_token:'fixture',messageTs:'reply.2',threadTs:'source.1'}),finish:result=>coordinator.closeOutreachReplyIfResolvedThisTurn({ownerUserId:'OWNER',threadTs:'source.1',jobId:job.id,turnStartedAt:'2026-09-19T10:00:00Z',result})};
 }
 test('R-F2-07 OOF acceptance retains canonical work and carries original facts to normal turn',async()=>{const h=fixture(),result=await h.reply();assert.equal(result.handled,false);assert.equal(result.matchedJobId,h.job.id);assert.equal(h.row.state,'awaiting_colleague');assert.equal(h.row.next_check_handler,'outreach_expiry');assert.match(result.priorOutboundContext,/guest@example.com/);assert.match(result.priorOutboundContext,/45/);assert.match(result.priorOutboundContext,/requester_is_attending.*false/);assert.equal(h.effects.orchestrator,0);assert.equal(h.effects.classifications,1);});
 for(const [name,result]of [['offers only',{}],['explicit failure',{mutationActions:[{ok:false}]}],['unknown outcome',{mutationActions:[]}]])test(`R-F2-07 ${name} after OOF handoff remains timed and open`,async()=>{const h=fixture();await h.reply();await h.finish(result);assert.equal(h.row.state,'awaiting_colleague');assert.ok(h.row.next_check_at);assert.equal(h.effects.events.length,0);});
@@ -35,3 +36,22 @@ test('preserved OOF decline closes without booking turn',async()=>{const h=fixtu
 test('R-F2-07 next booking reply keeps original facts without another OOF classifier',async()=>{const h=fixture();await h.reply();const result=await h.reply();assert.equal(result.handled,false);assert.equal(h.effects.classifications,1);assert.equal(h.row.state,'awaiting_colleague');assert.match(result.priorOutboundContext,/guest@example.com/);assert.equal(h.job.intent,undefined);});
 test('R-F2-08 failed closure does not announce that outreach completed',async()=>{const h=fixture({closeThrows:true});await h.finish({bookingOccurred:true});assert.equal(h.row.state,'awaiting_colleague');assert.equal(h.effects.sends.length,0);assert.equal(h.effects.events.length,0);});
 test('R-F2-08 unconfirmed canonical closure does not announce completion',async()=>{const h=fixture({closeNoop:true});await h.finish({bookingOccurred:true});assert.equal(h.row.state,'awaiting_colleague');assert.equal(h.effects.sends.length,0);assert.equal(h.effects.events.length,0);});
+
+for(const lang of ['de','es','ar']) {
+ test('o308 '+lang+' OOF decline sends localized owner notice and retains terminal outcome',async()=>{
+  const h=fixture({lang,status:'no'}),payload=h.job.context_json;const result=await h.reply();
+  assert.equal(result.handled,true);assert.equal(h.row.state,'cancelled');assert.equal(h.row.next_check_at,null);
+  const notice=h.effects.sends.find(s=>s.id==='OWNER');assert.ok(notice);
+  assert.equal(notice.body,require('./fixtures/relay-copy.cjs').relayNotice(lang,'oof_declined',{target:'Colleague'}));
+  assert.ok(notice.body.includes('Colleague'));assert.ok(!notice.body.includes('no longer need time'));
+  assert.equal(h.job.context_json,payload);assert.equal(h.effects.classifications,1);assert.equal(h.effects.orchestrator,0);
+ });
+ test('o308 '+lang+' OOF reask sends actual localized payload and keeps bounded timer',async()=>{
+  const h=fixture({lang}),payload=h.job.context_json;assert.equal(await h.reask(),'rearmed');
+  assert.equal(h.effects.sends.length,1);assert.equal(h.effects.sends[0].id,'DCOLLEAGUE');
+  assert.equal(h.effects.sends[0].body,require('./fixtures/relay-copy.cjs').relayNotice(lang,'oof_reask',{name:'Colleague',subject:'"Planning"'}));
+  assert.ok(h.effects.sends[0].body.includes('Planning'));assert.equal(h.effects.sends[0].opts.threadTs,'source.1');
+  assert.equal(h.job.context_json,payload);assert.equal(h.row.next_check_handler,'outreach_expiry');assert.equal(h.row.phase,'outreach:nudged');
+  assert.ok(h.row.next_check_at);assert.equal(h.effects.classifications,0);assert.equal(h.effects.orchestrator,0);
+ });
+}
