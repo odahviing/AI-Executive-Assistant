@@ -1,5 +1,5 @@
-**25 rows await you** — v5.0.1 prepared for release, 0 new product decisions from this wrap.
+**28 rows await you** — v5.0.1 wrapped, 0 new product decisions from this wrap.
 
-26 open rows — 14 still-real · 3 need a re-read · 9 cite no file · 25 rulable · 1 waiting on a verb (node scripts/ledger-stats.cjs --open).
+29 open rows — 12 still-real · 6 need a re-read · 11 cite no file · 28 rulable · 1 waiting on a verb (node scripts/ledger-stats.cjs --open).
 
-Held backlog remains held. The authorized source batch is independently verified; Sharon's approved duplicate merge is complete.
+Held backlog remains held; 17 source correction/maintenance refs independently verified and shipped. Sharon's approved merge is complete.
