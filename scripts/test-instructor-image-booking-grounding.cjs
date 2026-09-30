@@ -35,6 +35,8 @@ function loadCreateMeetingTool() {
     './meetings/calendarOffline': { withCalendarOfflineRefusal: async (_name, _context, run) => run() },
     '../utils/logger': { __esModule: true, default: { info: noop, warn: noop, error: noop } },
     luxon: require('luxon'),
+    // This structural fixture never executes availability; reject accidental use.
+    '../utils/timezoneConvert': { renderClockInZone: () => { throw Error('Timezone rendering is outside this prompt-capture fixture'); } },
     '../utils/calendarListingFormat': { calendarListingFormatRule: () => '' },
     '../utils/scheduleRules': { checkSlot: noop, occupancyRoleOf: noop },
     '../utils/displaySubject': {

@@ -52,7 +52,7 @@ function harness() {
     compose: directive => sandbox.exports.composeSocialCoda({
       directive, personSlackId: 'U_RECIPIENT', channelId: 'D_RECIPIENT',
       senderRole: 'colleague', senderFirstName: 'Recipient', language: 'en',
-    }, profile),
+    }, profile, 'The meeting is booked.'),
     searches, tried, composerPrompts, unexpected,
   };
 }

@@ -800,6 +800,9 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
           // it nests under the original outbound's shadow thread.
           try {
             const { shadowNotify } = await import('../../../utils/shadowNotify');
+            const autoMoveRequestId = await import('../../../db/jobs')
+              .then(db => db.getAutoMoveRequestIdForOutreachThread(profile.user.slack_user_id, reactor, item.channel!, item.ts!))
+              .catch(() => null);
             const messagePreview = closed.message.slice(0, 120).replace(/\s+/g, ' ').trim();
             await shadowNotify(profile, {
               channel: closed.dm_channel_id ?? '',
@@ -807,6 +810,7 @@ export function registerReactionHandler(ctx: SlackAppContext): void {
               action: `${closed.colleague_name} reacted :${reaction}:`,
               detail: `to: "${messagePreview}${closed.message.length > messagePreview.length ? '…' : ''}"`,
               conversationKey: closed.dm_message_ts,
+              autoMoveRequestId: autoMoveRequestId ?? undefined,
               conversationHeader: `Conversation with ${closed.colleague_name}`,
             });
           } catch (shadowErr) {

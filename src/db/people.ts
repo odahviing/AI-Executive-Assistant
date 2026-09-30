@@ -55,10 +55,11 @@ export interface PersonProfile {
   // intersects (slot search, outreach gating) AND the owner-path prompt reads
   // (formatPeopleMemoryForPrompt, get_person_memory) — one window, one reader.
   working_hours_structured?: {
-    workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
-    hoursStart: string;   // 'HH:MM' in `timezone`, otherwise the person's dated timezone
-    hoursEnd: string;     // 'HH:MM'
+    workdays?: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
+    hoursStart?: string;   // 'HH:MM' in `timezone`, otherwise the person's dated timezone
+    hoursEnd?: string;     // 'HH:MM'
     timezone?: string;    // IANA — overrides people_memory.timezone for this window when set
+    dayOverrides?: Partial<Record<import('../utils/workingHoursDefault').WeekDay, { hoursStart: string; hoursEnd: string }>>;
   };
 
   // Their role and what they care about — learned over time
@@ -1392,7 +1393,7 @@ export function updatePersonProfile(slackId: string, updates: Partial<PersonProf
 /** v3.2.0 — person_id-keyed worker. */
 export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
   const db = getDb();
-  const row = db.prepare('SELECT profile_json FROM people_memory WHERE person_id = ?').get(personId) as { profile_json: string | null } | undefined;
+  const row = db.prepare('SELECT profile_json, timezone FROM people_memory WHERE person_id = ?').get(personId) as { profile_json: string | null; timezone: string | null } | undefined;
   const outcomes: ProfileWriteOutcomes = {};
   if (!row) return outcomes;
 
@@ -1417,7 +1418,12 @@ export function updatePersonProfileById(personId: string, updates: Partial<Perso
       outcomes[field] = 'refused_lower_authority';
       continue;
     }
-    (existing as Record<string, unknown>)[field] = value;
+    if (field === 'working_hours_structured') {
+      const { mergeWorkingHoursUpdate, defaultWorkingHoursForTz } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+      existing.working_hours_structured = mergeWorkingHoursUpdate(existing.working_hours_structured, value, row.timezone ? defaultWorkingHoursForTz(row.timezone) : undefined);
+    } else {
+      (existing as Record<string, unknown>)[field] = value;
+    }
     tags[field] = by;
     outcomes[field] = 'applied';
     changed = true;

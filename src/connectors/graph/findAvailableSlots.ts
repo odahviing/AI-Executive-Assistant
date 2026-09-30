@@ -287,6 +287,7 @@ export async function findAvailableSlots(params: {
     workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
     hoursStart: string;        // 'HH:MM'
     hoursEnd: string;
+    dayOverrides?: import('../../utils/workingHoursDefault').WorkingHours['dayOverrides'];
     workingHoursTimezone?: string;
     // v3.3.8 — per-day travel resolution (see utils/attendeeAvailability.ts).
     // The clip resolves the attendee's TZ for the candidate's DAY: inside

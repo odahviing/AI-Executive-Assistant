@@ -57,6 +57,37 @@ export function getLinkedRequestIdForOutreach(outreachId: string): string | null
   return row?.request_id ?? null;
 }
 
+/** A presentation association, never a parent/child lifecycle dependency. */
+export function getAutoMoveRequestIdForOutreach(outreachId: string, ownerUserId: string): string | null {
+  const db = getDb();
+  const job = db.prepare('SELECT * FROM outreach_jobs WHERE id = ? AND owner_user_id = ?')
+    .get(outreachId, ownerUserId) as OutreachJob | undefined;
+  if (!job || job.intent !== 'meeting_reschedule' || !job.context_json || !job.request_id) return null;
+  let context: { auto_move_request_id?: unknown; meeting_id?: unknown };
+  try { context = JSON.parse(job.context_json); } catch { return null; }
+  if (!context || typeof context.auto_move_request_id !== 'string' || typeof context.meeting_id !== 'string') return null;
+  // Both ends must belong to this owner; an arbitrary payload id is not proof.
+  const move = db.prepare(`SELECT id FROM requests WHERE id = ? AND owner_user_id = ?
+    AND kind = 'follow_up' AND subkind = 'auto_move' AND initiated_by_role = 'system'
+    AND outcome_external_event_id = ?`).get(context.auto_move_request_id, ownerUserId, context.meeting_id) as { id: string } | undefined;
+  const linked = db.prepare("SELECT id FROM requests WHERE id = ? AND owner_user_id = ? AND kind = 'outreach'")
+    .get(job.request_id, ownerUserId);
+  return move && linked ? move.id : null;
+}
+
+/** Only an exact delivered conversation proves association; colleague identity alone never does. */
+export function getAutoMoveRequestIdForOutreachThread(
+  ownerUserId: string, colleagueSlackId: string, channelId: string, threadTs: string,
+): string | null {
+  if (!ownerUserId || !colleagueSlackId || !channelId || !threadTs) return null;
+  const jobs = getDb().prepare(`SELECT id FROM outreach_jobs WHERE owner_user_id = ?
+    AND colleague_slack_id = ? AND dm_channel_id = ? AND dm_message_ts = ? AND sent_at IS NOT NULL`)
+    .all(ownerUserId, colleagueSlackId, channelId, threadTs) as { id: string }[];
+  if (!jobs.length) return null;
+  const ids = jobs.map(job => getAutoMoveRequestIdForOutreach(job.id, ownerUserId));
+  return ids[0] && ids.every(id => id === ids[0]) ? ids[0] : null;
+}
+
 // v3.5.x — reverse lookup: the outreach detail row for a spine request. Used by
 // the reschedule_reask spine handler to re-ping the colleague from the request's
 // timer. Reads the existing request_id column — no new state (coord's own

@@ -1,5 +1,5 @@
-**28 rows await you** — v5.0.1 wrapped, 0 new product decisions from this wrap.
+**30 rows await you** — v5.0.2 release prepared, 0 new product decisions from this wrap.
 
-29 open rows — 15 still-real · 3 need a re-read · 11 cite no file · 28 rulable · 1 waiting on a verb (node scripts/ledger-stats.cjs --open).
+Board: 30 open rows — 14 still-real · 5 need a re-read · 11 cite no file · 30 rulable · 0 queued (node scripts/ledger-stats.cjs --open).
 
-Held backlog remains held; 17 source correction/maintenance refs independently verified and shipped. Sharon's approved merge is complete.
+Six primary product corrections/features and three test-maintenance packages independently verified; one related report alias shares its correction. Mark's email display and the unsupported news mention remain technically unresolved; the other 28 standing backlog rows retain their recorded dispositions.

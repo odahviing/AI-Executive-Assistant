@@ -114,6 +114,8 @@ export interface CloseMeetingArtifactsResult {
 export async function closeMeetingArtifacts(params: {
   ownerUserId: string;
   meetingId: string;
+  /** Current automatic move's presentation identity; never a lifecycle parent. */
+  autoMoveRequestId?: string;
   reason: MeetingArtifactReason;
   /**
    * v2.9.2 — meeting subject, used only to compose the close-loop DM to the
@@ -638,6 +640,7 @@ async function relayVoidedNotices(
   params: {
     ownerUserId: string;
     meetingId: string;
+    autoMoveRequestId?: string;
     subject?: string;
     newStartIso?: string;
     newEndIso?: string;
@@ -695,7 +698,7 @@ async function relayVoidedNotices(
   // column nor the owner's timezone. A replaced held FYI is not a correction (the
   // colleague was told nothing) and is not capped: it is their first notice.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { countCorrectionNoticesSince } = require('../db/jobs') as typeof import('../db/jobs');
+  const { countCorrectionNoticesSince, getAutoMoveRequestIdForOutreach } = require('../db/jobs') as typeof import('../db/jobs');
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   if (contradicted.length && countCorrectionNoticesSince(params.ownerUserId, params.meetingId, since) > 0) {
     logger.info('closeMeetingArtifacts — correction already relayed for this event today, staying quiet', {
@@ -735,6 +738,7 @@ async function relayVoidedNotices(
     try {
       const delivered = await notifyColleagueOfMove({
         profile,
+        autoMoveRequestId: params.autoMoveRequestId ?? getAutoMoveRequestIdForOutreach(row.id, params.ownerUserId) ?? undefined,
         ownerChannel: row.owner_channel,
         colleagueSlackId: row.colleague_slack_id,
         colleagueName: row.colleague_name,
@@ -760,6 +764,8 @@ async function relayVoidedNotices(
     try {
       const delivered = await notifyColleagueOfMove({
         profile,
+        // A manual correction/revert retains only the row's proven association.
+        autoMoveRequestId: params.autoMoveRequestId ?? getAutoMoveRequestIdForOutreach(row.id, params.ownerUserId) ?? undefined,
         // Channel ONLY — never this row's owner_thread_ts. On the autofix path that
         // is the pseudo-key `brief_health_<ownerId>` (tasks/briefs.ts), not a Slack
         // ts, and it would be handed straight to chat.postMessage.

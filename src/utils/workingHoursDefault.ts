@@ -19,6 +19,39 @@ export interface WorkingHours {
   hoursEnd:   string;
   timezone?: string; // Explicit fixed timezone for this window, independent of travel.
   source: 'manual' | 'auto';
+  dayOverrides?: Partial<Record<WeekDay, { hoursStart: string; hoursEnd: string }>>;
+}
+
+type StatedHours = NonNullable<import('../db/people').PersonProfile['working_hours_structured']>;
+
+/** Validate structured clocks, then merge only supplied days. The caller owns
+ * authenticated write authority; this never interprets prose or invents hours. */
+export function mergeWorkingHoursUpdate(existing: StatedHours | undefined, update: unknown, defaults?: Pick<WorkingHours, 'hoursStart' | 'hoursEnd'>): StatedHours {
+  if (!update || typeof update !== 'object' || Array.isArray(update)) throw new Error('Invalid working hours');
+  const value = update as StatedHours;
+  const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  if (Object.keys(value).some(k => !['workdays', 'hoursStart', 'hoursEnd', 'timezone', 'dayOverrides'].includes(k))
+    || (value.workdays !== undefined && (!Array.isArray(value.workdays) || !value.workdays.length || !value.workdays.every(d => WEEK_ORDER.includes(d))))
+    || (value.hoursStart !== undefined && !clock.test(value.hoursStart))
+    || (value.hoursEnd !== undefined && !clock.test(value.hoursEnd))
+    || (value.timezone !== undefined && !isStrictIana(value.timezone))) throw new Error('Invalid working hours');
+  if (value.dayOverrides !== undefined) {
+    if (!value.dayOverrides || typeof value.dayOverrides !== 'object' || Array.isArray(value.dayOverrides)) throw new Error('Invalid day overrides');
+    for (const [day, hours] of Object.entries(value.dayOverrides)) {
+      if (!WEEK_ORDER.includes(day as WeekDay) || !hours || !clock.test(hours.hoursStart) || !clock.test(hours.hoursEnd)
+        || hours.hoursStart >= hours.hoursEnd
+        || Object.keys(hours).some(k => !['hoursStart', 'hoursEnd'].includes(k))) throw new Error('Invalid day override');
+    }
+  }
+  const merged = { ...existing, ...value,
+    ...((existing?.dayOverrides || value.dayOverrides) ? { dayOverrides: { ...existing?.dayOverrides, ...value.dayOverrides } } : {}),
+  };
+  // Compare the effective pair, including a retained/default clock when only
+  // one side was edited. Scheduling intervals are strictly positive, same-day.
+  const start = merged.hoursStart ?? defaults?.hoursStart;
+  const end = merged.hoursEnd ?? defaults?.hoursEnd;
+  if (start !== undefined && end !== undefined && start >= end) throw new Error('Working hours end must be later on the same day');
+  return merged;
 }
 
 const WEEK_ORDER: WeekDay[] =
@@ -94,21 +127,24 @@ export function refreshAutoWorkingHoursById(personId: string): void {
 export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | null {
   // Try manual override from profile_json first
   try {
-    const profile = JSON.parse(person.profile_json || '{}') as { working_hours_structured?: WorkingHours };
-    if (profile.working_hours_structured?.workdays?.length) {
-      const m = profile.working_hours_structured;
+    const profile = JSON.parse(person.profile_json || '{}') as { working_hours_structured?: StatedHours };
+    if (profile.working_hours_structured) {
+      const fallback = person.timezone ? defaultWorkingHoursForTz(person.timezone) : undefined;
+      const stated = mergeWorkingHoursUpdate(undefined, profile.working_hours_structured, fallback);
+      const m = { ...fallback, ...stated };
       const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
       if (!Array.isArray(m.workdays) || !m.workdays.every(d => WEEK_ORDER.includes(d))
-        || !clock.test(m.hoursStart) || !clock.test(m.hoursEnd)
+        || !m.hoursStart || !m.hoursEnd || !clock.test(m.hoursStart) || !clock.test(m.hoursEnd)
         || (m.timezone !== undefined && !isStrictIana(m.timezone))) {
         throw new Error('Invalid structured working-hours window');
       }
       return {
-        workdays:   m.workdays as WeekDay[],
+        workdays:   [...new Set([...m.workdays, ...Object.keys(m.dayOverrides ?? {})])] as WeekDay[],
         hoursStart: m.hoursStart,
         hoursEnd:   m.hoursEnd,
         source:     'manual',
         ...(m.timezone ? { timezone: m.timezone.trim() } : {}),
+        ...(m.dayOverrides ? { dayOverrides: m.dayOverrides } : {}),
       };
     }
   } catch { /* ignore */ }
@@ -137,13 +173,14 @@ export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | n
  * read (the owner roster line in db/people.ts, get_person_memory and the write
  * echo in core/assistant.ts), so one stored window never reads two ways.
  */
-export function formatWorkingHoursWindow(wh: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd' | 'timezone'>): string {
+export function formatWorkingHoursWindow(wh: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd' | 'timezone' | 'dayOverrides'>): string {
   const idx = wh.workdays.map(d => WEEK_ORDER.indexOf(d)).filter(i => i >= 0).sort((a, b) => a - b);
   const contiguous = idx.length > 1 && idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
   const days = contiguous
     ? `${WEEK_ORDER[idx[0]].slice(0, 3)}–${WEEK_ORDER[idx[idx.length - 1]].slice(0, 3)}`
     : idx.map(i => WEEK_ORDER[i].slice(0, 3)).join('/');
-  return `${days} ${wh.hoursStart}–${wh.hoursEnd}${wh.timezone ? ` ${wh.timezone}` : ''}`;
+  const overrides = WEEK_ORDER.filter(d => wh.dayOverrides?.[d]).map(d => `${d.slice(0, 3)} ${wh.dayOverrides![d]!.hoursStart}–${wh.dayOverrides![d]!.hoursEnd}`);
+  return `${days} ${wh.hoursStart}–${wh.hoursEnd}${overrides.length ? `; overrides: ${overrides.join(', ')}` : ''}${wh.timezone ? ` ${wh.timezone}` : ''}`;
 }
 
 /**
@@ -162,6 +199,7 @@ export function describeEffectiveWorkingHours(person: PersonMemory): {
   hoursEnd: string;
   timezone: string | null;
   window: string;
+  dayOverrides?: WorkingHours['dayOverrides'];
 } | null {
   const eff = getEffectiveWorkingHours(person);
   if (!eff) return null;
@@ -171,6 +209,7 @@ export function describeEffectiveWorkingHours(person: PersonMemory): {
     workdays:   eff.workdays,
     hoursStart: eff.hoursStart,
     hoursEnd:   eff.hoursEnd,
+    ...(eff.dayOverrides ? { dayOverrides: eff.dayOverrides } : {}),
     timezone,
     window:     formatWorkingHoursWindow({ ...eff, timezone: timezone ?? undefined }),
   };

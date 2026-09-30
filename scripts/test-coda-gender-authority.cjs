@@ -21,7 +21,7 @@ async function run(row,options={}) {
   '../../utils/claimChecker':{checkReplyClaims:async p=>{validator.push(p);return {claimed_action:false};}},
  };
  const mod={exports:{}};vm.runInNewContext(code,{module:mod,exports:mod.exports,require:name=>{assert.ok(Object.hasOwn(deps,name),name);return deps[name];}});
- const output=await mod.exports.composeSocialCoda({directive:{mode:'raise_new',categoryLabel:'music'},personSlackId:'URECIPIENT',senderRole:options.role||'colleague',senderFirstName:'Recipient',language:options.language||'he'},{user:{slack_user_id:'UOWNER',name:'Owner'},assistant:{name:'Maelle'}});
+ const output=await mod.exports.composeSocialCoda({directive:{mode:'raise_new',categoryLabel:'music'},personSlackId:'URECIPIENT',senderRole:options.role||'colleague',senderFirstName:'Recipient',language:options.language||'he'},{user:{slack_user_id:'UOWNER',name:'Owner'},assistant:{name:'Maelle'}}, 'The meeting is booked.');
  return {output,calls,reads,validator,warnings,prompt:calls[0]?.messages[0].content};
 }
 for(const [label,row,expected] of [

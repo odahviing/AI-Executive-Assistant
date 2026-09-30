@@ -939,6 +939,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (!entry) continue;
               if (typeof ov.start === 'string' && hhmm.test(ov.start.trim())) entry.hoursStart = ov.start.trim();
               if (typeof ov.end === 'string' && hhmm.test(ov.end.trim())) entry.hoursEnd = ov.end.trim();
+              // This search's explicit bound also overrides dated weekday windows;
+              // preserve each day's other bound when only one was supplied.
+              if (entry.dayOverrides) {
+                entry.dayOverrides = Object.fromEntries(Object.entries(entry.dayOverrides).map(([day, hours]) => [day, {
+                  ...hours,
+                  ...(typeof ov.start === 'string' && hhmm.test(ov.start.trim()) ? { hoursStart: ov.start.trim() } : {}),
+                  ...(typeof ov.end === 'string' && hhmm.test(ov.end.trim()) ? { hoursEnd: ov.end.trim() } : {}),
+                }]));
+              }
               if (typeof ov.tz === 'string' && ov.tz.trim()) {
                 entry.workingHoursTimezone = ov.tz.trim();
                 // Same rule as `tzTempDifferingForDay`, third path: the hedge

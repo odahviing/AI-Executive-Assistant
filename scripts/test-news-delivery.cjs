@@ -67,6 +67,8 @@ function fixture(options = {}) {
   });
   const post = load('src/connectors/slack/postReply.ts', {
     '../../utils/logger': logger, '../../db': { appendToConversation: (...args) => { state.history.push(args); if (options.historyFail) throw Error('history unavailable'); } },
+    // News fixtures have no delivered auto-move outreach thread association.
+    '../../db/jobs': { getAutoMoveRequestIdForOutreachThread: () => null },
     '../../connections/slack/formatting': { formatForSlack: text => text }, '../../connections/slack/messaging': { setAssistantStatus: async () => {} },
     '../../config': { config: { OPENAI_API_KEY: 'fixture' } },
     '../../voice': {

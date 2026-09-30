@@ -45,6 +45,7 @@ import { extractFirstJsonObject } from '../utils/extractJson';
 
 export interface RescheduleContext {
   meeting_id: string;
+  auto_move_request_id?: string;
   meeting_subject: string;
   proposed_start: string;  // ISO
   proposed_end: string;    // ISO
@@ -569,6 +570,7 @@ export async function notifyColleagueOfMove(params: {
   profile: UserProfile;
   ownerChannel: string;
   ownerThreadTs?: string;
+  autoMoveRequestId?: string;
   colleagueSlackId: string;
   colleagueName: string;
   colleagueTz?: string;
@@ -626,6 +628,7 @@ export async function notifyColleagueOfMove(params: {
 
     const ctx: RescheduleContext = {
       meeting_id: params.meetingId,
+      ...(params.autoMoveRequestId ? { auto_move_request_id: params.autoMoveRequestId } : {}),
       meeting_subject: params.meetingSubject,
       proposed_start: params.newStartIso,
       proposed_end: params.newEndIso,

@@ -84,12 +84,12 @@ function harness({ results = [source], messages = [], subjects = [], category = 
   const sandbox = { exports: {}, require: name => Object.hasOwn(dependencies, name) ? dependencies[name] : forbidden(`require(${name})`)() };
   vm.runInNewContext(compiled, sandbox, { filename: sourcePath });
   return {
-    async compose(overrides = {}) {
+    async compose(overrides = {}, deliveredWorkReply = 'The meeting is booked.') {
       const result = await sandbox.exports.composeSocialCoda({
         directive: { mode: 'raise_new', categoryLabel: 'burnout' },
         personSlackId: 'U_RECIPIENT', channelId: 'D_RECIPIENT', senderRole: 'owner', senderFirstName: 'Recipient', language: 'en',
         ...overrides,
-      }, profile);
+      }, profile, deliveredWorkReply);
       assert.deepEqual(unexpected, [], 'caught forbidden effects must fail the test too');
       assert.equal(warnings.length, Number(searchThrows) + Number(historyThrows) + Number(truncated), 'unexpected fail-open is a failure');
       assert.equal(unansweredCalls.length, 0, 'composition, validation, and grounding outcomes must not spend a delivered-raise counter');
@@ -133,6 +133,33 @@ function composerPrompt(h) {
   assert.equal(h.composerCalls[0].messages[0].role, 'user');
   return h.composerCalls[0].messages[0].content;
 }
+
+test('missing delivered work context suppresses before search or model calls', async () => {
+  const h = harness();
+  assert.equal(await h.compose({}, ''), null);
+  assert.equal(h.searches.length, 0);
+  assert.equal(h.composerCalls.length, 0);
+  assert.equal(h.validatorCalls.length, 0);
+});
+
+test('structural: final work reply reaches existing composer with unresolved-statement silence rule', async () => {
+  const h = harness();
+  const reply = 'Chris still overlaps for 15 minutes; check with him before adding him.';
+  await h.compose({}, reply);
+  const prompt = composerPrompt(h);
+  assert.ok(prompt.includes(JSON.stringify(reply)));
+  assert.ok(prompt.includes('A statement can leave work unresolved without a question mark'));
+  assert.ok(!prompt.includes("Either way it's off your plate"));
+});
+
+test('structural: unrelated names and tragedy do not compel a coda', async () => {
+  const h = harness();
+  await h.compose();
+  const prompt = composerPrompt(h);
+  assert.ok(prompt.includes('A shared first name is not evidence'));
+  assert.ok(prompt.includes('death, injury, or tragedy'));
+  assert.ok(prompt.includes('return an empty sentence; do not force a connection'));
+});
 
 function deliveredRaiseHarness() {
   const calls = { socialMoments: [], raisedSubjects: [] };

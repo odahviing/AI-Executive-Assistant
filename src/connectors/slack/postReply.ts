@@ -242,6 +242,7 @@ function pickCodaDelayMs(): number {
  */
 function scheduleSocialCoda(opts: {
   coda: OrchestratorOutput['socialCoda'];
+  deliveredWorkReply: string;
   say: PostReplyInput['say'];
   profile: UserProfile;
   senderId: string;
@@ -323,7 +324,7 @@ function scheduleSocialCoda(opts: {
         // memory in the pipes for no reason the pipes have. Only the finished
         // sentence and its bounded history rendering cross. Total by contract —
         // null means "nothing to post".
-        const composed = await composeSocialCoda(coda, profile);
+        const composed = await composeSocialCoda(coda, profile, opts.deliveredWorkReply);
         if (!composed) {
           logger.info('Social coda not composed — nothing to post', {
             threadTs, personSlackId: coda.personSlackId,
@@ -407,8 +408,8 @@ function scheduleSocialCoda(opts: {
         // rationale as the v3.0.8 move that put the shadow after the gates).
         //
         // Its OWN shadowNotify call, but NOT a second "Conversation with X"
-        // header: the same conversationKey threads it under the anchor Step 4.6
-        // cached (shadowNotify.ts:95), so the owner sees one conversation with the
+        // header: the same proven move association or conversationKey threads
+        // it under the reply's anchor, so the owner sees one conversation with the
         // coda as a labelled line inside it. Labelled 'Social coda' because
         // telling it apart from the reply at a glance is the whole point of the
         // request. Colleague-facing only — the owner doesn't need his own DM
@@ -418,12 +419,16 @@ function scheduleSocialCoda(opts: {
         if (role === 'colleague' && senderId !== profile.user.slack_user_id) {
           const who = colleagueName ?? senderId;
           const { shadowNotify } = await import('../../utils/shadowNotify');
+          const autoMoveRequestId = await import('../../db/jobs')
+            .then(db => db.getAutoMoveRequestIdForOutreachThread(profile.user.slack_user_id, senderId, channelId, threadTs))
+            .catch(() => null);
           await shadowNotify(profile, {
             channel: channelId,
             threadTs,
             action: 'Social coda',
             detail: `I → ${who}: "${shadowPreview(text)}"`,
             conversationKey: threadTs,
+            autoMoveRequestId: autoMoveRequestId ?? undefined,
             // Identical to Step 4.6's header so a re-anchor (approval turn, or a
             // restart that lost the cache) can't label the same conversation two
             // different ways.
@@ -592,6 +597,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
       // silently swallow every coda that rode a one-word task confirmation.
       scheduleSocialCoda({
         coda: result.socialCoda, say, profile, senderId, colleagueName,
+        deliveredWorkReply: cleanReply,
         channelId, threadTs, role,
         isMpim: isMpim === true, isChannel: isChannel === true,
       });
@@ -621,6 +627,13 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   ) {
     try {
       const { shadowNotify } = await import('../../utils/shadowNotify');
+      // Only the exact delivered 1:1 outreach thread proves a move association.
+      // Missing/ambiguous/unavailable evidence retains ordinary shadow routing.
+      const autoMoveRequestId = !isMpim && !isChannel
+        ? await import('../../db/jobs')
+          .then(db => db.getAutoMoveRequestIdForOutreachThread(profile.user.slack_user_id, senderId, channelId, threadTs))
+          .catch(() => null)
+        : null;
       const who = colleagueName ?? senderId;
       const replyPreview = shadowPreview(cleanReply);
       // v4.3.x (#144) — fold in the attachment description (already
@@ -653,6 +666,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
         action: 'Reply',
         detail: combinedDetail,
         conversationKey: threadTs,
+        autoMoveRequestId: autoMoveRequestId ?? undefined,
         conversationHeader: `Conversation with ${who}`,
       });
     } catch (err) {
@@ -690,6 +704,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // get here — a failed reply is not followed by small talk.
   scheduleSocialCoda({
     coda: result.socialCoda, say, profile, senderId, colleagueName,
+    deliveredWorkReply: cleanReply,
     channelId, threadTs, role,
     isMpim: isMpim === true, isChannel: isChannel === true,
   });

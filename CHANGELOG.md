@@ -1,3 +1,22 @@
+## 5.0.2 — Weekday-specific team hours and connected auto-fix conversations
+
+Team availability now supports different hours for each weekday through the existing conversational update process. Unspecified days keep their defaults, and related colleague updates appear under the corresponding auto-fix notice.
+
+### Changed
+- Store explicit weekday windows incrementally without replacing other days. Availability searches and contact timing use the same dated timezone-aware intervals; invalid, zero-length and reversed same-day windows are rejected without claiming success.
+- Keep each automatic meeting move in its own owner thread, including related text, image, reaction, correction and revert updates. Durable associations survive restart and require a proven owner-DM destination.
+
+### Fixed
+- Preserve the checked instant, timezone and localized presentation through join-availability summaries, avoiding contradictory Eastern-time answers.
+- Preserve the responsible actor and action status in voice-style guidance, including legitimate organizer-owned invitation handoffs.
+- Give the existing social composer the final delivered work reply so it can decline an aside during unresolved work. Allow it to reject unrelated name matches and unsuitable tragedy-based topics without adding a model call.
+
+### Verification and limits
+- Full release checkpoint: 195 suite/timezone executions and 4,873 assertions passed after bounded test-harness repairs; original failures and replacement evidence retained. Golden30: 23 passes, 7 stale citations traced to current source, zero failures. Typecheck passed.
+- Six primary correction/feature identities and one related report alias independently reviewed. Voice and social judgment remain model-dependent; structural checks do not guarantee model obedience.
+- Mark's email display and the unsupported news mention remain unresolved because their historical producer inputs were not retained. This release does not change the live Boston schedule or existing people hours; the owner can update weekday hours after deployment.
+
+
 ## 5.0.1 — Scheduling across home regions and reliable request notices
 
 Corrected scheduling defaults that could change colleagues’ workweeks when the owner moves, and exercised the proposed Boston schedule across office/home days and US/Israel daylight-saving transitions. The tests use November 3, 2026, Monday–Friday: office Monday/Tuesday/Thursday 09:00–17:00 and home Wednesday/Friday 08:00–17:00. This release does not change the live profile or schedule a future permanent move; permanent YAML changes still require application reload and existing scheduled work must be assessed separately.

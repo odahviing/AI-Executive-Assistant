@@ -28,5 +28,6 @@ await test('no-thread-owner-DM',async()=>{const h=harness({noThread:true});await
 await test('actual-daily-producer-persists-header-and-records-notice',async()=>{const h=harness({realDaily:true});await h.run();await h.run();assert.equal(h.sent.length,2);assert.match(h.sent[0][1],/Discussions/);assert.equal(h.sent[1][0],'D_OWNER');assert.equal(h.history[0][0],'2')});
 await test('concurrent-sweeps-one-notice',async()=>{const h=harness();await Promise.all([h.run(),h.run()]);assert.equal(h.sent.length,1)});
 await test('restart-resets-existing-process-dedup',async()=>{const a=harness(),b=harness();await a.run();await b.run();assert.equal(a.sent.length+b.sent.length,2)});
-if(dir){fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,before?'before-results.json':'after-results.json'),JSON.stringify(results,null,2));}console.log(JSON.stringify(results,null,2));process.exitCode=results.some(r=>r.status==='fail')?1:0;
+const summary={results,passed:results.filter(r=>r.status==='pass').length,failed:results.filter(r=>r.status==='fail').length};
+if(dir){fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,before?'before-results.json':'after-results.json'),JSON.stringify(summary,null,2));}console.log(JSON.stringify(summary,null,2));process.exitCode=summary.failed?1:0;
 })();

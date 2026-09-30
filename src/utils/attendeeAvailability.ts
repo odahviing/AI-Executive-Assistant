@@ -21,6 +21,7 @@ import logger from './logger';
 import { renderClockInZone } from './timezoneConvert';
 import { slotDayMinutes, configuredWorkIntervalsBetween } from './workHours';
 import type { WeekDay } from './floatingBlocks';
+import type { WorkingHours } from './workingHoursDefault';
 import type { TimezoneTempSource, PersonMemory } from '../db/people';
 
 export interface AttendeeAvailabilityEntry {
@@ -29,6 +30,7 @@ export interface AttendeeAvailabilityEntry {
   workdays: WeekDay[];
   hoursStart: string;
   hoursEnd: string;
+  dayOverrides?: WorkingHours['dayOverrides'];
   workingHoursTimezone?: string; // explicitly stated window frame, independent of physical/travel zone
   // v2.5.2 — when active travel overrode the stored profile timezone for this
   // entry, this carries the original stored timezone + travel location so the
@@ -134,7 +136,9 @@ export interface AttendeeWorkSegment {
 
 /** Partition a meeting at every local midnight and trip boundary. Fixed
  * workingHoursTimezone continues to own the work window while physical travel
- * owns presentation only. A slot must fit every visited wall clock (DST too). */
+ * owns presentation only. Each segment uses that frame's weekday override,
+ * falling back to the uniform window. A slot must fit every visited wall clock
+ * (DST too). */
 export function attendeeWorkSegmentsBetween(
   entry: AttendeeAvailabilityEntry, from: DateTime, until: DateTime,
 ): AttendeeWorkSegment[] {
@@ -146,12 +150,14 @@ export function attendeeWorkSegmentsBetween(
     for (let day = from.setZone(zone).startOf('day').plus({ days: 1 }); day < until; day = day.plus({ days: 1 })) cuts.add(day.toMillis());
   }
   const points = [...cuts].sort((a, b) => a - b);
-  const [sh, sm] = entry.hoursStart.split(':').map(Number);
-  const [eh, em] = entry.hoursEnd.split(':').map(Number);
   return points.slice(0, -1).map((ms, i) => {
     const instant = DateTime.fromMillis(ms, { zone: 'UTC' });
     const timezone = entry.workingHoursTimezone ?? attendeeTzForDay(entry, instant.toISO()!);
     const start = instant.setZone(timezone), end = DateTime.fromMillis(points[i + 1], { zone: timezone });
+    const day = start.toFormat('EEEE') as WeekDay;
+    const hours = entry.dayOverrides?.[day] ?? entry;
+    const [sh, sm] = hours.hoursStart.split(':').map(Number);
+    const [eh, em] = hours.hoursEnd.split(':').map(Number);
     const { startMin, endMin } = slotDayMinutes(start, end);
     const fitsWorkHours = entry.workdays.includes(start.toFormat('EEEE') as WeekDay)
       && startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
@@ -166,10 +172,12 @@ export function attendeeWorkIntervalsBetween(
   entry: AttendeeAvailabilityEntry, from: DateTime, until: DateTime,
 ): Array<{ start: DateTime; end: DateTime }> {
   const result: Array<{ start: DateTime; end: DateTime }> = [];
-  const [sh, sm] = entry.hoursStart.split(':').map(Number);
-  const [eh, em] = entry.hoursEnd.split(':').map(Number);
   for (const segment of attendeeWorkSegmentsBetween(entry, from, until)) {
-    if (!entry.workdays.includes(segment.start.toFormat('EEEE') as WeekDay)) continue;
+    const day = segment.start.toFormat('EEEE') as WeekDay;
+    if (!entry.workdays.includes(day)) continue;
+    const hours = entry.dayOverrides?.[day] ?? entry;
+    const [sh, sm] = hours.hoursStart.split(':').map(Number);
+    const [eh, em] = hours.hoursEnd.split(':').map(Number);
     result.push(...configuredWorkIntervalsBetween(segment.start, segment.end, segment.timezone,
       [{ startMin: sh * 60 + sm, endMin: eh * 60 + em }]));
   }
@@ -322,6 +330,7 @@ export function loadAttendeeAvailabilityForPerson(
       workdays: wh.workdays,
       hoursStart: wh.hoursStart,
       hoursEnd: wh.hoursEnd,
+      ...('dayOverrides' in wh && wh.dayOverrides ? { dayOverrides: wh.dayOverrides } : {}),
       ...('timezone' in wh && typeof wh.timezone === 'string' ? { workingHoursTimezone: wh.timezone } : {}),
       homeTimezone: resolvedTz,
       ...(travelMeta ? { travel: travelMeta } : {}),

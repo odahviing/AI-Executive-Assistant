@@ -30,10 +30,22 @@ function fixture(o={}){
  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{Date})(name=>name==='luxon'?{DateTime}:load(path.posix.normalize(path.posix.join(path.posix.dirname(file),name))+'.ts'),m,m.exports);return m.exports;
  }
  const m={exports:load('src/skills/meetingReschedule.ts')};
- return {row,effects,started,release:()=>releaseMove?.(),run:()=>m.exports.handleRescheduleReply({}, {job,replyText:'fixture reply',profile,bot_token:'fixture'})};
+ return {row,job,effects,started,release:()=>releaseMove?.(),run:()=>m.exports.handleRescheduleReply({}, {job,replyText:'fixture reply',profile,bot_token:'fixture'})};
 }
 const assertTimed=h=>{assert.equal(h.row.state,'awaiting_colleague');assert.equal(h.row.next_check_at,'2026-12-01T09:00:00Z');assert.equal(h.row.next_check_handler,'outreach_expiry');};
-test('R-F2-09 owner notice throw before completion leaves existing durable timer',async()=>{const h=fixture({status:'declined',ownerThrows:true});await assert.rejects(h.run(),/owner transport/);assertTimed(h);assert.equal(h.effects.moves,0);});
+// A decisive decline finishes the colleague ask. Failed owner delivery remains
+// visible through informed=0; it must not re-arm an answered colleague's timer.
+test('R-F2-09 declined owner notice failure stays terminal and observable without replay',async()=>{
+ const h=fixture({status:'declined',ownerThrows:true});
+ assert.equal(await h.run(),true);
+ assert.equal(h.row.state,'resolved');assert.equal(h.row.next_check_at,null);assert.equal(h.row.next_check_handler,null);
+ assert.equal(h.row.informed,0);assert.equal(h.job.reply_text,'fixture reply');
+ assert.deepEqual(JSON.parse(h.job.conversation_json),[{role:'colleague',text:'fixture reply'}]);
+ assert.equal(h.effects.moves,0);assert.equal(h.effects.verifications.length,0);assert.equal(h.effects.approvals.length,0);
+ assert.equal(h.effects.sends.length,1);assert.equal(h.effects.sends[0].id,'DOWNER');assert.equal(h.effects.ownerRows[0].state,'resolved');
+ assert.equal(await h.run(),true);
+ assert.equal(h.effects.classifications,1);assert.equal(h.effects.moves,0);assert.equal(h.effects.sends.length,1);assert.equal(h.row.informed,0);
+});
 test('R-F2-09 malformed conversation before completion leaves existing durable timer',async()=>{const h=fixture({corruptConversation:true});await assert.rejects(h.run());assertTimed(h);assert.equal(h.effects.moves,0);});
 for(const [name,options,moves]of [['successful move',{ownerThrows:true},1],['already moved',{ownerThrows:true,alreadyMoved:true},0],['uncertain move',{ownerThrows:true,moveThrows:true},1]])test(`R-F2-09 ${name} owner delivery throw stays handled and never replays`,async()=>{const h=fixture(options);assert.equal(await h.run(),true);assert.equal(h.row.state,options.moveThrows?'cancelled':'resolved');if(options.moveThrows){assert.match(h.row.closure_reason,/attempted_unconfirmed/);assert.equal(JSON.parse(h.row.outcome_json).verified,false);assert.equal(h.row.informed,0);assert.equal(h.effects.verifications.length,1);assert.equal(h.effects.ownerRows[0].closure_reason,h.row.closure_reason);}assert.equal(h.row.next_check_at,null);assert.equal(h.effects.moves,moves);const sends=h.effects.sends.length;assert.equal(await h.run(),true);assert.equal(h.effects.moves,moves);assert.equal(h.effects.sends.length,sends);assert.equal(h.effects.classifications,1);});
 test('R-F2-09 completed counter with shadow throw cannot fall back to asking owner to act again',async()=>{const h=fixture({status:'counter',active:true,shadowThrows:true});assert.equal(await h.run(),true);assert.equal(h.row.state,'resolved');assert.equal(h.effects.moves,1);assert.equal(h.effects.sends.filter(s=>s.id==='DOWNER').length,0);await h.run();assert.equal(h.effects.moves,1);assert.equal(h.effects.shadows,1);});
@@ -50,3 +62,4 @@ test('R-F2-09 room owner notice failure cannot replay completed move',async()=>{
 for(const status of ['desired_state_observed','different_state_observed','unavailable'])test(`R-F2-09 uncertain move read-only ${status} is durably and honestly reported`,async()=>{const h=fixture({moveThrows:true,verification:status});assert.equal(await h.run(),true);assert.equal(h.effects.moves,1);assert.equal(h.effects.verifications.length,1);assert.equal(h.effects.verifications[0].args.new_start,'2026-12-01T09:00:00Z');assert.equal(h.row.state,status==='desired_state_observed'?'resolved':'cancelled');assert.equal(JSON.parse(h.row.outcome_json).verified,status==='desired_state_observed');assert.equal(h.row.informed,0);assert.equal(h.effects.ownerRows[0].closure_reason,h.row.closure_reason);assert.doesNotMatch(h.effects.sends.find(x=>x.id==='DOWNER').body,/You'll need to move it manually/);await h.run();assert.equal(h.effects.moves,1);assert.equal(h.effects.verifications.length,1);});
 test('R-F2-09 verification throw retains unconfirmed terminal outcome before failed warning',async()=>{const h=fixture({moveThrows:true,verificationThrows:true,ownerThrows:true});assert.equal(await h.run(),true);assert.equal(h.row.state,'cancelled');assert.match(h.row.closure_reason,/attempted_unconfirmed/);assert.equal(h.row.informed,0);assert.equal(h.effects.ownerRows[0].closure_reason,h.row.closure_reason);assert.equal(h.effects.moves,1);});
 test('R-F2-09 uncertain automatic counter never falls into another owner action',async()=>{const h=fixture({status:'counter',active:true,moveThrows:true,ownerThrows:true});assert.equal(await h.run(),true);assert.equal(h.row.state,'cancelled');assert.match(h.row.closure_reason,/attempted_unconfirmed/);assert.equal(h.effects.verifications.length,1);assert.equal(h.effects.verifications[0].args.new_start,'2026-12-01T09:15:00.000Z');assert.equal(h.row.informed,0);assert.equal(h.effects.moves,1);assert.doesNotMatch(h.effects.sends.find(x=>x.id==='DOWNER').body,/Want me to take it/);await h.run();assert.equal(h.effects.moves,1);});
+

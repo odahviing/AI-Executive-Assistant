@@ -38,7 +38,8 @@ function harness(people){
   if(Object.hasOwn(mocks,rel))return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
   if(!actual.has(rel))throw Error('Unhandled actual module '+rel);
   if(!compiled.has(rel)){
-   const source=before?cp.execFileSync('git',['show',baseline+':'+rel],{cwd:root,encoding:'utf8'}):fs.readFileSync(path.join(root,rel),'utf8');
+   const saved = process.env.HOURS_BATCH_BEFORE && ({'src/db/people.ts':'people.before.ts','src/utils/workingHoursDefault.ts':'workingHoursDefault.before.ts'})[rel];
+   const source=saved?fs.readFileSync(path.join(root,process.env.HOURS_BATCH_BEFORE,saved),'utf8'):before?cp.execFileSync('git',['show',baseline+':'+rel],{cwd:root,encoding:'utf8'}):fs.readFileSync(path.join(root,rel),'utf8');
    compiled.set(rel,ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);
   }
   const mod={exports:{}};modules.set(rel,mod);
@@ -98,3 +99,37 @@ test('HV-measure-25: roster size measured on a 25-contact fixture (5 no-tz, 10 d
   return {slack_id:id,name,timezone:'Asia/Jerusalem',timezone_set_by:'person',state:'Tel Aviv',profile_json:stated(ST,'09:00','18:00'),working_hours_auto:auto(ST,'09:00','18:00')};});
  const r=harness(many).roster();const lines=r.split('\n').filter(l=>/^Contact \d\d Surname \(/.test(l));assert.equal(lines.length,25);
  console.log(`# roster_chars=${r.length} roster_lines=${lines.length} mode=${before?'before':'after'}`);});
+
+test('DH incremental owner windows preserve siblings and default after reload',()=>{
+ const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Monday:{hoursStart:'08:00',hoursEnd:'14:00'}}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ const row=p.getPersonMemory('UALEX'),eff=w.getEffectiveWorkingHours(row);
+ assert.equal(eff.hoursStart,'08:00'); assert.equal(eff.hoursEnd,'17:00');
+ assert.equal(eff.dayOverrides.Monday.hoursEnd,'14:00'); assert.equal(eff.dayOverrides.Tuesday.hoursStart,'10:00');
+ assert.ok(w.describeEffectiveWorkingHours(row).window.includes('Mon 08:00–14:00, Tue 10:00–16:00'));
+ const replay=p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).dayOverrides.Monday.hoursEnd,'14:00');
+});
+test('DH day-only initial write uses region defaults and explicit non-default weekday',()=>{
+ const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
+ p.updatePersonProfile('UDAN',{working_hours_structured:{dayOverrides:{Sunday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'person');
+ const eff=w.getEffectiveWorkingHours(p.getPersonMemory('UDAN'));
+ assert.equal(eff.source,'manual'); assert.equal(eff.hoursStart,'09:00'); assert.ok(eff.workdays.includes('Sunday')); assert.equal(eff.dayOverrides.Sunday.hoursEnd,'16:00');
+});
+test('DH invalid weekday or clock cannot replace durable valid hours',()=>{
+ const h=harness(PEOPLE),p=h.load('src/db/people.ts');
+ for(const patch of [{dayOverrides:{Tuesday:{hoursStart:'late',hoursEnd:'16:00'}}},{dayOverrides:{Funday:{hoursStart:'10:00',hoursEnd:'16:00'}}}]) {
+  const original=p.getPersonMemory('UALEX').profile_json;
+  assert.throws(()=>p.updatePersonProfile('UALEX',{working_hours_structured:patch},'owner'));
+  assert.equal(p.getPersonMemory('UALEX').profile_json,original);
+ }
+});
+test('DH lower authority cannot amend owner day overrides; unknown timezone cannot invent default',()=>{
+ const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ assert.equal(p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Monday:{hoursStart:'06:00',hoursEnd:'12:00'}}}},'person').working_hours_structured,'refused_lower_authority');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).dayOverrides.Monday,undefined);
+ p.updatePersonProfile('UEREZ',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UEREZ')),null);
+});

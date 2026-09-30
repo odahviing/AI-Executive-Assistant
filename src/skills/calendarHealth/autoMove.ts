@@ -88,7 +88,7 @@ export async function revalidateActiveOverlapIssues(
 // #133 — shared autonomous internal-meeting move. Extracted from the
 // double_booking auto-fix so EVERY active-mode auto-move (clash-clearing AND
 // efficient-calendar defrag) runs ONE path: record the revert handle → PATCH
-// and verify → record success → rebalance/notify → shadow-notify the owner.
+// and verify → record success → anchor owner notice → rebalance/notify → report status.
 // Caller supplies the already-chosen, free + rule-valid
 // target (newStartIso) and the human phrasing; verified writes are recorded
 // before ancillary cleanup/notifications, whose failures remain in fix_detail.
@@ -287,6 +287,21 @@ export async function executeInternalAutoMove(params: {
     logger.warn('auto-move request-record resolve failed — move already done', { err: String(err).slice(0, 160) });
   }
 
+  // Establish the move's owner thread before corrections or fresh notices can
+  // receive replies. Only the calendar outcome is confirmed at this point.
+  const { shadowNotify } = require('../../utils/shadowNotify') as typeof import('../../utils/shadowNotify');
+  try {
+    await shadowNotify(profile, {
+      channel: context.channelId, icon: '🔧', action: `Active-mode autofix — ${issue.type}`,
+      detail: `${issue.fix_detail} Say "revert" if you'd rather I hadn't.`,
+      autoMoveRequestId: autoMoveReq.id, autoMoveRoot: true,
+    });
+  } catch (err) {
+    // Missing pointers never authorize a second root attempt: delivery may
+    // have succeeded before persistence failed. The move remains confirmed.
+    logger.warn('auto-move owner root unconfirmed — not retrying', { err: String(err).slice(0, 200) });
+  }
+
   // elan-hold-survives-the-move-that-resolved-it (2026-09-06) — every OTHER
   // meeting-mutation path calls closeMeetingArtifacts (moveMeeting.ts:1942);
   // this autonomous path never did, so a colleague already DM'd a (now-stale)
@@ -307,6 +322,7 @@ export async function executeInternalAutoMove(params: {
     reason: 'moved',
     subject: subj,
     bookingThreadTs: context.threadTs,
+    autoMoveRequestId: autoMoveReq.id,
     newStartIso,
     newEndIso,
     // This caller owns auto_move_executed closure, including if its closure
@@ -356,6 +372,7 @@ export async function executeInternalAutoMove(params: {
     if (correctedColleagueSlackIds.has(row.slack_id)) continue;
     const delivered = await notifyColleagueOfMove({
       profile, ownerChannel: context.channelId, ownerThreadTs: context.threadTs,
+      autoMoveRequestId: autoMoveReq.id,
       colleagueSlackId: row.slack_id,
       colleagueName: a.emailAddress.name || row.name || email,
       colleagueTz: row.timezone, meetingId: movable.id, meetingSubject: colleagueSubj,
@@ -376,16 +393,19 @@ export async function executeInternalAutoMove(params: {
   if (heldNotices.length) issue.fix_detail += ` I'll let ${heldNotices.join(' and ')} know when ${heldNotices.length === 1 ? 'their' : 'each of their'} workday starts.`;
   if (followUpFailures.length) issue.fix_detail += ` ${followUpFailures.join(' ')}`;
 
+  const noticeStatus = [
+    ...(notified.length ? [`Let ${notified.join(' and ')} know — I'll loop you in if they push back.`] : []),
+    ...(heldNotices.length ? [`I'll let ${heldNotices.join(' and ')} know when their workday starts.`] : []),
+    ...followUpFailures,
+  ].join(' ');
+  if (!noticeStatus) return;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { shadowNotify } = require('../../utils/shadowNotify') as typeof import('../../utils/shadowNotify');
     await shadowNotify(profile, {
       channel: context.channelId,
       icon: '🔧',
-      action: `Active-mode autofix — ${issue.type}`,
-      detail: `${issue.fix_detail} Say "revert" if you'd rather I hadn't.`,
-      // Key the owner notice to the durable move handle for later correction.
-      conversationKey: autoMoveReq?.id,
+      action: 'Autofix follow-up',
+      detail: noticeStatus,
+      autoMoveRequestId: autoMoveReq.id,
     });
   } catch (err) {
     logger.warn('shadowNotify on active-mode move threw — continuing', { err: String(err).slice(0, 200) });

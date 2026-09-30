@@ -18,7 +18,8 @@ function harness(options = {}) {
   const logger = Object.fromEntries(['info','warn','error','debug'].map(k => [k, (...args) => logs.push(args)]));
   function load(name, deps, dir = 'src/connectors/slack') {
     const boundedBefore = process.env.SLACK_BOUNDARY_SOURCE_ROOT && path.join(process.env.SLACK_BOUNDARY_SOURCE_ROOT, dir, `${name}.ts`);
-    const file = before ? path.resolve(before, `${name}.before.ts`) : boundedBefore && fs.existsSync(boundedBefore) ? boundedBefore : path.join(root, dir, `${name}.ts`);
+    const beforeFile = before && path.resolve(before, `${name}.before.ts`);
+    const file = beforeFile && fs.existsSync(beforeFile) ? beforeFile : boundedBefore && fs.existsSync(boundedBefore) ? boundedBefore : path.join(root, dir, `${name}.ts`);
     const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText;
     const exports = {};
     vm.runInNewContext(code, { exports, require: name => {
@@ -47,32 +48,48 @@ function harness(options = {}) {
     getLastMaelleMessage: thread => { if (options.activityThrows) throw Error('activity unavailable'); return replies.get(thread) ?? null; },
     recordMaelleMessage: (thread, channel, messageTs) => replies.set(thread, { messageTs }),
   };
+  const composerPrompts = [];
+  const realComposer = options.realComposer ? load('generateCoda', {
+    '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async args => {
+      composerPrompts.push(args.messages[0].content);
+      return { content: [{ type: 'tool_use', input: { sentence: options.emptySentence ? '' : 'Social question?' } }] };
+    } } }) },
+    '../../llm/models': { SONNET: { model: 'fixture' } },
+    '../../utils/usageLog': { logLlmUsage() {} }, '../../utils/logger': logger,
+    '../../skills/general': { tavilySearch: async () => ({ results: [{ title: 'New album', content: 'An artist released a new album.', url: 'https://example.com/album' }] }) },
+    '../../db': { authoritativeGender: () => 'unknown', getPersonMemory: () => ({ name: 'Recipient' }), getRecentChannelMessages: () => [] },
+    '../../db/socialSubjects': { getActiveSubjectsForPersonCategory: () => [], getCategoryByLabel: () => null, recordCategoryRaiseTried() {} },
+    '../../utils/claimChecker': { checkReplyClaims: async () => ({ claimed_action: false }) },
+  }, 'src/core/social') : null;
   const mod = load('postReply', {
     '../../utils/logger': logger,
     '../../db': { appendToConversation: (...args) => history.push(args) },
     '../../connections/slack/formatting': { formatForSlack: text => options.emptyFormat && text === 'Social question?' ? '' : text },
     '../../connections/slack/messaging': { setAssistantStatus: async () => {} },
     '../../config': { config: { OPENAI_API_KEY: 'fixture-only' } },
-    '../../voice': { shouldRespondWithAudio: p => p.inputWasVoice, textToSpeech: async () => 'audio', sendAudioMessage: async () => {} },
+    '../../voice': { shouldRespondWithAudio: p => p.inputWasVoice, textToSpeech: async () => 'audio', sendAudioMessage: async () => { if (options.audioUnknown) throw Error('unknown audio delivery'); } },
     '../../utils/guards/runOutputGates': {
-      runDeliberationGuard: async text => text, runOutputGates: async text => { if (options.workGatePause) await options.workGatePause.promise; return text; },
+      runDeliberationGuard: async text => text, runOutputGates: async text => { if (options.workGatePause) await options.workGatePause.promise; return options.gatedReply ?? text; },
       runCodaGates: async () => { gateCalls++; if (options.gatePause) await options.gatePause.promise; if (options.gateThrows) throw Error('gate unavailable'); return { ship: !options.gateDrop }; },
     },
     './inboundQueue': queue, '../../utils/threadActivity': threadActivity,
-    '../../core/social/generateCoda': { composeSocialCoda: async () => {
+    '../../core/social/generateCoda': { composeSocialCoda: async (coda, profile, deliveredWorkReply) => {
+      if (options.expectedDelivered !== undefined) assert.equal(deliveredWorkReply, options.expectedDelivered);
       composeCalls++; if (options.composePause) await options.composePause.promise;
+      if (realComposer) return realComposer.composeSocialCoda(coda, profile, deliveredWorkReply);
       if (options.composeThrows) throw Error('compose unavailable');
       return options.composeNull ? null : { text: 'Social question?', historyContent: 'Social question?\n[internal provenance]' };
     } },
     '../../core/social/stateMachine': socialState,
     '../../core/social/logEngagement': socialAccounting,
     '../../utils/shadowNotify': { shadowNotify: async (profile, entry) => mirrors.push(entry) },
+    '../../db/jobs': { getAutoMoveRequestIdForOutreachThread: () => null },
   });
   async function reply(overrides = {}) {
     const person = overrides.senderId ?? 'U_OWNER';
     await mod.postOrchestratorReply({
       app: { client: { reactions: { add: async () => {} } } },
-      profile: { user: { slack_user_id: 'U_OWNER', timezone: 'UTC' }, assistant: { slack: { bot_token: 'fixture' } } },
+      profile: { user: { name: 'Owner', slack_user_id: 'U_OWNER', timezone: 'UTC' }, assistant: { name: 'Maelle', slack: { bot_token: 'fixture' } } },
       result: { reply: 'Work answer ready.', socialCoda: { personSlackId: person, directive: { mode: 'raise_new', categoryLabel: 'music' } } },
       say: async msg => {
         posts.push(msg);
@@ -95,7 +112,7 @@ function harness(options = {}) {
     queue.enqueueMessage({ channelId: 'D_OWNER', threadTs: 'T1', isOneOnOneDm: true, text: 'Follow-up', senderId: 'U_OWNER', meta: {}, runner: async () => {}, ...overrides });
   }
   function count() { assert.deepEqual(unexpected, []); return posts.filter(p => p.text === 'Social question?').length; }
-  return { reply, fire, inbound, count, posts, history, stamps, subjectRaises, categoryRaises, mirrors, charged, replies, logs, get composeCalls() { return composeCalls; }, get gateCalls() { return gateCalls; } };
+  return { reply, fire, inbound, count, posts, history, stamps, subjectRaises, categoryRaises, mirrors, charged, replies, logs, composerPrompts, get composeCalls() { return composeCalls; }, get gateCalls() { return gateCalls; } };
 }
 
 for (const mode of ['workSendThrows', 'workSendRejects']) {
@@ -104,6 +121,7 @@ for (const mode of ['workSendThrows', 'workSendRejects']) {
     await assert.rejects(h.reply({ onDelivered: () => { delivered = true; } }));
     assert.equal(delivered, false);
     assert.equal(h.history.length, 0);
+    await h.fire('coda'); assert.equal(h.composeCalls, 0);
   });
 }
 test('thread delivery: superseded reply during gates cannot send or persist', async () => {
@@ -231,4 +249,37 @@ test('regression: rejected continue coda does not start subject silence accounti
 test('regression: failed stamp on continue neither sends nor raises subject', async () => {
   const h = harness({ stampFails: true }); await h.reply({ result: { reply: 'Work answer', socialCoda: { personSlackId: 'U_OWNER', subjectId: 'S1', directive: { mode: 'continue' } } } });
   await h.fire('coda'); assert.equal(h.count(), 0); assert.deepEqual(h.subjectRaises, []);
+});
+
+for (const mode of ['text', 'audio', 'ack']) test(`delivered context: ${mode} passes only final gated work reply`, async () => {
+  const gated = mode === 'ack' ? 'Done' : 'Safe final work answer.';
+  const h = harness({ gatedReply: gated, expectedDelivered: gated });
+  await h.reply({ role: 'colleague', senderId: 'U_COLLEAGUE', voiceInput: mode === 'audio', userMessageTs: mode === 'ack' ? 'U1' : undefined,
+    result: { reply: 'PRIVATE RAW DRAFT', socialCoda: { personSlackId: 'U_COLLEAGUE', directive: { mode: 'raise_new' } } } });
+  await h.fire('coda'); assert.equal(h.count(), 1, 'composer received final context and emitted coda');
+  assert.ok(!JSON.stringify(h.mirrors).includes('PRIVATE RAW DRAFT'));
+});
+for (const mode of ['audio', 'text']) test(`delivered context: unknown ${mode} delivery never invokes composer`, async () => {
+  const h = harness({ audioUnknown: mode === 'audio' });
+  await h.reply(mode === 'audio' ? { voiceInput: true } : { say: async () => undefined });
+  await h.fire('coda'); assert.equal(h.composeCalls, 0); assert.equal(h.stamps.length, 0);
+});
+
+for (const mode of ['text', 'audio', 'ack']) test(`integrated real composer: ${mode} captures gated reply and preserves completed-work coda`, async () => {
+  const gated = mode === 'ack' ? 'Done' : 'Booked the meeting.';
+  const h = harness({ realComposer: true, gatedReply: gated });
+  await h.reply({ voiceInput: mode === 'audio', userMessageTs: mode === 'ack' ? 'U1' : undefined });
+  await h.fire('coda');
+  assert.equal(h.composerPrompts.length, 1);
+  assert.ok(h.composerPrompts[0].includes(JSON.stringify(gated)));
+  assert.ok(!h.composerPrompts[0].includes('Work answer ready.'));
+  assert.equal(h.count(), 1); assert.equal(h.categoryRaises.length, 1);
+});
+test('integrated real composer: empty semantic verdict stays silent without delivery charge', async () => {
+  const h = harness({ realComposer: true, gatedReply: 'Chris has a conflict; check with him before adding him.', emptySentence: true });
+  await h.reply(); await h.fire('coda');
+  assert.equal(h.composerPrompts.length, 1);
+  assert.ok(h.composerPrompts[0].includes('A statement can leave work unresolved without a question mark'));
+  assert.ok(h.composerPrompts[0].includes('A shared first name is not evidence'));
+  assert.equal(h.count(), 0); assert.equal(h.stamps.length, 0); assert.equal(h.categoryRaises.length, 0);
 });

@@ -153,12 +153,18 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
           const isInternal = !!(ownerDomain && senderDomain && senderDomain === ownerDomain);
           if (isInternal) {
             const senderName = senderUser?.real_name || senderUser?.name || message.user;
+            const autoMoveRequestId = !isMpim
+              ? await import('../../../db/jobs')
+                .then(db => db.getAutoMoveRequestIdForOutreachThread(profile.user.slack_user_id, message.user!, channelId, threadTs))
+                .catch(() => null)
+              : null;
             await shadowNotify(profile, {
               channel: channelId,
               threadTs,
               action: 'Image forwarded',
               detail: 'sent an image',
               conversationKey: threadTs,
+              autoMoveRequestId: autoMoveRequestId ?? undefined,
               conversationHeader: `Conversation with ${senderName}`,
               attachments: imageUrls.map(u => ({ sourceUrl: u })),
             });

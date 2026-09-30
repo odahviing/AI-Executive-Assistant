@@ -757,10 +757,16 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // verdict (meetings.ts's own field: true / 'partial' / false /
         // 'needs_approval') so a "he's free then" claim can be verified the
         // same way a find_available_slots claim can.
-        const meetingStart = typeof input.meeting_start === 'string' ? input.meeting_start : '';
-        const when = meetingStart ? `${meetingStart.slice(0, 10)} ${meetingStart.slice(11, 16)}` : '?';
-        const canJoin = (result && typeof result === 'object') ? (result as { can_join?: unknown }).can_join : undefined;
-        return `[check_join_availability ${when}: can_join=${String(canJoin ?? 'unknown')}]`;
+        const r = result && typeof result === 'object'
+          ? result as { can_join?: unknown; meeting_start?: unknown; presentation_local?: unknown } : {};
+        // Match the handler's owner-zone interpretation of naive input; retain
+        // the checked offset and its computed presentation instead of making
+        // the grounding model infer a timezone from an unlabelled clock.
+        const meetingStart = typeof r.meeting_start === 'string' ? r.meeting_start
+          : typeof input.meeting_start === 'string' ? input.meeting_start : '';
+        const at = DateTime.fromISO(meetingStart, { zone: ownerTz }).setZone(ownerTz);
+        const when = at.isValid ? `${at.toISO()} ${ownerTz}` : '?';
+        return `[check_join_availability ${when}${localSuffix(r.presentation_local)}: can_join=${String(r.can_join ?? 'unknown')}]`;
       }
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;

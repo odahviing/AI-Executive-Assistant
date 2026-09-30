@@ -9,6 +9,7 @@ import { SchedulingSkill as _LegacyOpsSkill } from './meetings/ops';
 import { withCalendarOfflineRefusal } from './meetings/calendarOffline';
 import logger from '../utils/logger';
 import { DateTime } from 'luxon';
+import { renderClockInZone } from '../utils/timezoneConvert';
 import { calendarListingFormatRule } from '../utils/calendarListingFormat';
 import { checkSlot, occupancyRoleOf } from '../utils/scheduleRules';
 import { displaySubject, subjectViewerFor, viewerEmailFor, PRIVATE_MASK } from '../utils/displaySubject';
@@ -56,7 +57,7 @@ Reply phrasing when available:
 - WRONG: "Want me to add him to the invite?" (Maelle doesn't own the meeting, can't add)
 - WRONG: "I'll add him." (same — not hers to do)
 
-Results:
+Results include meeting_start, meeting_timezone and code-rendered presentation_local. Quote presentation_local verbatim for the checked time in every verdict; use the rendered field instead of timezone arithmetic.
 - Free → confirm availability, tell the colleague to send the invite themselves
 - Partially free → offer partial join (first or last N minutes), same ownership rule
 - Blocked by scheduling rule (lunch, travel buffer) → escalate to owner with context
@@ -70,6 +71,7 @@ If the meeting is NOT yet booked and they need to find a time together, use find
               type: 'string',
               description: 'Meeting start time in ISO format (e.g. "2026-04-14T14:00:00"). Convert relative times ("Tuesday at 2pm") to ISO before calling.',
             },
+            present_in_timezone: { type: 'string', description: 'Optional IANA timezone for the reply clock, e.g. America/New_York. Set when a specific zone is requested; quote returned presentation_local verbatim. Defaults to the owner timezone.' },
             duration_min: { type: 'number', description: 'Meeting duration in minutes' },
             subject: { type: 'string', description: 'What the meeting is about' },
             reason: { type: 'string', description: 'Why should the owner join — context from the requester' },
@@ -613,6 +615,19 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         if (!startDt.isValid) {
           return { error: 'Could not parse meeting_start. Use ISO format like "2026-04-14T14:00:00".' };
         }
+        const presentationZone = typeof args.present_in_timezone === 'string'
+          ? args.present_in_timezone.trim() || timezone : timezone;
+        const presentationLocal = renderClockInZone(startDt.toISO()!, timezone, presentationZone);
+        if (!presentationLocal) {
+          return { error: 'Could not resolve present_in_timezone. Use an IANA timezone.' };
+        }
+        // Preserve the checked instant and code-rendered clock through every verdict.
+        // Output gates must compare these fields rather than infer timezone math.
+        const checkedTime = {
+          meeting_start: startDt.toISO()!,
+          meeting_timezone: timezone,
+          presentation_local: presentationLocal,
+        };
         const endDt = startDt.plus({ minutes: durationMin });
         const dayStr = startDt.toFormat('yyyy-MM-dd');
         const timeStr = startDt.toFormat("EEEE, d MMMM 'at' HH:mm");
@@ -784,7 +799,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
                   { start: meetingStartMs, end: meetingEndMs },
                 );
                 if (aligned === null) return {
-                  can_join: false, needs_owner_decision: true, time: timeStr,
+                  can_join: false, needs_owner_decision: true, time: timeStr, ...checkedTime,
                   blocks_moved: movesDone.length > 0 ? movesDone : undefined,
                   message: 'Making room requires rearranging other calendar events. Please ask the owner whether to rearrange them before confirming attendance.',
                 };
@@ -828,7 +843,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             : '';
           return {
             can_join: true,
-            time: timeStr,
+            time: timeStr, ...checkedTime,
             duration_min: durationMin,
             subject,
             blocks_moved: movesDone.length > 0 ? movesDone : undefined,
@@ -879,7 +894,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           if (partialOptions.length > 0) {
             return {
               can_join: 'partial',
-              time: timeStr,
+              time: timeStr, ...checkedTime,
               duration_min: durationMin,
               subject,
               conflict_with: busyInMeeting.map(b => b.subject).join(', '),
@@ -902,7 +917,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           return {
             can_join: false,
             reason: 'busy',
-            time: timeStr,
+            time: timeStr, ...checkedTime,
             subject,
             conflict_with: directConflicts.map((ev, i) =>
               `"${conflictNames[i]}" (${evTime(ev.start).toFormat('HH:mm')}–${evTime(ev.end).toFormat('HH:mm')})`
@@ -922,7 +937,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
           return {
             can_join: false,
             reason: 'busy',
-            time: timeStr,
+            time: timeStr, ...checkedTime,
             subject,
             conflict_with: held?.subject,
             // An all-day OOF is not "he has something at that time", it is
@@ -959,7 +974,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
         const joinViolation = joinCheck.violation_label ?? 'one of his scheduling rules';
         return {
           can_join: 'needs_approval',
-          time: timeStr,
+          time: timeStr, ...checkedTime,
           duration_min: durationMin,
           subject,
           reason,

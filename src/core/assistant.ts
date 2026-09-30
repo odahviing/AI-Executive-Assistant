@@ -48,36 +48,19 @@ function describeCoreWrites(
   };
 }
 
-/**
- * The honest half of an HOURS write. `working_hours` (prose) stays on the row
- * as the record of what was said, but nothing acts on it: scheduling reads
- * `working_hours_structured` and then the timezone default
- * (getEffectiveWorkingHours, utils/workingHoursDefault.ts), the colleague
- * context block skips it on purpose (#135, db/people.ts), and the owner roster
- * line and get_person_memory render the EFFECTIVE window in its place
- * (describeEffectiveWorkingHours — the same shape echoed here). A prose-only
- * write therefore leaves every slot search exactly where it was — and a plain
- * "noted" reads to the owner as "in force" (Lori Sarsfield, 2026-09-09: "East
- * Coast, Wed/Fri 7am–4pm" stored as text, still clipped to the 09:00–17:00
- * default, owner told "Got it, noted"). So read the row back AFTER the write
- * and report the window scheduling will actually use, and whether the hours
- * just received ARE that window. The signal is which field landed, never the
- * message text (W4).
- */
+/** Echo the effective reader; only the store outcome confirms this attempted write. */
 function describeHoursWrite(
   personId: string,
   args: Record<string, unknown>,
   name: string,
+  outcome?: CoreFieldWrite,
 ): { scheduling_hours?: Record<string, unknown>; notes: string[] } {
   const prose = typeof args.working_hours === 'string' && args.working_hours.trim() !== '';
-  // Anything non-null counts as an ATTEMPT: updatePersonProfileById stores a
-  // malformed value as-is and getEffectiveWorkingHours then ignores it, so the
-  // attempt must be reported as not landed rather than passed over.
   const structured = args.working_hours_structured != null;
   if (!prose && !structured) return { notes: [] };
   const row = getPersonById(personId);
   const eff = row ? describeEffectiveWorkingHours(row) : null;
-  if (structured && eff?.source === 'manual') {
+  if (structured && (outcome === 'applied' || outcome === 'already_set') && eff) {
     return {
       scheduling_hours: { in_force: true, ...eff },
       notes: [`${name}'s stated hours are in force: slot searches now clip to ${eff.window}.`],
@@ -94,9 +77,9 @@ function describeHoursWrite(
     },
     notes: [
       structured
-        ? `working_hours_structured for ${name} did NOT land — it needs a non-empty workdays[] plus hoursStart/hoursEnd as HH:MM. Slot searches still use ${still}.`
+        ? `working_hours_structured for ${name} was not confirmed as saved (${outcome ?? "no write outcome"}). Slot searches still use ${still}.`
         : `${name}'s working_hours landed as a NOTE only — no scheduling path reads that text, so slot searches still use ${still}.`,
-      `Do not report these hours as set or honoured — say they're noted and that scheduling is unchanged. If they fit ONE window (one set of workdays, one start, one end), call again with working_hours_structured to put them in force; if they differ by day, say plainly that the store holds a single window per person today.`,
+      'Use working_hours_structured for stated clock windows, including dayOverrides for individual weekdays. Ask for exact start and end clocks for vague hours such as Tuesday nights; retain unspecified days and defaults.',
     ],
   };
 }
@@ -267,7 +250,7 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
             },
             working_hours_structured: {
               type: 'object',
-              description: 'The working window in force: slot searches clip to it and the contacts list shows it as their hours (until it is set, a timezone default stands in, marked as such). Save it when the owner or the person states the hours, or a strong signal gives them (calendar invite metadata); the result echoes the window now in force.',
+              description: 'The working window in force: slot searches clip to it and the contacts list shows it as their hours (until it is set, a timezone default stands in, marked as such). Save it when the owner or the person states the hours, or a strong signal gives them (calendar invite metadata); the result confirms the write outcome and echoes the effective window. Send only dayOverrides for individual weekdays; unspecified days, sibling overrides and defaults are retained. Ask for exact start and end clocks for vague hours such as Tuesday nights. Windows must end after they start on the same day.',
               properties: {
                 workdays: {
                   type: 'array',
@@ -276,9 +259,20 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
                 },
                 hoursStart: { type: 'string', description: 'HH:MM in their local time. e.g. "09:00".' },
                 hoursEnd:   { type: 'string', description: 'HH:MM in their local time. e.g. "18:00".' },
+                dayOverrides: {
+                  type: 'object',
+                  description: 'Partial weekday map. Send only stated days; the store merges them with existing hours or timezone defaults.',
+                  properties: Object.fromEntries(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map(day => [day, {
+                    type: 'object', properties: {
+                      hoursStart: { type: 'string', description: 'Exact local HH:MM start.' },
+                      hoursEnd: { type: 'string', description: 'Exact local HH:MM end, later than start.' },
+                    }, required: ['hoursStart', 'hoursEnd'], additionalProperties: false,
+                  }])),
+                  additionalProperties: false,
+                },
                 timezone:   { type: 'string', description: 'Optional IANA TZ — only set if it differs from their people_memory.timezone (rare). e.g. "America/New_York".' },
               },
-              required: ['workdays', 'hoursStart', 'hoursEnd'],
+              additionalProperties: false,
             },
             role_summary: {
               type: 'string',
@@ -1325,7 +1319,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           if (notSavedFields.length) described.not_saved = [...(described.not_saved ?? []), ...notSavedFields];
           if (emailConflict) described.not_saved = [...(described.not_saved ?? []), 'email'];
           if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
-          const hours = describeHoursWrite(personId, args, target.name);
+          const hours = describeHoursWrite(personId, args, target.name, profileWrites.working_hours_structured);
           const allNotes = [...described.notes, ...hours.notes, ...extraNotes, ...travelNotes];
           const mirrorSynced = await syncPersonOperationalSections(context.profile, personId, Object.keys(args));
           if (!mirrorSynced) allNotes.push('Structured facts were retained, but the markdown mirror could not be refreshed. Retry the same profile update to refresh it.');
@@ -1532,7 +1526,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         notes.push(...described.notes);
         notes.push(...travelNotes);
 
-        const hours = describeHoursWrite(target.personId, args, target.name);
+        const hours = describeHoursWrite(target.personId, args, target.name, profileWrites.working_hours_structured);
         if (hours.scheduling_hours) base.scheduling_hours = hours.scheduling_hours;
         notes.push(...hours.notes);
 

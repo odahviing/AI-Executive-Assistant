@@ -8,12 +8,21 @@ const srcRoot = at < 0 ? root : path.resolve(process.argv[at + 1]);
 const source = fs.readFileSync(path.join(srcRoot, 'src/skills/meetings.ts'), 'utf8');
 const noop = () => {};
 let skill;
+const timezoneModule = { exports: {} };
+const timezoneJs = ts.transpileModule(fs.readFileSync(path.join(srcRoot, 'src/utils/timezoneConvert.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+}).outputText;
+vm.runInNewContext(`(function(require,module,exports){${timezoneJs}\n})`, {})(id => {
+  assert.equal(id, 'luxon', `Unexpected timezone helper dependency ${id}`);
+  return require('luxon');
+}, timezoneModule, timezoneModule.exports);
 const deps = {
   '../connectors/graph/calendar': {},
   './meetings/ops': { SchedulingSkill: class {} },
   './meetings/calendarOffline': {},
   '../utils/logger': { __esModule: true, default: { info: noop, warn: noop } },
   luxon: require('luxon'),
+  '../utils/timezoneConvert': timezoneModule.exports,
   '../utils/calendarListingFormat': { calendarListingFormatRule: () => '' },
   '../utils/scheduleRules': {}, '../utils/displaySubject': {},
   './registry': { getSkillTools: (p, role, scopes, channel) => skill.getTools(p).filter(t => channel !== 'email' || ['create_meeting','find_available_slots'].includes(t.name)) },

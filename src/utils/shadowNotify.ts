@@ -16,7 +16,9 @@ import { getOrCreateOwnerDailyThread } from './ownerDailyThread';
  * If the originating channel is not the owner's DM, we redirect to the
  * owner's DM instead. Colleagues must NEVER see shadow/debug messages.
  *
- * Where in the owner's DM (three routes, first match wins):
+ * Where in the owner's DM (first match wins):
+ *   0. `autoMoveRequestId` — a verified durable auto-move notice root, or a
+ *      follow-up beneath it. Only `autoMoveRoot` may create that root.
  *   1. `conversationKey` — one owner-DM thread per conversation ("Conversation
  *      with X"), anchored on the first shadow for that key.
  *   2. caller's `channel` + `threadTs` IS the owner's own DM thread — post there,
@@ -70,6 +72,13 @@ export async function shadowNotify(
      * dispatchers without a conversation context) — those go to the owner's daily thread.
      */
     conversationKey?: string;
+    /** Verified auto-move association from the producer or outreach reader. */
+    autoMoveRequestId?: string;
+    /** Producer only: create the move notice before colleague notifications.
+     * Existing confirmed roots are not resent. Never retry an unknown send;
+     * absent persisted pointers do not prove that delivery was not attempted.
+     */
+    autoMoveRoot?: boolean;
     /**
      * v2.3.2 — optional one-line header for the FIRST shadow on a new
      * conversation key. Renders as a top-level "🔍 *Conversation header*"
@@ -105,6 +114,49 @@ export async function shadowNotify(
   try {
     const icon = params.icon ?? '🔍';
     const text = `${icon} _*${params.action}:* ${params.detail}_`;
+
+    if (params.autoMoveRequestId) {
+      // Lazy import keeps unrelated shadows independent of the request store.
+      const { getRequest, updateRequest } = require('../db/requests') as typeof import('../db/requests');
+      const move = getRequest(params.autoMoveRequestId);
+      const validMove = move && move.owner_user_id === ownerId && move.kind === 'follow_up'
+        && move.subkind === 'auto_move' && move.initiated_by_role === 'system';
+      const ownerDm = await conn.resolveDirectChannelId?.(ownerId);
+      if (validMove && ownerDm) {
+        const anchor = move.owner_dm_channel === ownerDm ? move.owner_dm_thread_ts : null;
+        if (anchor) {
+          if (params.autoMoveRoot) return; // Confirmed root already exists, including after restart.
+          const res = await conn.postToChannel(ownerDm, text, { threadTs: anchor, attachments: params.attachments });
+          if (res.ok) {
+            recordShadowInHistory(anchor, ownerDm, text, res.ts, params.action);
+            if (res.attachments_failed) logger.warn('shadowNotify auto-move attachment upload failed', { action: params.action, attachments_failed: res.attachments_failed });
+          } else {
+            logger.warn('shadowNotify auto-move follow-up unconfirmed; not retrying', { action: params.action, reason: res.reason });
+          }
+          return; // An attempted send is never retried as a new root.
+        }
+        if (params.autoMoveRoot) {
+          const res = await conn.sendDirect(ownerId, text, { attachments: params.attachments });
+          if (res.ok && res.ref === ownerDm && res.ts) {
+            // Persist only the Connection-confirmed owner DM pair. A database
+            // failure after delivery is logged by the outer catch, never resent.
+            recordShadowInHistory(res.ts, ownerDm, text, res.ts, params.action);
+            updateRequest(move.id, { ownerDmChannel: ownerDm, ownerDmThreadTs: res.ts });
+            ownerDmChannelCache.set(ownerId, ownerDm);
+            if (res.attachments_failed) logger.warn('shadowNotify auto-move root attachment upload failed', { action: params.action, attachments_failed: res.attachments_failed });
+          } else {
+            logger.warn('shadowNotify auto-move root unconfirmed; not retrying', { action: params.action });
+          }
+          return;
+        }
+      }
+      if (params.autoMoveRoot) {
+        logger.warn('shadowNotify auto-move root unavailable', { action: params.action });
+        return;
+      }
+      // Without a proven root, retain the existing owner-only shadow route.
+      // This preserves visibility without pretending an unconfirmed notice exists.
+    }
 
     // v2.3.2 — conversation-key threading takes priority. If the caller
     // tagged this shadow with a conversationKey, use the cached anchor (or

@@ -62,6 +62,8 @@ Each user is configured via a YAML file in `config/users/`. The profile defines:
 - Categories with scheduling rules (`limits.per_day`, `day_type`, `requires_travel_buffer`)
 - Priorities, VIP contacts, which skills are active
 
+Colleague availability can be updated in conversation with different same-day hours for each weekday, such as Monday 08:00–14:00 and Tuesday 10:00–16:00. Unspecified days retain their defaults; a later Tuesday update preserves the other days.
+
 ---
 
 ## Architecture — four layers
