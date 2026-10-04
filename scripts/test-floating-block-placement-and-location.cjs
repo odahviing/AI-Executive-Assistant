@@ -31,6 +31,8 @@ const ts = require('typescript');
 const luxon = require('luxon');
 const { DateTime } = luxon;
 const { test } = require('node:test');
+// Fixture events must stay future-facing independently of the execution date.
+luxon.Settings.now = () => Date.parse('2026-10-04T05:00:00Z');
 
 const rootArg = process.argv.indexOf('--source-root');
 const sourceRoot = rootArg < 0 ? path.resolve(__dirname, '..') : path.resolve(process.argv[rootArg + 1]);
@@ -552,13 +554,39 @@ function healthDetector() {
 // idan.yaml's lunch is `can_skip: true`; the D2 fixture above predates the field.
 function runHealthDetection({ events, nowIso, hasOverride = false, block = { ...lunch, can_skip: true } }) {
   const profile = { ...rebalanceProfile, meetings: { floating_blocks: [block] } };
-  return compile(healthDetector(), {
+  const previousNow = luxon.Settings.now;
+  const fixtureNow = DateTime.fromISO(nowIso, { zone }).toMillis();
+  luxon.Settings.now = () => fixtureNow;
+  try { return compile(healthDetector(), {
     DateTime, events, timezone: zone, dayStr: '2026-10-04', dayName: 'Sunday',
     nowMs: DateTime.fromISO(nowIso, { zone }).toMillis(),
     floatingBlocks: [block], fb: floatingBlocks, profile, waivedBlockGapIds: new Set(), issues: [],
     getEffectiveWorkDay: () => ({ hasOverride }),
-  }).issues;
+  }).issues; } finally { luxon.Settings.now = previousNow; }
 }
+
+test('F · an elapsed missing-block window creates no issue', () => {
+  assert.deepEqual(runHealthDetection({ events: [], nowIso: '2026-10-04T14:00:00', block: { ...lunch, can_skip: false } }), []);
+});
+
+test('E · elapsed overlapping lunch is not relocated or promised by dry run', async () => {
+  const previousNow = luxon.Settings.now;
+  luxon.Settings.now = () => Date.parse('2026-10-04T11:00:00Z');
+  graphCalls.length = 0;
+  try {
+    const result = await rebalance.rebalanceFloatingBlocksAfterMutation({
+      profile: rebalanceProfile, affectedSlotIso: '2026-10-04T12:00:00+03:00', ownerSlackId: 'U1',
+      preloadedDayEvents: [stretchedLunch, newMeeting],
+    });
+    assert.equal(graphCalls.length, 0);
+    assert.deepEqual(plain(result.moves), []);
+    const impact = await rebalance.dryRunFloatingBlockRelocation({
+      profile: rebalanceProfile, candidateStartIso: '2026-10-04T12:00:00+03:00', candidateEndIso: '2026-10-04T12:25:00+03:00',
+      preloadedDayEvents: [stretchedLunch],
+    });
+    assert.deepEqual(plain(impact), []);
+  } finally { luxon.Settings.now = previousNow; }
+});
 
 test('F4 · an early lunch that already ended is today\'s lunch, not a missing one', () => {
   const issues = runHealthDetection({

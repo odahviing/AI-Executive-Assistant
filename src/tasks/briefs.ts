@@ -4,7 +4,8 @@ import { SONNET } from '../llm/models';
 import { App } from '@slack/bolt';
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getDb, getPreferences, appendToConversation } from '../db';
+import { getDb, appendToConversation } from '../db';
+import { getBriefingRoutineHourMin } from './crons';
 import {
   getRequestsForBrief,
   markRequestSurfaced,
@@ -1061,25 +1062,7 @@ export function getBriefingWorkDays(profile: UserProfile): string[] {
 }
 
 export function getBriefingHourMin(profile: UserProfile): [number, number] {
-  const prefs = getPreferences(profile.user.slack_user_id);
-  const timePref = prefs.find(p => p.key === 'briefing_time');
-  if (timePref) {
-    const match = timePref.value.match(/\b(\d{1,2}):(\d{2})\b/);
-    if (match) return [parseInt(match[1], 10), parseInt(match[2], 10)];
-  }
-  // v2.8.1 — earliest work-hour start across all days in the canonical work_hours map.
-  const wh = profile.schedule.work_hours ?? {};
-  const allStarts: string[] = [];
-  for (const ranges of Object.values(wh)) {
-    for (const r of ranges) {
-      const m = r.match(/^(\d{2}:\d{2})-/);
-      if (m) allStarts.push(m[1]);
-    }
-  }
-  allStarts.sort();
-  const earliest = allStarts[0] ?? '09:00';
-  const [h, m] = earliest.split(':').map(Number);
-  return [h, m ?? 0];
+  return getBriefingRoutineHourMin(profile);
 }
 
 export function isWorkDay(dt: DateTime, profile: UserProfile): boolean {

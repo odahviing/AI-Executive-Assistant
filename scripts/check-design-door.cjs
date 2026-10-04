@@ -75,6 +75,14 @@ const compiledBugger = vm.compileFunction(`return (async () => {${neutralise(SRC
 
 /** Run a compiled engine with canned dispatch results. Returns {out, err, calls, logs}. */
 const makeRunner = (compiledFn) => async (args, canned) => {
+  // These existing orchestration fixtures assume their supplied work is already
+  // authorized. Supply that premise explicitly for the new build boundary.
+  // Admission refusal is tested with the real native producer and whole engines
+  // in test-workshop-intake-admission.cjs, without this synthetic adapter.
+  if (args && !Object.hasOwn(args, 'intakeAdmission')) {
+    const candidates = [args.issues, args.pieces, args.pendingOverflow, canned.editor?.issues, canned.editor?.backlogReread].filter(Array.isArray).flat()
+    args = { ...args, intakeAdmission: { version: 1, authorization: 'Synthetic fixture assumes existing owner approval.', allowFresh: true, entries: candidates.filter(i => i && (i.id || i.ref) && i.lane).map(i => ({ ref: i.id || i.ref, lane: i.lane, status: 'ready', selected: true, ...(i._ownerRuled ? { ownerRuled: i._ownerRuled, rulingToken: 'fixture-ruling' } : {}) })) } }
+  }
   const calls = []
   const logs = []
   const phases = []
@@ -1231,16 +1239,16 @@ const main = async () => {
   // anchor) and the ACTUAL exported function, not a reimplementation. `%cs` is
   // a fixed placeholder: `TZ=UTC0` does not move it, proven directly here so
   // the claim that it needed the same `%cd`+format-local swap as the other two
-  // sites is measured, not assumed. `.claude/commands/golden.md` has exactly
-  // ONE commit in its entire history (`git log --follow` confirms) and is not
-  // expected to be touched again, so its "latest touch" stays pinned to that
-  // one real, permanent commit for as long as that holds.
+  // sites is measured, not assumed. The catalog has since changed: compare its
+  // latest touch to an independently parsed ISO timestamp, not an old commit.
   const csIgnoresUtc = execFileSync('git', ['-C', ROOT, 'log', '-1', '--pretty=format:%cs', '6d9e9a85ee683bafbec8f7e8a503ad6a4b013bb1'], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC0' } }).trim()
   ok('fires on the bad input: `%cs` still renders the committer-offset day even under `TZ=UTC0` — it cannot be forced', csIgnoresUtc === '2026-08-31', csIgnoresUtc)
   const touchedReal = fileTouchDates('2026-08-01')
+  const latestGoldenIso = execFileSync('git', ['-C', ROOT, 'log', '-1', '--format=%cI', '--', '.claude/commands/golden.md'], { encoding: 'utf8' }).trim()
+  const expectedGoldenDay = new Date(latestGoldenIso).toISOString().slice(0, 10)
   ok(
-    "stays silent on the good one: fileTouchDates resolves this real commit to its UTC day (2026-08-30), not the committer-offset day",
-    touchedReal && touchedReal.get('.claude/commands/golden.md') === '2026-08-30',
+    "stays silent on the good one: fileTouchDates resolves the actual latest commit to its independently computed UTC day",
+    touchedReal && touchedReal.get('.claude/commands/golden.md') === expectedGoldenDay,
     touchedReal && touchedReal.get('.claude/commands/golden.md'),
   )
 

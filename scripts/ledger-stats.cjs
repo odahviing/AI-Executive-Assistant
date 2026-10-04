@@ -235,6 +235,17 @@ const openOnly = argv.includes('--open');
 // what a person reads and what `--wrap` cross-references.
 const jsonOut = argv.includes('--json');
 let verificationFailed = false;
+if (argv.includes('--intake') || argv.includes('--batch-plan')) {
+  const intake = require('./workshop-intake.cjs');
+  try {
+    const rows = intake.read(REPO);
+    let result = argv.includes('--batch-plan') ? intake.plan(rows, REPO, JSON.parse(fs.readFileSync(argOf('--batch-plan'), 'utf8'))) : intake.view(rows, REPO);
+    if (argv.includes('--intake') && argOf('--ref')) result = { items: [...result.items, ...result.closed].filter(r => normRef(r.ref) === normRef(argOf('--ref'))) };
+    else if (argv.includes('--intake')) result = { counts: result.counts, items: result.items.map(r => ({ ref: r.ref, lane: r.lane || '', type: r.intake?.type || 'backlog', status: r.status, finding: r.finding, reason: r.currentReason || r.intake?.reason || '', examples: r.examples.length })), verified: result.verified.map(r => ({ ref: r.ref, attemptId: r.evidence?.attemptId })) };
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.blocked?.length ? 1 : 0);
+  } catch (e) { console.error(e.message); process.exit(1); }
+}
 
 // Completion is a code gate for direct dispatches and either engine. Reports
 // may describe blocked work, but cannot exit green while a pass is absent/stale.
@@ -278,13 +289,19 @@ if (argv.includes('--architect')) {
   // read as an anonymous one and `architect-file.cjs`'s clash check would lose the
   // text it matches against. Spreading keeps the history and lets the writer append
   // four fields instead of copying the whole row back into the file.
+  const { hydrate } = require('./architect-file.cjs');
   const latest = new Map();
-  for (const r of all) latest.set(r.id, { ...(latest.get(r.id) || {}), ...r });
+  for (const r of all) latest.set(r.id, { ...(latest.get(r.id) || {}), ...hydrate(r) });
   const rows = [...latest.values()];
   // X78 · which verdicts CLOSE a row is defined once, by the only thing that can
   // write one. This file kept its own copy and the two had drifted already.
-  const { CLOSED } = require('./architect-file.cjs');
-  const open = rows.filter((r) => !CLOSED.has(r.verdict));
+  const { isClosed, currentVerdict } = require('./architect-file.cjs');
+  const open = rows.filter((r) => !isClosed(r));
+  for (const r of rows) r.verdict = currentVerdict(r);
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ open: open.length, closed: rows.length - open.length, items: rows }));
+    process.exit(0);
+  }
   const p = (s, n) => String(s).padEnd(n);
 
   // X38 · The ledger is append-only and a target label is not worth breaking
@@ -340,7 +357,7 @@ if (argv.includes('--architect')) {
     byTarget.get(t).push(r);
   }
   console.log(
-    `\nOPEN — ${open.length} awaiting triage or approval · ${aN('still-real')} still-real · ${aRecheck.length} need a re-read (${aN('moved')} moved · ${aN(
+    `\nOPEN — ${open.length} awaiting triage, implementation or independent review · ${aN('still-real')} still-real · ${aRecheck.length} need a re-read (${aN('moved')} moved · ${aN(
       'unexamined',
     )} never examined) · ${aNoCite.length} cite no file` + (aTouched ? '' : ' (no git history — `moved` NOT CHECKED; `never examined` is unaffected)'),
   );
@@ -352,6 +369,7 @@ if (argv.includes('--architect')) {
       const b = aBucket.get(r.id);
       console.log(`  ${p(r.id, 5)} ${p(REREAD.has(b) ? 'RE-READ' : r.verdict, 10)} ${String(r.finding).slice(0, 96)}`);
       if (r.evidence) console.log(`        ${String(r.evidence).slice(0, 96)}`);
+      if (r.implementation) console.log(`        ${r.verdict}: ${r.implementation.attemptId}${r.review ? ` — ${r.review.reason}` : ' — awaiting independent review'}`);
       if (b === 'moved') console.log(`        ! ${s.which} changed ${s.movedOn}, this row was written ${r.date}`);
       if (b === 'unexamined') console.log(`        ! never re-read — filed ${r.date || '(no date)'}, and nobody has opened it since`);
       // X47 · somebody looked and it was still real. Printed with its date, so a
@@ -889,6 +907,106 @@ if (argOf('--wrap')) {
   process.exit(verificationFailed ? 1 : 0);
 }
 
+function checkWrapMarkers() {
+  let bad = 0;
+  const isPipe = l => /^\s*\|/.test(String(l));
+  const isSep = l => /^\s*\|[\s|:—–-]*\|\s*$/.test(String(l)) && /-/.test(String(l));
+  // ── X103 · BOTH WRAP MARKERS, CHECKED AGAINST THE ONE THING THAT CANNOT DRIFT ──
+  // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7
+  // wraps skipped it — it stood at 4.3.7 while 4.3.8 and 4.4.0 shipped) and the
+  // `runId: wrap-<version>` ledger stamp (2 of 7). A skipped stamp is not
+  // cosmetic — it silently OVER-SCOPES both readers: `cleaner.md` C4 re-scans
+  // commits it has already judged, and the built-list check above counts every
+  // `built` row back to the last stamp, which is how it reported 42.
+  //
+  // The release commit is the fact both markers describe, and git already has it,
+  // so this compares them against it rather than adding a third marker.
+  const lastRelease = (() => {
+    try {
+      const out = require('child_process')
+        .execFileSync('git', ['-C', REPO, 'log', '-40', '--date=iso-strict', '--format=%h|%ad|%s'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .split(/\r?\n/);
+      for (const l of out) {
+        const [sha, date, ...rest] = l.split('|');
+        const subject = rest.join('|');
+        const v = (subject.match(/^(\d+\.\d+\.\d+)\b/) || [])[1];
+        // X153 · a wrap's OWN bookkeeping commit ("4.4.6 bookkeeping:
+        // stamp the release") also starts with the version number, and `git log`
+        // is newest-first — so on every wrap this loop hit the bookkeeping commit
+        // BEFORE the real release and reported `lastWrapIso` as stale by however
+        // many seconds separate the two, forever. This was already found once and
+        // "fixed" by convention alone (db43fc0 deliberately dropped the version
+        // from its OWN subject, and said so) — a convention that regressed on the
+        // very next wrap (4414ea3) because nothing enforced it. Skip a bookkeeping
+        // subject here instead: it is the one place the loop can hold the line
+        // regardless of what a commit message happens to say.
+        if (v && !/\bbookkeeping\b/i.test(subject)) return { sha, date, v, subject };
+      }
+    } catch {
+      /* no git history — nothing to compare against */
+    }
+    return null;
+  })();
+  if (lastRelease) {
+    let stampedIso = null;
+    try {
+      stampedIso = JSON.parse(fs.readFileSync(path.join(REPO, '.claude', 'agent-loop', 'state.json'), 'utf8')).lastWrapIso || null;
+    } catch {
+      /* reported below as absent */
+    }
+    const wrapRunIds = new Set();
+    if (fs.existsSync(LEDGER))
+      for (const t of fs.readFileSync(LEDGER, 'utf8').split(/\r?\n/)) {
+        const s = t.trim();
+        if (!s) continue;
+        try {
+          const r = JSON.parse(s);
+          if (/^wrap-/.test(String(r.runId || ''))) wrapRunIds.add(String(r.runId).slice(5));
+        } catch {
+          /* the main reader counts unparseable lines */
+        }
+      }
+    // X123 · THE ROW STAMP IS OWED ONLY BY A WRAP THAT HAD ROWS TO APPEND. The
+    // marker rides ON the rows, so a wrap whose report was already empty has
+    // nowhere to write it — and an empty report is a legitimate wrap, which is
+    // exactly what 4.4.1 was. Asked unconditionally, this exited 1 forever on a
+    // correctly executed wrap: a check that cannot pass on a valid input is the
+    // same family as one that passes on known-bad input.
+    //
+    // NO FOURTH MARKER (X103 found the three that exist already disagree). What
+    // was owed is derived from the artifact the wrap consumed: the report as it
+    // stood in the release commit's PARENT, before step 9 emptied it. Rows there
+    // and no stamp = they were appended unstamped. No rows there = nothing owed.
+    const rowsAtWrap = (() => {
+      try {
+        const l = require('child_process')
+          .execFileSync('git', ['-C', REPO, 'show', `${lastRelease.sha}^:.claude/agent-loop/report.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+          .split(/\r?\n/);
+        return l.filter((x, i) => isPipe(x) && !isSep(x) && !isSep(l[i + 1])).length;
+      } catch {
+        return 0; // no report at that commit — nothing could have been appended from it
+      }
+    })();
+    const isoBehind = !stampedIso || new Date(stampedIso) < new Date(lastRelease.date);
+    const ledgerBehind = rowsAtWrap > 0 && !wrapRunIds.has(lastRelease.v);
+    if (isoBehind || ledgerBehind) {
+      console.log(`\n  ! WRAP MARKER(S) SKIPPED — the newest release commit is ${lastRelease.sha} \`${lastRelease.v}\` at ${lastRelease.date}:`);
+      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C4 scopes off this, so the next cleaner re-scans commits it already judged. Set it to \`git log -1 --date=iso-strict --format=%ad\`.`);
+      if (ledgerBehind)
+        console.log(
+          `      the report held ${rowsAtWrap} row(s) at ${lastRelease.sha}^ and NO ledger row is stamped \`runId: wrap-${lastRelease.v}\` — they were appended unstamped, so \`--wrap ${lastRelease.v}\` cannot name them and the built-list count above reaches back past the release. Stamp \`runId:"wrap-<version>"\` on every row appended.`,
+        );
+      bad += 1;
+    } else if (rowsAtWrap) {
+      console.log(`\n  wrap markers: both current at \`${lastRelease.v}\` (${lastRelease.sha}) · ${rowsAtWrap} report row(s) appended and stamped   ok`);
+    } else {
+      console.log(`\n  wrap markers: lastWrapIso current at \`${lastRelease.v}\` (${lastRelease.sha}) · no row stamp owed — the report was already empty at ${lastRelease.sha}^   ok`);
+    }
+  }
+
+  return bad;
+}
+
 // ── X27 · DOES THE REPORT'S OWN ARITHMETIC ADD UP? ──────────────────────────
 // Reads `report.md` and checks the numbers it asserts about ITSELF: every group
 // heading's count against the rows beneath it, the headline's "N rows await you"
@@ -909,6 +1027,15 @@ if (argv.includes('--report')) {
   if (!fs.existsSync(RP)) {
     console.error(`\nNo report at ${RP}\n`);
     process.exit(1);
+  }
+  const rawReport = fs.readFileSync(RP, 'utf8');
+  if (rawReport.startsWith('<!-- workshop-ledger-report-v1 -->') || readVerificationRows(LEDGER).some(r => r.intake || r.capture)) {
+    const intake = require('./workshop-intake.cjs');
+    const expected = intake.render(readVerificationRows(LEDGER), REPO);
+    const current = rawReport.replace(/\r\n/g, '\n') === expected;
+    console.log(current ? 'REPORT — exact ledger projection; every open ref and verified claim reconciled' : 'REPORT STALE — missing, extra or stale items/counts; run ledger-file.cjs --sync-report');
+    const markers = checkWrapMarkers();
+    process.exit(current && !markers ? 0 : 1);
   }
   const lines = fs.readFileSync(RP, 'utf8').split(/\r?\n/);
   const isPipe = (l) => /^\s*\|/.test(String(l));
@@ -1182,98 +1309,7 @@ if (argv.includes('--report')) {
       }. Not a failure: only the run's own manifest knows how many pairs it had.`,
     );
   }
-  // ── X103 · BOTH WRAP MARKERS, CHECKED AGAINST THE ONE THING THAT CANNOT DRIFT ──
-  // The wrap sets two markers and nothing read either: `state.lastWrapIso` (5 of 7
-  // wraps skipped it — it stood at 4.3.7 while 4.3.8 and 4.4.0 shipped) and the
-  // `runId: wrap-<version>` ledger stamp (2 of 7). A skipped stamp is not
-  // cosmetic — it silently OVER-SCOPES both readers: `cleaner.md` C4 re-scans
-  // commits it has already judged, and the built-list check above counts every
-  // `built` row back to the last stamp, which is how it reported 42.
-  //
-  // The release commit is the fact both markers describe, and git already has it,
-  // so this compares them against it rather than adding a third marker.
-  const lastRelease = (() => {
-    try {
-      const out = require('child_process')
-        .execFileSync('git', ['-C', REPO, 'log', '-40', '--date=iso-strict', '--format=%h|%ad|%s'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-        .split(/\r?\n/);
-      for (const l of out) {
-        const [sha, date, ...rest] = l.split('|');
-        const subject = rest.join('|');
-        const v = (subject.match(/^(\d+\.\d+\.\d+)\b/) || [])[1];
-        // X153 · a wrap's OWN bookkeeping commit ("4.4.6 bookkeeping:
-        // stamp the release") also starts with the version number, and `git log`
-        // is newest-first — so on every wrap this loop hit the bookkeeping commit
-        // BEFORE the real release and reported `lastWrapIso` as stale by however
-        // many seconds separate the two, forever. This was already found once and
-        // "fixed" by convention alone (db43fc0 deliberately dropped the version
-        // from its OWN subject, and said so) — a convention that regressed on the
-        // very next wrap (4414ea3) because nothing enforced it. Skip a bookkeeping
-        // subject here instead: it is the one place the loop can hold the line
-        // regardless of what a commit message happens to say.
-        if (v && !/\bbookkeeping\b/i.test(subject)) return { sha, date, v, subject };
-      }
-    } catch {
-      /* no git history — nothing to compare against */
-    }
-    return null;
-  })();
-  if (lastRelease) {
-    let stampedIso = null;
-    try {
-      stampedIso = JSON.parse(fs.readFileSync(path.join(REPO, '.claude', 'agent-loop', 'state.json'), 'utf8')).lastWrapIso || null;
-    } catch {
-      /* reported below as absent */
-    }
-    const wrapRunIds = new Set();
-    if (fs.existsSync(LEDGER))
-      for (const t of fs.readFileSync(LEDGER, 'utf8').split(/\r?\n/)) {
-        const s = t.trim();
-        if (!s) continue;
-        try {
-          const r = JSON.parse(s);
-          if (/^wrap-/.test(String(r.runId || ''))) wrapRunIds.add(String(r.runId).slice(5));
-        } catch {
-          /* the main reader counts unparseable lines */
-        }
-      }
-    // X123 · THE ROW STAMP IS OWED ONLY BY A WRAP THAT HAD ROWS TO APPEND. The
-    // marker rides ON the rows, so a wrap whose report was already empty has
-    // nowhere to write it — and an empty report is a legitimate wrap, which is
-    // exactly what 4.4.1 was. Asked unconditionally, this exited 1 forever on a
-    // correctly executed wrap: a check that cannot pass on a valid input is the
-    // same family as one that passes on known-bad input.
-    //
-    // NO FOURTH MARKER (X103 found the three that exist already disagree). What
-    // was owed is derived from the artifact the wrap consumed: the report as it
-    // stood in the release commit's PARENT, before step 9 emptied it. Rows there
-    // and no stamp = they were appended unstamped. No rows there = nothing owed.
-    const rowsAtWrap = (() => {
-      try {
-        const l = require('child_process')
-          .execFileSync('git', ['-C', REPO, 'show', `${lastRelease.sha}^:.claude/agent-loop/report.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-          .split(/\r?\n/);
-        return l.filter((x, i) => isPipe(x) && !isSep(x) && !isSep(l[i + 1])).length;
-      } catch {
-        return 0; // no report at that commit — nothing could have been appended from it
-      }
-    })();
-    const isoBehind = !stampedIso || new Date(stampedIso) < new Date(lastRelease.date);
-    const ledgerBehind = rowsAtWrap > 0 && !wrapRunIds.has(lastRelease.v);
-    if (isoBehind || ledgerBehind) {
-      console.log(`\n  ! WRAP MARKER(S) SKIPPED — the newest release commit is ${lastRelease.sha} \`${lastRelease.v}\` at ${lastRelease.date}:`);
-      if (isoBehind) console.log(`      state.lastWrapIso ${stampedIso ? `= ${stampedIso}, which is BEHIND it` : 'is ABSENT'} — cleaner.md C4 scopes off this, so the next cleaner re-scans commits it already judged. Set it to \`git log -1 --date=iso-strict --format=%ad\`.`);
-      if (ledgerBehind)
-        console.log(
-          `      the report held ${rowsAtWrap} row(s) at ${lastRelease.sha}^ and NO ledger row is stamped \`runId: wrap-${lastRelease.v}\` — they were appended unstamped, so \`--wrap ${lastRelease.v}\` cannot name them and the built-list count above reaches back past the release. Stamp \`runId:"wrap-<version>"\` on every row appended.`,
-        );
-      bad += 1;
-    } else if (rowsAtWrap) {
-      console.log(`\n  wrap markers: both current at \`${lastRelease.v}\` (${lastRelease.sha}) · ${rowsAtWrap} report row(s) appended and stamped   ok`);
-    } else {
-      console.log(`\n  wrap markers: lastWrapIso current at \`${lastRelease.v}\` (${lastRelease.sha}) · no row stamp owed — the report was already empty at ${lastRelease.sha}^   ok`);
-    }
-  }
+  bad += checkWrapMarkers();
   if (!totalRows) console.log(`\n  0 table rows — an emptied report is a valid state. Its headline must still carry the ledger's open total (\`--open\`).`);
 
   // ── X72 · THE HEADLINE'S OTHER CLAIM, and it is the only one an EMPTIED report

@@ -34,6 +34,7 @@ interface DedupResult {
   match: 'new' | 'existing';
   existing_id?: string;
   reasoning?: string;
+  material_change?: boolean;
 }
 
 const SYSTEM_PROMPT = `You judge whether a proposed new request is the SAME logical ask as an existing request, including an owner-declined request, or a genuinely new ask.
@@ -44,8 +45,10 @@ Different = different subject, different intent, or sufficient time has passed t
 
 Be conservative — when in doubt, return "new". A false-merge silently swallows a real request; a false-split surfaces a duplicate (which is annoying but recoverable).
 
+For an existing match, material_change is true if the proposed subject/description changes any requested term, constraint, reason, urgency or context the owner needs to decide. A paraphrase, translation or shortened wording with identical meaning is false. If uncertain, true. This is independent of matching the same logical request: a correction still matches it.
+
 Output strict JSON, no markdown:
-{ "match": "new" | "existing", "existing_id": "req_..." | null, "reasoning": "<one short sentence>" }`;
+{ "match": "new" | "existing", "existing_id": "req_..." | null, "material_change": true | false, "reasoning": "<one short sentence>" }`;
 
 export async function judgeRequestDedup(params: {
   proposed: { kind: string; subkind?: string | null; subject: string; description?: string | null };
@@ -72,10 +75,10 @@ export async function judgeRequestDedup(params: {
       `Proposed new request:`,
       `  kind: ${params.proposed.kind}${params.proposed.subkind ? ` / ${params.proposed.subkind}` : ''}`,
       `  subject: ${params.proposed.subject}`,
-      params.proposed.description ? `  description: ${params.proposed.description.slice(0, 400)}` : '',
+      params.proposed.description ? `  description: ${params.proposed.description}` : '',
       ``,
       `Existing requests for this (owner, requester), including prior owner refusals:`,
-      ...candidateRows.map(c => `  - id=${c.id} (${c.state}, ${c.kind}${c.subkind ? '/' + c.subkind : ''}, ${c.age_hours}h old): ${c.subject}\n    ${(params.candidates.find(row => row.id === c.id)?.description ?? '').slice(0, 400)}`),
+      ...candidateRows.map(c => `  - id=${c.id} (${c.state}, ${c.kind}${c.subkind ? '/' + c.subkind : ''}, ${c.age_hours}h old): ${c.subject}\n    ${params.candidates.find(row => row.id === c.id)?.description ?? ''}`),
       ``,
       `JSON only.`,
     ].filter(Boolean).join('\n');
@@ -96,7 +99,7 @@ export async function judgeRequestDedup(params: {
     // the gate stack does: strips fences AND tolerates trailing prose. A raw
     // JSON.parse threw on trailing prose → fell to the catch → a real "existing"
     // match was silently treated as NEW (a duplicate request). null → treat as new.
-    const parsed = parseFirstJsonObject<{ match?: string; existing_id?: string | null; reasoning?: string }>(text);
+    const parsed = parseFirstJsonObject<{ match?: string; existing_id?: string | null; material_change?: boolean; reasoning?: string }>(text);
     if (!parsed) {
       logger.warn('requestDedup — no JSON object in extractor output, treating as new');
       return fallback;
@@ -110,7 +113,7 @@ export async function judgeRequestDedup(params: {
         });
         return fallback;
       }
-      return { match: 'existing', existing_id: parsed.existing_id, reasoning: parsed.reasoning };
+      return { match: 'existing', existing_id: parsed.existing_id, material_change: parsed.material_change === false ? false : true, reasoning: parsed.reasoning };
     }
     return { match: 'new', reasoning: parsed.reasoning };
   } catch (err) {

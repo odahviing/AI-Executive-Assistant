@@ -10,6 +10,9 @@ const revision = process.argv.find(a => a.startsWith('--revision='))?.split('=')
 const compiled = new Map(), pending = [];
 const profile = { user: { slack_user_id: 'UOWNER', name: 'Owner Example', email: 'owner@example.test', timezone: 'UTC', language: 'en' }, assistant: { name: 'Maelle' }, skills: { news: false, calendar: false } };
 function loader(mocks, actual) {
+  // Composition fixtures never request a schedule; routine integration has its
+  // own SQLite suite. Refuse accidental use rather than inventing a clock.
+  mocks['src/tasks/crons.ts'] ??= { getBriefingRoutineHourMin() { throw new Error('Unexpected briefing schedule read in composition fixture'); } };
   const unexpected = [], modules = new Map(); pending.push(unexpected);
   function load(relative) {
     if (Object.hasOwn(mocks, relative)) return mocks[relative];

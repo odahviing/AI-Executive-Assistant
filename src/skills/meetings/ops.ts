@@ -5,7 +5,7 @@
  * `move_meeting`, `delete_meeting`, `update_meeting`, `get_free_busy`,
  * `find_available_slots`, `analyze_calendar`, ...) live in ./ops/handlers/*
  * (extracted v3.7.x); `executeToolCall` below is a thin dispatcher plus the
- * email-leg result scrub. The pure helpers `processCalendarEvents` /
+ * audience-scoped result payload. The pure helpers `processCalendarEvents` /
  * `analyzeCalendar` live in ./ops/analysis and are re-exported below for
  * their consumers (tasks/briefs.ts, core/orchestrator/buildTurnContext.ts);
  * the task runner's `calendar_fix` dispatcher is a retired no-op
@@ -23,7 +23,7 @@
 import type { SkillContext } from '../types';
 
 // v3.7.x (pass B) — the direct-ops case bodies now live in ./ops/handlers/*;
-// executeToolCall dispatches handlers and scopes email results before the model
+// executeToolCall dispatches handlers and scopes results before the model
 // receives them. Analysis remains a public re-export for other consumers.
 export { processCalendarEvents, analyzeCalendar } from './ops/analysis';
 import { handleFindAvailableSlots } from './ops/handlers/findAvailableSlots';
@@ -41,6 +41,7 @@ import {
 } from './ops/handlers/calendarReads';
 import type { OpCtx } from './ops/handlers/context';
 import { grantRelaxed } from './bookingRequest';
+import { OWNER_OVERRIDABLE_SEARCH_LABELS, type SearchRejectLabel } from '../../utils/scheduleRules';
 
 /**
  * Internal ops helper. Not a registered skill (see file header). MeetingsSkill
@@ -69,6 +70,47 @@ export class SchedulingSkill {
     // instead of calling it a second time and logging its decision twice.
     const relaxedGrant = toolName === 'find_available_slots' ? grantRelaxed(args, context) : undefined;
     const result = await this.dispatch(toolName, args, context, relaxedGrant);
+
+    // Search diagnostics are owner administration, not colleague availability.
+    // Keep them inside the scheduling engine; scope the existing return boundary
+    // before serialization or history capture. Approval creation independently
+    // rechecks the chosen interval and renders its reasons in the owner's DM.
+    if (toolName === 'find_available_slots' && context.senderRole !== 'owner'
+      && typeof result === 'object' && result !== null) {
+      const r = result as Record<string, unknown>;
+      const candidates = Array.isArray(r.owner_approval_candidates)
+        ? r.owner_approval_candidates as Array<Record<string, unknown>> : [];
+      const remote = candidates.filter(c => Array.isArray(c.broken_rules)
+        && c.broken_rules.length === 1 && c.broken_rules[0] === 'in_person_on_home_day');
+      if (r._must_be_owner_approval_note) {
+        r._must_be_owner_approval_note = 'These candidates require owner approval. They are in priority order; propose the FIRST one. Do NOT book directly. Raise create_approval(kind=policy_exception) with one candidate and the requester’s stated reason. Approval creation checks the reasons independently.'
+          + (remote.length ? ` These times work online with no approval: ${remote.map(c => c.label).join(', ')}. Offer online first; request approval only if in-person is required.` : '');
+      }
+      if (r._colleague_soft_block_hint) {
+        r._colleague_soft_block_hint = 'No matching confirmed option was found for some requested times. If the requester insists on a specific time, ask the owner through create_approval(kind=policy_exception); do not book directly.';
+      }
+      const scopeCandidate = (slot: Record<string, unknown>) => {
+        const privateReason = typeof slot.broken_rule === 'string'
+          && OWNER_OVERRIDABLE_SEARCH_LABELS.has(slot.broken_rule as SearchRejectLabel);
+        const needsApproval = privateReason
+          || (Array.isArray(slot.broken_rules) && slot.broken_rules.length > 0);
+        if (needsApproval) { delete slot.broken_rule; delete slot.broken_rule_label; }
+        for (const key of ['broken_rules', 'disturbs_floating_block', 'density', 'day_type']) delete slot[key];
+        if (needsApproval) slot.less_preferred_label = 'requires owner approval';
+      };
+      for (const list of [Array.isArray(result) ? result : r.slots, r.results, candidates]) {
+        if (Array.isArray(list)) for (const slot of list) scopeCandidate(slot as Record<string, unknown>);
+      }
+      if (r.preferred_slot_status && typeof r.preferred_slot_status === 'object') {
+        scopeCandidate(r.preferred_slot_status as Record<string, unknown>);
+        delete (r.preferred_slot_status as Record<string, unknown>)._note;
+      }
+      if (Array.isArray(r.day_summary)) for (const day of r.day_summary as Array<Record<string, unknown>>) {
+        if (Array.isArray(day.top_reasons)) day.top_reasons = day.top_reasons.filter(reason => !OWNER_OVERRIDABLE_SEARCH_LABELS.has(reason as SearchRejectLabel));
+      }
+      delete r._travel_buffer_note;
+      delete r._recovery_note;
+    }
 
     // o#222 / G1 (2026-08-06, owner ruling: "stay quiet ... its long strange
     // that she explains other people why I cant meet with them") — a

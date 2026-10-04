@@ -108,7 +108,36 @@ const workshopContract = (() => {
     regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
     boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
   const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
-  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema }
+  reviewSchema.properties.ownerRulingToken = { type: 'string', description: 'When checking an existing attempt after an owner answer, copy its current native rulingToken to bind this review to that answer.' }
+  // Engines receive a current native projection under the existing owner run
+  // authorization. Editor recommendations never release ledger dispositions.
+  const admissionKey = value => String(value || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
+    // Ticket identity is structured, not symptom similarity. A parent ruling
+    // covers all complaints; a complaint ruling covers itself, never siblings.
+  const identities = value => String(value || '').split(/[+,/]| and /i).map(admissionKey).filter(Boolean)
+  const parent = value => /^(\d+)(?:[-–_][a-z0-9][a-z0-9_.:>–-]*|\s+[a-z]\d+)$/.exec(value)?.[1]
+  const issueRefs = i => [...new Set([i.id, i.ref, i.matchesOpenBacklog, i.overridesDeclined].filter(text).flatMap(identities))]
+  const matchingEntries = (admission, i) => (admission?.entries || []).filter(e => identities(e.ref).some(r => issueRefs(i).some(candidate => r === candidate || r === parent(candidate) || parent(r) === candidate)))
+  const withOwnerRulings = (admission, issues) => issues.map(i => {
+    const entry = matchingEntries(admission, i).find(e => e.ownerRuled)
+    return entry ? { ...i, _ownerRuled: entry.ownerRuled, _ownerRulingToken: entry.rulingToken } : i
+  })
+  const checkAdmission = (admission, issues, protectedRefs = [], preset = false) => {
+    if (!admission || admission.version !== 1 || !text(admission.authorization) || !Array.isArray(admission.entries)) return issues.map(i => ({ ref: i.id || i.ref, reason: 'missing current native intakeAdmission; regenerate the authorized batch plan' }))
+    const entries = admission.entries
+    const protectedSet = new Set(protectedRefs.flatMap(identities))
+    return issues.flatMap(i => {
+      const refs = issueRefs(i)
+      const known = matchingEntries(admission, i)
+      const reject = reason => [{ ref: i.id || i.ref, reason }]
+      const rulings = known.filter(e => e.ownerRuled).map(e => JSON.stringify(e.ownerRuled))
+      if (new Set(rulings).size > 1 || i._ownerRuled && (!rulings.length || JSON.stringify({ askedBecause: i._ownerRuled.askedBecause, hisRuling: i._ownerRuled.hisRuling }) !== rulings[0])) return reject('owner answer is absent, conflicting or stale; use the current native ruling')
+      if (known.length) return known.every(e => (e.status === 'ready' || e.status === 'continuation' && text(e.attemptId)) && e.selected === true && e.lane === i.lane) ? [] : reject('recorded item is not selected, current ready/continuation work for this lane')
+      if (preset || refs.some(r => protectedSet.has(r) || protectedSet.has(parent(r))) || ['owner', 'backlog', 'verify'].includes(i.source) || i.intake || i.matchesOpenBacklog || i.overridesDeclined) return reject('owner/backlog/preset item needs explicit native charter assessment and selection')
+      return admission.allowFresh === true && ['github', 'logs', 'both'].includes(i.source) ? [] : reject('fresh-source work is outside this authorized run')
+    })
+  }
+  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
 const workshopReviews = new Map()
@@ -1145,10 +1174,16 @@ if (MODE === 'plan') {
 // ═══════════════════════════════════════════════════════════════════════════
 // BUILD MODE — the owner has approved specific pieces. Dispatch in dep order.
 // ═══════════════════════════════════════════════════════════════════════════
-const raw = Array.isArray(A.pieces) ? A.pieces : []
+let raw = Array.isArray(A.pieces) ? A.pieces : []
 if (!raw.length) {
   return { mode: 'build', error: 'No approved pieces. Run mode:"plan" first, get the owner\'s approval, then pass pieces:[...].' }
 }
+// Current native selection covers initial work and exact-attempt continuation.
+// An unchanged approved payload cannot release a newer ledger hold.
+const admissionBlocked = workshopContract.checkAdmission(A.intakeAdmission, raw, [], true)
+if (admissionBlocked.length) throw new Error('INTAKE ADMISSION BLOCKED — nothing dispatched: ' + JSON.stringify(admissionBlocked))
+raw = workshopContract.withOwnerRulings(A.intakeAdmission, raw)
+
 // X25 · THE READER FOR `awaitingOwner`, identical to bugger.js's guard on
 // `args.issues`. The verify's deferred asks are shaped for a paste straight back
 // into `args.pieces`, so the flag saying "the parent is still waiting on him" must
@@ -1171,7 +1206,9 @@ if (undecidedPieces.length)
 const recon = Array.isArray(A.recon) ? A.recon : []
 const approved = raw.map((p) => {
   const u = recon.find((x) => x && x.ref === p.ref)
-  return u ? { ...p, _where: { todayBehaviour: u.todayBehaviour, surfaces: u.surfaces || [] } } : p
+  const resume = A.intakeAdmission.entries.find(e => e.status === 'continuation' && [p.id, p.ref].includes(e.ref))
+  const current = resume ? { ...p, _continuation: { attemptId: resume.attemptId, verdict: resume.verdict, review: resume.review } } : p
+  return u ? { ...current, _where: { todayBehaviour: u.todayBehaviour, surfaces: u.surfaces || [] } } : current
 })
 
 const answers = A.answers || {} // owner's answers to blockingQuestions, threaded to every builder
@@ -1579,7 +1616,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
           connection: p.connection,
           expectation: p.expectation,
           productDecision: p.productDecision,
-          ...(p && p._ownerRuled ? { _ownerRuled: p._ownerRuled } : {}),
+          ...(p && p._ownerRuled ? { _ownerRuled: p._ownerRuled, ownerRulingToken: p._ownerRulingToken } : {}),
         })),
         null,
         2,
@@ -1994,8 +2031,8 @@ if (workshopUnread.length)
 if (ownSpecUnresolved)
   featureWarnings.push(
     `THIS WAVE IS NOT DONE — ${ownSpecUnresolved} piece(s) of its OWN SPEC are unresolved: ${needsOwnerRuling.length} need your ruling, ${deferredDepAsks.length} cross-lane ask(s) await routing, ${remaining.length} never dispatched, ${stillBlockedIds.size} stuck past the dependency round cap. ` +
-      `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Rule on \`needsOwnerRuling\`, then find the matching piece(s) inside \`resume.pieces\`, add \`_ownerRuled:{askedBecause, hisRuling}\` and drop \`awaitingOwner\` on each, and re-invoke ` +
-      `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon}}). ` +
+      `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Record the owner's answer with native \`--assess-file\` against the current questionToken (Manager OPERATIONS), then regenerate \`intakeAdmission\` with each current continuation attempt. Retain the full \`resume.pieces\` and drop \`awaitingOwner\` only on answered pieces. The native admission supplies the current \`_ownerRuled\` words. Re-invoke ` +
+      `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon, intakeAdmission:<current native plan>}}). ` +
       `Untouched pieces replay from cache for free — only the ruled piece and the re-verify it forces run live.`,
   )
 if (verificationPending.length) featureWarnings.push(`INDEPENDENT VERIFICATION PENDING — ${verificationPending.map(r => r.id).join(', ')}. Persist the actual independent review before wrapping; no new owner ruling is implied.`)

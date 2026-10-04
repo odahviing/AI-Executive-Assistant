@@ -90,6 +90,30 @@ export function extractCallbacks(details: Record<string, unknown> | null | undef
   return callbacks;
 }
 
+/** A timed calendar proposal stops being actionable when its proposed start
+ * arrives. Read the same callback and counter used by replay, never prose. */
+export function boundApprovalExpiry(expiresAt: string, details: Record<string, unknown>, profile: UserProfile): string {
+  try {
+    let action = extractCallbacks(details).on_approve;
+    if (!action) return expiresAt;
+    if (details.counter && typeof details.counter === 'object') {
+      action = mergeAmendIntoApprove(action, details.counter as Record<string, unknown>, profile);
+    }
+    const raw = action.tool === 'create_meeting' ? action.args.start
+      : action.tool === 'move_meeting' || action.tool === 'update_meeting' ? action.args.new_start : undefined;
+    if (typeof raw !== 'string') return expiresAt;
+    const resolved = resolveStatedInstant({ startIso: raw, statedZone: statedZoneFromArgs(action.args),
+      personTimezone: statedClockPersonContext(action.args, profile, raw), homeTz: profile.user.timezone, profile });
+    const start = DateTime.fromISO(resolved.startIso, { zone: profile.user.timezone });
+    return start.isValid && start.toMillis() < Date.parse(expiresAt) ? start.toUTC().toISO()! : expiresAt;
+  } catch (err) {
+    // A clock awaiting clarification has no known instant to cap against.
+    // Preview/replay retain their existing clarification gate and pending state.
+    if (err instanceof StatedTimeClarificationError) return expiresAt;
+    throw err;
+  }
+}
+
 /**
  * Verbalize on_approve for the owner-facing approval DM. The owner reads
  * "Approve X? — If yes, I'll [verbalized consequence]" and knows what saying

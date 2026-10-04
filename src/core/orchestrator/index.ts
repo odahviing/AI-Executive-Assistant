@@ -708,11 +708,15 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           try {
             if (input.app) {
               const { shadowNotify } = await import('../../utils/shadowNotify');
+              const { statusForTool } = await import('../../utils/toolStatusText');
+              // Outbound formatting strips internal tool names. Reuse the
+              // human-readable label and make clear this action did not run.
+              const blockedAction = statusForTool(toolUse.name, ownerFirst) || 'Requested action';
               await shadowNotify(profile, {
                 channel: input.channelId,
                 threadTs,
                 action: '⚠ Colleague tool-call flood',
-                detail: `${input.senderName ?? input.userId} tripped the broad tool-call budget (tool: ${toolUse.name}). I deflected with "let me check with ${ownerFirst}". Review the thread when you can.`,
+                detail: `${input.senderName ?? input.userId} tripped the broad tool-call budget. Blocked action: "${blockedAction}" (not executed). I deflected with "let me check with ${ownerFirst}". Review the thread when you can.`,
               });
             }
           } catch (_) {}

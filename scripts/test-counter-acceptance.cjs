@@ -4,12 +4,21 @@
  * Only the explicitly listed TypeScript modules may load; no Maelle boot, DB or network.
  */
 const assert = require('node:assert/strict');
-const { test, afterEach } = require('node:test');
+const { test, afterEach, after } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
-const { DateTime } = require('luxon');
+const { DateTime, Settings } = require('luxon');
+// These decisions occur before the fixture's September 10 meeting, regardless
+// of when the suite runs. Use one clock for timers and the elapsed replay gate.
+const priorNow = Settings.now;
+class Clock extends Date {
+  constructor(...args) { super(...(args.length ? args : ['2026-09-10T00:00:00Z'])); }
+  static now() { return Date.parse('2026-09-10T00:00:00Z'); }
+}
+Settings.now = () => Clock.now();
+after(() => { Settings.now = priorNow; });
 
 const root = path.resolve(__dirname, '..');
 const sourceRoot = process.env.MAELLE_COUNTER_SOURCE_ROOT || root;
@@ -118,7 +127,7 @@ function harness(options = {}) {
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };
     // No process, timers, filesystem, native require, or network in the module context.
-    const run = vm.runInNewContext(`(function(require,module,exports){${compiled.get(filename)}\n})`, { Date, Set, Map, console: undefined }, { filename });
+    const run = vm.runInNewContext(`(function(require,module,exports){${compiled.get(filename)}\n})`, { Date: Clock, Set, Map, console: undefined }, { filename });
     run(isolatedRequire, module, module.exports);
     return module.exports;
   }
@@ -154,6 +163,22 @@ test('Paul Yes replays only the stored owner 17:15–17:40 counter, once', async
   assert.equal(h.effects.replay[0].args.end, end);
   assert.equal(h.effects.replay[0].args.relaxed, true);
   assert.equal(h.effects.closes.length, 1);
+});
+
+test('elapsed stored counter refuses replay and arms canonical expiry', async () => {
+  const elapsed = '2026-09-09T17:15:00+03:00';
+  const h = harness({ counter: { start: elapsed, end: '2026-09-09T17:40:00+03:00' } });
+  const result = await h.call();
+  assert.equal(result.ok, false);
+  assert.equal(result.effect, 'proposal_elapsed');
+  assert.equal(h.effects.replay.length, 0);
+  assert.equal(h.effects.closes.length, 0);
+  assert.equal(h.effects.sends.length, 0);
+  assert.equal(h.row().state, 'awaiting_colleague');
+  const timer = h.effects.writes.at(-1);
+  assert.equal(timer.nextCheckHandler, 'expiry');
+  assert.equal(timer.expiresAt, '2026-09-09T14:15:00.000Z');
+  assert.equal(timer.nextCheckAt, timer.expiresAt);
 });
 test('an explicit empty colleague approve.data still accepts the stored counter', async () => {
   const h = harness();

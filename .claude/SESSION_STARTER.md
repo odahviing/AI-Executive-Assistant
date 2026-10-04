@@ -2,18 +2,19 @@
 
 Working on Maelle at `E:/Code/Maelle`. **Every fact in this file that a command can print is NAMED BY ITS COMMAND, never copied** — a number written here is stale by the next wrap, and this file is the first thing a fresh chat reads. **Version:** the `version` field in `package.json`. **HEAD:** `git log -1` — a wrap commit's subject opens with the version it shipped. **Open bug tickets:** `gh issue list --label Bug`; when that comes back empty the work is in the ledger backlog and the logs.
 
-## He flags a bug directly — record it, don't investigate it
+## He flags a bug or suggestion — capture it, don't investigate it
 
-He can name a bug in one sentence, in **any** chat, at any time, and never think about it again. **Run this — do not read the code, do not trace a root cause, and do not open the Manager skill or `.claude/skills/manager/SKILL.md` for this. Staying cheap is the entire point:**
+He can collect bugs and suggestions over several days in any chat. Save his words and available screenshots without investigating product code, opening Manager or dispatching agents. Write a small capture JSON file, then run the native writer once:
 
 ```
-node scripts/ledger-file.cjs --ref "<short-slug>" --source owner \
-  --finding "Owner says: <his words, one sentence>" \
-  --verdict needs-owner-decision --invariant none \
-  --note "Flagged directly, no investigation done — triage on the next /manager run."
+node scripts/ledger-file.cjs --capture-file <capture.json>
 ```
 
-Capture his words as close to verbatim as reasonable for `--finding`. **Never hand-compose the JSON line into `ledger.jsonl` yourself — always go through the script**, the same rule every other ledger writer follows. Once it lands, reply with one short line and stop: *"Flagged — `<ref>`. Surfaces on your next /manager run."* This is for a bug he wants **recorded**, not fixed now and not something this chat investigates or builds — it becomes a normal atomic item, triaged and built like any GitHub issue or log finding, on the next real `/manager run`.
+The JSON is `{"id":"<stable message/event id>","ref":"<stable issue slug>","type":"bug","finding":"<his words>","attachments":[]}`. Use `type:"suggestion"` for suggestions; local screenshot paths in `attachments` are copied into durable evidence, URLs retained as references. Reuse the identical JSON/id after an interrupted call: the writer records the example once and synchronizes `report.md`. It reports a failed synchronization explicitly; repair with the same capture or `--sync-report`, never claim success from the ledger append alone.
+
+For another example of a **proven same item**, use its exact `ref`, a new event `id` and `sameItemEvidence` stating the shared request/root identity. The writer appends evidence without replacing words, screenshots, decisions or verification. Similar wording is not proof; keep uncertain matches separate for lane assessment. A closed or declined ref requires explicit reassessment, never silent reopening through capture.
+
+Reply briefly: “Collected — `<ref>`, pending your batch run.” Capture does not authorize implementation or create a product question. When he says run, Manager assesses the collected scope against owning charters and groups authorized work into lane batches. Existing holds remain held. The detailed batch and recovery contract lives in Manager OPERATIONS.
 
 ## He rules decline/defer on an open report row — record it, don't build it
 
@@ -151,7 +152,7 @@ Every lane takes the product requirement into a different area. At a glance:
 > ```bash
 > node scripts/architect-file.cjs --session architect --finding "…" --evidence "…" --target feature.js --source "this chat"
 > ```
-> `--session architect` is REQUIRED on every write — filing, `--close`, `--recheck`, `--duplicate` — and the script refuses outright without it (X163). A framework problem is an engine that did nothing while reporting success, a manifest that lied, a skill instruction that contradicts the code, a charter that no longer matches what a lane does. **A Maelle bug is not one** — that is a GitHub issue or a report row, and it belongs to a lane. The script refuses a row with no checkable evidence (`--targets` lists valid targets); read the backlog with `node scripts/ledger-stats.cjs --architect`. It also refuses a **re-file**: if your finding matches an open row it stops outright, and if it matches an **already-built** row it asks you to read that row and pass `--amends <id>` or `--amends none` — because a match against built work is usually an amendment, and building a mechanism that already exists costs a full dispatch for nothing. Closings live there too: `--close <id> --built "<what shipped, and where>"`, `--close <id> --declined "<his reason>"`, and `--recheck <id> --checked "<what you opened>"` for a row you re-read and found still real.
+> `--session architect` is REQUIRED on every write, and the script refuses without it (X163). A framework problem belongs here; a Maelle product bug belongs to its lane. Read the backlog with `node scripts/ledger-stats.cjs --architect`; the writer assigns IDs, requires checkable evidence and guards against re-filing existing work. Record implementation with `--implementation <id> --evidence-file <canonical-attempt.json>`; it remains open until `--review <id> --review-file <independent-review.json>` records an exact current pass. Failed or unproven review remains open, with history retained. Historical `built` rows remain readable; new `--close --built` calls are refused. Owner decline uses `--close <id> --declined "<his reason>"`; a still-real re-read uses `--recheck <id> --checked "<what you opened>"`. Manager OPERATIONS owns the detailed lifecycle and historical false-closure correction procedure.
 >
 > **Two concurrent architect sessions can edit the same charter over the same row — it happened for real (X197, 2026-08-14) and was caught only by luck, at the `--close` refusal, after the duplicate prose was already on disk.** Before writing ANY edit to a charter file to resolve a ledger row, re-read that row's LIVE verdict first — `node scripts/ledger-stats.cjs --architect` (or grep its id directly in `architect-ledger.jsonl`) — never edit off a relayed instruction ("he ruled: fold into X") without confirming the row is still open. If it is already closed, stop — the collision has already happened in another session.
 >

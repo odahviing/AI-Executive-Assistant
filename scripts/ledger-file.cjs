@@ -140,6 +140,7 @@ const KNOWN_FLAGS = new Set([
   '--state', '--bounces', '--confirm-new-invariant', '--severity',
   '--evidence-file', '--review', '--review-file',
   '--from-ref',
+  '--capture-file', '--assess-file', '--sync-report',
 ])
 for (const tok of argv) {
   if (tok.startsWith('--') && !KNOWN_FLAGS.has(tok))
@@ -177,9 +178,7 @@ const KNOWN_VERDICTS = new Set([
 ])
 const RETIRED_VERDICTS = { 'flagged-for-owner': 'queued-next-run' }
 
-/** Read every existing row once. Malformed lines are skipped, never fatal —
- * this script only ever ADDS a line; it must not refuse to run because an
- * earlier line (that it did not write) is bad. */
+/** Malformed lines fail closed: never append beyond an unreadable partial row. */
 const readRows = () => {
   if (!fs.existsSync(LEDGER)) return []
   try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
@@ -187,9 +186,46 @@ const readRows = () => {
 
 const append = (obj) => {
   fs.appendFileSync(LEDGER, JSON.stringify(verification.compactRow(obj, REPO)) + '\n')
+  // Once adopted, every verdict/review/release append refreshes the projection.
+  // Ledger first: a failed report write is loud and recoverable with --sync-report.
+  const report = path.join(REPO, '.claude/agent-loop/report.md')
+  if (obj.capture || obj.intake || readRows().some(r => r.capture || r.intake) || fs.existsSync(report) && fs.readFileSync(report, 'utf8').startsWith('<!-- workshop-ledger-report-v1 -->')) {
+    const intake = require('./workshop-intake.cjs')
+    try { intake.reconcile(REPO, true) }
+    catch (e) { die(`ledger append succeeded, report synchronization failed: ${e.message}`, 'Do not capture again with a new id. Retry the identical capture or run --sync-report.') }
+  }
 }
 const readLifecycleRows = () => {
   try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
+}
+
+// Serialize ledger + projection writers. Never steal a lock: a crashed writer's
+// lock requires checking its PID and live state before explicitly removing it.
+if (!flag('--targets') && argv.length) {
+  const lock = `${LEDGER}.lock`
+  let fd
+  try { fd = fs.openSync(lock, 'wx'); fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })) }
+  catch (e) { die(`ledger writer lock unavailable: ${e.message}`, 'Another writer may be active. Retry after it finishes; inspect stale locks before removing them.') }
+  process.on('exit', () => { fs.closeSync(fd); fs.unlinkSync(lock) })
+}
+
+if (flag('--capture-file') || flag('--assess-file') || flag('--sync-report')) {
+  const intake = require('./workshop-intake.cjs')
+  try {
+    const state = intake.readState(REPO)
+    if (state.lastRun?.status === 'running' || state.inFlight?.length) die('report has a live run/writer; let its Manager record the input after the run')
+    intake.assertAdoption(readRows(), REPO)
+    let row = null
+    if (!flag('--sync-report')) {
+      const file = argOf(flag('--capture-file') ? '--capture-file' : '--assess-file')
+      const input = JSON.parse(fs.readFileSync(file, 'utf8'))
+      row = (flag('--capture-file') ? intake.capture : intake.assess)(input, readRows(), REPO, stampDate())
+      if (row) append(row)
+    }
+    const result = intake.reconcile(REPO, true)
+    console.log(JSON.stringify({ appended: row ? 1 : 0, report: result }))
+    process.exit(0)
+  } catch (e) { die(e.message) }
 }
 
 // ── the invariant vocabulary, harvested live, never hand-maintained ──────────
@@ -223,7 +259,7 @@ const nearestInvariants = (candidate, vocab) => {
 
 if (argv.includes('--targets') || argv.length === 0) {
   console.log(`\nUsage — see the file header, or:\n  node ${path.basename(__filename)} --ref "…" --lane <lane> --source <source> --finding "…" --verdict <verdict> --invariant "<slug>|none"\n`)
-  console.log(`Other modes: --wrap-companion, --gh-sync, --recheck, --run-manifest (see the file header)`)
+  console.log(`Other modes: --capture-file <json>, --assess-file <json>, --sync-report; --review, --wrap-companion, --gh-sync, --recheck, --run-manifest (see Manager OPERATIONS and the file header)`)
   console.log(`Lanes: ${[...KNOWN_LANES].join(', ')}`)
   console.log(`Sources: ${[...KNOWN_SOURCES].join(', ')}`)
   console.log(`Verdicts: ${[...KNOWN_VERDICTS].join(', ')}`)
@@ -385,6 +421,9 @@ if (flag('--review')) {
   if (!['pass', 'fail', 'unproven'].includes(review.verdict) || !review.reviewer || !review.trace || !review.reason) die('review needs verdict, independent reviewer, actual trace and reason.')
   if (implementation.evidence && (review.attemptId !== implementation.evidence.attemptId || review.reviewer === implementation.evidence.builder)) die('review must come from an independent dispatch and match the current attempt.')
   if (review.verdict === 'pass') {
+    const authority = verification.ownerStates(lifecycleRows).get(verification.normRef(ref))
+    if (authority?.hold || authority?.question && !authority.answer || authority?.terminal) die('independent pass cannot release an unresolved owner gate or reopen terminal work')
+    if (authority?.answer && implementation.ownerRulingToken !== authority.answer.token && review.ownerRulingToken !== authority.answer.token) die('review must bind the current native owner rulingToken; a pre-answer pass cannot be replayed')
     const errors = [...verification.checkReview(implementation.evidence, review), ...verification.snapshotErrors(implementation, REPO)]
     if (errors.length) die('independent pass not established.', errors.join('\n'))
   }
@@ -472,6 +511,16 @@ if (bouncesRaw !== null) {
 
 if (verdictRaw === 'wrapped' || ['wrapped', 'closed'].includes(state)) die('use --wrap-companion or --gh-sync; ordinary rows cannot bypass independent verification with a shipping state.')
 const row = { date: stampDate(), lifecycleVersion: 1, ref, lane: lane || '', source, finding, verdict: verdictRaw }
+const ownerAuthority = verification.ownerStates(rows).get(verification.normRef(ref))
+if (ownerAuthority?.terminal && !['declined', 'converted'].includes(verdictRaw)) die('terminal work cannot receive a new gate or implementation; capture a distinct recurrence ref')
+// An explicit native lane/Manager verdict is an actual pending question, unlike
+// cheap owner capture. Do not hide it behind stale ready metadata or backlog.
+if (['built', 'implemented'].includes(verdictRaw)) {
+  const authority = ownerAuthority
+  if (authority?.hold || authority?.question && !authority.answer || authority?.terminal) die('implementation cannot release an unresolved owner gate or reopen terminal work')
+  if (authority?.answer) row.ownerRulingToken = authority.answer.token
+}
+if (['needs-owner-decision', 'blocked-charter'].includes(verdictRaw) && rows.some(r => r.capture || r.intake)) row.intake = { ...verification.collapseRows(rows).latest.find(r => verification.normRef(r.ref) === verification.normRef(ref))?.intake, type: verification.collapseRows(rows).latest.find(r => verification.normRef(r.ref) === verification.normRef(ref))?.intake?.type || 'bug', status: 'decision', question: note || finding, recommend: recommend || 'Manager recommendation pending', reason: note || finding }
 if (argOf('--runId')) row.runId = argOf('--runId')
 if (['built', 'implemented'].includes(verdictRaw)) {
   const evidence = readJson(argOf('--evidence-file'))

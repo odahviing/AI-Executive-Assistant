@@ -33,8 +33,8 @@
  * frozen because it narrates the rename.
  *
  * Usage:
- *   node scripts/architect-file.cjs --close X29 \
- *     --built "no new mode — bugger.js PRESET path already is it; SKILL.md routes rulings back through `build`"
+ *   node scripts/architect-file.cjs --session architect --implementation X29 --evidence-file attempt.json
+ *   node scripts/architect-file.cjs --session architect --review X29 --review-file independent-review.json
  *
  *   node scripts/architect-file.cjs --close X22 --declined "his words: not worth the second index"
  *
@@ -90,9 +90,22 @@ const TARGETS = [
 // no row carries because a merge DELETES the absorbed row instead of writing one,
 // which is exactly why nobody noticed. It is exported and read there, so a new
 // closing verdict is added here and both views move together.
-const CLOSED = new Set(['built', 'declined', 'refuted'])
-const stillOpen = (rs) => rs.filter((r) => !CLOSED.has(r.verdict)).length
-module.exports = { CLOSED }
+const CLOSED = new Set(['built', 'verified', 'declined', 'refuted'])
+const isClosed = (r, repo = path.join(__dirname, '..')) => {
+  if (!CLOSED.has(r.verdict)) return false
+  if (r.lifecycleVersion !== 1 || r.verdict !== 'verified') return true
+  const v = require('./workshop-verification.cjs')
+  return !v.checkReview(r.implementation, r.review).length && !v.snapshotErrors({ evidence: r.implementation, snapshot: r.snapshot }, repo).length
+}
+const currentVerdict = (r, repo) => r.verdict === 'verified' && !isClosed(r, repo) ? 'verification-unproven' : r.verdict
+const hydrate = (r, repo = path.join(__dirname, '..')) => {
+  if (!r.implementationRef && !r.reviewRef) return r
+  const v = require('./workshop-verification.cjs')
+  const loaded = v.hydrateRow({ evidenceRef: r.implementationRef, reviewRef: r.reviewRef }, repo)
+  return { ...r, ...(loaded.evidence ? { implementation: loaded.evidence } : {}), ...(loaded.review ? { review: loaded.review } : {}) }
+}
+const stillOpen = (rs) => rs.filter((r) => !isClosed(r)).length
+module.exports = { CLOSED, isClosed, currentVerdict, hydrate }
 // Required by the reader for that set alone. Everything below is the CLI, and the
 // filing path ends in `process.exit`, so a plain `require` of this file would kill
 // its caller. Nothing above this line touches the ledger or `process.argv`.
@@ -179,7 +192,7 @@ if (fs.existsSync(LEDGER)) {
       } catch {
         return
       }
-      if (r && r.id) latest.set(r.id, { ...(latest.get(r.id) || {}), ...r })
+      if (r && r.id) latest.set(r.id, { ...(latest.get(r.id) || {}), ...hydrate(r) })
     })
   rows = [...latest.values()]
 }
@@ -192,6 +205,68 @@ if (fs.existsSync(LEDGER)) {
 // REFUSES while one remains. His gate, 2026-07-31, mechanised rather than
 // remembered.
 const REPO = path.join(__dirname, '..')
+// Explicit lifecycle events preserve historical built rows while preventing
+// a new implementation or failed review from masquerading as completion.
+const implementationId = argOf('--implementation'), reviewId = argOf('--review')
+if (implementationId || reviewId) {
+  const v = require('./workshop-verification.cjs')
+  const id = implementationId || reviewId, row = rows.find(r => r.id === id)
+  if (!row || implementationId && reviewId) die('name one existing Architect row with --implementation or --review')
+  if (['declined', 'refuted'].includes(row.verdict)) die('a ruling or refutation cannot be reopened by implementation metadata')
+  const stateFile = path.join(REPO, '.claude/agent-loop/state.json')
+  const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile)) : {}
+  if (['running', 'stopped'].includes(state.lastRun?.status) || state.inFlight?.length) die('live run must be resolved before Architect metadata writes')
+  const lock = `${LEDGER}.lock`
+  let fd
+  try { fd = fs.openSync(lock, 'wx') } catch { die('Architect ledger writer lock exists; no append performed') }
+  try {
+    let event
+    if (implementationId) {
+      if (!argOf('--evidence-file')) throw new Error('--implementation needs --evidence-file')
+      const build = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--evidence-file'))))
+      const errors = v.checkEvidence(build); if (errors.length) throw new Error(errors.join('; '))
+      let importedReview = null
+      const snapshotInput = argOf('--snapshot-file') ? JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--snapshot-file')))) : null
+      if (snapshotInput) {
+        if (!argOf('--review-file')) throw new Error('historical snapshot import requires its failed independent review')
+        importedReview = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--review-file'))))
+        if (snapshotInput.attemptId !== build.attemptId || importedReview.attemptId !== build.attemptId || importedReview.verdict !== 'fail' || !importedReview.reviewer || importedReview.reviewer === build.builder || !importedReview.reason) throw new Error('historical correction requires exact-attempt independent fail, never a pass')
+      }
+      const snapshot = snapshotInput ? snapshotInput.files : v.snapshot(build.files, REPO)
+      if (!Array.isArray(snapshot) || build.files.some(file => !snapshot.some(s => s.file === file && /^[a-f0-9]{64}$/.test(s.sha256)))) throw new Error('incomplete implementation snapshot')
+      if (snapshot.some(s => !s.sha256)) throw new Error('implementation snapshot contains missing files')
+      if (row.lifecycleVersion === 1 && row.implementation?.attemptId === build.attemptId && JSON.stringify(row.implementation) !== JSON.stringify(build)) throw new Error('attempt identity reused with changed evidence')
+      event = { id, date: new Date().toISOString().slice(0, 10), lifecycleVersion: 1, verdict: importedReview ? 'verification-failed' : 'implemented', implementation: build, snapshot, review: importedReview }
+      if (row.implementation?.attemptId === build.attemptId) {
+        if (JSON.stringify(row.snapshot) !== JSON.stringify(snapshot)) throw new Error('changed attempt needs a new attemptId')
+        event = null // retry cannot erase a later review
+      }
+    } else {
+      if (!row.implementation || !argOf('--review-file')) throw new Error('--review needs a recorded implementation and --review-file')
+      const review = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--review-file'))))
+      if (review.attemptId !== row.implementation.attemptId || !review.reviewer || review.reviewer === row.implementation.builder || !review.trace || !['pass', 'fail', 'unproven'].includes(review.verdict) || !review.reason) throw new Error('review must name the exact implementation, independent reviewer, trace, verdict and reason')
+      const errors = v.checkReview(row.implementation, review)
+      if (review.verdict === 'pass') errors.push(...v.snapshotErrors({ evidence: row.implementation, snapshot: row.snapshot }, REPO))
+      if (review.verdict === 'pass' && errors.length) throw new Error(errors.join('; '))
+      event = { id, date: new Date().toISOString().slice(0, 10), lifecycleVersion: 1, verdict: review.verdict === 'pass' ? 'verified' : review.verdict === 'fail' ? 'verification-failed' : 'verification-unproven', review }
+      if (JSON.stringify(row.review) === JSON.stringify(review)) event = null
+    }
+    if (event) {
+      const payload = v.compactRow({ evidence: event.implementation, review: event.review }, REPO)
+      const stored = { ...event }
+      if (payload.evidenceRef) { stored.implementationRef = payload.evidenceRef; delete stored.implementation }
+      if (payload.reviewRef) { stored.reviewRef = payload.reviewRef; delete stored.review }
+      fs.appendFileSync(LEDGER, JSON.stringify(stored) + '\n')
+    }
+    // Ledger is authoritative. Report failure remains loud and retryable.
+    const intake = require('./workshop-intake.cjs')
+    const productRows = intake.read(REPO)
+    if (productRows.some(r => r.intake || r.capture)) intake.reconcile(REPO, true)
+    console.log(`${id}: ${event?.verdict || row.verdict}; ledger recorded, report synchronized`)
+  } catch (e) { console.error(`REFUSED/INCOMPLETE — ${e.message}. If append succeeded, retry the identical request to reconcile the report.`); process.exitCode = 1 }
+  finally { fs.closeSync(fd); fs.unlinkSync(lock) }
+  return
+}
 const SCAN_DIRS = [path.join(REPO, '.claude'), path.join(REPO, 'scripts')]
 const SCANNABLE = /\.(md|js|cjs|mjs|json|jsonl|ts)$/
 const SKIP_DIR = /^(node_modules|worktrees|\.git)$/
@@ -267,6 +342,7 @@ const carryOver = (r) => {
 // evidence is worse than an open row: it closes the item here and leaves the
 // proof nowhere. Name what shipped and WHERE.
 if (closeId) {
+  if (built) die('new implementation records use --implementation <id> --evidence-file <json>, then exact independent --review; --built remains historical data, not a new closure')
   if (!rows.length) die('the ledger is empty — there is nothing to close.')
   const row = rows.find((r) => r.id === closeId)
   if (!row) die(`--close ${closeId} is not a row in this ledger.`, `Read it with: node scripts/ledger-stats.cjs --architect`)
@@ -353,13 +429,6 @@ if (closeId) {
     process.exit(0)
   }
 
-  if (built && built.length < 20) die(`--built is ${built.length} chars.`, 'Too short to check. Cite the file and the symbol, the command, or the commit.')
-  if (built && !POINTS_SOMEWHERE.test(built))
-    die(
-      'that --built does not point at anything checkable.',
-      `It needs at least one of: a \`file:line\`, a filename, a run id (\`wf_…\`), or the command that proves it.\n` +
-        `"done" and "shipped" are not closings — the next reader must be able to open the thing you built.`,
-    )
   if (declined && declined.length < 20)
     die(`--declined is ${declined.length} chars.`, 'Give his reason, not just "no". The next reader must be able to tell a decline from a deferral without asking him again.')
   // X10 · held to the SAME bar as `--built` and for the same reason. A decline is
@@ -374,9 +443,7 @@ if (closeId) {
         `The row claimed something about the code — name where you looked and what was there instead.`,
     )
   const today = new Date().toISOString().slice(0, 10)
-  const closing = built
-    ? { id: closeId, date: today, verdict: 'built', built }
-    : refuted
+  const closing = refuted
       ? { id: closeId, date: today, verdict: 'refuted', refuted }
       : { id: closeId, date: today, verdict: 'declined', declined }
   fs.appendFileSync(LEDGER, JSON.stringify(closing) + '\n')
@@ -595,5 +662,5 @@ if (row.amends) console.log(`  amends  : ${row.amends}`)
 if (note) console.log(`  note    : ${note}`)
 console.log(`\nIt is OPEN. The architect reads its own ledger, triages, and proposes —`)
 console.log(`nothing gets built off this row until the owner approves it.\n`)
-console.log(`When it IS built, close it here — an open row that shipped is why this ledger read 19 open when 3 were:`)
-console.log(`  node scripts/architect-file.cjs --close ${id} --built "<what shipped, with the file:line>"\n`)
+console.log(`When implemented, record its canonical evidence; it stays open until independent review passes:`)
+console.log(`  node scripts/architect-file.cjs --session architect --implementation ${id} --evidence-file <attempt.json>\n`)

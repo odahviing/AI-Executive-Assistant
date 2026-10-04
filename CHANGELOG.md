@@ -1,3 +1,23 @@
+## 5.0.3 — Approval timing, colleague privacy and briefing schedule reliability
+
+Approval requests now expire by the proposed meeting time, and semantic paraphrases no longer force correction notices when the existing classifier identifies unchanged terms. Colleague availability results withhold the owner's private scheduling reasons before they reach the reply model.
+
+### Fixed
+- Bound meeting approvals and late decision replay by the stored proposal start; preserve material action changes and legitimate future approvals.
+- Reuse the existing dedup classifier's material-change verdict for approval corrections without adding a model call.
+- Return generic approval requirements to colleagues while preserving owner diagnostics, valid options and remote alternatives.
+- Preserve an existing briefing routine's schedule across startup and read that same routine when composing briefings. Schedule updates no longer also write a competing preference value.
+- Keep the blocked action readable in tool-budget notices after outbound formatting, with an explicit not-executed status. Budget limits remain unchanged.
+
+### Framework
+- Include the previously reviewed collected-intake workflow: durable capture and charter assessment, bounded authorized batches, exact-attempt evidence and a ledger-derived report.
+- Distinguish proven citation range failures from suspected positional drift while retaining the checker's strict failure behavior.
+
+### Verification and limits
+- Five product correction identities across six tracked refs and two framework changes independently reviewed; zero overturns. Executable checkpoint: 202 suite/timezone executions and 5,035 assertions passed, with the original full run and four bounded replacement checks retained; typecheck passed.
+- Golden30: 23 passes and seven stale catalog anchors traced to current source, zero failures. Semantic classification and reply wording remain model-dependent.
+- Full preference/person-store consolidation, production fixture cleanup, durable Slack recovery and reports with unproven roots remain unresolved; no production data migration ran.
+
 ## 5.0.2 — Weekday-specific team hours and connected auto-fix conversations
 
 Team availability now supports different hours for each weekday through the existing conversational update process. Unspecified days keep their defaults, and related colleague updates appear under the corresponding auto-fix notice.

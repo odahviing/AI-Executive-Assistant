@@ -21,7 +21,9 @@
  *     literally contains that identifier in the target file today (a citation
  *     to a genuine USE site — a call, an assignment — not just the
  *     declaration), OR the symbol's OWN declaration line is within TOLERANCE
- *     of the cited anchor. Only when neither holds is it drift, flagged.
+ *     of the cited anchor. When neither holds, positional drift is suspected,
+ *     not proven: a valid statement deep in a function can omit its name.
+ *     The finding still blocks shipping until the citation is reviewed.
  *     (Before this, only the declaration-distance half existed, so a citation
  *     correctly naming a call site far from its own declaration — `cleanReply`
  *     declared at one line, cited 40+ lines later at the exact line it's
@@ -75,8 +77,8 @@
  * Usage:
  *   node scripts/check-stale-citations.cjs           # wave-diff-scoped (wrap-time default)
  *   node scripts/check-stale-citations.cjs --all     # whole repo, for a periodic sweep
- * Exit 0  no citation whose target this run checked is provably stale.
- * Exit 1  at least one is — named, with the citing line and the reason.
+ * Exit 0  no detected range failure or suspected positional drift.
+ * Exit 1  at least one requires review — named with its evidence category.
  */
 const fs = require('fs')
 const path = require('path')
@@ -86,7 +88,7 @@ const ROOT = path.join(__dirname, '..')
 const EXT = 'ts|tsx|js|jsx|cjs|mjs|md'
 const SCAN_EXT = new Set(EXT.split('|').map((e) => `.${e}`))
 // How far a named symbol's OWN declaration may drift from the cited line
-// before it counts as stale. Wide enough that a comment citing a statement a
+// before it is flagged for review. Wide enough that a comment citing a statement a
 // few lines into a function body (not the function's own opening line) is
 // not a false alarm; narrow enough that "still somewhere in a 2000-line
 // file" does not pass as "near".
@@ -323,7 +325,7 @@ for (const citingFile of allFiles) {
     // the cited line/range itself literally contains the identifier today
     // (proof the citation still points at a real occurrence of it), or the
     // declaration-proximity check that already existed. Only a citation
-    // matching NEITHER is drift.
+    // matching NEITHER needs review for suspected positional drift.
     const citedRangeHasSymbol = (id) => {
       const re = new RegExp(`(?<![\\w$])${id.replace(/\$/g, '\\$')}(?![\\w$])`)
       return pairs.some((p) => {
@@ -343,6 +345,7 @@ for (const citingFile of allFiles) {
         citingLine: lineIdx + 1,
         citation: `${citation}:${spec}`,
         target,
+        suspected: true,
         reason: `names ${nearest.map((n) => `"${n.id}" (now at ${target}:${n.line})`).join(', ')} — ${TOLERANCE}+ line(s) from the cited anchor ${anchor}`,
       })
     }
@@ -352,11 +355,14 @@ for (const citingFile of allFiles) {
 // ── report ───────────────────────────────────────────────────────────────
 console.log(`\ncheck-stale-citations — ${ALL ? 'FULL REPO' : 'wave-diff-scoped'} (${allFiles.length} file(s) scanned${touched ? `, ${touched.size} touched` : ''})\n`)
 
+const suspected = findings.filter((f) => f.suspected).length
+const proven = findings.length - suspected
 if (findings.length) {
-  console.error(`STALE — ${findings.length} citation(s) provably wrong:\n`)
-  for (const f of findings) console.error(`  ${f.citingFile}:${f.citingLine}  cites ${f.citation}\n    ${f.reason}\n`)
+  console.error(`REVIEW REQUIRED — ${proven} proven range failure(s), ${suspected} suspected positional drift(s):\n`)
+  for (const f of findings) console.error(`  ${f.suspected ? 'SUSPECTED POSITIONAL DRIFT' : 'PROVEN RANGE FAILURE'} — ${f.citingFile}:${f.citingLine}  cites ${f.citation}\n    ${f.reason}\n`)
+  if (suspected) console.error('  Declaration distance alone cannot prove a body anchor is wrong; inspect the cited statement and claim.\n')
 }
-console.log(`  ${findings.length} stale, ${weak.length} weak-checked (no symbol named — range exists, position unverified), ${unresolved.length} unresolved target(s)`)
+console.log(`  ${proven} proven range failure(s), ${suspected} suspected positional drift(s), ${weak.length} weak-checked (no symbol named — range exists, position unverified), ${unresolved.length} unresolved target(s)`)
 if (weak.length) console.log(`  (weak coverage is real but partial — a citation to a still-valid line at the WRONG spot in its file is invisible to this tier)`)
 if (unresolved.length && process.env.VERBOSE) {
   console.log('\n  unresolved:')
@@ -364,8 +370,8 @@ if (unresolved.length && process.env.VERBOSE) {
 }
 
 if (findings.length) {
-  console.error(`\n${findings.length} stale citation(s). Fix the cited line/range (or the comment's claim) before shipping.\n`)
+  console.error(`\n${findings.length} citation(s) require review. Correct proven failures and resolve suspected drift before shipping.\n`)
   process.exit(1)
 }
-console.log(`\nNo provably stale citation among what this run checked.\n`)
+console.log(`\nNo detected range failure or suspected positional drift among what this run checked.\n`)
 process.exit(0)

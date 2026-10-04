@@ -273,10 +273,10 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
  * his work hours. Then re-arm next_check_at = expires_at, handler = 'expiry'.
  */
 async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promise<'rearmed' | 'closed'> {
+  if (row.expires_at && Date.parse(row.expires_at) <= Date.now()) return runExpiry(row, profile);
   // A missing owner anchor means the original alarm was never delivered.
   // Retry its full ask immediately, outside the ordinary work-hours nag gate.
   if (row.state === 'awaiting_owner' && !row.owner_dm_channel) {
-    if (row.expires_at && Date.parse(row.expires_at) <= Date.now()) return runExpiry(row, profile);
     const conn = getConnection(profile.user.slack_user_id, 'slack');
     if (conn) {
       const text = await composeOwnerAskText({ askText: row.description ?? row.subject, details: parseDetails(row), profile, requestId: row.id });

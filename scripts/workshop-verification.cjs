@@ -111,7 +111,36 @@ const workshopContract = (() => {
     regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
     boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
   const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
-  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema }
+  reviewSchema.properties.ownerRulingToken = { type: 'string', description: 'When checking an existing attempt after an owner answer, copy its current native rulingToken to bind this review to that answer.' }
+  // Engines receive a current native projection under the existing owner run
+  // authorization. Editor recommendations never release ledger dispositions.
+  const admissionKey = value => String(value || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
+    // Ticket identity is structured, not symptom similarity. A parent ruling
+    // covers all complaints; a complaint ruling covers itself, never siblings.
+  const identities = value => String(value || '').split(/[+,/]| and /i).map(admissionKey).filter(Boolean)
+  const parent = value => /^(\d+)(?:[-–_][a-z0-9][a-z0-9_.:>–-]*|\s+[a-z]\d+)$/.exec(value)?.[1]
+  const issueRefs = i => [...new Set([i.id, i.ref, i.matchesOpenBacklog, i.overridesDeclined].filter(text).flatMap(identities))]
+  const matchingEntries = (admission, i) => (admission?.entries || []).filter(e => identities(e.ref).some(r => issueRefs(i).some(candidate => r === candidate || r === parent(candidate) || parent(r) === candidate)))
+  const withOwnerRulings = (admission, issues) => issues.map(i => {
+    const entry = matchingEntries(admission, i).find(e => e.ownerRuled)
+    return entry ? { ...i, _ownerRuled: entry.ownerRuled, _ownerRulingToken: entry.rulingToken } : i
+  })
+  const checkAdmission = (admission, issues, protectedRefs = [], preset = false) => {
+    if (!admission || admission.version !== 1 || !text(admission.authorization) || !Array.isArray(admission.entries)) return issues.map(i => ({ ref: i.id || i.ref, reason: 'missing current native intakeAdmission; regenerate the authorized batch plan' }))
+    const entries = admission.entries
+    const protectedSet = new Set(protectedRefs.flatMap(identities))
+    return issues.flatMap(i => {
+      const refs = issueRefs(i)
+      const known = matchingEntries(admission, i)
+      const reject = reason => [{ ref: i.id || i.ref, reason }]
+      const rulings = known.filter(e => e.ownerRuled).map(e => JSON.stringify(e.ownerRuled))
+      if (new Set(rulings).size > 1 || i._ownerRuled && (!rulings.length || JSON.stringify({ askedBecause: i._ownerRuled.askedBecause, hisRuling: i._ownerRuled.hisRuling }) !== rulings[0])) return reject('owner answer is absent, conflicting or stale; use the current native ruling')
+      if (known.length) return known.every(e => (e.status === 'ready' || e.status === 'continuation' && text(e.attemptId)) && e.selected === true && e.lane === i.lane) ? [] : reject('recorded item is not selected, current ready/continuation work for this lane')
+      if (preset || refs.some(r => protectedSet.has(r) || protectedSet.has(parent(r))) || ['owner', 'backlog', 'verify'].includes(i.source) || i.intake || i.matchesOpenBacklog || i.overridesDeclined) return reject('owner/backlog/preset item needs explicit native charter assessment and selection')
+      return admission.allowFresh === true && ['github', 'logs', 'both'].includes(i.source) ? [] : reject('fresh-source work is outside this authorized run')
+    })
+  }
+  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
 
@@ -120,6 +149,29 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const CLOSED = new Set(['built', 'verified', 'wrapped', 'confirmed-other-lane', 'already-fixed', 'audit', 'declined', 'converted'])
 const normRef = t => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
+// Owner authority is independent of build/review verdicts. Only an explicit
+// answer or matching hold release changes these gates; a later review cannot.
+function ownerStates(rows) {
+  const states = new Map()
+  rows.forEach((r, index) => {
+    if (!r.ref || r.kind) return
+    const key = normRef(r.ref)
+    if (!states.has(key) && !r.intake && r.verdict !== 'deferred' && r.state !== 'deferred') return // historical, unadopted backlog
+    const s = states.get(key) || {}
+    s.adopted ||= Boolean(r.intake)
+    const token = () => crypto.createHash('sha256').update(JSON.stringify({ index, event: r })).digest('hex')
+    if (s.adopted && (['declined', 'converted', 'wrapped'].includes(r.verdict) || r.state === 'wrapped')) s.terminal = r.verdict || 'wrapped'
+    if (r.verdict === 'deferred' || r.state === 'deferred' || r.intake?.status === 'held') s.hold = { token: token(), reason: r.note || r.intake?.reason || r.finding }
+    if (r.intake?.releaseHoldFor === s.hold?.token && r.intake?.releaseHold) delete s.hold
+    if (s.adopted && ['needs-owner-decision', 'blocked-charter'].includes(r.verdict)) {
+      s.question = { token: token(), askedBecause: r.intake?.question || r.note || r.finding, recommend: r.recommend || r.intake?.recommend }
+      delete s.answer
+    }
+    if (r.ownerRuling && s.question?.token === r.ownerRuling.questionToken) s.answer = { ...r.ownerRuling, token: token() }
+    states.set(key, s)
+  })
+  return states
+}
 const refTokens = ref => {
   const raw = String(ref || '').trim()
   const out = new Set(raw ? [normRef(raw)] : [])
@@ -130,9 +182,10 @@ const refTokens = ref => {
   }
   return out
 }
-const isClosed = r => (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
+const isClosed = r => ['declined', 'converted'].includes(r.verdict) || (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
 function collapseRows(rows) {
   rows = rows.map(r => hydrateRow(r))
+  const authority = ownerStates(rows)
   const latest = new Map(), eventAt = new Map(), refless = []
   rows.forEach((r, i) => {
     if (r.kind && r.kind !== 'invariant-backfill') return
@@ -153,6 +206,16 @@ function collapseRows(rows) {
     }
     latest.set(key, merged)
   })
+  for (const [key, r] of latest) {
+    const s = authority.get(key)
+    if (!s || !r.intake) continue // legacy closures remain history until explicit adoption
+    if (s.terminal) latest.set(key, { ...r, verdict: s.terminal, state: s.terminal === 'wrapped' ? 'wrapped' : 'closed' })
+    else if (s.hold) latest.set(key, { ...r, verdict: 'deferred', state: 'deferred' })
+    else if (s.question && !s.answer) latest.set(key, { ...r, verdict: 'needs-owner-decision' })
+    else if (s.answer && ['needs-owner-decision', 'blocked-charter'].includes(r.verdict)) latest.set(key, { ...r, verdict: r.evidence ? 'implemented' : 'captured', intake: { ...r.intake, status: 'ready' } })
+    else if (r.verdict === 'deferred' && r.intake?.releaseHoldFor) latest.set(key, { ...r, verdict: r.evidence ? 'implemented' : 'captured', state: 'open' })
+    else if (s.answer && r.verdict === 'verified' && r.ownerRulingToken !== s.answer.token && r.review?.ownerRulingToken !== s.answer.token) latest.set(key, { ...r, verdict: 'verification-unproven' })
+  }
   for (const [key, r] of latest) if (r.verificationOf && r.verdict === 'verified') {
     const parent = latest.get(normRef(r.verificationOf))
     if (!parent || parent.verificationOf || !['verified', 'wrapped'].includes(parent.verdict) || !isClosed(parent) || parent.evidence?.attemptId !== r.evidence?.attemptId)
@@ -268,4 +331,4 @@ function wrapCounts(rows, history = rows) {
   return { events: rows.length, coveredRefs: covered.size, implementationRefs: [...covered].filter(ref => !linked.has(ref)).length,
     verifiedImplementationRefs: refs(r => r.verdict === 'verified' && !linked.has(normRef(r.ref))).size }
 }
-module.exports = { ...workshopContract, CLOSED, normRef, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers, compactRow, hydrateRow, wrapCounts }
+module.exports = { ...workshopContract, CLOSED, normRef, ownerStates, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers, compactRow, hydrateRow, wrapCounts }

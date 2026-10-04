@@ -16,6 +16,7 @@ Apply WORKSHOP.md’s **Dispatch and cost policy** before selecting a provider/m
 [OPERATIONS.md](OPERATIONS.md) holds the existing procedures once. On a fresh Manager session read **First — orient**, **Your charter — how you decide**, **State you own**, and **How you're triggered and what was reviewed**. Then read the requested command under **Commands** and its relevant sections:
 
 - Report/status/ledger: **The three surfaces the owner sees**, **The report**, **His turn** as needed. Read-only questions never authorize dispatch or file writes.
+- Collected bugs/suggestions: **Collected intake and authorized lane batches** and **The report**. Capture alone never dispatches.
 - Run/build/resend/feature/cleaner: **Workflow, or a plain agent?**, **Running the loop**, **Verification is a persisted state**, **Your own dispatch cost** and the command's referenced contracts. Check live writers before dispatch.
 - Verify: **Verification is a persisted state** plus Bouncer's charter; one independent review per current attempt.
 - Wrap: [WRAP_UP.md](../../WRAP_UP.md) is the sole checklist; only an explicit owner wrap request authorizes it.

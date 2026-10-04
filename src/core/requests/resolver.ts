@@ -23,6 +23,7 @@ import {
   composeOwnerAskText,
   extractCallbacks,
   mergeAmendIntoApprove,
+  boundApprovalExpiry,
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
@@ -70,15 +71,17 @@ const OWNER_DECISION_WORKDAYS = 2;
  * The midpoint nag is deliberately NOT re-armed on a transition — the message
  * that caused the transition (the counter relay, the pushback DM) IS the nudge.
  *
- * The deadline never shortens a live one: whichever of the current `expires_at`
+ * The reply window normally never shortens: whichever of the current `expires_at`
  * and the fresh side-appropriate window is later wins, so someone handed the
  * ball at the tail end of the window still gets a fair chance to answer.
+ * A concrete calendar proposal caps that window at its proposed start.
  * expires_at moves with next_check_at — one deadline, never two disagreeing.
  */
 function timersForWaitingSide(
   row: RequestRow,
   side: 'owner' | 'colleague',
   profile: UserProfile,
+  counter?: Record<string, unknown>,
 ): { expiresAt: string; nextCheckAt: string; nextCheckHandler: 'expiry' } {
   let fresh: DateTime;
   if (side === 'colleague') {
@@ -96,7 +99,9 @@ function timersForWaitingSide(
     );
   }
   const existing = row.expires_at ? DateTime.fromISO(row.expires_at, { zone: 'utc' }) : null;
-  const at = ((existing?.isValid && existing > fresh) ? existing : fresh).toUTC().toISO()!;
+  const details = parseDetails<Record<string, unknown>>(row) ?? {};
+  const at = boundApprovalExpiry(((existing?.isValid && existing > fresh) ? existing : fresh).toUTC().toISO()!,
+    counter ? { ...details, counter } : details, profile);
   return { expiresAt: at, nextCheckAt: at, nextCheckHandler: 'expiry' };
 }
 
@@ -500,7 +505,7 @@ async function resolveRequestInner(
       updateRequest(requestId, {
         state: 'awaiting_owner',
         // #42 — ball back with the owner, so the clock goes back to his window.
-        ...timersForWaitingSide(row, 'owner', ctx.profile),
+        ...timersForWaitingSide(row, 'owner', ctx.profile, verdict.counter),
         details: {
           ...detailsAll,
           counter: verdict.counter,
@@ -556,7 +561,7 @@ async function resolveRequestInner(
       : [];
     counterHistoryOwnerSide.push({ by: 'owner', counter: verdict.counter, at: DateTime.now().toISO() });
     // #42 — the ball just moved to the colleague; re-aim the clock at them.
-    const colleagueTimers = timersForWaitingSide(row, 'colleague', ctx.profile);
+    const colleagueTimers = timersForWaitingSide(row, 'colleague', ctx.profile, verdict.counter);
     updateRequest(requestId, {
       state: 'awaiting_colleague',
       ...colleagueTimers,
@@ -794,6 +799,13 @@ async function runApproveCallback(
   try { priorOutcome = JSON.parse(row.outcome_json ?? '{}'); } catch { /* no recorded result */ }
   if (priorOutcome.verified === false && priorOutcome.replayed) {
     return closeUnconfirmedExecution(row, ctx, String(priorOutcome.replayed));
+  }
+
+  const proposalExpiry = boundApprovalExpiry('9999-12-31T00:00:00Z', { callbacks: { on_approve: approveCallback } }, ctx.profile);
+  if (Date.parse(proposalExpiry) <= Date.now()) {
+    updateRequest(row.id, { expiresAt: proposalExpiry, nextCheckAt: proposalExpiry, nextCheckHandler: 'expiry' });
+    return { ok: false, request_id: row.id, state: row.state, effect: 'proposal_elapsed',
+      reason: 'The proposed meeting time has passed. Nothing was executed; this proposal is due to expire. Choose a new future time if still needed.' };
   }
 
 

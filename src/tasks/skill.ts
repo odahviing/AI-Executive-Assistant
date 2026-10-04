@@ -22,7 +22,7 @@ import { closeRequest } from '../core/requests/closeRequest';
 import { resolveRequest, withRequestLock, notifyRequesterOfDecision, renderCounter, textCarriesInternalWorkItemId, type ResolveVerdict } from '../core/requests/resolver';
 import { requesterRelayLanguage, relayClosureToRequester, relayNotice } from '../core/requests/requesterRelay';
 import { logActivity } from '../core/requests/logActivity';
-import { composeOwnerAskText, extractCallbacks } from '../core/approvals/approvalCallbacks';
+import { composeOwnerAskText, extractCallbacks, boundApprovalExpiry } from '../core/approvals/approvalCallbacks';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import type { AmendDispatch } from '../core/approvals/approvalCallbacks';
@@ -798,6 +798,8 @@ export async function createApprovalRequest(
           expiresAt = addWorkdays(base, n, profile);
         }
 
+        expiresAt = boundApprovalExpiry(expiresAt, payload, profile);
+
         // Already bound to the authenticated caller (or owner-nominated recipient)
         // above, before dedup, persistence and requester-dependent lookups.
         const requesterSlackId = typeof payload.requester_slack_id === 'string' ? payload.requester_slack_id : undefined;
@@ -1110,6 +1112,7 @@ export async function createApprovalRequest(
         // Check open requests for this (owner, requester) before inserting.
         // Same logical ask within 48h → return existing instead of fresh row.
         let existingId: string | null = null;
+        let unchangedProseSnapshot: { subject: string; description: string | null } | undefined;
         let priorDecline: RequestRow | null = null;
         if (requesterSlackId) {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1132,7 +1135,12 @@ export async function createApprovalRequest(
             if (judged.match === 'existing' && judged.existing_id) {
               const matched = candidates.find(candidate => candidate.id === judged.existing_id);
               if (matched?.state === 'cancelled') priorDecline = matched;
-              else existingId = judged.existing_id;
+              else {
+                existingId = judged.existing_id;
+                if (judged.material_change === false && matched) {
+                  unchangedProseSnapshot = { subject: matched.subject, description: matched.description };
+                }
+              }
               logger.info('create_approval — LLM dedup matched existing', {
                 existingId, reasoning: judged.reasoning,
               });
@@ -1265,10 +1273,11 @@ export async function createApprovalRequest(
           // replays? Drives whether maybeRevive below must force a re-post
           // regardless of its 2h cold-re-ask gate (a correction isn't a
           // "still waiting" nudge — it's a different ask he hasn't seen).
-          const changed = row.subject !== subject
-            || (row.description ?? '') !== askText
-            || JSON.stringify(priorDetails.deferred_action ?? null) !== JSON.stringify(payload.deferred_action ?? null)
-            || JSON.stringify(priorDetails.callbacks ?? null) !== JSON.stringify(payload.callbacks ?? null);
+          const matchedProseUnchanged = unchangedProseSnapshot?.subject === row.subject
+            && unchangedProseSnapshot?.description === row.description;
+          const changed = (!matchedProseUnchanged && (row.subject !== subject || (row.description ?? '') !== askText))
+            || !isDeepStrictEqual(JSON.parse(JSON.stringify(priorDetails.deferred_action ?? null)), JSON.parse(JSON.stringify(payload.deferred_action ?? null)))
+            || !isDeepStrictEqual(JSON.parse(JSON.stringify(priorDetails.callbacks ?? null)), JSON.parse(JSON.stringify(payload.callbacks ?? null)));
 
           const mergedDetails: Record<string, unknown> = { ...priorDetails, ...payload };
           if (changed) {
@@ -1304,9 +1313,12 @@ export async function createApprovalRequest(
             }
           }
 
-          updateRequest(row.id, { subject, description: askText, details: mergedDetails,
+          const refreshedExpiry = boundApprovalExpiry(changed ? expiresAt : row.expires_at ?? expiresAt, mergedDetails, profile);
+          updateRequest(row.id, { subject, description: askText, details: mergedDetails, expiresAt: refreshedExpiry,
             ...(changed ? { ownerDmChannel: null, ownerDmThreadTs: null, terminalDmMsgTs: null,
-              nextCheckAt: new Date(Date.now() + 5 * 60000).toISOString(), nextCheckHandler: 'approval_reminder' as const } : {}) });
+              nextCheckAt: new Date(Math.min(Date.now() + 5 * 60000, Date.parse(refreshedExpiry))).toISOString(), nextCheckHandler: 'approval_reminder' as const }
+              : row.next_check_at && Date.parse(row.next_check_at) > Date.parse(refreshedExpiry)
+                ? { nextCheckAt: refreshedExpiry, nextCheckHandler: 'expiry' as const } : {}) });
 
           // Trap noted by the bouncer, fixed as cheap/obvious: idempotency_key
           // is hash(owner, requester, kind, subject) — if a subject correction
@@ -1641,7 +1653,7 @@ export async function createApprovalRequest(
         }
 
         if (!ownerNotified) {
-          updateRequest(row.id, { nextCheckAt: DateTime.now().plus({ minutes: 5 }).toUTC().toISO(), nextCheckHandler: 'approval_reminder' });
+          updateRequest(row.id, { nextCheckAt: new Date(Math.min(Date.now() + 5 * 60000, Date.parse(expiresAt))).toISOString(), nextCheckHandler: 'approval_reminder' });
         }
 
         return {

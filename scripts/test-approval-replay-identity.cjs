@@ -18,6 +18,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const profile = { user: { name: 'Owner Example', slack_user_id: 'UOWNER', timezone: 'UTC' }, assistant: { name: 'Maelle' } };
 const meetingTools = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'];
 function harness(options = {}) {
+  // The fixture's September decisions must run before their September starts.
+  class Clock extends Date { constructor(...a) { super(...(a.length ? a : [options.now ?? Date.parse('2026-09-10T00:00:00Z')])); } static now() { return options.now ?? Date.parse('2026-09-10T00:00:00Z'); } }
   const effects = { executes: [], creates: [], closes: [], sends: [], ownerPosts: [], keys: [], candidates: [], judges: [], warnings: [], promotions: [] };
   const unexpected = [], pending = [], modules = new Map();
   const details = { deferred_action: { tool: options.tool || 'create_meeting', args: { subject: 'Approved sync', start: '2026-09-20T12:00:00Z', end: '2026-09-20T12:30:00Z', new_start: '2026-09-20T12:00:00Z', new_end: '2026-09-20T12:30:00Z', meeting_id: 'event-1', person_id: 'person-1', expected_value: 'UTC' } }, ...options.details };
@@ -66,7 +68,7 @@ function harness(options = {}) {
     'src/utils/resolveSlackId.ts': { resolveSlackId: id => ({ slack_id: id, was_hallucinated: false }) },
     'src/llm/models.ts': { MODEL_HAIKU: 'isolated-model' },
     'src/llm/client.ts': { getAnthropicClient: () => ({ messages: { create: async () => ({ content: [{ type: 'text', text: '' }] }) } }) },
-    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {judgeRequestDedup:async args=>{effects.judges.push(args);return {match:'existing',existing_id:row.id};}}, 'src/utils/closeLoopOnOwnerHandled.ts': {},
+    'src/utils/usageLog.ts': { logLlmUsage() {} }, 'src/tasks/briefs.ts': {}, 'src/utils/requestDedup.ts': {judgeRequestDedup:async args=>{effects.judges.push(args);return {match:'existing',existing_id:row.id,material_change:options.materialChange};}}, 'src/utils/closeLoopOnOwnerHandled.ts': {},
     'src/db.ts': { getPendingRequestCountForColleague: () => 0 },
   };
   function load(relative) {
@@ -82,7 +84,7 @@ function harness(options = {}) {
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');
     };
-    const run = vm.runInNewContext(`(function(require,module,exports){${compiled.get(filename)}\n})`, { Date, Set, Map, setImmediate: callback => pending.push(callback), console: undefined }, { filename });
+    const run = vm.runInNewContext(`(function(require,module,exports){${compiled.get(filename)}\n})`, { Date: Clock, Set, Map, setImmediate: callback => pending.push(callback), console: undefined }, { filename });
     run(isolatedRequire, module, module.exports); return module.exports;
   }
   const replay = load('src/core/requests/deferredActionReplay.ts');

@@ -36,6 +36,8 @@ const ts = require('typescript');
 const luxon = require('luxon');
 const { DateTime } = luxon;
 const { test } = require('node:test');
+// These explicit October slots exercise location rules, not the real clock.
+luxon.Settings.now = () => Date.parse('2026-10-04T05:00:00Z');
 
 const rootArg = process.argv.indexOf('--source-root');
 const sourceRoot = rootArg < 0 ? path.resolve(__dirname, '..') : path.resolve(process.argv[rootArg + 1]);
@@ -128,6 +130,12 @@ function slotOn(date, extra = {}) {
     viewer: 'owner', ...extra,
   });
 }
+
+test('L2 · a past slot still fails the past-time guard', () => {
+  const verdict = slotOn('2026-10-03', { inPersonRequested: true });
+  assert.equal(verdict.passes, false);
+  assert.equal(verdict.violation_kind, 'in_the_past');
+});
 
 test('L2 · in-person on a home day is a soft violation named for the owner', () => {
   const verdict = slotOn('2026-10-05', { inPersonRequested: true });

@@ -226,6 +226,24 @@ function ordinal(n: number): string {
 
 // ── System cron management ───────────────────────────────────────────────────
 
+/** Profile default is used only until the owner has a persisted briefing routine. */
+function defaultBriefingTime(profile: UserProfile): string {
+  const starts = Object.values(profile.schedule.work_hours ?? {}).flat()
+    .map(range => range.match(/^(\d{2}:\d{2})-/)?.[1])
+    .filter((time): time is string => time != null).sort();
+  return starts[0] ?? '09:00';
+}
+
+/** Read the existing structured schedule; multiple daily times return the first. */
+export function getBriefingRoutineHourMin(profile: UserProfile): [number, number] {
+  const routine = getDb().prepare('SELECT * FROM routines WHERE id = ?')
+    .get(`system_briefing_${profile.user.slack_user_id}`) as Routine | undefined;
+  const time = routine?.schedule_time ?? defaultBriefingTime(profile);
+  const slots = parseScheduleTimes(time);
+  if (!slots.length) throw new Error('Invalid persisted briefing schedule_time');
+  return [slots[0].h, slots[0].m];
+}
+
 /**
  * Ensures the system briefing cron exists and is up to date.
  * Called at startup — idempotent.
@@ -237,13 +255,14 @@ export function ensureBriefingCron(profile: UserProfile): void {
 
   const existing = db.prepare('SELECT * FROM routines WHERE id = ?').get(cronId) as Routine | null;
 
-  // Get briefing time from preferences or profile
-  const { getBriefingHourMin } = require('./briefs') as typeof import('./briefs');
-  const [h, m] = getBriefingHourMin(profile);
-  const scheduleTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   const workDays = getProfileWorkDays(profile);
 
   if (existing) {
+    // The routine is canonical, including owner edits, paused/deleted state,
+    // multi-time clocks and schedule days. Legacy preferences cannot override it.
+    const scheduleTime = existing.schedule_time;
+    const invalidSchedule = scheduleError(existing.schedule_type, scheduleTime, existing.schedule_day);
+    if (invalidSchedule) throw new Error(`Invalid persisted briefing schedule: ${invalidSchedule}`);
     const now = DateTime.utc();
     const nextRunAt = computeNextRunAt(existing.schedule_type, scheduleTime, existing.schedule_day, profile.user.timezone, now, workDays);
     const storedNext = existing.next_run_at
@@ -258,7 +277,7 @@ export function ensureBriefingCron(profile: UserProfile): void {
       !storedNext.isValid ||
       (storedNext > now && storedNext.toMillis() !== DateTime.fromISO(nextRunAt).toMillis())
     );
-    if (existing.schedule_time !== scheduleTime || futureCursorChanged) {
+    if (futureCursorChanged) {
       db.prepare(`
         UPDATE routines SET schedule_time = ?, next_run_at = ?, updated_at = datetime('now')
         WHERE id = ?
@@ -267,6 +286,14 @@ export function ensureBriefingCron(profile: UserProfile): void {
     }
     return;
   }
+
+  // One-way legacy import only for a missing routine. Keep the source row for
+  // the preference migration's backup and verified retirement, never dual-write.
+  const legacy = db.prepare('SELECT value FROM user_preferences WHERE user_id = ? AND key = ?')
+    .get(ownerUserId, 'briefing_time') as { value: string } | undefined;
+  const scheduleTime = legacy?.value ?? defaultBriefingTime(profile);
+  const invalidSchedule = scheduleError('weekdays', scheduleTime, null);
+  if (invalidSchedule) throw new Error(`Invalid legacy briefing_time: ${invalidSchedule}`);
 
   // Create the system briefing cron
   const dmResult = db.prepare(`
@@ -503,10 +530,8 @@ action='list' — list all routines (active and paused), each with its schedule.
         // + notify_on_skip are mutable on EVERY routine, including system.
         // Title + prompt stay locked on system routines because the
         // dispatcher pivots on `prompt === '__system_briefing__'` — changing
-        // those would break the special briefing rendering path. When the
-        // briefing's schedule_time changes, we ALSO write the briefing_time
-        // preference so the value persists across restarts (ensureBriefingCron
-        // reads it at startup).
+        // those would break the special briefing rendering path. The routine
+        // row owns its schedule across restarts, including the system briefing.
         const routine = db.prepare(
           'SELECT * FROM routines WHERE id = ? AND owner_user_id = ?'
         ).get(args.routine_id as string, ownerUserId) as Routine | null;
@@ -546,25 +571,6 @@ action='list' — list all routines (active and paused), each with its schedule.
         db.prepare(
           `UPDATE routines SET ${fields}, updated_at = datetime('now') WHERE id = @routine_id`
         ).run({ ...updates, routine_id: args.routine_id as string });
-
-        // v2.5.1 — persist briefing time across restarts. ensureBriefingCron
-        // reads `briefing_time` pref at startup; without this write, a live
-        // schedule_time edit on the system briefing would reset on next
-        // restart back to whatever the pref / profile default holds.
-        if (routine.is_system === 1 && routine.id.startsWith('system_briefing_') && args.schedule_time != null) {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { savePreference } = require('../db/preferences') as typeof import('../db/preferences');
-          savePreference({
-            userId: ownerUserId,
-            category: 'general',
-            key: 'briefing_time',
-            value: args.schedule_time as string,
-            source: 'user_taught',
-          });
-          logger.info('Briefing schedule_time persisted to preference', {
-            ownerUserId, value: args.schedule_time,
-          });
-        }
 
         logger.info('Routine updated', { id: args.routine_id, updates: Object.keys(updates), is_system: routine.is_system });
         return { updated: true, routine_id: args.routine_id };
@@ -606,8 +612,7 @@ action='list' — list all routines (active and paused), each with its schedule.
     //     the routine's own tool (which does the work: books blocks, sends
     //     the brief).
     //   - the morning briefing's time is changed through action='update' with
-    //     schedule_time, which reschedules AND persists it (the briefing_time
-    //     preference write below).
+    //     schedule_time, which reschedules AND persists it in the routine row.
     //   - a routine `prompt` must be self-contained: dispatchers/routine.ts
     //     runs it with `conversationHistory: []`.
     // "weekdays means the owner's own work days, not Mon-Fri" needs no rule at

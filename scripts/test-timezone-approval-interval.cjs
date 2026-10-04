@@ -5,6 +5,7 @@ const assert=require('node:assert/strict'),{test}=require('node:test'),fs=requir
 const luxon=require('luxon'),{DateTime,Settings}=luxon;
 const root=path.resolve(__dirname,'..'),beforeRoot=process.env.TZ_APPROVAL_BEFORE_ROOT;
 Settings.now=()=>Date.parse('2026-09-11T00:00:00Z');
+class Clock extends Date { constructor(...a){super(...(a.length?a:[Settings.now()]));} static now(){return Settings.now();} }
 const captured=new Set(['src/core/approvals/approvalCallbacks.ts','src/core/requests/resolver.ts']);
 const actual=new Set([...captured,'src/core/requests/deferredActionReplay.ts','src/core/requests/types.ts','src/utils/weTimeResolver.ts','src/utils/timezoneConvert.ts','src/utils/workHours.ts','src/utils/workingElsewhere.ts','src/utils/textScrubber.ts']);
 const read=f=>fs.readFileSync(path.join(beforeRoot&&captured.has(f)?beforeRoot:root,f),'utf8');
@@ -46,7 +47,7 @@ function harness(tool,counter,opts={}){
   const module={exports:{}};modules.set(f,module);
   const js=ts.transpileModule(read(f),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const req=s=>s==='luxon'?luxon:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(f),s))+'.ts'):s.startsWith('node:')?require(s):(()=>{throw Error('Unexpected external '+s);})();
-  vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date,console,Set,Map,Buffer,setTimeout,setImmediate},{filename:f})(req,module,module.exports);return module.exports;
+  vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date:Clock,console,Set,Map,Buffer,setTimeout,setImmediate},{filename:f})(req,module,module.exports);return module.exports;
  }
  async function executionNormalization(kind,args,context){
   const file=`src/skills/meetings/ops/handlers/${kind==='create_meeting'?'createMeeting':'moveMeeting'}.ts`;

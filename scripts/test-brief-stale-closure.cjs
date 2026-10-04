@@ -60,6 +60,7 @@ function harness(options={}) {
     'src/llm/models.ts':{SONNET:{}},
   };
   function load(relative){
+    if(relative==='src/tasks/crons.ts')return {getBriefingRoutineHourMin(){throw new Error('Unexpected briefing schedule read in closure fixture');}};
     if(Object.hasOwn(mocks,relative))return mocks[relative];
     if(modules.has(relative))return modules.get(relative).exports;
     if(!actual.has(relative)){unexpected.push(relative);throw new Error(`Blocked module: ${relative}`);}

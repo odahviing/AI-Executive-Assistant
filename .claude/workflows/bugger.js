@@ -108,7 +108,36 @@ const workshopContract = (() => {
     regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
     boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
   const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
-  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema }
+  reviewSchema.properties.ownerRulingToken = { type: 'string', description: 'When checking an existing attempt after an owner answer, copy its current native rulingToken to bind this review to that answer.' }
+  // Engines receive a current native projection under the existing owner run
+  // authorization. Editor recommendations never release ledger dispositions.
+  const admissionKey = value => String(value || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
+    // Ticket identity is structured, not symptom similarity. A parent ruling
+    // covers all complaints; a complaint ruling covers itself, never siblings.
+  const identities = value => String(value || '').split(/[+,/]| and /i).map(admissionKey).filter(Boolean)
+  const parent = value => /^(\d+)(?:[-–_][a-z0-9][a-z0-9_.:>–-]*|\s+[a-z]\d+)$/.exec(value)?.[1]
+  const issueRefs = i => [...new Set([i.id, i.ref, i.matchesOpenBacklog, i.overridesDeclined].filter(text).flatMap(identities))]
+  const matchingEntries = (admission, i) => (admission?.entries || []).filter(e => identities(e.ref).some(r => issueRefs(i).some(candidate => r === candidate || r === parent(candidate) || parent(r) === candidate)))
+  const withOwnerRulings = (admission, issues) => issues.map(i => {
+    const entry = matchingEntries(admission, i).find(e => e.ownerRuled)
+    return entry ? { ...i, _ownerRuled: entry.ownerRuled, _ownerRulingToken: entry.rulingToken } : i
+  })
+  const checkAdmission = (admission, issues, protectedRefs = [], preset = false) => {
+    if (!admission || admission.version !== 1 || !text(admission.authorization) || !Array.isArray(admission.entries)) return issues.map(i => ({ ref: i.id || i.ref, reason: 'missing current native intakeAdmission; regenerate the authorized batch plan' }))
+    const entries = admission.entries
+    const protectedSet = new Set(protectedRefs.flatMap(identities))
+    return issues.flatMap(i => {
+      const refs = issueRefs(i)
+      const known = matchingEntries(admission, i)
+      const reject = reason => [{ ref: i.id || i.ref, reason }]
+      const rulings = known.filter(e => e.ownerRuled).map(e => JSON.stringify(e.ownerRuled))
+      if (new Set(rulings).size > 1 || i._ownerRuled && (!rulings.length || JSON.stringify({ askedBecause: i._ownerRuled.askedBecause, hisRuling: i._ownerRuled.hisRuling }) !== rulings[0])) return reject('owner answer is absent, conflicting or stale; use the current native ruling')
+      if (known.length) return known.every(e => (e.status === 'ready' || e.status === 'continuation' && text(e.attemptId)) && e.selected === true && e.lane === i.lane) ? [] : reject('recorded item is not selected, current ready/continuation work for this lane')
+      if (preset || refs.some(r => protectedSet.has(r) || protectedSet.has(parent(r))) || ['owner', 'backlog', 'verify'].includes(i.source) || i.intake || i.matchesOpenBacklog || i.overridesDeclined) return reject('owner/backlog/preset item needs explicit native charter assessment and selection')
+      return admission.allowFresh === true && ['github', 'logs', 'both'].includes(i.source) ? [] : reject('fresh-source work is outside this authorized run')
+    })
+  }
+  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
 const workshopReviews = new Map()
@@ -1459,7 +1488,7 @@ const editor = await agent(
       ? `## The backlog re-read\n\n` +
         `Run \`node scripts/ledger-stats.cjs --open\` (read-only) and take **ONLY the rows printed with the \`RE-READ\` prefix** — nobody has stood behind those rows: either the code they cite **moved** after they were written, or **nobody has ever re-read them** (X59, and that second reason is the large half — 28 of 52 on 2026-07-30 against 0 that had moved). **Report \`backlogSeen\`**: how many the command printed. This pass exists to make the list SHORTER, honestly.\n` +
         `  • **The rows it lists under \`cite no file\` are NOT yours.** They cite nothing, so there is nothing to re-read; hunting for their code is unbounded work with no answer at the end. **Report the count as \`backlogNoCite\` and move on** — they go to the owner as a named hand-read list.\n` +
-        `  • **EXCEPTION — pull an UNTOUCHED \`source:owner\` row out of that skip, first.** \`--open\`'s no-cite list now prints each row's \`source:<value>\` next to it. A row tagged \`source:owner\` **with no \`recommend\` yet** is not a stale row with nowhere to point — it is a FRESH flag he logged directly in some other chat, outside any run, on purpose (\`.claude/SESSION_STARTER.md\`'s "flag a bug directly" section), and it cites nothing only because nobody has looked yet. **Check \`recommend\` before you touch it — re-run \`node scripts/ledger-stats.cjs --open --json\` and pull the row by its \`ref\`**, which also gives you the FULL \`finding\` text the console line truncates at 88 chars. **A \`source:owner\` row that already carries a \`recommend\` is NOT this case** — it has already been triaged and parked (his own past ruling may be sitting in it, e.g. a \`defer\`) — leave it in the ordinary hand-read list untouched. Only for the untouched ones, **treat it exactly like a raw GitHub or log finding**: validate it against the code from scratch (E1), classify \`atomic\`/\`needs-shaping\` as usual, route it to the owning lane, and emit it into \`issues\` — \`source: 'owner'\`, and its own ledger \`ref\` as the issue's \`id\` (never renumber it, never fold it into a ticket suffix). **Only a row you actually pulled out this way is excluded from \`backlogNoCite\`** — every other no-cite row, owner-sourced or not, keeps today's behavior exactly: not yours, count it, move on.\n` +
+        `  • Owner captures are collection-only until the native batch planner selects a current charter-assessed ref. Never promote source:owner/no-recommend rows into issues. Read them only as existing evidence; recommend, backlog matches and queued rows do not override recorded capture/hold/decision state.\n` +
         `  • Open the file each row cites and rule: **\`fixed\`** (the defect is gone), **\`moved\`** (still real, elsewhere — give the current \`file:line\` in \`whereNow\`), **\`still-real\`** (still there, as described).\n` +
         `  • **A bare \`fixed\` is REFUSED. Name the commit or the code that proves it** — \`git log -1 --format=%h -- <file>\`, or the branch that now handles the case. A restructured file looks fixed when the defect has only MOVED, and a false close is worse than a stale row because nothing ever looks again.\n` +
         `  • **Emit NO issue for a row you RE-READ here** — it rides on its own row, not as a duplicate. **X129 · your \`recommend\` verb is now ACTED ON in this same run:** a \`build\` verb sends that row to the lane you name in \`lane\`, so write it only where you would dispatch a fresh atomic bug. Every other verb keeps the row on his desk and builds nothing.\n` +
@@ -1657,8 +1686,10 @@ let fromBacklog = 0
 // is able to build should be build. the stuff that are not to build is the ones
 // waiting for me, or the one decline/deferred/moved to github and then there are
 // there only for history."* So BUILD is the default and the exclusions are
-// explicit — the editor's `recommend` verb IS the authority, the same trust it
-// already carries for the atomic-vs-needs-shaping call on every fresh issue.
+// explicit — the editor's `recommend` verb identifies a candidate, not authority
+// to release a capture, hold or product decision.
+// The native intake admission below additionally preserves current owner authorization.
+// A recommendation alone cannot release a capture, hold or decision.
 // Gate on the VERB, never on the display bucket: `--open` prints some rows as
 // DECIDE and some as QUEUED, and that column describes where the row sits on his
 // desk, not whether the editor would dispatch it.
@@ -1673,7 +1704,7 @@ if (!PRESET && BACKLOG) {
     if (!r || r.state === 'fixed') continue // fixed closes the row; nothing to build
     // `decline` / `defer` / `resend` / `convert` / no recommendation at all — a
     // row waiting on him, or parked, or headed for GitHub. The verb is the whole
-    // gate; there is no second list to keep in sync with it.
+    // candidate filter; current native admission still gates actual dispatch.
     if (!BUILD_VERB.test(String(r.recommend || ''))) continue
     if (!r.lane || !KNOWN_LANES.has(r.lane)) {
       backlogUndispatchable.push(r)
@@ -1726,6 +1757,14 @@ if (!PRESET) {
   buildable = buildable.concat(mergedQueue, mergedBacklog)
   if (fromQueue || fromBacklog)
     log(`Merged: ${fromEditor} from the editor + ${fromQueue} from args.pendingOverflow + ${fromBacklog} from the backlog re-read = ${buildable.length} buildable.`)
+}
+
+// All intake producers converge here: Editor, regression re-instatement,
+// presets, queue and backlog recommendation. Gate before any lane dispatch.
+if (MODE !== 'collect') {
+  const admissionBlocked = workshopContract.checkAdmission(A.intakeAdmission, buildable, [...OPEN_BACKLOG.map(r => r.ref), ...carriedIn.map(r => r.id || r.ref), ...backlogBuildable.map(r => r.id)], Boolean(PRESET))
+  if (admissionBlocked.length) throw new Error('INTAKE ADMISSION BLOCKED — nothing dispatched: ' + JSON.stringify(admissionBlocked))
+  buildable = workshopContract.withOwnerRulings(A.intakeAdmission, buildable)
 }
 
 // Severity-first cap so a heavy day cannot overrun the window; the rest is reported as pending.
