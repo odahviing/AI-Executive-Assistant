@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 32 open items; 0 captured, 8 ready for an authorized lane batch, 22 held, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (6):** rita-redundant-approval-update · rita-tool-budget-deflection · rita-approval-expiry-after-proposed-meeting · rita-colleague-protected-time-disclosure · two-owner-preference-stores-routine-dependency · rita-protected-time-tool-description-dependency
+**Independently verified, awaiting wrap (0):** none
 
 ### Ready for lane (8)
 
