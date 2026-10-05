@@ -37,7 +37,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { Client, RetryHandlerOptions } from '@microsoft/microsoft-graph-client';
+import { Client, GraphError, RetryHandlerOptions } from '@microsoft/microsoft-graph-client';
 import type { AuthenticationProvider } from '@microsoft/microsoft-graph-client';
 import { config } from '../../config';
 import type { UserProfile } from '../../config/userProfile';
@@ -122,6 +122,13 @@ export class MailAuthRevokedError extends Error {
     super(`Email channel authentication failed (${code}): ${detail}`);
     this.name = 'MailAuthRevokedError';
   }
+}
+
+/** The Graph SDK wraps authentication-provider errors, preserving their name
+ * in GraphError.code with no HTTP response (status -1), not their class. */
+export function isTerminalMailAuthError(err: unknown): boolean {
+  return err instanceof MailAuthRevokedError
+    || (err instanceof GraphError && err.statusCode === -1 && err.code === 'MailAuthRevokedError');
 }
 
 // ── Token + delta persistence (data/, gitignored) ───────────────────────────
@@ -565,7 +572,7 @@ export async function replyToMail(profile: UserProfile, opts: ReplyToMailOptions
     return 'accepted';
   } catch (err) {
     const status = (err as { statusCode?: number })?.statusCode;
-    const explicitlyRejected = err instanceof MailAuthRevokedError
+    const explicitlyRejected = isTerminalMailAuthError(err)
       || (typeof status === 'number' && status >= 400 && status < 500 && status !== 408);
     if (sendAttempted && !explicitlyRejected) {
       logger.warn('mail.ts:replyToMail — send outcome unconfirmed; no retry or cleanup', { draftId });

@@ -30,7 +30,7 @@
  */
 import type { UserProfile } from '../../config/userProfile';
 import {
-  listNewMessages, markMessageRead, hasMailRefreshToken, MailAuthRevokedError, LIST_MESSAGES_TIMEOUT_MS,
+  listNewMessages, markMessageRead, hasMailRefreshToken, isTerminalMailAuthError, LIST_MESSAGES_TIMEOUT_MS,
 } from './mail';
 import { getMailInbound } from './mailInboundRegistry';
 import { getConnection } from '../../connections/registry';
@@ -69,7 +69,7 @@ async function pollProfile(profile: UserProfile): Promise<void> {
   try {
     messages = await listNewMessages(profile);
   } catch (err) {
-    if (err instanceof MailAuthRevokedError) {
+    if (isTerminalMailAuthError(err)) {
       // Check-then-add, both synchronous with no `await` between them, so
       // this is atomic under JS's single-threaded scheduling even when two
       // overlapping pollProfile runs for the SAME profile both land here

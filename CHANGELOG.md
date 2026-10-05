@@ -1,3 +1,11 @@
+## 5.0.5 — Preserve terminal email failures through Microsoft’s SDK
+
+The live 5.0.4 check confirmed the alert removal but exposed Microsoft Graph wrapping authentication errors into its own error class. Recognize the SDK's structured terminal-auth error in polling and send outcomes so rejected credentials actually pause polling and remain a confirmed send rejection.
+
+### Verification and limits
+- Focused follow-up under the same owner-authorized expedited release; no Bouncer or full release pipeline. All 74 affected email tests and TypeScript passed. Regression coverage exercises the installed Graph SDK with isolated token responses and fails on the deployed 5.0.4 source.
+- The expired Microsoft app credential still requires replacement before email can work.
+
 ## 5.0.4 — Stop repeated email failure alerts
 
 Remove repeated Slack notices for automatically retried email polling failures. Microsoft credential rejection now pauses email polling and produces one brief repair notice per running process, without exposing mailbox addresses, provider errors, source filenames or commands.

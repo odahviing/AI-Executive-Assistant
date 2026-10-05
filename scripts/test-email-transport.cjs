@@ -30,8 +30,8 @@ function harness(options={}) {
   const source=fs.readFileSync(saved&&fs.existsSync(saved)?saved:path.join(root,rel),'utf8');
   const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const mod={exports:{}};modules.set(rel,mod);
-  function req(s){if(s==='fs'||s==='node:fs')return disk;if(s==='@microsoft/microsoft-graph-client')return {...require(s),Client:{initWithMiddleware:o=>{auth=o.authProvider;return graph;}}};if(s.startsWith('.')){let f=path.posix.normalize(path.posix.join(path.posix.dirname(rel),s));return load(fs.existsSync(path.join(root,f+'.ts'))?f+'.ts':f+'/index.ts');}return require(s);}
-  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{process:{cwd:()=>'/fixture'},Date:Clock,console,Map,Set,URLSearchParams,AbortSignal:options.abortSignal||AbortSignal,fetch:options.fetch||(()=>{throw Error('unexpected token fetch');}),setInterval:f=>{timer=f;}},{filename:rel})(req,mod,mod.exports);
+  function req(s){if(s==='fs'||s==='node:fs')return disk;if(s==='@microsoft/microsoft-graph-client')return {...require(s),Client:{initWithMiddleware:o=>{auth=o.authProvider;return options.realSdk ? require(s).Client.initWithMiddleware(o) : graph;}}};if(s.startsWith('.')){let f=path.posix.normalize(path.posix.join(path.posix.dirname(rel),s));return load(fs.existsSync(path.join(root,f+'.ts'))?f+'.ts':f+'/index.ts');}return require(s);}
+  vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{process:{cwd:()=>'/fixture'},Date:Clock,Error,console,Map,Set,URLSearchParams,AbortSignal:options.abortSignal||AbortSignal,fetch:options.fetch||(()=>{throw Error('unexpected token fetch');}),setInterval:f=>{timer=f;}},{filename:rel})(req,mod,mod.exports);
   return mod.exports;
  }
  const registry=load('src/connectors/graph/mailInboundRegistry.ts');
@@ -69,7 +69,7 @@ test('410 resync retries exactly once with the same abort budget',async()=>{
 test('transient and sustained poll failures remain quiet and recover automatically',async()=>{
  let fail=true;const h=harness({graph:()=>{if(fail)throw Error('private diagnostic fixture');return {value:[raw('recovered')],'@odata.deltaLink':'done'};}});h.start();for(let i=0;i<40;i++)await h.tick();assert.equal(h.notices.length,0);assert.equal(h.calls.length,40);fail=false;await h.tick();assert.equal(h.handled.length,1);
 });
-test('revoked auth stops future polls and says reauth plus restart once',async()=>{
+test('revoked auth stops future polls and requests repair plus restart once',async()=>{
  let h;h=harness({graph:()=>{throw new (h.load('src/connectors/graph/mail.ts').MailAuthRevokedError)('fixture');}});h.start();await h.tick();await h.tick();assert.equal(h.calls.length,1);assert.equal(h.notices.length,1);assert.match(h.notices[0][1],/restart/);
 });
 test('owner and alias sends preserve quote and explicit recipient despite inferred Reply-To',async()=>{
@@ -189,4 +189,18 @@ test('retryable token failures retry silently then recover',async()=>{
 
 test('overlapping terminal authentication failures send only one notice',async()=>{
  const rejects=[];const h=harness({graph:()=>new Promise((resolve,reject)=>rejects.push(reject))});h.start();await h.tick();h.advance(800000);await h.tick();assert.equal(rejects.length,2);const AuthError=h.load('src/connectors/graph/mail.ts').MailAuthRevokedError;rejects.forEach(reject=>reject(new AuthError('private','invalid_client')));for(let i=0;i<20;i++)await new Promise(setImmediate);assert.equal(h.notices.length,1);await h.tick();assert.equal(h.calls.length,2);
+});
+
+for (const code of ['invalid_client','invalid_grant']) test('real Graph SDK preserves terminal '+code+' polling classification',async()=>{
+ let fetches=0;const h=harness({realSdk:true,fetch:async()=>{fetches++;return {ok:false,status:401,json:async()=>({error:code,error_description:'PRIVATE_SDK_DIAGNOSTIC'})};}});h.start();for(let i=0;i<40;i++)await h.tick();assert.equal(fetches,1);assert.equal(h.notices.length,1);assert.doesNotMatch(h.notices[0][1],/PRIVATE|invalid_|token|401/);
+});
+test('real Graph SDK retryable token failures stay retryable and silent',async()=>{
+ let fetches=0;const h=harness({realSdk:true,fetch:async()=>{fetches++;return {ok:false,status:503,json:async()=>({error:'temporarily_unavailable'})};}});h.start();for(let i=0;i<5;i++)await h.tick();assert.equal(fetches,5);assert.equal(h.notices.length,0);
+});
+test('SDK authentication rejection during send is failed, not an unknown send outcome',async()=>{
+ const {GraphErrorHandler}=require('@microsoft/microsoft-graph-client/lib/src/GraphErrorHandler');let h;h=harness({graph:async c=>{if(c.url.endsWith('/createReply'))return {id:'draft'};if(c.url.endsWith('/send'))throw await GraphErrorHandler.getError(new (h.load('src/connectors/graph/mail.ts').MailAuthRevokedError)('private','invalid_client'));}});const c=h.load('src/connections/email/index.ts').createEmailConnection(profile);assert.equal((await c.sendDirect('owner@example.com','fixture',{replyToMessageId:'m'})).reason,'send_failed');assert.equal(h.calls.filter(c=>c.method==='delete').length,1);
+});
+
+test('Graph response with a matching code and ambiguous status remains unconfirmed',async()=>{
+ const {GraphErrorHandler}=require('@microsoft/microsoft-graph-client/lib/src/GraphErrorHandler');const h=harness({graph:async c=>{if(c.url.endsWith('/createReply'))return {id:'draft'};if(c.url.endsWith('/send'))throw await GraphErrorHandler.getError({error:{code:'MailAuthRevokedError',message:'provider response'}},503);}});const c=h.load('src/connections/email/index.ts').createEmailConnection(profile);assert.equal((await c.sendDirect('owner@example.com','fixture',{replyToMessageId:'m'})).reason,'send_unconfirmed');assert.equal(h.calls.filter(c=>c.method==='delete').length,0);
 });
