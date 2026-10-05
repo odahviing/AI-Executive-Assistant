@@ -66,8 +66,8 @@ test('restart resumes persisted delta instead of initial inbox replay',async()=>
 test('410 resync retries exactly once with the same abort budget',async()=>{
  let first=true;const h=harness({graph:c=>{if(first){first=false;throw {statusCode:410};}return {value:[raw('m')],'@odata.deltaLink':'done'};}});const result=await h.load('src/connectors/graph/mail.ts').listNewMessages(profile);assert.equal(result.length,1);assert.equal(h.calls.length,2);assert.equal(h.calls[0].options.signal,h.calls[1].options.signal);
 });
-test('transient poll failure stays quiet; sustained failures notify at 5 then 10',async()=>{
- const h=harness({graph:()=>{throw Error('transient fixture');}});h.start();for(let i=0;i<4;i++)await h.tick();assert.equal(h.notices.length,0);await h.tick();assert.equal(h.notices.length,1);for(let i=0;i<5;i++)await h.tick();assert.equal(h.notices.length,2);
+test('transient and sustained poll failures remain quiet and recover automatically',async()=>{
+ let fail=true;const h=harness({graph:()=>{if(fail)throw Error('private diagnostic fixture');return {value:[raw('recovered')],'@odata.deltaLink':'done'};}});h.start();for(let i=0;i<40;i++)await h.tick();assert.equal(h.notices.length,0);assert.equal(h.calls.length,40);fail=false;await h.tick();assert.equal(h.handled.length,1);
 });
 test('revoked auth stops future polls and says reauth plus restart once',async()=>{
  let h;h=harness({graph:()=>{throw new (h.load('src/connectors/graph/mail.ts').MailAuthRevokedError)('fixture');}});h.start();await h.tick();await h.tick();assert.equal(h.calls.length,1);assert.equal(h.notices.length,1);assert.match(h.notices[0][1],/restart/);
@@ -179,3 +179,14 @@ test('history failure after accepted send never manufactures a send failure noti
 });
 
 module.exports={harness,raw,profile};
+
+for (const code of ['invalid_client','invalid_grant']) test(code+' token response halts polling with one safe repair notice',async()=>{
+ let h,fetches=0;h=harness({fetch:async()=>{fetches++;return {ok:false,status:401,json:async()=>({error:code,error_description:'PRIVATE_PROVIDER_DIAGNOSTIC'})};},graph:async()=>{await h.auth().getAccessToken();throw Error('unreachable');}});h.start();for(let i=0;i<40;i++)await h.tick();assert.equal(fetches,1);assert.equal(h.notices.length,1);assert.match(h.notices[0][1],/repair/);assert.match(h.notices[0][1],/restart/);assert.doesNotMatch(h.notices[0][1],/PRIVATE|invalid_|fixture|example|scripts|token|401/);
+});
+test('retryable token failures retry silently then recover',async()=>{
+ let h,fail=true,fetches=0;h=harness({fetch:async()=>{fetches++;return fail?{ok:false,status:503,json:async()=>({error:'temporarily_unavailable'})}:{ok:true,json:async()=>({access_token:'access',refresh_token:'rotated',expires_in:3600})};},graph:async c=>{await h.auth().getAccessToken();return {value:[],'@odata.deltaLink':'done'};}});h.start();for(let i=0;i<4;i++)await h.tick();assert.equal(fetches,4);assert.equal(h.notices.length,0);fail=false;await h.tick();assert.equal(fetches,5);await h.tick();assert.equal(fetches,5);assert.equal(h.notices.length,0);
+});
+
+test('overlapping terminal authentication failures send only one notice',async()=>{
+ const rejects=[];const h=harness({graph:()=>new Promise((resolve,reject)=>rejects.push(reject))});h.start();await h.tick();h.advance(800000);await h.tick();assert.equal(rejects.length,2);const AuthError=h.load('src/connectors/graph/mail.ts').MailAuthRevokedError;rejects.forEach(reject=>reject(new AuthError('private','invalid_client')));for(let i=0;i<20;i++)await new Promise(setImmediate);assert.equal(h.notices.length,1);await h.tick();assert.equal(h.calls.length,2);
+});

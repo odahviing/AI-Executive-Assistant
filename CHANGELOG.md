@@ -1,3 +1,15 @@
+## 5.0.4 — Stop repeated email failure alerts
+
+Remove repeated Slack notices for automatically retried email polling failures. Microsoft credential rejection now pauses email polling and produces one brief repair notice per running process, without exposing mailbox addresses, provider errors, source filenames or commands.
+
+### Fixed
+- Treat structured OAuth `invalid_client` responses, including expired app credentials, as terminal authentication failures through the existing stop-and-notify path.
+- Keep transient failure diagnostics in logs and preserve automatic recovery when a later poll succeeds.
+
+### Verification and limits
+- Focused hotfix at the owner's request; Bouncer and the full release process were explicitly waived. Four affected email suites passed 69 tests, and TypeScript passed. The updated regression harness reproduced three failures on the previous source.
+- This stops the notification flood; it does not renew the expired Microsoft app credential. Email resumes after credential repair and restart.
+
 ## 5.0.3 — Approval timing, colleague privacy and briefing schedule reliability
 
 Approval requests now expire by the proposed meeting time, and semantic paraphrases no longer force correction notices when the existing classifier identifies unchanged terms. Colleague availability results withhold the owner's private scheduling reasons before they reach the reply model.

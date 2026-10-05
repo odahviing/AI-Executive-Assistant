@@ -27,16 +27,9 @@
  *     2026-07-28 against Microsoft's docs) — every refresh persists the NEW
  *     token back to that same file so the next refresh, and the next
  *     process restart, use it instead of the one just spent.
- *   - `invalid_grant` (the stored token was revoked — admin reset / explicit
- *     revoke-all, or the 90-day confidential-client idle limit, which a
- *     ~30s poll never approaches) is surfaced as MailAuthRevokedError — a
- *     clear, logged, reportable condition. Callers must not crash-loop on
- *     it. The one caller today (connectors/graph/mailPoll.ts) reports it
- *     once, then skips that profile on every future tick — re-running
- *     scripts/email-auth.mjs alone does NOT resume polling, because that
- *     only fixes the token ON DISK. The in-memory "revoked" latch is
- *     cleared only by restarting the process, which then re-seeds
- *     initMailAuth from whatever token is on disk at that point.
+ *   - Structured invalid_grant and invalid_client failures are terminal:
+ *     MailAuthRevokedError stops polling until credentials are repaired and
+ *     the process restarts. Other failures remain retryable.
  *
  * Both the token store and the delta watermark live under data/ (gitignored,
  * same as the sqlite db) — never in the committed yaml.
@@ -122,12 +115,11 @@ const MAIL_DELEGATED_SCOPES = [
 const SHORT_MAIL_CALL_TIMEOUT_MS = 15_000;
 export const LIST_MESSAGES_TIMEOUT_MS = 180_000;
 
-/** Thrown when the stored refresh token is dead — revoked or past its idle
- * window. Never retry-loop on this; it needs a human to re-run
- * scripts/email-auth.mjs. */
+/** Terminal delegated authentication failure. Also covers rejected client
+ * credentials, preserving the shared polling and send-outcome contract. */
 export class MailAuthRevokedError extends Error {
-  constructor(detail: string) {
-    super(`Email channel refresh token is invalid/revoked: ${detail}. Re-run: node scripts/email-auth.mjs <profile>`);
+  constructor(detail: string, code: 'invalid_grant' | 'invalid_client' = 'invalid_grant') {
+    super(`Email channel authentication failed (${code}): ${detail}`);
     this.name = 'MailAuthRevokedError';
   }
 }
@@ -256,11 +248,11 @@ async function refreshAccessToken(profileId: string): Promise<string> {
   const json: any = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    if (json?.error === 'invalid_grant') {
-      logger.error('mail.ts — refresh token invalid/revoked; email channel needs re-auth', {
-        profileId, description: json.error_description,
+    if (json?.error === 'invalid_grant' || json?.error === 'invalid_client') {
+      logger.error('mail.ts — terminal email authentication failure; credentials need repair', {
+        profileId, code: json.error, description: json.error_description,
       });
-      throw new MailAuthRevokedError(json.error_description || 'invalid_grant');
+      throw new MailAuthRevokedError(json.error_description || json.error, json.error);
     }
     logger.error('mail.ts — token refresh failed', { profileId, status: res.status, error: json?.error, description: json?.error_description });
     throw new Error(`mail.ts — token refresh failed (${res.status}): ${json?.error || 'unknown error'}`);
