@@ -1,11 +1,11 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "note": "Owner-authorized same-version 5.0.4 repair wrap; full checkpoint running on frozen source",
-    "status": "running",
+    "note": "5.0.4 repair wrapped: three independently verified corrections; 224 executions and 5423 assertions with bounded fixture replacement, Golden30 complete.",
+    "status": "complete",
     "id": "wrap-provider-schema-20261006"
   },
-  "lastWrapIso": "2026-10-06T11:58:43+03:00",
+  "lastWrapIso": "2026-10-06T21:24:50+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
   "nextReportId": 315,
   "verifiedClean": [

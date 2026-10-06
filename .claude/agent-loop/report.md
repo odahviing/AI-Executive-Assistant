@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 30 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 6 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (3):** profile-tool-provider-schema-rejection-20261006 · task-tool-provider-schema-rejection-20261006 · slack-failure-reply-language-20261006
+**Independently verified, awaiting wrap (0):** none
 
 ### Needs a product decision (2)
 
