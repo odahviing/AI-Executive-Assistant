@@ -390,14 +390,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     appendToConversation(threadTs, channelId, { role: 'user', content: persistedText, ts });
 
     // ── Load actual Slack thread replies and merge with DB history ──────────
-    // The DB only has messages Maelle processed. In channels/MPIMs she may have
-    // missed messages (not mentioned, relevance filtered). Fetch the real thread
-    // so Claude has the full picture.
-    // v3.5.x — ONLY merge in channels/MPIMs. In a 1:1 DM Maelle misses nothing
-    // (every inbound is processed + appended), so the merge added zero new info
-    // and only re-inflated stale history past the DB's recency cap — burying a
-    // NEW request under ~50 messages of an already-finished one (Daniel,
-    // 2026-06-29: a fresh "meeting with Tal" ask read as a continuation).
+    // Automated Connection sends need not pass through postReply's DB writer.
+    // Recover the current thread on explicit DM replies as well as rooms;
+    // a fresh top-level DM never inherits a previous topic's remote history.
     const namedHumanIds = [...text.matchAll(/(?:<@|\(slack_id:\s*)([A-Z0-9]+)(?:>|\))/g)]
       .map(m => m[1]).filter(id => id !== ctx.botUserId);
     let threadParticipantIds: string[] | undefined;
@@ -405,10 +400,10 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
     const dbHistory = getConversationHistory(threadTs).filter(m => !m.ts || !exclude.includes(m.ts));
     let history = dbHistory;
     threadParticipantIds = (isChannel || isMpim) ? [...new Set([senderId, ...namedHumanIds])] : undefined;
-    if (isChannel || isMpim) {
+    if (isChannel || isMpim || threadTs !== ts) {
       try {
         const threadMessages = await readSlackThread(client, assistant.slack.bot_token, channelId, threadTs, Infinity);
-        threadParticipantIds = [...new Set([
+        if (isChannel || isMpim) threadParticipantIds = [...new Set([
           ...threadMessages.filter(m => m.user && !m.bot_id && m.user !== ctx.botUserId).map(m => String(m.user)),
           senderId, ...namedHumanIds,
         ])];
@@ -423,29 +418,27 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
         // this pass a bare `<@U0ARK...>` id syntax rode into the merged history
         // (and from there into the model / a reply) instead of a resolved name.
         //
-        // v4.4.9 — exclude Maelle's OWN messages (m.user === ctx.botUserId) from
-        // "missed" reconciliation entirely. This block's whole premise (see the
-        // comment above, v3.5.x) is recovering INBOUND messages the addressee
-        // gate filtered before she ever saw them — that concept doesn't apply to
-        // her own replies, she always knows what she said. But assistant rows
-        // written by appendToConversation carry a local delivery timestamp,
-        // not necessarily the Slack message timestamp, so her own past replies
-        // can fail the `dbTimestamps.has(m.ts)` check and
-        // was funneled back in here as a "missed" message: reprocessed through
-        // resolveSlackMentions (meant for fresh inbound text, not her own
-        // already-resolved output) and duplicated alongside the identical
-        // content already sitting in dbHistory — doubling every one of her own
-        // replies in the model's context on every channel/MPIM catch-up merge.
+        // The app's auth.test identity establishes assistant authorship, never
+        // bot_id or a claim in text. Keep trusted DB receipts when postReply's
+        // local timestamp differs from Slack's; strip only its recorded prefix
+        // for comparison, without interpreting remote prose as tool evidence.
+        const storedAssistantText = new Set(dbHistory.filter(m => m.role === 'assistant').map(m => {
+          const prefix = m.toolSummaries?.length ? `${m.toolSummaries.join(' ')}\n` : '';
+          return prefix && m.content.startsWith(prefix) ? m.content.slice(prefix.length) : m.content;
+        }));
         const missedMessages = await Promise.all(slackMessages
-          .filter(m => m.user !== ctx.botUserId && !dbTimestamps.has(m.ts) && !exclude.includes(m.ts))
+          .filter(m => !dbTimestamps.has(m.ts) && !exclude.includes(m.ts))
+          .filter(m => m.user === ctx.botUserId
+            ? !storedAssistantText.has(m.text as string)
+            : !m.bot_id && (isChannel || isMpim || m.user === senderId))
           .map(async m => ({
-            role: 'user' as const,
-            content: await ctx.resolveSlackMentions(m.text as string),
+            role: m.user === ctx.botUserId ? 'assistant' as const : 'user' as const,
+            content: m.user === ctx.botUserId ? m.text as string : await ctx.resolveSlackMentions(m.text as string),
             ts: m.ts as string,
           })));
 
         if (missedMessages.length > 0) {
-          // Preserve trusted DB receipt metadata; remote prose is only user text.
+          // Preserve trusted DB receipt metadata; remote prose carries no receipts.
           const merged = [...dbHistory, ...missedMessages].sort((a, b) => {
             const tsA = parseFloat(a.ts || '0');
             const tsB = parseFloat(b.ts || '0');

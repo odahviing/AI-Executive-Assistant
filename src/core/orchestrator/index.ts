@@ -1412,7 +1412,6 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           'manage_preference', // v2.9 — merged learn_preference/forget_preference/recall_preferences
           'recall_interactions',
           'update_person_profile',
-          'update_person_memory',
           'get_person_memory',
           'confirm_gender',
         ]);

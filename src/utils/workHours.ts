@@ -415,6 +415,26 @@ export function computeHealthCheckWindow(profile: UserProfile): {
   };
 }
 
+/** Unspecified meeting timing: today and the next two owner working dates.
+ * Dated overrides and their timezone own the final day's endpoint. This is a
+ * search boundary, selected before availability or preference ranking.
+ */
+export function defaultMeetingSearchWindow(profile: UserProfile): { from: string; to: string } {
+  const now = DateTime.now().setZone(profile.user.timezone);
+  let day = now.startOf('day');
+  let remaining = 2;
+  // Bound malformed/empty schedules without silently inventing a workday.
+  for (let scanned = 0; scanned < 366; scanned++) {
+    day = day.plus({ days: 1 });
+    const effective = getEffectiveWorkDay(day.toISODate()!, profile);
+    if (!effective.isWorkday || effective.windows.length === 0) continue;
+    if (--remaining === 0) {
+      return { from: now.toISO()!, to: DateTime.fromISO(day.toISODate()!, { zone: effective.timezone }).endOf('day').toISO()! };
+    }
+  }
+  throw new Error('No two future owner working days are configured for the meeting search.');
+}
+
 /**
  * v2.1.3 — base timestamp for owner-workday expiry calculations.
  * Returns NOW when the owner is currently within their work hours, else

@@ -15,14 +15,13 @@
  *      channel is (`resolveChannelCounterpart`) and skips owner DMs. No
  *      transport client is touched here — this module knows people, not pipes.
  *   4. It loads the colleague's current state (people_memory profile_json
- *      + .md file content + recent notes) and the just-completed chat.
+ *      + canonical memory view) and the just-completed chat.
  *   5. A single Haiku call extracts deltas — facts the chat revealed
  *      that aren't already on file. Comparing against current state
  *      means re-runs on the same chat (idempotency) are no-ops.
- *   6. Code applies deltas: DB writes first (profile_json fields via
- *      updatePersonProfile + setCoreFieldWithProvenance), then mirrors
- *      the same updates into the colleague's .md file sections so the
- *      day-to-day prompt (which reads from .md) reflects current state.
+ *   6. Code applies deltas: canonical DB writes (profile_json fields via
+ *      updatePersonProfile + setCoreFieldWithProvenance); prompt views
+ *      derive accepted facts from that same record.
  *   7. `markThreadCaptured` stamps captured_at so re-runs don't refire
  *      until new messages arrive.
  *
@@ -50,7 +49,7 @@ import {
   recordSocialCaptureUnknown,
   type PersonProfile,
 } from '../db';
-import { readPersonMemory, writePersonSection, slugifyName, syncPersonOperationalSections } from './peopleMemory';
+import { readPersonMemory } from './peopleMemory';
 import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
@@ -134,7 +133,7 @@ interface CaptureDelta {
 
 const SYSTEM_PROMPT = `You are a fact extractor for an executive assistant's memory layer.
 
-You will be given (1) a chat transcript between an EA named Maelle and a colleague, (2) the current structured profile + freeform md notes Maelle already has on that colleague.
+You will be given (1) a chat transcript between an EA named Maelle and a colleague, (2) the current structured profile + canonical memory Maelle already has on that colleague.
 
 Your ONLY job: identify what is genuinely NEW or UPDATED about the colleague based on this chat. Compare against the current state — DO NOT re-emit facts already on file.
 
@@ -167,7 +166,7 @@ Output strict JSON. No prose, no markdown fences, just the JSON object.`;
 function buildUserMessage(
   colleagueName: string,
   currentProfile: PersonProfile,
-  currentMd: string,
+  currentMemory: string,
   chatTranscript: string,
 ): string {
   return [
@@ -180,7 +179,7 @@ function buildUserMessage(
     '',
     'CURRENT MD FILE (freeform notes — also do NOT re-emit content already here):',
     '```',
-    currentMd || '(none yet)',
+    currentMemory || '(none yet)',
     '```',
     '',
     'CHAT TRANSCRIPT (just completed):',
@@ -221,7 +220,7 @@ function parseDelta(raw: string): CaptureDelta | null {
 }
 
 /**
- * Apply a Haiku delta to BOTH the DB and the colleague's .md file.
+ * Apply a Haiku delta to the canonical person record.
  *
  * DB writes use the existing provenance-aware helpers (`_set_by='auto'` via
  * setCoreFieldWithProvenance for state/name_he; timezone goes through
@@ -229,13 +228,6 @@ function parseDelta(raw: string): CaptureDelta | null {
  * lands as temp instead of clobbering an established zone; updatePersonProfile
  * for profile_json fields). Owner-direct writes still trump auto.
  *
- * MD mirroring: each structured field maps to a section in the .md file
- * template (Residence / Workplace / Working hours / Communication style).
- * Mirrors what the DB write actually LANDED, not the raw delta — the .md is
- * prompt context, so a refused or diverted value must never appear there.
- * Updates REPLACE the section body. Interaction history APPENDS to the
- * "What we've discussed" section. Owner can hand-edit any section; the
- * next capture pass replaces only the auto-managed sections.
  */
 async function applyDelta(
   profile: UserProfile,
@@ -294,8 +286,7 @@ async function applyDelta(
     appendPersonNote(slackId, delta.durable_note, 'auto');
   }
 
-  // Interaction history — appended to interaction_log AND mirrored to
-  // the "What we've discussed" .md section as a dated bullet.
+  // Interaction history is appended once to the canonical interaction_log.
   if (delta.interaction_summary) {
     appendPersonInteraction(slackId, {
       type: 'conversation',
@@ -303,31 +294,7 @@ async function applyDelta(
     });
   }
 
-  // ── 2. MD file mirroring ──────────────────────────────────────────────
-  // The .md is a narrative mirror used as prompt
-  // context; operational sections reflect accepted structured facts.
-  // Section body REPLACES the prior content (latest signal wins) for
-  // structural state; the discussed-history section APPENDS.
-  // v3.2.0 — md files are keyed by person_id now. A known colleague always has
-  // a row (written at message arrival); fall back to the legacy name-slug only
-  // if somehow absent so a write never silently drops.
-  const stored = getPersonMemory(slackId);
-  const personId = stored?.person_id ?? slugifyName(colleagueName);
 
-  // Refresh complete operational sections from accepted facts, including
-  // siblings absent from this partial delta. Assessment visibility is unchanged.
-  await syncPersonOperationalSections(profile, personId, Object.keys(delta), true);
-  // History section — APPEND-style. We read the current section, append
-  // a dated bullet through the serialized full-file writer.
-  if (delta.interaction_summary) {
-    const today = new Date().toISOString().split('T')[0];
-    const newLine = `- [${today}] ${delta.interaction_summary}`;
-    await writePersonSection({
-      profile, personId, displayName: colleagueName,
-      section: "What we've discussed",
-      text: newLine, append: true,
-    });
-  }
 }
 
 /**
@@ -405,11 +372,10 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         continue;
       }
 
-      // 2. Load current state — people_memory row + profile_json + md file.
+      // 2. Load current state from the canonical person record.
       const personRow = getPersonMemory(colleagueId);
       if (!personRow) {
-        // No row yet — capture skipped because we have no name to slug
-        // the md file. The first explicit interaction creates the row;
+        // No row yet — the first explicit interaction creates the row;
         // future captures will land.
         markThreadCaptured(row.thread_ts);
         continue;
@@ -417,7 +383,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       const currentProfile: PersonProfile = (() => {
         try { return JSON.parse(personRow.profile_json || '{}'); } catch { return {}; }
       })();
-      const currentMd = await readPersonMemory(profile, personRow.person_id, personRow.name) ?? '';
+      const currentMemory = await readPersonMemory(profile, personRow.person_id, personRow.name, { kind: 'self', senderId: colleagueId }) ?? '';
 
       // 3. Load chat transcript.
       const messages = getConversationHistory(row.thread_ts);
@@ -428,7 +394,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       const transcript = chatToTranscript(messages, personRow.name);
 
       // 4. Single Haiku call to extract deltas.
-      const userMsg = buildUserMessage(personRow.name, currentProfile, currentMd, transcript);
+      const userMsg = buildUserMessage(personRow.name, currentProfile, currentMemory, transcript);
       const resp = await anthropic.messages.create({
         model: HAIKU_MODEL,
         max_tokens: 800,
@@ -461,7 +427,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
         if (delta === null) logger.warn('capturePass: malformed profile capture; no facts applied', { threadTs: row.thread_ts, colleague: personRow.name });
         else logger.info('capturePass: no new deltas', { threadTs: row.thread_ts, colleague: personRow.name });
       } else {
-        // 5. Apply deltas to DB + md mirror.
+        // 5. Apply deltas to the canonical record.
         await applyDelta(profile, colleagueId, personRow.name, delta);
 
         logger.info('capturePass: applied deltas', {
@@ -653,7 +619,7 @@ async function runSelfCapture(
     // NEW since the last capture, not the whole stored (up-to-20) window.
     // This is the one field with no structured ground truth to check a
     // re-derivation against (colleague capture at least compares against the
-    // stored profile/md; here it's only free-text `existingNotes`, and a
+    // stored profile/memory; here it's only free-text `existingNotes`, and a
     // fact this system dropped — correctly, as non-identity — is never on
     // that list). Re-summarizing an already-resolved older exchange from
     // scratch on every later, unrelated turn risks a fresh, inconsistent (or

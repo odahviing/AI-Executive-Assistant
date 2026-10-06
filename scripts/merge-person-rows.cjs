@@ -98,8 +98,8 @@ function main() {
   out(`  row deleted:   ${loserId}`);
 
   // Per-person md files live at config/users/<owner>_people/<person_id>.md
-  // (src/memory/peopleMemory.ts). Listed here read-only so the fold is visible
-  // before it happens; the fold itself is mergePersonMdFiles, inside the merge.
+  // (src/memory/peopleMemory.ts). Their presence blocks merging until reviewed
+  // maintenance imports and archives them; runtime no longer folds files.
   const usersRoot = path.join(appRoot, 'config', 'users');
   const mdFiles = [];
   for (const dir of fs.existsSync(usersRoot) ? fs.readdirSync(usersRoot) : []) {
@@ -109,8 +109,7 @@ function main() {
       if (fs.existsSync(p)) mdFiles.push(path.relative(appRoot, p));
     }
   }
-  const loserMd = mdFiles.some((f) => f.endsWith(`${loserId}.md`));
-  out(`  md files:      ${mdFiles.length ? mdFiles.join(', ') : '(none)'}${loserMd ? ` — ${loserId}.md is folded into ${survivorId}.md` : ''}`);
+  out(`  md files:      ${mdFiles.length ? mdFiles.join(', ') + ' — reconcile and archive before merging' : '(none)'}`);
 
   if (!confirm) {
     out('\nDRY RUN — nothing written. Re-run with --confirm to apply. A merge is not reversible.');

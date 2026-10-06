@@ -167,8 +167,8 @@ export function maybeOpenInFlightMeetingRequest(input: MaybeOpenInput): void {
   // tool call that nobody retries) become orphans. 24h is a reasonable
   // outer bound: if owner doesn't follow up by tomorrow's brief, the work
   // is stale. The runner's runExpiry handler closes to state='expired' on
-  // fire; closeRequest cascades + informs the brief via informed=0 so it
-  // surfaces once with closure narration then drops.
+  // fire; closeRequest cascades and clears timers. Completed work stays in
+  // history; only explicit notification failures enter the brief.
   const expiresAtIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
   // v2.8.6 — prepend the triggering verb so the brief shows WHAT was being

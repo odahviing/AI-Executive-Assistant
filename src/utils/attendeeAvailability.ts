@@ -94,6 +94,38 @@ export interface AttendeeAvailabilityEntry {
   tzTempDiffering?: { tempZone: string; expiresAt: string; source: TimezoneTempSource };
 }
 
+/** The owner-approved comparison cohort is all remembered contacts. Only
+ * resolved scheduling facts leave this boundary; private person rows never do.
+ * Missing comparison data affects preference only, never slot validity.
+ */
+export function loadSchedulingComparisonAvailability(
+  profile: import('../config/userProfile').UserProfile,
+  attendees: readonly AttendeeAvailabilityEntry[],
+): AttendeeAvailabilityEntry[] | undefined {
+  try {
+    const { listSchedulingContacts } = require('../db') as typeof import('../db');
+    const excludedEmails = new Set([profile.user.email, ...attendees.map(a => a.email)].map(e => e.toLowerCase()));
+    return listSchedulingContacts()
+      .filter(p => p.slack_id !== profile.user.slack_user_id && (!p.email || !excludedEmails.has(p.email.toLowerCase())))
+      .map(p => loadAttendeeAvailabilityForPerson(p, profile.user.timezone))
+      .filter((a): a is AttendeeAvailabilityEntry => !!a && (!a.assumed || !!a.workingHoursTimezone));
+  } catch (err) {
+    logger.warn('Scheduling comparison cohort unavailable; retaining ordinary day-quality ranking', { err: String(err).slice(0, 120) });
+    return undefined;
+  }
+}
+
+/** Resolve once per searched interval, using the same day/travel/DST windows
+ * as attendee validity. Unknown fallback clocks never consume shared overlap.
+ */
+export function schedulingComparisonIntervals(
+  entries: readonly AttendeeAvailabilityEntry[], from: DateTime, until: DateTime,
+): Array<Array<{ start: number; end: number }>> {
+  return entries.map(entry => attendeeWorkIntervalsBetween(entry, from, until)
+    .filter(i => !!entry.workingHoursTimezone || !!attendeeKnownTimezoneForDay(entry, i.start.toISO()!))
+    .map(i => ({ start: i.start.toMillis(), end: i.end.toMillis() })));
+}
+
 /**
  * The attendee's physical zone on a requested destination-local calendar date
  * or at an explicit instant. Trip dates include both endpoints in the

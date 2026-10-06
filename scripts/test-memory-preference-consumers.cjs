@@ -1,7 +1,6 @@
 // Actual-module harness: filesystem fixtures + captured model requests; no live calls.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const cp = require('node:child_process');
@@ -13,7 +12,10 @@ const test = (name, run) => tests.push({ name, run });
 const actual = new Set(['src/core/assistant.ts','src/utils/skillPreferences.ts','src/skills/summary.ts','src/skills/news.ts','src/tasks/briefs.ts','src/utils/extractJson.ts','src/skills/registry.ts']);
 const compiled = new Map();
 function harness() {
-  const disk = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-consumer-'));
+  // Windows sandbox temp permits creation but denies the atomic rename under
+  // test. Keep the real filesystem operation in an isolated writable workspace.
+  const disk = fs.mkdtempSync(path.join(root, '.memory-consumer-'));
+  const cleanup=()=>{const target=path.resolve(disk);assert.equal(path.dirname(target),root);assert.ok(path.basename(target).startsWith('.memory-consumer-'));fs.rmSync(target,{recursive:true,force:true});};
   const modules = new Map();
   const draft = {subject:'Project review',main_topic:'Project',attendees:[],paragraphs:['Owner final paragraph.'],action_items:[],is_external:false};
   const state = { requests:[], searches:[], reply:JSON.stringify(draft), failModel:false, failWrite:false, failRead:false, failRename:false, draft, dbPrefs:[{category:'summary',value:'DB-STYLE-CONTROL'}] };
@@ -52,7 +54,7 @@ function harness() {
   function seed(skill,text){const file=path.join(disk,'config/users/owner_prefs',skill+'.md');fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,text);return file;}
   const ctx=(authority='owner',surface='owner_dm')=>({profile,authority,surface,senderRole:surface==='owner_dm'?'owner':'colleague',userId:authority==='owner'?'UOWNER':'UCOLLEAGUE',channel:'slack',channelId:'DTEST',threadTs:'123.456'});
   const tool=(args,authority,surface)=>new(load('src/core/assistant.ts').AssistantSkill)().executeToolCall('update_my_preferences',args,ctx(authority,surface));
-  return {state,profile,disk,load,seed,ctx,tool,restart:()=>modules.clear(),cleanup:()=>fs.rmSync(disk,{recursive:true,force:true})};
+  return {state,profile,disk,load,seed,ctx,tool,restart:()=>modules.clear(),cleanup};
 }
 async function fixture(run){const h=harness();try{await run(h);}finally{h.cleanup();}}
 const textOf = req => [req.system||'',...req.messages.map(m=>m.content)].join('\n');

@@ -27,7 +27,7 @@ import {
   type ToolCallback,
 } from '../approvals/approvalCallbacks';
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
-import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, relayNotice, recordRequesterCompositionFailure, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed, requesterRelayStopped, beginRequesterRelayAttempt } from './requesterRelay';
+import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, relayNotice, recordRequesterCompositionFailure, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed, requesterRelayStopped, beginRequesterRelayAttempt, recordOwnerNotificationOutcome } from './requesterRelay';
 import logger from '../../utils/logger';
 import { MODEL_HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
@@ -1119,9 +1119,8 @@ interface ExecutedOutcome {
 // (the scanner that closes a request when the owner's free-text says "done" /
 // "dropped" / "handled" out of band) used to call closeRequest directly and
 // stop there: the request had a `requester_slack_id` waiting on it (a
-// colleague-raised approval), and closeRequest's own informed=0 only queues a
-// narration for the OWNER's brief — the owner already knows, he's the one who
-// said it's done. Nobody ever told the colleague who actually raised the ask
+// colleague-raised approval). The owner already knows, he's the one who
+// said it's done; the colleague still needs the outcome. Nobody told that requester
 // (R3 — "the people waiting on it are told what actually happened... Never
 // the wrong outcome, never twice, never silence"). Reusing this function
 // (rather than growing a second, thinner relay) keeps the idempotency guard,
@@ -1741,9 +1740,10 @@ export async function closeUnconfirmedExecution(row: RequestRow, ctx: ResolveCon
   try {
     const lang = requesterRelayLanguage(row.owner_user_id);
     const text = relayNotice(lang, 'action_unconfirmed', { hi: relayNotice(lang, 'greeting', { name: ctx.profile.user.name.split(' ')[0] }), subject: row.subject });
-    if (conn) await postOwnerDecision({ profile: ctx.profile, conn, text, label: 'unconfirmed action owner outcome',
-      inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
-  } catch { updateRequest(row.id, { informed: 0 }); }
+    const posted = conn ? await postOwnerDecision({ profile: ctx.profile, conn, text, label: 'unconfirmed action owner outcome',
+      inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null }) : null;
+    recordOwnerNotificationOutcome(row, posted);
+  } catch { recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' }); }
   return { ok: false, request_id: row.id, state: 'resolved', effect: 'approve_replay_unconfirmed', reason,
     requester_notify_outcome: sent ? 'sent' : 'failed' };
 }
@@ -1755,13 +1755,15 @@ async function closeCounterLimit(row: RequestRow, ctx: ResolveContext): Promise<
     const { getConnection } = await import('../../connections/registry');
     const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
     const conn = getConnection(row.owner_user_id, 'slack');
-    if (conn) await postOwnerDecision({ profile: ctx.profile, conn,
+    const posted = conn ? await postOwnerDecision({ profile: ctx.profile, conn,
       text: relayNotice(requesterRelayLanguage(row.owner_user_id), 'counter_limit', { subject: row.subject,
         status: relayNotice(requesterRelayLanguage(row.owner_user_id), requesterNotified === 'sent' ? 'requester_told' : 'requester_untold') }),
       label: 'counter limit outcome',
       inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null,
-    });
+    }) : null;
+    recordOwnerNotificationOutcome(row, posted);
   } catch (err) {
+    recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' });
     logger.warn('counter limit owner outcome failed', { id: row.id, err: String(err).slice(0, 200) });
   }
   return { ok: true, request_id: row.id, state: 'expired', effect: 'counter limit reached without agreement', requester_notify_outcome: requesterNotified };

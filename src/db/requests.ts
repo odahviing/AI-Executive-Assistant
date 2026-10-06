@@ -565,30 +565,23 @@ export function getDueRequests(): RequestRow[] {
 }
 
 /**
- * Brief read: requests that should surface this morning. Either:
- *   - open state AND last_surfaced_at is older than `briefingDayStart`
- *   - OR informed=0 (covers post-closure narration)
- * Top-level rows only.
- *
- * gh#52 (52-U1) — `state != 'logged'` is an EXPLICIT, unconditional exclusion,
- * not folded into the `informed = 0` arm it would otherwise ride along with.
- * logActivity() rows record something Maelle already did that needed no
- * owner decision — pulled (undo/history), never pushed to the brief — and
- * they are minted with no control over `informed` from this function's point
- * of view, so guarding only the OR-branch would leave the door open the
- * moment a caller's default informed value ever changed. Excluding the state
- * outright makes a 'logged' row surfacing here impossible by construction.
+ * Daily briefing: open work and explicit unresolved notification receipts.
+ * Terminal work (including logged activity) never enters merely because its
+ * old informed flag is zero. A retained terminal row is notification attention,
+ * not an action to execute or a completion recap. Timer selection is separate.
  */
 export function getRequestsForBrief(ownerUserId: string, briefingDayStartIso: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
     WHERE owner_user_id = ?
       AND (parent_request_id IS NULL OR kind = 'approval')
-      AND state != 'logged'
+      AND (last_surfaced_at IS NULL OR datetime(last_surfaced_at) < datetime(?))
       AND (
-        (state IN ('awaiting_owner','awaiting_colleague','in_flight')
-         AND (last_surfaced_at IS NULL OR datetime(last_surfaced_at) < datetime(?)))
-        OR informed = 0
+        state IN ('awaiting_owner','awaiting_colleague','in_flight')
+        OR (state IN ('resolved','cancelled','expired','logged') AND json_valid(outcome_json) AND (
+          (requester_notified_at IS NULL AND json_extract(outcome_json, '$.requester_relay.delivery') IN ('failed','exhausted','unconfirmed','unknown'))
+          OR json_extract(outcome_json, '$.requester_relay.owner_delivery') IN ('failed','unconfirmed','unknown')
+        ))
       )
     ORDER BY
       CASE state

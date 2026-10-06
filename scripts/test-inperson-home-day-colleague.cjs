@@ -81,9 +81,10 @@ function loader() {
       ATTENDEE_REASON_PREFIXES: ['attendee_busy_collision', 'outside_attendee_work_hours', 'attendee_out_of_office'],
     },
     'src/db/people.ts': {},
+    'src/connectors/graph/graphClient.ts': {},
   };
-  function load(rel) {
-    if (mocks[rel]) return mocks[rel];
+  function load(rel, actual = false) {
+    if (mocks[rel] && !actual) return mocks[rel];
     if (modules.has(rel)) return modules.get(rel).exports;
     const js = ts.transpileModule(read(rel), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const mod = { exports: {} }; modules.set(rel, mod);
@@ -91,6 +92,7 @@ function loader() {
     vm.runInNewContext('(function(require,module,exports){' + js + '\n})', { Date: Clock, console, Set, Map, setTimeout, clearTimeout }, { filename: rel })(req, mod, mod.exports);
     return mod.exports;
   }
+  mocks['src/connectors/graph/calendarReads.ts'] = { ...load('src/connectors/graph/calendarReads.ts', true), ...mocks['src/connectors/graph/calendarReads.ts'] };
   return load;
 }
 const load = loader();
@@ -111,7 +113,7 @@ function compileFn(body, bindings) {
 }
 const calReads = sf('src/connectors/graph/calendarReads.ts');
 const fnText = name => one(collect(calReads, n => ts.isFunctionDeclaration(n) && n.name?.text === name), name).getText().replace(/^export /, '');
-const spread = compileFn(`${fnText('slotZonedStart')}\n${fnText('slotLocalDay')}\n${fnText('pickSpreadSlots')}\nreturn { pickSpreadSlots };`, { DateTime });
+const spread = compileFn(`${fnText('compareSlotPreference')}\n${fnText('slotZonedStart')}\n${fnText('slotLocalDay')}\n${fnText('pickSpreadSlots')}\nreturn { pickSpreadSlots };`, { DateTime });
 
 const HANDLER = 'src/skills/meetings/ops/handlers/findAvailableSlots.ts';
 const mustBeIf = one(collect(sf(HANDLER), n => ts.isIfStatement(n) && n.expression.getText() === 'mustBe && relaxedRecoverySlots.length > 0'), 'must-be branch');
@@ -119,7 +121,7 @@ async function mustBeResult(relaxedRecoverySlots) {
   const { pickSpreadSlots } = await spread();
   const run = compileFn(`${mustBeIf.getText()}\nreturn null;`, {
     mustBe: true, relaxedRecoverySlots, timezone: zone, offerCount: 8, args: { duration_minutes: 25 },
-    context: { profile }, DateTime, strictDaySummary: [], require: () => ({ pickSpreadSlots }),
+    context: { profile }, DateTime, strictDaySummary: [], recoveryDiagnostics: {}, require: () => ({ pickSpreadSlots }),
     compareByRulePriority: rules.compareByRulePriority ?? (() => 0),
   });
   return run();

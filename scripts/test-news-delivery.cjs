@@ -187,16 +187,22 @@ for (const mode of ['channel', 'dm', 'failed', 'unknown', 'throw', 'room', 'coll
   test(`research actual run and tracked send ${mode}`, async () => {
     const f = fixture({ writeFail: mode === 'write-failure' });
     const fmt = formatting(f, text => mode === 'stripped' ? text.replace(/<https[^>]+>/g, '') : text);
-    const sends = [], closures = [], updates = [];
+    const sends = [], closures = [], updates = [], ownerReceipts = [];
+    const row = { id: 'req1', owner_user_id: 'U_OWNER', initiated_by: mode === 'colleague' ? 'U_OTHER' : 'U_OWNER', origin_channel: mode === 'dm' ? '' : mode === 'room' ? 'C_ROOM' : 'D_OWNER' };
     const send = async (_target, body) => { sends.push(fmt.formatForSlack(body)); if (mode === 'throw') throw Error('unknown send'); return mode === 'failed' ? { ok: false, reason: 'rejected' } : mode === 'unknown' ? undefined : { ok: true, ts: 'sent' }; };
     const globals = { logger: f.logger, getConnection: () => ({ sendDirect: send, postToChannel: send }), parseDetails: () => ({ message: 'Show news' }),
-      deriveOriginSurface: () => mode === 'room' ? 'room' : mode === 'colleague' ? 'colleague_dm' : 'owner_dm', updateRequest: (...args) => updates.push(args), closeRequest: args => closures.push(args) };
+      deriveOriginSurface: () => mode === 'room' ? 'room' : mode === 'colleague' ? 'colleague_dm' : 'owner_dm', updateRequest: (...args) => updates.push(args), closeRequest: args => closures.push(args),
+      getRequest: id => { assert.equal(id, row.id); return row; },
+      recordOwnerNotificationOutcome: (record, result) => { assert.equal(record, row); ownerReceipts.push(result); } };
     const mod = f.load('src/core/requests/runner.ts', { '../orchestrator': { runOrchestrator: input => f.gather(input) }, '../../skills/news': f.news, '../../connections/slack/formatting': fmt }, globals,
       selectFunctions(['runResearchRun', 'sendTracked'], 'const RESEARCH_ANSWER_STORE_CAP = 4000;'));
-    const run = () => mod.runResearchRun({ id: 'req1', initiated_by: mode === 'colleague' ? 'U_OTHER' : 'U_OWNER', origin_channel: mode === 'dm' ? '' : mode === 'room' ? 'C_ROOM' : 'D_OWNER' }, f.profile, {});
+    const run = () => mod.runResearchRun(row, f.profile, {});
     if (['failed', 'unknown', 'throw'].includes(mode)) { await assert.rejects(run()); assert.equal(closures.length, 0); assert.equal(updates.length, 1); }
     else { await run(); assert.equal(closures.length, 1); }
-    await flush(); assert.equal(f.state.writes.length, ['channel', 'dm'].includes(mode) ? 1 : 0); assert.equal(sends.length, 1); f.check();
+    await flush(); assert.equal(f.state.writes.length, ['channel', 'dm'].includes(mode) ? 1 : 0); assert.equal(sends.length, 1);
+    assert.equal(ownerReceipts.length, ['colleague', 'unknown'].includes(mode) ? 0 : 1);
+    if (ownerReceipts.length) assert.equal(ownerReceipts[0].ok, !['failed', 'throw'].includes(mode));
+    f.check();
   });
 }
 for (const mode of ['text', 'unknown', 'throw', 'stranger', 'group', 'audio', 'audio-fallback', 'write-failure']) {

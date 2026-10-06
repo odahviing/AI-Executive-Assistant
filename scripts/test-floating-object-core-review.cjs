@@ -155,7 +155,7 @@ const health = healthModule.exports;
     const decision = src.indexOf('if (joinCheck.passes) {', start);
     const tail = src.indexOf('const movesLine =', decision);
     assert.ok(start > 0 && decision > start && tail > decision, 'join AST region anchors');
-    const run = compile(`exports.run=async function(d) { const { DateTime, fb, profile, events, timezone, dayStr, meetingStartMs, meetingEndMs, evTime, floatingBlocks, logger, updateMeeting, userEmail }=d; const suppressedFloatingIds = new Set(); ${src.slice(start,decision)} ${src.slice(decision + 'if (joinCheck.passes) {'.length,tail)} return movesDone; }`, n => {
+    const run = compile(`exports.run=async function(d) { const { DateTime, fb, profile, events, timezone, dayStr, meetingStartMs, meetingEndMs, evTime, floatingBlocks, logger, updateMeeting, userEmail }=d; const joinViewer = 'owner'; const suppressedFloatingIds = new Set(); ${src.slice(start,decision)} ${src.slice(decision + 'if (joinCheck.passes) {'.length,tail)} return movesDone; }`, n => {
       if (n === '../utils/rebalanceFloatingBlocks') return { logRebalanceMoveActivity: (...args) => opts.activities?.push(args) };
       throw Error(`Unmocked join dependency ${n}`);
     }).run;

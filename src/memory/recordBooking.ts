@@ -1,42 +1,5 @@
-/**
- * v3.0.6 — auto-write a booking record into each non-owner attendee's
- * person_memory md file when a meeting is successfully booked, including
- * bookings finalized via coord. Code-driven, once per completed booking.
- * Closes the gap surfaced 2026-05-25 where Maelle had booked a
- * Modiin lunch meeting with Natan earlier in the day but had NO memory of
- * the venue she'd negotiated when asked about it that night — because the
- * existing capturePass only runs on COLLEAGUE DM threads, not on owner DM
- * threads that drive a booking.
- *
- * What gets written:
- *   Section: "What we've discussed"
- *   Line:    "- [YYYY-MM-DD] Booked '<subject>' at <location> for <when>"
- *
- * Where it's keyed (v3.2.0 — Unified Person Store):
- *   Every attendee is resolved through `resolvePerson({email, name})`, which
- *   FINDS-OR-CREATES the person row — internal AND external. Pure-email
- *   externals (gmail candidates, customers) are NO LONGER skipped: they get a
- *   person row on first booking, the booking is appended to their structured
- *   `interaction_log` (DB-first), and the md "What we've discussed" note is
- *   written after (keyed by person_id). Next time the owner books them, the
- *   history is already on file.
- *
- * Who earns a row (L1 — ACTIVE engagement, not who asked):
- *   Everyone on a meeting Maelle actually BOOKED. v3.1.7 gated new externals on
- *   `ownerInitiated`, which is the wrong axis: a colleague booking the owner
- *   with an external is still real, deliberate work with that external, and
- *   dropping them meant the next encounter started from zero. The rule L1
- *   actually protects is that PASSIVE observation must never mint people —
- *   reading a calendar, scanning a day, passing over an attendee list. That is
- *   enforced where it belongs: the v3.1.7 auto calendar-backfill sweep was
- *   deleted (core/background.ts), calendar readers use getPersonByEmail
- *   (read-only), and this function is only ever called from a completed
- *   mutation. So there is no engagement test left to make here — reaching this
- *   line IS the engagement. What remains is the not-a-person filter below
- *   (recording bots, no-reply senders, room mailboxes).
- *
- * Never throws. A failure here must never undo a successful booking.
- */
+/** Record completed booking mutations once in the canonical person interaction log.
+ * Only active booking engagement earns a row; calendar observation does not. */
 import type { UserProfile } from '../config/userProfile';
 import { DateTime } from 'luxon';
 import logger from '../utils/logger';
@@ -89,8 +52,6 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     // skills/meetings/ops.ts → here → db → ... back into skills.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { resolvePerson, appendPersonInteractionById } = require('../db') as typeof import('../db');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { writePersonSection } = require('./peopleMemory') as typeof import('./peopleMemory');
 
     const ownerEmail = params.profile.user.email.toLowerCase();
     const ownerDomain = ownerEmail.split('@')[1] ?? '';
@@ -102,13 +63,11 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
     const tz = params.profile.user.timezone;
 
     const whenDt = DateTime.fromISO(params.startIso, { zone: tz });
-    const dateStr = new Date().toISOString().split('T')[0];
     const whenLabel = whenDt.isValid ? whenDt.toFormat('EEE d MMM HH:mm') : params.startIso;
     const verb = VERB_BY_MUTATION[params.mutation];
     const locPart = params.location && params.location.trim().length > 0
       ? ` at ${params.location.trim()}`
       : '';
-    const newLine = `- [${dateStr}] ${verb} "${params.subject}"${locPart} for ${whenLabel}`;
 
     for (const att of params.attendees) {
       const email = (att.email ?? '').toLowerCase();
@@ -137,20 +96,7 @@ export async function recordBookingInPersonMemory(params: RecordBookingParams): 
         logger.warn('recordBooking: interaction-log append failed', { email, err: String(err).slice(0, 200) });
       }
 
-      // Then the md narrative note, keyed by person_id.
-      try {
-        await writePersonSection({
-          profile: params.profile,
-          personId: person.person_id,
-          displayName: person.name,
-          section: "What we've discussed",
-          text: newLine, append: true,
-        });
-      } catch (err) {
-        logger.warn('recordBooking: writePersonSection failed for attendee', {
-          email, personId: person.person_id, err: String(err).slice(0, 200),
-        });
-      }
+
     }
   } catch (err) {
     logger.warn('recordBookingInPersonMemory threw — booking still succeeded', {

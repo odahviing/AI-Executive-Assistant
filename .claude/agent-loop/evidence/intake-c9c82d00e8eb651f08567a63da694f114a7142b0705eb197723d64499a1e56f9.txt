@@ -1,0 +1,10 @@
+Owner-supplied conversation, captured 2026-10-05. Product investigation not performed.
+23:50 Owner: I need to go to the garage tomorrow so will be our 09:00-10:30 - please add to the calendar and we need to change stuff in the calendar.
+23:52 Maelle: Done. Added Garage 09:00-10:30 tomorrow, moved Michal BiWeekly 12:00-12:40, Simon BiWeekly 13:00-13:40. Tuesday already 4 weekly cadence meetings Michal Simon Dina Elan over usual 3/day; nothing new caused by this.
+Owner asks calendar checks.
+Maelle: Yes I ran a check for both... Michal free 12:00-12:40 but outside usual hours; Simon free 13:00-13:40 also outside usual hours... later than normally online.
+Owner asks usual hours.
+23:53 Maelle: Michal Sun-Thu 09:00-18:00, Simon Sun-Thu 08:00-19:00. Both 12:00 and 13:00 inside... wrong... check actually flagged lower confidence score (not clean open slot), not outside-hours block.
+Owner framing: very good work by maelle but then her reasoning got fucked.
+Supported finding: contradictory explanation. Actual tool outputs, moves, availability
+checks and reason for confidence remain unverified; no scheduling defect claimed.

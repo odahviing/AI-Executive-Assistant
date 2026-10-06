@@ -10,7 +10,7 @@ import { nameGenuinelyMatches } from '../memory/resolveAttendeeEmails';
 // a contact; engagement resolves the identity before adding durable context.
 
 export interface PersonNote {
-  date: string;   // YYYY-MM-DD
+  date: string;   // YYYY-MM-DD; empty for historical notes whose date is unknown
   note: string;
   // Who recorded it — owner / person / auto (capture pass), derived from the
   // AUTHENTICATED writer by appendPersonNoteById, never from a model claim.
@@ -1643,6 +1643,20 @@ export function searchPeopleMemory(query: string): PersonMemory[] {
   `).all(q, q) as PersonMemory[];
 }
 
+/** Complete canonical cohort for internal scheduling calculations, not a tool
+ * payload. Keep unknown schedules for the existing availability resolver to
+ * assess; this reader neither infers hours nor filters by region/contact route.
+ * Synthetic assistant rows are excluded. A real owner person remains a contact
+ * here; callers exclude their current owner using authenticated context.
+ * Database failures propagate so unavailable never means an empty cohort. */
+export function listSchedulingContacts(): PersonMemory[] {
+  return getDb().prepare(`
+    SELECT * FROM people_memory
+    WHERE kind != 'self'
+    ORDER BY person_id ASC
+  `).all() as PersonMemory[];
+}
+
 /**
  * Like `searchPeopleMemory`, but matches EITHER direction: the query inside
  * the stored name (searchPeopleMemory's original semantics) OR the stored
@@ -1877,7 +1891,7 @@ type PersonRow = PersonMemory & { engagement_rank?: number; proactive_pending?: 
  * pair, or the reason it refuses — with nothing touched. Split out so an
  * irreversible merge can be shown before it is confirmed
  * (`scripts/merge-person-rows.cjs` prints this as its dry run); the merge
- * itself is this plan followed by the md fold and the row transaction, so the
+ * itself is this plan followed by the legacy-file guard and row transaction, so the
  * two can never disagree about what a merge does.
  *
  * Survivor choice is the CALLER's (the canonical rule is `getPersonByEmail`'s:
@@ -1904,6 +1918,16 @@ export function planPersonMerge(survivorId: string, loserId: string) {
   }
   if (survivor.slack_id && loser.slack_id && survivor.slack_id !== loser.slack_id) {
     return { ok: false as const, reason: `two distinct slack identities (${survivor.slack_id} vs ${loser.slack_id})` };
+  }
+  // Refuse damaged history instead of treating a parse failure as an empty
+  // record and deleting its only durable copy during a merge.
+  for (const row of [survivor, loser]) {
+    for (const field of ['notes', 'interaction_log'] as const) {
+      try {
+        const entries = JSON.parse(row[field] || '[]');
+        if (!Array.isArray(entries) || entries.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry))) throw new Error('invalid entries');
+      } catch { return { ok: false as const, reason: `invalid ${field} on ${row.person_id}` }; }
+    }
   }
 
   const slackIdMerged = survivor.slack_id ?? loser.slack_id ?? null;
@@ -2012,10 +2036,10 @@ export function planPersonMerge(survivorId: string, loserId: string) {
     timezone_temp:        survivor.timezone_temp ?? loser.timezone_temp ?? null,
     notes:                unionDated<PersonNote>(
                             survivor.notes, loser.notes,
-                            n => `${n.date ?? ''}|${n.note ?? ''}`, n => n.date ?? '', Infinity),
+                            n => JSON.stringify(n), n => n.date ?? '', Infinity),
     interaction_log:      unionDated<PersonInteraction>(
                             survivor.interaction_log, loser.interaction_log,
-                            i => `${i.date ?? ''}|${i.type ?? ''}|${i.summary ?? ''}`, i => i.date ?? '', 200, retainInteractions),
+                            i => JSON.stringify(i), i => i.date ?? '', Infinity),
     profile_json:         mergeProfileJson(survivor.profile_json, loser.profile_json),
     last_seen:            laterOf(survivor.last_seen, loser.last_seen),
     last_social_at:       laterOf(survivor.last_social_at, loser.last_social_at),
@@ -2033,11 +2057,8 @@ export function planPersonMerge(survivorId: string, loserId: string) {
  * union of what each side knew (`planPersonMerge` decides the union and the
  * identity refusals). Returns true when the merge happened.
  *
- * The loser's per-person md file is folded into the survivor's BEFORE the rows
- * collapse, and a fold that didn't complete DEFERS the collapse — see the
- * comment at the call below for why that order is the only recoverable one.
- * That deferral is the one refusal added here: not a verdict on identity, the
- * pair stays visible to the sweep and the next attempt finishes the job.
+ * Unreconciled legacy markdown defers the merge. Maintenance must import and
+ * archive those files first; this runtime path never folds or deletes files.
  */
 export function mergePersonRows(survivorId: string, loserId: string): boolean {
   const plan = planPersonMerge(survivorId, loserId);
@@ -2049,6 +2070,10 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
   const db = getDb();
 
   const apply = db.transaction(() => {
+    // Another process may have corrected either row since the preview. Plan
+    // again under the SQLite write lock before deleting any source record.
+    const lockedPlan = planPersonMerge(survivorId, loserId);
+    if (!lockedPlan.ok) throw new Error(lockedPlan.reason);
     // DELETE first: when the survivor is adopting the loser's slack_id, the
     // UNIQUE index would still see it held by the loser row.
     db.prepare(`DELETE FROM people_memory WHERE person_id = ?`).run(loserId);
@@ -2068,20 +2093,11 @@ export function mergePersonRows(survivorId: string, loserId: string): boolean {
         last_inbound_lang = @last_inbound_lang, last_inbound_lang_at = @last_inbound_lang_at,
         created_at = @created_at, updated_at = datetime('now')
       WHERE person_id = @person_id
-    `).run(merged);
+    `).run(lockedPlan.merged);
   });
 
-  // Fold the loser's md file into the survivor's FIRST — the row transaction is
-  // the commit point of the WHOLE merge, files included. Files and SQLite are
-  // separate durability domains, so these two halves can never be one atomic
-  // commit; the order is what decides where an interrupted merge leaves residue.
-  // Rows-first (the v4.0.4 shape) left the unrecoverable side: process death
-  // between the commit and the fold orphaned `<loserId>.md` forever, because the
-  // dedupe sweep looks for duplicate ROWS and by then there were none — and the
-  // orphan file still renders as a phantom duplicate person in the prompt
-  // catalog, i.e. exactly the bug v4.0.4 removed. Md-first inverts it: any
-  // failure leaves the pair still duplicated, which the boot sweep already finds
-  // and retries, and the fold is idempotent so the retry is free.
+  // The historical helper name now guards against unreconciled legacy files.
+  // A refusal leaves both records intact for migration and a later retry.
   // Lazy require: the md layer owns the file layout and itself reads the DB, so
   // the dependency is resolved at call time in both directions (same pattern as
   // refreshAutoWorkingHours).

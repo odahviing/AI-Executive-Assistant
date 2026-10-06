@@ -1,22 +1,34 @@
-## 5.0.5 — Preserve terminal email failures through Microsoft’s SDK
+## 5.0.4 — Canonical person memory, scheduling and delivery reliability
 
-The live 5.0.4 check confirmed the alert removal but exposed Microsoft Graph wrapping authentication errors into its own error class. Recognize the SDK's structured terminal-auth error in polling and send outcomes so rejected credentials actually pause polling and remain a confirmed send rejection.
-
-### Verification and limits
-- Focused follow-up under the same owner-authorized expedited release; no Bouncer or full release pipeline. All 74 affected email tests and TypeScript passed. Regression coverage exercises the installed Graph SDK with isolated token responses and fails on the deployed 5.0.4 source.
-- The expired Microsoft app credential still requires replacement before email can work.
-
-## 5.0.4 — Stop repeated email failure alerts
-
-Remove repeated Slack notices for automatically retried email polling failures. Microsoft credential rejection now pauses email polling and produces one brief repair notice per running process, without exposing mailbox addresses, provider errors, source filenames or commands.
+Consolidate both email hotfixes and the accumulated Workshop run into 5.0.4 at the owner's direction. Person memory uses the canonical database, scheduling ranks the complete known contact cohort, and follow-ups and briefings distinguish completed actions from notification delivery.
 
 ### Fixed
-- Treat structured OAuth `invalid_client` responses, including expired app credentials, as terminal authentication failures through the existing stop-and-notify path.
-- Keep transient failure diagnostics in logs and preserve automatic recovery when a later poll succeeds.
+- Stop repeated Slack alerts for retried email polling failures. Structured terminal authentication rejection, including Graph SDK-wrapped errors, pauses polling and retains a confirmed send rejection; transient diagnostics and recovery remain intact.
+- Bind conditional follow-ups to an explicit pending parent and outward message. Recheck the parent when firing, cancel dependent timers on terminal closure, and preserve parent-aware idempotency without guessing legacy associations.
+- Relay the saved full request to the owner instead of its internal title, with authenticated requester and owner scoping. Recover bounded exact-thread Slack context for replies to automated outreach; remotely hydrated prose cannot become a trusted tool receipt.
+- Preserve confirmed transport outcomes when subsequent receipt bookkeeping fails, without resending an already delivered message.
+- Keep resolved activity out of generic briefing recaps. Surface terminal requests only for explicit unresolved owner or requester delivery, preserving ordinary pending work, approval timing and delivered-only briefing counters.
+- Explain rejected search candidates separately from offered slots. Report actual block moves and result dates, retain confirmed writes through activity-log failures, and withhold private move details from non-owner payloads.
+- Derive garage scheduling diagnostics from the search pass that produced the result.
+
+### Changed
+- Use canonical database person fields and notes throughout capture, booking and memory reads; remove the duplicate Markdown writer and `update_person_memory` tool. Explicit identity reconciliation is restricted to the authenticated owner in a private conversation.
+- Rank internal working-hour overlap against all known scheduling contacts before limiting and spreading options. Preserve weekday, timezone, travel and DST rules, public priority labels and earlier reasonable choices; internal scoring stays out of returned payloads.
+- Default unspecified searches to today and the next two actual owner working days. Explicit windows and the default result limit stay intact.
+- Align approval-first tool contracts and remove competing timezone preference instructions without adding model calls.
+
+### Migration
+- Preserve legacy person files and database state in a stopped-writer backup, import their notes with provenance, and archive originals before starting the canonical reader. Remove only the independently identified fixture/self row after exact-state validation.
+
+### Framework
+- Bind collected-intake decisions to current authority tokens and preserve original event indexes through assessment and dispatch.
+- Record independently reviewed Architect changes against real release commits so shipped history remains distinguishable from current unwrapped work.
 
 ### Verification and limits
-- Focused hotfix at the owner's request; Bouncer and the full release process were explicitly waived. Four affected email suites passed 69 tests, and TypeScript passed. The updated regression harness reproduced three failures on the previous source.
-- This stops the notification flood; it does not renew the expired Microsoft app credential. Email resumes after credential repair and restart.
+- Accumulated executable checkpoint: 222 suite/timezone executions and 5,373 assertions passed; TypeScript passed. Independent repair review retained the original failed evidence and verified the corrected delivery and fixture paths.
+- Golden30: 18 passes and 12 stale catalog anchors traced to current source, zero failures. Structural prompt checks do not establish live model obedience.
+- The earlier email hotfixes had owner-authorized focused verification (69 initial and 74 follow-up checks); their code is retained and covered by this accumulated executable checkpoint. Credential replacement is separate operational work.
+- News attribution remains blocked on missing historical source evidence; broader deferred work is not claimed fixed.
 
 ## 5.0.3 — Approval timing, colleague privacy and briefing schedule reliability
 

@@ -61,3 +61,6 @@ Thumbs.db
 # Ephemeral isolated workspaces created by Workshop regression tests.
 /.workshop-before-linked-*/
 /.workshop-verification-*/
+
+# Owner-restricted local source evidence; never publish.
+.claude/agent-loop/evidence/intake-3f7889de87436a5c21f01d6b281f25644ec993f314c56f805c3a74b6c4f74316.txt

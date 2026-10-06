@@ -14,7 +14,7 @@
  *   - Owner preferences (learn_preference / recall_preferences)
  *   - Core attendee fields (gender / timezone / state via update_person_profile)
  *   - confirm_gender, log_interaction, recall_interactions
- *   - Per-person md memory (get_person_memory / update_person_memory)
+ *   - Canonical person memory reads (get_person_memory); profile/history writes use the tools above
  *   - Slack auto-pull of timezone / pronouns / image
  *   - The owner / colleague identity blocks in the system prompt
  *

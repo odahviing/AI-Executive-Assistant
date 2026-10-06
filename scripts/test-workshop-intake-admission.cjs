@@ -114,10 +114,67 @@ const buildEvidence = (attemptId = 'resume-attempt') => {
   return { version: 1, attemptId, builder: 'lane', changeKind: 'prose-only', exception: 'Fixture exercises persisted lifecycle only.', files: ['fixture.md'], regressions: [], boundaries: { changedGuards: [], paths: [] } }
 }
 const build = (attemptId = 'resume-attempt') => ok(write('--ref', 'alpha', '--source', 'owner', '--lane', 'registrar', '--finding', 'Built piece awaiting joint completion', '--verdict', 'built', '--rootCause', 'fixture.md:1', '--invariant', 'none', '--evidence-file', json('build.json', buildEvidence(attemptId))))
+const dependency = (note = 'Live database operation remains unverified; access alone is insufficient.') => write('--ref', 'alpha', '--source', 'owner', '--lane', 'registrar', '--finding', 'Existing authorized correction awaits its dependency.', '--verdict', 'needs-dependency', '--invariant', 'none', '--note', note)
+test('execution dependency supersedes ready authorization in report and both engine admission paths', async () => {
+  capture(); ok(assess(assessment())); ok(dependency())
+  assert.equal(item().status, 'blocked'); assert.match(item().currentReason, /database operation/)
+  assert.match(fs.readFileSync(path.join(loop, 'report.md'), 'utf8'), /database operation/)
+  const p = plan(['alpha']); bad(p.result); assert.equal(p.data.blocked[0].status, 'blocked')
+  for (const name of ['bugger', 'feature']) {
+    const r = await engine(name, name === 'bugger' ? { issues: [issue()], intakeAdmission: p.data.intakeAdmission } : { mode: 'build', pieces: [piece()], intakeAdmission: p.data.intakeAdmission })
+    assert.equal(r.lane, false); assert.match(r.error, /INTAKE ADMISSION BLOCKED/)
+  }
+})
+test('dependency reassessment retains authorization but stale ready replay cannot clear it', () => {
+  capture(); const ready = assessment(); ok(assess(ready)); ok(dependency()); bad(assess(ready))
+  const resolution = assessment({ dispositionToken: item().dispositionToken, reason: 'Receiving lane verified the required operation; evidence fixture:1.' })
+  ok(assess(resolution)); ok(plan(['alpha']).result)
+  ok(assess(resolution)); ok(plan(['alpha']).result)
+  ok(dependency('A newer dependency is unavailable.')); bad(assess(resolution)); assert.equal(item().status, 'blocked')
+})
+test('answered owner question remains durable through a later technical dependency', () => {
+  capture(); ok(assess(assessment({ status: 'decision', question: 'Which recipients?', uncovered: 'Recipient scope not covered.', recommend: 'Owner only.' })))
+  const q = item(); ok(assess(assessment({ ownerRuled: { questionToken: q.questionToken, askedBecause: q.ownerQuestion, hisRuling: 'Owner only.' } })))
+  const ruling = item().rulingToken; ok(dependency())
+  assert.equal(item().status, 'blocked'); assert.equal(item().rulingToken, ruling); assert.equal(item().intake.authorization, 'Owner: run alpha.')
+})
+for (const name of ['bugger', 'feature']) for (const verdict of ['built', 'needs-owner-decision']) test(`${name} actual verification return preserves ${verdict === 'built' ? 'technical failure without owner question' : 'genuine new owner question'}`, async () => {
+  capture(); ok(assess(assessment())); const p = plan(['alpha']); ok(p.result)
+  const body = fs.readFileSync(path.join(source, '.claude/workflows', name + '.js'), 'utf8').replace('export const meta', 'const meta')
+  const agent = async (prompt, opts) => opts.agentType === 'bouncer'
+    ? { results: [{ id: 'alpha', verdict, notes: verdict === 'built' ? 'Claimed pass without review evidence.' : 'New representation choice: include external recipients?' }] }
+    : { results: [{ id: 'alpha', lane: 'registrar', verdict: 'built', evidence: buildEvidence(), notes: 'Fixture implementation.', rootCause: 'fixture.md:1', workshopRead: true }] }
+  const args = name === 'bugger' ? { issues: [issue({ bounces: 2 })], golden: false } : { mode: 'build', pieces: [{ ...piece(), bounces: 1 }], sharedPiece: 'none' }
+  const result = await new AsyncFunction('args', 'agent', 'parallel', 'phase', 'log', body)({ ...args, intakeAdmission: p.data.intakeAdmission }, agent, async jobs => Promise.all(jobs.map(j => j())), () => {}, () => {})
+  assert.equal(result.results.find(r => r.id === 'alpha').verdict, verdict === 'built' ? 'needs-dependency' : 'needs-owner-decision')
+  assert.equal(result.verification.packageReady, false)
+  const returned = result.results.find(r => r.id === 'alpha')
+  ok(write('--ref', 'alpha', '--source', 'verify', '--lane', 'registrar', '--finding', 'Verification returned an unresolved result.', '--verdict', returned.verdict, '--invariant', 'none', '--note', returned.notes))
+  assert.equal(item().status, verdict === 'built' ? 'blocked' : 'decision')
+})
 const continuationPlan = (attemptId = 'resume-attempt', refs = ['alpha']) => {
   const result = stats('--batch-plan', json('resume.json', { refs, resume: [{ ref: 'alpha', attemptId }], authorization: 'Resume the existing authorized wave.' }))
   return { result, data: JSON.parse(result.stdout || '{}') }
 }
+for (const mode of ['technical', 'genuine', 'mixed']) test(`feature continuation warning and resume distinguish ${mode} unresolved work`, async () => {
+  capture(); ok(assess(assessment()))
+  const ids = mode === 'mixed' ? ['alpha', 'beta'] : ['alpha']
+  if (mode === 'mixed') {
+    ok(write('--capture-file', json('beta.json', { id: 'beta', ref: 'beta', type: 'bug', finding: 'Separate authorized correction.', attachments: [] })))
+    ok(assess(assessment({ ref: 'beta' })))
+  }
+  const p = plan(ids); ok(p.result)
+  const body = fs.readFileSync(path.join(source, '.claude/workflows/feature.js'), 'utf8').replace('export const meta', 'const meta')
+  const agent = async (prompt, opts) => opts.agentType === 'bouncer'
+    ? { results: ids.map(id => ({ id, verdict: mode === 'genuine' || id === 'beta' ? 'needs-owner-decision' : 'built', notes: 'Actual uncovered recipient choice or missing independent evidence.' })) }
+    : { results: ids.map(id => ({ id, lane: 'registrar', verdict: 'built', evidence: buildEvidence(id), notes: 'Fixture built.', rootCause: 'fixture.md:1', workshopRead: true })) }
+  const result = await new AsyncFunction('args', 'agent', 'parallel', 'phase', 'log', body)({ mode: 'build', pieces: ids.map(id => ({ ...piece(id), bounces: 1 })), sharedPiece: 'none', intakeAdmission: p.data.intakeAdmission }, agent, async jobs => Promise.all(jobs.map(j => j())), () => {}, () => {})
+  const warning = result.warnings.find(w => w.startsWith('THIS WAVE IS NOT DONE'))
+  assert.ok(result.resume); assert.deepEqual(result.resume.pieces.map(p => p.id).sort(), ids)
+  if (mode === 'technical') { assert.doesNotMatch(warning, /Record the owner's answer|questionToken/); assert.match(warning, /existing authorization/); assert.equal(result.needsOwnerRuling.length, 0); assert.equal(result.resume.pieces[0].awaitingOwner, undefined) }
+  if (mode === 'genuine') { assert.match(warning, /OWNER ANSWERS REQUIRED — alpha/); assert.match(warning, /questionToken/); assert.equal(result.resume.pieces[0].awaitingOwner, true) }
+  if (mode === 'mixed') { assert.match(warning, /OWNER ANSWERS REQUIRED — beta/); assert.match(warning, /TECHNICAL CONTINUATION — alpha/); assert.equal(result.resume.pieces.find(p => p.id === 'alpha').awaitingOwner, undefined); assert.equal(result.resume.pieces.find(p => p.id === 'beta').awaitingOwner, true) }
+})
 const githubHold = (ref = 'gh#12') => {
   ok(write('--capture-file', json('ticket.json', { id: 'ticket', ref, type: 'bug', finding: 'Owner holds this scope.', attachments: [] })))
   ok(write('--ref', ref, '--source', 'owner', '--finding', 'Owner holds this scope.', '--verdict', 'deferred', '--invariant', 'none', '--note', 'Owner: not this scope now.'))

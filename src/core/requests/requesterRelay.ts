@@ -410,17 +410,39 @@ export function isRequesterSendUnconfirmed(result: { ok: boolean; reason?: strin
   return result.ok !== true && result.reason === 'error';
 }
 
+/** Existing owner-notice receipt, independent of requester delivery and timers.
+ * Owner-only terminal notices reuse this receipt without inventing a requester
+ * outcome. A confirmed owner notice must not clear a failed requester relay. */
+export function recordOwnerNotificationOutcome(row: RequestRow, result: { ok: boolean; reason?: string } | null): void {
+  const delivery = result?.ok ? 'sent' : result && (isRequesterSendUnconfirmed(result) || result.reason === 'send_threw') ? 'unconfirmed' : 'failed';
+  const current = getRequest(row.id) ?? row;
+  const outcome = readOutcome(current);
+  const previous = outcome.requester_relay as Record<string, unknown> | undefined;
+  if (delivery === 'sent' && !previous) return;
+  if (delivery === 'sent') {
+    // A general owner notice is not the dedicated requester-exhaustion notice.
+    // Clear its pending attention rather than setting the exhaustion helper's
+    // sent marker and accidentally suppressing that later notification.
+    const remaining = { ...previous };
+    delete remaining.owner_delivery;
+    delete remaining.owner_send_attempts;
+    if (Object.keys(remaining).length) outcome.requester_relay = remaining;
+    else delete outcome.requester_relay;
+  } else outcome.requester_relay = { ...previous, owner_delivery: delivery };
+  updateRequest(row.id, { outcomeJson: outcome });
+}
+
 /** Claim the transport opportunity synchronously, before any await or send. */
 export function beginRequesterRelayAttempt(row: RequestRow, body: string): boolean {
   const current = getRequest(row.id) ?? row;
   if (current.requester_notified_at || requesterRelayStopped(current)) return false;
   if (!['resolved', 'cancelled', 'expired', 'logged'].includes(current.state)) return true;
   const outcome = readOutcome(current);
-  const previous = outcome.requester_relay as { send_attempts?: number } | undefined;
-  const attempts = (previous?.send_attempts ?? (previous ? 1 : 0)) + 1;
+  const previous = outcome.requester_relay as { send_attempts?: number; delivery?: string } | undefined;
+  const attempts = (previous?.send_attempts ?? (previous?.delivery ? 1 : 0)) + 1;
   if (attempts > 3) return false;
   // A crash or concurrent caller must see uncertainty, never a replayable send.
-  updateRequest(row.id, { outcomeJson: { ...outcome, requester_relay: { body, send_attempts: attempts, delivery: 'unconfirmed' } },
+  updateRequest(row.id, { outcomeJson: { ...outcome, requester_relay: { ...previous, body, send_attempts: attempts, delivery: 'unconfirmed' } },
     nextCheckAt: null, nextCheckHandler: null });
   return true;
 }
@@ -436,7 +458,7 @@ export function recordRequesterRelayFailure(row: RequestRow, body: string, uncon
   const attempts = previous.send_attempts ?? 1;
   const exhausted = !unconfirmed && attempts >= 3;
   updateRequest(row.id, {
-    outcomeJson: { ...outcome, requester_relay: { body, send_attempts: attempts,
+    outcomeJson: { ...outcome, requester_relay: { ...previous, body, send_attempts: attempts,
       delivery: unconfirmed ? 'unconfirmed' : exhausted ? 'exhausted' : 'failed' } },
     // Exhaustion retains the existing timer only to deliver the owner notice.
     nextCheckAt: unconfirmed ? null : new Date(Date.now() + 5 * 60000).toISOString(),
@@ -465,8 +487,6 @@ async function notifyOwnerOfExhaustedRelay(row: RequestRow, profile: UserProfile
     updateRequest(row.id, { outcomeJson: { ...outcome, requester_relay: { ...stored, owner_delivery: delivery, owner_send_attempts: attempts } },
       nextCheckAt: retry ? new Date(Date.now() + 5 * 60000).toISOString() : null,
       nextCheckHandler: retry ? 'requester_relay_retry' : null,
-      // Existing brief narration remains available if the direct notice fails.
-      informed: delivery === 'sent' ? current.informed : 0,
     });
   };
   const conn = getConnection(row.owner_user_id, 'slack');
@@ -478,7 +498,7 @@ async function notifyOwnerOfExhaustedRelay(row: RequestRow, profile: UserProfile
     // Rendering failed before transport: retain failed visibility, not a false
     // unknown-send receipt or a timer that can only repeat the same failure.
     updateRequest(row.id, { outcomeJson: { ...outcome, requester_relay: { ...stored, owner_delivery: 'failed', owner_send_attempts: stored.owner_send_attempts ?? 0 } },
-      informed: 0, nextCheckAt: null, nextCheckHandler: null });
+      nextCheckAt: null, nextCheckHandler: null });
     return;
   }
   // Claim before the daily-thread lookup's first await as well as transport.
@@ -506,10 +526,9 @@ export function recordRequesterCompositionFailure(row: RequestRow): void {
   const current = getRequest(row.id) ?? row;
   if (current.requester_notified_at || requesterRelayStopped(current)) return;
   const outcome = readOutcome(current);
-  const previous = outcome.requester_relay as { send_attempts?: number } | undefined;
+  const previous = outcome.requester_relay as { send_attempts?: number; delivery?: string } | undefined;
   updateRequest(row.id, {
-    outcomeJson: { ...outcome, requester_relay: { delivery: 'failed', send_attempts: previous?.send_attempts ?? 0 } },
-    informed: 0,
+    outcomeJson: { ...outcome, requester_relay: { ...previous, delivery: 'failed', send_attempts: previous?.send_attempts ?? 0 } },
     ...(['resolved', 'cancelled', 'expired', 'logged'].includes(current.state) ? { nextCheckAt: null, nextCheckHandler: null } : {}),
   });
 }
@@ -518,7 +537,11 @@ export function completeRequesterRelay(row: RequestRow): void {
   const current = getRequest(row.id) ?? row;
   const outcome = readOutcome(current);
   const hadRetry = !!outcome.requester_relay;
-  delete outcome.requester_relay;
+  const previous = outcome.requester_relay as { owner_delivery?: string; owner_send_attempts?: number } | undefined;
+  if (previous?.owner_delivery && previous.owner_delivery !== 'sent') {
+    outcome.requester_relay = { owner_delivery: previous.owner_delivery,
+      ...(previous.owner_send_attempts !== undefined ? { owner_send_attempts: previous.owner_send_attempts } : {}) };
+  } else delete outcome.requester_relay;
   updateRequest(row.id, {
     requesterNotifiedAt: new Date().toISOString(),
     ...(hadRetry ? { outcomeJson: outcome, nextCheckAt: null, nextCheckHandler: null } : {}),

@@ -35,7 +35,7 @@ import { renderClockInZone } from '../utils/timezoneConvert';
 import { resolveStatedInstant } from '../utils/weTimeResolver';
 import { isColleagueSendDeferred } from '../utils/responseDeadline';
 import { getPersonMemory } from '../db/people';
-import { relayNotice, requesterRelayLanguage } from '../core/requests/requesterRelay';
+import { relayNotice, requesterRelayLanguage, recordOwnerNotificationOutcome } from '../core/requests/requesterRelay';
 import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { getConnection } from '../connections/registry';
@@ -210,17 +210,22 @@ async function handleRescheduleReplyLocked(
     status: 'replied', reply_text: replyText, conversation_json: JSON.stringify(conversation),
   });
   const notifyHandledOwner = async (compose: () => string, remember = false) => {
+    let attempted = false;
     try {
       const text = compose();
+      attempted = true;
       const receipt = await conn.postToChannel(job.owner_channel, text, { threadTs: job.owner_thread_ts ?? undefined });
-      if (!receipt.ok) throw new Error("Owner notification delivery unconfirmed");
+      const request = requestId ? getRequest(requestId) : null;
+      if (request) recordOwnerNotificationOutcome(request, receipt);
+      if (!receipt.ok) return;
       if (remember && job.owner_thread_ts) {
         appendToConversation(job.owner_thread_ts, job.owner_channel, { role: 'assistant', content: text });
       }
     } catch (err) {
       // A notification failure cannot authorize replaying a completed or
       // already-attempted calendar action through the generic reply path.
-      if (requestId) updateRequest(requestId, { informed: 0 });
+      const request = requestId ? getRequest(requestId) : null;
+      if (request) recordOwnerNotificationOutcome(request, attempted ? { ok: false, reason: 'error' } : null);
       logger.warn('Reschedule handled; owner notification failed', { jobId: job.id, err: String(err).slice(0, 200) });
     }
   };
@@ -243,9 +248,8 @@ async function handleRescheduleReplyLocked(
     const reason = observed ? 'reschedule_desired_state_observed'
       : status === 'different_state_observed' ? 'reschedule_requested_state_not_observed'
       : 'reschedule_action_attempted_unconfirmed';
-    // Persist an honest outcome BEFORE fallible delivery. closeRequest sets
-    // informed=0 so the existing owner brief can surface this exact reason
-    // even when the immediate warning fails. No unresolved calendar retry.
+    // Persist the action outcome BEFORE fallible delivery. A failed owner
+    // notice retains its separate receipt, never an unresolved calendar retry.
     updateOutreachJob(job.id, { reply_text: replyText, conversation_json: JSON.stringify(conversation) });
     if (requestId) {
       closeRequest({ id: requestId, state: observed ? 'resolved' : 'cancelled',

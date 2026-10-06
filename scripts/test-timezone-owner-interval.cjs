@@ -22,6 +22,9 @@ function harness(rows={},options={}){
   'src/utils/categoryRules.ts':{checkCategorySlot:()=>({allowed:true}),getProfileCategoryByName:()=>null},
   'src/utils/displaySubject.ts':{displaySubject:()=>'',PRIVATE_MASK:'private'},
   'src/db/people.ts':{personIdForSlackId:()=>null,searchPeopleMemory:()=>[],getTravelRecordById:()=>null,getEffectiveTimezoneById:()=>({})},
+  'src/db.ts':{listSchedulingContacts:()=>[]},
+  'src/db/client.ts':{},
+  'src/connectors/graph/graphClient.ts':{},
   'src/db/venues.ts':{getVenueTravelTimeMinutes:()=>null,isCompanyLocation:()=>false},
   'src/utils/locationTz.ts':{inferTimezoneFromStateStatic:()=>null},
   'src/utils/resolveLocation.ts':{resolveLocation:()=>({kind:'resolved',isOnline:true,location:'fixture online',reasoning:'fixture'}),isPhoneLocationString:()=>false},
@@ -36,17 +39,22 @@ function harness(rows={},options={}){
   'src/utils/attendeeAvailability.ts':{attendeeTzForDay:e=>e.timezone},
   'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>[],recordOfferedSlots:a=>calls.offers.push(a)},
  };
- function load(rel){
+ Object.assign(mocks,options.extraMocks);
+ if(options.realAvailability)delete mocks['src/utils/attendeeAvailability.ts'];
+ if(options.realDensity)delete mocks['src/utils/calendarDensity.ts'];
+ function load(rel, actual=false){
   if(rel==='src/connectors/graph/calendar.ts')return {...mocks['src/connectors/graph/calendarReads.ts'],
    findAvailableSlots:async a=>{calls.searches.push(a);return load('src/connectors/graph/findAvailableSlots.ts').findAvailableSlots(a);},
-   pickSpreadSlots:slots=>slots.map(s=>s.start),slotLocalDay:(s,tz)=>DateTime.fromISO(s.start).setZone(tz).toISODate()};
-  if(mocks[rel])return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
-  const source=fs.readFileSync(path.join(root,rel),'utf8');
+   pickSpreadSlots:load('src/connectors/graph/calendarReads.ts').pickSpreadSlots,slotLocalDay:load('src/connectors/graph/calendarReads.ts').slotLocalDay};
+  if(mocks[rel]&&!actual)return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
+  const before=process.env.SLOT_PRIORITY_BEFORE&&path.join(root,process.env.SLOT_PRIORITY_BEFORE,rel);
+  const source=fs.readFileSync(before&&fs.existsSync(before)?before:path.join(root,rel),'utf8');
   const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const mod={exports:{}};modules.set(rel,mod);
   const req=s=>s==='luxon'?luxon:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),s))+'.ts'):(()=>{throw Error('Unexpected module '+s);})();
   vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date:Clock,console,Set,Map,Buffer,setTimeout,clearTimeout},{filename:rel})(req,mod,mod.exports);return mod.exports;
  }
+ mocks['src/connectors/graph/calendarReads.ts']={...load('src/connectors/graph/calendarReads.ts',true),...mocks['src/connectors/graph/calendarReads.ts']};
  const check=(s=start,e=end,extra={})=>load('src/utils/scheduleRules.ts').checkSlot({profile,slotStartIso:s,slotEndIso:e,events:[],category:null,...extra});
  const find=(s=start,e=end,extra={})=>load('src/connectors/graph/findAvailableSlots.ts').findAvailableSlots({userEmail:profile.user.email,timezone:home,profile,durationMinutes:DateTime.fromISO(e).diff(DateTime.fromISO(s),'minutes').minutes,searchFrom:s,searchTo:e,autoExpand:false,requestedTimeWindow:null,minBufferHours:0,...extra});
  const outcome=(s=start,e=end)=>load('src/utils/verifyScheduledOutcome.ts').verifyScheduledOutcome({subjectKeyword:'Sync',proposedSlots:[s]},[{id:'fixture',subject:'Sync',start:{dateTime:s,timeZone:home},end:{dateTime:e,timeZone:home}}],profile);

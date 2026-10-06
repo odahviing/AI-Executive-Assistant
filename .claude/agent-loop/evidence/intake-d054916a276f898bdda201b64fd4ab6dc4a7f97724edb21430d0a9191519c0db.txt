@@ -1,0 +1,25 @@
+Owner additions relayed from source chat01a0e9fe-204b-7be3-974e-08f8b53b9777, Tuesday6Oct2026. All authorized for this batch. Preserve version5.0.5, independent review after integration. These are reports/rulings, not independently verified production causes.
+
+NEWS — exact supplied brief excerpts:
+“• Reflectiz namecheck: competitor site ScriptMonitoring published both an "alternative to Reflectiz" comparison and a Reflectiz pricing breakdown page https://www.scriptmonitoring.com/alternative-to-reflectiz
+• Reflectiz's agentic pentesting launch is turning up as a syndicated "related reading" link on devops.com and Latest Hacking News, passive pickup rather than original coverage, but worth knowing it's circulating https://latesthackingnews.com/2026/09/29/salmon-introduces-execution-verification-infrastructure-evi-for-securing-ai-agents-and-autonomous-systems
+• Snyk cut 200+ jobs even as revenue topped $300M, leaning further into its AI security push https://tech.eu/2026/10/01/snyk-laid-off-over-200-employees-revenues-top-300m”
+Owner: “again couple items like the one before last - mention refletiz, but reflectiz is not there. i think you are running a fix to it now”.
+Other source context: https://www.israeldefense.co.il/en/node/71357 (brief: Accenture$5B acquisitions / Armadin$255.5M SeriesB); https://www.remio.ai/post/fleuret-ai-funding-backs-a-european-challenge-to-one-off-penetration-tests ; https://www.aicerts.ai/blogs/what-are-the-top-3-skills-for-cyber-security-experts (brief alleged Jscrambler supply-chain compromise); https://www.show.it/en/remotethreat-launches-with-7-million-for-offensive-operations-platform .
+Candidate related prior ref news-reflectiz-mention-without-source-confirmation remains technically blocked, NOT fixed; missing historical snippet/provenance. This fresh incident is separate until actual correction/root identity is proven. Investigate actual retrieved payload, attribution, related-links versus article content. Current page contents alone do not reconstruct historical runtime input. No speculative prompt patch or new LLM call.
+
+RESOLVED WORK RECAP — explicit product ruling:
+“in the past ia sked to be updated on the morning brief about stuff that happened yesterday "status=informed" its just annoying. if its not open, and i already know about it (as it was resolved on a thread) don't tell me about it.. so just kill the informed status”.
+Exact offending briefing passage:
+“Yesterday: one of the meeting reschedules I was running went through, the meeting moved, so that's closed out. I'm still carrying three more reschedule tasks on my plate, one due today, two by tomorrow, details on which meetings are thin on my end, so I'll keep working them and flag anything that needs your call.”
+Earlier recap rule explicitly superseded. Remove resolved/already-informed morning recap behavior, preserve genuinely open/action-needed work and truthful identities. Trace actual informed producers/consumers; remove obsolete feature-only state coherently, don't blindly delete lifecycle used elsewhere. No new LLM call.
+
+DINA — exact conversation Tuesday6Oct:
+Idan10:04 “i have weekly with dina today, see when opening this thursday to move it”
+Maelle10:04 “Thursday's open for Dina: 14:00 or 15:15 are clean, no lunch disruption. Want one of those?”
+Idan10:05 “why not before? i want in the morning”
+Maelle10:05 “11:00 and 11:45 are also open Thursday, I skipped them because Dina only showed as partially free at that end of the morning, afternoon looked cleaner. If you want morning, 11:00 or 11:45 are the two to pick from.”
+Idan10:05 “11:00am”
+Maelle10:06 “Moved, Dina's BiWeekly is now Thursday 11:00–11:40. That frees up 10:45–11:25 today. One thing, I said lunch today shifted to 11:45, but I actually haven't done that yet, so it's still at its original time for now. Let me know if you want me to move it.”
+Owner: “again why she offered me bad times, and why she inveting reasons - its might something you already fix now”.
+Selection/availability explanation and lunch mutation/claim are distinct candidate correction identities. Initial request did not say morning; afternoon alone not provenwrong. Verify actual live tool outputs, attendee hours/conflicts, summaries, requested morning follow-up and real mutation/claim provenance. Do not equate with Garage diagnostics or new uncommitted ranking merely by symptoms. Self-correction isn't proof of root or mutation. Current deployedSHA versus dirtysource is material. Retain unknowns honestly.

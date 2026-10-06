@@ -26,14 +26,21 @@ const loggerMock = { default: { info: noop, warn: noop, error: noop, debug: noop
 
 function loader(mocks) {
   const modules = new Map();
-  function load(rel) {
-    if (mocks[rel]) return mocks[rel];
+  mocks['src/connectors/graph/graphClient.ts'] = {};
+  function load(rel, actual = false) {
+    if (mocks[rel] && !actual) return mocks[rel];
     if (modules.has(rel)) return modules.get(rel).exports;
     const js = ts.transpileModule(fs.readFileSync(path.join(root, rel), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const mod = { exports: {} }; modules.set(rel, mod);
     const req = s => s === 'luxon' ? luxon : s.startsWith('.') ? load(path.posix.normalize(path.posix.join(path.posix.dirname(rel), s)) + '.ts') : require(s);
     vm.runInNewContext('(function(require,module,exports){' + js + '\n})', { Date: Clock, console, Set, Map, Buffer, setTimeout, clearTimeout, Promise, JSON, RegExp, Number, String, Object, Array, Error, Math }, { filename: rel })(req, mod, mod.exports);
     return mod.exports;
+  }
+  // Preserve actual deterministic selection exports; replace only calendar I/O.
+  if (mocks['src/connectors/graph/calendarReads.ts']) {
+    mocks['src/connectors/graph/calendarReads.ts'] = {
+      ...load('src/connectors/graph/calendarReads.ts', true), ...mocks['src/connectors/graph/calendarReads.ts'],
+    };
   }
   return load;
 }
@@ -152,7 +159,10 @@ test('P2 preserved: a plain busy block rejects as attendee_busy_collision and it
   const labels = h.load('src/skills/meetings/ops/violationLabels.ts');
   assert.equal(labels.humanizeViolationLabel(`attendee_busy_collision:${DINA}`, 'Owner'), 'an attendee is already booked then');
   assert.equal(labels.attendeeConflictLine({ email: DINA, reason: 'busy' }, null), "Dina's busy then");
-  const { slots } = await h.find({ tagAttendeeConflicts: true });
+  // Probe the named conflict itself: a broad offering search can correctly
+  // spend its bounded candidate budget on clean times before busy ones.
+  const { slots } = await h.find({ tagAttendeeConflicts: true,
+    searchFrom: '2026-09-22T10:00:00+03:00', searchTo: '2026-09-22T11:00:00+03:00' });
   const tagged = slots.filter(s => s.start.startsWith('2026-09-22T10'));
   assert.ok(tagged.length > 0 && tagged.every(s => s.attendee_conflicts?.[0]?.reason === 'busy'));
 });

@@ -1,12 +1,11 @@
 /**
- * findAvailableSlots — extracted VERBATIM (v3.7.x, pass B) from the 'find_available_slots' case body of
- * SchedulingSkill.executeToolCall in ../../ops.ts. No logic changes: the case
- * body is byte-for-byte identical; only relative import/require paths were
- * deepened by two levels for the ops/handlers/ location, and the free
- * variables (context, userEmail, timezone) are threaded via OpCtx.
+ * Tool handler for bounded availability search, candidate validation and
+ * audience-scoped offers. The Graph finder/checkSlot own slot validity;
+ * this handler selects and presents its ranked candidates and diagnostics.
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
+import { defaultMeetingSearchWindow } from '../../../../utils/workHours';
 
 import { humanizeViolationLabel, attendeeFirstName, attendeeConflictLine } from '../../ops/violationLabels';
 import { enrichUnresolvedInternal } from '../../ops/analysis';
@@ -323,7 +322,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // predecessor's end. Optional; when omitted, behavior is unchanged.
           // Predecessor lookup via getCalendarEvents window around the
           // searchFrom date — saves a per-event-id roundtrip and is bounded.
-          let effectiveSearchFrom = args.search_from as string;
+          const defaultWindow = !args.search_from && !args.search_to
+            ? defaultMeetingSearchWindow(context.profile) : undefined;
+          let effectiveSearchFrom = (args.search_from as string | undefined)
+            ?? defaultWindow?.from ?? DateTime.now().setZone(timezone).toISO()!;
           // v3.0.6 — expand date-only search_to to end-of-that-day. The
           // downstream parser reads any date-only string as 00:00 of that day,
           // so a bare `search_from=search_to="2026-05-27"` would collapse to a
@@ -331,7 +333,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           // getCalendarEvents does internally via `toEndOfDayLocal` — append
           // T23:59:59 to a bare YYYY-MM-DD.
           let effectiveSearchTo = ((): string => {
-            const raw = args.search_to as string;
+            const raw = (args.search_to as string | undefined) ?? defaultWindow?.to
+              ?? DateTime.fromISO(effectiveSearchFrom, { zone: timezone }).endOf('day').toISO()!;
             if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
               return `${raw}T23:59:59`;
             }
@@ -413,7 +416,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   ? `${args.search_to}T23:59:59` : args.search_to as string,
                 timezone: searchWindowTz || timezone }
             : null;
-          if (!requestedTimeWindow) {
+          if (!requestedTimeWindow && !defaultWindow) {
             effectiveSearchFrom = DateTime.fromISO(effectiveSearchFrom, { zone: timezone }).startOf('day').toISO()!;
             effectiveSearchTo = DateTime.fromISO(effectiveSearchTo, { zone: timezone }).endOf('day').toISO()!;
           }
@@ -1050,12 +1053,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             attendeesNotChecked?: string[];
           } = {};
 
-          // v2.7.6 — narrow-window detection. When owner explicitly named a
-          // day/window ("Monday", "this week", "Tuesday afternoon"), the
-          // search window will be ≤7 days. Disable auto-expand in that case
-          // so we don't silently jump to next week. Open-ended asks ("when
-          // can we meet") usually pass wider windows and benefit from
-          // auto-expand.
+          // Narrow windows qualify for the existing bounded recovery path.
+          // All offering searches now retain their chosen boundary, regardless
+          // of length; this flag never authorizes automatic date expansion.
           const userNamedNarrowWindow = (() => {
             try {
               const from = DateTime.fromISO(effectiveSearchFrom, { zone: timezone });
@@ -1313,7 +1313,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
               travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
               attendeeAvailability,
-              autoExpand: !userNamedNarrowWindow,
+              autoExpand: false, // timing window is selected before ranking; never widen it silently
               minBufferHours: leadHours,
               viewer,
               viewerEmail,
@@ -1335,14 +1335,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // gh#168-a — ground the day-level narration BEFORE any return branch
             // below reads diagnosticsOut.daySummary (one enrichment, every exit
             // path benefits — early-return, relaxed-recovery, and full success).
-            if (diagnosticsOut.daySummary) {
-              for (const day of diagnosticsOut.daySummary) {
+            const groundAttendeeHours = (summary: typeof diagnosticsOut.daySummary) => {
+              for (const day of summary ?? []) {
                 if (day.top_reasons.includes('outside_attendee_work_hours')) {
                   const notes = attendeeHoursGroundingNotes(day.blocked_by, day.date, attendeeAvailability, timezone, context.profile.user.name.split(' ')[0]);
                   if (notes) day.attendee_hours_note = notes;
                 }
               }
-            }
+            };
+            groundAttendeeHours(diagnosticsOut.daySummary);
             // v3.0.3 — strict-pass log. Shows the effective args the low-level
             // function actually ran with, plus what came back. The crucial fields:
             // effectiveSearchFrom / search_to (after any internal clipping) and
@@ -1480,6 +1481,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             //       for an internal attendee; missing/unknown status stays unconfirmed.
             //       If the owner is himself busy, owner-only also returns 0 →
             //       honest "he's booked then."
+            const attendeeRecoveryDiagnostics: typeof diagnosticsOut = {};
             const recoverAttendeeBlockedSlots = (audience: 'owner_tagged' | 'colleague_owner_only') => {
               const ownerAudience = audience === 'owner_tagged';
               return findAvailableSlots({
@@ -1495,7 +1497,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 preferMorning: args.prefer_morning as boolean | undefined,
                 meetingMode: mode as import('../../../../connectors/graph/calendar').MeetingMode,
                 travelBufferMinutes: args.travel_buffer_minutes as number | undefined,
-                autoExpand: !userNamedNarrowWindow,
+                autoExpand: false,
                 // Owner-audience recovery reads his OWN lead time even on a
                 // colleague turn — the slots come back for HIM to choose from.
                 minBufferHours: ownerAudience
@@ -1507,6 +1509,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 relaxed: false,
                 excludeEventIds: excludeEventIdsForSearch,
                 category: args.category as string | undefined,
+                diagnosticsOut: attendeeRecoveryDiagnostics,
               });
             };
             // Colleague path: strict-failed only on attendee busy → owner-only.
@@ -1569,6 +1572,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             }
             let relaxedRecoverySlots: typeof rawSlots = [];
             const strictDaySummary = diagnosticsOut.daySummary;
+            const recoveryDiagnostics: typeof diagnosticsOut = {};
             // Owner-tagged backstop wins over relaxing soft rules: his genuinely
             // open times (attendee-conflicted) beat times that break his focus /
             // lunch / category limits. Only relax when he has no open slot at all.
@@ -1602,7 +1606,9 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   excludeEventIds: excludeEventIdsForSearch,
                   category: args.category as string | undefined,
                   autoExpand: false,  // recovery stays inside the user's window
+                  diagnosticsOut: recoveryDiagnostics,
                 });
+                groundAttendeeHours(recoveryDiagnostics.daySummary);
                 // v3.1.7 — the recovery is clipped to the owner's working DAY, and
                 // that clip now lives INSIDE the walker (`keepWorkHours`), above
                 // its per-day cap. It used to run out here, re-deriving the day's
@@ -1679,7 +1685,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   slots: [],
                   owner_approval_candidates: candidates,
                   _must_be_owner_approval_note: `No clean slot here — these times are open only if ${ownerFirst} bends one or more of his own scheduling rules, so they're his call. Each candidate's \`broken_rules\` lists EVERY rule it breaks (\`disturbs_floating_block\`: it lands on his lunch/break as currently placed); they are listed in ${ownerFirst}'s rule-priority order (the fewest/least important bends first; time order only between equal bends), so propose the FIRST one — a requester's "as early as possible" never outranks that order — and never describe any as clean. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason, and name every rule in that candidate's \`broken_rules\` so ${ownerFirst} decides with a single yes.${remoteOnly.length > 0 ? ` In-person is not available that day (${ownerFirst} only meets in person on his office days, and that day isn't one), but ${remoteOnly.map(c => c.label).join(', ')} ${remoteOnly.length === 1 ? 'works' : 'work'} as an online meeting with no approval: tell the colleague that plainly and offer online there first; raise the approval only if they insist on meeting in person.` : ''} Never reveal the other candidates' times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
-                  ...(strictDaySummary && strictDaySummary.length > 0 ? { day_summary: strictDaySummary } : {}),
+                  ...(recoveryDiagnostics.daySummary?.length ? { day_summary: recoveryDiagnostics.daySummary } : {}),
                 };
               }
             }
@@ -1917,7 +1923,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
             }
 
-            const slots = candidateSet.filter(s => chosenStarts.has(s.start));
+            const { compareSlotPreference } = await import('../../../../connectors/graph/calendarReads');
+            const slots = candidateSet.filter(s => chosenStarts.has(s.start))
+              .sort((a, b) => Number(!!a.over_optional) - Number(!!b.over_optional) || compareSlotPreference(a, b))
+              .map(({ shared_overlap: _sharedOverlap, density: _density, ...slot }) => slot);
 
             // v2.7.0 — initiator-aware annotation. Owner-path normally pre-drops
             // attendee-busy slots via attendeeBusyEmails. Colleague-path doesn't
@@ -2121,15 +2130,19 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // "why no Monday?" honestly. When both travelers and day_summary
             // are empty, fall back to the legacy array shape so existing
             // narration paths see the same plain list.
-            // strictDaySummary holds the rejection breakdown from the STRICT
-            // pass — that's the authoritative "why was this slot relaxed-only"
-            // signal. diagnosticsOut.daySummary at this point reflects whichever
-            // pass ran last (strict OR recovery); strictDaySummary was captured
-            // before recovery to preserve the original blame.
+            // Describe the pass that produced the offers. A strict pass can
+            // accept nothing because of an owner rule while counting overnight
+            // attendee off-hours as its largest rejection. Carrying that old
+            // blocked-day verdict beside recovered noon offers falsely blames
+            // the attendees. Per-slot broken_rules retain the owner compromise;
+            // the recovery summary retains real rejected days/partial conflicts.
             const isRecoveryResult = relaxedRecoverySlots.length > 0;
             const daySummary = isRecoveryResult
-              ? strictDaySummary
-              : diagnosticsOut.daySummary;
+              ? recoveryDiagnostics.daySummary
+              : (ownerAttendeeTaggedSlots.length > 0 || colleagueOwnerOnlySlots.length > 0)
+                ? attendeeRecoveryDiagnostics.daySummary
+                : diagnosticsOut.daySummary;
+            groundAttendeeHours(daySummary);
             const hasDaySummary = Array.isArray(daySummary) && daySummary.length > 0;
             // Relaxed (owner-override) search keeps attendee-conflicted slots
             // instead of dropping them, tagged with `attendee_conflicts`. Tell
@@ -2318,7 +2331,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // for "WHICH rule each slot is breaking". Both were wrong, and
                 // together they are how a double-booked 15:30 got narrated as
                 // "clean for both of you" (2026-07-26 19:17Z): the retry ALSO
-                // waived his own hard busy, and day_summary is a per-DAY top-2 from
+                // waived his own hard busy, and day_summary was a per-DAY top-2 from
                 // the STRICT pass, which on that search blamed the attendee and
                 // said nothing about the offered times. The walker now excludes
                 // committed and out-of-hours slots outright and tags each surfaced

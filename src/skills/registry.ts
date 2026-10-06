@@ -132,7 +132,7 @@ const SKILL_MAP = buildSkillMap();
  */
 // v3.x (Block 2 Change A) — ALWAYS_ON slimmed from 22 → 12. The cut tools were
 // expensive-and-rare on the common scheduling turn and have a natural home scope:
-//   - person WRITES (update_person_profile 1.9k, update_person_memory,
+//   - person WRITES (update_person_profile 1.9k,
 //     confirm_gender, note_about_person, note_about_self) → 'people' scope.
 //     READS stay always-on (get_person_memory, recall_interactions) so loading a
 //     contact is always one call away. Person writes are also backstopped by the
@@ -205,7 +205,7 @@ const SCOPE_TO_TOOLS: Record<string, Set<string>> = {
   // note_about_* are SocialSkill tools — listed here too, but only ship when
   // social is on (filterToolsByScope works off the actually-loaded tool list).
   people: new Set<string>([
-    'update_person_profile', 'update_person_memory', 'confirm_gender',
+    'update_person_profile', 'confirm_gender',
     'note_about_person', 'note_about_self',
   ]),
   // 'social' scope is a recognized NO-OP signal scope (person writes moved to
@@ -437,7 +437,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
   //
   // What stays owner-only (still in the hard-block list at assistant.ts):
   //   learn_preference, forget_preference, recall_preferences,
-  //   update_person_memory, get_person_memory
+  //   get_person_memory
   // — these touch owner's catalog or other people's memory and have no
   // self-only equivalent on the colleague side.
   //
@@ -472,8 +472,7 @@ const COLLEAGUE_ALLOWED_TOOLS = new Set([
  * may never reach. resolve_approval is already in the shared set for a
  * requester's guarded awaiting_colleague response; its handler uses authority
  * to retain the owner's full approval power. Owner data tools
- * (get_person_memory, manage_preference, update_my_preferences,
- * update_person_memory — the merged learn/forget/recall_preferences) are
+ * (get_person_memory, manage_preference, update_my_preferences) are
  * deliberately NOT added here: they stay unreachable in a room regardless of
  * authority because they're absent from this set. AssistantSkill also
  * explicitly refuses these tools on room surfaces; its WRITE authority
@@ -531,7 +530,7 @@ export const WRITE_TOOLS = new Set<string>([
   // Memory writes. v2.9 — preferences merged into manage_preference (set/forget are writes).
   'manage_preference', 'update_my_preferences',
   'note_about_person', 'note_about_self',
-  'log_interaction', 'update_person_profile', 'update_person_memory',
+  'log_interaction', 'update_person_profile',
   'confirm_gender',
   // Briefing
   'send_briefing_now',
@@ -703,7 +702,7 @@ export async function executeApprovedSkillTool(
     case 'log_interaction': complete = result.logged === true; break;
     case 'confirm_gender': complete = result.confirmed === true; break;
     case 'update_person_profile': complete = result.updated === true; break;
-    case 'update_my_preferences': case 'update_person_memory': case 'send_briefing_now':
+    case 'update_my_preferences': case 'send_briefing_now':
       complete = result.ok === true;
       break;
   }
@@ -899,8 +898,8 @@ export async function executeSkillTool(
   // clamped into a room (context.authority === 'owner') dispatches against
   // OWNER_ROOM_ACTION_TOOLS (book/move/cancel/approve); a real colleague
   // still dispatches against COLLEAGUE_ALLOWED_TOOLS unchanged. Data-only
-  // tools (get_person_memory, manage_preference, update_my_preferences,
-  // update_person_memory) are in neither set, so this chokepoint blocks them
+  // tools (get_person_memory, manage_preference, update_my_preferences)
+  // are in neither set, so this chokepoint blocks them
   // regardless of authority — AssistantSkill's explicit room-surface refusal
   // also blocks them; its WRITE gates use authority, not the DATA scope.
   if (context.senderRole === 'colleague') {

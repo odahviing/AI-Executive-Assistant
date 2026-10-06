@@ -12,8 +12,8 @@ for(const [tz,pref] of [['America/New_York','15:00-19:00'],['Europe/Paris','09:0
  const p=m.exports.profile;p.user.timezone=tz;p.schedule.timezone_preferences={local_participants:'morning',remote_participants:pref};
  const text=m.exports.skill.getSystemPromptSection(p,undefined,true,'slack');
  console.log('METRICS '+tz+' chars='+text.length);
- check(tz+' preference truth regression',()=>{assert.ok(!text.includes('it overlaps better with their working day'));assert.ok(text.includes('the configured soft preference'));});
- check(tz+' YAML-derived preference control',()=>{assert.ok(text.includes(`lean toward ${pref} Owner's time`));assert.ok(text.includes('Never refuse on a soft preference alone'));assert.ok(text.includes('find_available_slots ALREADY clips'));});
+ check(tz+' preference truth regression',()=>{assert.ok(!text.includes('it overlaps better with their working day'));assert.ok(text.includes('returned slot ranking and earlier reasonable alternatives'));assert.ok(text.includes('actual hours and day quality within the requested window'));});
+ check(tz+' ranked preference and validity control',()=>{assert.ok(!text.includes(`lean toward ${pref} Owner's time`));assert.ok(!text.includes('lean toward morning'));assert.ok(text.includes('Never refuse on a soft preference alone'));assert.ok(text.includes('find_available_slots ALREADY clips'));const finder=m.exports.skill.getTools(p).find(t=>t.name==='find_available_slots');assert.match(finder.description,/relative preference after validity checks/);assert.match(finder.description,/no booking authority or additional availability assurance/);assert.match(finder.description,/conflict, unknown-calendar and approval annotations/);});
  fs.writeFileSync(path.join(dir,(before?'before':'after')+'-meetings-'+tz.replace('/','-')+'.txt'),text);
 }
 const capturePath=path.join(dir,(before?'before':'after')+'-capture.json');

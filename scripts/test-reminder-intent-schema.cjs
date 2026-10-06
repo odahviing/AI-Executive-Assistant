@@ -29,9 +29,20 @@ for (const name of ['create_task', 'update_task']) {
     assert.match(field.description, /false.*vague day\/date.*tomorrow.*recipient work hours/);
     assert.match(field.description, /Omit for other task types/);
   });
-  test(`${name} preserves other task types and their existing required fields`, () => {
+  test(`${name} preserves creation types or immutable edits and existing required fields`, () => {
     const schema = tool(name).input_schema;
-    assert.deepEqual(schema.properties.type.enum, ['reminder', 'follow_up', 'research']);
+    if (name === 'create_task') {
+      assert.deepEqual(schema.properties.type.enum, ['reminder', 'follow_up', 'research']);
+    } else {
+      assert.equal(schema.properties.type, undefined);
+      const validate = new (require('ajv'))({strict:false}).compile(schema);
+      const edit = {action:'edit',task_id:'req_fixture'};
+      assert.equal(validate({...edit,type:'reminder'}), false);
+      assert.equal(validate({...edit,parent_request_id:'req_other'}), false);
+      assert.equal(validate({...edit,due_at:'2099-01-01T09:00:00Z',explicit_time:true,message:'Report due'}), true);
+      assert.equal(validate({...edit,message:'Updated outward message'}), true);
+      assert.equal(validate({action:'cancel',task_id:'req_fixture'}), true);
+    }
     assert.deepEqual(schema.required, name === 'create_task' ? ['type', 'title', 'due_at'] : ['action', 'task_id']);
     assert.equal(schema.properties.due_at.type, 'string');
   });

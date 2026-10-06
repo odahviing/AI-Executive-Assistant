@@ -497,15 +497,15 @@ if (severity && !['high', 'medium', 'low'].includes(severity)) die('--severity m
 // The ceiling here is the HIGHER of the two, since this script has no
 // `--engine` flag to tell which produced the row — a hand-run bounce follows
 // the same ladder (SKILL.md: "write bounces: 1" / "bounces: 2"). The OUTCOME
-// of the bounce (fixed and cleared, vs escalated after the last attempt) is
-// already carried by `--verdict` (`built` vs `needs-owner-decision`) — a
+// of the bounce (fixed, technical blocker or actual owner question) is
+// already carried by `--verdict` — a
 // second field for that would be the same fact twice, so this stays a single
 // count, not a new verdict spelling.
 let bounces = null
 if (bouncesRaw !== null) {
   const n = Number(bouncesRaw)
   if (!Number.isInteger(n) || n < 1) die('--bounces must be a positive integer.', 'Omit the flag entirely for a row that was never sent back — there is no reason to write `bounces: 0`.')
-  if (n > 2) die(`--bounces ${n} is above either engine's own limit.`, 'BOUNCE_LIMIT is 2 in bugger.js and 1 in feature.js — a row overturned past its own engine\'s limit goes to the owner with verdict `needs-owner-decision`, it does not get a bigger count. If this really happened outside either engine, that is a bug in the bounce mechanism, not a new value for this field.')
+  if (n > 2) die(`--bounces ${n} is above either engine's own limit.`, 'BOUNCE_LIMIT is 2 in bugger.js and 1 in feature.js — exhausted repair remains a technical blocker unless an actual owner choice is reported; it does not get a bigger count.')
   bounces = n
 }
 

@@ -1,0 +1,5 @@
+
+check-stale-citations — wave-diff-scoped (505 file(s) scanned, 185 touched)
+
+  1 proven range failure(s), 2 suspected positional drift(s), 143 weak-checked (no symbol named — range exists, position unverified), 23 unresolved target(s)
+  (weak coverage is real but partial — a citation to a still-valid line at the WRONG spot in its file is invisible to this tier)

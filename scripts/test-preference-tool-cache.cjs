@@ -3,7 +3,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const vm = require('node:vm');
 const ts = require('typescript');
 const { test } = require('node:test');
@@ -33,8 +32,10 @@ function compile(text, deps, filename, globals = {}) {
 }
 
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maelle-preference-cache-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Exercise real atomic rename in the writable workspace; Windows sandbox
+  // os.tmpdir permits file creation but can reject rename with EPERM.
+  const dir = fs.mkdtempSync(path.join(root, '.maelle-preference-cache-'));
+  t.after(() => {const target=path.resolve(dir);assert.equal(path.dirname(target),root);assert.ok(path.basename(target).startsWith('.maelle-preference-cache-'));fs.rmSync(target, { recursive: true, force: true });});
   const prefs = compile(source('src/utils/skillPreferences.ts'), {
     fs, path, crypto: require('node:crypto'), './logger': logger,
   }, 'skillPreferences.ts', { process: { cwd: () => dir } });

@@ -1,0 +1,21 @@
+Owner-reported Oran incident, Tuesday6Oct2026, relayed sourcechat01a0e9fe-204b-7be3-974e-08f8b53b9777. Authorized investigation/fix in current batch; no actual LinkedIn posting, video access, outbound message or public disclosure authorized.
+
+Exact shadow conversation:
+Oran Frenkel: “Maelle can you pls ask Idan to upload this video to his LinkedIn? This is the link to the video [URL below] He can add a short punchy text like this: ‘Your Website Risks, Covered.’ #CISO #Websecurity #Pentesting”
+PRIVATE SOURCE URL — preserve only, DO NOT open/download/send/publicize:
+[PRIVATE VIDEO URL RETAINED ONLY IN LOCAL EVIDENCE]
+Maelle to Oran: “Got it, I'll pass the video and your suggested caption along to Idan.”
+
+Actual owner thread:
+Maelle11:03AM: “Relay Oran's LinkedIn video upload request to Idan”
+Idan11:03AM: “what relay?”
+Maelle: “Not sure what you mean, there's nothing about a relay in what we've been discussing. Can you give me a bit more context on what you're asking about?”
+
+Owner: “that what i got from maelle, this is very broken ... no context no reasoning, what i suppost to understand”.
+
+Distinct candidate corrections pending proof:
+1. Relay payload exposed internal title instead of requester identity/action/original URL/caption. Trace actual request/task/event lifecycle and saved payload; do not presume PayPal title-fallback root. Colleague promise must match actual delivery truth.
+2. Owner's reply in emitted thread omitted/denied relay context. Trace Slack thread association -> request/source context -> model inputs -> reply, restart/delayed controls and private surface isolation. Do not infer exact IDs; retrieve today11:03 evidence. Common root requires proof before merging. No person-specific workaround/new model call/arbitrary context expansion.
+Owner said “two more stuff” but this message supplies one conversation/two symptoms; do not invent a missing example. Earlier news/recap/Dina additions remain. Version5.0.5, independent Bouncer after integration.
+
+Local-only source provenance: artifacts/workshop-verification/approved-continuation-20261006/additions/oran-owner-evidence.txt. The original private URL must not be opened or published.

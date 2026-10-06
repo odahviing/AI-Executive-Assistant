@@ -91,15 +91,17 @@ const workshopContract = (() => {
     const errors = checkReview(r.evidence, r.review)
     return errors.length ? { ...r, verdict: 'implemented', verificationErrors: errors, notes: `${r.notes || ''} [awaiting independent verification: ${errors.join('; ')}]` } : r
   }
-  const acceptReviews = (builds, check, reviews) => {
+  const acceptReviews = (builds, check, reviews, questions = new Map()) => {
     if (!check) return
     check.results = array(check.results).map(r => {
+      if (['needs-owner-decision', 'blocked-charter'].includes(r.verdict)) questions.set(r.id, r.verdict)
+      else questions.delete(r.id)
       const built = builds.find(b => b.id === r.id && b.verdict === 'built')
       if (!built) return r
       reviews.set(r.id, r.review)
       if (r.verdict !== 'built') return r
       const errors = checkReview(built.evidence, r.review)
-      return errors.length ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
+      return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
     })
   }
   // Schema lives beside validation; conditional requirements are enforced above.
@@ -151,10 +153,10 @@ const CLOSED = new Set(['built', 'verified', 'wrapped', 'confirmed-other-lane', 
 const normRef = t => String(t || '').trim().toLowerCase().replace(/^(?:gh)?#/, '')
 // Owner authority is independent of build/review verdicts. Only an explicit
 // answer or matching hold release changes these gates; a later review cannot.
-function ownerStates(rows) {
+function ownerStates(rows, ignoreRow = () => false) {
   const states = new Map()
   rows.forEach((r, index) => {
-    if (!r.ref || r.kind) return
+    if (!r.ref || r.kind || ignoreRow(r)) return
     const key = normRef(r.ref)
     if (!states.has(key) && !r.intake && r.verdict !== 'deferred' && r.state !== 'deferred') return // historical, unadopted backlog
     const s = states.get(key) || {}
@@ -183,11 +185,12 @@ const refTokens = ref => {
   return out
 }
 const isClosed = r => ['declined', 'converted'].includes(r.verdict) || (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
-function collapseRows(rows) {
+function collapseRows(rows, ignoreRow = () => false) {
   rows = rows.map(r => hydrateRow(r))
-  const authority = ownerStates(rows)
+  const authority = ownerStates(rows, ignoreRow)
   const latest = new Map(), eventAt = new Map(), refless = []
   rows.forEach((r, i) => {
+    if (ignoreRow(r)) return
     if (r.kind && r.kind !== 'invariant-backfill') return
     if (!r.ref) { if (!isClosed(r)) refless.push(r); return }
     const key = normRef(r.ref), previous = latest.get(key) || {}
@@ -257,12 +260,14 @@ function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
   rows = rows.map(r => hydrateRow(r, repo))
   // GitHub partial sync records remaining ticket scope, not a new build or
   // overturn. Keep it in backlog collapse, but verify the actual lifecycle it
-  // annotates; filtering the event must never discard earlier failed work.
-  rows = rows.filter(r => !(r.state === 'partial' && /^gh#\d+$/.test(r.ref || '') && /^wrap-/.test(r.runId || '') && !r.lifecycleVersion && !r.evidence && !r.review && (!r.verdict || r.verdict === 'needs-owner-decision')))
-  const collapsed = collapseRows(rows)
+  // annotates. Skip during collapse so saved owner tokens keep their original
+  // event positions; removing rows first silently invalidates later answers.
+  const ignoreRow = r => r.state === 'partial' && /^gh#\d+$/.test(r.ref || '') && /^wrap-/.test(r.runId || '') && !r.lifecycleVersion && !r.evidence && !r.review && (!r.verdict || r.verdict === 'needs-owner-decision')
+  const collapsed = collapseRows(rows, ignoreRow)
   const closedKeys = new Set(collapsed.closed.map(r => normRef(r.ref)))
   const builtKeys = new Set(), eventDates = new Map()
   for (const r of rows) {
+    if (ignoreRow(r)) continue
     if (['built', 'implemented', 'verified'].includes(r.verdict)) builtKeys.add(normRef(r.ref))
     if (r.verdict || r.state === 'partial') eventDates.set(normRef(r.ref), String(r.date || ''))
   }

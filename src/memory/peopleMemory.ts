@@ -1,592 +1,69 @@
-/**
- * People memory (v2.2.1) — per-person markdown files.
- *
- * Operational facts about people live here: residence, workplace, working
- * hours, communication style, how Maelle should talk to them. Same pattern as
- * KnowledgeBaseSkill (config/users/<owner>_kb/) — a cheap catalog is injected
- * into the prompt at every turn, and Maelle calls get_person_memory(<name>)
- * on demand when a turn needs the detail.
- *
- * Rationale:
- *   - Prompts don't bloat with every person's full profile.
- *   - Owner can read/edit files directly.
- *   - Owner is treated as "just another person" (idan.md) — no special path.
- *   - Empty-until-real-fact: no file materializes until a real fact lands.
- *
- * Split with SQLite:
- *   - Md files hold qualitative facts (where they live, how they work, what
- *     we've discussed) — LLM context.
- *   - people_memory rows still hold gender, timezone, engagement_rank,
- *     interaction_log, last_seen, email — fields that CODE paths read
- *     deterministically. These accepted facts also feed prompt reads; their
- *     provenance and dated travel windows outrank an older narrative mirror.
- */
-
+/** Canonical person memory views. Durable content lives only in people_memory.
+ * Legacy markdown must be reconciled with scripts/reconcile-person-memory.cjs
+ * before deployment; it is never a second live fact writer or reader. */
 import type { UserProfile } from '../config/userProfile';
-import { promises as fs, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import type { PersonMemory, PersonProfile, PersonNote } from '../db/people';
+import { readdirSync, existsSync } from 'fs';
 import path from 'path';
-import logger from '../utils/logger';
-import { SLACK_ID_RE } from '../utils/resolveSlackId';
-import { nameGenuinelyMatches } from './resolveAttendeeEmails';
 
-const MAX_FILE_BYTES = 32 * 1024; // Bounded prompt read, never a disk-write limit.
+export type PersonMemoryAudience = { kind: 'owner' } | { kind: 'self'; senderId: string };
+const MAX_CONTEXT = 32 * 1024;
 
-const SECTION_TEMPLATE = [
-  '## Residence',
-  '',
-  '## Workplace',
-  '',
-  '## Working hours',
-  '',
-  '## Communication style',
-  '',
-  '## What we\'ve discussed',
-  '',
-].join('\n');
-
-export interface PersonFile {
-  slug: string;          // "amazia-cohen"
-  displayName: string;   // "Amazia Cohen"
-  relPath: string;       // "amazia-cohen.md"
-  sizeBytes: number;
-  sections: string[];    // h2 headers actually present with content (empty headers excluded)
-}
-
-function rootForProfile(profile: UserProfile): string {
-  const firstName = profile.user.name.split(' ')[0].toLowerCase();
-  return path.resolve(process.cwd(), 'config', 'users', `${firstName}_people`);
-}
-
-/**
- * Normalize a person name into a filename slug.
- *
- * v3.2.0 — this is now the LEGACY key. Md files are keyed by `person_id`
- * (collision-proof: two people with the same first+last name get distinct
- * files). `slugifyName` is retained only to locate a person's pre-migration
- * file so it can be renamed on first touch (see `migrateLegacyMdIfNeeded`).
- */
-export function slugifyName(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]/gu, '')
-    .replace(/\s+/g, '-')
-    .slice(0, 60) || 'unknown';
-}
-
-/**
- * v3.2.0 — migrate a person's md file from the legacy name-slug filename to
- * the collision-proof `person_id` filename, lazily, on first write/read. If
- * the person_id file already exists, no-op. If only the legacy file exists,
- * rename it so its history carries over. Non-fatal on any fs error.
- */
-async function migrateLegacyMdIfNeeded(root: string, personId: string, displayName: string): Promise<void> {
+/** A merge cannot discard an unreconciled legacy file. After migration there
+ * are no files to fold: row notes/history merge through the existing DB rule. */
+export function mergePersonMdFiles(survivorId: string, loserId: string, _survivorName?: string): boolean {
+  if (!survivorId || !loserId || survivorId === loserId || /[\\/\0]|\.\./.test(survivorId + loserId)) return false;
+  const root = path.resolve(process.cwd(), 'config/users');
   try {
-    const target = path.resolve(root, `${personId}.md`);
-    if (!target.startsWith(root) || existsSync(target)) return;
-    const legacySlug = slugifyName(displayName);
-    if (!legacySlug || legacySlug === personId) return;
-    const legacy = path.resolve(root, `${legacySlug}.md`);
-    if (legacy.startsWith(root) && existsSync(legacy)) {
-      await fs.rename(legacy, target);
-      logger.info('person memory — migrated legacy md filename to person_id', {
-        from: `${legacySlug}.md`, to: `${personId}.md`,
-      });
-    }
-  } catch { /* non-fatal — write/read proceeds against person_id */ }
+    return readdirSync(root).filter(n => n.endsWith('_people')).every(n =>
+      !existsSync(path.join(root, n, `${loserId}.md`)) && !existsSync(path.join(root, n, `${survivorId}.md`)));
+  } catch { return false; }
 }
 
-function ensureDir(dir: string): Promise<void> {
-  return fs.mkdir(dir, { recursive: true }).then(() => undefined);
-}
-
-/** Split a person file into its h2 sections (header + raw body). */
-function parseSections(md: string): { header: string; body: string }[] {
-  const out: { header: string; body: string[] }[] = [];
-  let current: { header: string; body: string[] } | null = null;
-  for (const line of md.split(/\r?\n/)) {
-    const h2 = /^##\s+(.+?)\s*$/.exec(line);
-    if (h2) {
-      if (current) out.push(current);
-      current = { header: h2[1], body: [] };
-    } else if (current) {
-      current.body.push(line);
-    }
+function render(row: PersonMemory, audience: PersonMemoryAudience): string | null {
+  if (audience.kind === 'self' && (!audience.senderId || row.slack_id !== audience.senderId)) return null;
+  const db = require('../db') as typeof import('../db');
+  const profile = JSON.parse(row.profile_json || '{}') as PersonProfile;
+  const owner = audience.kind === 'owner';
+  const lines = [`# ${row.name}`, '', '## Current record'];
+  if (row.timezone) lines.push(`Timezone: ${row.timezone}`);
+  if (row.state) lines.push(`Location: ${row.state}`);
+  const { describeEffectiveWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+  const hours = describeEffectiveWorkingHours(row);
+  if (hours) lines.push(`Scheduling hours: ${JSON.stringify(hours)}`);
+  const travel = db.getTravelRecordById(row.person_id);
+  if (travel) lines.push(`Travel recorded: ${travel.location}, ${travel.from} through ${travel.until} (inclusive).`);
+  for (const key of ['communication_style', 'response_speed', 'role_summary', 'reports_to', 'collaboration_notes'] as const) {
+    const provenance = profile._set_by?.[key];
+    if (profile[key] && (owner || provenance === 'person' || provenance === 'auto')) lines.push(`${key}: ${profile[key]}`);
   }
-  if (current) out.push(current);
-  return out.map(s => ({ header: s.header, body: s.body.join('\n').trim() }));
+  const notes = JSON.parse(row.notes || '[]') as PersonNote[];
+  const visibleNotes = notes.filter(n => owner || n.set_by === 'person');
+  if (visibleNotes.length) lines.push('', '## Notes', ...visibleNotes.map(n => `- [${n.date || 'date unknown'}] ${n.note}`));
+  const history = db.readInteractionLog(row.interaction_log);
+  const visibleHistory = owner ? history.relational : history.relational.filter(i => !['social_chat', 'social_ping'].includes(i.type));
+  if (visibleHistory.length) lines.push('', '## History', ...visibleHistory.slice(-30).map(i => `- [${i.date}] ${i.summary}`));
+  if (history.recentBookings.length) lines.push('', `## Recent booking snapshots (${db.BOOKING_SNAPSHOT_FRAME})`, ...history.recentBookings.slice(-8).map(i => `- [${i.date}] ${i.summary}`));
+  const content = lines.join('\n');
+  return content.length <= MAX_CONTEXT ? content : `${content.slice(0, MAX_CONTEXT / 2)}\n[Middle omitted from this view; retained in the canonical record.]\n${content.slice(-MAX_CONTEXT / 2)}`;
 }
 
-/** Parse h2 headers that have non-empty content under them. */
-function extractNonEmptySections(md: string): string[] {
-  return parseSections(md).filter(s => s.body.length > 0).map(s => s.header);
+/** Caller must supply authenticated audience. Missing audience returns no data. */
+export function readPersonMemorySync(_profile: UserProfile, personId: string, _legacyName?: string, audience?: PersonMemoryAudience): string | null {
+  if (!audience) return null;
+  const { getPersonById } = require('../db') as typeof import('../db');
+  const row = getPersonById(personId);
+  return row ? render(row, audience) : null;
 }
 
-// A generated history bullet: "- [2026-06-16] Booked …". Structured, generated
-// by code (recordBooking / capturePass) — never natural language, so matching it
-// is language-independent.
-const DATED_BULLET = /^-\s*\[(\d{4}-\d{2}-\d{2})\]/;
-
-/** Union `incoming`'s sections into `base`, line-deduped. Sections made purely
- *  of dated bullets are re-sorted by date so a merged history reads in order. */
-function mergeMarkdownSections(base: string, incoming: string): string {
-  let out = base;
-  for (const section of parseSections(incoming)) {
-    if (!section.body) continue;
-    const existing = parseSections(out).find(s => s.header.toLowerCase() === section.header.toLowerCase())?.body ?? '';
-    const kept = existing.split(/\r?\n/).map(l => l.trimEnd()).filter(l => l.trim().length > 0);
-    const have = new Set(kept.map(l => l.trim()));
-    const added = section.body.split(/\r?\n/).map(l => l.trimEnd())
-      .filter(l => l.trim().length > 0 && !have.has(l.trim()));
-    if (added.length === 0) continue;
-    let lines = [...kept, ...added];
-    if (lines.every(l => DATED_BULLET.test(l.trim()))) {
-      lines = lines.sort((a, b) => DATED_BULLET.exec(a.trim())![1].localeCompare(DATED_BULLET.exec(b.trim())![1]));
-    }
-    out = upsertSection(out, section.header, lines.join('\n'));
-  }
-  return out;
+export async function readPersonMemory(profile: UserProfile, personId: string, legacyName?: string, audience?: PersonMemoryAudience): Promise<string | null> {
+  return readPersonMemorySync(profile, personId, legacyName, audience);
 }
 
-/**
- * v4.0.4 — fold one person's md file into another's. v4.2.x — called by
- * `db/people.mergePersonRows` as a PRECONDITION of the row collapse, not as a
- * follow-up to it, and it reports whether the fold actually completed.
- *
- * Without the fold the loser's `<person_id>.md` is ORPHANED: nothing in the DB
- * points at it any more, but `formatPeopleCatalogSync` reads the DIRECTORY, so
- * the file keeps rendering as a second "Luke Joas" in the prompt catalog — the
- * duplicate we just removed, resurrected one layer up.
- *
- * Files and SQLite are separate durability domains, so the row merge and the md
- * fold can never be ONE atomic commit. What can be decided is which side a crash
- * leaves residue on. Row-first (the v4.0.4 shape) left the unrecoverable one: a
- * clean DB plus an orphan file that the dedupe sweep will never revisit, because
- * the sweep looks for duplicate ROWS and there are none any more. Md-first
- * inverts it — an interrupted merge leaves the pair still duplicated, which is
- * exactly the state the boot sweep exists to find and retry. Hence two
- * properties this function must keep: it is IDEMPOTENT (a re-run after a partial
- * fold is a no-op, or a line-deduped re-merge), and it RETURNS false when any
- * `_people` directory still holds the loser's file, which the caller treats as
- * "do not collapse the rows yet".
- *
- * Profile-independent on purpose (the db layer has no UserProfile): md files are
- * keyed ONLY by person_id, so every `config/users/*_people` directory is swept —
- * which is also what makes it correct multi-tenant.
- *
- * `survivorName` re-titles the file's `# <Display Name>` line ONLY when the file
- * arrives by rename (its h1 is then the merged-away row's name, and the catalog
- * renders h1, so it would show a name the DB no longer knows). A survivor file
- * that already existed keeps its own h1 — that line is the documented
- * owner-editable display override.
- */
-export function mergePersonMdFiles(survivorId: string, loserId: string, survivorName?: string): boolean {
-  if (!survivorId || !loserId || survivorId === loserId) return false;
-  // Both ids are internal surrogates, never user input — belt-and-braces anyway.
-  if (/[\\/\0]|\.\./.test(survivorId + loserId)) return false;
-
-  const usersRoot = path.resolve(process.cwd(), 'config', 'users');
-  let entries: string[];
-  try {
-    entries = readdirSync(usersRoot);
-  } catch (err) {
-    // Can't see the file side ⇒ can't promise it is clean. Refuse rather than
-    // let the rows collapse over an md file we never looked at.
-    logger.warn('person memory — md merge could not read the users root', {
-      survivorId, loserId, err: String(err).slice(0, 200),
-    });
-    return false;
-  }
-
-  let complete = true;
-  for (const entry of entries) {
-    if (!entry.endsWith('_people')) continue;
-    const root = path.resolve(usersRoot, entry);
-    const loserPath = path.resolve(root, `${loserId}.md`);
-    const survivorPath = path.resolve(root, `${survivorId}.md`);
-    if (!loserPath.startsWith(root) || !survivorPath.startsWith(root)) continue;
-    if (!existsSync(loserPath)) continue;
-    try {
-      if (!existsSync(survivorPath)) {
-        renameSync(loserPath, survivorPath);
-        const name = (survivorName ?? '').trim();
-        if (name) {
-          const md = readFileSync(survivorPath, 'utf-8');
-          if (extractDisplayName(md) !== name) {
-            writeFileSync(survivorPath, md.replace(/^#\s+.*$/m, `# ${name}`), 'utf-8');
-          }
-        }
-        logger.info('person memory — md file re-keyed to the surviving person', {
-          dir: entry, from: `${loserId}.md`, to: `${survivorId}.md`,
-        });
-      } else {
-        const survivorMd = readFileSync(survivorPath, 'utf-8');
-        const mergedMd = mergeMarkdownSections(survivorMd, readFileSync(loserPath, 'utf-8'));
-        if (mergedMd !== survivorMd) writeFileSync(survivorPath, mergedMd, 'utf-8');
-        unlinkSync(loserPath);
-        logger.info('person memory — md files merged', { dir: entry, survivorId, loserId });
-      }
-    } catch (err) {
-      logger.warn('person memory — md merge failed, both files left in place', {
-        dir: entry, survivorId, loserId, err: String(err).slice(0, 200),
-      });
-    }
-    // Postcondition asserted on disk, not inferred from control flow: a rename
-    // that half-succeeded, a failed unlink, or a caught error all read the same
-    // way here — the loser's file is still there, so the merge is not done.
-    if (existsSync(loserPath)) complete = false;
-  }
-  return complete;
-}
-
-/** List every people-memory file the owner has, with a short "what's in it" hint. */
-export async function listPersonFiles(profile: UserProfile): Promise<PersonFile[]> {
-  const root = rootForProfile(profile);
-  let entries;
-  try {
-    entries = await fs.readdir(root, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out: PersonFile[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.md') || entry.name === 'README.md') continue;
-    const full = path.join(root, entry.name);
-    try {
-      const stat = await fs.stat(full);
-      const content = await fs.readFile(full, 'utf-8');
-      const displayName = extractDisplayName(content) ?? entry.name.replace(/\.md$/, '');
-      out.push({
-        slug: entry.name.replace(/\.md$/, ''),
-        displayName,
-        relPath: entry.name,
-        sizeBytes: stat.size,
-        sections: extractNonEmptySections(content),
-      });
-    } catch { /* skip unreadable */ }
-  }
-  return omitLegacyTwins(out).sort((a, b) => a.slug.localeCompare(b.slug));
-}
-
-function omitLegacyTwins(files: PersonFile[]): PersonFile[] {
-  const canonicalNames = new Set(files.filter(f => f.slug.startsWith('p_')).map(f => f.displayName.trim().toLowerCase()));
-  return files.filter(f => f.slug.startsWith('p_') || !canonicalNames.has(f.displayName.trim().toLowerCase()));
-}
-
-/**
- * The first line convention: `# <Display Name>` at the top of each file.
- * Owner can override display by editing that line; slug stays immutable.
- */
-function extractDisplayName(md: string): string | null {
-  const first = md.split(/\r?\n/, 1)[0] ?? '';
-  const m = /^#\s+(.+?)\s*$/.exec(first);
-  return m ? m[1] : null;
-}
-
-function safeResolve(root: string, slug: string): string | null {
-  if (!slug || slug.includes('..') || slug.startsWith('/') || slug.includes('\\') || slug.includes('\0')) {
-    return null;
-  }
-  const full = path.resolve(root, `${slug}.md`);
-  return full.startsWith(root) ? full : null;
-}
-
-/**
- * Resolve a user-supplied person string ("Amazia", "amazia-cohen", slack id,
- * first name) to an existing file slug. Names must identify one person;
- * unresolved or ambiguous queries return null. Explicit file keys remain valid.
- */
-export async function resolvePersonSlug(profile: UserProfile, query: string): Promise<string | null> {
-  if (!query) return null;
-  const root = rootForProfile(profile);
-
-  // 1. The query is already a file key (person_id or a legacy slug) with a file.
-  const direct = safeResolve(root, query);
-  if (direct && existsSync(direct)) return query;
-
-  // 2. Resolve through the DB to a person_id (no create — this is a lookup).
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const db = require('../db') as typeof import('../db');
-    let row = SLACK_ID_RE.test(query) ? db.getPersonMemory(query) : null;
-    if (!row) {
-      const lookup = db.findPersonByName(query);
-      row = lookup.match;
-      if (lookup.status === 'ambiguous') return null;
-    }
-    if (row?.person_id) return row.person_id;
-  } catch { return null; /* unavailable identity state cannot authorize a name fallback */ }
-
-  // 3. Legacy fallback — match an existing file by name-slug / display name.
-  const files = await listPersonFiles(profile);
-  if (files.length === 0) return null;
-  const qSlug = slugifyName(query);
-  const matches = files.filter(f => !f.slug.startsWith('p_') && (
-    f.slug === qSlug || nameGenuinelyMatches(f.displayName, undefined, query)),
-  );
-  return matches.length === 1 ? matches[0].slug : null;
-}
-
-/**
- * Read a person's md file by `person_id`. Returns null when none exists.
- * v3.2.0 — `legacyName` enables reading a not-yet-migrated file still under
- * its old name-slug filename (the rename happens on next write).
- */
-export async function readPersonMemory(profile: UserProfile, personId: string, legacyName?: string): Promise<string | null> {
-  const root = rootForProfile(profile);
-  const candidates = [safeResolve(root, personId)];
-  if (legacyName) candidates.push(safeResolve(root, slugifyName(legacyName)));
-  for (const full of candidates) {
-    if (!full) continue;
-    try {
-      const stat = await fs.stat(full);
-      if (stat.size > MAX_FILE_BYTES) {
-        logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
-      }
-      const content = await fs.readFile(full, 'utf-8');
-      return projectMemoryRead(personId, content);
-    } catch (err: any) {
-      if (err?.code === 'ENOENT') continue;
-      throw err;
-    }
-  }
-  return null;
-}
-
-/**
- * v2.9.3 (#103) — sync variant of readPersonMemory used by the system-
- * prompt builder (which assembles synchronously). Same shape as the async
- * version; never throws — fs failures return null.
- */
-export function readPersonMemorySync(profile: UserProfile, personId: string, legacyName?: string): string | null {
-  const root = rootForProfile(profile);
-  const candidates = [safeResolve(root, personId)];
-  if (legacyName) candidates.push(safeResolve(root, slugifyName(legacyName)));
-  for (const full of candidates) {
-    if (!full) continue;
-    try {
-      const stat = statSync(full);
-      if (stat.size > MAX_FILE_BYTES) {
-        logger.warn('person memory file too large — truncating read', { personId, bytes: stat.size });
-      }
-      return projectMemoryRead(personId, readFileSync(full, 'utf-8'));
-    } catch { /* try next candidate */ }
-  }
-  return null;
-}
-
-/**
- * Write or replace a section in a person's md file. Creates the file from the
- * section template when it doesn't exist (first real fact — no earlier seed).
- *
- * `section` is the h2 header ("Residence", "Workplace", etc). If the header
- * already exists in the file, its body is REPLACED. Otherwise the section is
- * APPENDED to the end.
- *
- * `text` is the section body — plain markdown, as many lines as needed.
- */
-export async function writePersonSection(params: {
-  profile: UserProfile;
-  personId: string;
-  displayName: string;
-  section: string;
-  text: string;
-  append?: boolean;
-}): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
-  // Serialize each file's complete read/modify/write. Both automatic history
-  // producers append here, so neither can rebuild from a truncated prompt read
-  // or overwrite a concurrent append in this process.
-  return queuePersonWrite(params.profile, params.personId, () => writePersonSectionUnlocked(params));
-}
-
-async function queuePersonWrite<T>(profile: UserProfile, personId: string, operation: () => Promise<T>): Promise<T> {
-  const key = `${rootForProfile(profile)}/${personId}`;
-  const previous = pendingWrites.get(key) ?? Promise.resolve();
-  const write = previous.catch(() => undefined).then(operation);
-  pendingWrites.set(key, write);
-  try { return await write; }
-  finally { if (pendingWrites.get(key) === write) pendingWrites.delete(key); }
-}
-
-const pendingWrites = new Map<string, Promise<unknown>>();
-
-/** Read-time freshness applies only to the dated travel section. History is
- * retained on disk; prompt reads include its newest tail when bounded. */
-function projectMemoryRead(personId: string, content: string): string {
-  const { getTravelRecordById } = require('../db') as typeof import('../db');
-  if (/^##\s+Travel\s*$/im.test(content)) {
-    const travel = getTravelRecordById(personId);
-    content = upsertSection(content, 'Travel', travel
-      ? `Travel recorded: ${travel.location}, ${travel.from} through ${travel.until} (inclusive).`
-      : 'No active or upcoming structured trip is on file.');
-  }
-  if (content.length <= MAX_FILE_BYTES) return content;
-  return `${content.slice(0, MAX_FILE_BYTES / 2)}\n[Older middle content omitted from this bounded read; retained on disk.]\n${content.slice(-MAX_FILE_BYTES / 2)}`;
-}
-
-/** Refresh operational sections from all stored sibling facts after a write.
- * Owner assessments are intentionally excluded: their visibility is a separate
- * owner decision, and a mirror repair cannot grant new access to them. */
-export async function syncPersonOperationalSections(profile: UserProfile, personId: string, fields: string[], includeWorkplace = false): Promise<boolean> {
-  return queuePersonWrite(profile, personId, async () => {
-    // Snapshot inside the same queue as the complete multi-section projection,
-    // so a later refresh cannot be followed by an older queued sibling snapshot.
-    const { getPersonById } = require('../db') as typeof import('../db');
-    const row = getPersonById(personId);
-    if (!row) return false;
-    const prof = JSON.parse(row.profile_json || '{}') as import('../db').PersonProfile;
-    const sections: Array<[string[], string, string[]]> = [
-      [['state', 'timezone'], 'Residence', [row.state ? `Lives in ${row.state}.` : '', row.timezone ? `Timezone: ${row.timezone}.` : '']],
-      [['working_hours', 'working_hours_structured', 'response_speed'], 'Working hours', [prof.working_hours ?? '', prof.working_hours_structured ? `Stated scheduling window: ${JSON.stringify(prof.working_hours_structured)}` : '', prof.response_speed && prof._set_by?.response_speed !== 'owner' ? `Typical response speed: ${prof.response_speed}.` : '']],
-      [['language_preference', 'name_he', 'name', 'communication_style'], 'Communication style', [prof.communication_style && prof._set_by?.communication_style !== 'owner' ? prof.communication_style : '', prof.language_preference ? `Language preference: ${prof.language_preference}.` : '', row.name_he ? `Native-script spelling: ${row.name_he}.` : '', row.name ? `Name: ${row.name}.` : '']],
-    ];
-    // Workplace remains capture-only, with the existing assessment exclusion.
-    if (includeWorkplace) {
-      const owned = ['role_summary', 'reports_to', 'collaboration_notes'] as const;
-      sections.push([[...owned], 'Workplace', owned.filter(field => prof._set_by?.[field] !== 'owner')
-        .map(field => prof[field] ? (field === 'reports_to' ? `Reports to ${prof[field]}.` : prof[field]!) : '')]);
-    }
-    try {
-      for (const [owned, section, lines] of sections) {
-        if (!owned.some(field => fields.includes(field))) continue;
-        const text = lines.filter(Boolean).join('\n');
-        if (text && !(await writePersonSectionUnlocked({ profile, personId, displayName: row.name, section, text })).ok) return false;
-      }
-      return true;
-    } catch (err) {
-      logger.warn('person memory operational mirror failed; structured facts retained', { personId, err: String(err) });
-      return false;
-    }
-  });
-}
-
-async function writePersonSectionUnlocked(params: {
-  profile: UserProfile; personId: string; displayName: string;
-  section: string; text: string; append?: boolean;
-}): Promise<{ ok: true; created: boolean } | { ok: false; error: string }> {
-  const { profile, personId, displayName, section, text } = params;
-  if (!personId) return { ok: false, error: 'empty_person_id' };
-  if (!section.trim()) return { ok: false, error: 'empty_section' };
-
-  const root = rootForProfile(profile);
-  const full = safeResolve(root, personId);
-  if (!full) return { ok: false, error: 'invalid_person_id' };
-
-  await ensureDir(root);
-  // v3.2.0 — carry over a pre-migration file (named by name-slug) before writing.
-  await migrateLegacyMdIfNeeded(root, personId, displayName);
-
-  let existing: string | null = null;
-  try {
-    existing = await fs.readFile(full, 'utf-8');
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT') return { ok: false, error: String(err) };
-  }
-
-  const created = existing === null;
-  const base: string = created
-    ? `# ${displayName}\n\n${SECTION_TEMPLATE}`
-    : existing!;
-
-  const updated = upsertSection(base, section.trim(), text.trimEnd(), params.append);
-  await fs.writeFile(full, updated, 'utf-8');
-  logger.info('Person memory section written', { personId, section, created });
-  return { ok: true, created };
-}
-
-function upsertSection(md: string, section: string, text: string, append = false): string {
-  const lines = md.split(/\r?\n/);
-  const headerPattern = new RegExp(`^##\\s+${escapeRegex(section)}\\s*$`, 'i');
-
-  // Find existing section range
-  let startIdx = -1;
-  let endIdx = lines.length;
-  for (let i = 0; i < lines.length; i++) {
-    if (headerPattern.test(lines[i])) {
-      startIdx = i;
-      for (let j = i + 1; j < lines.length; j++) {
-        if (/^##\s+/.test(lines[j])) { endIdx = j; break; }
-      }
-      break;
-    }
-  }
-
-  if (startIdx === -1) {
-    // Append new section at end, with blank line separator
-    const trimmed = md.replace(/\s+$/, '');
-    return `${trimmed}\n\n## ${section}\n${text ? `\n${text}\n` : '\n'}`;
-  }
-
-  // Replace body between startIdx+1 and endIdx
-  const before = lines.slice(0, startIdx + 1);
-  const after = lines.slice(endIdx);
-  if (append) {
-    const existing = lines.slice(startIdx + 1, endIdx).join('\n').trim();
-    if (existing.split('\n').includes(text)) return md;
-    text = existing ? `${existing}\n${text}` : text;
-  }
-  const body = text ? ['', text, ''] : [''];
-  return [...before, ...body, ...after].join('\n');
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Sync variant of the catalog builder — used by the system-prompt builder
- * which is synchronous (same pattern as KnowledgeBaseSkill's KB catalog).
- * Never throws; returns empty string on any fs error.
- */
-export function formatPeopleCatalogSync(profile: UserProfile): string {
-  const root = rootForProfile(profile);
-  let names: string[];
-  try {
-    names = readdirSync(root);
-  } catch {
-    return '';
-  }
-  let files: PersonFile[] = [];
-  for (const name of names) {
-    if (!name.endsWith('.md') || name === 'README.md') continue;
-    const full = path.join(root, name);
-    try {
-      const stat = statSync(full);
-      const content = readFileSync(full, 'utf-8');
-      const displayName = extractDisplayName(content) ?? name.replace(/\.md$/, '');
-      files.push({
-        slug: name.replace(/\.md$/, ''),
-        displayName,
-        relPath: name,
-        sizeBytes: stat.size,
-        sections: extractNonEmptySections(content),
-      });
-    } catch { /* skip */ }
-  }
-  files = omitLegacyTwins(files);
-  if (files.length === 0) return '';
-  files.sort((a, b) => a.displayName.localeCompare(b.displayName));
-
-  // v3.2.0 — files are keyed by person_id now; surface the human display name
-  // as the handle (get_person_memory resolves name → person_id via the DB).
-  // When two people share a display name, disambiguate with a short id suffix
-  // so the handle stays unique.
-  const nameCounts = new Map<string, number>();
-  for (const f of files) {
-    const k = f.displayName.toLowerCase();
-    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1);
-  }
-  const ownerName = profile.user.name.toLowerCase();
-  const lines = files.map(f => {
-    const ownerTag = f.displayName.toLowerCase() === ownerName ? ' — you' : '';
-    const dupTag = (nameCounts.get(f.displayName.toLowerCase()) ?? 0) > 1 ? ` #${f.slug.slice(-4)}` : '';
-    const sectionHint = f.sections.length > 0 ? ` [${f.sections.join(', ')}]` : ' [empty]';
-    return `- ${f.displayName}${dupTag}${ownerTag}${sectionHint}`;
-  });
-  return [
-    'PEOPLE NOTES (markdown files, one per person — call get_person_memory(<name>) to load full content):',
-    ...lines,
-    '',
-    'Use update_person_memory(<name>, <section>, <text>) whenever you learn a durable fact about someone — where they live, where they work, working hours, communication style, anything that helps you be a better assistant to them. One-off social moments go through note_about_person / note_about_self as before. Empty-until-real-fact — no file exists until you write the first real fact.',
-  ].join('\n');
+/** Owner-only catalog: identities come from the canonical store, never files. */
+export function formatPeopleCatalogSync(_profile: UserProfile): string {
+  const { getDb } = require('../db/client') as typeof import('../db/client');
+  const rows = getDb().prepare('SELECT person_id,name FROM people_memory ORDER BY name,person_id').all() as Array<{person_id: string; name: string}>;
+  if (!rows.length) return '';
+  return ['PEOPLE MEMORY (canonical person records; use get_person_memory with the person ID):', ...rows.map(r => `- ${r.name} [${r.person_id}]`)].join('\n');
 }

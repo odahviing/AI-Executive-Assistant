@@ -197,8 +197,12 @@ function requesterNotificationForBrief(r: RequestRow): Record<string, unknown> |
   if (!relay && !r.requester_notified_at) return undefined;
   const count = (value: unknown): number | null =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  // Owner-only receipts share the container but establish no requester result.
   const delivery = r.requester_notified_at ? 'sent'
-    : ['failed', 'exhausted', 'unconfirmed'].includes(String(relay?.delivery)) ? String(relay!.delivery) : 'unknown';
+    : ['failed', 'exhausted', 'unconfirmed', 'unknown'].includes(String(relay?.delivery)) ? String(relay!.delivery) : undefined;
+  const ownerDelivery = ['sent', 'failed', 'unconfirmed', 'unknown'].includes(String(relay?.owner_delivery))
+    ? String(relay!.owner_delivery) : undefined;
+  if (!delivery && !ownerDelivery) return undefined;
   const missingBody = typeof relay?.body !== 'string' || !relay.body.trim();
   const status = delivery === 'sent' ? 'confirmed_notified'
     : delivery === 'failed' || delivery === 'exhausted' ? 'not_notified' : 'delivery_unknown';
@@ -207,11 +211,9 @@ function requesterNotificationForBrief(r: RequestRow): Record<string, unknown> |
     : delivery === 'failed' && !missingBody && r.next_check_handler === 'requester_relay_retry' && r.next_check_at
       ? 'retry_pending' : 'manual_contact_needed';
   return {
-    delivery, status, missing_body: missingBody, send_attempts: count(relay?.send_attempts),
-    next_action: nextAction,
-    ...(relay?.owner_delivery !== undefined || relay?.owner_send_attempts !== undefined ? {
-      owner_delivery: ['sent', 'failed', 'unconfirmed'].includes(String(relay?.owner_delivery))
-        ? String(relay!.owner_delivery) : 'unknown',
+    ...(delivery ? { delivery, status, missing_body: missingBody, send_attempts: count(relay?.send_attempts), next_action: nextAction } : {}),
+    ...(ownerDelivery ? {
+      owner_delivery: ownerDelivery,
       owner_send_attempts: count(relay?.owner_send_attempts),
     } : {}),
   };
@@ -237,9 +239,6 @@ function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
     slots: slotsArr,
     payload: det,
     requester_notification: requesterNotificationForBrief(r),
-    closure_reason: r.closure_reason,
-    closed_at: r.closed_at,
-    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.requester_slack_id, 3),
   };
 }
@@ -268,9 +267,7 @@ function buildOutreachItem(
     ? (awaitsReply ? 'sent, awaiting reply' : "sent — they're handling it on their side")
     : r.state === 'in_flight'
       ? (det.scheduled_at ? `scheduled to go out ${relativeTime(det.scheduled_at as string, timezone)}` : 'in flight')
-      : r.state === 'resolved'
-        ? (replyPreview ? 'replied' : 'done')
-        : r.state;
+      : r.state;
 
   let verifiedOutcome: ScheduleOutcome | null = null;
   if (ownerCalendarEvents.length > 0 && det.proposed_slots) {
@@ -305,9 +302,6 @@ function buildOutreachItem(
     replyPreview: replyPreview ?? undefined,
     awaitsReply,
     requester_notification: requesterNotificationForBrief(r),
-    closure_reason: r.closure_reason,
-    closed_at: r.closed_at,
-    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.target_slack_id, 3),
   };
   if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
@@ -326,7 +320,7 @@ function buildOutreachItem(
 function buildTaskItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
   return {
-    kind: r.state === 'resolved' || r.state === 'cancelled' || r.state === 'expired' ? 'completed_task' : 'open_task',
+    kind: 'open_task',
     request_id: r.id,
     state: r.state,
     title: r.subject,
@@ -335,9 +329,6 @@ function buildTaskItem(r: RequestRow, timezone: string): RichItem {
     context: det.message ?? det.subject ?? undefined,
     target_name: r.target_name,
     requester_notification: requesterNotificationForBrief(r),
-    closure_reason: r.closure_reason,
-    closed_at: r.closed_at,
-    closed_at_relative: r.closed_at ? relativeTime(r.closed_at, timezone) : null,
     recent_context: recentColleagueContext(r.target_slack_id, 3),
   };
 }
@@ -347,7 +338,17 @@ function buildItemForRow(
   ownerCalendarEvents: CalendarEvent[],
   profile: UserProfile,
   timezone: string,
-): RichItem {
+): RichItem | null {
+  if (['resolved', 'cancelled', 'expired', 'logged'].includes(r.state)) {
+    const notification = requesterNotificationForBrief(r);
+    const unresolvedRequester = ['failed', 'exhausted', 'unconfirmed', 'unknown'].includes(String(notification?.delivery));
+    const unresolvedOwner = ['failed', 'unconfirmed', 'unknown'].includes(String(notification?.owner_delivery));
+    if (!unresolvedRequester && !unresolvedOwner) return null;
+    // Terminal rows carry only unresolved notification attention, never their
+    // old approval payload, requester body, or unrelated conversation history.
+    return { kind: 'notification_attention', request_id: r.id, state: r.state,
+      title: r.subject, requester_notification: notification };
+  }
   if (r.kind === 'approval') return buildApprovalItem(r, timezone);
   if (r.kind === 'outreach' || r.kind === 'social_outreach') return buildOutreachItem(r, ownerCalendarEvents, profile, timezone);
   return buildTaskItem(r, timezone);
@@ -467,6 +468,7 @@ async function collectBriefingData(
 
   for (const r of requests) {
     const item = buildItemForRow(r, ownerCalendarEvents, profile, timezone);
+    if (!item) continue;
     items.push(item);
     requestIdsToSurface.push(r.id);
 
@@ -603,17 +605,11 @@ LANGUAGE — write the entire brief in ${ownerLangName} (${firstName}'s language
 STRUCTURE (in this order):
 1. TODAY'S CALENDAR — this is the FIRST line of the message. Only if a calendar_today item is present; apply the CALENDAR LISTING FORMAT block below. When no calendar_today item exists, the first line is instead the first notable item (step 3).
 2. TOMORROW (one short line) — only if calendar_tomorrow is present AND there's something notable.
-3. The rest — per-person paragraphs for colleagues who have open or recently-changed work, plus freestanding lines for items not tied to a specific person (calendar conflicts, pending approvals, auto-categorizations, etc.). No separate "ACTION ITEMS" section — every open or notable item gets narrated ONCE in the body, in whichever spot reads most naturally.
+3. The rest — per-person paragraphs for colleagues who have open work, plus freestanding lines for items not tied to a specific person (calendar conflicts, pending approvals, unresolved notification delivery, auto-categorizations, etc.). No separate "ACTION ITEMS" section — every open or notable item gets narrated ONCE in the body, in whichever spot reads most naturally.
 
 Principle: nobody can assign ${firstName} work. Only HIS rules / HIS calendar / HIS approvals deserve to be surfaced as "needs your call". Random colleague drafts, suggestions, or "what do you think?" pings stay in the per-person paragraph as conversation, not as a decision request.
 
 APPROVAL CONTEXT RULE: when a request item has kind='approval', USE the ask_text + subject + requester_name + payload fields. NEVER ask ${firstName} what the item is about — he filed it through you. If a critical field is missing, surface the gap honestly ("I have a pending Julia approval but the context didn't come through — let me dig") rather than asking him.
-
-CLOSURE NARRATION: When a request has a closure_reason and state in (resolved / cancelled / expired), narrate it as past tense closure in the colleague's paragraph — there's nothing left to act on. Use the closed_at_relative field on the item to anchor the narration in time ("Yesterday: ...", "Earlier today: ...") so ${firstName} doesn't read a stale close as today's news.
-- closure_reason='surfaced_threshold' → "I stopped working on X — let me know if you want me to revive it." (one passive line; this is auto-park after 2 delivered briefing appearances with no action)
-- closure_reason starting with 'owner_' → YOUR own decision, not an outbound action. Narrate as "${firstName} said <closure_reason>, so I closed the X coord — nothing to do." NEVER claim "I told <requester>" / "I let <name> know" — those imply a DM you sent. Only describe an outbound DM when the item has target_slack_id set AND closure actually involved a colleague reply or relay (e.g., closure_reason='colleague_replied').
-- closure_reason='colleague_replied' → describe the reply.
-- closure_reason starting with 'meeting_' (meeting_created / meeting_moved / meeting_updated / meeting_deleted — what the calendar-mutation cascade actually writes) or starting with 'parent_' → narrate using state: resolved → "the meeting went through (booked/moved/updated), so I closed X"; cancelled → "the meeting got cancelled, so I closed X."
 
 ${calendarListingFormatRule(firstName)}
 
@@ -622,7 +618,8 @@ FORMAT:
 
 WHAT GETS SURFACED:
 - calendar_unavailable means the calendar could not be checked. Say so plainly; never infer an empty or free day from missing calendar data.
-- Everything still open AND every closure ${firstName} hasn't been informed about yet. Don't hide stuff he should know about.
+- Surface open work and explicit unresolved notification attention. Resolved work does not get a completion recap.
+- notification_attention items exist solely because a notification still needs attention. State describes the request outcome separately; a notification problem does not mean a calendar action failed. An absent requester delivery field establishes no requester outcome, including when owner_delivery is present.
 - Prefer OUTCOME / current state over activity.
 - requester_notification is separate from the action outcome: not_notified means the requester was NOT notified; manual_contact_needed means tell the owner manual contact is needed. delivery_unknown means receipt is UNKNOWN, never claim failure or retry blindly; check first. retry_pending means a notification retry is scheduled. Preserve the action state: a completed action can still have an undelivered notification. owner_delivery describes only the separate owner notice, never the requester delivery. Do not expose stored counters or internal field names.
 - Skip internal plumbing.
@@ -726,7 +723,17 @@ function buildFallbackBriefing(items: RichItem[], _profile: UserProfile): string
     if (item.kind === 'coordination')    lines.push(`• ${item.colleague} / ${item.subject}: ${item.status}`);
     if (item.kind === 'approval')        lines.push(`• ${item.requester_name ?? 'someone'}: ${item.subject}`);
     if (item.kind === 'open_task')       lines.push(`• ${item.title}`);
-    if (item.kind === 'completed_task')  lines.push(`• Done: ${item.title}`);
+    if (item.kind === 'notification_attention') {
+      const receipt = item.requester_notification as Record<string, unknown>;
+      const notices: string[] = [];
+      if (receipt.status === 'not_notified') notices.push(receipt.next_action === 'retry_pending'
+        ? 'requester notification not delivered; retry scheduled'
+        : 'requester not notified; manual contact needed');
+      if (receipt.status === 'delivery_unknown') notices.push('requester notification delivery unknown; check before contacting again');
+      if (receipt.owner_delivery === 'failed') notices.push('owner notification not delivered');
+      if (receipt.owner_delivery === 'unconfirmed' || receipt.owner_delivery === 'unknown') notices.push('owner notification delivery unconfirmed; check before contacting again');
+      lines.push(`• ${item.title} (request ${item.state}): ${notices.join('; ')}`);
+    }
   }
   return lines.join('\n');
 }
@@ -1007,9 +1014,9 @@ export async function sendMorningBriefing(
 
   try {
     // POST-BRIEF: stamp surfaced + auto-park stale items.
-    // Stamp goes FIRST so surfaced_count is reflective; stale closures land
-    // after — those rows will surface ONE more time next brief with closure
-    // narration ("I stopped working on X"), then drop.
+    // Stamp goes FIRST so surfaced_count is reflective. Stale closures do not
+    // create a later completion recap; explicit notification failures remain
+    // independently eligible through the request spine's receipt selection.
     markRequestSurfaced(requestIdsToSurface);
     let autoParked = 0;
     const { withRequestLock } = await import('../core/requests/resolver');

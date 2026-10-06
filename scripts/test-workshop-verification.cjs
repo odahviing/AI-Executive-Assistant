@@ -149,7 +149,7 @@ for (const [label, runtime] of implementations) {
     assert.equal(runtime.gateFinal({ verdict: 'built', evidence: e, review: r }).verdict, 'implemented')
     const reviews = new Map(), check = { results: [{ id: 'a', verdict: 'built', review: r }] }
     runtime.acceptReviews([{ id: 'a', verdict: 'built', evidence: e }], check, reviews)
-    assert.equal(check.results[0].verdict, 'needs-owner-decision')
+    assert.equal(check.results[0].verdict, 'needs-dependency')
   })
   test(`${label}: honest prompt-only and prose-only exceptions require no invented regression`, () => {
     const e = validEvidence(); e.changeKind = 'prompt-only'; e.exception = 'Only prompt inputs checked; model obedience remains unproven.'; e.regressions = []
@@ -272,6 +272,52 @@ test('partial state on a lifecycle event is never treated as bookkeeping', () =>
     setRows([row('gh#24', 'built', { state: 'wrapped' }), { ref: 'gh#24', state: 'partial', runId: 'wrap-99.0.0', ...extra }])
     assert.equal(gate('--verification').status, 1)
   }
+})
+
+const authorityFixture = (withSync = true) => {
+  const rows = withSync ? [{ ref: 'gh#24', state: 'partial', runId: 'wrap-99.0.0', verdict: 'needs-owner-decision' }] : []
+  rows.push(row('approved', 'needs-owner-decision', { intake: { status: 'awaiting-owner', question: 'Choose the permitted behavior' } }))
+  const question = contract.ownerStates(rows).get('approved').question.token
+  rows.push({ ref: 'approved', ownerRuling: { questionToken: question, hisRuling: 'Use the documented behavior' } })
+  const answer = contract.ownerStates(rows).get('approved').answer.token
+  rows.push(row('approved', 'verified', { lifecycleVersion: 1, evidence: validEvidence(), review: { ...validReview(), ownerRulingToken: answer }, ownerRulingToken: answer, snapshot: contract.snapshot([product], root) }))
+  return rows
+}
+test('saved owner answer survives earlier excluded bookkeeping and reader restart', () => {
+  setRows(authorityFixture())
+  assert.equal(contract.collapseRows(contract.readRows(ledger)).latest.find(r => r.ref === 'approved').verdict, 'verified')
+  for (let retry = 0; retry < 2; retry++) assert.equal(gate('--verification').status, 0)
+})
+test('saved owner answer without bookkeeping remains accepted', () => {
+  setRows(authorityFixture(false))
+  assert.equal(gate('--verification').status, 0)
+})
+test('matching hold release retains its historical token across excluded bookkeeping', () => {
+  const rows = authorityFixture()
+  rows.push(row('approved', 'deferred', { note: 'Wait for explicit release' }))
+  const hold = contract.ownerStates(rows).get('approved').hold.token
+  rows.push({ ref: 'approved', intake: { releaseHold: true, releaseHoldFor: hold } })
+  const answer = contract.ownerStates(rows).get('approved').answer.token
+  rows.push(row('approved', 'verified', { evidence: validEvidence(), review: { ...validReview(), ownerRulingToken: answer }, snapshot: contract.snapshot([product], root) }))
+  setRows(rows)
+  assert.equal(gate('--verification').status, 0)
+})
+test('unanswered questions, stale answers, active holds and unbound reviews still block', () => {
+  for (const mode of ['unanswered', 'stale-answer', 'hold', 'unbound-review']) {
+    const rows = authorityFixture()
+    if (mode === 'unanswered') rows.splice(2, 1)
+    if (mode === 'stale-answer') rows[2].ownerRuling.questionToken = 'stale'
+    if (mode === 'hold') rows.push(row('approved', 'deferred'))
+    if (mode === 'unbound-review') { delete rows[3].ownerRulingToken; delete rows[3].review.ownerRulingToken }
+    setRows(rows)
+    assert.equal(gate('--verification').status, 1, mode)
+  }
+})
+test('terminal declined capture survives earlier bookkeeping', () => {
+  const rows = authorityFixture().slice(0, 3)
+  rows.push(row('approved', 'declined'))
+  setRows(rows)
+  assert.equal(gate('--verification').status, 0)
 })
 test('direct writer lifecycle: implementation → pass → fail → repair awaiting review → pass', () => {
   setRows([])

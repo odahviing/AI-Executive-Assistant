@@ -45,11 +45,12 @@ import { logLlmUsage } from '../utils/usageLog';
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
 /** Exact task occurrence identity; amendments replace the same key atomically. */
 function taskOccurrenceKey(owner: string, requester: string | null, kind: string, title: string,
-  due: string, target: string | null, description: string | null, message: string | null, explicitTime = true): string {
+  due: string, target: string | null, description: string | null, message: string | null, explicitTime = true, parentRequestId: string | null = null): string {
   return `task:${createHash('sha256').update(JSON.stringify([
     buildIdempotencyKey({ ownerUserId: owner, requesterSlackId: requester, kind, subject: title }),
     due, target ?? owner, description ?? '', message ?? '',
     ...(explicitTime ? [] : [false]),
+    ...(parentRequestId ? [parentRequestId] : []),
   ])).digest('hex')}`;
 }
 
@@ -1688,7 +1689,7 @@ Use when asked to:
 
 Task types:
 - reminder: remind the owner (or someone else) about something at a specific time
-- follow_up: check back on an ongoing situation after X days
+- follow_up: conditional check on an explicit existing pending parent_request_id; requires a nonempty outward message. Use reminder for unconditional reminders.
 - research: research a topic, compile summary (runs through the full agent)
 - coordination: handled automatically when initiating meeting booking
 - outreach: handled automatically when sending messages to colleagues`,
@@ -1696,6 +1697,7 @@ Task types:
           type: 'object',
           properties: {
             type: { type: 'string', enum: ['reminder', 'follow_up', 'research'] },
+            parent_request_id: { type: 'string', minLength: 1, description: 'Required for follow_up: explicit existing pending request ID whose unresolved state warrants this message. Omit for standalone tasks.' },
             title: { type: 'string', description: 'Plain English title of what Maelle is doing.' },
             description: { type: 'string', description: 'More detail if needed' },
             due_at: { type: 'string', description: 'ISO 8601 datetime when to execute this task.' },
@@ -1705,6 +1707,7 @@ Task types:
             message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
           },
           required: ['type', 'title', 'due_at'],
+          allOf: [{ if: { properties: { type: { const: 'follow_up' } }, required: ['type'] }, then: { required: ['parent_request_id', 'message'], properties: { message: { type: 'string', pattern: '\\S' } } }, else: { not: { required: ['parent_request_id'] } } }],
         },
       },
       {
@@ -1714,7 +1717,7 @@ Task types:
         name: 'update_task',
         description: `Update an existing task. Two actions:
 
-action='edit' — change a task's title, description, due_at, message, or type. Required: task_id. Pass any subset of mutable fields.
+action='edit' — change a task's title, description, due_at, or message. Required: task_id. Type and parent association stay fixed; a conditional follow-up retains a nonempty outward message.
 
 action='cancel' — cancel a pending task. Required: task_id.
 
@@ -1728,10 +1731,10 @@ For creating a new task, use \`create_task\`. For listing tasks, use \`get_my_ta
             description: { type: 'string', description: 'edit: optional.' },
             due_at: { type: 'string', description: 'edit: optional ISO 8601 datetime.' },
             explicit_time: { type: 'boolean', description: 'Required when editing a reminder due_at: true for a user-specified clock time or relative duration (honor that instant); false for a vague day/date such as "tomorrow" (use recipient work hours). Supply together with due_at; other edits retain the existing intent. Omit for other task types.' },
-            type: { type: 'string', enum: ['reminder', 'follow_up', 'research'], description: 'edit: optional task type.' },
             message: { type: 'string', description: 'edit: optional message body.' },
           },
           required: ['action', 'task_id'],
+          not: { anyOf: [{ required: ['type'] }, { required: ['parent_request_id'] }] },
         },
       },
       {
@@ -1867,6 +1870,25 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
       case 'create_task': {
         const taskType = args.type as CreateTaskType;
         const title = args.title as string;
+        const parentRequestId = typeof args.parent_request_id === 'string' ? args.parent_request_id.trim() : null;
+        const validateParent = () => {
+          if (taskType !== 'follow_up') return parentRequestId
+            ? { error: 'parent_requires_follow_up', message: 'Use follow_up for conditional work, or omit parent_request_id for a standalone task.' } : null;
+          if (!parentRequestId) return { error: 'missing_parent_request_id', message: 'Name the existing pending request explicitly. Use reminder for an unconditional reminder.' };
+          if (typeof args.message !== 'string' || !args.message.trim()) return { error: 'missing_follow_up_message', message: 'Supply the outward message to deliver while the parent request is still pending.' };
+          const parent = getRequest(parentRequestId);
+          if (!parent || parent.owner_user_id !== ownerUserId ||
+              (context.userId !== ownerUserId && parent.requester_slack_id !== context.userId && parent.initiated_by !== context.userId)) {
+            return { error: 'invalid_follow_up_parent', message: 'The parent is unavailable to this requester.' };
+          }
+          if (!['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(parent.state)) {
+            return { error: 'follow_up_parent_closed', message: 'That request has already ended; a delivered notification is not a pending decision.' };
+          }
+          if (parent.kind === 'follow_up') return { error: 'invalid_follow_up_parent', message: 'Link directly to the pending work, not another follow-up.' };
+          return null;
+        };
+        const parentRefusal = validateParent();
+        if (parentRefusal) return parentRefusal;
         if (taskType === 'reminder' && typeof args.explicit_time !== 'boolean') {
           return { error: 'missing_explicit_time', message: 'State whether the requester supplied an explicit reminder time or a vague day/date using explicit_time.' };
         }
@@ -1912,7 +1934,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
         // Task identity includes its scheduled occurrence and destination. A
         // title alone must not reserve that title forever after the first use.
         const idempotencyKey = taskOccurrenceKey(ownerUserId, context.userId, kind, title, dueAt,
-          targetSlackId ?? null, description ?? null, message ?? null, explicitTime);
+          targetSlackId ?? null, description ?? null, message ?? null, explicitTime, parentRequestId);
         return withRequestLock(idempotencyKey, async () => {
           let existing = getRequestByIdempotencyKey(idempotencyKey);
           if (!existing) {
@@ -1928,7 +1950,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             if (legacy && legacyDue && taskOccurrenceKey(legacy.owner_user_id, legacy.requester_slack_id,
               legacy.kind, legacy.subject, legacyDue, legacy.target_slack_id, legacy.description,
               typeof legacyDetails.message === 'string' ? legacyDetails.message : null,
-              legacy.kind !== 'reminder' || legacyDetails.explicit_time !== false) === idempotencyKey) {
+              legacy.kind !== 'reminder' || legacyDetails.explicit_time !== false, legacy.parent_request_id) === idempotencyKey) {
               existing = legacy;
             }
           }
@@ -1951,9 +1973,13 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             return { error: capRefusal.error, message: capRefusal.reason };
           }
 
+          // The cap check yields; validate again immediately before the synchronous insert.
+          const freshParentRefusal = validateParent();
+          if (freshParentRefusal) return freshParentRefusal;
           const row = createRequest({
             ownerUserId,
             idempotencyKey,
+            parentRequestId: parentRequestId ?? undefined,
             initiatedBy: context.userId,
             // o#219 — create_task IS colleague-reachable (registry.ts's
             // COLLEAGUE_ALLOWED_TOOLS has no authority/senderRole gate on it), so
@@ -2014,6 +2040,13 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
           }
 
           const detailsCurrent = parseDetails(row) ?? {};
+          if ((args.parent_request_id !== undefined && args.parent_request_id !== row.parent_request_id) ||
+              (args.type !== undefined && args.type !== row.kind)) {
+            return { updated: false, error: 'immutable_task_association', message: 'Task type and parent association cannot be changed. Create a new task.' };
+          }
+          if (row.kind === 'follow_up' && row.parent_request_id && typeof args.message === 'string' && !args.message.trim()) {
+            return { updated: false, error: 'missing_follow_up_message' };
+          }
           if (row.kind === 'reminder' && typeof args.due_at === 'string' && typeof args.explicit_time !== 'boolean') {
             return { updated: false, error: 'missing_explicit_time', message: 'State whether the new reminder time was explicitly requested using explicit_time.' };
           }
@@ -2056,7 +2089,7 @@ Binding — take the explicit id token from the owner's reply; otherwise the lin
             const key = taskOccurrenceKey(row.owner_user_id, row.requester_slack_id, row.kind, patch.subject ?? row.subject,
               due, row.target_slack_id, patch.description ?? row.description,
               typeof patch.details?.message === 'string' ? patch.details.message : typeof detailsCurrent.message === 'string' ? detailsCurrent.message : null,
-              row.kind !== 'reminder' || (patch.details ?? detailsCurrent).explicit_time !== false);
+              row.kind !== 'reminder' || (patch.details ?? detailsCurrent).explicit_time !== false, row.parent_request_id);
             const existing = getRequestByIdempotencyKey(key);
             if (existing && existing.id !== id) return { updated: false, error: 'task_already_exists', task_id: existing.id,
               message: 'Another task already tracks that scheduled occurrence. No task was changed.' };

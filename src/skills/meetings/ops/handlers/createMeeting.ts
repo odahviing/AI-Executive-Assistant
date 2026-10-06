@@ -2037,7 +2037,10 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
               affectedSlotIso: args.start as string,
               ownerSlackId: context.profile.user.slack_user_id,
             });
-            blocksMoved = floatingResult.moves;
+            // Configured block names and placements are private calendar details.
+            blocksMoved = subjectViewerFor(context) === 'owner'
+              ? floatingResult.moves
+              : floatingResult.moves.map(() => 'moved a calendar block');
           } catch (err) {
             logger.warn('rebalance after create_meeting threw — continuing', { err: String(err).slice(0, 200) });
           }

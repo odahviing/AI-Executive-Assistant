@@ -85,7 +85,7 @@ Always-active core modules:
 
 | Module | Tools |
 |---|---|
-| **Memory** (`core/assistant.ts`) | `manage_preference` (set/forget/recall), `recall_interactions`, `update_person_profile`, `update_person_memory`, `get_person_memory`, `log_interaction`, `confirm_gender` |
+| **Memory** (`core/assistant.ts`) | `manage_preference` (set/forget/recall), `recall_interactions`, `update_person_profile`, `get_person_memory`, `log_interaction`, `confirm_gender` |
 | **Outreach** (`skills/outreach.ts`) | `message_colleague` |
 | **Tasks** (`tasks/skill.ts`) | `create_task`, `update_task` (edit/cancel), `get_my_tasks`, `create_approval`, `resolve_approval`, `list_pending_approvals`, `get_briefing`, `send_briefing_now` |
 | **Routines** (`tasks/crons.ts`) | `manage_routine` (create/update/delete/list) |

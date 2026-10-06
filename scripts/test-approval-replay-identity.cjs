@@ -20,6 +20,9 @@ const meetingTools = ['create_meeting', 'move_meeting', 'update_meeting', 'delet
 function harness(options = {}) {
   // The fixture's September decisions must run before their September starts.
   class Clock extends Date { constructor(...a) { super(...(a.length ? a : [options.now ?? Date.parse('2026-09-10T00:00:00Z')])); } static now() { return options.now ?? Date.parse('2026-09-10T00:00:00Z'); } }
+  // Module-local clock: Luxon must use the same instant as Date without
+  // changing process-global Settings.now for other fixtures.
+  class FixtureDateTime extends DateTime { static now() { return DateTime.fromMillis(Clock.now()); } }
   const effects = { executes: [], creates: [], closes: [], sends: [], ownerPosts: [], keys: [], candidates: [], judges: [], warnings: [], promotions: [] };
   const unexpected = [], pending = [], modules = new Map();
   const details = { deferred_action: { tool: options.tool || 'create_meeting', args: { subject: 'Approved sync', start: '2026-09-20T12:00:00Z', end: '2026-09-20T12:30:00Z', new_start: '2026-09-20T12:00:00Z', new_end: '2026-09-20T12:30:00Z', meeting_id: 'event-1', person_id: 'person-1', expected_value: 'UTC' } }, ...options.details };
@@ -41,7 +44,7 @@ function harness(options = {}) {
     },
     'src/core/requests/closeRequest.ts': { closeRequest: args => { effects.closes.push(clone(args)); row = { ...row, state: args.state }; } },
     'src/core/requests/logActivity.ts': { logActivity() {} },
-    'src/core/requests/requesterRelay.ts': { relayNotice: require('./fixtures/relay-copy.cjs').relayNotice, beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => options.lang || 'en' },
+    'src/core/requests/requesterRelay.ts': {recordOwnerNotificationOutcome(){}, relayNotice: require('./fixtures/relay-copy.cjs').relayNotice, beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed:r=>r.reason==='error', recordRequesterRelayFailure(){}, completeRequesterRelay:row=>update(row.id,{requesterNotifiedAt:new Date().toISOString()}), relayClosureToRequester:async({compose})=>{effects.sends.push({id:'UPAUL',body:compose({lang:options.lang||'en',hi:'Hey Paul',ownerFirst:'Owner',subject:'Approved sync'})});return true;}, usableRelaySubject: x => typeof x === 'string' ? x : '', requesterRelayLanguage: () => options.lang || 'en' },
     'src/db/conversations.ts': { appendToConversation() {}, getConversationHistory: () => [] },
     'src/db/people.ts': { resolveOutboundLanguageForPerson:()=>options.lang||null, getPersonMemory: id => options.noPerson ? undefined : { name: id === 'UPAUL' ? 'Paul' : 'Other', timezone: 'UTC', timezone_set_by: 'person' }, promoteTimezoneTempById: (...args) => { effects.promotions.push(args); return options.promotion || 'applied'; } },
     'src/db/client.ts': { getDb: () => ({ prepare: () => ({ all: (...args) => { effects.candidates.push(args); return options.semanticRepeat ? [row] : []; } }) }) },
@@ -79,7 +82,7 @@ function harness(options = {}) {
     if (!compiled.has(filename)) compiled.set(filename, ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText);
     const module = { exports: {} }; modules.set(relative, module);
     const isolatedRequire = spec => {
-      if (spec === 'luxon') return { DateTime };
+      if (spec === 'luxon') return { DateTime: FixtureDateTime };
       if (spec === 'node:util' || spec === 'node:async_hooks' || spec === 'node:crypto') return require(spec);
       if (!spec.startsWith('.')) { unexpected.push(spec); throw new Error(`Blocked external ${spec}`); }
       return load(path.posix.normalize(path.posix.join(path.posix.dirname(relative), spec)) + '.ts');

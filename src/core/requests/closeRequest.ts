@@ -19,7 +19,8 @@
  * (SQLite); convention does. Audit happens here.
  *
  * Cascade semantics:
- *   - Closing a parent cascades to its children unless skipChildren=true.
+ *   - Closing a parent cascades to its children unless skipChildren=true;
+ *     conditional follow-up timers always close with their direct parent.
  *     Reason: a cancelled parent shouldn't leave child outreach rows still
  *     awaiting_colleague.
  *   - Closing a child does NOT cascade up — sibling children may still be
@@ -27,9 +28,8 @@
  *   - Next-check timers on the same row are cleared (next_check_at = NULL,
  *     handler = NULL) so the runner doesn't re-fire on a closed row.
  *
- * informed=0 on closure: the brief will surface the closure narration ("I
- * told Yael Sunday's good") once, then flip informed=1. After that, the row
- * is invisible — that's the orphan kill.
+ * Closure does not queue a morning recap. Outstanding notification receipts
+ * are selected separately by getRequestsForBrief; timers remain independent.
  */
 
 import { DateTime } from 'luxon';
@@ -65,13 +65,8 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
     closureReason: input.closureReason,
     closedBy: input.closedBy,
     closedAt: now,
-    // informed=0 → brief will narrate the closure once, then flip. Except
-    // for state='logged': getRequestsForBrief excludes state='logged'
-    // outright (52-U1), unconditionally — there is no narration to flip
-    // FOR, ever. Stamp informed=1 immediately instead, matching
-    // logActivity's own inserts (52-U2), so no future reader of `informed`
-    // mistakes a logged row for pending post-closure narration (gh#52).
-    informed: input.state === 'logged' ? 1 : 0,
+    // Terminal activity is history, not an automatic briefing item.
+    informed: 1,
     nextCheckAt: null,     // kill any pending timer on this row
     nextCheckHandler: null,
     outcomeExternalEventId: input.outcomeExternalEventId,
@@ -79,8 +74,10 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
   });
 
   let childrenClosed = 0;
-  if (!input.skipChildren) {
-    const children = getChildRequests(input.id);
+  {
+    // Domain cascades remain depth-limited; conditional timers must also stop
+    // when their parent is itself being closed by a cascade.
+    const children = getChildRequests(input.id).filter(child => !input.skipChildren || child.kind === 'follow_up');
     for (const child of children) {
       if (child.state === 'resolved' || child.state === 'cancelled' || child.state === 'expired' || child.state === 'logged') continue;
       // Cascade with a derived reason so audit can distinguish parent-driven
@@ -90,7 +87,7 @@ export function closeRequest(input: CloseRequestInput): CloseResult {
         state: input.state,
         closureReason: `parent_${input.state}: ${input.closureReason}`,
         closedBy: input.closedBy,
-        skipChildren: true,  // depth-1 only; nested coords would loop otherwise
+        skipChildren: true,  // domain cascade depth-1; conditional timers still close
       });
       if (sub.ok) childrenClosed++;
     }

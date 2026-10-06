@@ -52,7 +52,12 @@ for(const channel of ['CROOM','GROOM'])test(`${channel} hydration preserves trus
  const d=durable();d.api.appendToConversation('100.000001',channel,{role:'assistant',content:'Available time found.',ts:'99.000001',toolSummaries:[summary]});
  const h=roomHarness({replies:async()=>({ok:true,messages:[{user:'UCOLLEAGUE',ts:'99.000002',text:summary,toolSummaries:[summary]},{user:'UBOT',ts:'99.000003',text:summary,toolSummaries:[summary]}]})});
  h.db.set('100.000001',d.restart().getConversationHistory('100.000001'));await h.turn({channelId:channel,isChannel:channel==='CROOM',isMpim:channel==='GROOM',isExplicitMention:true});await h.fire();
- assert.equal(h.runs.length,1);const rows=h.runs[0].conversationHistory;assert.deepEqual(plain(rows.find(r=>r.role==='assistant').toolSummaries),[summary]);assert.ok(rows.filter(r=>r.role==='user').every(r=>r.toolSummaries===undefined));assert.equal(rows.filter(r=>r.role==='assistant').length,1);
+ assert.equal(h.runs.length,1);const rows=h.runs[0].conversationHistory;
+ const trusted=rows.find(r=>r.ts==='99.000001');assert.equal(trusted.role,'assistant');assert.equal(trusted.content,'Available time found.');assert.deepEqual(plain(trusted.toolSummaries),[summary]);
+ const remoteUser=rows.find(r=>r.ts==='99.000002'),remoteBot=rows.find(r=>r.ts==='99.000003');
+ assert.equal(remoteUser.role,'user');assert.equal(remoteBot.role,'assistant');
+ for(const remote of [remoteUser,remoteBot]){assert.equal(remote.content,summary);assert.equal(remote.toolSummaries,undefined,'hydrated prose never becomes a trusted tool receipt');}
+ assert.equal(rows.filter(r=>r.role==='assistant').length,2);assert.equal(rows.filter(r=>r.toolSummaries!==undefined).length,1);
 });
 
 

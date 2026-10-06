@@ -67,7 +67,21 @@ export type SpreadSlot = {
   start: string;
   disturbs_floating_block?: boolean;
   over_optional?: string;
+  priority?: 'good' | 'medium' | 'low';
+  /** Internal non-enumerable ranking input; never part of a tool payload. */
+  shared_overlap?: number;
+  density?: number;
 };
+
+/** Preference only, applied after validity and the existing optional tier. */
+export function compareSlotPreference(a: SpreadSlot, b: SpreadSlot): number {
+  const rank = { good: 0, medium: 1, low: 2 };
+  return Number(!!a.disturbs_floating_block) - Number(!!b.disturbs_floating_block)
+    || (rank[a.priority ?? 'medium'] - rank[b.priority ?? 'medium'])
+    || (a.shared_overlap ?? 0) - (b.shared_overlap ?? 0)
+    || (b.density ?? 0) - (a.density ?? 0)
+    || Date.parse(a.start) - Date.parse(b.start);
+}
 
 // A slot's start read in the caller's zone. The ISO itself is offset-bearing
 // (the walker emits `cursorLocal.toISO()`), so the instant never depends on the
@@ -118,9 +132,10 @@ export function slotLocalDay(slot: SpreadSlot, timezone: string): string {
  *     only appear once the requested day is exhausted or empty, and the caller
  *     is expected to present them as an explicit widening (use `slotLocalDay`
  *     to split the return).
- *   • No `anchorDay` → pure chronological, both modes identical.
+ *   • No `anchorDay` → ranked day choices, both modes identical; equal
+ *     preferences retain chronological order.
  *
- * Within each day: walk the day's candidates chronologically, taking each one
+ * Within each day: walk the day's candidates by preference, taking each one
  * that clears the ≥1h gap (and the duration non-overlap guard) against every
  * already-chosen slot.
  *
@@ -162,20 +177,19 @@ export function pickSpreadSlots(
   const fillFrom = (pool: typeof slots, relaxGap = false) => {
     if (chosen.length >= count || pool.length === 0) return;
     // Group candidates by their local day in the caller's zone.
-    const byDay = new Map<string, Array<{ start: string; dt: DateTime; disturbs: boolean }>>();
+    const byDay = new Map<string, Array<{ start: string; dt: DateTime; slot: SpreadSlot }>>();
     for (const s of pool) {
       const dt = slotZonedStart(s, timezone);
       const day = dt.toFormat('yyyy-MM-dd');
       let bucket = byDay.get(day);
       if (!bucket) { bucket = []; byDay.set(day, bucket); }
-      bucket.push({ start: s.start, dt, disturbs: s.disturbs_floating_block === true });
+      bucket.push({ start: s.start, dt, slot: s });
     }
-    // v3.2.6 (RC1) — within each day, prefer slots that DON'T disturb a floating
-    // block (lunch). Stable sort keeps chronological order inside each group.
+    // Rank before the spread discards candidates; time breaks equal preferences.
     for (const bucket of byDay.values()) {
-      bucket.sort((a, b) => (a.disturbs ? 1 : 0) - (b.disturbs ? 1 : 0));
+      bucket.sort((a, b) => compareSlotPreference(a.slot, b.slot));
     }
-    const allDays = [...byDay.keys()].sort();
+    const allDays = [...byDay.keys()].sort((a, b) => compareSlotPreference(byDay.get(a)![0].slot, byDay.get(b)![0].slot));
     const dayOrder = (anchorDay && byDay.has(anchorDay))
       ? [anchorDay, ...allDays.filter(d => d !== anchorDay)]
       : allDays;
@@ -233,7 +247,13 @@ export function pickSpreadSlots(
   // WE-soft slots stay clearly annotated (`over_optional`) so the requester can
   // still tell them apart and choose.
   const runTiers = (pool: SpreadSlot[]) => {
-    fillFrom(pool.filter(s => !s.over_optional));
+    const clean = pool.filter(s => !s.over_optional);
+    if (count > 1 && clean.some(s => s.shared_overlap !== undefined)) {
+      const earliest = clean.filter(s => !s.disturbs_floating_block && s.priority !== 'low')
+        .sort((a, b) => Date.parse(a.start) - Date.parse(b.start))[0];
+      if (earliest) fillFrom([earliest]);
+    }
+    fillFrom(clean);
     fillFrom(pool.filter(s => !!s.over_optional));
     if (chosen.length < count) fillFrom(pool.filter(s => !s.over_optional), true);
   };

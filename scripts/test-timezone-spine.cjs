@@ -71,14 +71,14 @@ function harness() {
   }
   async function clipSearch(args, predecessorEnd) {
     const tree = ast('src/skills/meetings/ops/handlers/findAvailableSlots.ts');
-    const decl = only(collect(tree,n=>names(n).includes('effectiveSearchFrom')), 'search from');
+    const decl = only(collect(tree,n=>names(n).includes('defaultWindow')), 'search window initialization');
     const statements = decl.parent.statements;
     const start = statements.indexOf(decl);
     const afterId = statements.findIndex((n,i)=>i>start && names(n).includes('mustBeAfterId'));
     assert(afterId > start && ts.isIfStatement(statements[afterId+1]));
     const body = statements.slice(start,afterId+2).map(n=>n.getText()).join('\n');
     return compile(`export async function run() { ${body}\nreturn effectiveSearchFrom; }`,
-      {args:{time_window_is_hard:true,...args}, context, timezone:zone, userEmail:profile.user.email, DateTime, logger, ...tz, ...resolver,
+      {args:{time_window_is_hard:true,...args}, context, timezone:zone, userEmail:profile.user.email, DateTime, logger, ...wh, ...tz, ...resolver,
         getCalendarEvents:async()=>[{id:'predecessor',end:{dateTime:predecessorEnd,timeZone:zone}}] }).run();
   }
   return { profile, wh, tz, travel, resolver, mutations, patches, metadataReads, outcome, normalizeHandler, clipSearch,

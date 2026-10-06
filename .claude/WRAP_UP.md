@@ -275,6 +275,8 @@ gh issue close <n>
 
 **Release step 1's lock in the same breath — this is the last tree-writing step the wrap has.** Set `.claude/agent-loop/state.json`'s `lastRun` to `{"id": "<the same id step 1 set>", "status": "complete", "note": "<version> wrapped"}`. One more line in the `git add -A` below, not a separate commit.
 
+For each independently reviewed Architect attempt shipped by the release, after the run is idle and before the bookkeeping commit, append `node scripts/architect-file.cjs --session architect --wrap-companion <Xid> --attempt-id <exact-attempt> --version <version> --sha <release-sha>`. This binds its existing pass and snapshot to actual release contents, so later edits do not reopen shipped history. Unwrapped attempts still require current verification; a new attempt or failed review reopens the item. For legacy checkout line endings, `--snapshot-root <preserved-checkout>` may supply bytes matching the recorded hash; only CRLF-to-LF differences are accepted. Never use a historical companion to claim current verification or to mark waived checks as passed. Confirm `node scripts/ledger-stats.cjs --architect` and the report agree.
+
 **COMMIT THESE ROWS before you check them — the check reads git history, not the working tree.** `git add -A && git commit -m "<version> bookkeeping: file <tickets> closes/comments" && git push`, riding alongside (or as) step 11's `lastWrapIso` bookkeeping commit. **The check, one command, run AFTER that commit — extends the same one already run at step 11:**
 
 ```bash

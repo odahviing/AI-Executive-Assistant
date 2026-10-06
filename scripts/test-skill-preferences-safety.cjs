@@ -3,7 +3,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { execFileSync } = require('node:child_process');
@@ -18,7 +17,9 @@ function source(rel) {
   return before ? execFileSync('git', ['show', `${before}:${rel}`], { cwd: root, encoding: 'utf8' }) : fs.readFileSync(path.join(root, rel), 'utf8');
 }
 function fixture() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maelle-preference-safety-'));
+  // Preserve the actual atomic-rename path without Windows sandbox temp EPERM.
+  const dir = fs.mkdtempSync(path.join(root, '.maelle-preference-safety-'));
+  const cleanup=()=>{const target=path.resolve(dir);assert.equal(path.dirname(target),root);assert.ok(path.basename(target).startsWith('.maelle-preference-safety-'));fs.rmSync(target,{recursive:true,force:true});};
   const modules = new Map();
   const faults = { read: false, rename: false };
   const profile = {
@@ -66,7 +67,7 @@ function fixture() {
   const revision = area => crypto.createHash('sha256').update(fs.existsSync(file(area)) ? fs.readFileSync(file(area)) : '').digest('hex');
   const write = (area, mode, text, expectedRevision) => prefs.writeSkillPreferences(profile, area, mode, text, { expectedRevision });
   const prompt = (role = 'owner', scopes, surface = 'dm', authority = role) => load('src/core/orchestrator/systemPrompt.ts').buildSystemPromptParts(profile, role, role === 'owner' ? 'Alex' : 'Colleague', surface === 'mpim' && authority === 'owner', undefined, surface === 'mpim', surface === 'room', undefined, authority === 'owner' ? 'UOWNER' : 'UCOLLEAGUE', [], scopes, 'slack', authority);
-  return { dir, prefs, profile, faults, file, seed, revision, write, prompt, reloadPreferences: () => { modules.delete('src/utils/skillPreferences.ts'); return load('src/utils/skillPreferences.ts'); }, setActive: ids => { active = ids; }, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  return { dir, prefs, profile, faults, file, seed, revision, write, prompt, reloadPreferences: () => { modules.delete('src/utils/skillPreferences.ts'); return load('src/utils/skillPreferences.ts'); }, setActive: ids => { active = ids; }, cleanup };
 }
 function scenario(name, run) { test(name, async () => { const f = fixture(); try { await run(f); } finally { f.cleanup(); } }); }
 

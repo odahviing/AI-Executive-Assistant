@@ -88,15 +88,17 @@ const workshopContract = (() => {
     const errors = checkReview(r.evidence, r.review)
     return errors.length ? { ...r, verdict: 'implemented', verificationErrors: errors, notes: `${r.notes || ''} [awaiting independent verification: ${errors.join('; ')}]` } : r
   }
-  const acceptReviews = (builds, check, reviews) => {
+  const acceptReviews = (builds, check, reviews, questions = new Map()) => {
     if (!check) return
     check.results = array(check.results).map(r => {
+      if (['needs-owner-decision', 'blocked-charter'].includes(r.verdict)) questions.set(r.id, r.verdict)
+      else questions.delete(r.id)
       const built = builds.find(b => b.id === r.id && b.verdict === 'built')
       if (!built) return r
       reviews.set(r.id, r.review)
       if (r.verdict !== 'built') return r
       const errors = checkReview(built.evidence, r.review)
-      return errors.length ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
+      return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
     })
   }
   // Schema lives beside validation; conditional requirements are enforced above.
@@ -140,7 +142,7 @@ const workshopContract = (() => {
   return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
-const workshopReviews = new Map()
+const workshopReviews = new Map(), workshopQuestions = new Map()
 
 export const meta = {
   name: 'feature',
@@ -1642,7 +1644,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
     // a hand dispatch can downgrade the one agent that must not be downgraded.
     { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
   )
-  workshopContract.acceptReviews(results, check, workshopReviews)
+  workshopContract.acceptReviews(results, check, workshopReviews, workshopQuestions)
   verifyRan = !!check
   verifiedClean = (check && check.verifiedClean) || []
   discoveries = (check && check.discoveries) || []
@@ -1711,8 +1713,8 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
   bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
   bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
   if (bounceAtLimit.length)
-    log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, straight to the owner with both attempts: ${bounceAtLimit.join(', ')}`)
-  if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
+    log(`  NOT bounced — already at the ${BOUNCE_LIMIT}-bounce limit, retain both attempts and their recorded blocker: ${bounceAtLimit.join(', ')}`)
+  if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, retain the recorded blocker for routing: ${bounceUnroutable.join(', ')}`)
   if (bouncedIds.length) {
     const bounceItems = bouncedIds.map((id) => ({
       ...(specById.get(id) || {}),
@@ -1770,7 +1772,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
           `**RE-CHECK — second and FINAL pass over ${rebuilt.length} piece(s) you already overturned once.** Your charter holds the bar and the return contract; return the independent \`review\` evidence from WORKSHOP.md for each build attempt; this is the same job, narrowed.\n\n` +
             `**Scope is these pieces and nothing else.** Do not re-read the rest of the wave — you passed it moments ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
             `For each piece: **what you refused is quoted on it.** Answer the one question — is its own \`expectation\` met now? Trace from the seam, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
-            `**THERE IS NO THIRD ATTEMPT.** A piece you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise the first time.\n\n` +
+            `**THERE IS NO THIRD ATTEMPT.** A piece you refuse here goes to the owner carrying both attempts and both of your notes. So refuse it if it is wrong — that is the correct outcome and it remains blocked with its actual technical reason or explicit owner question — but do not refuse it for something you did not raise the first time.\n\n` +
             (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
             (askedDuringBounce.length
               ? `**ALSO ANSWER — ${askedDuringBounce.length} pending dependency ask(s) on a lane you are rebuilding this round.** Each was raised by the wave check above and is still unresolved on the owner's desk. You are already re-reading this lane's files for the rebuild above — check whether that SAME rebuild happens to also satisfy it. Return one \`results\` entry per id below: \`verdict:"already-fixed"\` if it is now closed, or \`verdict:"needs-dependency"\` (unchanged) if it is not. Do not build anything new for these — only answer whether they are already closed:\n${askedDuringBounce.map((a) => `  • ${a.id} → ${a.lane}: ${a.whatChanges}`).join('\n')}\n\n`
@@ -1784,7 +1786,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
         )
       : null
     bounceRecheckRan = !!recheck
-    workshopContract.acceptReviews(rebuilt, recheck, workshopReviews)
+    workshopContract.acceptReviews(rebuilt, recheck, workshopReviews, workshopQuestions)
     const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
     // A discovery raised by the re-check is next run's intake like any other —
     // it NEVER bounces.
@@ -1811,7 +1813,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
         finalOverturn.set(id, `${first} [BOUNCED ONCE; the re-check returned no verdict for this piece, so the second attempt is UNCHECKED]`)
       else {
         const again = recheckResults.find((x) => x.id === id)
-        if (again.verdict !== rebuiltClaim.get(id)) finalOverturn.set(id, `${first} [ATTEMPT 2 ALSO REFUSED: ${again.notes || ''}] — two attempts, no third; this is yours to rule on.`)
+        if (again.verdict !== rebuiltClaim.get(id)) finalOverturn.set(id, `${first} [ATTEMPT 2 ALSO REFUSED: ${again.notes || ''}] — two attempts, no third; retain the technical blocker or explicit owner question.`)
         else finalOverturn.delete(id)
       }
     }
@@ -1823,8 +1825,8 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
       }.`,
     )
   }
-  // Every overturn still standing after the bounce and the re-check: what he
-  // actually has to rule on. `finalOverturn`, not `overturned` — a piece the
+  // Every overturn still standing retains its technical blocker or explicit
+  // owner question. `finalOverturn`, not `overturned` — a piece the
   // bounce round fixed and the re-check confirmed is `built` and must not
   // reach his desk.
   bounceEscalated = finalOverturn.size
@@ -1833,7 +1835,7 @@ if (!preVerifyOwnerGate.length && (built.length || claimedFixed.length) && A.ver
     const b = Number((specById.get(r.id) || {}).bounces || 0)
     const row = b ? { ...r, bounces: b } : r
     return finalOverturn.has(r.id)
-      ? { ...row, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [wave-verify overturned: ${finalOverturn.get(r.id)}]`.trim() }
+      ? { ...row, verdict: workshopQuestions.get(r.id) || (['needs-owner-decision', 'blocked-charter'].includes(row.verdict) ? row.verdict : 'needs-dependency'), notes: `${r.notes || ''} [wave-verify overturned: ${finalOverturn.get(r.id)}]`.trim() }
       : row
   })
 }
@@ -2031,9 +2033,11 @@ if (workshopUnread.length)
 if (ownSpecUnresolved)
   featureWarnings.push(
     `THIS WAVE IS NOT DONE — ${ownSpecUnresolved} piece(s) of its OWN SPEC are unresolved: ${needsOwnerRuling.length} need your ruling, ${deferredDepAsks.length} cross-lane ask(s) await routing, ${remaining.length} never dispatched, ${stillBlockedIds.size} stuck past the dependency round cap. ` +
-      `THIS IS NOT bugger.js WORK — do not fold it into \`build <ids>\`. Record the owner's answer with native \`--assess-file\` against the current questionToken (Manager OPERATIONS), then regenerate \`intakeAdmission\` with each current continuation attempt. Retain the full \`resume.pieces\` and drop \`awaitingOwner\` only on answered pieces. The native admission supplies the current \`_ownerRuled\` words. Re-invoke ` +
+      (needsOwnerRuling.length ? `OWNER ANSWERS REQUIRED — ${needsOwnerRuling.map(p => p.id).join(', ')}. Record the owner's answer for these pieces with native \`--assess-file\` against each current questionToken (Manager OPERATIONS); drop \`awaitingOwner\` only on answered pieces. The native admission supplies the current \`_ownerRuled\` words. ` : '') +
+      (stillBlockedIds.size || deferredDepAsks.length || remaining.length ? `TECHNICAL CONTINUATION — ${[...stillBlockedIds, ...deferredDepAsks.map(p => p.id), ...remaining.map(p => p.id)].join(', ')}. Resolve the recorded dependency or verification evidence and route pending work under existing authorization; these technical conditions do not require a new owner answer. ` : '') +
+      `Keep this wave in feature.js. Regenerate \`intakeAdmission\` with each current continuation attempt and retain the full \`resume.pieces\`, including unresolved owner gates. Re-invoke ` +
       `Workflow({scriptPath:'.claude/workflows/feature.js', resumeFromRunId:<this run's own id>, args:{mode:'build', pieces:resume.pieces, sharedPiece:resume.sharedPiece, answers:resume.answers, recon:resume.recon, intakeAdmission:<current native plan>}}). ` +
-      `Untouched pieces replay from cache for free — only the ruled piece and the re-verify it forces run live.`,
+      `Preserve unchanged pieces and their recorded evidence; complete the changed paths and required independent review.`,
   )
 if (verificationPending.length) featureWarnings.push(`INDEPENDENT VERIFICATION PENDING — ${verificationPending.map(r => r.id).join(', ')}. Persist the actual independent review before wrapping; no new owner ruling is implied.`)
 // ── X182-PARITY · QUESTION 1's GATE, and it compares against the DENOMINATOR ─

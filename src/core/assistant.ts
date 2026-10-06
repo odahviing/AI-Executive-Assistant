@@ -5,9 +5,6 @@ import { savePreference, deletePreference, upsertPersonMemory, updatePersonProfi
 import { getConnection } from '../connections/registry';
 import {
   readPersonMemory,
-  writePersonSection,
-  resolvePersonSlug,
-  syncPersonOperationalSections,
 } from '../memory/peopleMemory';
 import { readSkillPreferencesSnapshot, writeSkillPreferences, PREF_SKILLS } from '../utils/skillPreferences';
 import { SLACK_ID_RE } from '../utils/resolveSlackId';
@@ -134,7 +131,7 @@ Pick one of three actions:
 
 action='set' — save or update a preference. Requires \`category\`, \`key\`, \`value\`.
   Examples: "prefers calls before noon local time" · "uses metric" · "linkedin posts always published tomorrow afternoon".
-  NOT for: facts about other PEOPLE (→ update_person_memory / update_person_profile), company/product knowledge (→ KB markdown files), one-off task details.
+  NOT for: facts about other PEOPLE (→ update_person_profile), company/product knowledge (→ KB markdown files), one-off task details.
 
 action='forget' — remove a previously learned preference. Requires \`key\`.
 
@@ -198,7 +195,9 @@ Always call this before saying you haven't interacted with someone.`,
 
 Authority comes from the authenticated caller: the owner can write about people, including in rooms; a colleague can update only their own operational fields (name/name_he, language, email, location/timezone, hours, travel). Other targets are refused; owner-curated fields are returned in not_saved. Room memory reads remain private. Owner only: an explicit configured SELF key selects her existing row; her exact configured name does so only without supplied identity handles or a matching person-name collision; human Slack IDs/emails follow ordinary person resolution.
 
-Report the result: updated means at least one field write was accepted/applied; already_set fields were already in place, and not_saved fields were refused. created means a database person was created. mirror_synced:false means structured facts were retained but the markdown refresh failed; retrying the same profile update safely retries that refresh.
+For an explicit owner correction that two records are the same person, use only {person_id, merge_person_id}: explicit survivor ID and duplicate ID. This exclusive reconciliation mode returns a minimal outcome, including in rooms; report only confirmed success. Authority is checked from authenticated context.
+
+Report the result: updated means at least one field write was accepted/applied; already_set fields were already in place, and not_saved fields were refused. created means a database person was created.
 
 You don't need explicit statements. Infer from behavior:
 - communication_style: describe their message pattern. "Brief, direct, never asks questions back" or "Detailed, conversational, often elaborates".
@@ -316,7 +315,10 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
               },
             },
           },
-          required: ['colleague_slack_id', 'colleague_name'],
+          oneOf: [
+            { required: ['person_id', 'merge_person_id'], properties: { person_id: { type: 'string', minLength: 1 }, merge_person_id: { type: 'string', minLength: 1 } }, additionalProperties: false },
+            { required: ['colleague_slack_id', 'colleague_name'], not: { anyOf: [{ required: ['person_id'] }, { required: ['merge_person_id'] }] } },
+          ],
         },
       },
       {
@@ -395,7 +397,7 @@ After calling this, use the correct Hebrew/English gendered forms from now on an
       },
       {
         name: 'get_person_memory',
-        description: `Load everything you know about a person: their markdown notes (residence, workplace, working hours, communication style) PLUS your relationship history with them — past social notes (★) and recent exchanges (↳ what they reached out about, what was discussed).
+        description: `Read a person's canonical record: current facts (residence, workplace, working hours, communication style), notes and relationship history — past social notes (★) and recent exchanges (↳ what they reached out about, what was discussed).
 
 Call this when:
 - A person in WORKSPACE CONTACTS shows a "N notes on file" hint and that person is relevant to the current turn — the hint means there's history to pull
@@ -419,34 +421,6 @@ Person-record deletion is unsupported. If asked to forget a person, explain that
         },
       },
       {
-        name: 'update_person_memory',
-        description: `Write additional durable operational facts to an existing person's markdown notes, e.g. "Always uses Teams". Use update_person_profile for supported structured facts: name/addressing, language, location, hours, email, communication style, and travel.
-
-Person facts go on their record. The owner's standing instructions about someone ("keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss") go to update_my_preferences under the relevant skill, naming the person. Personal/social stories go to note_about_person; facts about the assistant herself go to note_about_self. Ephemeral events go to log_interaction.
-
-An existing section is REPLACED; a new section is APPENDED. Preserve still-valid facts when replacing. The "Travel" section is refused: use update_person_profile.currently_traveling. "What we've discussed" replacement is refused: append events with log_interaction.
-
-Name-only lookup never creates a person; unresolved_person means resolve the identity before saving. On success, created reports database-person creation; file_created reports markdown-file creation.`,
-        input_schema: {
-          type: 'object' as const,
-          properties: {
-            person: {
-              type: 'string',
-              description: 'Known person name or real Slack ID. For the owner prefer their configured Slack ID; names use ordinary identity resolution, with no owner shortcut or name-only person creation.',
-            },
-            section: {
-              type: 'string',
-              description: 'Section header for the additional fact, e.g. "Workplace" or "Tooling". Matching is case-insensitive. Travel uses currently_traveling; timeline events use log_interaction.',
-            },
-            text: {
-              type: 'string',
-              description: 'The fact, in plain markdown. One or two sentences usually. Be specific — "Anna lives in Nes Ziona" beats "lives south of Tel Aviv".',
-            },
-          },
-          required: ['person', 'section', 'text'],
-        },
-      },
-      {
         name: 'update_my_preferences',
         description: `Read or edit the OWNER's standing preferences for how Maelle should behave in an AREA. These are free-text instructions in the owner's own words, overriding defaults within hard rules and safety guards.
 
@@ -454,11 +428,11 @@ To edit or remove existing preferences, use mode='read' for that area first, eve
 
 Save after the owner confirms a STANDING preference (apply every time), e.g. "on Sundays don't add a missing lunch", "just delete duplicate recruiting-system invites", "call me Mr. Cohen when you confirm a booking". Offer to remember, then save on his yes. Reading existing preferences needs no save confirmation.
 
-ABOUT A SPECIFIC PERSON — this is the right tool. A standing instruction from the owner concerning someone ("keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss", "never book Yael before 10", "Rita gets a call, not a thread") is HIS preference, not a fact about them. Save it here, naming the person inside the line, under the skill whose behavior it changes — meetings for booking style, general for how to address someone. That is what makes it fire at the moment it matters. FACTS about that person (where they live, their hours, what they use) still go to update_person_profile / update_person_memory.
+ABOUT A SPECIFIC PERSON — this is the right tool. A standing instruction from the owner concerning someone ("keep Dirk's meetings to 30 minutes", "always address Dr. Weiss as Dr. Weiss", "never book Yael before 10", "Rita gets a call, not a thread") is HIS preference, not a fact about them. Save it here, naming the person inside the line, under the skill whose behavior it changes — meetings for booking style, general for how to address someone. That is what makes it fire at the moment it matters. FACTS about that person (where they live, their hours, what they use) still go to update_person_profile.
 
 SHAPE OF THE ASK: when he asks to change how you do something recurring, do NOT both pre-commit ("I'll do it next time") AND ask to make it standing — that's muddled (did it save, or are you waiting on him?). Acknowledge in one short line, then ask ONE clear question ("Want me to save that so every report comes this way?") and act only on his yes. Keep the ask uncrowded — don't re-list the whole structure inline, especially when the request was to reduce clutter.
 
-NOT for: one-off instructions for today, FACTS about other people (→ update_person_memory / update_person_profile — but his standing instruction ABOUT a person belongs here, see above), or company knowledge (→ KB markdown).`,
+NOT for: one-off instructions for today, FACTS about other people (→ update_person_profile — but his standing instruction ABOUT a person belongs here, see above), or company knowledge (→ KB markdown).`,
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -496,10 +470,30 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
   ): Promise<unknown | null> {
     const userId = context.profile.user.slack_user_id;
     const isOwner = context.authority === 'owner';
+    // Identity reconciliation is an owner correction, never a self-profile
+    // edit. Run before the colleague allowlist can strip merge arguments.
+    if (toolName === 'update_person_profile' && Object.prototype.hasOwnProperty.call(args, 'merge_person_id')) {
+      if (!isOwner || !context.userId || context.userId !== userId) return { updated: false, merged: false, reason: 'owner_required' };
+      if (typeof args.person_id !== 'string' || !args.person_id.trim() || typeof args.merge_person_id !== 'string' || !args.merge_person_id.trim()
+        || Object.keys(args).some(key => !['person_id', 'merge_person_id'].includes(key))) {
+        return { updated: false, merged: false, reason: 'merge_requires_only_two_person_ids' };
+      }
+      // No person content enters this payload, including on owner room writes.
+      // A missing duplicate after retry is unknown, not evidence of success.
+      try {
+        const { planPersonMerge, mergePersonRows } = require('../db') as typeof import('../db');
+        const plan = planPersonMerge(args.person_id, args.merge_person_id);
+        if (!plan.ok) return { updated: false, merged: false, reason: 'identity_merge_refused' };
+        const merged = mergePersonRows(args.person_id, args.merge_person_id);
+        return { updated: merged, merged, person_id: args.person_id, ...(merged ? {} : { reason: 'merge_not_completed' }) };
+      } catch {
+        return { updated: false, merged: false, reason: 'merge_unavailable_or_unconfirmed' };
+      }
+    }
     const notSavedFields: string[] = [];
     // Authority permits writes; a shared surface still withholds private reads
     // and the existing owner preference / markdown tools.
-    if (context.surface === 'room' && ['get_person_memory', 'recall_interactions', 'manage_preference', 'update_my_preferences', 'update_person_memory'].includes(toolName)) {
+    if (context.surface === 'room' && ['get_person_memory', 'recall_interactions', 'manage_preference', 'update_my_preferences'].includes(toolName)) {
       return { error: 'not_permitted', reason: 'Person memory and preferences are private on shared surfaces.' };
     }
     if (toolName === 'update_person_profile') {
@@ -530,7 +524,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
     // reports_to, collaboration_notes, communication_style, response_speed)
     // are refused on the colleague-self path with not_saved and a log line.
     if (!isOwner) {
-      const ownerOnlyTools = ['manage_preference', 'update_my_preferences', 'update_person_memory', 'get_person_memory'];
+      const ownerOnlyTools = ['manage_preference', 'update_my_preferences', 'get_person_memory'];
       if (ownerOnlyTools.includes(toolName)) {
         logger.warn('Colleague attempted owner-only tool', { tool: toolName, userId: context.userId });
         return { error: 'not_permitted', reason: 'This action can only be performed by the owner.' };
@@ -902,9 +896,9 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           : asksAboutOwnerByFullName
             ? (getPersonMemoryRow(context.profile.user.slack_user_id) ?? searchPeopleMemoryEitherDirection(query)[0] ?? null)
             : (getPersonById(query) ?? findPersonByName(query).match);
-        // v3.2.0 — md keyed by person_id; legacy name-slug passed as fallback.
-        const personId = row?.person_id ?? (await resolvePersonSlug(context.profile, query));
-        let content = personId ? await readPersonMemory(context.profile, personId, row?.name ?? query) : null;
+        // Resolve the canonical record only; legacy files are reconciled before deployment.
+        const personId = row?.person_id;
+        let content = personId ? await readPersonMemory(context.profile, personId, row?.name ?? query, { kind: 'owner' }) : null;
         let notes: PersonNote[] = [];
         let recentInteractions: Array<{ date: string; type: string; summary: string }> = [];
         let recentBookings: Array<{ date: string; summary: string }> = [];
@@ -970,7 +964,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           return {
             found: false,
             person: row?.name ?? query,
-            message: `No memory file yet for "${query}" — no durable facts recorded. Use update_person_memory when you learn one.`,
+            message: `No canonical memory yet for "${query}" — no durable facts recorded.`,
           };
         }
         logger.info('Person memory fetched', {
@@ -1024,69 +1018,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
               }
             : {}),
         };
-      }
-
-      case 'update_person_memory': {
-        const query = (args.person as string | undefined)?.trim();
-        const section = (args.section as string | undefined)?.trim();
-        const text = args.text as string | undefined;
-        if (!query) return { error: 'empty_person' };
-        if (!section) return { error: 'empty_section' };
-        if (!text || !text.trim()) return { error: 'empty_text' };
-
-        if (section.toLowerCase() === "what we've discussed") {
-          return { ok: false, created: false, not_saved: [section], reason: 'history_is_append_only', message: 'Use log_interaction to append a new event; the existing timeline cannot be replaced.' };
-        }
-        if (section.toLowerCase() === 'travel') {
-          return { ok: false, created: false, not_saved: [section], reason: 'structured_travel_required', message: 'Use update_person_profile.currently_traveling with location, from and until so travel expires and scheduling can use it.' };
-        }
-
-        // v3.2.0 — resolve-or-create the person (internal by slack_id, else by
-        // name), then key the md file by person_id. This is also what lets an
-        // email-only / name-only person get a memory file at all.
-        const ownerDomain = context.profile.user.email.split('@')[1] ?? '';
-        const resolved = resolvePerson(
-          SLACK_ID_RE.test(query) ? { slackId: query, ownerDomain } : { name: query, ownerDomain },
-        );
-        if (!resolved) {
-          return { error: 'unresolved_person', created: false, candidates: findPersonByName(query).candidates.map(p => ({ name: p.name, person_id: p.person_id })), message: `Couldn't resolve "${query}" to a person.` };
-        }
-        const personId = resolved.person_id;
-        const displayName = resolved.row.name;
-
-        const result = await writePersonSection({
-          profile: context.profile,
-          personId,
-          displayName,
-          section,
-          text,
-        });
-        if (!result.ok) {
-          logger.warn('update_person_memory failed', { personId, section, err: result.error });
-          return { ok: false, error: result.error, created: resolved.created };
-        }
-
-        // v3.0.7 — stale-slot-results signal. When the md section name
-        // suggests a slot-relevant update (work hours / timezone /
-        // schedule / availability / workdays / travel), flag prior
-        // find_available_slots results as stale. Sonnet sees the note in
-        // the next iteration and re-runs the slot finder instead of
-        // memo-filtering. Section name match is fuzzy because md
-        // sections are owner-named free-text; any of these substrings
-        // (case-insensitive) trigger.
-        const SLOT_RELEVANT_SECTION_PATTERNS = [
-          'hours', 'timezone', 'time zone', 'schedule', 'workdays',
-          'availability', 'travel', 'working',
-        ];
-        const sectionLower = section.toLowerCase();
-        const slotRelevant = SLOT_RELEVANT_SECTION_PATTERNS.some(p => sectionLower.includes(p));
-
-        const base = { ok: true, person: displayName, section, created: resolved.created, file_created: result.created } as Record<string, unknown>;
-        if (slotRelevant) {
-          base._slot_results_now_stale = true;
-          base._note = `You wrote to a slot-relevant section ("${section}") for ${displayName}. Any prior find_available_slots results involving them are now stale — re-run find_available_slots before proposing options to the owner. Don't mentally filter old slot candidates.`;
-        }
-        return base;
       }
 
       case 'update_my_preferences': {
@@ -1321,11 +1252,8 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           if (travelWrite && travelWrite !== 'applied' && travelWrite !== 'already_set') described.not_saved = [...(described.not_saved ?? []), 'currently_traveling'];
           const hours = describeHoursWrite(personId, args, target.name, profileWrites.working_hours_structured);
           const allNotes = [...described.notes, ...hours.notes, ...extraNotes, ...travelNotes];
-          const mirrorSynced = await syncPersonOperationalSections(context.profile, personId, Object.keys(args));
-          if (!mirrorSynced) allNotes.push('Structured facts were retained, but the markdown mirror could not be refreshed. Retry the same profile update to refresh it.');
           return {
             updated: coreWrites.some(([, o]) => o === 'applied') || travelWrite === 'applied' || typeof args.vip === 'boolean', name: target.name, external: getPersonById(personId)?.kind === 'external', created: target.created,
-            mirror_synced: mirrorSynced,
             ...(travelWrite ? { travel_write: travelWrite } : {}),
             ...(described.not_saved ? { not_saved: described.not_saved } : {}),
             ...(described.already_set ? { already_set: described.already_set } : {}),
@@ -1531,8 +1459,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         notes.push(...hours.notes);
 
         if (notes.length > 0) base._note = notes.join(' ');
-        base.mirror_synced = await syncPersonOperationalSections(context.profile, target.personId, Object.keys(args));
-        if (!base.mirror_synced) base._note = `${base._note ?? ''} Structured facts were retained, but the markdown mirror could not be refreshed. Retry the same profile update to refresh it.`.trim();
         return base;
       }
 

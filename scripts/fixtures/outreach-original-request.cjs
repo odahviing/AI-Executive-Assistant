@@ -22,7 +22,7 @@ function fixture(o={}){
   'src/db/client.ts':{getDb:()=>db},'src/db/conversations.ts':{getConversationHistory:()=>[],appendToConversation:noop},
   'src/db/people.ts':{getPersonMemory:()=>({name:'Colleague',timezone:'UTC'})},
   'src/core/requests/logActivity.ts':{logActivity:noop},'src/core/requests/activityRevertibility.ts':{ACTIVITY_REVERTIBILITY:{}},
-  'src/core/requests/requesterRelay.ts':{relayClosureToRequester:async()=>true},'src/core/requests/colleagueOofReengage.ts':{},
+  'src/core/requests/requesterRelay.ts':{relayClosureToRequester:async()=>true,recordOwnerNotificationOutcome:(...args)=>ownerReceipt.recordOwnerNotificationOutcome(...args)},'src/core/requests/colleagueOofReengage.ts':{},
   'src/tasks/briefs.ts':{},'src/utils/closeLoopOnOwnerHandled.ts':{},'src/utils/usageLog.ts':{},
   'src/core/approvals/approvalCallbacks.ts':{},'src/llm/client.ts':{},'src/llm/models.ts':{},
   'src/connections/registry.ts':{getConnection:()=>o.noConnection?undefined:{sendDirect:send,postToChannel:send}},
@@ -44,6 +44,9 @@ function fixture(o={}){
   const m={exports:{}};modules.set(file,m);vm.runInNewContext('(function(require,module,exports){'+ts.transpileModule(text,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText+'\n})',{Date,Map,Set,Buffer,Promise,Error,JSON})(spec=>spec==='luxon'?{DateTime}:spec==='crypto'||spec.startsWith('node:')?require(spec):load(path.posix.normalize(path.posix.join(path.posix.dirname(file),spec))+'.ts'),m,m.exports);return m.exports;
  }
  const reqs=load('src/db/requests.ts'),jobs=load('src/db/jobs.ts');
+ const relayText=fs.readFileSync(path.join(root,'src/core/requests/requesterRelay.ts'),'utf8'),relayAst=ts.createSourceFile('relay.ts',relayText,ts.ScriptTarget.Latest,true);
+ const receiptSource=relayAst.statements.filter(n=>ts.isFunctionDeclaration(n)&&['recordOwnerNotificationOutcome','readOutcome','isRequesterSendUnconfirmed'].includes(n.name?.getText())).map(n=>n.getText()).join('\n');
+ const ownerReceipt=compile(receiptSource,{}, {getRequest:reqs.getRequest,updateRequest:reqs.updateRequest});
  return {db,effects,profile,reqs,jobs,load,options:o,
   tool:(args={},ctx={})=>new (load('src/skills/outreach.ts').OutreachCoreSkill)().executeToolCall('message_colleague',{colleague_slack_id:'COLLEAGUE',colleague_name:'Colleague',message:'Original exact message',await_reply:false,...args},{profile,userId:'OWNER',authority:'owner',surface:'owner_dm',senderRole:'owner',channel:'slack',channelId:'DOWNER',threadTs:'owner.1',...ctx}),
   job:()=>db.prepare('SELECT * FROM outreach_jobs ORDER BY rowid DESC LIMIT 1').get(),rows:()=>db.prepare('SELECT * FROM requests ORDER BY rowid').all(),

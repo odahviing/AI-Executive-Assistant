@@ -35,6 +35,7 @@
  * Usage:
  *   node scripts/architect-file.cjs --session architect --implementation X29 --evidence-file attempt.json
  *   node scripts/architect-file.cjs --session architect --review X29 --review-file independent-review.json
+ *   node scripts/architect-file.cjs --session architect --wrap-companion X29 --attempt-id exact-attempt --version 5.0.3 --sha release-commit
  *
  *   node scripts/architect-file.cjs --close X22 --declined "his words: not worth the second index"
  *
@@ -58,6 +59,8 @@
  */
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
+const { execFileSync } = require('child_process')
 
 const LEDGER = path.join(__dirname, '..', '.claude', 'agent-loop', 'architect-ledger.jsonl')
 
@@ -90,14 +93,21 @@ const TARGETS = [
 // no row carries because a merge DELETES the absorbed row instead of writing one,
 // which is exactly why nobody noticed. It is exported and read there, so a new
 // closing verdict is added here and both views move together.
-const CLOSED = new Set(['built', 'verified', 'declined', 'refuted'])
+const digest = value => crypto.createHash('sha256').update(value).digest('hex')
+const normalizedText = bytes => bytes.toString('utf8').replace(/\r\n/g, '\n')
+const releaseBound = r => r.release?.attemptId === r.implementation?.attemptId && /^[a-f0-9]{40,64}$/.test(r.release?.sha || '') &&
+  r.release.reviewSha256 === digest(JSON.stringify(r.review)) && r.release.snapshotSha256 === digest(JSON.stringify(r.snapshot)) &&
+  Array.isArray(r.release.files) && r.release.files.length === r.implementation.files.length &&
+  r.implementation.files.every(file => r.release.files.some(f => f.file === file && f.reviewedSha256 === r.snapshot.find(s => s.file === file)?.sha256 && /^[a-f0-9]{64}$/.test(f.releasedSha256) && ['exact', 'crlf-to-lf'].includes(f.normalization)))
+const CLOSED = new Set(['built', 'verified', 'wrapped', 'declined', 'refuted'])
 const isClosed = (r, repo = path.join(__dirname, '..')) => {
   if (!CLOSED.has(r.verdict)) return false
-  if (r.lifecycleVersion !== 1 || r.verdict !== 'verified') return true
+  if (r.verdict !== 'wrapped' && (r.lifecycleVersion !== 1 || r.verdict !== 'verified')) return true
   const v = require('./workshop-verification.cjs')
+  if (r.verdict === 'wrapped') return releaseBound(r) && !v.checkReview(r.implementation, r.review).length
   return !v.checkReview(r.implementation, r.review).length && !v.snapshotErrors({ evidence: r.implementation, snapshot: r.snapshot }, repo).length
 }
-const currentVerdict = (r, repo) => r.verdict === 'verified' && !isClosed(r, repo) ? 'verification-unproven' : r.verdict
+const currentVerdict = (r, repo) => ['verified', 'wrapped'].includes(r.verdict) && !isClosed(r, repo) ? 'verification-unproven' : r.verdict
 const hydrate = (r, repo = path.join(__dirname, '..')) => {
   if (!r.implementationRef && !r.reviewRef) return r
   const v = require('./workshop-verification.cjs')
@@ -207,11 +217,11 @@ if (fs.existsSync(LEDGER)) {
 const REPO = path.join(__dirname, '..')
 // Explicit lifecycle events preserve historical built rows while preventing
 // a new implementation or failed review from masquerading as completion.
-const implementationId = argOf('--implementation'), reviewId = argOf('--review')
-if (implementationId || reviewId) {
+const implementationId = argOf('--implementation'), reviewId = argOf('--review'), wrapId = argOf('--wrap-companion')
+if (implementationId || reviewId || wrapId) {
   const v = require('./workshop-verification.cjs')
-  const id = implementationId || reviewId, row = rows.find(r => r.id === id)
-  if (!row || implementationId && reviewId) die('name one existing Architect row with --implementation or --review')
+  const id = implementationId || reviewId || wrapId, row = rows.find(r => r.id === id)
+  if (!row || [implementationId, reviewId, wrapId].filter(Boolean).length !== 1) die('name one existing Architect row with --implementation, --review or --wrap-companion')
   if (['declined', 'refuted'].includes(row.verdict)) die('a ruling or refutation cannot be reopened by implementation metadata')
   const stateFile = path.join(REPO, '.claude/agent-loop/state.json')
   const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile)) : {}
@@ -221,7 +231,36 @@ if (implementationId || reviewId) {
   try { fd = fs.openSync(lock, 'wx') } catch { die('Architect ledger writer lock exists; no append performed') }
   try {
     let event
-    if (implementationId) {
+    if (wrapId) {
+      const version = argOf('--version'), requestedSha = argOf('--sha'), attemptId = argOf('--attempt-id')
+      if (!['verified', 'wrapped'].includes(row.verdict) || attemptId !== row.implementation?.attemptId || v.checkReview(row.implementation, row.review).length) throw new Error('release requires the exact recorded attempt and its independent passing review')
+      if (!/^\d+\.\d+\.\d+$/.test(version || '') || !/^[a-f0-9]{7,64}$/.test(requestedSha || '')) throw new Error('release requires a version and real commit SHA')
+      const git = args => execFileSync('git', args, { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] })
+      const sha = git(['rev-parse', '--verify', `${requestedSha}^{commit}`]).toString().trim()
+      git(['merge-base', '--is-ancestor', sha, 'HEAD'])
+      const subject = git(['show', '-s', '--format=%s', sha]).toString().trim()
+      if (!subject.startsWith(version + ':') || /\bbookkeeping\b/i.test(subject)) throw new Error('SHA must name the actual release commit for this version')
+      if (!Array.isArray(row.snapshot) || row.snapshot.length !== row.implementation.files.length) throw new Error('missing complete reviewed snapshot')
+      if (row.verdict === 'wrapped' && (!releaseBound(row) || row.release.sha !== sha || row.release.version !== version)) throw new Error('attempt already shipped under a different or invalid release; preserve its original companion')
+      const files = row.verdict === 'wrapped' ? row.release.files : row.implementation.files.map(file => {
+        const recorded = row.snapshot.find(s => s.file === file)
+        if (!recorded?.sha256) throw new Error(`missing reviewed snapshot: ${file}`)
+        const released = git(['show', `${sha}:${file}`])
+        let normalization = 'exact'
+        if (digest(released) !== recorded.sha256) {
+          // Legacy snapshots hash checkout bytes, which may mix LF and CRLF.
+          // Normalize only after the supplied bytes prove the recorded hash;
+          // never infer reviewed content from today's changed file or a digest.
+          const reviewed = fs.readFileSync(path.resolve(argOf('--snapshot-root') || REPO, file))
+          if (digest(reviewed) !== recorded.sha256 || !Buffer.from(reviewed.toString('utf8')).equals(reviewed) || !Buffer.from(released.toString('utf8')).equals(released) || normalizedText(reviewed) !== normalizedText(released)) throw new Error(`release differs from reviewed snapshot: ${file}`)
+          normalization = 'crlf-to-lf'
+        }
+        return { file, reviewedSha256: recorded.sha256, releasedSha256: digest(released), normalization }
+      })
+      const release = { attemptId, version, sha, reviewSha256: digest(JSON.stringify(row.review)), snapshotSha256: digest(JSON.stringify(row.snapshot)), files }
+      if (row.verdict === 'wrapped' && JSON.stringify(row.release) !== JSON.stringify(release)) throw new Error('attempt already shipped under a different release; preserve its original companion')
+      event = row.verdict === 'wrapped' ? null : { id, date: new Date().toISOString().slice(0, 10), lifecycleVersion: 1, verdict: 'wrapped', release }
+    } else if (implementationId) {
       if (!argOf('--evidence-file')) throw new Error('--implementation needs --evidence-file')
       const build = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--evidence-file'))))
       const errors = v.checkEvidence(build); if (errors.length) throw new Error(errors.join('; '))

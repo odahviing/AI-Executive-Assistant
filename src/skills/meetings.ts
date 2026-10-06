@@ -218,9 +218,9 @@ EXPLAINING WHY A DAY ISN'T OFFERED. The tool returns a \`day_summary\` array wit
 
 NEVER fabricate a reason. Say "day off" / "not a workday" only when \`top_reasons\` includes \`vacation_or_off_day\` — that's the actual day-off case. \`wrong_day_type\` is a different mismatch (in-person requested on a home day) — he's working, just not from the office, so don't call that one a day off. The data has the truth — use it. And NEVER blame the colleague for the owner's full day: "X isn't available / can't make it" is honest ONLY with positive evidence from X's calendar (\`attendee_busy_collision\` / \`blocked_by\`). When the real block is the owner's own calendar, or you lack positive evidence he's free then, say it owner-first / no-overlap ("your Thursday is full", "no opening that works for both of you Thursday") — never a false absolute about the colleague.
 
-A SPREAD IS A SAMPLE. The 2–5 options find_available_slots surfaces are a sample of the day, not the whole set — NEVER narrate the un-shown time as gone ("that's all", "the rest of the day is packed"). More may be free; offer to pull more, or to check a specific time.
+A SPREAD IS A SAMPLE. Returned options sample the window; unshown times may still be free. Preserve the returned ranking and earlier reasonable alternatives when the requested count permits. The slot's priority (good/medium/low) is relative preference after validity checks, using actual working-hour overlap and day quality. It grants no booking authority or additional availability assurance: retain all conflict, unknown-calendar and approval annotations.
 
-The search window auto-expands up to 21 days if fewer than 3 slots are found.
+Omit both search dates when timing is unspecified: search from now through today and the next two owner working days. Supply the requested date bounds when given; the search stays within those dates. Set time_window_is_hard for explicit clock windows or deadlines.
 
 PREFERRED SLOT (v2.9.2): when the requester names a SPECIFIC preferred time ("preferably 11:30", "around 14:00", "if 10:00 works"), pass that exact ISO datetime as \`preferred_slot\`. The tool will check that slot specifically and include it in the result if it's free — even when the spread-picker (1h gap rule, 2/day cap) would have filtered it out. Without this, the requester's asked time can vanish from the offered options and you end up narrating "X isn't clean" when X is actually free.
 
@@ -231,7 +231,7 @@ Return shape in this mode is DIFFERENT:
 
 When ALL candidates are blocked: narrate WHY using each \`broken_rule_label\` verbatim ("Jun 9 7pm is outside the attendee's working hours; Jun 10 5:30pm conflicts with another meeting…") and offer to widen the search. When at least one is available: surface those.
 
-ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidates are concrete times the user named. ONE call instead of N saves real time. \`search_from\` / \`search_to\` are ignored in this mode — pass any value (the candidate range is used).`,
+ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidates are concrete times the user named. ONE call instead of N saves real time. \`search_from\` / \`search_to\` are ignored in this mode — omit them (the candidate range is used).`,
         input_schema: {
           type: 'object',
           properties: {
@@ -260,7 +260,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
                 required: ['email'],
               },
             },
-            search_from: { type: 'string', description: 'Start of search window. ISO 8601, date-only ("2026-05-25") or with time ("2026-05-25T07:00:00"). NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true (see below) — otherwise the tool searches the full work day. Auto-expanded up to 21 days if fewer than 3 slots found.' },
+            search_from: { type: 'string', description: 'Start of search window. ISO 8601, date-only ("2026-05-25") or with time ("2026-05-25T07:00:00"). NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true (see below) — otherwise the tool searches the full work day. Omit both dates for now through today and the next two owner working days; supplied date bounds stay fixed.' },
             search_to: { type: 'string', description: 'End of search window. ISO 8601, date-only or with time. NOTE: the time-of-day is only honored as a hard limit when time_window_is_hard=true.' },
             time_window_is_hard: { type: 'boolean', description: 'Set TRUE only when the owner/attendee gave a REAL time constraint ("must end by noon", "only after 3pm", "available 7–12"). Then the search_from/search_to times are honored as a hard clip. When false/omitted (DEFAULT), those times are treated as SOFT — the tool searches the OWNER\'S FULL WORK DAY (including night-shift hours) and lets the work-hours + attendee-timezone filters surface the real overlap. This prevents accidentally clipping off valid late/night-shift slots that overlap a far-timezone colleague\'s working hours.' },
             present_in_timezone: { type: 'string', description: 'IANA timezone to ALSO render every returned slot in (e.g. "America/New_York", "America/Los_Angeles"). Set this whenever the requester asks for options in a specific timezone — INCLUDING when no attendee is stored in that zone (e.g. an organizer collecting options to hand to US colleagues "in ET"). The tool attaches a pre-rendered `presentation_local` string per slot (e.g. "Tue 16 Jun 09:00 EDT"); quote it verbatim and NEVER do the timezone conversion yourself.' },
@@ -321,7 +321,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               },
             },
           },
-          required: ['duration_minutes', 'attendee_emails', 'search_from', 'search_to', 'meeting_mode'],
+          required: ['duration_minutes', 'attendee_emails', 'meeting_mode'],
         },
       },
       {
@@ -812,10 +812,14 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
                   start: newStart.toISO()!, end: newEnd.toISO()!, timezone,
                 });
                 moveAccepted = true;
+                // Record the acknowledged write before best-effort activity logging.
+                // Only the authenticated private owner may see configured details.
+                movesDone.push(joinViewer === 'owner'
+                  ? `moved ${block.name} ${currentStart.toFormat('HH:mm')}→${newStart.toFormat('HH:mm')}`
+                  : 'moved a calendar block');
                 logRebalanceMoveActivity(profile.user.slack_user_id, block.name, blockEvent, timezone, newStart, newEnd);
                 blockEvent.start = { dateTime: newStart.toISO()!, timeZone: timezone };
                 blockEvent.end = { dateTime: newEnd.toISO()!, timeZone: timezone };
-                movesDone.push(`moved ${block.name} ${currentStart.toFormat('HH:mm')}→${newStart.toFormat('HH:mm')}`);
                 if (usedWorkingElsewhereFallback) movedIntoWorkingElsewhereFallback = true;
                 logger.info('check_join_availability active-mode: block moved in-turn', {
                   eventId: blockEvent.id, blockName: block.name,
@@ -831,7 +835,7 @@ Colleague-path: a colleague can only hold/release a time that WAS offered to the
             }
           }
           const movesLine = movesDone.length > 0
-            ? ` I ${movesDone.join(' and ')} to make room.${movedIntoWorkingElsewhereFallback
+            ? ` I ${movesDone.join(' and ')} to make room.${joinViewer === 'owner' && movedIntoWorkingElsewhereFallback
                 ? ' (No fully clear gap in the window — it now sits against a Working-Elsewhere block.)'
                 : ''}`
             : '';
@@ -1177,14 +1181,8 @@ ${isOwner === false
 
 ${firstName.toUpperCase()}'S SCHEDULING PREFERENCES — soft guidance, NOT hard rules. Use judgment when proposing slots.
 ${(() => {
-  const tp = profile.schedule.timezone_preferences;
   const ns = profile.schedule.night_shift;
   const lines: string[] = [];
-  if (tp) {
-    lines.push(`- When everyone is in ${firstName}'s own timezone (${profile.user.timezone}): lean toward ${tp.local_participants}.`);
-    lines.push(`- When ANY attendee is in a DIFFERENT timezone from ${firstName}: lean toward ${tp.remote_participants} ${firstName}'s time within the available overlap — the configured soft preference.`);
-    if (tp.note) lines.push(`- Note from ${firstName}: "${tp.note}"`);
-  }
   if (ns) {
     lines.push(`- Night-shift window: ${ns.hours_start}–${ns.hours_end} — ${firstName}'s standard late work time${ns.typical_day ? ` on ${ns.typical_day}` : ''} (already merged into work_hours). Also useful for overlap with attendees whose working day begins as ${firstName}'s is ending, when he offers it.`);
   }
@@ -1192,8 +1190,7 @@ ${(() => {
   lines.push('How to apply these:');
   lines.push(`- find_available_slots ALREADY clips candidates to the intersection of everyone's working hours — each attendee's own timezone + work hours (from their saved profile) are honored automatically. The workable cross-timezone overlap is computed for you: do NOT pick a magic hour or reason about specific countries/regions. Just run the search; the tool returns the times that actually overlap.`);
   lines.push(`- A cross-timezone overlap is NORMAL EA work — NEVER ask ${firstName} permission for it. "OK booking on EST time?" / "can you take a late slot in that range?" are nonsense to him; his own afternoon or evening isn't a favour to grant. Compute the overlap, propose the concrete slots, and let him say if a specific one doesn't work.`);
-  if (tp) lines.push(`- Within that overlap, lean toward the preference above (same-timezone → ${tp.local_participants}; cross-timezone → ${tp.remote_participants}).`);
-  lines.push(`- These are PREFERENCES not rules — if nothing in the preferred window works, propose outside it and NARRATE the trade-off (*"Nothing in your usual window; best I have is Wed 11:30"*). Never refuse on a soft preference alone.`);
+  lines.push('- Use the returned slot ranking and earlier reasonable alternatives. Priority reflects actual hours and day quality within the requested window; infer no regional morning, afternoon or weekday preference. Never refuse on a soft preference alone.');
   lines.push(`- ${firstName} can override any of these at any time with \`relaxed:true\`: it bends the rules about his own day, and each slot it returns carries the \`broken_rule_label\` it bends. A proposal is still a time he is free — he books over a commitment by naming it to \`create_meeting\`.`);
   return lines.join('\n');
 })()}`}${categoriesBlock}

@@ -78,10 +78,10 @@ function harness(options={}) {
  }
  function searchWindow(args) {
   const rel='src/skills/meetings/ops/handlers/findAvailableSlots.ts',tree=ts.createSourceFile(rel,read(rel),ts.ScriptTarget.Latest,true);
-  const from=one(nodes(tree,n=>named(n,'effectiveSearchFrom'))),siblings=from.parent.statements,index=siblings.indexOf(from),last=siblings.findIndex((n,i)=>i>index&&named(n,'mustBeAfterId'));
+  const from=one(nodes(tree,n=>named(n,'defaultWindow'))),siblings=from.parent.statements,index=siblings.indexOf(from),last=siblings.findIndex((n,i)=>i>index&&named(n,'mustBeAfterId'));
   const body=siblings.slice(index,last).map(n=>n.getText()).join('\n');
   const code=`export function run(){try {${body}\nreturn {start:effectiveSearchFrom,end:effectiveSearchTo,zone:searchWindowTz};}catch(err){if(err.code==='stated_time_clarification')return err.toToolResult();throw err;}}`;
-  return compile(code,{args,context:{profile},timezone:profile.user.timezone,DateTime,logger:mocks['src/utils/logger.ts'].default,...load('src/utils/timezoneConvert.ts'),...resolver}).run();
+  return compile(code,{args,context:{profile},timezone:profile.user.timezone,DateTime,logger:mocks['src/utils/logger.ts'].default,...load('src/utils/workHours.ts'),...load('src/utils/timezoneConvert.ts'),...resolver}).run();
  }
  function grounding(date) {
   const rel='src/skills/meetings/ops/handlers/findAvailableSlots.ts',tree=ts.createSourceFile(rel,read(rel),ts.ScriptTarget.Latest,true);

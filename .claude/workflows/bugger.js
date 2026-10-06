@@ -88,15 +88,17 @@ const workshopContract = (() => {
     const errors = checkReview(r.evidence, r.review)
     return errors.length ? { ...r, verdict: 'implemented', verificationErrors: errors, notes: `${r.notes || ''} [awaiting independent verification: ${errors.join('; ')}]` } : r
   }
-  const acceptReviews = (builds, check, reviews) => {
+  const acceptReviews = (builds, check, reviews, questions = new Map()) => {
     if (!check) return
     check.results = array(check.results).map(r => {
+      if (['needs-owner-decision', 'blocked-charter'].includes(r.verdict)) questions.set(r.id, r.verdict)
+      else questions.delete(r.id)
       const built = builds.find(b => b.id === r.id && b.verdict === 'built')
       if (!built) return r
       reviews.set(r.id, r.review)
       if (r.verdict !== 'built') return r
       const errors = checkReview(built.evidence, r.review)
-      return errors.length ? { ...r, verdict: 'needs-owner-decision', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
+      return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [verification gate: ${errors.join('; ')}]` } : r
     })
   }
   // Schema lives beside validation; conditional requirements are enforced above.
@@ -140,7 +142,7 @@ const workshopContract = (() => {
   return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
-const workshopReviews = new Map()
+const workshopReviews = new Map(), workshopQuestions = new Map()
 
 export const meta = {
   name: 'bugger',
@@ -1291,7 +1293,7 @@ const REGRESSION_NOTE =
 // and `needs-owner-decision` already exists for the honest negative.
 const TIMEOUT_NOTE =
   `\n\n**IF YOUR FIX IS A NUMBER THAT BOUNDS A DURATION** — a timeout, a budget, a retry window — your verdict must carry an OBSERVED figure for the path being bounded (\`the on-demand gather ran 6.2s at maelle-2026-07-30.log:812\`), or say plainly that the path was never observed. ` +
-  `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, that is \`needs-owner-decision\`, not a fourth guess.`
+  `A different number with no measurement behind it is the same fix again: gh#166 has been "fixed" three times that way. If you cannot observe the path, return \`needs-dependency\` with the missing evidence; ask the owner only for an actual uncovered choice.`
 
 // 2026-08-06 · THE MECHANISM IS NOT THE OUTCOME. Three repairs in one wave each
 // built exactly what their brief specified and changed nothing that mattered:
@@ -2265,7 +2267,7 @@ if (VERIFY) {
       // hand dispatch can downgrade the one agent that must not be downgraded.
       { label: `bouncer:wave(${built.length})`, phase: 'Verify', agentType: 'bouncer', effort: EFFORT.bouncer, schema: VERIFY_OUT },
     )
-    workshopContract.acceptReviews(results, check, workshopReviews)
+    workshopContract.acceptReviews(results, check, workshopReviews, workshopQuestions)
   verifyRan = !!check
 
     // ── 2026-08-30 · collect the golden battery's return, launched above ─────
@@ -2444,8 +2446,8 @@ if (VERIFY) {
     bouncedIds = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && KNOWN_LANES.has(laneOf(id)))
     bounceUnroutable = [...overturned.keys()].filter((id) => bounceOf(id) < BOUNCE_LIMIT && !KNOWN_LANES.has(laneOf(id)))
     if (bounceAtLimit.length)
-      log(`  NOT bounced — already made every attempt this ladder allows (bounces=${BOUNCE_LIMIT}), straight to the owner: ${bounceAtLimit.join(', ')}`)
-    if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, straight to the owner: ${bounceUnroutable.join(', ')}`)
+      log(`  NOT bounced — already made every attempt this ladder allows (bounces=${BOUNCE_LIMIT}), retain the recorded blocker for routing: ${bounceAtLimit.join(', ')}`)
+    if (bounceUnroutable.length) log(`  NOT bounced — no resolvable lane, retain the recorded blocker for routing: ${bounceUnroutable.join(', ')}`)
     bounceRecheckRan = true // AND'ed with each round's own result below; stays true if no round ever had anything to re-check
     let round = 0
     let stillOverturned = [...bouncedIds]
@@ -2530,7 +2532,7 @@ if (VERIFY) {
               `**Scope is these rows and nothing else.** Do not re-read the rest of the wave — you passed it an hour ago and it has not moved. Do not open new questions on it, and do not raise standards findings outside these files: anything else you notice is a \`discovery\`, which never bounces and never blocks.\n\n` +
               `For each row: **what you refused is quoted on it.** Answer the one question — is the reported problem fixed now? Trace from the symptom, exactly as before. \`built\` if it holds; any other verdict if it does not, and say plainly what is still wrong.\n\n` +
               (isLastRound
-                ? `**THERE IS NO FURTHER ATTEMPT.** A row you refuse here goes to the owner carrying every attempt and every note. So refuse it if it is wrong — that is the correct outcome and it costs one decision, not another round — but do not refuse it for something you did not raise before.\n\n`
+                ? `**THERE IS NO FURTHER ATTEMPT.** A row you refuse here goes to the owner carrying every attempt and every note. So refuse it if it is wrong — that is the correct outcome and it remains blocked with its actual technical reason or explicit owner question — but do not refuse it for something you did not raise before.\n\n`
                 : `**A row you refuse here gets exactly ONE further attempt, on a different model, before it reaches the owner.** So refuse it if it is wrong — that is the correct outcome — but do not refuse it for something you did not raise before.\n\n`) +
               (waveFiles.length ? `**THIS WAVE'S FILES:**\n${waveFiles.map((f) => `  • ${f}`).join('\n')}\n\n` : '') +
               (askedDuringBounce.length
@@ -2546,7 +2548,7 @@ if (VERIFY) {
         : null
       const thisRecheckRan = !!recheck
       if (rebuilt.length) bounceRecheckRan = bounceRecheckRan && thisRecheckRan
-      workshopContract.acceptReviews(rebuilt, recheck, workshopReviews)
+      workshopContract.acceptReviews(rebuilt, recheck, workshopReviews, workshopQuestions)
     const recheckResults = ((recheck && recheck.results) || []).filter((x) => x && rebuiltClaim.has(x.id))
       // A discovery raised by the re-check is next run's intake like any other.
       // It NEVER bounces — that is the loop with no exit.
@@ -2576,7 +2578,7 @@ if (VERIFY) {
         else {
           const again = recheckResults.find((x) => x.id === id)
           if (again.verdict !== rebuiltClaim.get(id)) {
-            finalOverturn.set(id, `${prior} [ATTEMPT ${round + 1} ALSO REFUSED: ${again.notes || ''}]${isLastRound ? ' — no further attempt; this is yours to rule on.' : ''}`)
+            finalOverturn.set(id, `${prior} [ATTEMPT ${round + 1} ALSO REFUSED: ${again.notes || ''}]${isLastRound ? ' — no further attempt; retain the technical blocker or explicit owner question.' : ''}`)
             if (!isLastRound) retryEligible.push(id)
           } else finalOverturn.delete(id)
         }
@@ -2606,7 +2608,7 @@ if (VERIFY) {
       return finalOverturn.has(r.id)
         ? {
             ...row,
-            verdict: 'needs-owner-decision',
+            verdict: workshopQuestions.get(r.id) || (['needs-owner-decision', 'blocked-charter'].includes(row.verdict) ? row.verdict : 'needs-dependency'),
             notes: `${r.notes || ''} [wave-verify overturned: ${finalOverturn.get(r.id)}]`.trim(),
           }
         : row

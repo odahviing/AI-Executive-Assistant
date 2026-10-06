@@ -4,7 +4,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { slotDayMinutes } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
-import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped } from './calendarReads';
+import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped, compareSlotPreference } from './calendarReads';
 import type { RuleCheckResult, SearchRejectLabel } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
 // Re-exported (not just imported) so a reader of the search-path vocabulary
@@ -13,7 +13,7 @@ import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
 // combined `SearchRejectReason`, scheduleRules.ts for the checkSlot-facing
 // `RuleViolationKind` side — without needing both import paths.
 export type { SearchRejectLabel };
-import { attendeeWorkSegmentsBetween, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES } from '../../utils/attendeeAvailability';
+import { attendeeWorkSegmentsBetween, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES, loadSchedulingComparisonAvailability, schedulingComparisonIntervals } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
 
 /**
@@ -109,6 +109,9 @@ type SlotCandidate = {
   day_type?: 'office' | 'home' | 'other';
   disturbs_floating_block?: boolean;
   over_optional?: string;
+  priority?: 'good' | 'medium' | 'low';
+  shared_overlap?: number;
+  density?: number;
   /**
    * The owner-rule this slot BREAKS, in his own words — set only on a `relaxed`
    * search, which is the only pass that returns a rule-breaking slot at all.
@@ -150,7 +153,7 @@ type SlotCandidate = {
  *                 never in `allWorkweekDays`, needs no reason recorded.
  */
 type CursorOutcome =
-  | { kind: 'accept'; dayKey: string; candidate: SlotCandidate & { density?: number } }
+  | { kind: 'accept'; dayKey: string; candidate: SlotCandidate }
   | {
       kind: 'reject';
       reason: SearchRejectReason;
@@ -462,6 +465,10 @@ export async function findAvailableSlots(params: {
   const meetingMode: MeetingMode = params.meetingMode ?? 'either';
   const autoExpand = params.autoExpand !== false;
   const maxSearchDays = params.maxSearchDays ?? 21;
+  // Preference reads are unnecessary for point validation and owner-only asks.
+  const comparison = params.profile && params.attendeeAvailability?.length
+    && DateTime.fromISO(params.searchTo).diff(DateTime.fromISO(params.searchFrom), 'minutes').minutes > params.durationMinutes
+    ? loadSchedulingComparisonAvailability(params.profile, params.attendeeAvailability) : undefined;
   // v2.5.4 — category-driven travel buffer: the buffer FACT belongs to the
   // category ("if it's Outside, we need buffer"), the LENGTH is config.
   // v4.1.x (M1) — resolved by travelBufferMinutesFor, the SAME helper checkSlot
@@ -1022,7 +1029,7 @@ export async function findAvailableSlots(params: {
           .filter(b => b.email === ownerEmailLower)
           .map(b => ({ start: b.start.getTime(), end: b.end.getTime() }))
       : [];
-    const dayBuckets: Map<string, Array<SlotCandidate & { density?: number }>> = new Map();
+    const dayBuckets: Map<string, SlotCandidate[]> = new Map();
 
     // v2.3.6 (#71a) — diagnostic rejection counters. Helps debug "why was 17:45
     // rejected?" by showing the per-rule breakdown at the end of the search.
@@ -1634,41 +1641,54 @@ export async function findAvailableSlots(params: {
       cursor = new Date(cursor.getTime() + step);
     }
 
-    // v2.0.9 — per-day selection. For each day, pick up to MAX_PER_DAY with
+    // Evaluate preferences over the full valid pool BEFORE either cap. Shared
+    // working time is scarce irrespective of country: preserve it when this
+    // meeting also fits a less shared instant inside the SAME search window.
+    const comparisonWindows = comparison?.length
+      ? schedulingComparisonIntervals(comparison, DateTime.fromISO(params.searchFrom, { zone: params.timezone }), currentTo) : [];
+    const allCandidates = [...dayBuckets.values()].flat();
+    for (const slot of allCandidates) {
+      if (comparisonWindows.length) {
+        const start = Date.parse(slot.start), end = Date.parse(slot.end);
+        const used = comparisonWindows.reduce((sum, windows) => sum + windows.reduce((n, w) =>
+          n + Math.max(0, Math.min(end, w.end) - Math.max(start, w.start)), 0), 0);
+        // Internal preference input: never serialize the cohort-derived score
+        // to a tool caller, even when another consumer returns these directly.
+        Object.defineProperty(slot, 'shared_overlap', {
+          value: used / ((end - start) * comparisonWindows.length), enumerable: false,
+        });
+      }
+    }
+    const dayCompromise = (s: SlotCandidate) => !!s.disturbs_floating_block || !!s.broken_rules?.length
+      || !!s.attendee_conflicts?.length || (s.density ?? 0) < 0;
+    const minimumOverlap = Math.min(...allCandidates.filter(s => !dayCompromise(s)).map(s => s.shared_overlap ?? Infinity));
+    for (const slot of allCandidates) slot.priority = dayCompromise(slot) ? 'low'
+      : slot.shared_overlap !== undefined && slot.shared_overlap === minimumOverlap || (slot.shared_overlap === undefined && (slot.density ?? 0) > 0)
+        ? 'good' : 'medium';
+
+    // Per-day selection. For each day, pick up to MAX_PER_DAY with
     // PREFERRED_GAP (30 min) between picks; if that yields fewer than
     // MAX_PER_DAY, fill remaining from the unused list at 15-min spacing.
     // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
     for (const [, daySlots] of dayBuckets) {
       if (daySlots.length === 0) continue;
-      // #133 — dense packing: keep the MOST EFFICIENT slots for the day (highest
-      // density score), earliest-first as the tiebreak — instead of the variety-
-      // spread pick. Clean slots still rank above WE-soft. pickSpreadSlots then
-      // spreads the final offered set across days, so the owner sees efficient
-      // options first (and, for cross-TZ, the earliest slot inside the overlap).
+      daySlots.sort((a, b) => Number(!!a.over_optional) - Number(!!b.over_optional) || compareSlotPreference(a, b));
+      // Keep an earlier reasonable alternative when the budget allows it; a
+      // better late slot must not erase speed from the choice altogether.
+      const earliest = comparisonWindows.length && MAX_PER_DAY > 1
+        ? [...daySlots].filter(s => !s.over_optional && !dayCompromise(s)).sort((a, b) => Date.parse(a.start) - Date.parse(b.start))[0]
+        : undefined;
+      const picked: typeof daySlots = earliest ? [earliest] : [];
       if (packingDense) {
-        const ranked = [...daySlots].sort((a, b) => {
-          const soft = (a.over_optional ? 1 : 0) - (b.over_optional ? 1 : 0);
-          if (soft !== 0) return soft;
-          const d = (b.density ?? 0) - (a.density ?? 0);
-          if (d !== 0) return d;
-          return a.start.localeCompare(b.start);   // earlier better
-        });
-        const picked = ranked.slice(0, MAX_PER_DAY);
-        picked.sort((a, b) => a.start.localeCompare(b.start));
+        picked.push(...daySlots.filter(s => s !== earliest).slice(0, MAX_PER_DAY - picked.length));
+        picked.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
         candidates.push(...picked);
         continue;
       }
-      // v3.6.4 — sink WE-soft (optional-join) slots so the per-day cap keeps
-      // CLEAN slots first and a clean slot is never dropped in favour of a soft
-      // one. Stable sort → chronological order preserved within each tier.
-      daySlots.sort((a, b) => (a.over_optional ? 1 : 0) - (b.over_optional ? 1 : 0));
-      const picked: typeof daySlots = [daySlots[0]];
-      let lastTime = new Date(daySlots[0].start).getTime();
-      for (let i = 1; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
+      for (let i = 0; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
         const t = new Date(daySlots[i].start).getTime();
-        if (t - lastTime >= PREFERRED_GAP_MS) {
+        if (picked.every(s => Math.abs(t - Date.parse(s.start)) >= PREFERRED_GAP_MS)) {
           picked.push(daySlots[i]);
-          lastTime = t;
         }
       }
       // Fallback: if we still have room, fill with anything we skipped (15-min
@@ -1678,8 +1698,8 @@ export async function findAvailableSlots(params: {
         for (let i = 0; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
           if (!pickedSet.has(daySlots[i].start)) picked.push(daySlots[i]);
         }
-        picked.sort((a, b) => a.start.localeCompare(b.start));
       }
+      picked.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
       candidates.push(...picked);
     }
 

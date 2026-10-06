@@ -260,7 +260,9 @@ const slotsInput = { duration_minutes: 25, search_from: '2026-09-14T10:45:00', s
 test('B1 a real per-attendee calendar read is named on the line', () => {
   const line = summarizeToolCall('find_available_slots', slotsInput, slotsResult, 'Asia/Jerusalem');
   assert.match(line, /calendars_read=daniel\.s@reflectiz\.com\+levana\.b@reflectiz\.com/);
-  assert.doesNotMatch(line, /outside@partner\.com/);
+  // Unknown is now carried on the offer, but must never become a read receipt.
+  assert.match(line, /outside@partner\.com:unknown/);
+  assert.doesNotMatch(line.match(/calendars_read=([^\]\s]+)/)?.[1] ?? '', /outside@partner\.com/);
 });
 
 test('B2 an unread calendar is never claimed as read', () => {

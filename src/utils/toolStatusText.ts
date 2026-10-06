@@ -77,7 +77,6 @@ export const TOOL_STATUS_TEXT: Record<string, string> = {
   note_about_person: 'Making a note',
   note_about_self: 'Making a note',
   log_interaction: 'Keeping notes',
-  update_person_memory: 'Making a note',
   update_person_profile: 'Filling in their profile',
 
   // Meeting summary

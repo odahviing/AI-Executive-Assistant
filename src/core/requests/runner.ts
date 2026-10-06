@@ -30,7 +30,7 @@ import { closeRequest } from './closeRequest';
 import { withRequestLock, closeUnconfirmedExecution } from './resolver';
 import type { NextCheckHandler, RequestRow } from './types';
 import { parseDetails, deriveOriginSurface, reminderWorkTimeAtOrAfter, PROMOTE_TIMEZONE_TEMP_TOOL } from './types';
-import { relayClosureToRequester, retryRequesterRelay, relayNotice, requesterRelayLanguage } from './requesterRelay';
+import { relayClosureToRequester, retryRequesterRelay, relayNotice, requesterRelayLanguage, isRequesterSendUnconfirmed, recordOwnerNotificationOutcome } from './requesterRelay';
 import { getConnection } from '../../connections/registry';
 import type { SendOptions, SendResult } from '../../connections/types';
 import { logActivity } from './logActivity';
@@ -64,17 +64,29 @@ async function sendTracked(
   label: string,
   requestId?: string,
 ): Promise<SendResult> {
+  const recordOwnerResult = (result: SendResult): void => {
+    const row = requestId ? getRequest(requestId) : null;
+    if (row && ('dm' in target ? target.dm === row.owner_user_id
+      : target.channel === row.owner_dm_channel || (row.initiated_by === row.owner_user_id && target.channel === row.origin_channel))) {
+      recordOwnerNotificationOutcome(row, result);
+    }
+  };
+  let res: SendResult;
   try {
-    const res = 'dm' in target
+    res = 'dm' in target
       ? await conn.sendDirect(target.dm, body, opts)
       : await conn.postToChannel(target.channel, body, opts);
-    if (res.ok) logger.info(`${label} — sent`, { requestId });
-    else logger.warn(`${label} — send failed`, { requestId, reason: res.reason });
-    return res;
   } catch (err) {
     logger.warn(`${label} — send threw`, { requestId, err: String(err).slice(0, 200) });
-    return { ok: false, reason: 'send_threw', detail: String(err).slice(0, 200) };
+    res = { ok: false, reason: 'send_threw', detail: String(err).slice(0, 200) };
   }
+  if (res.ok) logger.info(`${label} — sent`, { requestId });
+  else logger.warn(`${label} — send failed`, { requestId, reason: res.reason });
+  // Receipt persistence cannot change what transport confirmed or cause a
+  // second send. A failed write remains unrecorded; never invent its success.
+  try { recordOwnerResult(res); }
+  catch (err) { logger.warn(`${label} — owner receipt bookkeeping failed`, { requestId, err: String(err).slice(0, 200) }); }
+  return res;
 }
 
 /**
@@ -132,9 +144,10 @@ export async function sweepDueRequests(opts: {
         try {
           const lang = requesterRelayLanguage(fresh.owner_user_id);
           const message = relayNotice(lang, 'failure', { hi: relayNotice(lang, 'greeting', { name: profile.user.name.split(' ')[0] }), subject: fresh.subject });
-          if (conn) await postOwnerDecision({ profile, conn, text: message, label: 'request failure outcome',
-            inThread: fresh.owner_dm_channel && fresh.owner_dm_thread_ts ? { channel: fresh.owner_dm_channel, threadTs: fresh.owner_dm_thread_ts } : null });
-        } catch { updateRequest(fresh.id, { informed: 0 }); }
+          const posted = conn ? await postOwnerDecision({ profile, conn, text: message, label: 'request failure outcome',
+            inThread: fresh.owner_dm_channel && fresh.owner_dm_thread_ts ? { channel: fresh.owner_dm_channel, threadTs: fresh.owner_dm_thread_ts } : null }) : null;
+          recordOwnerNotificationOutcome(fresh, posted);
+        } catch { recordOwnerNotificationOutcome(fresh, { ok: false, reason: 'error' }); }
         await relayClosureToRequester({ row: fresh, profile, label: 'request failure requester outcome',
           compose: ({ lang, hi, subject }) => relayNotice(lang, 'failure', { hi, subject }) });
         closed++;
@@ -239,11 +252,13 @@ async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed
       if (conn) {
         const who = row.requester_name?.split(' ')[0] ?? 'They';
         const what = relayNotice(requesterRelayLanguage(row.owner_user_id), waitingOnColleague ? 'owner_counter_expired' : 'owner_expired', { target: who, subject });
-        await postOwnerDecision({ profile, conn, text: what, label: 'runExpiry owner tombstone',
+        const posted = await postOwnerDecision({ profile, conn, text: what, label: 'runExpiry owner tombstone',
           inThread: row.owner_dm_channel && row.owner_dm_thread_ts
             ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null });
-      }
+        recordOwnerNotificationOutcome(row, posted);
+      } else recordOwnerNotificationOutcome(row, null);
     } catch (err) {
+      recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' });
       logger.warn('runExpiry — tombstone DM failed', { requestId: row.id, err: String(err).slice(0, 200) });
     }
   }
@@ -384,11 +399,33 @@ async function runApprovalReminder(row: RequestRow, profile: UserProfile): Promi
  */
 async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'closed' | 'rearmed'> {
   const details = parseDetails<Record<string, unknown>>(row) ?? {};
-  const message = typeof details.message === 'string' && details.message
-    ? details.message
-    : (row.subject ?? '');
+  // Legacy unlinked rows retain their promise; never infer an association.
+  if (row.kind === 'follow_up' && row.parent_request_id) {
+    const parent = getRequest(row.parent_request_id);
+    if (!parent || parent.owner_user_id !== row.owner_user_id ||
+        !['awaiting_owner', 'awaiting_colleague', 'in_flight'].includes(parent.state) ||
+        typeof details.message !== 'string' || !details.message.trim()) {
+      closeRequest({ id: row.id, state: 'cancelled', closureReason: 'follow_up_parent_unavailable', closedBy: 'system' });
+      return 'closed';
+    }
+  }
   const ownerId = profile.user.slack_user_id;
   const targetSlackId = row.target_slack_id ?? ownerId;
+  const explicitMessage = typeof details.message === 'string' && details.message.trim()
+    ? details.message : null;
+  // A colleague's owner-directed task may hold its actual request in the
+  // description (including the supplied link/caption). That content is for
+  // this owner only, never a fallback payload to another recipient or room.
+  const ownerRelayDescription = !explicitMessage && row.owner_user_id === ownerId &&
+    targetSlackId === ownerId && row.initiated_by_role === 'colleague' &&
+    row.initiated_by !== ownerId && row.requester_slack_id === row.initiated_by &&
+    typeof row.description === 'string' && row.description.trim()
+    ? row.description : null;
+  const message = explicitMessage ?? (ownerRelayDescription
+    ? relayNotice(requesterRelayLanguage(ownerId), 'reminder_content', {
+      target: getPersonMemory(row.initiated_by)?.name ?? row.requester_name ?? 'A colleague',
+      quote: ownerRelayDescription,
+    }) : row.subject ?? '');
   if (row.kind === 'reminder' && details.explicit_time === false) {
     const next = reminderWorkTimeAtOrAfter(new Date().toISOString(), targetSlackId, profile);
     if (Date.parse(next) > Date.now() + 60_000) {
@@ -400,9 +437,11 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
   // Delivery outcome, tracked so the requester loop-close below (R3) tells
   // the truth about what actually happened rather than assuming success.
   let delivered = false;
+  let deliveryUnknown = false;
 
   try {
     const conn = getConnection(ownerId, 'slack');
+    if (!conn) recordOwnerNotificationOutcome(row, null);
     if (conn) {
       if (remindingSomeoneElse) {
         // Remind someone else: attribute the ask to its authenticated initiator, then
@@ -416,6 +455,7 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
         const framed = relayNotice(requesterRelayLanguage(targetSlackId), 'reminder_content', { target: initiatorName, quote: message });
         const res = await sendTracked(conn, { dm: targetSlackId }, framed, undefined, 'runReminderFire colleague DM', row.id);
         delivered = res.ok;
+        deliveryUnknown = isRequesterSendUnconfirmed(res) || (!res.ok && res.reason === 'send_threw');
         if (res.ok) {
           await sendTracked(conn, { dm: ownerId }, relayNotice(requesterRelayLanguage(ownerId), 'reminded_owner', { target: targetName, subject: row.subject ?? message }), undefined, 'runReminderFire owner report', row.id);
           // runReminderFire-same-invisibility-as-research (2026-08-14) — a
@@ -439,15 +479,18 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
             targetName: row.target_name ?? undefined,
           });
         } else {
-          await sendTracked(conn, { dm: ownerId }, relayNotice(requesterRelayLanguage(ownerId), 'reminder_owner_failed', { target: targetName }), undefined, 'runReminderFire owner unreachable report', row.id);
+          await sendTracked(conn, { dm: ownerId }, relayNotice(requesterRelayLanguage(ownerId), deliveryUnknown ? 'scheduled_unconfirmed' : 'reminder_owner_failed', { target: targetName }), undefined, 'runReminderFire owner unreachable report', row.id);
         }
       } else {
         // Remind me — DM the owner the message.
         const res = await sendTracked(conn, { dm: ownerId }, message, undefined, 'runReminderFire owner reminder', row.id);
         delivered = res.ok;
+        deliveryUnknown = isRequesterSendUnconfirmed(res) || (!res.ok && res.reason === 'send_threw');
       }
     }
   } catch (err) {
+    deliveryUnknown = true;
+    recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' });
     logger.warn('runReminderFire — DM threw', { requestId: row.id, err: String(err).slice(0, 200) });
   }
   closeRequest({
@@ -456,12 +499,9 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
     // 2026-08-14) — 'logged', not 'resolved': a fired reminder is exactly the
     // "completed Maelle-initiated action that needed no owner decision" case
     // logActivity.ts's header names research/DMs/approvals as examples of.
-    // 'resolved' made it invisible the instant the brief surfaced+flipped
-    // informed — getRequestsForBrief excludes anything resolved once narrated,
-    // so a later "did you remind Yael about X" had nothing to recall from.
-    // 'logged' is what getRecentActivityForOwner (52-U6) can still find, forever.
+    // 'logged' is what getRecentActivityForOwner can recall, forever.
     state: delivered ? 'logged' : 'cancelled',
-    closureReason: delivered ? 'reminder_fired' : 'reminder_delivery_failed',
+    closureReason: delivered ? 'reminder_fired' : deliveryUnknown ? 'reminder_delivery_unconfirmed' : 'reminder_delivery_failed',
     closedBy: 'system',
   });
   // R1/R3 requester loop-close — create_task is colleague-reachable (o#219),
@@ -475,14 +515,15 @@ async function runReminderFire(row: RequestRow, profile: UserProfile): Promise<'
   // (live incident, Oran Frenkel/2026-09-06: told "I'll let you know" and
   // never was). Skips by construction when requester_slack_id is unset or is
   // the owner himself (a self-reminder needs no loop-close).
-  if (row.requester_slack_id && row.requester_slack_id !== ownerId) {
+  if (row.requester_slack_id && row.requester_slack_id !== ownerId &&
+      !getRequest(row.id)?.closure_reason?.startsWith('parent_')) {
     const targetName = row.target_name ?? 'them';
     await relayClosureToRequester({
       row,
       profile,
       label: 'runReminderFire requester loop-close',
       compose: ({ lang, hi, ownerFirst, subject }) => relayNotice(lang,
-        remindingSomeoneElse ? (delivered ? 'reminder_sent' : 'reminder_failed') : (delivered ? 'owner_reached' : 'owner_unconfirmed'),
+        deliveryUnknown ? 'scheduled_unconfirmed' : remindingSomeoneElse ? (delivered ? 'reminder_sent' : 'reminder_failed') : (delivered ? 'owner_reached' : 'owner_unconfirmed'),
         { hi, owner: ownerFirst, target: targetName, subject }),
     });
   }
@@ -593,8 +634,7 @@ async function runResearchRun(row: RequestRow, profile: UserProfile, app: App | 
     // the "completed Maelle-initiated action that needed no owner decision"
     // logActivity.ts's own header names as a canonical logged-row example
     // (research run alongside a colleague DM / a resolved approval). Closing
-    // as 'resolved' left it invisible everywhere the instant the brief
-    // surfaced+flipped informed — 'logged' is what makes it recallable via
+    // as 'resolved' excluded it from activity recall — 'logged' is what makes it recallable via
     // get_my_tasks' recent_activity bucket (52-U6), forever, by design.
     state: 'logged',
     closureReason: 'research_completed',
@@ -722,7 +762,7 @@ async function runOutreachExpiryOrDecision(row: RequestRow, profile: UserProfile
         'runOutreachExpiryOrDecision owner tombstone',
         row.id,
       );
-    }
+    } else recordOwnerNotificationOutcome(row, null);
   }
   return 'closed';
 }
@@ -736,11 +776,12 @@ async function notifyAskerScheduledOutreachFailed(row: RequestRow, profile: User
   kind: 'scheduled_failed' | 'scheduled_unconfirmed' | 'attachments_failed', values: Record<string, string> = {}): Promise<void> {
   if (!row.origin_channel) return;
   const conn = getConnection(profile.user.slack_user_id, 'slack');
-  if (!conn) return;
+  const ownerAsker = row.initiated_by === row.owner_user_id;
+  if (!conn) { if (ownerAsker) recordOwnerNotificationOutcome(row, null); return; }
   let body: string;
   try { body = relayNotice(requesterRelayLanguage(row.initiated_by || row.owner_user_id), kind, { target: row.target_name ?? row.target_slack_id ?? '', ...values }); }
   catch {
-    updateRequest(row.id, { informed: 0 });
+    if (ownerAsker) recordOwnerNotificationOutcome(row, null);
     return;
   }
   // A held automatic move notice carries the health runner's pseudo thread key
@@ -977,8 +1018,8 @@ async function runSendScheduledOutreach(row: RequestRow, profile: UserProfile): 
  * 'cancelled' — never 'logged' — so a permanently-failed delivery can never
  * read, to getRecentActivityForOwner or a later dedup check
  * (getLatestFreeformOwnerFlag), as though it actually reached him. A
- * 'cancelled' close still lands informed=0, so the next brief gets one more
- * chance to surface it. R3 (2026-08-18) — the give-up path also tells the
+ * Unresolved owner-delivery receipts remain notification attention in the
+ * brief. R3 (2026-08-18) — the give-up path also tells the
  * REQUESTER their backstop flag never landed, mirroring runExpiry's own
  * requester loop-close: they were promised "I've also flagged the raw ask
  * for the owner directly" at raise time, and a silent permanent failure here
@@ -1007,6 +1048,7 @@ async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Prom
       posted = await postOwnerDecision({ profile, conn, text: message, label: 'freeform escalation flag (retry)' });
     }
   } catch (err) {
+    posted = { ok: false, reason: 'error' };
     logger.warn('runFreeformFlagRetry — retry threw', { requestId: row.id, attempt: attempts, err: String(err).slice(0, 200) });
   }
 
@@ -1036,6 +1078,7 @@ async function runFreeformFlagRetry(row: RequestRow, profile: UserProfile): Prom
       closureReason: 'freeform_escalation_flag_delivery_failed',
       closedBy: 'system',
     });
+    recordOwnerNotificationOutcome(row, posted);
     // R3 — mirror runExpiry's requester loop-close (above). skill.ts's
     // flagUnresolvedFreeformForOwner tells the requester up front "I've also
     // flagged the raw ask for the owner directly as a backstop" — if that

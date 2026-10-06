@@ -947,7 +947,7 @@ export async function precheckAvailability(params: {
       // can never assert "bookable" or "not bookable" with no data behind it. The
       // data source is built for that too: whether it's a typed `CalendarOfflineError`
       // (v4.3.x — `eventsForWeek` now reads via `getOwnerEventsForDecision`,
-      // connectors/graph/calendarReads.ts:435, the SAME decision-safe helper the slot walker uses) or
+      // connectors/graph/calendarReads.ts:467, the SAME decision-safe helper the slot walker uses) or
       // any other propagated throw, "no events" and "a completely free week" are never
       // the same value here, so both land in this same catch and skip this same
       // pair — a later reader must not come here looking for an offline verdict

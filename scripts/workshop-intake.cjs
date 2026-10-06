@@ -74,6 +74,7 @@ function assess(input, rows, repo, date) {
     if (input.charter?.file !== file || !text(input.charter?.rule) || input.charter.sha256 !== hash(fs.readFileSync(path.join(repo, file)))) fail('assessment needs current owning charter file, sha256 and relevant rule citation')
   }
   if (input.status === 'ready' && !text(input.authorization)) fail('ready needs explicit owner authorization; recommend build is not authorization')
+  if (input.status === 'ready' && !input.ownerRuled && row.verdict === 'needs-dependency' && input.dispositionToken !== dispositionToken(rows, row.ref)) fail('dependency reassessment needs the current dispositionToken and a reason citing the resolved dependency; retain the existing authorization')
   if (input.status === 'decision' && (!text(input.question) || !text(input.uncovered) || !text(input.recommend))) fail('decision needs a concrete question, uncovered charter/product choice and recommendation')
   // Earlier holds are never undone by capture or a generic run. An explicit
   // per-ref owner instruction is required to release a held/backlog item.
@@ -107,6 +108,7 @@ function view(rows, repo, state = readState(repo)) {
     let status = 'held'
     if (isHeld(rows, row) || authority.terminal) status = 'held'
     else if (authority.question && !authority.answer || row.verdict === 'needs-owner-decision' && (assessmentCurrent && row.intake?.status === 'decision' || row.intake && !authority.answer)) status = 'decision'
+    else if (row.verdict === 'needs-dependency') status = 'blocked'
     else if (reviewNeeded.has(v.normRef(row.ref))) status = 'review'
     else if (row.intake) status = authority.answer ? 'ready' : row.intake.status
     if (status === 'ready') {
@@ -114,24 +116,24 @@ function view(rows, repo, state = readState(repo)) {
       if (!c || !fs.existsSync(path.join(repo, c.file)) || hash(fs.readFileSync(path.join(repo, c.file))) !== c.sha256) status = 'captured'
     }
     if (inFlight.has(v.normRef(row.ref))) status = 'in-flight'
-    return { ...row, status, assessmentCurrent, dispositionToken: authority.hold?.token || dispositionToken(rows, row.ref), questionToken: authority.question?.token || null, rulingToken: authority.answer?.token || null, ownerQuestion: authority.question?.askedBecause || null, currentReason: authority.hold?.reason || (authority.question && !authority.answer ? authority.question.askedBecause : null) || row.note || event.note || event.recommend || '', examples: rows.filter(r => same(r.ref, row.ref) && r.capture).map(r => r.capture) }
+    return { ...row, status, assessmentCurrent, dispositionToken: authority.hold?.token || dispositionToken(rows, row.ref), questionToken: authority.question?.token || null, rulingToken: authority.answer?.token || null, ownerQuestion: authority.question?.askedBecause || null, currentReason: authority.hold?.reason || (authority.question && !authority.answer ? authority.question.askedBecause : null) || event.note || event.intake?.reason || event.recommend || row.note || '', examples: rows.filter(r => same(r.ref, row.ref) && r.capture).map(r => r.capture) }
   })
   const closed = collapsed.closed.map(row => { const authority = ownerState(rows, row.ref); return { ...row, questionToken: authority.question?.token || null, rulingToken: authority.answer?.token || null, ownerQuestion: authority.question?.askedBecause || null } })
   const verified = closed.filter(r => r.verdict === 'verified' && r.state !== 'wrapped')
-  return { items, verified, closed, counts: Object.fromEntries(['captured', 'ready', 'decision', 'held', 'review', 'in-flight'].map(s => [s, items.filter(r => r.status === s).length])) }
+  return { items, verified, closed, counts: Object.fromEntries(['captured', 'ready', 'decision', 'held', 'blocked', 'review', 'in-flight'].map(s => [s, items.filter(r => r.status === s).length])) }
 }
 const cell = value => String(value || '').replace(/\r?\n/g, ' ').replace(/\|/g, '&#124;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 const brief = value => { const s = String(value || '').replace(/\s+/g, ' '); return s.length > 240 ? s.slice(0, 237) + '…' : s }
 function render(rows, repo, state = readState(repo)) {
   const board = view(rows, repo, state), c = board.counts
-  const lines = [MARKER, `**${c.decision} product decisions await you** — ${board.items.length} open items; ${c.captured} captured, ${c.ready} ready for an authorized lane batch, ${c.held} held, ${c.review} awaiting review/repair, ${c['in-flight']} in flight.`, '', `**Independently verified, awaiting wrap (${board.verified.length}):** ${board.verified.map(r => cell(r.ref)).join(' · ') || 'none'}`, '']
-  const names = { captured: 'Captured — pending batch assessment', ready: 'Ready for lane', decision: 'Needs a product decision', held: 'Held — recorded rulings / existing backlog', review: 'Awaiting independent review or repair', 'in-flight': 'In flight' }
+  const lines = [MARKER, `**${c.decision} product decisions await you** — ${board.items.length} open items; ${c.captured} captured, ${c.ready} ready for an authorized lane batch, ${c.held} held, ${c.blocked} dependency blocked, ${c.review} awaiting review/repair, ${c['in-flight']} in flight.`, '', `**Independently verified, awaiting wrap (${board.verified.length}):** ${board.verified.map(r => cell(r.ref)).join(' · ') || 'none'}`, '']
+  const names = { captured: 'Captured — pending batch assessment', ready: 'Ready for lane', decision: 'Needs a product decision', held: 'Held — recorded rulings / existing backlog', blocked: 'Blocked — dependency or execution evidence required', review: 'Awaiting independent review or repair', 'in-flight': 'In flight' }
   for (const [status, title] of Object.entries(names)) {
     const items = board.items.filter(r => r.status === status)
     if (!items.length) continue
     lines.push(`### ${title} (${items.length})`, '', '| Lane · ref | What happened | Your options | Risk |', '|---|---|---|---|')
     for (const r of items) {
-      const options = status === 'decision' ? r.assessmentCurrent ? `${r.intake.question} Recommend: ${r.intake.recommend}` : `${r.currentReason || r.finding} — Manager must retain the lane's actual product question and recommendation before dispatch.` : status === 'held' ? `Held: ${r.currentReason || 'Needs explicit authorization before scheduling'}` : status === 'ready' ? 'Included when the authorized batch runs' : status === 'captured' ? 'Collected; assess against the owning charter when you say run' : status === 'in-flight' ? 'Lane is working' : 'Not verified; review or repair required'
+      const options = status === 'decision' ? r.assessmentCurrent ? `${r.intake.question} Recommend: ${r.intake.recommend}` : `${r.currentReason || r.finding} — Manager must retain the lane's actual product question and recommendation before dispatch.` : status === 'held' ? `Held: ${r.currentReason || 'Needs explicit authorization before scheduling'}` : status === 'blocked' ? `Blocked: ${r.currentReason || 'Dependency outcome requires verification'}; existing owner authorization is retained.` : status === 'ready' ? 'Included when the authorized batch runs' : status === 'captured' ? 'Collected; assess against the owning charter when you say run' : status === 'in-flight' ? 'Lane is working' : 'Not verified; review or repair required'
       lines.push(`| ${cell(r.lane || 'unassigned')} · ${cell(r.ref)} | ${cell(r.intake?.type || 'backlog')}: ${cell(brief(r.finding))}${r.examples.length ? ` (${r.examples.length} retained example${r.examples.length === 1 ? '' : 's'})` : ''} | ${cell(status === 'held' ? brief(options) : options)} | ${cell(r.intake?.risk || 'Not assessed')} |`)
     }
     lines.push('')

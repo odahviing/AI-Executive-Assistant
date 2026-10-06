@@ -116,7 +116,7 @@ const MUTATION_DOMAIN: Record<string, MutationDomain> = {
   // the memory / preference / routine / knowledge write family
   update_my_preferences: 'other', manage_preference: 'other',
   note_about_person: 'other', note_about_self: 'other', log_interaction: 'other',
-  confirm_gender: 'other', update_person_profile: 'other', update_person_memory: 'other',
+  confirm_gender: 'other', update_person_profile: 'other',
   manage_routine: 'other', manage_calendar_issue: 'other', update_task: 'other',
   update_summary_draft: 'other', manage_knowledge: 'other', resolve_approval: 'other',
   // gh#200 (200b) — a per-date work-schedule override (day off / custom hours /
@@ -211,9 +211,9 @@ function approvalOwnerNotified(toolName: string, result: unknown): boolean {
  * matchingToolAlreadyRan block) reads ONE token, `attendee_check=`, in this
  * turn's tape and in prior turns' persisted rows, instead of re-deriving it
  * from prose. The line's own text (the busy note, `unavailable (outside the
- * attendee's working hours: <email>)`, `attendee_partial=`, the refusal label)
+ * attendee's working hours: <email>)`, `rejected_search_candidates=`, the refusal label)
  * still says WHAT the check found and about whom (`attendee_blocked=` is the
- * `attendee_partial=` twin for a day the strict pass killed outright — the same
+ * rejected-candidate twin for a day the search killed outright — the same
  * per-attendee tally plus that day's canonical attendee reason);
  * the marker only says that
  * one happened. The value names the source, for a log reader:
@@ -400,6 +400,21 @@ function localSuffix(presentationLocal: unknown): string {
     : '';
 }
 
+// These entries are emitted only after acknowledged writes, and are already
+// scoped by the producer to the authenticated reader. A parent availability
+// refusal can still carry earlier confirmed moves. Absence proves nothing
+// about failed/unknown writes; never synthesize a move or a "nothing changed".
+function blockMovesSuffix(result: unknown, affectedStart: unknown, ownerTz: string): string {
+  const moves = (result as { blocks_moved?: unknown } | null)?.blocks_moved;
+  if (!Array.isArray(moves)) return '';
+  const confirmed = moves.filter((m): m is string => typeof m === 'string' && m.trim().length > 0);
+  if (!confirmed.length) return '';
+  // Match rebalance's owner-zone affected day, never the request or today's date.
+  const day = typeof affectedStart === 'string' ? DateTime.fromISO(affectedStart, { zone: ownerTz }) : null;
+  const when = day?.isValid ? `${day.toISODate()} ${ownerTz}` : 'date unknown';
+  return ` [confirmed block moves ${when}: ${confirmed.join('; ')}]`;
+}
+
 function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
   try {
     // createmeeting-failed-summary-drops-counter-offer-reason (2026-09-04) — a
@@ -570,11 +585,17 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           return `[find_available_slots candidate_validation dur=${durCV}m: ${parts.join(', ')}]`;
         }
 
-        const slots: Array<{ start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }> }> =
+        const slots: Array<{ start?: string; end?: string; attendee_status?: Array<{ email?: string; status?: string }>; attendee_conflicts?: Array<{ email?: string; reason?: string; assumed?: boolean }> }> =
           Array.isArray(result) ? result :
           (result && typeof result === 'object' && Array.isArray((result as any).slots)) ? (result as any).slots :
           [];
-        const slotList = slots.map(fmt).join(', ');
+        // Only a finding attached to this offer establishes its attendee status.
+        // Day-level rejection tallies describe other candidates in the search.
+        const slotList = slots.map(s => {
+          const conflicts = (s.attendee_conflicts ?? []).map(a => `${a.email}:${a.reason}${a.assumed ? '(assumed)' : ''}`);
+          const statuses = (s.attendee_status ?? []).map(a => `${a.email}:${a.status}`);
+          return `${fmt(s)}${conflicts.length ? ` attendee_conflicts=${conflicts.join('+')}` : ''}${statuses.length ? ` attendee_status=${statuses.join('+')}` : ''}`;
+        }).join(', ');
         const dur = (input as any).duration_minutes;
         const from = (input as any).search_from;
         const to = (input as any).search_to;
@@ -638,49 +659,18 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             return `${d.date}(${reason}${d.oof_until_display ? ` until ${d.oof_until_display}` : ''})`;
           });
         const offDaysPart = offDayParts.length ? ` off_days=${offDayParts.join(',')}` : '';
-        // slots-returned-turn-carries-no-attendee-rejection-reason (2026-09-06)
-        // — a day can yield slots (accepted > 0, so it's invisible to
-        // offDaysPart/reasonPart above, both gated to accepted===0) while ALSO
-        // having quarter-hours an attendee couldn't make.
-        // `attendee_partial_conflicts` (findAvailableSlots.ts's DaySummaryEntry)
-        // carries exactly that per-attendee tally for the partially-rejected
-        // case. Render it here so a true "Erez can't make some of today's
-        // options" has ground truth in TOOL ACTIVITY on a WITH-slots turn,
-        // same as offDaysPart does for whole-day-off — without this,
-        // claimChecker's invented_third_party_fact rule has nothing to check
-        // that true sentence against.
+        // This counts rejected candidates across the whole search, including
+        // off-hours. It says nothing about partial availability on an offer.
         const byAttendee = (list: Array<{ email?: string; slots_blocked?: number }>) =>
           list.map(a => `${a.email}:${a.slots_blocked}`).join('+');
         const attendeePartialParts = daySummary
           .filter(d => typeof d.date === 'string' && Array.isArray(d.attendee_partial_conflicts) && d.attendee_partial_conflicts.length > 0)
           .map(d => `${d.date}(${byAttendee(d.attendee_partial_conflicts ?? [])})`);
-        const attendeePartialPart = attendeePartialParts.length ? ` attendee_partial=${attendeePartialParts.join(',')}` : '';
-        // recovery-path-day-summary-still-carries-no-attendee-signal (2026-09-07)
-        // — `blocked_by` is `attendee_partial_conflicts`' twin for a day the
-        // STRICT pass killed outright (findAvailableSlots.ts's accepted===0
-        // branch, same rankAttendees split), and nothing here rendered it. That
-        // is the ONE turn where it matters most: the rule-6 backstops
-        // (handlers/findAvailableSlots.ts's recoverAttendeeBlockedSlots)
-        // re-search after a strict wipeout and hand back the owner's own open
-        // times, while day_summary stays the STRICT one (the recovery call
-        // passes no diagnosticsOut, so isRecoveryResult's ternary there returns the pre-recovery blame).
-        // So the line took the WITH-slots return below, where the three existing
-        // day-level renders all miss it: reasonPart only runs on the zero-slot
-        // return, attendeePartialPart is accepted>0-only, offDaysPart is
-        // whole-day-off-only. The `attendee_check=slots` marker WAS already
-        // stamped (attendeeCheckSource reads blocked_by), but the line's own
-        // text said nothing about WHAT the check found or about whom — and that
-        // text is exactly what claimChecker's third-party rule judges the draft
-        // against (claimChecker.ts:707-709), so a true "Yael can't make any of
-        // these" had a marker with no finding behind it and could be flagged
-        // invented. Render the same per-attendee tally the partial case does,
-        // plus the day's attendee-scoped reason (the collapsed, name-free
-        // canonical prefix — the KIND the checker compares) so busy is not read
-        // as off-hours. Kept DAY-level, deliberately: a per-slot conflict tag
-        // would attach a negative verdict to an instant this line also offers,
-        // which is the slot-grounding check's own flag condition (:613) — the
-        // guard would then retract the owner's genuinely open times, the exact
-        // reply this row exists to protect (G5).
+        const attendeePartialPart = attendeePartialParts.length ? ` rejected_search_candidates=${attendeePartialParts.join(',')} (not offered-slot availability)` : '';
+        // Render blocked-day attendee tallies and reason kinds from the
+        // supplied day_summary. The handler selects diagnostics from the pass
+        // that produced the offers, including recovery. Keep these findings
+        // day-level: a rejected day is not a conflict on an offered slot.
         const attendeeBlockedParts = daySummary
           .filter(d => typeof d.date === 'string' && Array.isArray(d.blocked_by) && d.blocked_by.length > 0)
           .map(d => {
@@ -766,7 +756,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           : typeof input.meeting_start === 'string' ? input.meeting_start : '';
         const at = DateTime.fromISO(meetingStart, { zone: ownerTz }).setZone(ownerTz);
         const when = at.isValid ? `${at.toISO()} ${ownerTz}` : '?';
-        return `[check_join_availability ${when}${localSuffix(r.presentation_local)}: can_join=${String(r.can_join ?? 'unknown')}]`;
+        return `[check_join_availability ${when}${localSuffix(r.presentation_local)}: can_join=${String(r.can_join ?? 'unknown')}${blockMovesSuffix(result, r.meeting_start, ownerTz)}]`;
       }
       case 'find_slack_user':
         return `[find_slack_user: "${input.name}"]`;
@@ -840,6 +830,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // 2026-09-08T20:28:14Z). Nesting a bracket on this line is fine:
         // extractActionTape below lifts the span balanced, not with `[^\]]*`.
         const localPart = localSuffix((result as { presentation_local?: unknown }).presentation_local);
+        const movedBlocksPart = toolName === 'create_meeting' || toolName === 'move_meeting'
+          ? blockMovesSuffix(result, (result as { booked_start?: unknown; new_start?: unknown }).booked_start
+            ?? (result as { new_start?: unknown }).new_start, ownerTz) : '';
 
         if (outcome.ok && typeof (result as { action_summary?: unknown }).action_summary === 'string') {
           const changes = (result as { action_summary: string }).action_summary.replace(/\s+/g, ' ').trim().slice(0, 220);
@@ -856,8 +849,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
             : [];
           const addedPart = addedEmails.length ? ` [added: ${addedEmails.join(', ')}]` : '';
           return changes
-            ? `[${toolName} OK — ${changes}${localPart}${addedPart}${busyNotePart}${idPart}]`
-            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${localPart}${addedPart}${busyNotePart}${idPart}]`;
+            ? `[${toolName} OK — ${changes}${localPart}${addedPart}${busyNotePart}${movedBlocksPart}${idPart}]`
+            : `[${toolName} OK ${String((input as any).new_subject ?? (input as any).meeting_subject ?? '').slice(0, 40)}${localPart}${addedPart}${busyNotePart}${movedBlocksPart}${idPart}]`;
         }
 
         // v3.4.2 (NEW-1) — NEVER fall back to meeting_id here. It was rendered
@@ -871,7 +864,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         const subj = (input as any).subject ?? (input as any).meeting_subject ?? (input as any).new_start ?? (input as any).date ?? '';
         const subjPart = subj ? ` ${String(subj).slice(0, 40)}` : '';
         if (outcome.ok) {
-          return `[${toolName} OK${subjPart}${localPart}${busyNotePart}${idPart}]`;
+          return `[${toolName} OK${subjPart}${localPart}${busyNotePart}${movedBlocksPart}${idPart}]`;
         }
         // check-claimed-that-never-ran (2026-09-06, bounce) — a refused
         // calendar mutation carries a `broken_rule_label` the handler already

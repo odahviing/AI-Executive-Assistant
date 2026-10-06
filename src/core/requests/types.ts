@@ -22,7 +22,7 @@ export type RequestKind =
   | 'approval'         // colleague→owner decision request (replaces approvals table)
   | 'outreach'         // send DM to colleague, optionally await reply
   | 'reminder'         // owner-self: "remind me Friday"
-  | 'follow_up'        // owner-self: "check back on X in 3 days"
+  | 'follow_up'        // conditional check on explicitly linked pending work; legacy rows may be unlinked
   | 'research'         // owner-self: "look this up and tell me"
   | 'social_outreach'; // proactive social DM to a colleague
 

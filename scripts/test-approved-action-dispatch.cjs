@@ -161,7 +161,7 @@ const contracts = [
   ['note_about_person', {}, { saved: true }], ['note_about_self', {}, { saved: true }],
   ['log_interaction', {}, { logged: true }], ['confirm_gender', {}, { confirmed: true }],
   ['update_person_profile', {}, { updated: true }],
-  ['update_my_preferences', {}, { ok: true }], ['update_person_memory', {}, { ok: true }],
+  ['update_my_preferences', {}, { ok: true }],
   ['send_briefing_now', {}, { ok: true }],
 ];
 const cases = [];
@@ -186,6 +186,10 @@ for (const [tool, args, result, variant = 'main', status = 'completed'] of contr
     add(`${key}-${name}`, tool, args, invalid, 'failed');
   }
 }
+add('retired-person-memory-write-refused', 'update_person_memory', {}, { ok: true }, 'failed', {}, context, (outcome, h) => {
+  assert.equal(outcome.result.error, 'unsupported_approved_action');
+  assert.equal(h.calls.length, 0, 'retired writer never dispatched');
+});
 add('knowledge-ambiguous', 'manage_knowledge', { action: 'ingest' }, { ok: true, kind: 'ambiguous', question: 'Which section?' }, 'failed');
 add('profile-not-saved', 'update_person_profile', {}, { updated: true, not_saved: ['email'] }, 'failed', {}, context, (outcome) => assert.deepEqual(outcome.result.not_saved, ['email']));
 add('summary-partial-send', 'share_summary', { recipients: [{}, {}] }, { ok: true, sent_to: [{}], refused: [], send_failures: [{ reason: 'unavailable' }] }, 'failed');
