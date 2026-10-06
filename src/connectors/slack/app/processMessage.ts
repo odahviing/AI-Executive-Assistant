@@ -947,7 +947,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // — a broken trailer's audience is the log, not them.
             if (delivered) return;
             try {
-              await say({ text: failureReply(err), thread_ts: threadTs });
+              await say({ text: failureReply(err, mergedRawText), thread_ts: threadTs });
             } catch (sendErr) {
               // Slack itself is refusing us; there is nothing left to try. Log
               // the ORIGINAL cause here so it survives into error-*.log instead
@@ -968,6 +968,6 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // timer and owns its failures in the runner catch above; this one cannot
       // see them.
       logger.error('Failed to process message', { err, assistant: assistant.name, channelId });
-      await say({ text: failureReply(err), thread_ts: threadTs });
+      await say({ text: failureReply(err, text), thread_ts: threadTs });
     }
 }

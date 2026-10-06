@@ -315,10 +315,8 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
               },
             },
           },
-          oneOf: [
-            { required: ['person_id', 'merge_person_id'], properties: { person_id: { type: 'string', minLength: 1 }, merge_person_id: { type: 'string', minLength: 1 } }, additionalProperties: false },
-            { required: ['colleague_slack_id', 'colleague_name'], not: { anyOf: [{ required: ['person_id'] }, { required: ['merge_person_id'] }] } },
-          ],
+          // Provider tools require a flat root object. The handler validates
+          // the exclusive two-ID reconciliation mode before any profile write.
         },
       },
       {
@@ -472,7 +470,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
     const isOwner = context.authority === 'owner';
     // Identity reconciliation is an owner correction, never a self-profile
     // edit. Run before the colleague allowlist can strip merge arguments.
-    if (toolName === 'update_person_profile' && Object.prototype.hasOwnProperty.call(args, 'merge_person_id')) {
+    if (toolName === 'update_person_profile' && ['person_id', 'merge_person_id'].some(key => Object.prototype.hasOwnProperty.call(args, key))) {
       if (!isOwner || !context.userId || context.userId !== userId) return { updated: false, merged: false, reason: 'owner_required' };
       if (typeof args.person_id !== 'string' || !args.person_id.trim() || typeof args.merge_person_id !== 'string' || !args.merge_person_id.trim()
         || Object.keys(args).some(key => !['person_id', 'merge_person_id'].includes(key))) {

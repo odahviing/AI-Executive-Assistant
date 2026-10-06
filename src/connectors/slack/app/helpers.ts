@@ -6,6 +6,7 @@
 
 import { upsertPersonMemory } from '../../../db';
 import { detectAndSaveGender } from '../../../utils/genderDetect';
+import { detectMessageLanguage } from '../../../utils/detectMessageLanguage';
 import type { SlackAppContext } from './context';
 
   // ── Channel type helpers ──────────────────────────────────────────────────
@@ -157,8 +158,28 @@ export const OVERLOAD_REPLY = `Quick coffee break, ping me again in a couple of 
  * Single source for both catches in processMessage (pre-queue and in-runner)
  * so the wording can never drift between the two halves of the same turn.
  */
-export function failureReply(err: unknown): string {
-  return isOverloadError(err)
+export function failureReply(err: unknown, inboundText: string): string {
+  // Queue batches separate raw messages with blank lines. Exclude only the
+  // exact transport marker so even short voice transcripts retain their script.
+  const languageText = inboundText.split('\n\n').map(part => {
+    const trimmed = part.trimStart();
+    const marker = '[Voice message]:';
+    return trimmed.startsWith(marker) ? trimmed.slice(marker.length) : part;
+  }).join('\n\n');
+  const language = detectMessageLanguage(languageText);
+  const overloaded = isOverloadError(err);
+  if (language === 'Hebrew') return overloaded
+    ? 'הפסקת קפה קצרה, אפשר לנסות שוב בעוד כמה דקות?'
+    : 'משהו השתבש אצלי, אפשר לנסות שוב בעוד דקה?';
+  if (language === 'Russian') return overloaded
+    ? 'Небольшой перерыв на кофе, попробуйте снова через пару минут?'
+    : 'У меня что-то пошло не так, попробуйте снова через минуту?';
+  if (language === 'Arabic') return overloaded
+    ? 'استراحة قهوة قصيرة، هل يمكنك المحاولة مجددًا بعد بضع دقائق؟'
+    : 'حدث خلل لديّ، هل يمكنك المحاولة مجددًا بعد دقيقة؟';
+  // Script detection cannot distinguish Latin languages or infer the language
+  // of captionless media; retain the existing English default for those cases.
+  return overloaded
     ? OVERLOAD_REPLY
     : `Something's off on my end, give me a minute and try again?`;
 }

@@ -7,6 +7,7 @@ function setup({optIn=false,failed=false,eligible=true}={}) {
   '../../../core/orchestrator':{},'../../../core/briefIntent':{},'../../../tasks/briefs':{},
   '../../../db':{upsertPersonMemory:p=>saved.push(p),auditLog(){}},
   '../../../utils/genderDetect':{detectAndSaveGender:async p=>{calls.push(p);}},
+  '../../../utils/detectMessageLanguage':{detectMessageLanguage:()=>{throw Error('language detection is outside the gender-ingestion fixture');}},
   '../coordinator':{handleOutreachReply:async()=>({handled:true})},'../../../vision':{},
   '../../../utils/logger':{__esModule:true,default:{info(){},warn(){}}},'./helpers':{},'../threadHistory':{},
   '../../../connections/slack/eligibility':{readInternalSlackConversation:async()=>eligible},'../socketWatermark':{stampSocketAlive(){}},

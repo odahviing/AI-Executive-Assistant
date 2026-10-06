@@ -3,6 +3,8 @@
 Consolidate both email hotfixes and the accumulated Workshop run into 5.0.4 at the owner's direction. Person memory uses the canonical database, scheduling ranks the complete known contact cohort, and follow-ups and briefings distinguish completed actions from notification delivery.
 
 ### Fixed
+- Restore provider-compatible person and task tool definitions so ordinary turns are not rejected before generation. Identity reconciliation and conditional follow-up requirements remain enforced by runtime validation.
+- Use the existing language detector for Slack failure replies in Hebrew, Russian and Arabic, including voice transcripts and queued messages; Latin, unknown and captionless inputs retain the English default. No model call added.
 - Stop repeated Slack alerts for retried email polling failures. Structured terminal authentication rejection, including Graph SDK-wrapped errors, pauses polling and retains a confirmed send rejection; transient diagnostics and recovery remain intact.
 - Bind conditional follow-ups to an explicit pending parent and outward message. Recheck the parent when firing, cancel dependent timers on terminal closure, and preserve parent-aware idempotency without guessing legacy associations.
 - Relay the saved full request to the owner instead of its internal title, with authenticated requester and owner scoping. Recover bounded exact-thread Slack context for replies to automated outreach; remotely hydrated prose cannot become a trusted tool receipt.
@@ -25,8 +27,9 @@ Consolidate both email hotfixes and the accumulated Workshop run into 5.0.4 at t
 - Record independently reviewed Architect changes against real release commits so shipped history remains distinguishable from current unwrapped work.
 
 ### Verification and limits
-- Accumulated executable checkpoint: 222 suite/timezone executions and 5,373 assertions passed; TypeScript passed. Independent repair review retained the original failed evidence and verified the corrected delivery and fixture paths.
+- Accumulated executable checkpoint: 224 suite/timezone executions and 5,423 assertions passed with one independently verified test-loader replacement; the original full-run failure is retained. TypeScript passed. All three subsequent provider-schema and failure-language repairs passed independent review.
 - Golden30: 18 passes and 12 stale catalog anchors traced to current source, zero failures. Structural prompt checks do not establish live model obedience.
+- Provider compatibility checks exercise actual exported tool sets through an offline provider stub; they do not establish live conversational recovery.
 - The earlier email hotfixes had owner-authorized focused verification (69 initial and 74 follow-up checks); their code is retained and covered by this accumulated executable checkpoint. Credential replacement is separate operational work.
 - News attribution remains blocked on missing historical source evidence; broader deferred work is not claimed fixed.
 

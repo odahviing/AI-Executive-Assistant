@@ -1707,7 +1707,6 @@ Task types:
             message: { type: 'string', description: 'What to say when the task fires. When reminding someone ELSE, pass the reminder CONTENT only (e.g. "the board prep deck") — Maelle adds the "<owner> asked me to remind you" framing and reports back to the owner. When reminding the owner, this is the text DM\'d to them.' },
           },
           required: ['type', 'title', 'due_at'],
-          allOf: [{ if: { properties: { type: { const: 'follow_up' } }, required: ['type'] }, then: { required: ['parent_request_id', 'message'], properties: { message: { type: 'string', pattern: '\\S' } } }, else: { not: { required: ['parent_request_id'] } } }],
         },
       },
       {

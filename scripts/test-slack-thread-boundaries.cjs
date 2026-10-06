@@ -47,6 +47,8 @@ function harness(options={}){
   'src/connectors/slack/postReply.ts':{postOrchestratorReply:async p=>{if(options.postReply)return options.postReply(p);if(options.deliveryPause)await options.deliveryPause.promise;p.onBeforeDelivery?.();await p.say({text:p.result.reply,thread_ts:p.threadTs});p.onDelivered();append(p.threadTs,p.channelId,{role:'assistant',content:'mutated=calendar '+p.result.reply,ts:'500.000001'});}}
  };
  const modules=new Map();
+ if(options.actualFailureReply){delete mocks['src/connectors/slack/app/helpers.ts'];actual.add('src/connectors/slack/app/helpers.ts');actual.add('src/utils/detectMessageLanguage.ts');}
+ if(options.prequeueFailure)mocks['src/db.ts'].getSummarySessionByThread=()=>{throw Error('fixture prequeue failure');};
  function load(rel){
   if(Object.hasOwn(mocks,rel))return mocks[rel];
   if(modules.has(rel))return modules.get(rel);

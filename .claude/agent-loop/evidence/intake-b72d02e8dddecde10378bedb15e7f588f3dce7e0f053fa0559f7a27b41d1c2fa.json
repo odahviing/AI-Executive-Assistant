@@ -1,0 +1,17 @@
+{
+  "kind": "Private screenshot retention manifest",
+  "originals": [
+    {
+      "source": "codex-clipboard-6bd61f31-5e2c-4994-b74f-18615c08b37e.png",
+      "retainedPath": "artifacts/workshop-verification/provider-schema-20261006/private/yael-existing-thread.png",
+      "sha256": "ca364bba6a5bd91cd4af74ab12aa77872a8a7d7e174ccf530e18e8d27575a21a"
+    },
+    {
+      "source": "codex-clipboard-f3e7a90b-8a44-4d15-ae90-23a86cab923c.png",
+      "retainedPath": "artifacts/workshop-verification/provider-schema-20261006/private/yael-new-thread.png",
+      "sha256": "d2e9c51abe9c6fdfb658bbecf4218ca71f912954e1928b4913b7a15c93e75ad5"
+    }
+  ],
+  "privacy": "Raw screenshot bytes retained locally in ignored evidence only; candidate details must not be published. Filenames are retention labels, not thread attribution.",
+  "observation": "Screenshots show17:47/17:49 Israel-time substantive Hebrew requests followed by a generic English failure fallback. Cloud logs corroborate same four failed provider calls; delivered:false does not mean no fallback Slack message. Screenshot capture time is not a new incident timestamp."
+}
