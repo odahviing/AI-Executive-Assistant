@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 24 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 2 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (9):** two-owner-preference-stores · slack-durable-delivery-recovery · two-owner-preference-stores-instructor-dependency · working-hours-present-effective-weekly-schedule · slack-durable-delivery-recovery-handyman-dependency · two-owner-preference-stores-handyman-dependency · working-hours-canonical-week-matchmaker-dependency · working-hours-canonical-week-instructor-dependency · working-hours-canonical-week-handyman-dependency
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (22)
 
