@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 30 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 6 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (5):** yael-recurring-meeting-ambiguity-20261007 · yael-approval-relay-language-20261007 · yael-human-gate-false-approval-20261007 · dina-owner-attendee-normalization-20261007 · dina-owner-third-party-claim-20261007
+**Independently verified, awaiting wrap (0):** none
 
 ### Needs a product decision (2)
 
