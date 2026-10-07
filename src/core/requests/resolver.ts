@@ -757,6 +757,15 @@ async function resolveRequestInner(
     });
   }
 
+  // Routing ambiguity is not a pure yes/no. The same request and its expiry
+  // stay pending until the exact action is known. Owner data.tool/args above
+  // uses the existing precise-decision recovery path, without inventing identity.
+  if (detailsAll.rule === 'freeform_needs_clarification') {
+    return { ok: false, request_id: requestId, state: row.state,
+      effect: 'approve_needs_clarification',
+      reason: 'The ask is tracked, but its action is still unclear. Nothing was executed or completed. Clarify the exact action and identity, then resolve this same request with data.tool and data.args; do not infer an event identity from a bare yes.' };
+  }
+
   // No on_approve — this is a PURE yes/no approval (e.g. "ok to share my
   // number?"): there's no fulfilling booking/cancel to wait for, so close +
   // relay "owner said yes" now. v3.4.6 (spine collapse) — the old

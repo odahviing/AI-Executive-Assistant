@@ -59,27 +59,45 @@ const VIEWED_MAX_PER_THREAD = 20;
 const viewedLedger = new Map<string, LedgerEntry[]>();
 
 /** Record events surfaced by a get_calendar read in this thread. Dedup by id
- *  (a later read refreshes subject/date); on overflow keep the SOONEST-dated —
- *  the near-term meetings are the ones the owner acts on ("move tomorrow's"),
- *  not one three weeks out. Undated entries sort last. */
+ *  (a later read refreshes subject/date). Retain the latest selection first;
+ *  within each read keep the soonest-dated events. Undated entries sort last. */
 export function recordViewedThreadEvents(
   threadTs: string,
   events: Array<{ subject?: string; eventId: string; dateIso?: string }>,
 ): void {
   if (!threadTs || events.length === 0) return;
   const byId = new Map((viewedLedger.get(threadTs) ?? []).map(e => [e.eventId, e]));
+  // One timestamp identifies one returned calendar selection. Keep it monotonic
+  // even for two reads in the same millisecond; older recall stays available.
+  const complete = events.length < VIEWED_MAX_PER_THREAD;
+  // Zero retains recall without claiming complete selection evidence. Invalidate
+  // older batches too, so truncation (or deleting one retained event later)
+  // cannot make an incomplete result appear unique.
+  if (!complete) for (const entry of byId.values()) entry.at = 0;
+  const at = complete ? Math.max(Date.now(), ...[...byId.values()].map(e => e.at + 1)) : 0;
   for (const ev of events) {
     if (!ev.eventId) continue;
-    byId.set(ev.eventId, { subject: ev.subject || 'a meeting', eventId: ev.eventId, dateIso: ev.dateIso ?? '', at: Date.now() });
+    byId.set(ev.eventId, { subject: ev.subject || 'a meeting', eventId: ev.eventId, dateIso: ev.dateIso ?? '', at });
   }
-  const sorted = [...byId.values()].sort((a, b) => (a.dateIso || '9999').localeCompare(b.dateIso || '9999'));
+  const sorted = [...byId.values()].sort((a, b) => b.at - a.at || (a.dateIso || '9999').localeCompare(b.dateIso || '9999'));
   viewedLedger.set(threadTs, sorted.slice(0, VIEWED_MAX_PER_THREAD));
 }
 
 /** Events looked at (get_calendar) in this thread, soonest-dated first. */
 export function getViewedThreadEvents(threadTs: string): LedgerEntry[] {
   if (!threadTs) return [];
-  return viewedLedger.get(threadTs) ?? [];
+  return [...(viewedLedger.get(threadTs) ?? [])].sort((a, b) => (a.dateIso || '9999').localeCompare(b.dateIso || '9999'));
+}
+
+/** The most recent nonempty calendar result, separate from cumulative recall. */
+export function getLatestViewedThreadEvents(threadTs: string): LedgerEntry[] {
+  const entries = getViewedThreadEvents(threadTs);
+  const latest = Math.max(...entries.map(e => e.at));
+  if (!(latest > 0)) return [];
+  const batch = entries.filter(e => e.at === latest);
+  // At the cap we cannot prove the complete result survived. Recall is useful,
+  // but a potentially truncated selection cannot establish uniqueness.
+  return batch.length >= VIEWED_MAX_PER_THREAD ? [] : batch;
 }
 
 /**

@@ -1,3 +1,20 @@
+## 5.0.5 — Reliable recurring moves and approval replies
+
+Repair the Yael recurring-reschedule and Dina owner-attendee incidents. Pending owner decisions retain their requester context, and final replies distinguish confirmed actions from pending, failed or unknown results.
+
+### Fixed
+- Select a dated recurring occurrence from the latest calendar view without confusing older exceptions from another series; retain conservative handling when the view is stale or incomplete.
+- Keep uncertain owner asks in the existing approval lifecycle with timers and original requester context. Do not execute a guessed action from a bare approval, or close the request as a delivered reminder.
+- Recognize an existing owner email in the attendee roster before peer availability checks, preserving owner scheduling rules and real attendee conflicts.
+- Check final rewritten replies against actual request and tool outcomes, preserving confirmed completion and withholding unsupported approval claims. Correct weekday extraction without corrupting valid short or full Hebrew weekday text.
+
+### Framework
+- Refresh two source-navigation citations for the output gates; no Workshop rule or runtime policy changed.
+
+### Verification and limits
+- Four correction roots independently reviewed. Full executable checkpoint retained with targeted repair replacements: 228 suite/timezone executions, 5,526 assertions, no failed or skipped checks; TypeScript passed.
+- Golden30 independently traced. Isolated fixtures and captured model inputs establish the tested contracts, not live model obedience or a replay of the users' conversations.
+
 ## 5.0.4 — Canonical person memory, scheduling and delivery reliability
 
 Consolidate both email hotfixes and the accumulated Workshop run into 5.0.4 at the owner's direction. Person memory uses the canonical database, scheduling ranks the complete known contact cohort, and follow-ups and briefings distinguish completed actions from notification delivery.

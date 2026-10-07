@@ -171,7 +171,7 @@ test('a prior approval delivery cannot ground a distinct current relay claim', a
   const c = ctx(null, { history: [{ role: 'assistant', content: `${summary}\nSent to Idan.` }] });
   assert.equal(await h.run(c, 'I sent this new ask to Idan.'), 'I did not send that yet.');
   assert.equal(h.calls.rewrite, 1);
-  assert.equal(h.calls.backstop, 1);
+  assert.equal(h.calls.backstop, 0);
 });
 
 for (const [label, result] of [
@@ -179,11 +179,11 @@ for (const [label, result] of [
   ['unknown', { ok: true, created: true, approval_id: 'req_unknown' }],
   ['failed', { error: 'no_verified_deviation' }],
 ]) {
-  test(`${label} approval claim is still rewritten and backstopped in a colleague DM`, async () => {
+  test(`${label} approval claim is corrected without an output-time side effect`, async () => {
     const h = loadGate({ verdict: deliveredVerdict });
     assert.equal(await h.run(ctx(approvalSummary(result)), 'I sent that to Idan.'), 'I did not send that yet.');
     assert.equal(h.calls.rewrite, 1);
-    assert.equal(h.calls.backstop, 1);
+    assert.equal(h.calls.backstop, 0);
   });
 }
 
@@ -200,7 +200,7 @@ test('a checker-confirmed specifics mismatch still wins over confirmed delivery'
   const h = loadGate({ verdict: { ...deliveredVerdict, claim_specifics_mismatch: true } });
   assert.equal(await h.run(ctx(summary), 'I sent the changed ask to Idan.'), 'I did not send that yet.');
   assert.equal(h.calls.rewrite, 1);
-  assert.equal(h.calls.backstop, 1);
+  assert.equal(h.calls.backstop, 0);
 });
 
 for (const [label, overrides] of [

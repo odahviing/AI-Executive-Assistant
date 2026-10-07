@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **2 product decisions await you** — 30 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 6 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (5):** yael-recurring-meeting-ambiguity-20261007 · yael-approval-relay-language-20261007 · yael-human-gate-false-approval-20261007 · dina-owner-attendee-normalization-20261007 · dina-owner-third-party-claim-20261007
 
 ### Needs a product decision (2)
 
@@ -47,4 +47,8 @@
 | instructor · rita-incomplete-availability-claims | bug: Finder returned four Monday candidates, while the reply called 10:30 the only opening; downstream root remains unproven. (1 retained example) | Blocked: No speculative duplicate prompt rule. Need original candidate payload and assembled inputs for first approval and later owner reply. Original W2/I5 refusal preserved; no guessed change. Evidence: artifacts/workshop-verification/approved-batch-20261004/instructor/assessment.txt; existing owner authorization is retained. | Not assessed |
 | instructor · two-owner-preference-stores-instructor-dependency | bug: Necessary preference interface dependency awaits the representation decision recorded on two-owner-preference-stores. (1 retained example) | Blocked: Approve minimal versioned structured blocks inside existing markdown to preserve key/category/provenance/summary conditions; keep unmarked free text and current guards. Alternative retires those semantics and is not recommended. No new representation or helper exports implemented. Duplication removal already authorized; this asks only about the necessary new persisted representation. Live inventory/migration and person reconciliation remain blocked/incomplete. Same correction identity, not another root.; existing owner authorization is retained. | Not assessed |
 | librarian · news-related-reading-attribution-20261006 | bug: Oct6 unsupported Reflectiz related-reading attribution confirmed; historical source provenance unavailable (1 retained example) | Blocked: New incident confirmed independently; current public pages cannot reconstruct historical input. No speculative fix. Distinct candidate from earlier blocked news ref; no same-root claim. Lane returned blocked-charter W2; classified as technical evidence prerequisite, not an owner product decision.; existing owner authorization is retained. | Not assessed |
+
+### Framework work (1 open)
+
+- X234 — verification-unproven: Stale citation checker reports heuristic body-anchor distance as proven stale — approved-batch-20261004-X234-a1 — Framework behavioral pass. Inspection confirms detector, scope selection and blocking exit unchanged; suspected declaration-distance drift is no longer called proven semantic error. Executed16 cases cover body/declaration/use/weak/unresolved/EOF, unrelated diff filtering, mixed categories and strict exits. Synchronous CLI has no product caller, persisted state, background lifecycle or external action. Heuristic positional results still require human semantic review.
 

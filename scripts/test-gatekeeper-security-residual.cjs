@@ -64,7 +64,7 @@ const ctx={profile,result:{toolSummaries:[]},history:[],userMessage:'Thanks',sen
 for(const [surface,extra] of [['colleague-dm',{}],['owner-mpim',{senderId:'UOWNER',role:'colleague',isMpim:true,isOwnerInGroup:true}],['owner-channel',{senderId:'UOWNER',role:'colleague',isChannel:true,channelId:'CROOM'}],['unknown',{senderId:'UUNKNOWN',role:'unknown'}]]) {
  test(`successful-rewrite-residual-${surface}-blocked-before-send`,async()=>{
   const draft='Your request req_abc123 is queued.';
-  const h=harness([textResponse(draft),verdict(true)]);
+  const h=harness([verdict(true),textResponse(draft)]);
   const out=await h.gates.runOutputGates(draft,{...ctx,...extra});
   assert.equal(out,'Your request is queued.');assert.deepEqual(h.forbidden,[]);
   assert.equal(h.security.scanForLeaks(out).length,0);assert.equal(h.calls.length,2);

@@ -100,21 +100,9 @@ export function getOutreachJobByRequestId(requestId: string): OutreachJob | null
 // the colleague rate-limit gate (max 2 pending requests per colleague). Reads
 // the requests spine (the lifecycle owner), independent of any side table.
 //
-// EXCLUDES subkind IN ('freeform_owner_flag', 'freeform_owner_ask') (bouncer
-// fix, pending-cap-blocks-unrelated-questions, 2026-08-10, widened
-// gh#194-b-promised-resend-never-fired x pending-cap-blocks-unrelated-questions):
-// those rows are minted by two DIFFERENT backstops — runOutputGates.ts's
-// claim-checker relay backstop (an unconfirmed "I told him" relay claim,
-// subkind='freeform_owner_flag') and tasks/skill.ts's
-// `flagUnresolvedFreeformForOwner` (an ambiguous freeform ask that can't be
-// confidently routed, subkind='freeform_owner_ask' as of chris-kelley-oof-
-// block-c round 3, 2026-08-18 — split from the shared value once it proved
-// NOT unique enough for the latter's own dedup lookup, getLatestFreeformOwnerFlag,
-// to tell the two backstops' rows apart) — both durable DMs to the owner
-// that must fire regardless of the colleague's own pending count (R3: each
-// exists precisely to stop a drop, so neither can itself be the thing that
-// gets dropped). Counting either here would silently eat a genuine slot of
-// the colleague's quota for something they never asked to have tracked.
+// Owner alarms retain R10's explicit cap exemption. The routing-uncertain ask
+// now rides an ordinary pending approval; old reminder rows retain the same
+// exemption while their already-scheduled delivery retries finish.
 export function getPendingRequestCountForColleague(ownerUserId: string, colleagueSlackId: string): number {
   const db = getDb();
   const count = (db.prepare(`
@@ -122,6 +110,7 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
     WHERE owner_user_id = ?
     AND state IN ('awaiting_owner', 'awaiting_colleague', 'in_flight')
     AND (requester_slack_id = ? OR target_slack_id = ?)
+    AND NOT (kind = 'approval' AND json_extract(CASE WHEN json_valid(details_json) THEN details_json ELSE '{}' END, '$.rule') IS 'freeform_needs_clarification')
     AND NOT (kind = 'reminder' AND (subkind IS '${FREEFORM_OWNER_FLAG_SUBKIND}' OR subkind IS '${FREEFORM_OWNER_ASK_SUBKIND}'))
   `).get(ownerUserId, colleagueSlackId, colleagueSlackId) as any)?.cnt ?? 0;
   return count;

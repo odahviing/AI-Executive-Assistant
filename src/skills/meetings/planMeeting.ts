@@ -542,7 +542,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // the few places that explicitly need "everyone except the owner".
   const hasOwner = input.participants.some(p => p.isOwner === true || (p.email ?? '').toLowerCase() === ownerEmail.toLowerCase());
   const participants: PlanParticipant[] = hasOwner
-    ? input.participants
+    ? input.participants.map(p => (p.email ?? '').toLowerCase() === ownerEmail.toLowerCase() ? { ...p, isOwner: true } : p)
     : [{ email: ownerEmail, isOwner: true }, ...input.participants];
   const nonOwnerParticipants = participants.filter(p => !p.isOwner);
 

@@ -10,9 +10,11 @@ const ts = require('typescript');
 const root = path.resolve(__dirname, '..');
 const at = process.argv.indexOf('--source-revision');
 const revision = at < 0 ? null : process.argv[at + 1];
+const sourceAt = process.argv.indexOf('--source-root');
+const sourceRoot = sourceAt < 0 ? null : process.argv[sourceAt + 1];
 const profile = { user: { name: 'Idan Cohen', slack_user_id: 'UOWNER', email: 'owner@example.com', timezone: 'Asia/Jerusalem' }, assistant: { name: 'Maelle' } };
 const verdict = (ok, rewrite) => ({ content: [{ type: 'tool_use', name: 'verdict', input: { ok, rewrite } }] });
-function harness(responses = [verdict(true)]) {
+function harness(responses = [verdict(true)], overrides = {}) {
   const calls = [], logs = [], forbidden = [], cache = {};
   const logger = Object.fromEntries(['info', 'warn', 'error', 'debug'].map(k => [k, (...args) => logs.push([k, ...args])]));
   const client = { messages: { create: async args => {
@@ -26,7 +28,7 @@ function harness(responses = [verdict(true)]) {
     'src/llm/models.ts': { MODEL_HAIKU: 'fixture-haiku', MODEL_SONNET: 'fixture-sonnet', SONNET: { model: 'fixture-sonnet' } },
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/utils/usageLog.ts': { logLlmUsage() {} },
-    'src/core/requests/types.ts': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },
+    'src/core/requests/types.ts': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag', ORIGIN_SURFACE_REPLAY_TOOLS: ['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block','promote_timezone_temp'] },
     'src/core/orchestrator/turnHelpers.ts': { toolLinesMatching: () => [] },
     'src/connections/slack/formatting.ts': { formatForSlack: s => s },
     'src/utils/availabilityGate.ts': { freshHardBlockedSlots: () => [] },
@@ -35,12 +37,14 @@ function harness(responses = [verdict(true)]) {
     'src/db/requests.ts': { getLatestRequestForThread: () => null },
     'src/db/index.ts': { getPersonMemory: () => ({ email: 'yael@example.com' }) },
   };
+  Object.assign(stubs, overrides);
   const actual = new Set(['src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
   function load(rel) {
     if (Object.hasOwn(stubs, rel)) return stubs[rel];
     if (cache[rel]) return cache[rel].exports;
     assert.ok(actual.has(rel), `unlisted module ${rel}`);
-    const source = revision ? cp.execFileSync('git', ['show', `${revision}:${rel}`], { cwd: root, encoding: 'utf8' }) : fs.readFileSync(path.join(root, rel), 'utf8');
+    const preserved = sourceRoot && path.join(sourceRoot, path.basename(rel));
+    const source = preserved && fs.existsSync(preserved) ? fs.readFileSync(preserved, 'utf8') : revision ? cp.execFileSync('git', ['show', `${revision}:${rel}`], { cwd: root, encoding: 'utf8' }) : fs.readFileSync(path.join(root, rel), 'utf8');
     const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText;
     const module = cache[rel] = { exports: {} };
     const req = name => {

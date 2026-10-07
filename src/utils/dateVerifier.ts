@@ -43,10 +43,7 @@ import { logLlmUsage } from './usageLog';
 
 const anthropic = getAnthropicClient();
 
-// Universal fallback weekday names (Mon..Sun). Only used to label a correction
-// when the extractor didn't return localized names — NOT a per-language table;
-// the correct word is normally taken from the LLM's same-language rendering.
-const WEEKDAY_EN_FALLBACK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
 
 export interface DateMismatch {
   writtenWeekday: string;  // exact weekday word as written — the token to swap out
@@ -185,18 +182,22 @@ export async function verifyDates(draft: string, profile: UserProfile, _userMess
     const correctNum = lookup.byIso.get(pair.isoDate);
     if (!correctNum) continue;                            // date outside our window
     if (correctNum === pair.writtenWeekdayNum) continue;  // weekday is right — no action
-    // Real mismatch. Correct name comes from the LLM's same-language rendering;
-    // fall back to English only if it didn't provide one.
-    const correctWeekday = extracted.weekdayNames[correctNum - 1] || WEEKDAY_EN_FALLBACK[correctNum - 1];
-    if (!correctWeekday) continue;
-    // 2026-08-02 false-positive: the extractor's writtenWeekdayNum is a SEPARATE
-    // LLM derivation from writtenWeekdayText and can disagree with it even when
-    // the WORD is already correct (observed live: correctWeekday and
-    // writtenWeekday both 'יום שלישי' while the two numbers differed). The
-    // written TEXT is the thing that ships; if it already equals the name we'd
-    // rewrite it TO, a swap would be a no-op-in-meaning at best and a wrong
-    // rewrite off a bad number at worst. Trust the text match over the number.
-    if (correctWeekday.trim().toLowerCase() === pair.writtenWeekdayText.trim().toLowerCase()) continue;
+    // Require a complete, internally consistent literal token/style contract.
+    // Shared prefixes (e.g. Hebrew's day prefix) belong to the source style:
+    // replacing a short token with a full name would duplicate that prefix.
+    const names = extracted.weekdayNames.map(name => name.trim());
+    if (names.length !== 7 || names.some(name => !name) || new Set(names).size !== 7) continue;
+    if (!Number.isInteger(pair.writtenWeekdayNum) || !draft.includes(pair.span)
+        || !pair.span.includes(pair.writtenWeekdayText)) continue;
+    const token = pair.writtenWeekdayText.trim();
+    const prefix = names[0].includes(' ') ? names[0].slice(0, names[0].indexOf(' ') + 1) : '';
+    const shortNames = prefix && names.every(name => name.startsWith(prefix))
+      ? names.map(name => name.slice(prefix.length)) : names;
+    const style = names.includes(token) ? names : shortNames;
+    // A contradictory number is unknown, not permission to mutate text.
+    if (style[pair.writtenWeekdayNum - 1] !== token) continue;
+    const correctWeekday = style[correctNum - 1];
+    if (correctWeekday === token) continue;
     mismatches.push({
       writtenWeekday: pair.writtenWeekdayText,
       correctWeekday,

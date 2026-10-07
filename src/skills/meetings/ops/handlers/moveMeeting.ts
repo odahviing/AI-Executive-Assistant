@@ -35,6 +35,7 @@ import { displaySubject, subjectViewerFor, viewerEmailFor, isEventPrivate } from
 import { createApprovalRequest } from '../../../../tasks/skill';
 import { logActivity } from '../../../../core/requests/logActivity';
 import type { OpCtx } from './context';
+import { getLatestViewedThreadEvents } from '../../../../utils/threadEventLedger';
 
 /** An explicit owner correction rejects only the automatic move still reflected in the calendar. */
 export async function recordOwnerAutoMoveCorrection(params: {
@@ -115,8 +116,7 @@ function notOrganizerRefusal(opts: {
  * the update path only; ported to move_meeting 2026-08-14, then extracted
  * here (bouncer, same night) so one rule has one spelling.
  *
- * Every gate downstream (organizer check, requester-controls, the mutation
- * itself) trusts args.meeting_id verbatim, but on a colleague's bare
+ * On a colleague's bare
  * subject reference ("add X to the meeting" / "move the sync to 3pm"),
  * meeting_id was resolved by the MODEL matching whatever get_calendar
  * returned against subject text — no code-owned check that the match was
@@ -126,7 +126,9 @@ function notOrganizerRefusal(opts: {
  * name) are indistinguishable to it.
  *
  * Mirrors findReschedulableSibling's create-path principle — match WHO, not
- * just WHAT — but for lookup: when another live event shares the identical
+ * just WHAT — but for lookup: prefer the most recent code-recorded calendar
+ * selection when its chosen event still has the same live date. Without that
+ * provenance, consider the full sibling window. When another event shares the identical
  * subject, resolve which one the ASKER actually means via the SAME
  * per-meeting signal the requester-controls gate downstream already trusts
  * (requests.requester_slack_id) plus raw attendee membership, then either
@@ -164,12 +166,25 @@ async function checkSameSubjectCollision(
     const subjectForMatch = (chosenProbe?.subject ?? (args.meeting_subject as string)).trim().toLowerCase();
     if (!chosenProbe?.startDateTime || !subjectForMatch) return null;
     const chosenSeriesKey = seriesKeyOf({ type: chosenProbe.type, seriesMasterId: chosenProbe.seriesMasterId, id: args.meeting_id });
+    // A calendar read already resolved the source date range. Do not widen that
+    // selection to 90 days of unrelated meetings merely because titles repeat.
+    // The ledger is code-produced from returned events, never a tool-argument
+    // assertion. A live date check prevents stale read evidence selecting an
+    // occurrence which has since moved. A fresh narrow read can resolve a prior
+    // broad ambiguity while the cumulative ledger still serves ordinary recall.
+    const viewed = getLatestViewedThreadEvents(context.threadTs);
+    const chosenDate = DateTime.fromISO(chosenProbe.startDateTime, { zone: timezone }).setZone(timezone).toISODate();
+    const selected = viewed.find(e => e.eventId === args.meeting_id && e.dateIso === chosenDate
+      && e.subject.trim().toLowerCase() === subjectForMatch);
+    const viewedIds = selected ? new Set(viewed.filter(e => e.subject.trim().toLowerCase() === subjectForMatch).map(e => e.eventId)) : undefined;
+    if (viewedIds?.size === 1) return null;
     const askerEmail = getPersonMemory(context.userId)?.email?.toLowerCase();
     const siblings = await findSameSubjectSiblings({
       userEmail, subject: subjectForMatch, anchorIso: chosenProbe.startDateTime, timezone,
     });
     const others = siblings.filter(s => {
       if (s.id === args.meeting_id) return false;
+      if (viewedIds && !viewedIds.has(s.id)) return false;
       // Another occurrence of the SAME recurring series as the chosen
       // event — not a different meeting, just calendarView's expansion.
       // Never ambiguous.
@@ -1362,8 +1377,8 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
   let bookedOverAttendees: AttendeeConflictTag[] = [];
         // move-meeting-bare-subject-lookup-same-ambiguity-class (2026-08-14) —
         // move_meeting's own same-subject-collision guard. Unconditional for
-        // colleague-path — move has no optional field to gate on; every
-        // colleague move resolves a meeting_id off a bare reference. (Was
+        // colleague-path; the helper distinguishes a recorded dated calendar
+        // selection from a bare reference. (Was
         // also the only unconditional one until 2026-09-07, when
         // update_meeting's own gate widened to match — see its call site.)
         // Shared with update_meeting via checkSameSubjectCollision above
