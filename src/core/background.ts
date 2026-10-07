@@ -7,6 +7,7 @@ import { stopInterruptedRoutineTasks } from '../tasks/dispatchers/routine';
 import logger from '../utils/logger';
 import { readInternalSlackConversation } from '../connections/slack/eligibility';
 import { readSlackThread } from '../connectors/slack/threadHistory';
+import { hasHeldDelivery, reconcileSlackDeliveries } from '../connectors/slack/deliveryAttempt';
 
 // v3.3.10 — recovery scope: DM + panel threads, gap-from-watermark (no time
 // cap — "since Maelle was last online", any length), one reply per distinct
@@ -548,6 +549,10 @@ export async function catchUpMissedMessages(
     return;
   }
 
+  // Durable unresolved attempts are independent of the socket gap. Revisit on
+  // every existing heartbeat, including when no new inbound history is due.
+  await reconcileSlackDeliveries(app, profile.user.slack_user_id, botToken, botUserId);
+
   // Gap = "since Maelle was last online", from the watermark. NO time cap
   // (owner direction): if she was off two days, recover two days; off a week,
   // a week. The per-conversation answered-check (latestHuman > latestBot)
@@ -879,6 +884,8 @@ async function replayMissedMessage(
 ): Promise<void> {
   const { profile, channelId } = opts;
   const msgTs = latestUserMsg.ts as string;
+  if (hasHeldDelivery({ profileId: profile.user.slack_user_id, channelId,
+    threadTs: post.postThreadTs, inboundTs: [msgTs] })) return;
   const userTs = parseFloat(msgTs);
   const hoursAgo = Math.round((Date.now() / 1000 - userTs) / 3600);
   logger.info('Catching up missed message', {
@@ -896,10 +903,9 @@ async function replayMissedMessage(
   // the live handler ingested it and is mid-flight (slow orchestrator turn,
   // reply not posted to Slack yet, so the answered-check that selected this
   // candidate saw stale botTs). Replaying now would post a SECOND reply. Gate
-  // on the return: if the live path already owns this message, skip. (After
-  // the 10-min dedup TTL, a genuinely-unanswered message becomes re-markable
-  // and a later tick will recover it — so a live turn that marked-then-threw
-  // still self-heals.)
+  // on the return: if the live path already owns this message, skip. Durable
+  // sending/unknown/confirmed attempts were excluded above even after TTL.
+  // A pre-send failure without an attempt can still be recovered later.
   let alreadyOwned = false;
   try {
     const { markProcessed } = require('../connectors/slack/processedDedup') as typeof import('../connectors/slack/processedDedup');

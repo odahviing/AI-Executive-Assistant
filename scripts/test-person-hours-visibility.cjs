@@ -8,9 +8,10 @@ const assert=require('node:assert/strict'),{test}=require('node:test'),fs=requir
 const luxon=require('luxon'),Database=require('better-sqlite3');
 const root=path.resolve(__dirname,'..'),baseline='13f50a4dbc23cf2c214112d61d508e536a2aa380',before=process.env.LIBRARIAN_BEFORE==='1',compiled=new Map();
 const actual=new Set(['src/memory/resolveAttendeeEmails.ts','src/db/people.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts']);
+const {regularWeek}=require('./fixtures/regular-week.cjs');
 const WEEK=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'],MF=WEEK.slice(1,6),ST=WEEK.slice(0,5);
 const auto=(workdays,hoursStart,hoursEnd)=>JSON.stringify({workdays,hoursStart,hoursEnd});
-const stated=(workdays,hoursStart,hoursEnd,timezone,extra={})=>JSON.stringify({...extra,working_hours_structured:{workdays,hoursStart,hoursEnd,...(timezone?{timezone}:{})}});
+const stated=(workdays,hoursStart,hoursEnd,timezone,extra={})=>JSON.stringify({...extra,working_hours_structured:{week:regularWeek(workdays,hoursStart,hoursEnd),source:'manual',...(timezone?{timezone}:{})}});
 const COLS='person_id,slack_id,name,name_set_by,email,email_set_by,kind,source,org,is_vip,timezone,timezone_set_by,timezone_temp,state,state_set_by,name_he,name_he_set_by,gender,gender_set_by,gender_confirmed,last_inbound_lang,last_inbound_lang_at,profile_json,working_hours_auto,currently_traveling,notes,interaction_log,engagement_rank,proactive_pending,last_social_at,last_seen,created_at,updated_at'.split(',');
 function harness(people){
  const sqlite=new Database(':memory:');
@@ -19,6 +20,7 @@ function harness(people){
  for(const p of people){
   const row=Object.fromEntries(COLS.map(c=>[c,null]));
   Object.assign(row,{person_id:'p_'+(p.slack_id||p.name.replace(/\W/g,'_')),kind:p.slack_id?'internal':'external',gender:'unknown',gender_confirmed:0,profile_json:'{}',notes:'[]',interaction_log:'[]',last_seen:new Date().toISOString()},p);
+  if(row.working_hours_auto && !JSON.parse(row.profile_json).working_hours_structured){const a=JSON.parse(row.working_hours_auto);row.profile_json=JSON.stringify({...JSON.parse(row.profile_json),working_hours_structured:{week:regularWeek(a.workdays,a.hoursStart,a.hoursEnd),source:'auto'}});row.working_hours_auto=null;}
   ins.run(row);
  }
  const profile={user:{name:'Owner Example',slack_user_id:'UOWNER',email:'owner@example.com',timezone:'Asia/Jerusalem'},assistant:{name:'Maelle'}};
@@ -66,22 +68,22 @@ const PEOPLE=[
 ];
 
 test('HV-roster-stated: owner roster renders a stated window at a glance, never the prose',()=>{const r=harness(PEOPLE).roster();
- const alex=line(r,'Alex Wiggins');assert.match(alex,/, hours: Mon–Fri 08:00–17:00, email:/);assert.doesNotMatch(alex,/tz default/);
- const lori=line(r,'Lori Sarsfield');assert.match(lori,/, hours: Mon–Fri 07:00–16:00 America\/New_York,/);assert.doesNotMatch(lori,/East Coast|Wed\/Fri/);
- assert.match(line(r,'Maayan Cohen'),/, hours: Sun–Thu 10:00–20:00,/);});
+ const alex=line(r,'Alex Wiggins');assert.match(alex,/, hours: Mon–Fri 08:00–17:00; Sun\/Sat off, email:/);assert.doesNotMatch(alex,/tz default/);
+ const lori=line(r,'Lori Sarsfield');assert.match(lori,/, hours: Mon–Fri 07:00–16:00; Sun\/Sat off America\/New_York,/);assert.doesNotMatch(lori,/East Coast|Wed\/Fri/);
+ assert.match(line(r,'Maayan Cohen'),/, hours: Sun–Thu 10:00–20:00; Fri–Sat off,/);});
 test('HV-roster-default: owner roster marks the timezone default as not stated',()=>{const r=harness(PEOPLE).roster();
- assert.match(line(r,'Dan Beauregard'),/, hours: Mon–Fri 09:00–17:00 \(tz default, not stated\),/);
- assert.match(line(r,'Kevin External'),/external — no Slack account.*, hours: Mon–Fri 09:00–17:00 \(tz default, not stated\),/);});
+ assert.match(line(r,'Dan Beauregard'),/, hours: Mon–Fri 09:00–17:00; Sun\/Sat off \(tz default, not stated\),/);
+ assert.match(line(r,'Kevin External'),/external — no Slack account.*, hours: Mon–Fri 09:00–17:00; Sun\/Sat off \(tz default, not stated\),/);});
 test('HV-roster-social-off: the slim social-off roster line carries the same window',()=>{const h=harness(PEOPLE);assert.match(line(h.roster(undefined,true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);assert.match(line(h.roster(new Set(['UALEX']),true),'Alex Wiggins'),/hours: Mon–Fri 08:00–17:00/);});
 test('HV-memory-effective: get_person_memory returns the effective window with its zone and provenance',async()=>{const h=harness(PEOPLE);
- const a=await h.memory('Alex Wiggins');assert.equal(a.found,true);assert.equal(a.working_hours.source,'manual');assert.equal(a.working_hours.workdays.join(','),MF.join(','));assert.equal(a.working_hours.hoursStart,'08:00');assert.equal(a.working_hours.hoursEnd,'17:00');assert.equal(a.working_hours.timezone,'America/New_York');assert.equal(a.timezone,'America/New_York');assert.equal(a.timezone_set_by,'person');assert.equal(a.state,'Boston');
- const d=await h.memory('Dan Beauregard');assert.equal(d.working_hours.source,'auto');assert.match(d.working_hours.note,/default for their timezone/);assert.equal(d.timezone_set_by,'auto');});
+ const a=await h.memory('Alex Wiggins');assert.equal(a.found,true);assert.equal(a.working_hours.source,'manual');assert.equal(Object.keys(a.working_hours.week).filter(d=>a.working_hours.week[d]).join(','),MF.join(','));assert.equal(a.working_hours.week.Monday.hoursStart,'08:00');assert.equal(a.working_hours.week.Monday.hoursEnd,'17:00');assert.equal(a.working_hours.timezone,'America/New_York');assert.equal(a.timezone,'America/New_York');assert.equal(a.timezone_set_by,'person');assert.equal(a.state,'Boston');
+ const d=await h.memory('Dan Beauregard');assert.equal(d.working_hours.source,'auto');assert.match(d.working_hours.note,/initialized from timezone defaults once/);assert.equal(d.timezone_set_by,'auto');});
 test('HV-memory-note-rank: get_person_memory ranks the stated window above a stale free-text note',async()=>{const i=await harness(PEOPLE).memory('Isaac Levy');
- assert.equal(i.working_hours.source,'manual');assert.equal(i.working_hours.window,'Mon/Thu 09:00–17:00 Asia/Jerusalem');assert.match(i.working_hours.note,/outranks any hours mentioned in notes/);assert.equal(i.notes.length,1);});
+ assert.equal(i.working_hours.source,'manual');assert.equal(i.working_hours.window,'Mon/Thu 09:00–17:00; Sun/Tue/Wed/Fri/Sat off Asia/Jerusalem');assert.match(i.working_hours.note,/outranks any hours mentioned in notes/);assert.equal(i.notes.length,1);});
 test('HV-correction-next-turn: a correction the owner just made is what the store reads back next turn',async()=>{const h=harness(PEOPLE);
- const w=await h.tool('Isaac Levy','UISAAC',{working_hours_structured:{workdays:MF,hoursStart:'09:00',hoursEnd:'19:00'}});assert.equal(w.scheduling_hours.in_force,true);
- const l=line(h.roster(undefined,true),'Isaac Levy');assert.match(l,/, hours: Mon–Fri 09:00–19:00,/);assert.doesNotMatch(l,/Mon\/Thu|Monday and Thursday/);assert.match(h.roster(undefined,true),/1 note on file/);
- const m=await h.memory('Isaac Levy');assert.equal(m.working_hours.window,'Mon–Fri 09:00–19:00 Asia/Jerusalem');});
+ const w=await h.tool('Isaac Levy','UISAAC',{working_hours_structured:{week:regularWeek(MF,'09:00','19:00')}});assert.equal(w.scheduling_hours.in_force,true);
+ const l=line(h.roster(undefined,true),'Isaac Levy');assert.match(l,/, hours: Mon–Fri 09:00–19:00; Sun\/Sat off,/);assert.doesNotMatch(l,/Mon\/Thu|Monday and Thursday/);assert.match(h.roster(undefined,true),/1 note on file/);
+ const m=await h.memory('Isaac Levy');assert.equal(m.working_hours.window,'Mon–Fri 09:00–19:00; Sun/Sat off Asia/Jerusalem');});
 test('HV-memory-facts-only: get_person_memory finds a person who has only scheduling facts on file',async()=>{const s=await harness(PEOPLE).memory('Sharon Nameonly');assert.equal(s.found,true);assert.equal(s.timezone,'America/New_York');assert.equal(s.state,'Boston');assert.equal(s.working_hours.source,'auto');});
 test('HV-control-no-hours: a contact with no timezone and no hours renders unchanged',()=>{const l=line(harness(PEOPLE).roster(),'Erez Hodis');assert.doesNotMatch(l,/hours:|tz:/);assert.match(l,/^Erez Hodis \(slack_id: UEREZ, gender: unknown, language_pref: unknown/);});
 test('HV-control-colleague-surfaces: colleague-path blocks still carry no working hours',()=>{const p=harness(PEOPLE).load('src/db/people.ts');
@@ -89,9 +91,9 @@ test('HV-control-colleague-surfaces: colleague-path blocks still carry no workin
  const work=p.buildPersonWorkContextBlock('ULORI');assert.match(work,/responds: fast/);assert.doesNotMatch(work,/hours|07:00|East Coast/);});
 test('HV-control-colleague-refused: colleague-path get_person_memory stays refused',async()=>{const r=await harness(PEOPLE).memory('Alex Wiggins','colleague');assert.equal(r.error,'not_permitted');});
 test('HV-control-unknown: an unknown person still reports no memory',async()=>{const r=await harness(PEOPLE).memory('Nobody Known');assert.equal(r.found,false);});
-test('HV-control-write-echo: update_person_profile still echoes the in-force window after a write',async()=>{const w=await harness(PEOPLE).tool('Alex Wiggins','UALEX',{working_hours_structured:{workdays:MF,hoursStart:'07:00',hoursEnd:'15:00',timezone:'America/Los_Angeles'}});
- assert.equal(w.scheduling_hours.in_force,true);assert.equal(w.scheduling_hours.timezone,'America/Los_Angeles');assert.match(w._note,/Mon.*Fri 07:00–15:00 America\/Los_Angeles/);});
-test('HV-control-prose-only: a prose-only hours write still reports scheduling unchanged',async()=>{const w=await harness(PEOPLE).tool('Dan Beauregard','UDAN',{working_hours:'mornings only'});assert.equal(w.scheduling_hours.in_force,false);assert.equal(w.scheduling_hours.stored_as,'note');assert.equal(w.scheduling_hours.scheduling_uses.source,'auto');});
+test('HV-control-write-echo: update_person_profile still echoes the in-force window after a write',async()=>{const w=await harness(PEOPLE).tool('Alex Wiggins','UALEX',{working_hours_structured:{week:regularWeek(MF,'07:00','15:00'),timezone:'America/Los_Angeles'}});
+ assert.equal(w.scheduling_hours.in_force,true);assert.equal(w.scheduling_hours.timezone,'America/Los_Angeles');assert.match(w._note,/Mon.*Fri 07:00–15:00; Sun\/Sat off America\/Los_Angeles/);});
+test('HV-control-prose-only: a prose-only hours write still reports scheduling unchanged',async()=>{const w=await harness(PEOPLE).tool('Dan Beauregard','UDAN',{working_hours:'mornings only'});assert.equal(w.updated,false);assert.equal(w.error,'retired_working_hours');});
 test('HV-measure-25: roster size measured on a 25-contact fixture (5 no-tz, 10 default, 10 stated)',()=>{
  const many=Array.from({length:25},(_,i)=>{const k=i%5,name=`Contact ${String(i).padStart(2,'0')} Surname`,id='UCONTACT'+String.fromCharCode(65+i);
   if(k===0)return {slack_id:id,name};
@@ -102,24 +104,24 @@ test('HV-measure-25: roster size measured on a 25-contact fixture (5 no-tz, 10 d
 
 test('DH incremental owner windows preserve siblings and default after reload',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Monday:{hoursStart:'08:00',hoursEnd:'14:00'}}}},'owner');
- p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:{hoursStart:'08:00',hoursEnd:'14:00'}}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
  const row=p.getPersonMemory('UALEX'),eff=w.getEffectiveWorkingHours(row);
- assert.equal(eff.hoursStart,'08:00'); assert.equal(eff.hoursEnd,'17:00');
- assert.equal(eff.dayOverrides.Monday.hoursEnd,'14:00'); assert.equal(eff.dayOverrides.Tuesday.hoursStart,'10:00');
- assert.ok(w.describeEffectiveWorkingHours(row).window.includes('Mon 08:00–14:00, Tue 10:00–16:00'));
- const replay=p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
- assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).dayOverrides.Monday.hoursEnd,'14:00');
+ assert.equal(eff.week.Wednesday.hoursStart,'08:00'); assert.equal(eff.week.Wednesday.hoursEnd,'17:00');
+ assert.equal(eff.week.Monday.hoursEnd,'14:00'); assert.equal(eff.week.Tuesday.hoursStart,'10:00');
+ assert.ok(w.describeEffectiveWorkingHours(row).window.includes('Mon 08:00–14:00; Tue 10:00–16:00'));
+ const replay=p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday.hoursEnd,'14:00');
 });
 test('DH day-only initial write uses region defaults and explicit non-default weekday',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UDAN',{working_hours_structured:{dayOverrides:{Sunday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'person');
+ p.updatePersonProfile('UDAN',{working_hours_structured:{week:{Sunday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'person');
  const eff=w.getEffectiveWorkingHours(p.getPersonMemory('UDAN'));
- assert.equal(eff.source,'manual'); assert.equal(eff.hoursStart,'09:00'); assert.ok(eff.workdays.includes('Sunday')); assert.equal(eff.dayOverrides.Sunday.hoursEnd,'16:00');
+ assert.equal(eff.source,'manual'); assert.equal(eff.week.Monday.hoursStart,'09:00'); assert.ok(eff.week.Sunday); assert.equal(eff.week.Sunday.hoursEnd,'16:00');
 });
 test('DH invalid weekday or clock cannot replace durable valid hours',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts');
- for(const patch of [{dayOverrides:{Tuesday:{hoursStart:'late',hoursEnd:'16:00'}}},{dayOverrides:{Funday:{hoursStart:'10:00',hoursEnd:'16:00'}}}]) {
+ for(const patch of [{week:{Tuesday:{hoursStart:'late',hoursEnd:'16:00'}}},{week:{Funday:{hoursStart:'10:00',hoursEnd:'16:00'}}}]) {
   const original=p.getPersonMemory('UALEX').profile_json;
   assert.throws(()=>p.updatePersonProfile('UALEX',{working_hours_structured:patch},'owner'));
   assert.equal(p.getPersonMemory('UALEX').profile_json,original);
@@ -127,9 +129,9 @@ test('DH invalid weekday or clock cannot replace durable valid hours',()=>{
 });
 test('DH lower authority cannot amend owner day overrides; unknown timezone cannot invent default',()=>{
  const h=harness(PEOPLE),p=h.load('src/db/people.ts'),w=h.load('src/utils/workingHoursDefault.ts');
- p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
- assert.equal(p.updatePersonProfile('UALEX',{working_hours_structured:{dayOverrides:{Monday:{hoursStart:'06:00',hoursEnd:'12:00'}}}},'person').working_hours_structured,'refused_lower_authority');
- assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).dayOverrides.Monday,undefined);
- p.updatePersonProfile('UEREZ',{working_hours_structured:{dayOverrides:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner');
+ assert.equal(p.updatePersonProfile('UALEX',{working_hours_structured:{week:{Monday:{hoursStart:'06:00',hoursEnd:'12:00'}}}},'person').working_hours_structured,'refused_lower_authority');
+ assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UALEX')).week.Monday.hoursStart,'08:00');
+ assert.throws(()=>p.updatePersonProfile('UEREZ',{working_hours_structured:{week:{Tuesday:{hoursStart:'10:00',hoursEnd:'16:00'}}}},'owner'));
  assert.equal(w.getEffectiveWorkingHours(p.getPersonMemory('UEREZ')),null);
 });

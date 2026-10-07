@@ -7,7 +7,7 @@ const idx=process.argv.indexOf('--source-dir');
 if(idx>=0)process.env.SLOT_PRIORITY_BEFORE=path.relative(process.cwd(),path.resolve(process.argv[idx+1]));
 const {run}=fixture('scripts/test-garage-recovery-summary.cjs','for(const role','',s=>s.replace("start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00'","start:'2026-10-08T12:40:00+03:00',end:'2026-10-08T14:15:00+03:00'"));
 const {harness,ctx,profile}=fixture('scripts/test-gatekeeper-join-summary-action.cjs','for(const [id,extra]','\nmodule.exports={harness,ctx,profile};');
-const options={clean:true,busy:true,argsOverride:{search_from:'2026-10-08',search_to:'2026-10-08'},availabilityOverride:[{email:'peer@example.test',timezone:'Asia/Jerusalem',hoursStart:'10:00',hoursEnd:'19:00',workdays:['Thursday']}]};
+const options={clean:true,busy:true,argsOverride:{search_from:'2026-10-08',search_to:'2026-10-08'},availabilityOverride:[{email:'peer@example.test',timezone:'Asia/Jerusalem',week:require('./fixtures/regular-week.cjs').regularWeek(['Thursday'],'10:00','19:00')}]};
 for(const [id,extra,role] of [['owner-dm',{senderId:'UOWNER',role:'owner'},'owner'],['colleague-dm',{},'colleague'],['owner-room',{senderId:'UOWNER',role:'owner',isMpim:true,isOwnerInGroup:true},'colleague'],['colleague-room',{isChannel:true,channelId:'CROOM'},'colleague']])test('rejected-candidates-'+id,async()=>{
  const r=await run({...options,role}),h=harness();assert.ok(r.out.slots.some(s=>s.start.includes('T11:00:')));assert.equal(r.out.day_summary[0].attendee_partial_conflicts[0].slots_blocked,68);
  assert.ok(r.summary.includes('rejected_search_candidates=2026-10-08(peer@example.test:68) (not offered-slot availability)'),r.summary);assert.ok(!r.summary.includes('attendee_partial='));

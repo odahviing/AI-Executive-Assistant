@@ -7,7 +7,7 @@ fs.copyFileSync(path.join(repo, '.gitignore'), path.join(root, '.gitignore'));
 fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, '.claude/agent-loop'), { recursive: true });
 for (const file of ['workshop-release.cjs', 'workshop-verification.cjs', 'ledger-file.cjs']) fs.copyFileSync(file === 'workshop-release.cjs' && process.env.WORKSHOP_BEFORE_RELEASE || path.join(__dirname, file), path.join(root, 'scripts', file));
 assert.equal(cp.spawnSync('git', ['init', '-q'], { cwd: root }).status, 0);
-after(() => { const resolved = fs.realpathSync(root); assert.equal(path.dirname(resolved), fs.realpathSync(repo)); assert.ok(path.basename(resolved).startsWith('.workshop-bookkeeping-')); fs.rmSync(resolved, { recursive: true, force: true }); });
+after(async () => { const resolved = fs.realpathSync(root); assert.equal(path.dirname(resolved), fs.realpathSync(repo)); assert.ok(path.basename(resolved).startsWith('.workshop-bookkeeping-')); await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
 const evidence = { version: 1, attemptId: 'attempt-1', builder: 'builder-dispatch', changeKind: 'prose-only', exception: 'Fixture validates bookkeeping only', files: ['scripts/workshop-verification.cjs'], regressions: [], boundaries: { changedGuards: [], paths: [] } };
 const review = { attemptId: 'attempt-1', reviewer: 'independent-dispatch', trace: 'fixture-transcript', verdict: 'pass', reason: 'Fixture independent review', outcome: 'traced', inventoryComplete: true, guardsComplete: true, findings: [], reviewedPaths: [], checks: [], scope: 'structural' };
 const built = { ref: 'fix-a', verdict: 'verified', evidence, review, snapshot: verification.snapshot(evidence.files, root) };

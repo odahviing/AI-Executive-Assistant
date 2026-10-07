@@ -152,8 +152,8 @@ for (const name of ['bugger', 'feature']) for (const verdict of ['built', 'needs
   ok(write('--ref', 'alpha', '--source', 'verify', '--lane', 'registrar', '--finding', 'Verification returned an unresolved result.', '--verdict', returned.verdict, '--invariant', 'none', '--note', returned.notes))
   assert.equal(item().status, verdict === 'built' ? 'blocked' : 'decision')
 })
-const continuationPlan = (attemptId = 'resume-attempt', refs = ['alpha']) => {
-  const result = stats('--batch-plan', json('resume.json', { refs, resume: [{ ref: 'alpha', attemptId }], authorization: 'Resume the existing authorized wave.' }))
+const continuationPlan = (attemptId = 'resume-attempt', refs = ['alpha'], refresh) => {
+  const result = stats('--batch-plan', json('resume.json', { refs, resume: [{ ref: 'alpha', attemptId, ...(refresh ? { refresh } : {}) }], authorization: 'Resume the existing authorized wave.' }))
   return { result, data: JSON.parse(result.stdout || '{}') }
 }
 for (const mode of ['technical', 'genuine', 'mixed']) test(`feature continuation warning and resume distinguish ${mode} unresolved work`, async () => {
@@ -210,6 +210,50 @@ for (const change of ['hold', 'decision', 'charter', 'snapshot', 'attempt']) tes
   assert.equal(r.lane, false, JSON.stringify(r))
 })
 const reviewFixture = (attemptId, verdict = 'pass') => ({ attemptId, reviewer: 'independent-reviewer', trace: 'Fixture independent trace', verdict, reason: verdict === 'pass' ? 'Fixture checked.' : 'Fixture integration failed.', outcome: verdict === 'pass' ? 'traced' : 'refuted', inventoryComplete: true, guardsComplete: true, scope: 'behavioral', findings: verdict === 'pass' ? [] : ['fixture defect'], reviewedPaths: [], checks: [{ id: 'fixture-check', command: 'fixture', exitCode: 0, passed: 1, failed: 0, output: 'fixture output' }] })
+
+const refreshFixture = () => ({ reason: 'Completed authorized dependency changed the shared fixture; obtain new evidence.', snapshot: [{ file: 'fixture.md', sha256: sha(fs.readFileSync(path.join(root, 'fixture.md'))) }] })
+test('explicit dependency refresh admits a fresh attempt without blessing historical pass', async () => {
+  capture(); ok(assess(assessment())); build()
+  ok(write('--review', '--ref', 'alpha', '--review-file', json('old-review.json', reviewFixture('resume-attempt'))))
+  fs.writeFileSync(path.join(root, 'fixture.md'), 'Completed dependency correction')
+  const history = fs.readFileSync(path.join(loop, 'ledger.jsonl'), 'utf8')
+  bad(continuationPlan().result); bad(stats('--verification'))
+  const refresh = refreshFixture(), p = continuationPlan('resume-attempt', ['alpha'], refresh); ok(p.result)
+  assert.deepEqual(p.data.intakeAdmission.entries.find(e => e.ref === 'alpha').refresh, refresh)
+  for (const name of ['bugger', 'feature']) {
+    const args = name === 'bugger' ? { issues: [issue()] } : { mode: 'build', pieces: [piece()], sharedPiece: 'none' }
+    assert.equal((await engine(name, { ...args, intakeAdmission: p.data.intakeAdmission })).lane, true)
+  }
+  assert.equal(fs.readFileSync(path.join(loop, 'ledger.jsonl'), 'utf8'), history)
+  bad(write('--review', '--ref', 'alpha', '--review-file', json('replay.json', reviewFixture('resume-attempt'))))
+  const fresh = buildEvidence('fresh-attempt')
+  fs.writeFileSync(path.join(root, 'fixture.md'), 'Completed dependency correction')
+  ok(write('--ref', 'alpha', '--source', 'owner', '--lane', 'registrar', '--finding', 'Fresh dependency evidence.', '--verdict', 'built', '--rootCause', 'fixture.md:1', '--invariant', 'none', '--evidence-file', json('fresh.json', fresh)))
+  assert.equal(item().evidence.attemptId, 'fresh-attempt'); assert.deepEqual(item().snapshot, refresh.snapshot)
+  bad(stats('--verification'))
+  bad(write('--review', '--ref', 'alpha', '--review-file', json('old-again.json', reviewFixture('resume-attempt'))))
+  ok(write('--review', '--ref', 'alpha', '--review-file', json('fresh-review.json', reviewFixture('fresh-attempt'))))
+  ok(stats('--verification'))
+})
+for (const change of ['hold', 'question', 'attempt', 'charter', 'in-flight', 'stale-hash', 'missing-file', 'incomplete', 'reason', 'declined', 'converted', 'wrapped']) test(`dependency refresh preserves ${change} rejection`, () => {
+  capture(); ok(assess(assessment())); build()
+  fs.writeFileSync(path.join(root, 'fixture.md'), 'Dependency correction')
+  const refresh = refreshFixture()
+  if (change === 'hold') ok(hold())
+  if (change === 'question') ok(write('--ref', 'alpha', '--source', 'owner', '--lane', 'registrar', '--finding', 'Actual uncovered scope question.', '--verdict', 'needs-owner-decision', '--invariant', 'none', '--note', 'Which recipient scope?', '--recommend', 'defer — retain scope'))
+  if (change === 'attempt') build('new-attempt')
+  if (change === 'charter') fs.writeFileSync(path.join(root, '.claude/agents/registrar.md'), 'Changed charter')
+  if (change === 'in-flight') fs.writeFileSync(path.join(loop, 'state.json'), JSON.stringify({ lastRun: { status: 'complete' }, inFlight: [{ ref: 'alpha' }] }))
+  if (change === 'stale-hash') fs.writeFileSync(path.join(root, 'fixture.md'), 'Another dependency change')
+  if (change === 'missing-file') fs.unlinkSync(path.join(root, 'fixture.md'))
+  if (change === 'incomplete') refresh.snapshot = []
+  if (change === 'reason') refresh.reason = ''
+  if (['declined', 'converted', 'wrapped'].includes(change)) {
+    const file = path.join(loop, 'ledger.jsonl')
+    fs.appendFileSync(file, JSON.stringify({ ref: 'alpha', verdict: change, state: change === 'wrapped' ? 'wrapped' : 'open', date: '2026-10-07' }) + '\n')
+  }
+  bad(continuationPlan('resume-attempt', ['alpha'], refresh).result)
+})
 test('failed review continuation preserves the failure; verified continuation preserves current review', async () => {
   capture(); ok(assess(assessment())); build()
   for (const verdict of ['fail', 'pass']) {

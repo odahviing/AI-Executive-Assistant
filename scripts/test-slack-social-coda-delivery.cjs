@@ -62,6 +62,7 @@ function harness(options = {}) {
     '../../utils/claimChecker': { checkReplyClaims: async () => ({ claimed_action: false }) },
   }, 'src/core/social') : null;
   const mod = load('postReply', {
+    './deliveryAttempt': (options.delivery||require('./fixtures/slack-delivery.cjs')()).module,
     '../../utils/logger': logger,
     '../../db': { appendToConversation: (...args) => history.push(args) },
     '../../connections/slack/formatting': { formatForSlack: text => options.emptyFormat && text === 'Social question?' ? '' : text },

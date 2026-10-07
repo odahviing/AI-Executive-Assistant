@@ -116,7 +116,7 @@ function attendeeHoursGroundingNotes(
   const notes: string[] = [];
   for (const b of blockedBy) {
     const entry = attendeeAvailability.find(a => a.email.toLowerCase() === b.email.toLowerCase());
-    if (!entry || !entry.hoursStart || !entry.hoursEnd) continue;
+    if (!entry) continue;
     try {
       const ownerDay = DateTime.fromISO(date, { zone: ownerTz }).startOf('day');
       const intervals = attendeeWorkIntervalsBetween(entry, ownerDay, ownerDay.plus({ days: 1 }));
@@ -940,17 +940,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               if (!ovEmail) continue;
               const entry = attendeeAvailability.find(a => a.email.toLowerCase() === ovEmail);
               if (!entry) continue;
-              if (typeof ov.start === 'string' && hhmm.test(ov.start.trim())) entry.hoursStart = ov.start.trim();
-              if (typeof ov.end === 'string' && hhmm.test(ov.end.trim())) entry.hoursEnd = ov.end.trim();
-              // This search's explicit bound also overrides dated weekday windows;
+              // This search's explicit bound applies to each regular workday;
               // preserve each day's other bound when only one was supplied.
-              if (entry.dayOverrides) {
-                entry.dayOverrides = Object.fromEntries(Object.entries(entry.dayOverrides).map(([day, hours]) => [day, {
+              entry.week = Object.fromEntries(Object.entries(entry.week).map(([day, hours]) => [day, hours && {
                   ...hours,
                   ...(typeof ov.start === 'string' && hhmm.test(ov.start.trim()) ? { hoursStart: ov.start.trim() } : {}),
                   ...(typeof ov.end === 'string' && hhmm.test(ov.end.trim()) ? { hoursEnd: ov.end.trim() } : {}),
-                }]));
-              }
+                }])) as typeof entry.week;
               if (typeof ov.tz === 'string' && ov.tz.trim()) {
                 entry.workingHoursTimezone = ov.tz.trim();
                 // Same rule as `tzTempDifferingForDay`, third path: the hedge
@@ -968,7 +964,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // narration says "stated", never "assumed", for this entry.
               entry.assumed = false;
               logger.info('find_available_slots — attendee hours override applied', {
-                email: entry.email, hoursStart: entry.hoursStart, hoursEnd: entry.hoursEnd, tz: entry.timezone,
+                email: entry.email, week: entry.week, tz: entry.timezone,
               });
             }
           }

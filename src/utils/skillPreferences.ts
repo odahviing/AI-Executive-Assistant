@@ -9,7 +9,7 @@
  *     `config/users/<owner>_prefs/<skill>.md`. Free text, the owner's personal
  *     style, taught and edited entirely by chat (`update_my_preferences`). Never
  *     shipped — lives in the owner's private config dir. The LLM reads and
- *     honors it; code does not parse it. A second owner's dir is empty and fills
+ *     honors it; code parses only explicitly marked keyed JSON blocks. A second owner's dir is empty and fills
  *     with THEIR style.
  *
  * Cost discipline: a block rides along ONLY on turns where its area is already
@@ -27,7 +27,7 @@ import logger from './logger';
 
 const MAX_FILE_BYTES = 16 * 1024; // 16 KB per skill — plenty for free-text style
 
-// Per-file write mutex. Preference calls bypass the tool cache so reads and
+// Per-owner write mutex. Preference calls bypass the tool cache so reads and
 // revision conflicts remain fresh; retries are handled here. The lock keeps
 // read/check/write atomic among in-process writers. Atomic rename also keeps
 // prompt readers from seeing a partially written file.
@@ -115,13 +115,156 @@ function fileForSkill(profile: UserProfile, skill: string): string | null {
  */
 export function readSkillPreferences(profile: UserProfile, skill: string): string {
   const result = readSkillPreferencesSnapshot(profile, skill);
-  return result.ok ? result.text.trim() : '';
+  if (!result.ok) return '';
+  const parsed = parsePreferences(result.text);
+  if (!parsed.ok) return '';
+  return renderPreferences(result.text, parsed.blocks).trim();
 }
 
 export interface SkillPreferencesSnapshot {
   text: string;
   revision: string;
   exists: boolean;
+}
+
+export interface KeyedPreference {
+  key: string;
+  category: string;
+  source: string;
+  condition: null | { summaryType: string };
+  value: string;
+}
+export interface LocatedKeyedPreference extends KeyedPreference { skill: PrefSkill }
+type PreferenceError = { ok: false; error: string };
+type PreferenceBlock = { start: number; end: number; entry: KeyedPreference };
+const MARKER = '```maelle-preference-v1';
+
+function validEntry(value: unknown): value is KeyedPreference {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const e = value as KeyedPreference;
+  if (Object.keys(e).sort().join(',') !== 'category,condition,key,source,value') return false;
+  if (![e.key, e.category, e.source, e.value].every(v => typeof v === 'string' && v.trim().length > 0)) return false;
+  return e.condition === null || (typeof e.condition === 'object' && !Array.isArray(e.condition)
+    && Object.keys(e.condition).join(',') === 'summaryType'
+    && typeof e.condition.summaryType === 'string' && e.condition.summaryType.trim().length > 0);
+}
+
+/** Parse only the versioned fence. Preserve all other bytes as opaque prose. */
+function parsePreferences(text: string): { ok: true; blocks: PreferenceBlock[] } | PreferenceError {
+  const blocks: PreferenceBlock[] = [];
+  let offset = 0;
+  while (true) {
+    const start = text.indexOf(MARKER, offset);
+    if (start < 0) break;
+    if (start > 0 && text[start - 1] !== '\n') return { ok: false, error: 'malformed_preference' };
+    const bodyStart = start + MARKER.length;
+    const opening = /^(?:\r?\n)/.exec(text.slice(bodyStart));
+    if (!opening) return { ok: false, error: 'malformed_preference' };
+    const closing = /\r?\n```(?=\r?\n|$)/g;
+    closing.lastIndex = bodyStart + opening[0].length;
+    const end = closing.exec(text);
+    if (!end) return { ok: false, error: 'malformed_preference' };
+    let entry: unknown;
+    try { entry = JSON.parse(text.slice(bodyStart + opening[0].length, end.index)); }
+    catch { return { ok: false, error: 'malformed_preference' }; }
+    if (!validEntry(entry)) return { ok: false, error: 'malformed_preference' };
+    offset = end.index + end[0].length;
+    blocks.push({ start, end: offset, entry });
+  }
+  return { ok: true, blocks };
+}
+
+function renderPreferences(text: string, blocks: PreferenceBlock[]): string {
+  for (const block of [...blocks].reverse()) {
+    const e = block.entry;
+    const label = e.source === 'user_taught' ? 'Explicit' : `Inferred (${e.source})`;
+    const condition = e.condition ? `; apply when summary type is ${JSON.stringify(e.condition.summaryType)}` : '';
+    text = text.slice(0, block.start) + `${label}${condition}: ${e.value}` + text.slice(block.end);
+  }
+  return text;
+}
+
+/** Revision covers all allowlisted files: exact keys are unique across the owner. */
+export function readKeyedPreferences(
+  profile: UserProfile,
+  filter: { key?: string; category?: string; summaryType?: string } = {},
+): { ok: true; entries: LocatedKeyedPreference[]; revision: string } | PreferenceError {
+  const entries: LocatedKeyedPreference[] = [];
+  const revisions: string[] = [];
+  const keys = new Set<string>();
+  for (const skill of PREF_SKILLS) {
+    const read = readSkillPreferencesSnapshot(profile, skill);
+    if (!read.ok) return read;
+    if (Buffer.byteLength(read.text, 'utf8') > MAX_FILE_BYTES) return { ok: false, error: 'too_large' };
+    revisions.push(`${skill}:${read.exists}:${read.revision}`);
+    const parsed = parsePreferences(read.text);
+    if (!parsed.ok) return parsed;
+    for (const { entry } of parsed.blocks) {
+      if (keys.has(entry.key)) return { ok: false, error: 'duplicate_key' };
+      keys.add(entry.key);
+      entries.push({ ...entry, skill });
+    }
+  }
+  return { ok: true, revision: createHash('sha256').update(revisions.join('\n')).digest('hex'),
+    entries: entries.filter(e => (filter.key === undefined || e.key === filter.key)
+      && (filter.category === undefined || e.category === filter.category)
+      && (filter.summaryType === undefined || e.condition === null || e.condition.summaryType === filter.summaryType)) };
+}
+
+export type KeyedPreferenceWriteResult = { ok: true; revision: string; unchanged: boolean } | PreferenceError;
+
+/** Import is conflict-safe and idempotent; ordinary edits require an owner revision. */
+export async function writeKeyedPreference(
+  profile: UserProfile, skill: PrefSkill, entry: KeyedPreference,
+  options: { expectedRevision: string; importOnly?: boolean },
+): Promise<KeyedPreferenceWriteResult> {
+  if (!isPrefSkill(skill)) return { ok: false, error: 'invalid_skill' };
+  if (!validEntry(entry)) return { ok: false, error: 'malformed_preference' };
+  return mutateKeyedPreference(profile, entry.key, { skill, entry, importOnly: options.importOnly }, options.expectedRevision);
+}
+
+export async function forgetKeyedPreference(
+  profile: UserProfile, key: string, options: { expectedRevision: string },
+): Promise<KeyedPreferenceWriteResult> {
+  return mutateKeyedPreference(profile, key, undefined, options.expectedRevision);
+}
+
+async function mutateKeyedPreference(
+  profile: UserProfile, key: string,
+  write: { skill: PrefSkill; entry: KeyedPreference; importOnly?: boolean } | undefined,
+  expectedRevision: string,
+): Promise<KeyedPreferenceWriteResult> {
+  return withWriteLock(rootForProfile(profile), async () => {
+    const current = readKeyedPreferences(profile);
+    if (!current.ok) return current;
+    const existing = current.entries.find(e => e.key === key);
+    if (existing && write && existing.skill !== write.skill) return { ok: false, error: 'key_destination_conflict' };
+    const equal = existing && write && ['key', 'category', 'source', 'value'].every(k => existing[k as keyof KeyedPreference] === write.entry[k as keyof KeyedPreference])
+      && existing.condition?.summaryType === write.entry.condition?.summaryType;
+    if (equal || (!existing && !write)) return { ok: true, revision: current.revision, unchanged: true };
+    if (existing && write?.importOnly) return { ok: false, error: 'import_conflict' };
+    if (!expectedRevision) return { ok: false, error: 'revision_required' };
+    if (expectedRevision !== current.revision) return { ok: false, error: 'revision_conflict' };
+    const skill = write?.skill ?? existing!.skill;
+    const file = fileForSkill(profile, skill)!;
+    const prior = readSkillPreferencesSnapshot(profile, skill);
+    if (!prior.ok) return prior;
+    const parsed = parsePreferences(prior.text);
+    if (!parsed.ok) return parsed;
+    const block = parsed.blocks.find(b => b.entry.key === key);
+    const replacement = write ? `${MARKER}\n${JSON.stringify(write.entry)}\n\`\`\`` : '';
+    const next = block ? prior.text.slice(0, block.start) + replacement + prior.text.slice(block.end)
+      : prior.text + (prior.text && !prior.text.endsWith('\n') ? '\n' : '') + replacement + '\n';
+    if (Buffer.byteLength(next, 'utf8') > MAX_FILE_BYTES) return { ok: false, error: 'too_large' };
+    try {
+      await fs.mkdir(rootForProfile(profile), { recursive: true });
+      if (prior.exists) await fs.writeFile(`${file}.bak`, prior.text, 'utf8');
+      await fs.writeFile(`${file}.tmp`, next, 'utf8');
+      await fs.rename(`${file}.tmp`, file);
+    } catch { return { ok: false, error: 'write_failed' }; }
+    const saved = readKeyedPreferences(profile);
+    return saved.ok ? { ok: true, revision: saved.revision, unchanged: false } : saved;
+  });
 }
 
 function snapshot(text: string, exists: boolean): SkillPreferencesSnapshot {
@@ -160,7 +303,7 @@ export function formatSkillPreferencesBlock(
   return [
     '',
     '─────────────────────────────',
-    `${firstName.toUpperCase()}'S ${label} PREFERENCES — he taught these; treat them as standing instructions.`,
+    `${firstName.toUpperCase()}'S ${label} PREFERENCES — explicit instructions and labeled inferred preferences.`,
     `Honor them over the defaults above when they conflict, UNLESS a hard rule or safety guard blocks it.`,
     body,
   ].join('\n');
@@ -220,8 +363,10 @@ export async function writeSkillPreferences(
   // each other. Plus an atomic rename below to make the on-disk swap a single
   // step rather than truncate-then-fill (a reader hitting mid-write otherwise
   // sees a partial file).
-  return withWriteLock(file, async () => {
+  return withWriteLock(rootForProfile(profile), async () => {
     try {
+      const ownerState = readKeyedPreferences(profile);
+      if (!ownerState.ok) return ownerState;
       let priorFull: string;
       let existed = true;
       try { priorFull = readFileSync(file, 'utf8'); }
@@ -251,7 +396,7 @@ export async function writeSkillPreferences(
           catch (e) { logger.warn('skillPreferences — .bak write failed', { skill, err: String(e).slice(0, 120) }); }
         }
       } else {
-        const prior = priorFull.trimEnd();
+        const prior = priorFull;
         // normalize the new line to a single bullet
         const line = clean.replace(/^[-*]\s*/, '').trim();
         // Dedup (v3.x) — skip an append that's substantially the same as an
@@ -262,7 +407,9 @@ export async function writeSkillPreferences(
           s.toLowerCase().replace(/^[-*]\s*/, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
         const newTokens = new Set(norm(line).split(' ').filter(Boolean));
         if (newTokens.size > 0) {
-          for (const pl of prior.split('\n')) {
+          const parsed = parsePreferences(prior);
+          if (!parsed.ok) return parsed;
+          for (const pl of renderPreferences(prior, parsed.blocks).split('\n')) {
             const t = pl.trim();
             // M-4 (v3.3) — compare against ANY existing content line, not only
             // '-' bullets (a prior `replace` may not have used dashes). Skip
@@ -282,10 +429,17 @@ export async function writeSkillPreferences(
             }
           }
         }
-        next = prior ? `${prior}\n- ${line}` : `- ${line}`;
+        next = prior ? `${prior}${prior.endsWith('\n') ? '' : '\n'}- ${line}` : `- ${line}`;
       }
 
-      if (Buffer.byteLength(next, 'utf8') > MAX_FILE_BYTES) {
+      const validated = parsePreferences(next);
+      if (!validated.ok) return validated;
+      const keys = new Set(ownerState.entries.filter(e => e.skill !== skill.trim().toLowerCase()).map(e => e.key));
+      for (const block of validated.blocks) {
+        if (keys.has(block.entry.key)) return { ok: false, error: 'duplicate_key' };
+        keys.add(block.entry.key);
+      }
+      if (Buffer.byteLength(mode === 'replace' ? next : `${next}\n`, 'utf8') > MAX_FILE_BYTES) {
         return { ok: false, error: 'too_large' };
       }
       const root = rootForProfile(profile);

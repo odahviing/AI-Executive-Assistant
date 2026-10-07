@@ -30,7 +30,8 @@ function harness(options={}) {
  const profile={user:{name:'Owner Example',email:'owner@example.test',slack_user_id:'UOWNER',timezone:options.ownerZone??'Asia/Jerusalem'},schedule:{work_hours:Object.fromEntries(weekdays.map(d=>[d,['00:00-23:59']])),office_days:{days:weekdays},home_days:{days:[]}},meetings:{buffer_minutes:0,allowed_durations:[25,55],categories:[]}};
  const person={person_id:'p1',email:'person@example.test',timezone:'Asia/Jerusalem',...options.person};
  const travel=options.travel===undefined?{from:'2026-09-14',until:'2026-09-14',location:'America/New_York'}:options.travel;
- const hours={workdays:weekdays,hoursStart:'09:00',hoursEnd:'18:00',...options.hours};
+ const fixtureHours={workdays:weekdays,hoursStart:'09:00',hoursEnd:'18:00',...options.hours};
+ const hours={week:fixtureHours.week ?? require('./fixtures/regular-week.cjs').regularWeek(fixtureHours.workdays,fixtureHours.hoursStart,fixtureHours.hoursEnd,fixtureHours.dayOverrides),source:'manual',...(fixtureHours.timezone?{timezone:fixtureHours.timezone}:{})};
  const people=[person,...(options.otherPeople??[])];
  const db={getPersonMemory:()=>person,searchPeopleMemory:email=>people.filter(p=>p.email===email),getTravelRecordById:()=>travel,getEffectiveTimezoneById:id=>({timezone:people.find(p=>p.person_id===id)?.timezone})};
  const mocks={

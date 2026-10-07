@@ -119,7 +119,7 @@ interface CaptureDelta {
   // is DERIVED from the person's most recent inbound (people.resolveOutbound-
   // LanguageForPerson), so a one-off ("do you speak Hebrew?") must not freeze
   // into a durable steering attribute. Owner can still pin via update_person_profile.
-  working_hours?: string;
+  working_hours_structured?: import('../utils/workingHoursDefault').WorkingHoursUpdate;
   communication_style?: string;
   response_speed?: 'immediate' | 'fast' | 'hours' | 'day' | 'slow' | 'unreliable';
   role_summary?: string;
@@ -141,7 +141,7 @@ What counts as a learnable fact (operational, changes how Maelle should interact
 - timezone: STRICT IANA Region/City form only — "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney". When the chat names a nickname (ET, PT, BST, IST, "Sydney time"), map to IANA before emitting. SKIP the field if you can't confidently resolve to a Region/City form. Never emit bare abbreviations — they get rejected downstream.
 - state: city / country mentioned as their location ("Boston", "Tel Aviv", "Israel")
 - name_he: the native-script spelling of their name (Hebrew/Cyrillic/Arabic) if they wrote it or it became clear — capture it so it's never re-guessed
-- working_hours: when they're typically reachable, what days they work
+- working_hours_structured: only explicit recurring regular-week clocks, as {"week":{"Monday":{"hoursStart":"09:00","hoursEnd":"17:00"},"Friday":null}}. Emit only stated weekdays; null means explicitly not working. Exact local HH:MM pairs only. Omitted duration means recurring. Do not emit temporary trips/dated changes here; those use the existing dated override tools. Omit vague windows rather than guessing clocks. Never emit legacy working_hours prose.
 - communication_style: brief vs lengthy, direct vs warm, asks questions back vs not
 - response_speed: how quickly they replied (immediate/fast/hours/day/slow/unreliable)
 - role_summary: their role, what they focus on
@@ -174,7 +174,7 @@ function buildUserMessage(
     '',
     'CURRENT STRUCTURED PROFILE (what we already know — do NOT re-emit these):',
     '```json',
-    JSON.stringify(currentProfile, null, 2),
+    JSON.stringify(Object.fromEntries(Object.entries(currentProfile).filter(([key]) => key !== 'working_hours')), null, 2),
     '```',
     '',
     'CURRENT MD FILE (freeform notes — also do NOT re-emit content already here):',
@@ -208,8 +208,13 @@ function parseDelta(raw: string): CaptureDelta | null {
     if (!match) return null;
     const value = JSON.parse(match);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const allowed = new Set(['timezone', 'state', 'name_he', 'working_hours', 'communication_style', 'response_speed', 'role_summary', 'reports_to', 'collaboration_notes', 'interaction_summary', 'durable_note']);
+    const allowed = new Set(['timezone', 'state', 'name_he', 'working_hours_structured', 'communication_style', 'response_speed', 'role_summary', 'reports_to', 'collaboration_notes', 'interaction_summary', 'durable_note']);
     for (const [key, field] of Object.entries(value)) {
+      if (key === 'working_hours_structured') {
+        const { mergeWorkingHoursUpdate, WEEK_ORDER } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+        mergeWorkingHoursUpdate(undefined, field, { week: Object.fromEntries(WEEK_ORDER.map(day => [day, null])) as import('../utils/workingHoursDefault').WeeklySchedule, source: 'auto' });
+        continue;
+      }
       if (!allowed.has(key) || typeof field !== 'string') return null;
       if (key === 'response_speed' && !['immediate', 'fast', 'hours', 'day', 'slow', 'unreliable'].includes(field)) return null;
     }
@@ -271,7 +276,7 @@ async function applyDelta(
 
   // profile_json fields — direct merge via updatePersonProfile.
   const profileUpdates: Partial<PersonProfile> = {};
-  if (delta.working_hours) profileUpdates.working_hours = delta.working_hours;
+  if (delta.working_hours_structured) profileUpdates.working_hours_structured = delta.working_hours_structured as PersonProfile['working_hours_structured'];
   if (delta.communication_style) profileUpdates.communication_style = delta.communication_style;
   if (delta.response_speed) profileUpdates.response_speed = delta.response_speed;
   if (delta.role_summary) profileUpdates.role_summary = delta.role_summary;

@@ -85,6 +85,7 @@ function harness(options = {}) {
   };
   const app = { client: { users, reactions: { add: async () => ({}) }, conversations: { replies: async () => ({ messages: [] }) } } };
   const mocks = {
+    'src/connectors/slack/deliveryAttempt.ts': require('./fixtures/slack-delivery.cjs')().module,
     'src/db/client.ts': { getDb: () => { if (state.dbDownOnce) { state.dbDownOnce = false; throw Error('people store unavailable'); } return sqlite; } },
     'src/utils/logger.ts': logger,
     'src/db/socialSubjects.ts': { getActiveSubjectsForPerson: () => [], getRecentTopicBeats: () => [] },

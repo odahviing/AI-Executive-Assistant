@@ -39,6 +39,7 @@ function fixture() {
     getHeaders() { return {}; }
   }
   const mocks = {
+    'src/connectors/slack/deliveryAttempt.ts': require('./fixtures/slack-delivery.cjs')().module,
     'src/llm/client.ts': { getAnthropicClient: () => ({ messages: { create: async () => {
       if (state.modelError) throw Error('unavailable');
       return { content: [{ type: 'text', text: state.verdict }] };

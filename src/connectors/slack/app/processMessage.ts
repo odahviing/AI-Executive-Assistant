@@ -27,6 +27,7 @@ import type { SenderRole, SlackAppContext, ProcessMessageParams } from './contex
 import { failureReply } from './helpers';
 import { readSlackThread } from '../threadHistory';
 import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
+import { attemptDelivery, hasHeldDelivery } from '../deliveryAttempt';
 
 // Re-attach a recent thread image on a follow-up owner turn. Image bytes
 // are multimodal ONLY on the turn they arrive; later turns saw just a lossy
@@ -91,7 +92,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
   const { assistant, user } = profile;
     const { senderId, text, framing, channelId, ts, threadTs, say: rawSay, client, isChannel, isMpim, isExplicitMention, voiceInput, mpimMemberIds, images, imageUrls } = params;
     if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, senderId)) return;
-    const say = async (message: { text: string; thread_ts?: string }) => {
+    const deliveryInput = (inboundTs: string[]) => ({ profileId: user.slack_user_id, channelId, threadTs, inboundTs });
+    if (hasHeldDelivery(deliveryInput([ts]))) return;
+    const say = async (message: { text: string; thread_ts?: string; client_msg_id?: string }) => {
       if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, senderId)) {
         throw new Error('Slack delivery withheld: conversation eligibility unavailable');
       }
@@ -651,6 +654,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
           // failure handler at the bottom of this closure.
           let delivered = false;
           try {
+            if (hasHeldDelivery(deliveryInput(messageTimestamps))) return;
             // The previous turn may have completed after this message arrived.
             // Refresh at execution, excluding the current batch already carried
             // in mergedText. Tool summaries and the latest Slack tail now agree.
@@ -898,6 +902,7 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
               // on it for ack-class replies (replacing "Got it" text with a
               // reaction).
               userMessageTs: ts,
+              inboundMessageTs: messageTimestamps,
               history,
               // The person's own words — NOT framedText. Step 4.6 mirrors this
               // string to the owner as `X said: "…"` (GH #150).
@@ -947,7 +952,9 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
             // — a broken trailer's audience is the log, not them.
             if (delivered) return;
             try {
-              await say({ text: failureReply(err, mergedRawText), thread_ts: threadTs });
+              await attemptDelivery(deliveryInput(messageTimestamps), attemptId => say({
+                text: failureReply(err, mergedRawText), thread_ts: threadTs, client_msg_id: attemptId,
+              }));
             } catch (sendErr) {
               // Slack itself is refusing us; there is nothing left to try. Log
               // the ORIGINAL cause here so it survives into error-*.log instead
@@ -968,6 +975,8 @@ export async function processMessage(ctx: SlackAppContext, params: ProcessMessag
       // timer and owns its failures in the runner catch above; this one cannot
       // see them.
       logger.error('Failed to process message', { err, assistant: assistant.name, channelId });
-      await say({ text: failureReply(err, text), thread_ts: threadTs });
+      await attemptDelivery(deliveryInput([ts]), attemptId => say({
+        text: failureReply(err, text), thread_ts: threadTs, client_msg_id: attemptId,
+      }));
     }
 }

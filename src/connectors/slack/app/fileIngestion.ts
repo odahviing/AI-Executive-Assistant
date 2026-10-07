@@ -192,6 +192,7 @@ export async function processImageFileShare(ctx: SlackAppContext, params: Proces
         channel: channelId,
         thread_ts: threadTs,
         text: txt,
+        client_msg_id: typeof msgOrText === 'string' ? undefined : msgOrText.client_msg_id,
       });
     };
 

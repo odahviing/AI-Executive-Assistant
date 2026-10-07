@@ -26,6 +26,7 @@ function boot(db) {
   const deps = { 'better-sqlite3': function Database() { return db; }, fs: fakeFs, path,
     '../config': { config: { DB_PATH: ':memory:' } }, '../utils/logger': logger,
     '../config/userProfile': { loadAllProfiles: () => [] }, './migrations/v3_2_0_person_store': personMigration };
+  deps['./slackDelivery'] = load('src/db/slackDelivery.ts', { crypto: require('node:crypto'), './client': { getDb: () => db } });
   for (const [file, fn] of [
     ['v2_0_7_consolidate_requests','runV207ConsolidateRequests'],['v4_0_4_dedupe_people_email','runDedupePeopleByEmail'],
     ['v4_4_9_social_provenance_backfill','runSocialProvenanceBackfill'],['v4_5_3_calendar_issues_axis','runCalendarIssuesAxisMigration'],

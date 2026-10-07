@@ -66,6 +66,7 @@ function fixture(options = {}) {
     '../social/stateMachine': { directiveForProactiveSlot: () => ({ mode: 'none' }) },
   });
   const post = load('src/connectors/slack/postReply.ts', {
+    './deliveryAttempt': require('./fixtures/slack-delivery.cjs')().module,
     '../../utils/logger': logger, '../../db': { appendToConversation: (...args) => { state.history.push(args); if (options.historyFail) throw Error('history unavailable'); } },
     // News fixtures have no delivered auto-move outreach thread association.
     '../../db/jobs': { getAutoMoveRequestIdForOutreachThread: () => null },

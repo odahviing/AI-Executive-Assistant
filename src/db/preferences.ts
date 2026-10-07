@@ -1,111 +1,72 @@
-import { getDb } from './client';
+import { loadAllProfiles, type UserProfile } from '../config/userProfile';
+import { readKeyedPreferences, writeKeyedPreference, forgetKeyedPreference, isPrefSkill, type LocatedKeyedPreference, type PrefSkill } from '../utils/skillPreferences';
 
-// ── User preferences ─────────────────────────────────────────────────────────
+// Owner instructions have one durable home: the existing skill markdown files.
+export type UserPreference = LocatedKeyedPreference;
 
-export interface UserPreference {
-  id: string;
-  user_id: string;
-  category: string;
-  key: string;
-  value: string;
-  source: string;
-  created_at: string;
-  updated_at: string;
+function ownerProfile(userId: string): UserProfile {
+  const profiles = [...loadAllProfiles().values()];
+  const matches = profiles.filter(p => p.user.slack_user_id === userId);
+  if (matches.length !== 1) throw new Error('preference_owner_unavailable');
+  const profile = matches[0];
+  const directory = profile.user.name.split(' ')[0].toLowerCase();
+  if (profiles.some(p => p !== profile && p.user.name.split(' ')[0].toLowerCase() === directory)) throw new Error('preference_owner_path_conflict');
+  return profile;
 }
 
-export function savePreference(params: {
-  userId: string;
-  category: string;
-  key: string;
-  value: string;
-  source?: string;
-}): void {
-  const db = getDb();
-  const id = `pref_${params.userId}_${params.key}`.replace(/[^a-zA-Z0-9_]/g, '_');
-  db.prepare(`
-    INSERT INTO user_preferences (id, user_id, category, key, value, source)
-    VALUES (@id, @user_id, @category, @key, @value, @source)
-    ON CONFLICT(user_id, key) DO UPDATE SET
-      value = @value,
-      category = @category,
-      source = @source,
-      updated_at = datetime('now')
-  `).run({
-    id,
-    user_id: params.userId,
-    category: params.category,
-    key: params.key,
-    value: params.value,
+/** Existing keys retain their reviewed destination; unknown new categories fail. */
+export function preferenceSkill(category: string): PrefSkill | undefined {
+  if (category === 'scheduling') return 'meetings';
+  if (category === 'communication') return 'general';
+  if (category.startsWith('summary_type_') && category.length > 'summary_type_'.length) return 'summary';
+  return isPrefSkill(category) ? category : undefined;
+}
+
+export async function savePreference(params: {
+  userId: string; category: string; key: string; value: string; source?: string;
+}): Promise<void> {
+  const profile = ownerProfile(params.userId);
+  const current = readKeyedPreferences(profile);
+  if (!current.ok) throw new Error(current.error);
+  const skill = current.entries.find(p => p.key === params.key)?.skill ?? preferenceSkill(params.category);
+  if (!skill) throw new Error('preference_category_destination_required');
+  const result = await writeKeyedPreference(profile, skill, {
+    key: params.key, category: params.category, value: params.value,
     source: params.source ?? 'user_taught',
-  });
+    condition: params.category.startsWith('summary_type_') ? { summaryType: params.category.slice('summary_type_'.length) } : null,
+  }, { expectedRevision: current.revision });
+  if (!result.ok) throw new Error(result.error);
 }
 
 export function getPreferences(userId: string): UserPreference[] {
-  const db = getDb();
-  return db.prepare(
-    `SELECT * FROM user_preferences WHERE user_id = ? ORDER BY category, key`
-  ).all(userId) as UserPreference[];
+  const result = readKeyedPreferences(ownerProfile(userId));
+  if (!result.ok) throw new Error(result.error);
+  return result.entries;
 }
 
-export function deletePreference(userId: string, key: string): boolean {
-  const db = getDb();
-  const result = db.prepare(
-    `DELETE FROM user_preferences WHERE user_id = ? AND key = ?`
-  ).run(userId, key);
-  return result.changes > 0;
+export async function deletePreference(userId: string, key: string): Promise<boolean> {
+  const profile = ownerProfile(userId);
+  const current = readKeyedPreferences(profile);
+  if (!current.ok) throw new Error(current.error);
+  const exists = current.entries.some(p => p.key === key);
+  const result = await forgetKeyedPreference(profile, key, { expectedRevision: current.revision });
+  if (!result.ok) throw new Error(result.error);
+  return exists;
 }
 
-/**
- * Compact catalog of what the user has taught — category + key list per row,
- * full text fetched on demand via manage_preference(action='recall', category|key). Mirrors
- * the v2.2.1 people-memory pattern: cheap injection, on-demand loading. Closes
- * the v2.3.8-era prompt bloat where 110 prefs (~7,600 tokens) shipped to every
- * turn even though most weren't relevant.
- *
- * Returns empty string when no preferences exist (so the prompt block is
- * skipped entirely on a fresh profile).
- */
 export function formatPreferencesCatalog(userId: string): string {
   const prefs = getPreferences(userId);
-  if (prefs.length === 0) return '';
-
-  const byCategory = new Map<string, string[]>();
-  for (const p of prefs) {
-    if (!byCategory.has(p.category)) byCategory.set(p.category, []);
-    byCategory.get(p.category)!.push(p.key);
-  }
-  // Stable ordering — categories alphabetical, keys alphabetical within each.
-  const categories = [...byCategory.keys()].sort();
-  const lines = categories.map(cat => {
-    const keys = byCategory.get(cat)!.sort();
-    return `${cat.toUpperCase()} (${keys.length}): ${keys.join(', ')}`;
-  });
-
+  if (!prefs.length) return '';
+  const categories = [...new Set(prefs.map(p => p.category))].sort();
   return [
     `PREFERENCES INDEX (${prefs.length} entries — call manage_preference(action='recall', category=...) or manage_preference(action='recall', key=...) to load full text):`,
-    ...lines,
+    ...categories.map(category => {
+      const keys = prefs.filter(p => p.category === category).map(p => p.key).sort();
+      return `${category.toUpperCase()} (${keys.length}): ${keys.join(', ')}`;
+    }),
   ].join('\n');
 }
 
-/**
- * Filtered fetch for the manage_preference(action='recall') tool. Returns all prefs when both
- * args omitted (back-compat with v1.x callers). category filter narrows by
- * category; key filter returns at most one row by exact key match.
- */
-export function getPreferencesFiltered(
-  userId: string,
-  filter: { category?: string; key?: string } = {},
-): UserPreference[] {
-  const db = getDb();
-  if (filter.key) {
-    return db.prepare(
-      `SELECT * FROM user_preferences WHERE user_id = ? AND key = ?`,
-    ).all(userId, filter.key) as UserPreference[];
-  }
-  if (filter.category) {
-    return db.prepare(
-      `SELECT * FROM user_preferences WHERE user_id = ? AND category = ? ORDER BY key`,
-    ).all(userId, filter.category) as UserPreference[];
-  }
-  return getPreferences(userId);
+export function getPreferencesFiltered(userId: string, filter: { category?: string; key?: string } = {}): UserPreference[] {
+  return getPreferences(userId).filter(p => filter.key ? p.key === filter.key : !filter.category || p.category === filter.category);
 }

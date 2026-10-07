@@ -35,7 +35,7 @@ const compiled = new Map();
 const COLLEAGUE = 'UCOLLEAGUE', OWNER = 'UOWNER';
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const IL_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
-const hours = (workdays) => JSON.stringify({ workdays, hoursStart: '09:00', hoursEnd: '17:00' });
+const hours = (workdays) => JSON.stringify({ working_hours_structured: {week: require('./fixtures/regular-week.cjs').regularWeek(workdays), source: 'auto'} });
 
 let now = Date.parse('2026-09-14T06:00:00Z');
 class Clock extends Date { constructor(...a) { super(...(a.length ? a : [now])); } static now() { return now; } }
@@ -185,7 +185,8 @@ test('regression: never-engaged recipient — scheduled send floors to the Slack
   assert.equal(p?.timezone_set_by, 'auto');
   assert.equal(p?.name, 'Colleague Slack');
   assert.equal(p?.email, 'colleague@example.com');
-  assert.equal(JSON.parse(p?.working_hours_auto ?? 'null')?.hoursStart, '09:00');
+  assert.equal(JSON.parse(p?.profile_json ?? '{}')?.working_hours_structured?.week.Monday.hoursStart, '09:00');
+  assert.equal(p?.working_hours_auto, null);
 });
 test('regression: never-engaged recipient — immediate awaited send arms the reply deadline in the recipient\'s zone', async () => {
   const h = harness();
@@ -222,7 +223,7 @@ test('regression: scheduled channel post for a never-engaged recipient floors to
 
 // ── known recipient: the store's ranking governs, the read never stomps ─────
 test('preserved: known recipient with a stated zone — the Slack reading moves neither the zone nor the schedule', async () => {
-  const h = harness({ person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'person', name_set_by: 'person', working_hours_auto: hours(IL_DAYS) } });
+  const h = harness({ person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'person', name_set_by: 'person', profile_json: hours(IL_DAYS) } });
   h.setNow('2026-09-14T06:00Z');
   const r = await h.tool({ send_at: '2026-09-14T10:00:00' }); // 10:00 Jerusalem — inside their stored hours
   assert.equal(r.scheduled_at, '2026-09-14T07:00:00.000Z');
@@ -233,14 +234,14 @@ test('preserved: known recipient with a stated zone — the Slack reading moves 
   assert.equal(p.name, 'Colleague');
 });
 test('preserved: known recipient — the reply deadline runs in the stored zone regardless of the tool\'s colleague_tz', async () => {
-  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', working_hours_auto: hours(WEEKDAYS) } });
+  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', profile_json: hours(WEEKDAYS) } });
   h.setNow('2026-09-14T06:00Z');
   const r = await h.tool({ colleague_tz: 'Asia/Jerusalem', send_now: true });
   assert.equal(r.ok, true);
   assert.equal(h.job().reply_deadline, NY_DEADLINE_FROM_MON_0600Z);
 });
 test('regression: known auto-tier recipient — a differing Slack reading diverts to timezone_temp; the permanent zone still governs', async () => {
-  const h = harness({ person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'auto', working_hours_auto: hours(IL_DAYS) } });
+  const h = harness({ person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'auto', profile_json: hours(IL_DAYS) } });
   h.setNow('2026-09-14T06:00Z');
   const r = await h.tool({ send_at: '2026-09-14T10:00:00' });
   assert.equal(r.scheduled_at, '2026-09-14T07:00:00.000Z');
@@ -252,7 +253,7 @@ test('regression: known auto-tier recipient — a differing Slack reading divert
 });
 test('regression: a Slack read with no tz retires a stale slack-sourced temp reading and fabricates no zone', async () => {
   const h = harness({
-    person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'auto', working_hours_auto: hours(IL_DAYS), timezone_temp: JSON.stringify({ value: 'America/New_York', expiresAt: '2026-09-20', source: 'slack', since: '2026-09-10', lastSeen: '2026-09-13' }) },
+    person: { timezone: 'Asia/Jerusalem', timezone_set_by: 'auto', profile_json: hours(IL_DAYS), timezone_temp: JSON.stringify({ value: 'America/New_York', expiresAt: '2026-09-20', source: 'slack', since: '2026-09-10', lastSeen: '2026-09-13' }) },
     coreInfo: { displayName: 'Colleague Slack' },
   });
   h.setNow('2026-09-14T06:00Z');
@@ -309,7 +310,7 @@ test('regression: ordinary send outside recipient hours is held for their work s
 
 test('preserved: unavailable profile keeps a stored zone and temp reading through the scheduled send', async () => {
   const temp = JSON.stringify({ value: 'Europe/London', expiresAt: '2026-09-20', source: 'slack', since: '2026-09-10', lastSeen: '2026-09-13' });
-  const h = harness({ readThrows: true, person: { timezone: 'America/New_York', timezone_set_by: 'auto', timezone_temp: temp, working_hours_auto: hours(WEEKDAYS) } });
+  const h = harness({ readThrows: true, person: { timezone: 'America/New_York', timezone_set_by: 'auto', timezone_temp: temp, profile_json: hours(WEEKDAYS) } });
   h.setNow('2026-09-14T06:00Z');
   const r = await h.tool({ send_at: '2026-09-14T09:00:00' });
   assert.equal(r.scheduled_at, NY_WORK_START_MON);
@@ -363,7 +364,7 @@ test('preserved: missing Connection cancels immediate outreach without sending',
 });
 
 test('preserved: scheduled soft failure survives module restart and sends only at the recipient next work window', async () => {
-  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', working_hours_auto: hours(WEEKDAYS) }, sendResults: [{ ok: false, reason: 'ratelimited' }] });
+  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', profile_json: hours(WEEKDAYS) }, sendResults: [{ ok: false, reason: 'ratelimited' }] });
   h.setNow('2026-09-14T06:00Z');
   await h.tool({ send_at: '2026-09-14T23:59:00', await_reply: false }); // 16:59 EDT
   h.setNow('2026-09-14T20:59:00Z');
@@ -384,7 +385,7 @@ test('preserved: scheduled soft failure survives module restart and sends only a
 });
 
 test('preserved: scheduled repeated explicit failures close after three attempts and notify the asker', async () => {
-  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', working_hours_auto: hours(WEEKDAYS) }, sendResults: Array.from({ length: 3 }, () => ({ ok: false, reason: 'cannot_dm' })) });
+  const h = harness({ person: { timezone: 'America/New_York', timezone_set_by: 'person', profile_json: hours(WEEKDAYS) }, sendResults: Array.from({ length: 3 }, () => ({ ok: false, reason: 'cannot_dm' })) });
   h.setNow('2026-09-14T06:00Z');
   await h.tool({ send_at: '2026-09-14T16:00:00' });
   for (const t of ['13:00', '13:10', '13:30']) {
@@ -445,12 +446,12 @@ test('R-FULL-UNKNOWN control missing connection retries before any send',async()
 test('R-FULL-UNKNOWN post-send bookkeeping failure never repeats confirmed text',async()=>{const options={},h=harness(options);h.setNow('2026-09-14T06:00Z');await h.tool({send_at:NY_WORK_START_MON});options.jobUpdateThrows=true;h.setNow(NY_WORK_START_MON);await h.fire();assert.equal(h.row().state,'cancelled');assert.equal(h.row().next_check_handler,null);h.restart();await h.sweep();assert.equal(h.sends.filter(x=>x.id==='UCOLLEAGUE').length,1);assert.match(h.sends[1].body,/couldn't confirm the full outcome/);});
 for(const channel of [false,true])for(const partial of [false,true])test(`R-FULL-PARTIAL completion tick ${channel?'room':'DM'} ${partial?'suppressed':'preserved'}`,async()=>{const h=harness({sendResults:[{ok:true,ref:channel?'CROOM':'DCOLLEAGUE',ts:'out.1',attachments_failed:partial?1:0}]});h.setNow(NY_WORK_START_MON);await h.tool({...(channel?{channel_id:'CROOM'}:{}),await_reply:false,attachments:[{sourceUrl:'https://slack.test/file'}]});assert.equal(h.ticks.length,partial?0:1);});
 
-test('R-INTENT real recipient timezone and weekend choose local working interval',()=>{const h=harness({person:{timezone:'America/New_York',timezone_set_by:'owner',working_hours_auto:hours(WEEKDAYS)}});assert.equal(h.reminderFloor('2026-09-19T06:00:00Z','UCOLLEAGUE'),'2026-09-21T13:00:00.000Z');});
+test('R-INTENT real recipient timezone and weekend choose local working interval',()=>{const h=harness({person:{timezone:'America/New_York',timezone_set_by:'owner',profile_json:hours(WEEKDAYS)}});assert.equal(h.reminderFloor('2026-09-19T06:00:00Z','UCOLLEAGUE'),'2026-09-21T13:00:00.000Z');});
 test('R-INTENT real owner configured hours choose next working day',()=>{const h=harness();assert.equal(h.reminderFloor('2026-09-18T06:00:00Z','UOWNER'),'2026-09-20T06:00:00.000Z');});
 
 // ── chris-headsup-outside-workdays-20260920: the recipient's own working day governs ──
 // Sun 20 Sep 2026 18:46Z = 21:46 owner (Asia/Jerusalem) = 14:46 Sunday for a Mon–Fri Boston recipient.
-const CHRIS = { timezone: 'America/New_York', timezone_set_by: 'owner', working_hours_auto: hours(WEEKDAYS) };
+const CHRIS = { timezone: 'America/New_York', timezone_set_by: 'owner', profile_json: hours(WEEKDAYS) };
 const SUN_EVENING = '2026-09-20T18:46:38Z';
 const BOSTON_MON_START = '2026-09-21T13:00:00.000Z';
 test('CHRIS regression: Sunday heads-up to a Mon–Fri recipient is held to their Monday start and described as scheduled', async () => {

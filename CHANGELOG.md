@@ -1,4 +1,4 @@
-## 5.0.5 — Reliable recurring moves and approval replies
+## 5.0.5 — Reliable scheduling, preferences and delivery
 
 Repair the Yael recurring-reschedule and Dina owner-attendee incidents. Pending owner decisions retain their requester context, and final replies distinguish confirmed actions from pending, failed or unknown results.
 
@@ -8,12 +8,20 @@ Repair the Yael recurring-reschedule and Dina owner-attendee incidents. Pending 
 - Recognize an existing owner email in the attendee roster before peer availability checks, preserving owner scheduling rules and real attendee conflicts.
 - Check final rewritten replies against actual request and tool outcomes, preserving confirmed completion and withholding unsupported approval claims. Correct weekday extraction without corrupting valid short or full Hebrew weekday text.
 
+### Changed
+- Use one canonical weekly base schedule across capture, availability, prompts and deadlines; preserve dated overrides and historical prose.
+- Consolidate owner preferences into keyed preference files with reviewed mappings, conflict checks and reversible backups.
+- Persist Slack delivery attempts and confirmed receipts so restart recovery avoids replaying confirmed sends.
+
 ### Framework
+- Require exact refreshed snapshots when resuming implemented Workshop dependencies, preserving authorization and independent review. Tolerate bounded Windows locks during bookkeeping fixture cleanup.
 - Refresh two source-navigation citations for the output gates; no Workshop rule or runtime policy changed.
 
 ### Verification and limits
 - Four correction roots independently reviewed. Full executable checkpoint retained with targeted repair replacements: 228 suite/timezone executions, 5,526 assertions, no failed or skipped checks; TypeScript passed.
 - Golden30 independently traced. Isolated fixtures and captured model inputs establish the tested contracts, not live model obedience or a replay of the users' conversations.
+
+Same-version extension: nine product evidence references independently reviewed across the three workstreams, plus two framework repairs. Combined executable checkpoint: 236 suite/timezone executions and 5,679 assertions; TypeScript and Golden30 passed. Original cleanup-lock failure and one unexplained preference-fixture failure remain retained alongside successful unchanged-source retries. Activation requires the separately reviewed live migration plan; local verification does not establish production migration.
 
 ## 5.0.4 — Canonical person memory, scheduling and delivery reliability
 

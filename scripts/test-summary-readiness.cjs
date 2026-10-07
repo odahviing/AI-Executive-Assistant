@@ -7,6 +7,8 @@ const ts = require('typescript'), Database = require('better-sqlite3');
 const root = path.resolve(__dirname, '..');
 const sourceRoot = process.env.SUMMARY_SOURCE_ROOT || root;
 const compiled = new Map();
+const fixtureDisks=[];
+require('node:test').after(()=>{for(const disk of fixtureDisks){assert.equal(path.dirname(disk),root);assert.ok(path.basename(disk).startsWith('.summary-readiness-'));fs.rmSync(disk,{recursive:true,force:true});}});
 function actualDirectory(members) {
   const cache=new Map(), mocks={
     'src/utils/logger.ts':{__esModule:true,default:{info(){},warn(){},error(){}}},
@@ -23,6 +25,7 @@ function actualDirectory(members) {
   return load('src/connections/slack/index.ts').createSlackConnection({client:{users:{list:async()=>({members})}}},'fixture',{user:{slack_user_id:'UOWNER'}});
 }
 function harness(opts = {}) {
+  const disk=fs.mkdtempSync(path.join(root,'.summary-readiness-'));fixtureDisks.push(disk);
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE summary_sessions (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, owner_user_id TEXT, thread_ts TEXT UNIQUE, channel_id TEXT, stage TEXT, current_draft TEXT, meeting_date TEXT, meeting_time TEXT, meeting_subject TEXT, main_topic TEXT, attendees TEXT, is_external INTEGER, transcript_chars INTEGER, shared_at TEXT, shared_to TEXT);`);
   const sends = [], tasks = [], prompts = [], preferences = opts.preferences || [], modules = new Map();
@@ -44,7 +47,6 @@ function harness(opts = {}) {
     'src/connectors/graph/calendar.ts':{getCalendarEvents:async()=>[]},
     'src/skills/knowledge.ts':{},
     'src/utils/logger.ts':{__esModule:true,default:{info(){},warn(){},error(){}}},
-    'src/utils/skillPreferences.ts':{formatSkillPreferencesBlock:()=>''},
     'src/utils/attendeeAvailability.ts':{loadAttendeeAvailabilityForPerson:()=>undefined,attendeeTzForDay:()=> 'UTC'},
     'src/utils/responseDeadline.ts':{colleagueWorkTimeBaseFromNow:()=>require('luxon').DateTime.fromISO('2026-10-01T14:00Z')},
   };
@@ -52,21 +54,22 @@ function harness(opts = {}) {
     if(rel === 'src/db.ts')return {...load('src/db/summarySessions.ts'),savePreference:p=>preferences.push(p),getPreferences:()=>preferences,getPersonMemory:()=>null};
     if(Object.hasOwn(mocks,rel))return mocks[rel];
     if(modules.has(rel))return modules.get(rel).exports;
-    assert.ok(['src/skills/summary.ts','src/db/summarySessions.ts','src/memory/resolveAttendeeEmails.ts','src/utils/extractJson.ts'].includes(rel),'unexpected import '+rel);
+    assert.ok(['src/utils/skillPreferences.ts','src/skills/summary.ts','src/db/summarySessions.ts','src/memory/resolveAttendeeEmails.ts','src/utils/extractJson.ts'].includes(rel),'unexpected import '+rel);
     if(!compiled.has(rel)) {
       const selected=path.join(sourceRoot,rel), source=fs.readFileSync(fs.existsSync(selected)?selected:path.join(root,rel),'utf8');
       compiled.set(rel,ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText);
     }
     const mod={exports:{}};modules.set(rel,mod);
     const req=s=>s==='@anthropic-ai/sdk'?{}:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),s))+'.ts'):require(s);
-    vm.runInNewContext('(function(require,module,exports){'+compiled.get(rel)+'\n})',{console,Buffer,setTimeout},{filename:rel})(req,mod,mod.exports);return mod.exports;
+    vm.runInNewContext('(function(require,module,exports){'+compiled.get(rel)+'\n})',{console,Buffer,setTimeout,process:{env:process.env,cwd:()=>disk}},{filename:rel})(req,mod,mod.exports);return mod.exports;
   }
   const store=load('src/db/summarySessions.ts');
   const draft={subject:'Planning',main_topic:'Launch',is_external:false,attendees:[],paragraphs:['Approved launch plan.'],action_items:[],speakers_unresolved:['דובר 2'],...opts.draft};
   if(!opts.empty)store.createSummarySession({ownerUserId:'UOWNER',threadTs:'1.2',channelId:'DOWNER',draft,transcriptChars:100});
   const skill=new (load('src/skills/summary.ts').SummarySkill)();
   const context={profile,app:{},userId:'UOWNER',senderRole:'owner',authority:'owner',surface:'owner_dm',threadTs:'1.2',channelId:'DOWNER'};
-  const call=(name,args,ctx={})=>skill.executeToolCall(name,args,{...context,...ctx});
+  const ready=(async()=>{const api=load('src/utils/skillPreferences.ts');for(const p of preferences){const read=api.readKeyedPreferences(profile);assert.equal(read.ok,true);const result=await api.writeKeyedPreference(profile,'summary',{key:p.key,category:p.category,value:p.value,source:'user_taught',condition:p.category.startsWith('summary_type_')?{summaryType:p.category.slice(13)}:null},{expectedRevision:read.revision});assert.equal(result.ok,true);}})();
+  const call=async(name,args,ctx={})=>{await ready;return skill.executeToolCall(name,args,{...context,...ctx});};
   return {db,store,sends,tasks,prompts,preferences,call,session:()=>store.getSummarySessionByThread('1.2'),share:(recipients=[{type:'user',id_or_name:'UOWNER'}])=>call('share_summary',{recipients}),ingest:(text)=>load('src/skills/summary.ts').ingestTranscriptUpload({text,caption:'',ownerUserId:'UOWNER',threadTs:'1.2',channelId:'DOWNER',profile})};
 }
 const user=(id,name,email=id+'@example.com')=>({id,name,email});
@@ -105,7 +108,7 @@ test('malformed new transcript response creates no durable session',async()=>{co
 test('malformed corrected upload preserves previous draft',async()=>{const h=harness({responses:[{kind:'summary'},{action_items:[null]}]});const before=h.session().current_draft;await assert.rejects(()=>h.ingest('Corrected'));assert.equal(h.session().current_draft,before);});
 test('valid partial edit preserves omitted arrays and updates text',async()=>{const h=harness({responses:[{subject:'Edited title'}]});const r=await h.call('update_summary_draft',{instruction:'Rename'});assert.equal(r.ok,true);assert.equal(JSON.parse(h.session().current_draft).subject,'Edited title');assert.equal(JSON.parse(h.session().current_draft).paragraphs[0],'Approved launch plan.');});
 const stylePrefs=[{category:'summary',key:'global',value:'GLOBAL_RULE'},{category:'summary_type_interview',key:'interview',value:'INTERVIEW_RULE'},{category:'summary_type_weekly',key:'weekly',value:'WEEKLY_RULE'}];
-for(const subject of ['ראיון עם דנה','Еженедельная встреча','Unknown meeting'])test('structural style groups remain available for '+subject,async()=>{const h=harness({draft:{subject},preferences:stylePrefs,responses:[{subject}]});await h.call('update_summary_draft',{instruction:'עדכן את הכותרת'});const p=h.prompts[0].messages[0].content;assert.match(p,/GLOBAL_RULE/);assert.match(p,/INTERVIEW_RULE/);assert.match(p,/WEEKLY_RULE/);assert.match(p,/unknown.*global/is);assert.match(p,/any language/i);});
+for(const subject of ['ראיון עם דנה','Еженедельная встреча','Unknown meeting'])test('structural style groups remain available for '+subject,async()=>{const h=harness({draft:{subject},preferences:stylePrefs,responses:[{subject}]});await h.call('update_summary_draft',{instruction:'עדכן את הכותרת'});const p=h.prompts[0].messages[0].content;assert.match(p,/GLOBAL_RULE/);assert.match(p,/INTERVIEW_RULE/);assert.match(p,/WEEKLY_RULE/);assert.match(p,/Explicit: GLOBAL_RULE/);assert.ok(p.includes('apply when summary type is "interview": INTERVIEW_RULE'));assert.ok(p.includes('apply when summary type is "weekly": WEEKLY_RULE'));});
 test('structural style learner receives multilingual subject without inferred English hint',async()=>{const h=harness({draft:{subject:'ראיון עם דנה'},preferences:stylePrefs,responses:[{subject:'ראיון עם דנה'}]});await h.call('update_summary_draft',{instruction:'קצר יותר בראיונות'});const p=h.prompts[1].messages[0].content;assert.ok(p.includes('ראיון עם דנה'));assert.ok(!p.includes('INFERRED TYPE:'));assert.match(p,/type_name/);});
 test('retired automatic followups retain deadlines as summary content only',async()=>{const h=harness({users:[user('UONE','Dan One')],draft:{action_items:[{...action,deadline_label:'Thursday'}]}});const r=await h.share();assert.equal(r.ok,true);assert.equal(h.tasks.length,0);assert.ok(h.sends[0].text.includes('Send launch plan'));assert.ok(h.sends[0].text.includes('Thursday'));assert.equal(r.tasks_created,undefined);});
 test('model edit cannot promote stale attendee Slack ID into wrong mention',async()=>{const h=harness({users:[user('UTWO','Dana Two')],draft:{attendees:[{name:'Dan One',email:'uone@example.com',slackId:'UONE',internal:true}],action_items:[action]},responses:[{attendees:[{name:'Dana Two',email:'utwo@example.com',slackId:'UONE',internal:true}],action_items:[{...action,assignee_text:'Dana Two'}]}]});assert.equal((await h.call('update_summary_draft',{instruction:'Dana Two owns this'})).ok,true);await h.share();assert.ok(h.sends[0].text.includes('<@UTWO>'));assert.ok(!h.sends[0].text.includes('<@UONE>'));assert.equal(h.tasks.length,0);});
@@ -114,4 +117,5 @@ test('model edit cannot promote stale attendee Slack ID into wrong mention',asyn
 test('unknown edited attendee retains content without stale mention',async()=>{const h=harness({draft:{attendees:[{name:'Dan One',internal:true,slackId:'UONE'}],action_items:[{...action,assignee_text:'Dan One'}]}});await h.share();plainAction(h);});
 for(const reason of ['unknown','failed'])test('attempted '+reason+' share archives and terminal replay does not resend',async()=>{const h=harness({sendResult:{ok:false,reason},draft:{action_items:[action]}});const r=await h.share();assert.equal(r.send_failures.length,1);assert.equal(h.session().current_draft,null);assert.equal(h.session().stage,'shared');assert.equal((await h.share()).ok,false);assert.equal(h.sends.length,1);assert.ok(h.sends[0].text.includes('Send launch plan'));});
 test('not-attempted delivery retries once after transport restoration',async()=>{const result={ok:false,reason:'not_attempted'};const h=harness({sendResult:result,draft:{action_items:[action]}});assert.equal((await h.share()).ok,false);assert.ok(h.session().current_draft);result.ok=true;delete result.reason;assert.equal((await h.share()).ok,true);assert.equal(h.session().current_draft,null);assert.equal((await h.share()).ok,false);assert.equal(h.sends.length,2);assert.ok(h.sends[1].text.includes('Send launch plan'));});
+
 

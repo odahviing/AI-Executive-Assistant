@@ -52,9 +52,9 @@ function describeHoursWrite(
   name: string,
   outcome?: CoreFieldWrite,
 ): { scheduling_hours?: Record<string, unknown>; notes: string[] } {
-  const prose = typeof args.working_hours === 'string' && args.working_hours.trim() !== '';
+
   const structured = args.working_hours_structured != null;
-  if (!prose && !structured) return { notes: [] };
+  if (!structured) return { notes: [] };
   const row = getPersonById(personId);
   const eff = row ? describeEffectiveWorkingHours(row) : null;
   if (structured && (outcome === 'applied' || outcome === 'already_set') && eff) {
@@ -64,19 +64,17 @@ function describeHoursWrite(
     };
   }
   const still = eff
-    ? `${eff.source === 'auto' ? 'the timezone default' : 'the window stored earlier'}, ${eff.window}`
+    ? `${eff.source === 'auto' ? 'the recorded week initialized from timezone defaults' : 'the recorded regular week'}, ${eff.window}`
     : 'no stored window (no timezone on file — a slot search assumes the requester\'s zone with standard hours)';
   return {
     scheduling_hours: {
       in_force: false,
-      ...(prose ? { stored_as: 'note' } : {}),
+
       scheduling_uses: eff,
     },
     notes: [
-      structured
-        ? `working_hours_structured for ${name} was not confirmed as saved (${outcome ?? "no write outcome"}). Slot searches still use ${still}.`
-        : `${name}'s working_hours landed as a NOTE only — no scheduling path reads that text, so slot searches still use ${still}.`,
-      'Use working_hours_structured for stated clock windows, including dayOverrides for individual weekdays. Ask for exact start and end clocks for vague hours such as Tuesday nights; retain unspecified days and defaults.',
+      `working_hours_structured for ${name} was not confirmed as saved (${outcome ?? "no write outcome"}). Slot searches still use ${still}.`,
+      'Use working_hours_structured.week for recurring weekday clocks or null for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Temporary changes use the existing dated override tools.',
     ],
   };
 }
@@ -243,29 +241,18 @@ Use real evidence; omit unknown fields. Save explicit corrections when given; in
               type: 'string',
               description: 'Email address for the person — pass ONLY an address explicitly stated in the conversation (owner: "Jim\'s email changed to jim@newco.com"; the person: "my address is dana@corp.io"). Durably updates the directory address used for calendar invites, so the correction holds in every future conversation. An owner-stated address outranks the auto-synced one and cannot be silently reverted by a later sync. NEVER pass an address you inferred, guessed, or composed yourself.',
             },
-            working_hours: {
-              type: 'string',
-              description: 'Free-text record of what was said about their hours, kept as said — a paper trail only. The window scheduling and the contacts list use is working_hours_structured below.',
-            },
             working_hours_structured: {
               type: 'object',
-              description: 'The working window in force: slot searches clip to it and the contacts list shows it as their hours (until it is set, a timezone default stands in, marked as such). Save it when the owner or the person states the hours, or a strong signal gives them (calendar invite metadata); the result confirms the write outcome and echoes the effective window. Send only dayOverrides for individual weekdays; unspecified days, sibling overrides and defaults are retained. Ask for exact start and end clocks for vague hours such as Tuesday nights. Windows must end after they start on the same day.',
+              description: 'Recorded complete regular week, initialized from timezone defaults once until stated. Send week with only changed weekdays: {hoursStart,hoursEnd}, or null for a day off; other days stay unchanged. Omitted duration means recurring. Temporary changes use the existing dated override tools. Save stated hours or strong calendar metadata; the result confirms the write and echoes the week. Ask for exact start and end clocks for vague hours. Windows end after they start on the same day.',
               properties: {
-                workdays: {
-                  type: 'array',
-                  description: 'Day names they work on. e.g. ["Sunday","Monday","Tuesday","Wednesday","Thursday"] for Israel; ["Monday","Tuesday","Wednesday","Thursday","Friday"] for US/EU.',
-                  items: { type: 'string', enum: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] },
-                },
-                hoursStart: { type: 'string', description: 'HH:MM in their local time. e.g. "09:00".' },
-                hoursEnd:   { type: 'string', description: 'HH:MM in their local time. e.g. "18:00".' },
-                dayOverrides: {
+                week: {
                   type: 'object',
-                  description: 'Partial weekday map. Send only stated days; the store merges them with existing hours or timezone defaults.',
                   properties: Object.fromEntries(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map(day => [day, {
-                    type: 'object', properties: {
-                      hoursStart: { type: 'string', description: 'Exact local HH:MM start.' },
-                      hoursEnd: { type: 'string', description: 'Exact local HH:MM end, later than start.' },
-                    }, required: ['hoursStart', 'hoursEnd'], additionalProperties: false,
+                    anyOf: [{ type: 'null' }, {
+                      type: 'object', properties: {
+                        hoursStart: { type: 'string' }, hoursEnd: { type: 'string' },
+                      }, required: ['hoursStart', 'hoursEnd'], additionalProperties: false,
+                    }],
                   }])),
                   additionalProperties: false,
                 },
@@ -488,6 +475,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         return { updated: false, merged: false, reason: 'merge_unavailable_or_unconfirmed' };
       }
     }
+    if (toolName === 'update_person_profile' && Object.prototype.hasOwnProperty.call(args, 'working_hours')) return { updated: false, error: 'retired_working_hours', reason: 'Use working_hours_structured.week for the regular week; historical prose was not changed.', _note: 'Use working_hours_structured.week for recurring weekday clocks or null for a day off; preserve unspecified days. Omitted duration means recurring. Ask for exact start and end clocks for vague hours. Temporary changes use the existing dated override tools.' };
     const notSavedFields: string[] = [];
     // Authority permits writes; a shared surface still withholds private reads
     // and the existing owner preference / markdown tools.
@@ -609,7 +597,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         // decide whether colleagues can self-set it; if yes, add it here.
         const COLLEAGUE_SELF_WRITABLE_FIELDS = new Set([
           'colleague_slack_id', 'colleague_name',
-          'timezone', 'state', 'working_hours', 'working_hours_structured',
+          'timezone', 'state', 'working_hours_structured',
           'language_preference', 'name', 'name_he', 'currently_traveling',
           // email: a person's own stated contact address (L2's own example, at
           // 'person' tier — corrects an auto-synced value, never an owner entry).
@@ -744,7 +732,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           if (!args.category || !args.key) {
             return { saved: false, error: 'missing_fields', message: 'set requires category, key, and value.' };
           }
-          savePreference({
+          await savePreference({
             userId,
             category: args.category as string,
             key: args.key as string,
@@ -758,7 +746,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           if (!args.key) {
             return { deleted: false, error: 'missing_fields', message: 'forget requires key.' };
           }
-          const deleted = deletePreference(userId, args.key as string);
+          const deleted = await deletePreference(userId, args.key as string);
           logger.info('Preference deleted', { userId, key: args.key, deleted });
           return { deleted, key: args.key };
         }
@@ -985,7 +973,7 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
                   ...hours,
                   note: hours.source === 'manual'
                     ? `Stated window — what slot searches clip to. It outranks any hours mentioned in notes or content (older prose); report THIS as ${row?.name ?? query}'s hours.`
-                    : `No hours stated for ${row?.name ?? query} yet — this is the default for their timezone, which slot searches use until hours are given.`,
+                    : `No hours stated for ${row?.name ?? query} yet — this recorded regular week was initialized from timezone defaults once; it stays until edited. Temporary changes use dated overrides.`,
                 },
               }
             : {}),
@@ -1226,7 +1214,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
           const profileWrites = updatePersonProfileById(personId, {
             communication_style: args.communication_style as string | undefined,
             language_preference: args.language_preference as string | undefined,
-            working_hours:       args.working_hours       as string | undefined,
             working_hours_structured: args.working_hours_structured as PersonProfile['working_hours_structured'],
             role_summary:        args.role_summary        as string | undefined,
             reports_to:          args.reports_to          as string | undefined,
@@ -1354,7 +1341,6 @@ NOT for: one-off instructions for today, FACTS about other people (→ update_pe
         const profileWrites = updatePersonProfile(slackId, {
           communication_style: args.communication_style as string | undefined,
           language_preference: args.language_preference as string | undefined,
-          working_hours:       args.working_hours       as string | undefined,
           working_hours_structured: args.working_hours_structured as PersonProfile['working_hours_structured'],
           role_summary:        args.role_summary        as string | undefined,
           reports_to:          args.reports_to          as string | undefined,

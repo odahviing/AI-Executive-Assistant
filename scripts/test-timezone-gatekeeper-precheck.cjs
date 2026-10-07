@@ -18,7 +18,7 @@ const actual=new Set(['src/utils/weTimeResolver.ts','src/utils/availabilityPreCh
 const travel={from:'2026-09-14',until:'2026-09-18',location:'New York'};
 async function run(options={}){
  const profile={user:{name:'Owner Fixture',slack_user_id:'UOWNER',email:'owner@example.test',timezone:options.ownerZone||'Asia/Jerusalem'},meetings:{allowed_durations:[10,25,50],categories:[]}};
- const person=options.missing?null:{person_id:42,slack_id:'UCOLLEAGUE',email:null,timezone:Object.hasOwn(options,'rawZone')?options.rawZone:'Asia/Jerusalem',profile_json:JSON.stringify({working_hours_structured:{workdays:['Monday','Tuesday','Wednesday','Thursday','Friday'],hoursStart:'07:00',hoursEnd:'16:00',timezone:options.hoursZone??'Europe/London'}}),working_hours_auto:JSON.stringify({workdays:['Monday','Tuesday','Wednesday','Thursday','Friday'],hoursStart:'09:00',hoursEnd:'18:00'}),private_notes:'PRIVATE_PERSON_NOTE'};
+ const person=options.missing?null:{person_id:42,slack_id:'UCOLLEAGUE',email:null,timezone:Object.hasOwn(options,'rawZone')?options.rawZone:'Asia/Jerusalem',profile_json:JSON.stringify({working_hours_structured:{week:require('./fixtures/regular-week.cjs').regularWeek(['Monday','Tuesday','Wednesday','Thursday','Friday'],'07:00','16:00'),source:'manual',timezone:options.hoursZone??'Europe/London'}}),working_hours_auto:JSON.stringify({workdays:['Monday','Tuesday','Wednesday','Thursday','Friday'],hoursStart:'09:00',hoursEnd:'18:00'}),private_notes:'PRIVATE_PERSON_NOTE'};
  const calls={checks:[],forgets:[],records:[],calendar:[],model:0,person:0,stash:[],precheck:[],warnings:[]},modules=new Map(),noop=()=>{};
  const slots=options.slots??[{wall_clock:'2026-09-15T10:00'}];
  const mocks={

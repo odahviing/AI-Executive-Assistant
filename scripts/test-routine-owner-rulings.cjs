@@ -54,6 +54,13 @@ function fixture(opts = {}) {
   const background = load('src/core/background.ts', {
     '../tasks/runner': {}, '../tasks/routineMaterializer': {}, '../tasks/crons': {}, '../tasks/dispatchers/routine': routine,
     '../utils/logger': log, '../connections/slack/eligibility': {}, '../connectors/slack/threadHistory': {},
+    // No catch-up invocation belongs to the interrupted-routine startup path.
+    // Fail visibly if that boundary changes; transport reconciliation has its
+    // own real-module suite rather than an assumed successful stub here.
+    '../connectors/slack/deliveryAttempt': {
+      hasHeldDelivery() { throw Error('Unexpected Slack catch-up in routine startup fixture'); },
+      reconcileSlackDeliveries() { throw Error('Unexpected Slack reconciliation in routine startup fixture'); },
+    },
   }, { setInterval(fn, delay) { state.intervals.push({ fn, delay }); } });
   return { db, state, async boot() { background.startBackgroundTimer([], new Map([['owner', { user: { slack_user_id: 'OWNER' } }]])); await new Promise(resolve => setImmediate(resolve)); } };
 }

@@ -13,6 +13,7 @@ function load(rel,deps,globals={}) {
 }
 const flush=()=>new Promise(r=>setImmediate(r));
 async function fixture(o={}) {
+ const delivery=require('./fixtures/slack-delivery.cjs')();
  const f=fixtureModule.exports(o),h=f.h,history=[],sent=[],timers=[],mirrors=[];
  await f.move(); await f.move('meeting-2');
  const jobs=h.db.prepare('SELECT * FROM outreach_jobs ORDER BY rowid').all();
@@ -27,6 +28,7 @@ async function fixture(o={}) {
  const shadow={shadowNotify:async(profile,p)=>{mirrors.push(p);return shadowModule.shadowNotify(profile,p);}};
  const db=o.lookupFails?{getAutoMoveRequestIdForOutreachThread(){throw Error('offline');}}:h.jobs;
  const post=load('src/connectors/slack/postReply.ts',{
+ './deliveryAttempt':delivery.module,
  '../../utils/logger':logger,'../../db':{appendToConversation(){}},'../../connections/slack/formatting':{formatForSlack:x=>x},'../../connections/slack/messaging':{setAssistantStatus:async()=>{}},'../../config':{config:{}},'../../voice':{shouldRespondWithAudio:()=>false},
  '../../utils/guards/runOutputGates':{runDeliberationGuard:async x=>x,runOutputGates:async()=> 'Safe delivered reply',runCodaGates:async()=>({ship:true})},
  './inboundQueue':{isThreadActive:()=>false,getThreadInboundRevision:()=>0},'../../utils/threadActivity':{getLastMaelleMessage:()=>null,recordMaelleMessage(){}},
@@ -43,7 +45,7 @@ async function fixture(o={}) {
  }
  async function react(thread='notice.1',extra={}) {
   let handler;
-  const handlers=load('src/connectors/slack/app/handlers.ts',{'../../../config':{config:{}},'../../../llm/client':{},'../../../core/threadActions':{},'../../../db':{},'../../../voice':{},'../../../utils/logger':logger,'../inboundReplayRegistry':{},'../processedDedup':{},'./helpers':{},'./fileIngestion':{},'../../../connections/slack/eligibility':{readInternalSlackConversation:async()=>({})},'../threadHistory':{},'../recentOutboundContext':h.load('src/connectors/slack/recentOutboundContext.ts'),'../../../utils/shadowNotify':shadow,'../../../db/jobs':db,'../../../db/requests':h.reqs});
+  const handlers=load('src/connectors/slack/app/handlers.ts',{'../deliveryAttempt':delivery.module,'../../../config':{config:{}},'../../../llm/client':{},'../../../core/threadActions':{},'../../../db':{},'../../../voice':{},'../../../utils/logger':logger,'../inboundReplayRegistry':{},'../processedDedup':{},'./helpers':{},'./fileIngestion':{},'../../../connections/slack/eligibility':{readInternalSlackConversation:async()=>({})},'../threadHistory':{},'../recentOutboundContext':h.load('src/connectors/slack/recentOutboundContext.ts'),'../../../utils/shadowNotify':shadow,'../../../db/jobs':db,'../../../db/requests':h.reqs});
   handlers.registerReactionHandler({profile:h.profile,botUserId:'BOT',app:{event:(_e,fn)=>handler=fn}});
   await handler({event:{item:{type:'message',channel:extra.channel||'DCOLLEAGUE',ts:thread},user:extra.sender||'COLLEAGUE',reaction:'thumbsup'},client:{}});
  }

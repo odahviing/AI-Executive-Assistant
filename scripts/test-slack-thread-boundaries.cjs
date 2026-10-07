@@ -9,6 +9,7 @@ const profile={user:{slack_user_id:'UOWNER',name:'Owner',timezone:'UTC'},assista
 const actual=new Set(['src/connectors/slack/app/handlers.ts','src/connectors/slack/app/processMessage.ts','src/connectors/slack/inboundQueue.ts','src/connectors/slack/processedDedup.ts','src/connectors/slack/inboundReplayRegistry.ts','src/connectors/slack/threadHistory.ts','src/connections/slack/messaging.ts','src/connections/slack/eligibility.ts','src/core/background.ts','src/utils/threadBoundApprovalAutoResolve.ts','src/memory/resolveAttendeeEmails.ts']);
 const compiled=new Map();
 function harness(options={}){
+ const delivery=options.delivery||require('./fixtures/slack-delivery.cjs')();
  const jobs=[],timers=[],unexpected=[],runs=[],posts=[],received=[],calls=[],classifications=[],events={},db=new Map(),logs=[],released=[],resolutions=[];let classifierCalls=0;
  const logger=Object.fromEntries(['info','warn','error','debug'].map(k=>[k,(...v)=>logs.push([k,...v])]));
  const channels={DOWNER:{is_im:true,user:'UOWNER'},DCOLLEAGUE:{is_im:true,user:'UCOLLEAGUE'},DEXTERNAL:{is_im:true,user:'UEXTERNAL'},CROOM:{is_channel:true,is_ext_shared:false},GROOM:{is_mpim:true,is_ext_shared:false},CMODERN:{is_mpim:true,is_ext_shared:false},CSHARED:{is_channel:true,is_ext_shared:true},GSHARED:{is_mpim:true,is_ext_shared:true},CUNKNOWN:{is_channel:true},...options.channels};
@@ -20,10 +21,11 @@ function harness(options={}){
   replies:async p=>{calls.push(['replies',p]);return options.replies?options.replies(p):{ok:true,messages:[],response_metadata:{}};},
   open:async({users})=>{calls.push(['open',users]);return {ok:true,channel:{id:users.includes(',')?'GROOM':users==='UOWNER'?'DOWNER':users==='UEXTERNAL'?'DEXTERNAL':'DCOLLEAGUE'}};},
   join:async p=>{calls.push(['join',p]);return {ok:true};}
- },chat:{postMessage:async p=>{posts.push(p);if(options.postFails)throw Error('post unavailable');if(options.rejectWrongParent&&p.channel.startsWith('D')&&p.thread_ts==='900.000001')throw Error('thread_not_found');return {ok:true,ts:'900.000001'};},update:async p=>{posts.push(p);return {ok:true};}},reactions:{add:async p=>{calls.push(['react',p]);return {ok:true};},remove:async()=>({ok:true})}};
+ },chat:{postMessage:async p=>{posts.push(p);if(options.postResponse)return options.postResponse(p,posts.length);if(options.postFails)throw Error('post unavailable');if(options.rejectWrongParent&&p.channel.startsWith('D')&&p.thread_ts==='900.000001')throw Error('thread_not_found');return {ok:true,ts:'900.000001'};},update:async p=>{posts.push(p);return {ok:true};}},reactions:{add:async p=>{calls.push(['react',p]);return {ok:true};},remove:async()=>({ok:true})}};
  const app={client,event:(name,fn)=>events[name]=fn,message:fn=>events.dm=fn};
  const append=(thread,channel,row)=>db.set(thread,[...(db.get(thread)||[]),row].slice(-20));
  const mocks={
+  'src/connectors/slack/deliveryAttempt.ts':delivery.module,
   'src/utils/logger.ts':logger,'src/config.ts':{config:{}},'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{classifierCalls++;if(classifierCalls===1&&options.classifierPause)await options.classifierPause.promise;return {content:[{type:'tool_use',input:{target:1,verdict:classifierCalls===1?'approve':'pass_to_sonnet'}}]};}}})},'src/core/threadActions.ts':{ownerPostedInThread:rows=>rows.slice(-5).some(m=>m.user==='UOWNER'),classifyThreadAction:async()=> 'other',buildThreadRoster:()=>[],buildThreadActionDirective:()=>''},
   'src/db.ts':{getConversationHistory:t=>[...(db.get(t)||[])],appendToConversation:append,upsertPersonMemory:()=>{},auditLog:()=>{},logEvent:()=>{},getPersonMemory:()=>({person_id:'fixture'}),touchPersonSeenById:()=>{},getSummarySessionByThread:()=>null},
   'src/voice.ts':{},'src/vision.ts':{},'src/utils/genderDetect.ts':{detectAndSaveGender:async()=>{}},

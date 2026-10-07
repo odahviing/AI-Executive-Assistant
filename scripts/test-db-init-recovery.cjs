@@ -26,6 +26,7 @@ function fixture() {
       handles.push(handle); return handle;
     },
     initSchema(db) { initializations++; if (failure === 'schema') throw Error('schema unavailable'); db.initialized = true; },
+    initSlackDeliverySchema() {}, // Separate storage suite executes the additive schema on SQLite.
   };
   for (const name of ['runV207ConsolidateRequests','runPersonStoreMigration','runDedupePeopleByEmail','runSocialProvenanceBackfill','runCalendarIssuesAxisMigration','runPurgeWorkShapedSocialSubjects','runSocialCategoryScoreRebase']) context[name] = () => {};
   vm.runInNewContext(ts.transpileModule(nodes.map(n => n.getText(tree)).join('\n'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);

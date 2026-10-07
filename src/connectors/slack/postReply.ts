@@ -37,6 +37,7 @@ import { getLastMaelleMessage } from '../../utils/threadActivity';
 import { recordCodaDelivered, reserveCodaAttempt } from '../../core/social/logEngagement';
 import { composeSocialCoda } from '../../core/social/generateCoda';
 import { isSocialInitiationDue } from '../../core/social/stateMachine';
+import { attemptDelivery, type DeliveryInput } from './deliveryAttempt';
 
 export type SenderRole = 'owner' | 'colleague' | 'unknown';
 
@@ -44,7 +45,9 @@ export interface PostReplyInput {
   app: App;
   profile: UserProfile;
   result: OrchestratorOutput;
-  say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
+  say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean; client_msg_id?: string }) => Promise<unknown>;
+  /** Every inbound member of the queued turn, including merged messages. */
+  inboundMessageTs?: string[];
   role: SenderRole;
   colleagueName?: string;
   senderId: string;
@@ -530,6 +533,9 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // invoke this only when their transport operation confirms delivery.
   // Keep raw tool summaries alongside vetted prose for later claim checks.
   input.onBeforeDelivery?.();
+  const delivery: DeliveryInput | undefined = input.inboundMessageTs?.length
+    ? { profileId: profile.user.slack_user_id, channelId, threadTs, inboundTs: input.inboundMessageTs }
+    : undefined;
   let recordedDelivery = false;
   const onDelivered = (confirmedText?: string) => {
   if (recordedDelivery) return;
@@ -567,19 +573,21 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
   // (can't react), already an emoji-only reply.
   const userMsgTs = (input as PostReplyInput).userMessageTs;
   if (!voiceInput && userMsgTs && isPureAckReply(cleanReply)) {
-    // Same shape as the audio branch below, for the same reason: this catch
-    // FALLS THROUGH TO A TEXT SEND, so nothing that runs after the reaction has
-    // landed may sit inside the try — a throw in there would post the same
-    // answer a second time.
+    // Only explicit rejection permits a text fallback. An uncertain reaction
+    // remains held just like an uncertain text/audio operation.
     let ackPosted = false;
     try {
-      await app.client.reactions.add({
+      const react = () => app.client.reactions.add({
         token: assistant.slack.bot_token,
         channel: channelId,
         timestamp: userMsgTs,
         name: '+1',
       });
-      ackPosted = true;
+      if (delivery) {
+        const outcome = await attemptDelivery(delivery, react, 'reaction');
+        if (outcome === 'unknown' || outcome === 'held') return;
+        ackPosted = outcome === 'confirmed';
+      } else { await react(); ackPosted = true; }
     } catch (err) {
       logger.warn('Ack-replacement reaction failed — falling back to text', {
         err: String(err).slice(0, 200),
@@ -695,6 +703,7 @@ export async function postOrchestratorReply(input: PostReplyInput): Promise<void
     voiceInput: voiceInput === true,
     say,
     onDelivered,
+    delivery,
   });
   if (!confirmedReply) return; // unknown audio delivery: no coda or failure reply
 
@@ -725,8 +734,9 @@ async function sendReply(opts: {
   threadTs: string;
   cleanReply: string;
   voiceInput: boolean;
-  say: (msg: { text: string; thread_ts?: string; unfurl_links?: boolean; unfurl_media?: boolean }) => Promise<unknown>;
+  say: PostReplyInput['say'];
   onDelivered?: (confirmedText?: string) => void;
+  delivery?: DeliveryInput;
 }): Promise<boolean> {
   const useAudio = shouldRespondWithAudio({
     inputWasVoice: opts.voiceInput,
@@ -744,13 +754,17 @@ async function sendReply(opts: {
       // No fallback after submission: uploadV2 can throw after Slack accepted
       // the file. This is unknown delivery, not proof that text is safe to send.
       try {
-        await sendAudioMessage({
+        const send = () => sendAudioMessage({
           app: opts.app,
           botToken: opts.botToken,
           channelId: opts.channelId,
           threadTs: opts.threadTs,
           audioBuffer,
         });
+        if (opts.delivery) {
+          const outcome = await attemptDelivery(opts.delivery, send, 'audio');
+          if (outcome !== 'confirmed') return false;
+        } else await send();
       } catch (err) {
         logger.error('Audio delivery unconfirmed — withholding a second reply', { err: String(err), channelId: opts.channelId, threadTs: opts.threadTs });
         return false;
@@ -771,8 +785,17 @@ async function sendReply(opts: {
   // v3.2.6 — suppress Slack link/media unfurl on Maelle's replies. An EA's
   // replies (esp. a news answer with many source links) shouldn't balloon into
   // a wall of previews. Cited links stay clickable; they just don't auto-expand.
-  const sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false, unfurl_media: false }) as
-    | { ts?: string; ok?: boolean } | undefined;
+  let sayRes: { ts?: string; ok?: boolean } | undefined;
+  const send = async (attemptId?: string) => {
+    sayRes = await opts.say({ text: opts.cleanReply, thread_ts: opts.threadTs, unfurl_links: false,
+      unfurl_media: false, ...(attemptId ? { client_msg_id: attemptId } : {}) }) as typeof sayRes;
+    return sayRes;
+  };
+  if (opts.delivery) {
+    const outcome = await attemptDelivery(opts.delivery, send);
+    if (outcome === 'failed') throw new Error('Slack explicitly rejected the reply');
+    if (outcome !== 'confirmed') return false;
+  } else await send();
   if (sayRes?.ok === false) throw new Error('Slack explicitly rejected the reply');
   if (sayRes?.ok !== true && !sayRes?.ts) {
     logger.warn('Text delivery unconfirmed — withholding history receipt', { channelId: opts.channelId, threadTs: opts.threadTs });

@@ -11,6 +11,7 @@ import { runSocialProvenanceBackfill } from './migrations/v4_4_9_social_provenan
 import { runCalendarIssuesAxisMigration } from './migrations/v4_5_3_calendar_issues_axis';
 import { runPurgeWorkShapedSocialSubjects } from './migrations/v4_5_9_purge_work_subjects';
 import { runSocialCategoryScoreRebase } from './migrations/v4_5_9_social_category_scores';
+import { initSlackDeliverySchema } from './slackDelivery';
 
 let db: Database.Database | undefined;
 
@@ -24,6 +25,7 @@ export function getDb(): Database.Database {
       db.pragma('journal_mode = WAL');
       db.pragma('foreign_keys = ON');
       initSchema(db);
+      initSlackDeliverySchema(db);
       // v2.0.7 — one-shot migration: back up + drop pending_requests + approval_queue.
       // Runs AFTER initSchema so new installs (that never had the tables) don't
       // create-then-drop; existing installs back up first, then drop. Idempotent.
@@ -146,18 +148,8 @@ function initSchema(db: Database.Database): void {
       reply_deadline  TEXT
     );
 
-    -- Learned preferences — things the assistant learns about the user over time
-    CREATE TABLE IF NOT EXISTS user_preferences (
-      id          TEXT PRIMARY KEY,
-      user_id     TEXT NOT NULL,          -- profile key (e.g. 'idan')
-      category    TEXT NOT NULL,          -- 'scheduling' | 'communication' | 'general' | 'people'
-      key         TEXT NOT NULL,          -- short label, e.g. 'prefers_morning_meetings'
-      value       TEXT NOT NULL,          -- the learned fact in plain English
-      source      TEXT NOT NULL,          -- 'user_taught' | 'inferred'
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE(user_id, key)               -- one value per key per user, updates replace
-    );
+    -- Owner preferences live in keyed skill markdown. Existing legacy tables
+    -- are retained empty for reversal after the reviewed startup migration.
 
     -- Per-date work-schedule overrides (v3.7.x / #143) — chat-driven exceptions
     -- to the yaml schedule for a specific date. YAML is the default; a row here

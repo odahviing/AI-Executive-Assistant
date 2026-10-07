@@ -171,7 +171,7 @@ test('outcome verification home compliant and outside-hours controls', () => {
 
 function personHarness({ hoursMissing=false, noZone=false, manualZone }={}) {
   const person={person_id:'p1',slack_id:'U1',email:'person@example.test',timezone:'America/New_York'};
-  const hours={workdays:['Monday','Tuesday','Wednesday','Thursday','Friday'],hoursStart:'09:00',hoursEnd:'17:00'};
+  const hours={week:require('./fixtures/regular-week.cjs').regularWeek(['Monday','Tuesday','Wednesday','Thursday','Friday'])};
   if(noZone) delete person.timezone;
   if(manualZone) hours.timezone=manualZone;
   const entries=load('src/utils/attendeeAvailability.ts', {luxon,'./logger':logger,
@@ -193,7 +193,7 @@ test('known person without derived-hours cache keeps permanent and dated travel 
 test('email adapter preserves stored hours, owner exclusion and travel return', () => {
   const {person,entries}=personHarness();
   const result=entries.loadAttendeeAvailabilityForEmails(['owner@example.test',person.email],'owner@example.test',zone);
-  assert.equal(result.length,1); assert.equal(result[0].hoursStart,'09:00');
+  assert.equal(result.length,1); assert.equal(result[0].week.Monday.hoursStart,'09:00');
   assert.equal(entries.attendeeTzForDay(result[0],'2026-09-14'),zone);
   assert.equal(entries.attendeeTzForDay(result[0],'2026-09-18'),zone);
   assert.equal(entries.attendeeTzForDay(result[0],'2026-09-19'),'America/New_York');
@@ -203,7 +203,7 @@ test('Slack-only person adapter reads the same dated travel and manual hours', (
   assert.equal(typeof entries.loadAttendeeAvailabilityForPerson,'function');
   const result=entries.loadAttendeeAvailabilityForPerson(person,zone);
   assert.equal(result.email,''); assert.equal(result.homeTimezone,'America/New_York');
-  assert.equal(result.hoursEnd,'17:00'); assert.equal(entries.attendeeTzForDay(result,'2026-09-16'),zone);
+  assert.equal(result.week.Monday.hoursEnd,'17:00'); assert.equal(entries.attendeeTzForDay(result,'2026-09-16'),zone);
 });
 
 test('Graph preserves both explicit occurrences of the owner repeated hour', async () => {
@@ -297,7 +297,7 @@ test('manual named-zone work window survives missing physical zone and travel',(
     const e=entries.loadAttendeeAvailabilityForEmails([person.email],'owner@example.test',zone)[0];
     assert.equal(e.workingHoursTimezone,'America/Los_Angeles');
     assert.equal(entries.attendeeTzForDay(e,'2026-09-16'),zone);
-    assert.equal(e.hoursStart,'09:00');
+    assert.equal(e.week.Monday.hoursStart,'09:00');
     if(noZone) assert.equal(e.assumed,true);
   }
 });
@@ -372,7 +372,7 @@ function attendeeHoursVerdict(params,start) {
 }
 
 test('M17 general relaxed and busy-tag offers keep hours; exact named requested slot can annotate',()=>{
-  const entry={email:'person@example.test',timezone:'America/New_York',workdays:['Wednesday'],hoursStart:'09:00',hoursEnd:'17:00'};
+  const entry={email:'person@example.test',timezone:'America/New_York',week:require('./fixtures/regular-week.cjs').regularWeek(['Wednesday'])};
   for(const flags of [{relaxed:true},{tagAttendeeConflicts:true}]) {
     assert.equal(attendeeHoursVerdict({...flags,attendeeAvailability:[entry]},'2026-09-16T12:00:00+03:00').kind,'reject');
     assert.equal(attendeeHoursVerdict({...flags,attendeeAvailability:[entry]},'2026-09-16T16:00:00+03:00').kind,'accept');

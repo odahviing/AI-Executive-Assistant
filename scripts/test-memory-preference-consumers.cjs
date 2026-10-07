@@ -54,7 +54,13 @@ function harness() {
   function seed(skill,text){const file=path.join(disk,'config/users/owner_prefs',skill+'.md');fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,text);return file;}
   const ctx=(authority='owner',surface='owner_dm')=>({profile,authority,surface,senderRole:surface==='owner_dm'?'owner':'colleague',userId:authority==='owner'?'UOWNER':'UCOLLEAGUE',channel:'slack',channelId:'DTEST',threadTs:'123.456'});
   const tool=(args,authority,surface)=>new(load('src/core/assistant.ts').AssistantSkill)().executeToolCall('update_my_preferences',args,ctx(authority,surface));
-  return {state,profile,disk,load,seed,ctx,tool,restart:()=>modules.clear(),cleanup};
+  async function seedStyle() {
+    const api=load('src/utils/skillPreferences.ts'), read=api.readKeyedPreferences(profile);
+    assert.equal(read.ok,true);
+    const result=await api.writeKeyedPreference(profile,'summary',{key:'style-control',category:'summary',value:'KEYED-STYLE-CONTROL',source:'user_taught',condition:null},{expectedRevision:read.revision});
+    assert.equal(result.ok,true);
+  }
+  return {state,profile,disk,load,seed,seedStyle,ctx,tool,restart:()=>modules.clear(),cleanup};
 }
 async function fixture(run){const h=harness();try{await run(h);}finally{h.cleanup();}}
 const textOf = req => [req.system||'',...req.messages.map(m=>m.content)].join('\n');
@@ -96,11 +102,11 @@ test('CONTROL unavailable write preserves old file and retry succeeds',()=>fixtu
 test('L1 failed atomic rename preserves prior document and retry succeeds',()=>fixture(async h=>{
   const file=h.seed('summary','old\n'),r=await h.tool({skill:'summary',mode:'read'});h.state.failRename=true;const args={skill:'summary',mode:'replace',text:'new\n',expected_revision:r.revision};assert.equal((await h.tool(args)).error,'write_failed');assert.equal(fs.readFileSync(file,'utf8'),'old\n');h.state.failRename=false;assert.equal((await h.tool(args)).ok,true);
 }));
-test('L2 transcript composer captures summary MD alongside DB style without extra calls',()=>fixture(async h=>{
-  h.seed('summary','SUMMARY-MD-עברית');await h.load('src/skills/summary.ts').consumerTest.draftSummaryFromTranscript({transcript:'Transcript input',ownerUserId:'UOWNER',ownerName:'Owner',profile:h.profile});assert.equal(h.state.requests.length,1);const prompt=textOf(h.state.requests[0]);assert.ok(prompt.includes('SUMMARY-MD-עברית'));assert.ok(prompt.includes('DB-STYLE-CONTROL'));assert.ok(prompt.includes('Transcript input'));
+test('L2 transcript composer captures summary MD alongside canonical keyed style without extra calls',()=>fixture(async h=>{
+  h.seed('summary','SUMMARY-MD-עברית');await h.seedStyle();await h.load('src/skills/summary.ts').consumerTest.draftSummaryFromTranscript({transcript:'Transcript input',ownerUserId:'UOWNER',ownerName:'Owner',profile:h.profile});assert.equal(h.state.requests.length,1);const prompt=textOf(h.state.requests[0]);assert.ok(prompt.includes('SUMMARY-MD-עברית'));assert.ok(prompt.includes('KEYED-STYLE-CONTROL'));assert.ok(prompt.includes('Transcript input'));
 }));
 test('L2 revise composer captures summary MD in actual model request',()=>fixture(async h=>{
-  h.seed('summary','SUMMARY-REVISION-RULE');const r=await h.load('src/skills/registry.ts').executeSkillTool('update_summary_draft',{instruction:'Use fewer paragraphs'},h.ctx());assert.equal(r.ok,true);assert.ok(textOf(h.state.requests[0]).includes('SUMMARY-REVISION-RULE'));assert.ok(textOf(h.state.requests[0]).includes('DB-STYLE-CONTROL'));
+  h.seed('summary','SUMMARY-REVISION-RULE');await h.seedStyle();const r=await h.load('src/skills/registry.ts').executeSkillTool('update_summary_draft',{instruction:'Use fewer paragraphs'},h.ctx());assert.equal(r.ok,true);assert.ok(textOf(h.state.requests[0]).includes('SUMMARY-REVISION-RULE'));assert.ok(textOf(h.state.requests[0]).includes('KEYED-STYLE-CONTROL'));
 }));
 test('CONTROL registry refuses private summary and preference reads for colleague and room',()=>fixture(async h=>{
   h.seed('summary','PRIVATE-SUMMARY-RULE');const registry=h.load('src/skills/registry.ts');for(const [authority,surface] of [['owner','room'],['colleague','colleague_dm'],['colleague','room']])for(const tool of ['update_summary_draft','update_my_preferences']){const r=await registry.executeSkillTool(tool,{instruction:'Read preferences',skill:'summary',mode:'read'},h.ctx(authority,surface));assert.equal(r.error,'not_permitted');}assert.equal(h.state.requests.length,0);
@@ -108,8 +114,8 @@ test('CONTROL registry refuses private summary and preference reads for colleagu
 test('CONTROL unavailable summary revision preserves prior draft and reports failure',()=>fixture(async h=>{
   const prior=JSON.stringify(h.state.draft);h.state.failModel=true;const r=await h.load('src/skills/registry.ts').executeSkillTool('update_summary_draft',{instruction:'Revise'},h.ctx());assert.equal(r.ok,false);assert.equal(r.reason,'update_failed');assert.equal(JSON.stringify(h.state.draft),prior);
 }));
-test('CONTROL untaught summary retains DB style and corrected text remains authoritative',()=>fixture(async h=>{
-  const api=h.load('src/skills/summary.ts').consumerTest;await api.draftSummaryFromTranscript({transcript:'Transcript input',ownerUserId:'UOWNER',ownerName:'Owner',profile:h.profile});assert.ok(textOf(h.state.requests[0]).includes('DB-STYLE-CONTROL'));
+test('CONTROL summary without unmarked prose retains keyed style and corrected text remains authoritative',()=>fixture(async h=>{
+  await h.seedStyle();const api=h.load('src/skills/summary.ts').consumerTest;await api.draftSummaryFromTranscript({transcript:'Transcript input',ownerUserId:'UOWNER',ownerName:'Owner',profile:h.profile});assert.ok(textOf(h.state.requests[0]).includes('KEYED-STYLE-CONTROL'));
   await api.parseSummaryFromText({summaryText:'EXACT OWNER PROSE',existing:h.state.draft,profile:h.profile});assert.ok(textOf(h.state.requests[1]).includes('EXACT OWNER PROSE'));assert.equal(h.state.requests.length,2);
 }));
 test('L3 grounded brief composer captures news MD and brief MD',()=>fixture(async h=>{
@@ -133,3 +139,4 @@ test('CONTROL untaught company fallback, explicit topic and valid planner remain
   h.seed('news','Space developments');h.state.failModel=false;h.state.reply='{"goals":["Space news"],"preferred_domains":["https://example.org/path"],"avoid_domains":[]}';await news.gatherNews(h.profile);assert.equal(h.state.searches.length,4); // existing preferred-source miss retries once broadly
 }));
 (async()=>{let passed=0;const results=[];for(const t of tests){try{await t.run();passed++;results.push({name:t.name,pass:true});console.log('PASS '+t.name);}catch(e){results.push({name:t.name,pass:false,error:e.message});console.error('FAIL '+t.name+'\n'+e.stack);}}const report={revision:before||'working-tree',passed,failed:tests.length-passed,cases:results};console.log(JSON.stringify(report,null,2));if(process.env.MEMORY_CONSUMERS_REPORT)fs.writeFileSync(process.env.MEMORY_CONSUMERS_REPORT,JSON.stringify(report,null,2));process.exitCode=report.failed?1:0;})();
+

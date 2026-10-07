@@ -20,6 +20,7 @@ import { isSlackDocFile, isSlackImageFile, extractSlackDocText, downloadAndScanI
 import type { SlackAppContext } from './context';
 import { readInternalSlackConversation } from '../../../connections/slack/eligibility';
 import { readSlackThread } from '../threadHistory';
+import { hasHeldDelivery } from '../deliveryAttempt';
 
 async function reportAudioFailure(client: SlackAppContext['app']['client'], botToken: string, channelId: string, threadTs: string): Promise<void> {
   try {
@@ -52,6 +53,7 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
     if (!senderId) return;
     if (!await readInternalSlackConversation(app.client, assistant.slack.bot_token, channelId, senderId)) return;
     const ts = (message.ts as string) ?? postThreadTs;
+    if (hasHeldDelivery({ profileId: user.slack_user_id, channelId, threadTs: postThreadTs, inboundTs: [ts] })) return;
     // Media (audio/video/image) candidates only ever come from the DM/panel
     // scan — background.ts's MPIM/channel mention discovery excludes any
     // `subtype` (so it never has to re-derive MPIM's owner-only image rule or
@@ -112,10 +114,11 @@ export function registerInboundReplayHandler(ctx: SlackAppContext): void {
 
     if (!text || text.trim().length < 1) return;  // nothing replayable
 
-    const catchUpSay = async (msg: { text: string; thread_ts?: string }) => {
+    const catchUpSay = async (msg: { text: string; thread_ts?: string; client_msg_id?: string }) => {
       return app.client.chat.postMessage({
         token: assistant.slack.bot_token, channel: channelId,
         thread_ts: msg.thread_ts ?? postThreadTs, text: msg.text,
+        client_msg_id: msg.client_msg_id,
         unfurl_links: false, unfurl_media: false,
       });
     };
@@ -186,6 +189,8 @@ export function registerDmHandler(ctx: SlackAppContext): void {
     // Only handle 1:1 DMs here
     if (!is1on1DM(channelId)) return;
     if (!await readInternalSlackConversation(client, assistant.slack.bot_token, channelId, message.user)) return;
+    if (hasHeldDelivery({ profileId: profile.user.slack_user_id, channelId,
+      threadTs: message.ts, inboundTs: [message.ts] })) return;
 
     const senderRole1v1 = getSenderRole(message.user!);
     logger.info('1:1 DM received', { senderId: message.user, channelId, role: senderRole1v1, subtype: subtype ?? 'text' });
@@ -293,11 +298,12 @@ export function registerDmHandler(ctx: SlackAppContext): void {
             channelId,
             ts,
             threadTs,
-            say: (msg: { text: string; thread_ts?: string }) => client.chat.postMessage({
+            say: (msg: { text: string; thread_ts?: string; client_msg_id?: string }) => client.chat.postMessage({
               token: assistant.slack.bot_token,
               channel: channelId,
               thread_ts: msg.thread_ts ?? threadTs,
               text: msg.text,
+              client_msg_id: msg.client_msg_id,
             }),
             client,
             isChannel: false,
@@ -358,7 +364,8 @@ export function registerDmHandler(ctx: SlackAppContext): void {
       setImmediate(async () => {
         const sayFn = async (msgOrText: any) => {
           const txt = typeof msgOrText === 'string' ? msgOrText : msgOrText.text;
-          return client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt });
+          return client.chat.postMessage({ token: assistant.slack.bot_token, channel: channelId, thread_ts: threadTs, text: txt,
+            client_msg_id: typeof msgOrText === 'string' ? undefined : msgOrText.client_msg_id });
         };
         for (let i = 0; i < audioFiles.length; i++) {
           const audioFile = audioFiles[i];
@@ -515,6 +522,8 @@ export function registerMpimHandler(ctx: SlackAppContext): void {
     const internalChannel = await readInternalSlackConversation(client, assistant.slack.bot_token, event.channel, 'user' in event ? event.user : undefined);
     if (!internalChannel || internalChannel.is_mpim !== true) return;
     if (!('user' in event) || !event.user) return;
+    if (hasHeldDelivery({ profileId: profile.user.slack_user_id, channelId: event.channel,
+      threadTs: event.ts, inboundTs: [event.ts] })) return;
 
     // ── Image file_share (v1.7.1) — OWNER ONLY in MPIM ───────────────────────
     // Has to run BEFORE the text-empty check below: an image can arrive
@@ -951,6 +960,8 @@ export function registerMentionHandler(ctx: SlackAppContext): void {
     if (!('user' in event) || !event.user) return;
     const internalChannel = await readInternalSlackConversation(client, assistant.slack.bot_token, event.channel, event.user);
     if (!internalChannel) return;
+    if (hasHeldDelivery({ profileId: profile.user.slack_user_id, channelId: event.channel,
+      threadTs: event.ts, inboundTs: [event.ts] })) return;
 
     // v2.6.1 — log event.ts so we can correlate against the MPIM `message`
     // handler when both fire for the same user @-mention in an MPIM.

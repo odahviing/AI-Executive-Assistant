@@ -6,13 +6,14 @@ import { startWhatsApp } from './connectors/whatsapp';
 import { startEmailChannel } from './connectors/email/inbound';
 import { loadAllProfiles, type UserProfile } from './config/userProfile';
 import { getDb } from './db';
+import { activateCanonicalStores } from './db/migrations/canonicalStores';
 import { startBackgroundTimer, initProfile, catchUpMissedMessages } from './core/background';
 import { startMailPollTimer } from './connectors/graph/mailPoll';
 import { seedAssistantSelf } from './core/assistantSelf';
 import { seedOwnerSelf } from './core/ownerSelf';
 import logger from './utils/logger';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 
 /**
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
   logger.info('Database ready');
 
   const profiles = loadAllProfiles();
+  await activateCanonicalStores(getDb(), [...profiles.values()], dirname(config.DB_PATH));
 
   // Ensure each profile has a people_memory row for its assistant so notes
   // the owner teaches her about herself land somewhere real, plus an owner

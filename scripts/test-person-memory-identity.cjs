@@ -15,14 +15,14 @@ test('I2 resolve and interaction advance last_seen',()=>{
   h.sqlite.prepare("UPDATE people_memory SET last_seen='2020-01-01'").run();h.p().appendPersonInteractionById('p_UCHRIS99',{type:'meeting_booked',summary:'Booked project sync'});assert.notEqual(h.p().getPersonById('p_UCHRIS99').last_seen,'2020-01-01');
 });
 test('I4 owner room write uses owner provenance; room reads remain private',async()=>{
-  const h=harness([chris]);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,working_hours:'mornings'},'owner','room');
-  assert.equal(r.updated,true);assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json)._set_by.working_hours,'owner');
+  const h=harness([chris]);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,communication_style:'concise'},'owner','room');
+  assert.equal(r.updated,true);assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json)._set_by.communication_style,'owner');
   for(const name of ['get_person_memory','recall_interactions'])assert.equal((await h.tool(name,{person:chris.name,name:chris.name},'owner','room')).error,'not_permitted');
 });
 test('CONTROL colleague third-party write refused and own operational write accepted',async()=>{
   const h=harness([chris,{slack_id:'UOTHER99',name:'Another Person'}]);
   assert.equal((await h.tool('update_person_profile',{colleague_name:'Another Person',colleague_slack_id:'UOTHER99',state:'Paris'},'colleague','room')).updated,false);
-  await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,working_hours:'mornings'},'colleague');assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json).working_hours,'mornings');
+  await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,language_preference:'English'},'colleague');assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json).language_preference,'English');
 });
 test('I5 legacy NULL gender does not steer either renderer',()=>{
   const h=harness([{...chris,last_seen:new Date().toISOString(),gender:'female',gender_set_by:null}]);const p=h.p();assert.match(p.formatThreadPeopleBlock('UCHRIS99',[],'UOWNER99'),/gender=unknown/);assert.match(p.formatPeopleMemoryForPrompt('UOWNER99','Asia/Jerusalem'),/gender: unknown/);
@@ -34,7 +34,7 @@ test('CONTROL owner-confirmed gender survives contrary pronouns',async()=>{
   const h=harness([{...chris,gender:'male',gender_set_by:'owner',gender_confirmed:1}]);await h.load('src/utils/genderDetect.ts').detectAndSaveGender({slackId:chris.slack_id,name:chris.name,pronouns:'she/her'});assert.equal(h.p().getPersonById('p_UCHRIS99').gender,'male');assert.equal(h.state.modelCalls,0);
 });
 test('I10 owner profile rejects automatic overwrite; notes retain author',()=>{
-  const h=harness([chris]),p=h.p();p.updatePersonProfileById('p_UCHRIS99',{working_hours:'owner window'},'owner');p.updatePersonProfileById('p_UCHRIS99',{working_hours:'auto window'},'auto');assert.equal(JSON.parse(p.getPersonById('p_UCHRIS99').profile_json).working_hours,'owner window');p.appendPersonNoteById('p_UCHRIS99','A durable note','person');assert.equal(JSON.parse(p.getPersonById('p_UCHRIS99').notes)[0].set_by,'person');
+  const h=harness([chris]),p=h.p();p.updatePersonProfileById('p_UCHRIS99',{communication_style:'owner style'},'owner');p.updatePersonProfileById('p_UCHRIS99',{communication_style:'auto style'},'auto');assert.equal(JSON.parse(p.getPersonById('p_UCHRIS99').profile_json).communication_style,'owner style');p.appendPersonNoteById('p_UCHRIS99','A durable note','person');assert.equal(JSON.parse(p.getPersonById('p_UCHRIS99').notes)[0].set_by,'person');
 });
 test('I12 colleague dropped fields are reported and no save claimed',async()=>{
   const h=harness([chris]);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,role_summary:'I run this'},'colleague');assert.equal(r.updated,false);assert.ok(r.not_saved.includes('role_summary'));
@@ -80,7 +80,7 @@ test('5d work history and unknown-kind durable notes survive routine churn',()=>
   const row=p.getPersonById('p_UCHRIS99');assert.ok(row.interaction_log.includes('WORK HISTORY'));assert.ok(row.notes.includes('DURABLE WORK FACT'));assert.equal(JSON.parse(row.interaction_log).filter(i=>i.type==='social_chat').length,200);
 });
 test('5d empty fields report not_saved without introducing clear semantics',async()=>{
-  const h=harness([{...chris,profile_json:JSON.stringify({working_hours:'retain me'})}]);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,working_hours:''});assert.equal(r.updated,false);assert.ok(r.not_saved.includes('working_hours'));assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json).working_hours,'retain me');
+  const h=harness([{...chris,profile_json:JSON.stringify({working_hours:'retain me'})}]);const r=await h.tool('update_person_profile',{colleague_name:chris.name,colleague_slack_id:chris.slack_id,working_hours:''});assert.equal(r.updated,false);assert.equal(r.error,'retired_working_hours');assert.equal(JSON.parse(h.p().getPersonById('p_UCHRIS99').profile_json).working_hours,'retain me');
 });
 test('CONTROL pronoun canonical forms remain supported',()=>{
   const d=harness().load('src/utils/genderDetect.ts').detectGenderFromPronouns;assert.equal(d('he/him'),'male');assert.equal(d('he'),'male');assert.equal(d('she'),'female');assert.equal(d('she / her'),'female');assert.equal(d('they/them'),'unknown');assert.equal(d(undefined),'unknown');

@@ -4,6 +4,7 @@ const root=path.resolve(__dirname,'..'),sourceRoot=process.env.SLACK_GENDER_BEFO
 function setup({optIn=false,failed=false,eligible=true}={}) {
  const calls=[],saved=[];
  const deps={
+  '../deliveryAttempt':require('./fixtures/slack-delivery.cjs')().module,
   '../../../core/orchestrator':{},'../../../core/briefIntent':{},'../../../tasks/briefs':{},
   '../../../db':{upsertPersonMemory:p=>saved.push(p),auditLog(){}},
   '../../../utils/genderDetect':{detectAndSaveGender:async p=>{calls.push(p);}},

@@ -1,216 +1,134 @@
-/**
- * Inferred workweeks use the person's own timezone region, never a tenant's
- * personal schedule: Israel Sunday–Thursday, elsewhere Monday–Friday.
- * Explicit structured working hours always win. Auto weekdays are re-derived
- * on read so stored tenant-derived defaults cannot survive a policy change.
- */
-
+/** One recorded regular week per person. Dated travel/override policy is owned
+ * by its existing callers and does not change this base schedule. */
 import { getDb } from '../db/client';
 import type { PersonMemory } from '../db/people';
-import logger from './logger';
 import { isStrictIana } from './timezoneValidator';
 
-export type WeekDay =
-  | 'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday';
+export const WEEK_ORDER = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
+export type WeekDay = typeof WEEK_ORDER[number];
+export interface ClockWindow { hoursStart: string; hoursEnd: string }
+export type WeeklySchedule = Record<WeekDay, ClockWindow | null>;
+export interface WorkingHours { week: WeeklySchedule; timezone?: string; source: 'manual' | 'auto' }
+export interface WorkingHoursUpdate { week: Partial<WeeklySchedule>; timezone?: string }
+const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
-export interface WorkingHours {
-  workdays: WeekDay[];
-  hoursStart: string;   // "HH:MM"
-  hoursEnd:   string;
-  timezone?: string; // Explicit fixed timezone for this window, independent of travel.
-  source: 'manual' | 'auto';
-  dayOverrides?: Partial<Record<WeekDay, { hoursStart: string; hoursEnd: string }>>;
+function validateDays(raw: unknown, complete: boolean): asserts raw is WeeklySchedule {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid regular week');
+  const days = raw as Record<string, unknown>;
+  if (Object.keys(days).some(d => !WEEK_ORDER.includes(d as WeekDay)) || (complete && WEEK_ORDER.some(d => !(d in days)))) throw new Error('Invalid regular week');
+  for (const hours of Object.values(days)) {
+    if (hours === null) continue;
+    if (!hours || typeof hours !== 'object' || Array.isArray(hours)) throw new Error('Invalid working hours');
+    const h = hours as ClockWindow;
+    if (Object.keys(h).some(k => !['hoursStart', 'hoursEnd'].includes(k)) || typeof h.hoursStart !== 'string' || typeof h.hoursEnd !== 'string' || !clock.test(h.hoursStart) || !clock.test(h.hoursEnd) || h.hoursStart >= h.hoursEnd) throw new Error('Invalid working hours');
+  }
 }
 
-type StatedHours = NonNullable<import('../db/people').PersonProfile['working_hours_structured']>;
+export function defaultWorkingHoursForTz(iana: string | null | undefined): WorkingHours {
+  const israel = iana === 'Asia/Jerusalem' || iana === 'Asia/Tel_Aviv';
+  const workdays: readonly WeekDay[] = israel ? WEEK_ORDER.slice(0, 5) : WEEK_ORDER.slice(1, 6);
+  return { week: Object.fromEntries(WEEK_ORDER.map(day => [day, workdays.includes(day) ? { hoursStart: '09:00', hoursEnd: israel ? '18:00' : '17:00' } : null])) as WeeklySchedule, source: 'auto' };
+}
 
-/** Validate structured clocks, then merge only supplied days. The caller owns
- * authenticated write authority; this never interprets prose or invents hours. */
-export function mergeWorkingHoursUpdate(existing: StatedHours | undefined, update: unknown, defaults?: Pick<WorkingHours, 'hoursStart' | 'hoursEnd'>): StatedHours {
+/** Recurring edits replace supplied days in the base; absent days survive. */
+export function mergeWorkingHoursUpdate(existing: WorkingHours | undefined, update: unknown, defaults?: WorkingHours): WorkingHours {
   if (!update || typeof update !== 'object' || Array.isArray(update)) throw new Error('Invalid working hours');
-  const value = update as StatedHours;
-  const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
-  if (Object.keys(value).some(k => !['workdays', 'hoursStart', 'hoursEnd', 'timezone', 'dayOverrides'].includes(k))
-    || (value.workdays !== undefined && (!Array.isArray(value.workdays) || !value.workdays.length || !value.workdays.every(d => WEEK_ORDER.includes(d))))
-    || (value.hoursStart !== undefined && !clock.test(value.hoursStart))
-    || (value.hoursEnd !== undefined && !clock.test(value.hoursEnd))
-    || (value.timezone !== undefined && !isStrictIana(value.timezone))) throw new Error('Invalid working hours');
-  if (value.dayOverrides !== undefined) {
-    if (!value.dayOverrides || typeof value.dayOverrides !== 'object' || Array.isArray(value.dayOverrides)) throw new Error('Invalid day overrides');
-    for (const [day, hours] of Object.entries(value.dayOverrides)) {
-      if (!WEEK_ORDER.includes(day as WeekDay) || !hours || !clock.test(hours.hoursStart) || !clock.test(hours.hoursEnd)
-        || hours.hoursStart >= hours.hoursEnd
-        || Object.keys(hours).some(k => !['hoursStart', 'hoursEnd'].includes(k))) throw new Error('Invalid day override');
-    }
-  }
-  const merged = { ...existing, ...value,
-    ...((existing?.dayOverrides || value.dayOverrides) ? { dayOverrides: { ...existing?.dayOverrides, ...value.dayOverrides } } : {}),
-  };
-  // Compare the effective pair, including a retained/default clock when only
-  // one side was edited. Scheduling intervals are strictly positive, same-day.
-  const start = merged.hoursStart ?? defaults?.hoursStart;
-  const end = merged.hoursEnd ?? defaults?.hoursEnd;
-  if (start !== undefined && end !== undefined && start >= end) throw new Error('Working hours end must be later on the same day');
-  return merged;
+  const value = update as WorkingHoursUpdate;
+  if (Object.keys(value).some(k => !['week', 'timezone'].includes(k)) || (value.timezone !== undefined && !isStrictIana(value.timezone))) throw new Error('Invalid working hours');
+  validateDays(value.week, false);
+  const prior = existing ?? defaults;
+  const week = { ...prior?.week, ...value.week } as WeeklySchedule;
+  validateDays(week, true);
+  return { week, source: 'manual', ...(value.timezone ?? prior?.timezone ? { timezone: value.timezone ?? prior?.timezone } : {}) };
 }
 
-const WEEK_ORDER: WeekDay[] =
-  ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-const WESTERN_DEFAULT: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> = {
-  workdays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-  hoursStart: '09:00', hoursEnd: '17:00',
-};
-
-export function defaultWorkingHoursForTz(iana: string | null | undefined): Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'> {
-  // IANA's historical Tel_Aviv link denotes the same Israeli region.
-  if (iana === 'Asia/Jerusalem' || iana === 'Asia/Tel_Aviv') {
-    return { workdays: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'], hoursStart: '09:00', hoursEnd: '18:00' };
+/** Migration-only conversion of the retired base/permanent-weekday format.
+ * Authority tags are carried by the surrounding profile and remain untouched. */
+export function materializeLegacyWorkingHours(stated: unknown, auto: unknown, timezone: string | null): WorkingHours | null {
+  // Validate even a superseded auto record before retiring it: malformed
+  // source data requires review, not silent deletion under a valid manual row.
+  if (auto != null) {
+    if (typeof auto !== 'object' || Array.isArray(auto)) throw new Error('Invalid legacy auto hours');
+    const value = auto as { workdays?: unknown; hoursStart?: unknown; hoursEnd?: unknown };
+    if (Object.keys(value).some(k => !['workdays', 'hoursStart', 'hoursEnd'].includes(k))
+      || !Array.isArray(value.workdays) || !value.workdays.length || !value.workdays.every(d => WEEK_ORDER.includes(d))
+      || typeof value.hoursStart !== 'string' || typeof value.hoursEnd !== 'string'
+      || !clock.test(value.hoursStart) || !clock.test(value.hoursEnd) || value.hoursStart >= value.hoursEnd) throw new Error('Invalid legacy auto hours');
   }
-  return WESTERN_DEFAULT;
+  if (stated && typeof stated === 'object' && 'week' in stated) {
+    const current = stated as WorkingHours;
+    if (Object.keys(current).some(k => !['week', 'source', 'timezone'].includes(k))) throw new Error('Invalid recorded week');
+    validateDays(current.week, true);
+    if (!['manual', 'auto'].includes(current.source) || (current.timezone !== undefined && !isStrictIana(current.timezone))) throw new Error('Invalid recorded week');
+    return current;
+  }
+  const legacy = stated as { workdays?: WeekDay[]; hoursStart?: string; hoursEnd?: string; dayOverrides?: Partial<Record<WeekDay, ClockWindow>>; timezone?: string } | undefined;
+  const inferred = auto as { workdays?: WeekDay[]; hoursStart?: string; hoursEnd?: string } | undefined;
+  if (legacy && (typeof legacy !== 'object' || Array.isArray(legacy) || Object.keys(legacy).some(k => !['workdays', 'hoursStart', 'hoursEnd', 'dayOverrides', 'timezone'].includes(k)))) throw new Error('Invalid legacy working hours');
+  if (legacy?.dayOverrides !== undefined) {
+    validateDays(legacy.dayOverrides, false);
+    if (Object.values(legacy.dayOverrides).some(h => h === null)) throw new Error('Invalid legacy day override');
+  }
+  if (!legacy && !inferred && !timezone) return null;
+  const defaults = defaultWorkingHoursForTz(timezone);
+  const first = Object.values(defaults.week).find(Boolean)!;
+  const days = legacy?.workdays ?? (timezone ? WEEK_ORDER.filter(d => defaults.week[d]) : inferred?.workdays);
+  if (!days || days.some(d => !WEEK_ORDER.includes(d))) throw new Error('Invalid legacy workdays');
+  // The old manual reader used regional defaults for omitted clocks, never
+  // the separately stored auto clocks. Preserve that exact effective value.
+  const start = legacy ? legacy.hoursStart ?? (timezone ? first.hoursStart : undefined) : inferred?.hoursStart ?? first.hoursStart;
+  const end = legacy ? legacy.hoursEnd ?? (timezone ? first.hoursEnd : undefined) : inferred?.hoursEnd ?? first.hoursEnd;
+  if (typeof start !== 'string' || typeof end !== 'string' || !clock.test(start) || !clock.test(end) || start >= end) throw new Error('Invalid legacy clocks');
+  const week = Object.fromEntries(WEEK_ORDER.map(day => [day, legacy?.dayOverrides?.[day] ?? (days.includes(day) ? { hoursStart: start, hoursEnd: end } : null)])) as WeeklySchedule;
+  validateDays(week, true);
+  if (legacy?.timezone !== undefined && !isStrictIana(legacy.timezone)) throw new Error('Invalid legacy timezone');
+  return { week, source: legacy ? 'manual' : 'auto', ...(legacy?.timezone ? { timezone: legacy.timezone } : {}) };
 }
 
-/**
- * Recompute and persist `working_hours_auto` for a person based on their
- * current timezone. Called from the same paths that write timezone (provenance
- * helper or upsert). Idempotent — silently no-ops when nothing's changed.
- *
- * Thin slack_id-keyed adapter over `refreshAutoWorkingHoursById` — kept for the
- * (internal-only) callers that already hold a slack_id rather than a person_id.
- */
 export function refreshAutoWorkingHours(slackId: string): void {
-  const db = getDb();
-  const row = db.prepare(`SELECT person_id FROM people_memory WHERE slack_id = ?`).get(slackId) as
-    | { person_id: string }
-    | undefined;
-  if (!row) return;
-  refreshAutoWorkingHoursById(row.person_id);
+  const row = getDb().prepare('SELECT person_id FROM people_memory WHERE slack_id = ?').get(slackId) as { person_id: string } | undefined;
+  if (row) refreshAutoWorkingHoursById(row.person_id);
 }
 
-/**
- * v4.2.x — person_id-keyed sibling of `refreshAutoWorkingHours`, so it works
- * for EXTERNALS too (no slack_id). Needed the moment a caller writes a
- * timezone onto a pure-email person (#24 row 129b, James Avery/Kevel): without
- * this, `working_hours_auto` stays NULL forever on an external row, and
- * `getEffectiveWorkingHours` has no manual override to fall back to either —
- * so a known timezone with no working-hours read as "unknown" and
- * `attendeeAvailability`'s clip silently skips the person rather than using a
- * sane default window for their zone. Same idempotent recompute-from-timezone
- * as the slack_id version (now its delegate).
- */
+/** Initialize once. A later timezone change never rewrites the regular week. */
 export function refreshAutoWorkingHoursById(personId: string): void {
   const db = getDb();
-  const row = db.prepare(`SELECT timezone FROM people_memory WHERE person_id = ?`).get(personId) as
-    | { timezone: string | null }
-    | undefined;
-  if (!row || !row.timezone) return;
-
-  const defaults = defaultWorkingHoursForTz(row.timezone);
-  const json = JSON.stringify(defaults);
-
-  const existing = db.prepare(`SELECT working_hours_auto FROM people_memory WHERE person_id = ?`).get(personId) as
-    | { working_hours_auto: string | null }
-    | undefined;
-
-  if (existing?.working_hours_auto === json) return;
-
-  db.prepare(`UPDATE people_memory SET working_hours_auto = ?, updated_at = datetime('now') WHERE person_id = ?`)
-    .run(json, personId);
-  logger.debug('Auto working_hours refreshed', { personId, tz: row.timezone });
+  const row = db.prepare('SELECT timezone, profile_json FROM people_memory WHERE person_id = ?').get(personId) as { timezone: string | null; profile_json: string | null } | undefined;
+  if (!row?.timezone) return;
+  const profile = JSON.parse(row.profile_json || '{}');
+  if (profile.working_hours_structured) return;
+  profile.working_hours_structured = defaultWorkingHoursForTz(row.timezone);
+  db.prepare("UPDATE people_memory SET profile_json = ?, working_hours_auto = NULL, updated_at = datetime('now') WHERE person_id = ?").run(JSON.stringify(profile), personId);
 }
 
-/**
- * Read effective working hours for a person — manual override (PersonProfile
- * .working_hours_structured) wins over the timezone-derived default. Returns
- * null when neither is available (no timezone known).
- */
 export function getEffectiveWorkingHours(person: PersonMemory): WorkingHours | null {
-  // Try manual override from profile_json first
   try {
-    const profile = JSON.parse(person.profile_json || '{}') as { working_hours_structured?: StatedHours };
-    if (profile.working_hours_structured) {
-      const fallback = person.timezone ? defaultWorkingHoursForTz(person.timezone) : undefined;
-      const stated = mergeWorkingHoursUpdate(undefined, profile.working_hours_structured, fallback);
-      const m = { ...fallback, ...stated };
-      const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
-      if (!Array.isArray(m.workdays) || !m.workdays.every(d => WEEK_ORDER.includes(d))
-        || !m.hoursStart || !m.hoursEnd || !clock.test(m.hoursStart) || !clock.test(m.hoursEnd)
-        || (m.timezone !== undefined && !isStrictIana(m.timezone))) {
-        throw new Error('Invalid structured working-hours window');
-      }
-      return {
-        workdays:   [...new Set([...m.workdays, ...Object.keys(m.dayOverrides ?? {})])] as WeekDay[],
-        hoursStart: m.hoursStart,
-        hoursEnd:   m.hoursEnd,
-        source:     'manual',
-        ...(m.timezone ? { timezone: m.timezone.trim() } : {}),
-        ...(m.dayOverrides ? { dayOverrides: m.dayOverrides } : {}),
-      };
-    }
-  } catch { /* ignore */ }
+    const hours = JSON.parse(person.profile_json || '{}').working_hours_structured as WorkingHours | undefined;
+    if (!hours) return null;
+    validateDays(hours.week, true);
+    if (!['manual', 'auto'].includes(hours.source) || (hours.timezone !== undefined && !isStrictIana(hours.timezone))) return null;
+    return hours;
+  } catch { return null; }
+}
 
-  // Fall back to auto-derived
-  if (person.working_hours_auto) {
-    try {
-      const auto = JSON.parse(person.working_hours_auto) as Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd'>;
-      const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
-      if (Array.isArray(auto?.workdays) && auto.workdays.length > 0
-          && auto.workdays.every(d => WEEK_ORDER.includes(d))
-          && typeof auto.hoursStart === 'string' && clock.test(auto.hoursStart)
-          && typeof auto.hoursEnd === 'string' && clock.test(auto.hoursEnd)) {
-        return { ...auto, ...(person.timezone ? { workdays: defaultWorkingHoursForTz(person.timezone).workdays } : {}), source: 'auto' };
-      }
-    } catch { /* ignore */ }
+export function formatWorkingHoursWindow(hours: Pick<WorkingHours, 'week' | 'timezone'>): string {
+  const groups = new Map<string, WeekDay[]>();
+  for (const day of WEEK_ORDER) {
+    const window = hours.week[day];
+    const key = window ? `${window.hoursStart}–${window.hoursEnd}` : 'off';
+    groups.set(key, [...(groups.get(key) ?? []), day]);
   }
-
-  return null;
-}
-
-/**
- * One compact human line for a window — "Sun–Thu 09:00–18:00", "Mon/Thu
- * 09:00–17:00 Asia/Jerusalem". Workdays contiguous in WEEK_ORDER collapse to a
- * range; anything else lists them. THE renderer for hours in every model-facing
- * read (the owner roster line in db/people.ts, get_person_memory and the write
- * echo in core/assistant.ts), so one stored window never reads two ways.
- */
-export function formatWorkingHoursWindow(wh: Pick<WorkingHours, 'workdays' | 'hoursStart' | 'hoursEnd' | 'timezone' | 'dayOverrides'>): string {
-  const idx = wh.workdays.map(d => WEEK_ORDER.indexOf(d)).filter(i => i >= 0).sort((a, b) => a - b);
-  const contiguous = idx.length > 1 && idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
-  const days = contiguous
-    ? `${WEEK_ORDER[idx[0]].slice(0, 3)}–${WEEK_ORDER[idx[idx.length - 1]].slice(0, 3)}`
-    : idx.map(i => WEEK_ORDER[i].slice(0, 3)).join('/');
-  const overrides = WEEK_ORDER.filter(d => wh.dayOverrides?.[d]).map(d => `${d.slice(0, 3)} ${wh.dayOverrides![d]!.hoursStart}–${wh.dayOverrides![d]!.hoursEnd}`);
-  return `${days} ${wh.hoursStart}–${wh.hoursEnd}${overrides.length ? `; overrides: ${overrides.join(', ')}` : ''}${wh.timezone ? ` ${wh.timezone}` : ''}`;
-}
-
-/**
- * The model-facing view of a person's EFFECTIVE window: what scheduling clips
- * to, which tier it came from (`source`: a stated structured window, else the
- * timezone default), and the zone it is expressed in — the window's own fixed
- * zone when stated, else the person's permanent zone. Returned by
- * get_person_memory and echoed by update_person_profile after an hours write
- * (core/assistant.ts) — one shape for the read and for the write echo. Null
- * when nothing is known (no stated window and no timezone to derive from).
- */
-export function describeEffectiveWorkingHours(person: PersonMemory): {
-  source: WorkingHours['source'];
-  workdays: WeekDay[];
-  hoursStart: string;
-  hoursEnd: string;
-  timezone: string | null;
-  window: string;
-  dayOverrides?: WorkingHours['dayOverrides'];
-} | null {
-  const eff = getEffectiveWorkingHours(person);
-  if (!eff) return null;
-  const timezone = eff.timezone ?? person.timezone ?? null;
-  return {
-    source:     eff.source,
-    workdays:   eff.workdays,
-    hoursStart: eff.hoursStart,
-    hoursEnd:   eff.hoursEnd,
-    ...(eff.dayOverrides ? { dayOverrides: eff.dayOverrides } : {}),
-    timezone,
-    window:     formatWorkingHoursWindow({ ...eff, timezone: timezone ?? undefined }),
+  const names = (days: WeekDay[]): string => {
+    const indices = days.map(d => WEEK_ORDER.indexOf(d));
+    return days.length > 1 && indices.every((n, i) => !i || n === indices[i - 1] + 1)
+      ? `${days[0].slice(0, 3)}–${days[days.length - 1].slice(0, 3)}` : days.map(d => d.slice(0, 3)).join('/');
   };
+  return [...groups].sort(([a], [b]) => Number(a === 'off') - Number(b === 'off')).map(([window, days]) => `${names(days)} ${window}`).join('; ') + (hours.timezone ? ` ${hours.timezone}` : '');
+}
+
+export function describeEffectiveWorkingHours(person: PersonMemory): (Omit<WorkingHours, 'timezone'> & { timezone: string | null; window: string }) | null {
+  const hours = getEffectiveWorkingHours(person);
+  if (!hours) return null;
+  const timezone = hours.timezone ?? person.timezone ?? null;
+  return { ...hours, timezone, window: formatWorkingHoursWindow({ ...hours, timezone: timezone ?? undefined }) };
 }

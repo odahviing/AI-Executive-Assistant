@@ -27,10 +27,7 @@ import type { TimezoneTempSource, PersonMemory } from '../db/people';
 export interface AttendeeAvailabilityEntry {
   email: string;
   timezone: string;
-  workdays: WeekDay[];
-  hoursStart: string;
-  hoursEnd: string;
-  dayOverrides?: WorkingHours['dayOverrides'];
+  week: WorkingHours['week'];
   workingHoursTimezone?: string; // explicitly stated window frame, independent of physical/travel zone
   // v2.5.2 — when active travel overrode the stored profile timezone for this
   // entry, this carries the original stored timezone + travel location so the
@@ -187,12 +184,12 @@ export function attendeeWorkSegmentsBetween(
     const timezone = entry.workingHoursTimezone ?? attendeeTzForDay(entry, instant.toISO()!);
     const start = instant.setZone(timezone), end = DateTime.fromMillis(points[i + 1], { zone: timezone });
     const day = start.toFormat('EEEE') as WeekDay;
-    const hours = entry.dayOverrides?.[day] ?? entry;
+    const hours = entry.week[day];
+    if (!hours) return { start, end, timezone, fitsWorkHours: false };
     const [sh, sm] = hours.hoursStart.split(':').map(Number);
     const [eh, em] = hours.hoursEnd.split(':').map(Number);
     const { startMin, endMin } = slotDayMinutes(start, end);
-    const fitsWorkHours = entry.workdays.includes(start.toFormat('EEEE') as WeekDay)
-      && startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
+    const fitsWorkHours = startMin >= sh * 60 + sm && endMin <= eh * 60 + em;
     return { start, end, timezone, fitsWorkHours };
   });
 }
@@ -206,8 +203,8 @@ export function attendeeWorkIntervalsBetween(
   const result: Array<{ start: DateTime; end: DateTime }> = [];
   for (const segment of attendeeWorkSegmentsBetween(entry, from, until)) {
     const day = segment.start.toFormat('EEEE') as WeekDay;
-    if (!entry.workdays.includes(day)) continue;
-    const hours = entry.dayOverrides?.[day] ?? entry;
+    const hours = entry.week[day];
+    if (!hours) continue;
     const [sh, sm] = hours.hoursStart.split(':').map(Number);
     const [eh, em] = hours.hoursEnd.split(':').map(Number);
     result.push(...configuredWorkIntervalsBetween(segment.start, segment.end, segment.timezone,
@@ -359,10 +356,7 @@ export function loadAttendeeAvailabilityForPerson(
     return {
       email,
       timezone,
-      workdays: wh.workdays,
-      hoursStart: wh.hoursStart,
-      hoursEnd: wh.hoursEnd,
-      ...('dayOverrides' in wh && wh.dayOverrides ? { dayOverrides: wh.dayOverrides } : {}),
+      week: wh.week,
       ...('timezone' in wh && typeof wh.timezone === 'string' ? { workingHoursTimezone: wh.timezone } : {}),
       homeTimezone: resolvedTz,
       ...(travelMeta ? { travel: travelMeta } : {}),
@@ -412,8 +406,8 @@ export function loadAttendeeAvailabilityForEmails(
     if (built.length === 0) return undefined;
     logger.info('attendeeAvailability — auto-loaded', {
       attendees: built.map(b => b.travel
-        ? `${b.email}(${b.timezone} via ${b.travel.location} until ${b.travel.until}, was ${b.travel.homeTimezone}, ${b.hoursStart}-${b.hoursEnd})`
-        : `${b.email}(${b.timezone}, ${b.hoursStart}-${b.hoursEnd})`),
+        ? `${b.email}(${b.timezone} via ${b.travel.location} until ${b.travel.until}, was ${b.travel.homeTimezone})`
+        : `${b.email}(${b.timezone})`),
     });
     return built;
   } catch (err) {

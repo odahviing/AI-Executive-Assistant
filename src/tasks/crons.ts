@@ -287,13 +287,11 @@ export function ensureBriefingCron(profile: UserProfile): void {
     return;
   }
 
-  // One-way legacy import only for a missing routine. Keep the source row for
-  // the preference migration's backup and verified retirement, never dual-write.
-  const legacy = db.prepare('SELECT value FROM user_preferences WHERE user_id = ? AND key = ?')
-    .get(ownerUserId, 'briefing_time') as { value: string } | undefined;
-  const scheduleTime = legacy?.value ?? defaultBriefingTime(profile);
+  // Startup requires reviewed legacy preference retirement before this runs.
+  // Existing routines above retain authority; a new owner uses profile defaults.
+  const scheduleTime = defaultBriefingTime(profile);
   const invalidSchedule = scheduleError('weekdays', scheduleTime, null);
-  if (invalidSchedule) throw new Error(`Invalid legacy briefing_time: ${invalidSchedule}`);
+  if (invalidSchedule) throw new Error(`Invalid default briefing time: ${invalidSchedule}`);
 
   // Create the system briefing cron
   const dmResult = db.prepare(`

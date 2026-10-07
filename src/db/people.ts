@@ -39,28 +39,15 @@ export interface PersonProfile {
   // e.g. "Hebrew" or "English" — learned from reply patterns
   language_preference?: string;
 
-  // When they're typically reachable — the record of what was SAID, as said.
-  // e.g. "Israel 9am–6pm" or "US Eastern, responds mornings"
-  // Free-text legacy: capture still writes it and assistantSelf renders it for
-  // Maelle's own row. Person scheduling clips to
-  // working_hours_structured / the timezone default (getEffectiveWorkingHours),
-  // and person model-facing reads either render that effective window (owner
-  // roster line, get_person_memory) or no hours at all (#135, colleague work
-  // block) — never this prose, which is how a stale "Mon/Thu only" once
-  // outranked the corrected structured window (Isaac, 2026-05-26).
+  // Historical prose retained losslessly for reviewed reconciliation only.
+  // No active writer or hours renderer uses it; regular weeks are canonical.
   working_hours?: string;
 
   // v2.2.1 (#46) — structured working window. Every reader goes through
   // getEffectiveWorkingHours (utils/workingHoursDefault.ts): the scheduling
   // intersects (slot search, outreach gating) AND the owner-path prompt reads
   // (formatPeopleMemoryForPrompt, get_person_memory) — one window, one reader.
-  working_hours_structured?: {
-    workdays?: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
-    hoursStart?: string;   // 'HH:MM' in `timezone`, otherwise the person's dated timezone
-    hoursEnd?: string;     // 'HH:MM'
-    timezone?: string;    // IANA — overrides people_memory.timezone for this window when set
-    dayOverrides?: Partial<Record<import('../utils/workingHoursDefault').WeekDay, { hoursStart: string; hoursEnd: string }>>;
-  };
+  working_hours_structured?: import('../utils/workingHoursDefault').WorkingHours;
 
   // Their role and what they care about — learned over time
   // e.g. "Heads up sales in EMEA. Focused on Q3 targets and team hiring."
@@ -1392,6 +1379,7 @@ export function updatePersonProfile(slackId: string, updates: Partial<PersonProf
 
 /** v3.2.0 — person_id-keyed worker. */
 export function updatePersonProfileById(personId: string, updates: Partial<PersonProfile>, by: CoreFieldSetBy): ProfileWriteOutcomes {
+  if (Object.prototype.hasOwnProperty.call(updates, 'working_hours') && updates.working_hours !== undefined) throw new Error('working_hours is historical; use working_hours_structured.week');
   const db = getDb();
   const row = db.prepare('SELECT profile_json, timezone FROM people_memory WHERE person_id = ?').get(personId) as { profile_json: string | null; timezone: string | null } | undefined;
   const outcomes: ProfileWriteOutcomes = {};

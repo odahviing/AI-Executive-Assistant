@@ -11,7 +11,7 @@ vm.runInNewContext(source,{require:createRequire(file),module:mod,__dirname,proc
 const email='peer@example.test',zone='Asia/Jerusalem';
 const prefixes=['attendee_busy_collision','outside_attendee_work_hours','attendee_out_of_office'];
 async function run({clean=false,busy=false,offhours=false,offline=false,unknown=false,role='owner',mustBe=false,multi=false,argsOverride={},contacts=[],availabilityOverride,workHoursOverride}={}) {
- const availability=availabilityOverride??[{email,timezone:zone,hoursStart:offhours?'20:00':'09:00',hoursEnd:offhours?'21:00':'18:00',workdays:['Sunday','Monday','Tuesday','Wednesday','Thursday']}];
+ const availability=availabilityOverride??[{email,timezone:zone,week:require('./fixtures/regular-week.cjs').regularWeek(['Sunday','Monday','Tuesday','Wednesday','Thursday'],offhours?'20:00':'09:00',offhours?'21:00':'18:00')}];
  const h=mod.exports.harness(multi?{'2026-10-05':{isWorkday:false}}:{}, {offline, calendar:{oofUntilDisplayFor:()=>undefined,GraphPermissionError:class extends Error{},firstRejectReason:d=>Object.keys(d??{})[0]},extraMocks:{
   'src/skills/meetings/ops/analysis.ts':{},'src/skills/meetings/ops/handlers/createMeeting.ts':{},'src/skills/meetings/ops/handlers/moveMeeting.ts':{},'src/skills/meetings/ops/handlers/calendarReads.ts':{},
   'src/skills/meetings/ops/violationLabels.ts':{humanizeViolationLabel:x=>x,attendeeFirstName:()=> 'Peer',attendeeConflictLine:c=>c.email+' '+c.reason},

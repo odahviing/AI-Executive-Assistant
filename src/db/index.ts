@@ -15,3 +15,4 @@ export * from './summarySessions';
 export * from './socialSubjects';
 export * from './engagementRank';
 export * from './venues';
+export * from './slackDelivery';

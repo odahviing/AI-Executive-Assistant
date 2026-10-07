@@ -23,6 +23,7 @@ function harness(options = {}) {
     sendDirect: async (user, text) => { effects.directs.push({ user, text }); return options.dmFails ? { ok: false, reason: 'DM unavailable' } : { ok: true, ref: 'DOWNER', ts: 'fallback.1' }; },
   };
   const mocks={
+    'src/connectors/slack/deliveryAttempt.ts': require('./fixtures/slack-delivery.cjs')().module,
  'src/core/requests/requesterRelay.ts':{requesterRelayLanguage:()=> 'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
     'src/config.ts': {}, 'src/llm/client.ts': {}, 'src/core/threadActions.ts': {}, 'src/voice.ts': {},
     'src/db.ts': { appendToConversation: append },

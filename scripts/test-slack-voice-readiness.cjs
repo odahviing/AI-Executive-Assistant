@@ -24,6 +24,7 @@ function harness(opts={}){
   https:{request:(_p,callback)=>{s.dependencyOptions.push({stage:'whisper',options:_p});const req=new EventEmitter();req.write=b=>{req.bytes=b;};req.end=()=>{if(opts.stall==='whisper')return;queueMicrotask(()=>{const res=new EventEmitter();res.statusCode=opts.whisperError?500:200;callback(res);res.emit('data',opts.emptyTranscript?'':req.bytes);res.emit('end');});};return req;}},
  };
  const mocks={
+  'src/connectors/slack/deliveryAttempt.ts':(opts.delivery||require('./fixtures/slack-delivery.cjs')()).module,
   'src/config.ts':{config},'src/utils/logger.ts':{__esModule:true,default:logger},
   'src/llm/client.ts':{},'src/core/threadActions.ts':{},'src/vision/index.ts':{},
   'src/db.ts':{appendToConversation:(...a)=>s.history.push(a)},
@@ -41,7 +42,8 @@ function harness(opts={}){
  const actual=['src/voice/index.ts','src/connectors/slack/app/handlers.ts','src/connectors/slack/postReply.ts','src/connections/slack/eligibility.ts'];
  const cache=new Map();
  function load(rel){if(mocks[rel])return mocks[rel];if(cache.has(rel))return cache.get(rel).exports;assert.ok(actual.includes(rel),rel);
-  const source=process.env.SLACK_AUDIO_BEFORE==='1'&&rel==='src/connectors/slack/postReply.ts'?fs.readFileSync(path.join(process.env.SLACK_AUDIO_BEFORE_ROOT||path.join(root,'artifacts/workshop-verification/v5-readiness-20260923/slackmaster/attempt-1/snapshot'),rel),'utf8'):before&&rel==='src/voice/index.ts'?cp.execFileSync('git',['show',`ea5e69c:${rel}`],{cwd:root,encoding:'utf8'}):fs.readFileSync(path.join(snapshot||root,rel),'utf8');
+  const boundarySource=process.env.SLACK_BOUNDARY_SOURCE_ROOT&&path.join(process.env.SLACK_BOUNDARY_SOURCE_ROOT,rel);
+  const source=process.env.SLACK_AUDIO_BEFORE==='1'&&rel==='src/connectors/slack/postReply.ts'?fs.readFileSync(path.join(process.env.SLACK_AUDIO_BEFORE_ROOT||path.join(root,'artifacts/workshop-verification/v5-readiness-20260923/slackmaster/attempt-1/snapshot'),rel),'utf8'):before&&rel==='src/voice/index.ts'?cp.execFileSync('git',['show',`ea5e69c:${rel}`],{cwd:root,encoding:'utf8'}):fs.readFileSync(boundarySource&&fs.existsSync(boundarySource)?boundarySource:path.join(snapshot||root,rel),'utf8');
   const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,mod={exports:{}};cache.set(rel,mod);
   const req=p=>{if(!p.startsWith('.'))return ext[p]||require(p);const r=path.posix.normalize(path.posix.join(path.posix.dirname(rel),p));return load(actual.includes(r+'/index.ts')||mocks[r+'/index.ts']?r+'/index.ts':r+'.ts');};
   vm.runInNewContext('(function(require,module,exports){'+code+'\n})',{console,Buffer,AbortController,setTimeout:(fn,ms)=>{s.timers.push(ms);return setTimeout(fn,ms);},clearTimeout,setImmediate:fn=>s.jobs.push(fn),fetch:async (url,options)=>{s.dependencyOptions.push({stage:'download',options});if(opts.stall==='download')return new Promise(()=>{});if(opts.downloadError)throw Error('download unavailable');const b=Buffer.from(String(url).slice(6));return {ok:true,status:200,headers:{get:()=> 'audio/webm'},arrayBuffer:async()=>opts.stall==='download-body'?new Promise(()=>{}):b};}},{filename:rel})(req,mod,mod.exports);return mod.exports;

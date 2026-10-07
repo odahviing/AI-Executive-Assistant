@@ -282,15 +282,12 @@ export async function findAvailableSlots(params: {
   // here to also subtract their busy time from the candidate pool.
   attendeeBusyEmails?: string[];
   // v2.2.3 (#43) — per-attendee working windows. Slots that fall outside ANY
-  // listed attendee's workdays / hoursStart..hoursEnd (in their own TZ) are
+  // listed attendee's recorded weekday window (in their own TZ) are
   // dropped before Graph cost. Empty / omitted → no clipping.
   attendeeAvailability?: Array<{
     email: string;
     timezone: string;          // IANA (now-resolved — travel TZ only while a trip is active today)
-    workdays: Array<'Sunday' | 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday'>;
-    hoursStart: string;        // 'HH:MM'
-    hoursEnd: string;
-    dayOverrides?: import('../../utils/workingHoursDefault').WorkingHours['dayOverrides'];
+    week: import('../../utils/workingHoursDefault').WorkingHours['week'];
     workingHoursTimezone?: string;
     // v3.3.8 — per-day travel resolution (see utils/attendeeAvailability.ts).
     // The clip resolves the attendee's TZ for the candidate's DAY: inside

@@ -99,11 +99,13 @@ export function formatAssistantSelfForPrompt(
   try { notes = JSON.parse(self.notes || '[]'); } catch (_) {}
   try { prof  = JSON.parse(self.profile_json || '{}'); } catch (_) {}
   try { log   = JSON.parse(self.interaction_log || '[]'); } catch (_) {}
+  const { describeEffectiveWorkingHours } = require('../utils/workingHoursDefault') as typeof import('../utils/workingHoursDefault');
+  const hours = describeEffectiveWorkingHours(self);
 
   // If there's nothing substantive, skip the block entirely.
   const anyProfile =
     prof.communication_style || prof.language_preference ||
-    prof.working_hours || prof.role_summary || prof.collaboration_notes;
+    hours || prof.role_summary || prof.collaboration_notes;
   if (notes.length === 0 && !anyProfile && log.length === 0) {
     return includeMutationHint
       ? `ABOUT YOU (${profile.assistant.name}): nothing saved yet. When ${profile.user.name.split(' ')[0]} teaches you something about yourself (your name, your story, how you like to work, whether you're AI/human, your age), call note_about_self to remember it — that's the tool for facts about ${profile.assistant.name} herself.`
@@ -114,7 +116,7 @@ export function formatAssistantSelfForPrompt(
   if (prof.role_summary)        lines.push(`  role: ${prof.role_summary}`);
   if (prof.communication_style) lines.push(`  communication style: ${prof.communication_style}`);
   if (prof.language_preference) lines.push(`  language: ${prof.language_preference}`);
-  if (prof.working_hours)       lines.push(`  working hours: ${prof.working_hours}`);
+  if (hours)                   lines.push(`  regular working week: ${hours.window}`);
   if (prof.collaboration_notes) lines.push(`  collaboration: ${prof.collaboration_notes}`);
   // v3.x (Block 3 prompt reduction) — dedup by text-prefix before rendering.
   // Capture-pass dedup is probabilistic (Haiku-judged), so exact/near-repeats

@@ -6,7 +6,7 @@ const {harness}=require('./test-timezone-owner-interval.cjs');
 Settings.now=()=>Date.parse('2026-10-01T00:00:00Z');
 const all=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 function person(id,tz,days=all,start='09:00',end='17:00',extra={}){
- return {person_id:id,email:id+'@example.test',timezone:tz,profile_json:JSON.stringify({working_hours_structured:{workdays:days,hoursStart:start,hoursEnd:end,...extra}}),notes:'PRIVATE CONTACT NOTES'};
+ return {person_id:id,email:id+'@example.test',timezone:tz,profile_json:JSON.stringify({working_hours_structured:{week:require('./fixtures/regular-week.cjs').regularWeek(days,start,end,extra.dayOverrides),source:'manual',...(extra.timezone?{timezone:extra.timezone}:{})}}),notes:'PRIVATE CONTACT NOTES'};
 }
 function fixture({contacts=[],ownerZone='Asia/Jerusalem',rows={},unavailable=false,dense=false}={}){
  const h=harness(rows,{realAvailability:true,realDensity:dense,extraMocks:{
@@ -19,7 +19,7 @@ function fixture({contacts=[],ownerZone='Asia/Jerusalem',rows={},unavailable=fal
  h.profile.meetings.work_hours_per_free_hour=0;
  h.profile.meetings.packing_preference=dense?'dense':'spread';
  const a=h.load('src/utils/attendeeAvailability.ts');
- const entry=(tz,days=all,start='09:00',end='17:00',extra={})=>({email:'meeting@example.test',timezone:tz,homeTimezone:tz,workdays:days,hoursStart:start,hoursEnd:end,...extra});
+ const entry=(tz,days=all,start='09:00',end='17:00',extra={})=>({email:'meeting@example.test',timezone:tz,homeTimezone:tz,week:require('./fixtures/regular-week.cjs').regularWeek(days,start,end),...extra});
  const search=async(from,to,attendee,extra={})=>h.load('src/connectors/graph/findAvailableSlots.ts').findAvailableSlots({userEmail:h.profile.user.email,timezone:ownerZone,profile:h.profile,durationMinutes:30,searchFrom:from,searchTo:to,autoExpand:false,minBufferHours:0,attendeeAvailability:[attendee],...extra});
  const pick=(slots,count=1)=>h.load('src/connectors/graph/calendarReads.ts').pickSpreadSlots(slots,ownerZone,count,undefined,30);
  return {...h,a,entry,search,pick};
@@ -100,7 +100,7 @@ const {run}=require('./test-garage-recovery-summary.cjs');
 for(const role of ['owner','colleague'])test('integrated '+role+' handler presents priority before earlier alternatives without exposing contacts',async()=>{
  const {out,warnings}=await run({role,clean:true,contacts:[person('private-israel','Asia/Jerusalem',all,'09:00','18:00')],
   workHoursOverride:Object.fromEntries(all.map(d=>[d,['09:00-23:59']])),
-  availabilityOverride:[{email:'peer@example.test',timezone:'America/New_York',workdays:all,hoursStart:'09:00',hoursEnd:'17:00'}],
+  availabilityOverride:[{email:'peer@example.test',timezone:'America/New_York',week:require('./fixtures/regular-week.cjs').regularWeek(all)}],
   argsOverride:{search_from:'2026-10-08T16:00:00+03:00',search_to:'2026-10-08T23:59:00+03:00',time_window_is_hard:true},
  });
  const slots=Array.isArray(out)?out:out.slots;assert.ok(slots?.length,JSON.stringify(out));assert.equal(slots[0].priority,'good');

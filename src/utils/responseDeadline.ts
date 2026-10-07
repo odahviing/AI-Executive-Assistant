@@ -20,7 +20,7 @@ export interface ColleagueTimeContext {
 function* workIntervals(fallbackTimezone: string, fromMs: number, recipient?: ColleagueTimeContext): Generator<[number, number]> {
   const person = recipient ? getPersonMemory(recipient.slackId) : undefined;
   const entry = loadAttendeeAvailabilityForPerson(person ?? undefined, fallbackTimezone);
-  const hours = entry ?? { ...defaultWorkingHoursForTz(fallbackTimezone), timezone: fallbackTimezone, email: '' };
+  const hours = entry ?? { week: defaultWorkingHoursForTz(fallbackTimezone).week, timezone: fallbackTimezone, email: '' };
   const ownerTimezone = recipient?.ownerTimezone ?? fallbackTimezone;
   const from = DateTime.fromMillis(fromMs, { zone: ownerTimezone });
   const until = from.startOf('day').plus({ days: 60 });

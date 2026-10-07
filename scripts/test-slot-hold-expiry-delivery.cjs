@@ -57,6 +57,7 @@ function harness(t, options = {}) {
     } }),
   };
   const mocks = {
+    'src/connectors/slack/deliveryAttempt.ts': require('./fixtures/slack-delivery.cjs')().module,
     'src/tasks/runner.ts': {}, 'src/tasks/routineMaterializer.ts': {}, 'src/tasks/crons.ts': {},
     'src/tasks/dispatchers/routine.ts': { stopInterruptedRoutineTasks: async () => {} },
     'src/utils/logger.ts': logger, 'src/db/client.ts': { getDb: () => sqlite },

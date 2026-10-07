@@ -22,6 +22,7 @@ function fixture(t){
  const profile={user:{slack_user_id:'OWNER',timezone:'UTC'}};
  const handler=async(_app,task)=>{effects.dispatches.push(task.type);load('src/tasks/index.ts').updateTask(task.id,{status:'completed'});};
  const mocks={
+  'src/connectors/slack/deliveryAttempt.ts':require('./fixtures/slack-delivery.cjs')().module,
   'src/db.ts':{getDb:()=>db},'src/db/client.ts':{getDb:()=>db},'src/db/jobs.ts':{},
   'src/core/requests/runner.ts':{sweepDueRequests:async()=>{effects.sweeps++;}},
   'src/tasks/dispatchers/routine.ts':{dispatchRoutine:handler,stopInterruptedRoutineTasks:async()=>{}},

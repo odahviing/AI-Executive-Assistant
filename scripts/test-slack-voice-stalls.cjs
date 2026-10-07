@@ -28,6 +28,7 @@ function harness(options={}){
   }},
  };
  const mocks={
+  'src/connectors/slack/deliveryAttempt.ts':require('./fixtures/slack-delivery.cjs')().module,
   'src/config.ts':{config:{OPENAI_API_KEY:'fixture'}},'src/utils/logger.ts':{__esModule:true,default:{info(){},warn(){},debug(){},error(){}}},
   'src/connections/slack/eligibility.ts':{readInternalSlackConversation:async()=>true},
   'src/llm/client.ts':{},'src/core/threadActions.ts':{},'src/db.ts':{},'src/vision/index.ts':{},

@@ -6,7 +6,7 @@
  *                          English summary (always English, even if transcript
  *                          is Hebrew). Posted to thread.
  *   Stage 2 — Iterating:   owner replies are absorbed as draft edits, style
- *                          rules (persisted to user_preferences), or share
+ *                          rules (persisted to canonical skill Markdown), or share
  *                          intent. Classic chat-LLM iteration — small or large.
  *   Stage 3 — Sharing:     final summary distributed to named recipients.
  *                          Action items and deadlines remain summary content.
@@ -71,25 +71,6 @@ function isInternalEmail(email: string | undefined, profile: UserProfile): boole
   const domain = ownerCompanyDomain(profile);
   if (!domain) return false;
   return email.toLowerCase().endsWith(`@${domain}`);
-}
-
-function summaryStylePromptBlock(ownerUserId: string): string {
-  // Meeting type is semantic and multilingual. Supply conditional groups to
-  // the existing composition call instead of filtering by English keywords.
-  const allPrefs = getPreferences(ownerUserId);
-  const globalPrefs = allPrefs.filter(p => p.category === 'summary');
-  const typePrefs = allPrefs.filter(p => p.category.startsWith('summary_type_'));
-  if (globalPrefs.length === 0 && typePrefs.length === 0) return '';
-
-  const sections: string[] = [];
-  if (globalPrefs.length > 0) {
-    sections.push(`GLOBAL (apply to every summary):\n${globalPrefs.map(p => `- ${p.value}`).join('\n')}`);
-  }
-  for (const category of new Set(typePrefs.map(p => p.category))) {
-    const label = category.slice('summary_type_'.length).toUpperCase().replace(/_/g, ' ');
-    sections.push(`ONLY FOR ${label} SUMMARIES (apply only when this is the meeting's type; then these win over global on conflict):\n${typePrefs.filter(p => p.category === category).map(p => `- ${p.value}`).join('\n')}`);
-  }
-  return `\n\nOWNER'S SUMMARY STYLE PREFERENCES (apply unless the owner overrides for this specific summary):\nDetermine the meeting type from its actual subject, transcript and owner framing in any language. Apply only matching type-specific groups. If the type is unknown, apply global rules only.\n\n${sections.join('\n\n')}`;
 }
 
 /**
@@ -191,7 +172,7 @@ async function draftSummaryFromTranscript(params: {
     ? `\n\nOWNER'S FRAMING FOR THIS SUMMARY (the owner typed this alongside the transcript upload — these instructions override defaults):\n"""\n${params.ownerCaption.trim()}\n"""`
     : '';
 
-  const styleBlock = summaryStylePromptBlock(params.ownerUserId);
+
 
   // v1.7.4 — when the KnowledgeBaseSkill is active, run a tiny relevance
   // pre-pass to pull any company/team context that would help ground this
@@ -248,7 +229,7 @@ CRITICAL RULES:
 - Prefer 4-6 paragraphs. Avoid one-sentence paragraphs.
 - Owner of this meeting: ${params.ownerName} — never list them as an action-item assignee unless they are explicitly tasked OR the action is a jointly-agreed next step (see above).
 - If the owner's framing (above) specifies what to cover or what to de-emphasize, FOLLOW IT. Their framing overrides the default paragraph shape.
-${captionBlock}${calBlock}${styleBlock}${formatSkillPreferencesBlock(params.profile, 'summary')}${kbBlock}
+${captionBlock}${calBlock}${formatSkillPreferencesBlock(params.profile, 'summary')}${kbBlock}
 
 TRANSCRIPT:
 """
@@ -435,7 +416,7 @@ function renderDraftForShare(draft: SummaryDraft, profile: UserProfile): string 
 // - Dedup/merge (gh#189): the already-saved rules for both categories are
 //   listed in the same classification prompt, and the model is told to reuse
 //   an existing rule's exact key when the new feedback is a near-duplicate or
-//   a conflict, so savePreference's ON CONFLICT(user_id, key) upsert updates
+//   a conflict, so savePreference's exact-key write updates
 //   it in place instead of piling up a second row for the same idea.
 //
 // Never blocks the iteration flow: runs asynchronously, fails open on any
@@ -453,7 +434,7 @@ async function classifyAndSaveStylePreference(params: {
 
   // gh#189 — feed the rules already saved so the same call can catch a
   // near-duplicate or a conflict, instead of always minting a fresh rule_key
-  // (which made the ON CONFLICT(user_id, key) dedup in savePreference blind
+  // (which made the exact-key dedup in savePreference blind
   // to anything but an exact key match).
   const existingStyleRules = getPreferences(ownerUserId).filter(
     p => p.category === 'summary' || p.category.startsWith('summary_type_'),
@@ -556,7 +537,7 @@ Output strict JSON only (no prose, no fences):
     const normalizedKey = verdict.rule_key.replace(/[^a-z0-9_]/gi, '_').toLowerCase();
     const merged = existingStyleRules.some(p => p.key === normalizedKey);
 
-    savePreference({
+    await savePreference({
       userId: ownerUserId,
       category,
       key: normalizedKey,
@@ -890,7 +871,7 @@ ${ownerMessage}
         const value = String(args.value ?? '').trim();
         if (!key || !value) return { ok: false, reason: 'missing_key_or_value' };
 
-        savePreference({
+        await savePreference({
           userId: ownerUserId,
           category: 'summary',
           key: key.startsWith('summary_') ? key : `summary_${key}`,
@@ -917,7 +898,7 @@ ${ownerMessage}
         const instruction = String(args.instruction ?? '').trim();
         if (!instruction) return { ok: false, reason: 'missing_instruction' };
 
-        const styleBlock = summaryStylePromptBlock(ownerUserId);
+
         const prompt = `You are revising an in-progress meeting summary based on the owner's instruction. Output the COMPLETE updated summary as STRICT JSON in the same shape — no prose, no markdown, no fences.
 
 INSTRUCTION: ${instruction}
@@ -929,7 +910,7 @@ Rules:
 - Apply the instruction precisely. If unclear, make the most reasonable interpretation.
 - Keep summary in English.
 - Don't invent attendees or action items not previously in the draft (unless the instruction explicitly adds one).
-- Preserve fields the instruction didn't touch.${styleBlock}${formatSkillPreferencesBlock(profile, 'summary')}
+- Preserve fields the instruction didn't touch.${formatSkillPreferencesBlock(profile, 'summary')}
 
 Output the full updated draft JSON.`;
 
