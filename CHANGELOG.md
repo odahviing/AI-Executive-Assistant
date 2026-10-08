@@ -1,3 +1,16 @@
+## 5.0.6 — Ground news in article content
+
+News retrieval now separates an article from surrounding site links before selecting company mentions or supplying briefing and on-demand sources. This addresses the observed Reflectiz misattribution; the referenced page currently mentions Reflectiz only in navigation linking another story.
+
+### Fixed
+- Use structurally identified article text and its final URL instead of search-result snippets as news evidence; exclude recognized navigation, related sections and nested article cards while preserving legitimate body-only and multilingual mentions.
+- Withhold unavailable or ambiguous article evidence. Bound public-page retrieval and validate network destinations on connection and redirects; share repeated URL reads within a news gathering operation.
+- Declare the schema tests' AJV development dependency explicitly so clean installs retain tool-schema validation.
+
+### Verification and limits
+- Independent news regression checks reproduce the old failure and exercise both briefing and on-demand consumers. The release checkpoint passes 237 suite/timezone executions and 5,718 assertions, with the original two missing-dependency failures retained alongside their successful replacements.
+- No additional model call or tier change. Publisher markup and model paraphrases remain semantic limits: unmarked related content inside an article is not universally distinguishable by structural extraction.
+
 ## 5.0.5 — Reliable scheduling, preferences and delivery
 
 Repair the Yael recurring-reschedule and Dina owner-attendee incidents. Pending owner decisions retain their requester context, and final replies distinguish confirmed actions from pending, failed or unknown results.

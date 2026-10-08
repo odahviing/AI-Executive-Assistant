@@ -6,6 +6,12 @@ import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { lookup } from 'node:dns';
+import { isIP } from 'node:net';
+import ipaddr from 'ipaddr.js';
+import { loadBuffer } from 'cheerio';
 
 const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
 
@@ -639,6 +645,93 @@ export async function duckduckgoSearch(query: string, timeRangeDays?: number): P
 }
 
 // ── URL content extraction ───────────────────────────────────────────────────
+
+/** Read publisher-marked article content, not search snippets or whole-page
+ * text. Missing/ambiguous article markup is unavailable evidence. This is a
+ * structural boundary, not a claim that a publisher's prose is factually true. */
+export async function readNewsArticle(url: string, timeoutMs: number): Promise<{ url: string; title?: string; content: string } | null> {
+  const signal = AbortSignal.timeout(Math.max(1, Math.floor(timeoutMs)));
+  const publicAddress = (address: string): boolean => {
+    try { return ipaddr.process(address).range() === 'unicast'; } catch { return false; }
+  };
+  try {
+    let current = new URL(url);
+    for (let redirects = 0; redirects <= 5; redirects++) {
+      const hostname = current.hostname.replace(/^\[|\]$/g, '');
+      if (!['http:', 'https:'].includes(current.protocol) || current.username || current.password
+        || current.port || (isIP(hostname) && !publicAddress(hostname))) return null;
+      signal.throwIfAborted();
+      const page = await new Promise<{ location?: string; bytes?: Buffer }>((resolve, reject) => {
+        const request = (current.protocol === 'https:' ? httpsRequest : httpRequest)(current, {
+          signal,
+          agent: false,
+          headers: { Accept: 'text/html, application/xhtml+xml', 'Accept-Encoding': 'identity', 'User-Agent': 'Maelle-Assistant/1.0' },
+          // Resolve and validate at socket creation. Do not preflight DNS then
+          // resolve again: that permits rebinding between check and connect.
+          lookup: (host, options, callback) => {
+            lookup(host, { all: true }, (err, addresses) => {
+              if (err || !addresses.length || addresses.some(a => !publicAddress(a.address))) {
+                callback(err ?? new Error('Non-public news address'), '', 4);
+              } else if (options.all) {
+                callback(null, addresses);
+              } else {
+                callback(null, addresses[0].address, addresses[0].family);
+              }
+            });
+          },
+        }, response => {
+          const status = response.statusCode ?? 0;
+          if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
+            response.destroy();
+            resolve({ location: response.headers.location });
+            return;
+          }
+          const type = response.headers['content-type']?.split(';')[0].trim().toLowerCase();
+          if (status !== 200 || !['text/html', 'application/xhtml+xml'].includes(type ?? '')
+            || (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity')) {
+            response.destroy();
+            reject(new Error('Unavailable article response'));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          response.on('data', (chunk: Buffer) => {
+            bytes += chunk.length;
+            // Resource bound, never accept a truncated document as evidence.
+            if (bytes > 2 * 1024 * 1024) response.destroy(new Error('Article exceeds read budget'));
+            else chunks.push(chunk);
+          });
+          response.on('error', reject);
+          response.on('aborted', () => reject(new Error('Incomplete article response')));
+          response.on('end', () => response.complete ? resolve({ bytes: Buffer.concat(chunks) }) : reject(new Error('Incomplete article response')));
+        });
+        request.on('error', reject);
+        request.end();
+      });
+      if (page.location) {
+        current = new URL(page.location, current);
+        continue;
+      }
+      if (!page.bytes) return null;
+      const $ = loadBuffer(page.bytes);
+      $('script, style, template, noscript, nav, aside, footer, form, [role="navigation"], [role="complementary"], [hidden], [aria-hidden="true"]').remove();
+      // Publisher structural metadata, never English prose/heading matching.
+      // entry-content is the WordPress/h-entry body convention used by the
+      // incident publisher. Require one article so listing pages cannot merge.
+      const articles = $('article');
+      const marked = $('[itemprop~="articleBody"]');
+      const entries = articles.find('.entry-content');
+      const body = marked.length === 1 ? marked : articles.length === 1 ? (entries.length ? entries : articles) : $();
+      if (body.length !== 1) return null;
+      body.find('article, .post-related, .related-posts, .sharedaddy, .social-share, [itemtype$="/SiteNavigationElement"]').remove();
+      const title = articles.length === 1 ? articles.find('h1').first().text().replace(/\s+/g, ' ').trim() : undefined;
+      body.find('p, div, li, h1, h2, h3, h4, br, section, tr').append('\n');
+      const content = body.text().replace(/\s+/g, ' ').trim();
+      return content ? { url: current.href, title: title || undefined, content } : null;
+    }
+  } catch { /* Unknown, unsafe, timed out or unparseable: never use the search snippet instead. */ }
+  return null;
+}
 
 export async function tavilyExtract(url: string, timeoutMs: number = TAVILY_EXTRACT_DEFAULT_TIMEOUT_MS): Promise<object> {
   if (!config.TAVILY_API_KEY) {

@@ -45,7 +45,7 @@ import path from 'path';
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
 import { MODEL_HAIKU } from '../llm/models';
-import { tavilySearch, type DomainFilterOpts } from './general';
+import { tavilySearch, readNewsArticle, type DomainFilterOpts } from './general';
 import { readSkillPreferencesSnapshot, formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
@@ -238,10 +238,9 @@ Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], 
 
 // ── Per-goal lightweight search (efficiency) ─────────────────────────────────
 // v3.2.6 cost fix: ONE Tavily news search per goal — no per-goal query
-// expansion (that was a Haiku call per goal) and NO full-article extraction
-// (3 tavilyExtract calls per goal). A morning news section writes from
-// headlines + snippets; deep reads are overkill and were the source of the
-// "100+ requests per ask" blow-up. Net: ~1 call/goal instead of ~8.
+// expansion (that was a Haiku call per goal). Search discovers candidates;
+// bounded public article reads establish the content boundary before compose.
+// No additional model calls. Repeated URLs share a read within this gather.
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   return new Promise<T | null>(resolve => {
     const t = setTimeout(() => resolve(null), ms);
@@ -255,14 +254,16 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
 
 interface TavilyLite { results?: Array<{ title?: string; content?: string; url?: string; published_date?: string }> }
 
-async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts): Promise<NewsSource[]> {
+async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts,
+  articleReads: Map<string, ReturnType<typeof readNewsArticle>>, ownerCompany: string): Promise<NewsSource[]> {
+  const deadline = Date.now() + NEWS_PER_GOAL_TIMEOUT_MS;
   const run = async (opts: DomainFilterOpts): Promise<NewsSource[]> => {
     const r = await withTimeout(
       tavilySearch(goal, 'advanced', recency, opts) as Promise<TavilyLite>,
-      NEWS_PER_GOAL_TIMEOUT_MS,
+      Math.max(1, deadline - Date.now()),
     );
     if (!r) return [];
-    return (r.results ?? [])
+    const candidates = (r.results ?? [])
       .filter(it => {
         if (!it.url) return false;
         if (!opts.includeDomains?.length && !opts.excludeDomains?.length) return true;
@@ -274,12 +275,31 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
             && (!opts.includeDomains?.length || opts.includeDomains.some(matches));
         } catch { return false; }
       })
-      .map(it => ({
-        title: it.title,
-        url: it.url as string,
-        snippet: (it.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 400),
-        published: it.published_date,
-      }));
+      ;
+    const sources = await Promise.all(candidates.map(async it => {
+      if (Date.now() >= deadline) return null;
+      const url = it.url as string;
+      const identity = normalizeUrl(url) || url;
+      let read = articleReads.get(identity);
+      if (!read) {
+        read = readNewsArticle(url, deadline - Date.now());
+        articleReads.set(identity, read);
+      }
+      const article = await withTimeout(read, Math.max(1, deadline - Date.now()));
+      if (!article) return null;
+      // Apply source policy and publisher attribution to the page actually
+      // read, not an external-looking URL that redirected to another publisher.
+      const host = cleanEmittedDomain(new URL(article.url).hostname);
+      if (!host) return null;
+      const matches = (domain: string) => host === domain || host.endsWith('.' + domain);
+      if (opts.excludeDomains?.some(matches) || (opts.includeDomains?.length && !opts.includeDomains.some(matches))) return null;
+      // Keep a body-only entity mention even when it occurs past the first
+      // paragraph. Never borrow the search title/snippet as article evidence.
+      const mention = ownerCompany ? article.content.toLowerCase().indexOf(ownerCompany.toLowerCase()) : -1;
+      const start = Math.max(0, mention - 120);
+      return { title: article.title, url: article.url, snippet: article.content.slice(start, start + 400), published: it.published_date };
+    }));
+    return sources.filter((source): source is NonNullable<typeof source> => source !== null);
   };
   // M-7 (v3.3.x) — domain steer is back, but LLM-emitted (not parsed). Over-narrow
   // guard: if a preferred-domain (include) filter returns nothing for this goal,
@@ -305,7 +325,8 @@ async function searchGoal(goal: string, recency: number, steer: DomainFilterOpts
 // instruction: for a goal that names the owner's own configured company (from
 // `profile.user.company` — never a hardcoded string, so this holds for any
 // tenant's own configured entity), a source is only admitted if its title or
-// snippet actually contains that entity string. Sources for every OTHER goal
+// structurally retrieved article snippet contains that entity string. Search
+// snippets and page navigation never count as article evidence. Every OTHER goal
 // (competitors, market topics, meeting companies) are untouched — this only
 // guards the one shape of claim that's about the owner himself.
 function containsEntity(text: string | undefined, entity: string): boolean {
@@ -531,8 +552,9 @@ export async function gatherNews(profile: UserProfile, opts: GatherNewsOpts = {}
     // out resolves to [] and is dropped. An "own company mention" goal is then
     // grounded: a source that never actually names the entity is dropped
     // before it ever reaches the brief-composition prompt as a candidate.
+    const articleReads = new Map<string, ReturnType<typeof readNewsArticle>>();
     const perGoal = await Promise.all(goals.map(async g => {
-      const found = await searchGoal(g, recency, steer);
+      const found = await searchGoal(g, recency, steer, articleReads, ownerCompany);
       return filterUngroundedEntitySources(g, found, ownerCompany, ownDomain);
     }));
 

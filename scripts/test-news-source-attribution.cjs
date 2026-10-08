@@ -42,7 +42,7 @@ function harness(results, { plannedGoal = 'Reflectiz mentions', failSearch = fal
       return { content: [{ text: JSON.stringify({ goals: [plannedGoal] }) }] };
     } } }) },
     '../llm/models': { MODEL_HAIKU: 'test-only' },
-    './general': { tavilySearch: async (...args) => {
+    './general': { readNewsArticle: async url => { try { new URL(url); } catch { return null; } const r = results.find(r => r.url === url); return r ? { url: r.url, title: r.title, content: r.content || 'Article body fixture.' } : null; }, tavilySearch: async (...args) => {
       searches.push(args);
       if (failSearch) throw new Error('Simulated search failure');
       return { results };

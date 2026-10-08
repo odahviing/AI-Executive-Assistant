@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
-**0 product decisions await you** — 24 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 2 dependency blocked, 0 awaiting review/repair, 0 in flight.
+**0 product decisions await you** — 22 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (3):** news-reflectiz-mention-without-source-confirmation · news-related-reading-attribution-20261006 · news-agentic-pentest-reflectiz-attribution-20261008
 
 ### Held — recorded rulings / existing backlog (22)
 
@@ -29,15 +29,4 @@
 | diplomat · email-from-claim-grants-owner-authority | backlog: Email owner authority follows From or alias without a verified provider-backed owner identity verdict. | Held: Owner: if you can do it easily, do it. Diplomat official-provider research found no simple reliable identity contract; no header-string gate added. Evidence: diplomat/auth-investigation-a1/HANDOFF.md. Prior full-context ruling rema… | Not assessed |
 | unassigned · gh#2 | backlog: Owner held other GitHub work while discussing issues 204, 205 and 206; no fresh implementation investigation. | Held: Owner: git hub ... should we fix #206 ... what is the issue with #204 and #205 ... the rest not for now. No GitHub issue closed. | Not assessed |
 | unassigned · gh#4 | backlog:  | Held: 5.0.1 (96c96f71f2b90a07c0b7283a3fcaf4b08d2623f9) prevents duplicate text fallback after an uncertain WhatsApp audio send and retains trusted tool receipts on confirmed deliveries. Isolated transport regressions cover confirmed, fai… | Not assessed |
-
-### Blocked — dependency or execution evidence required (2)
-
-| Lane · ref | What happened | Your options | Risk |
-|---|---|---|---|
-| librarian · news-reflectiz-mention-without-source-confirmation | bug: Current actual news path reproduces related-reading token admission; complete safe correction remains unproven for briefing and on-demand consumers. | Blocked: Executed current gatherNews fixtures6pass2fail, existing attribution43pass. Historical source/goal input remains unavailable; distinct refs retained. Existing-call structural backstop assessed, not sufficient proof of complete correction. Evidence artifacts/workshop-verification/approved-four-20261007/librarian/news-current-a1/RESULT.md and EXISTING-CALL-AVENUE.md. No news edit or completion claim.; existing owner authorization is retained. | Not assessed |
-| librarian · news-related-reading-attribution-20261006 | bug: Current actual news path reproduces related-reading token admission; complete safe correction remains unproven for briefing and on-demand consumers. (1 retained example) | Blocked: Executed current gatherNews fixtures6pass2fail, existing attribution43pass. Oct6 historical input remains unavailable; current syndicated article is Salmon/Archipelo. Distinct ref retained, no historical shared-root claim. Existing-call structural backstop remains partial. Evidence artifacts/workshop-verification/approved-four-20261007/librarian/news-current-a1/RESULT.md and EXISTING-CALL-AVENUE.md. No news edit or completion claim.; existing owner authorization is retained. | Not assessed |
-
-### Framework work (1 open)
-
-- X234 — verification-unproven: Stale citation checker reports heuristic body-anchor distance as proven stale — approved-batch-20261004-X234-a1 — Framework behavioral pass. Inspection confirms detector, scope selection and blocking exit unchanged; suspected declaration-distance drift is no longer called proven semantic error. Executed16 cases cover body/declaration/use/weak/unresolved/EOF, unrelated diff filtering, mixed categories and strict exits. Synchronous CLI has no product caller, persisted state, background lifecycle or external action. Heuristic positional results still require human semantic review.
 

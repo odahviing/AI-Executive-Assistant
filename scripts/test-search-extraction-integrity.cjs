@@ -8,7 +8,9 @@ function harness(o={}){
  const calls=[],timeouts=[],planner=[];
  const config={TAVILY_API_KEY:o.provider==='tavily'||!o.provider?'fixture':'',BRAVE_SEARCH_API_KEY:o.provider==='brave'?'fixture':''};
  const noop=()=>{};
+ const noArticleNetwork=()=>{throw Error("Unexpected article network call in existing search/extraction tests");};
  const mocks={
+  "node:http":{request:noArticleNetwork},"node:https":{request:noArticleNetwork},"node:dns":{lookup:noArticleNetwork},"node:net":require("node:net"),"ipaddr.js":require("ipaddr.js"),"cheerio":require("cheerio"),
   '../config':{config},'../llm/models':{},'../utils/logger':{__esModule:true,default:{info:noop,warn:noop,error:noop}},
   '../utils/extractJson':{extractFirstJsonObject:s=>s},
   '../llm/client':{getAnthropicClient:()=>({messages:{create:async x=>{planner.push(x);if(o.plannerFails)throw Error('planner unavailable');return {content:[{type:'text',text:JSON.stringify({queries:o.queries||['query'],recency_days:o.plannerDays})}]};}}})},
