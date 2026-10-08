@@ -2,10 +2,10 @@
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
     "id": "wrap-news-5.0.6-20261008",
-    "status": "running",
-    "note": "Exacta2independentlyverified; release237checks5718assertions andGolden30current. Bookkeeping/commit/deploy next. Prior3alreadydeployedb0ae9b1."
+    "status": "complete",
+    "note": "5.0.6 source committed 597ef53aa4414055b80cd8a37b97fa4292edf76b; one present NEWS correction independently verified across3refs. Prior3workstreams deployedb0ae9b1; final NEWS deployment evidence retained separately."
   },
-  "lastWrapIso": "2026-10-07T17:54:34+03:00",
+  "lastWrapIso": "2026-10-08T18:37:11+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",
   "nextReportId": 315,
   "verifiedClean": [

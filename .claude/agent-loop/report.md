@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 22 open items; 0 captured, 0 ready for an authorized lane batch, 22 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (3):** news-reflectiz-mention-without-source-confirmation · news-related-reading-attribution-20261006 · news-agentic-pentest-reflectiz-attribution-20261008
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (22)
 
