@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 1 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (3):** slack-progress-status-final-only-20261011 · gh#208-sonnet · gh#208-haiku
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (1)
 
