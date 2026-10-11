@@ -36,9 +36,9 @@ import type { UserProfile } from '../../config/userProfile';
 import logger from '../../utils/logger';
 import { logLlmUsage } from '../../utils/usageLog';
 import { FIXED_CATEGORIES } from '../../db/socialSubjects';
-import { MODEL_HAIKU } from '../../llm/models';
+import { HAIKU } from '../../llm/models';
 
-const MODEL = MODEL_HAIKU;
+const MODEL = HAIKU.model;
 
 // ── Intent types (formerly in classifyOwnerIntent.ts, removed in the v3.0.6
 //    merge — this module is now the sole owner of per-turn classification) ──
@@ -300,7 +300,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
 
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL,
+      ...HAIKU,
       max_tokens: 250,
       system: systemPrompt,
       tools: [{

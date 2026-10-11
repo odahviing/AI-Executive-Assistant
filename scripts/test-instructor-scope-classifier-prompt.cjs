@@ -32,7 +32,7 @@ function loadClassifier() {
     '../../utils/logger': { __esModule: true, default: { info: noop, warn: noop, error: noop } },
     '../../utils/usageLog': { logLlmUsage: noop },
     '../../db/socialSubjects': { FIXED_CATEGORIES: ['work', 'personal'] },
-    '../../llm/models': { MODEL_HAIKU: 'fixture-haiku' },
+    '../../llm/models': require('./load-test-models.cjs'),
   };
   const isolatedRequire = name => {
     assert.ok(Object.hasOwn(deps, name), `unexpected classifyTurn dependency: ${name}`);
@@ -107,7 +107,7 @@ test('multi-purpose turns retain union guidance', () => {
 });
 
 test('the existing classifier call and scope schema remain unchanged', () => {
-  assert.equal(captured.model, 'fixture-haiku');
+  assert.equal(captured.model, require('./load-test-models.cjs').HAIKU.model);
   assert.equal(captured.tools.length, 1);
   assert.equal(captured.tools[0].name, 'classify_turn');
   const scopes = captured.tools[0].input_schema.properties.scopes;

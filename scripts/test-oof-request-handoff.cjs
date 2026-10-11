@@ -12,7 +12,7 @@ function fixture(o={}){
  const mocks={
  'src/core/requests/requesterRelay.ts':{requesterRelayLanguage:()=> o.lang||'en',relayNotice:require('./fixtures/relay-copy.cjs').relayNotice},
  'src/db.ts':jobs,'src/db/jobs.ts':jobs,'src/db/requests.ts':{getRequest:()=>row,getOpenRequestsForThread:()=>o.freshApproval?[{kind:'approval',state:'awaiting_owner',created_at:'2026-09-19 10:00:01'}]:[],updateRequest:(_id,p)=>{for(const[k,v]of Object.entries(p))row[{nextCheckAt:'next_check_at',nextCheckHandler:'next_check_handler',phase:'phase'}[k]||k]=v;}},
- 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{effects.classifications++;return {content:[{type:'tool_use',input:{status:o.status||'yes'}}]};}}})},'src/llm/models.ts':{},
+ 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{effects.classifications++;return {content:[{type:'tool_use',input:{status:o.status||'yes'}}]};}}})},'src/llm/models.ts':require('./load-test-models.cjs'),
  'src/connections/registry.ts':{getConnection:()=>({sendDirect:send,postToChannel:send})},'src/connections/slack/formatting.ts':{formatForSlack:x=>x},
  'src/core/requests/resolver.ts':{withRequestLock:async(_id,fn)=>fn()},
  'src/utils/responseDeadline.ts':{isColleagueSendDeferred:()=>({deferred:false}),calcResponseDeadline:()=> '2026-12-02T00:00:00Z'},

@@ -52,7 +52,7 @@ import {
 import { readPersonMemory } from './peopleMemory';
 import { selfSlackId } from '../core/assistantSelf';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import { isStrictIana } from '../utils/timezoneValidator';
 import { config } from '../config';
 import logger from '../utils/logger';
@@ -78,7 +78,7 @@ import {
 
 const SILENCE_MINUTES = 30;
 const MAX_THREADS_PER_TICK = 20;
-const HAIKU_MODEL = MODEL_HAIKU;
+
 
 /** Failure is unknown, not a silent answer. Use inbound timestamps already
  * stored by Slack so a failure on the coda's own first capture cannot turn a
@@ -401,7 +401,7 @@ export async function runCapturePass(profile: UserProfile): Promise<void> {
       // 4. Single Haiku call to extract deltas.
       const userMsg = buildUserMessage(personRow.name, currentProfile, currentMemory, transcript);
       const resp = await anthropic.messages.create({
-        model: HAIKU_MODEL,
+        ...HAIKU,
         max_tokens: 800,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMsg }],
@@ -664,7 +664,7 @@ async function runSelfCapture(
     ].join('\n');
 
     const resp = await anthropic.messages.create({
-      model: HAIKU_MODEL,
+      ...HAIKU,
       max_tokens: 1000,
       system: selfSystemPrompt(assistantName, ownerName),
       messages: [{ role: 'user', content: userMsg }],
@@ -1028,7 +1028,7 @@ async function runSubjectReconciliation(
     ].join('\n');
 
     const resp = await anthropic.messages.create({
-      model: HAIKU_MODEL,
+      ...HAIKU,
       // 1500 → 3000 (item 3, 2026-08-16): each match/create decision now also
       // carries a 5-10 sentence merged summary (up to ~1800 chars). The old
       // budget covered labels + beats only; a multi-subject chat would now

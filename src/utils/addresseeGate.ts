@@ -19,7 +19,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import logger from './logger';
 
 const anthropic = getAnthropicClient();
@@ -61,7 +61,7 @@ export async function classifyAddressee(params: {
       // Binary MAELLE/HUMAN/AMBIGUOUS classifier — Haiku-grade.
       // (The original Sonnet choice was a leftover; top-of-file comment
       // already documented the intent as "cheap Haiku call".)
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 12,
       system:
         `You watch a group chat where ${assistantName} is the executive assistant to ${ownerFirstName}. ` +

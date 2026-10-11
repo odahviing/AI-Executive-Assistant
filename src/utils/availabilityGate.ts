@@ -106,7 +106,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
-import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
+import { SONNET, MODEL_SONNET, MODEL_HAIKU, HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { renderClockInZone } from './timezoneConvert';
@@ -594,7 +594,7 @@ Report one entry per numbered time by calling the report tool.`;
 
   try {
     const resp = await getAnthropicClient().messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 500,
       tools: [{
         name: 'report',
@@ -664,7 +664,7 @@ Report one entry per numbered time by calling the report tool.`;
 // ── Remedy ──────────────────────────────────────────────────────────────────
 
 /**
- * One tool-less bounded rewrite. Sonnet, forced `verdict` tool — same shape as
+ * One tool-less bounded rewrite. Sonnet, validated `verdict` tool — same shape as
  * rewriteOwningTheMiss, and for the same reason: only the structured fields can
  * become the reply, so the model's reasoning can never ship (G4).
  *
@@ -684,7 +684,7 @@ export async function rewriteBlockedSlotClaim(opts: {
     .map(s => `  - ${s.display} — NOT available for ${opts.ownerFirstName}${s.phrase ? `; the only reason you may give: "${s.phrase}"` : '; NO reason is available — say it does not work and give none'}`)
     .join('\n');
 
-  const prompt = `You are correcting a message an assistant already drafted for ${opts.ownerFirstName}. A deterministic calendar check established that the times below are NOT available, and the draft presents at least one of them as workable. Report your decision by calling the \`verdict\` tool — write no prose outside the tool call.
+  const prompt = `You are correcting a message an assistant already drafted for ${opts.ownerFirstName}. A deterministic calendar check established that the times below are NOT available, and the draft presents at least one of them as workable. Report your decision by calling the \`verdict\` tool exactly once — write no prose outside the tool call.
 
 ESTABLISHED FACTS (settled — do not re-judge them):
 ${facts}
@@ -703,11 +703,8 @@ SAFE-MISS — the hard rule. If you cannot tell that the draft presents one of t
 Draft:
 ${opts.draft}`;
 
-  try {
-    const resp = await getAnthropicClient().messages.create({
-      ...SONNET,
-      max_tokens: 700,
-      tools: [{
+  // Sonnet 5.5 accepts auto only. A missing/invalid tool verdict is a safe miss.
+  const verdictTool = {
         name: 'verdict',
         description: 'Report whether the draft presents an unavailable time as workable, and if so the corrected message.',
         input_schema: {
@@ -725,14 +722,34 @@ ${opts.draft}`;
           },
           required: ['verdict'],
         },
-      }],
-      tool_choice: { type: 'tool', name: 'verdict' },
+      };
+
+  try {
+    const resp = await getAnthropicClient().messages.create({
+      ...SONNET,
+      max_tokens: 700,
+      tools: [verdictTool],
+      tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: prompt }],
     });
     logLlmUsage('availability_floor_rewrite', MODEL_SONNET, resp);
 
-    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const input = (toolUse?.input ?? {}) as { verdict?: string; message?: string };
+    const verdicts = resp.content.filter(b => b.type === 'tool_use');
+    if ((resp.stop_reason !== 'tool_use' && resp.stop_reason !== 'end_turn') || verdicts.length !== 1 || verdicts[0].name !== 'verdict') {
+      logger.warn('Availability floor — no unique completed verdict; draft stays unchecked and unchanged');
+      return null;
+    }
+    const payload = verdicts[0].input;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const fields = payload as Record<string, unknown>;
+    // Validate against the same schema sent to the model; never trust free text.
+    const properties = verdictTool.input_schema.properties as Record<string, { type: string; enum?: string[] }>;
+    const valid = verdictTool.input_schema.required.every(key => Object.hasOwn(fields, key))
+      && Object.entries(fields).every(([key, value]) => Object.hasOwn(properties, key)
+        && typeof value === properties[key].type
+        && (!properties[key].enum || properties[key].enum!.includes(value as string)));
+    if (!valid) return null;
+    const input = fields as { verdict?: string; message?: string };
     if (input.verdict !== 'rewrite') {
       logger.info('Availability floor — rewriter kept the draft (judged it already honest about the blocked time)', {
         verdict: input.verdict ?? '(none)',

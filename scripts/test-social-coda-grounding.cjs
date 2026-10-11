@@ -38,7 +38,7 @@ const wireText = 'An interesting report about burnout.';
 const source = { title: 'Clinicians discuss burnout', url: 'https://news.example/reports/clinicians', content: 'A physician couple discussed their decision to move abroad.' };
 const profile = { user: { name: 'Owner Test', slack_user_id: 'U_OWNER' }, assistant: { name: 'Maelle' } };
 
-function harness({ results = [source], messages = [], subjects = [], category = null, searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText, truncated = false } = {}) {
+function harness({ results = [source], messages = [], subjects = [], category = null, searchThrows = false, historyThrows = false, verdict = {}, sentence = wireText, truncated = false, response } = {}) {
   const unexpected = [];
   const warnings = [];
   const searches = [];
@@ -52,9 +52,9 @@ function harness({ results = [source], messages = [], subjects = [], category = 
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async args => {
       composerCalls.push(args);
       // `truncated` replays a max_tokens cut: the tool block came back with no `sentence`.
-      return truncated
-        ? { stop_reason: 'max_tokens', content: [{ type: 'tool_use', input: {} }] }
-        : { stop_reason: 'tool_use', content: [{ type: 'tool_use', input: { sentence } }] };
+      return response || (truncated
+        ? { stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'compose_coda', input: {} }] }
+        : { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'compose_coda', input: { sentence } }] });
     } } }) },
     '../../llm/models': { SONNET: { model: 'isolated-composer' } },
     '../../utils/usageLog': { logLlmUsage: (...args) => usageLogs.push(args) },
@@ -91,7 +91,7 @@ function harness({ results = [source], messages = [], subjects = [], category = 
         ...overrides,
       }, profile, deliveredWorkReply);
       assert.deepEqual(unexpected, [], 'caught forbidden effects must fail the test too');
-      assert.equal(warnings.length, Number(searchThrows) + Number(historyThrows) + Number(truncated), 'unexpected fail-open is a failure');
+      assert.equal(warnings.length, Number(searchThrows) + Number(historyThrows) + Number(truncated) + Number(Boolean(response?.invalid)), 'unexpected fail-open is a failure');
       assert.equal(unansweredCalls.length, 0, 'composition, validation, and grounding outcomes must not spend a delivered-raise counter');
       return result;
     },
@@ -439,3 +439,14 @@ test('measure actual composer prompt size for the fixed incident-shaped fixture'
   const prompt = composerPrompt(h);
   t.diagnostic(`Actual composer prompt: ${prompt.length} UTF-16 code units; ${Buffer.byteLength(prompt, 'utf8')} UTF-8 bytes. No tokenizer or live model evaluation.`);
 });
+
+for (const [label, content, stop_reason] of [
+ ['missing', [], 'end_turn'],
+ ['wrong tool', [{type:'tool_use',name:'wrong',input:{sentence:wireText}}], 'tool_use'],
+ ['duplicate', Array.from({length:2},()=>({type:'tool_use',name:'compose_coda',input:{sentence:wireText}})), 'tool_use'],
+ ['incomplete', [{type:'tool_use',name:'compose_coda',input:{sentence:wireText}}], 'max_tokens'],
+ ['invalid sentence', [{type:'tool_use',name:'compose_coda',input:{sentence:42}}], 'tool_use'],
+]) test('migration rejects '+label, async()=>{const h=harness({response:{content,stop_reason,invalid:true}});assert.equal(await h.compose(),null);assert.equal(h.validatorCalls.length,0);});
+test('migration auto tool request preserves legitimate sentence',async()=>{const h=harness();assert.ok(await h.compose());assert.equal(h.composerCalls[0].tool_choice.type,'auto');});
+
+test('complete end_turn tool with accompanying text is accepted',async()=>{const h=harness({response:{stop_reason:'end_turn',content:[{type:'text',text:'Done'},{type:'tool_use',name:'compose_coda',input:{sentence:wireText}}]}});assert.equal((await h.compose()).text,wireText);});

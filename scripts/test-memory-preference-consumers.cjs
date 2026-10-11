@@ -25,7 +25,7 @@ function harness() {
   const mocks = {
     'src/utils/logger.ts':{__esModule:true,default:logger},
     'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async request=>{state.requests.push(request);if(state.failModel)throw Error('fixture unavailable');return {content:[{type:'text',text:state.reply}]};}}})},
-    'src/llm/models.ts':{SONNET:{model:'fixture'},MODEL_HAIKU:'fixture'},
+    'src/llm/models.ts':{SONNET:{model:'fixture'},HAIKU:{model:'fixture',thinking:{type:'disabled'}}},
     'src/db.ts':{getPreferences:()=>state.dbPrefs,getSummarySessionByThread:()=>({id:1,current_draft:JSON.stringify(state.draft)}),parseDraft:()=>state.draft,replaceSummaryDraft:(_thread,d)=>{state.draft=d;}},
     'src/skills/general.ts':{tavilySearch:async(...args)=>{state.searches.push(args);return {results:[]};}},
     'src/utils/calendarListingFormat.ts':{calendarListingFormatRule:()=>''},

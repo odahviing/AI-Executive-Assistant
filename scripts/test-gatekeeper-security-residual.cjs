@@ -25,7 +25,7 @@ function harness(responses = [verdict(true)]) {
   } } };
   const stubs = {
     'src/llm/client.ts': { getAnthropicClient: () => client },
-    'src/llm/models.ts': { MODEL_HAIKU: 'fixture-haiku', MODEL_SONNET: 'fixture-sonnet', SONNET: { model: 'fixture-sonnet' } },
+    'src/llm/models.ts': require('./load-test-models.cjs'),
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/utils/usageLog.ts': { logLlmUsage() {} },
     'src/core/requests/types.ts': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },

@@ -7,7 +7,7 @@ function harness(options={}) {
  const logger=Object.fromEntries(['info','warn','error','debug'].map(k=>[k,(...a)=>logs.push([k,...a])]));
  const client={messages:{create:async req=>{calls.push(req);const human=req.tools?.some(t=>t.name==='verdict');events.push(human?'human':'claim');if(human){if(options.unavailable)throw Error('fixture unavailable');return {content:[{type:'tool_use',name:'verdict',input:{ok:!options.rewrite,rewrite:options.rewrite??null}}]};}return {content:[{type:'text',text:JSON.stringify({claimed_action:false,action_type:null,action_summary:null,target_name:null})}]};}}};
  const mocks={
- 'src/llm/client.ts':{getAnthropicClient:()=>client},'src/llm/models.ts':{MODEL_HAIKU:'fixture',MODEL_SONNET:'fixture',SONNET:{model:'fixture'}},
+ 'src/llm/client.ts':{getAnthropicClient:()=>client},'src/llm/models.ts':require('./load-test-models.cjs'),
  'src/utils/logger.ts':{__esModule:true,default:logger},'src/utils/usageLog.ts':{logLlmUsage(){}},
  'src/utils/attendeeAvailability.ts':{ATTENDEE_REASON_PREFIXES:[]},'src/utils/detectMessageLanguage.ts':{detectMessageLanguage:()=> 'en'},
  'src/core/requests/types.ts':{FREEFORM_OWNER_FLAG_SUBKIND:'freeform_owner_flag'},'src/connections/slack/formatting.ts':{formatForSlack:s=>s},

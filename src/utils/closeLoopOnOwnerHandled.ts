@@ -6,7 +6,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU, MODEL_HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import { getOpenScannerItems, getRequest } from '../db/requests';
 import { closeRequest } from '../core/requests/closeRequest';
@@ -229,7 +229,7 @@ export async function closeLoopOnOwnerHandled(params: {
       // set. Safety is model-independent — the conservative SYSTEM_PROMPT + the
       // deterministic messageReferencesRequest backstop (below) + fail-open all hold,
       // and a missed close just resurfaces in tomorrow's brief (safe miss either way).
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 400,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],

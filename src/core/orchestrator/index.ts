@@ -39,6 +39,7 @@ export interface OrchestratorInput {
   // research runs) that flow through the orchestrator but aren't a live
   // conversation. Suppresses the proactive social directive + end-of-turn coda
   // so a one-way report doesn't get "Do you have any pets?" tacked on.
+  // Also skips live-thread progress: these callers use synthetic internal keys.
   // Defaults to interactive (true) when omitted.
   interactive?: boolean;
   isMpim?: boolean;                   // true if this is a group DM (MPIM)
@@ -48,12 +49,9 @@ export interface OrchestratorInput {
   /** Observed thread participants, distinct from the full room membership. */
   threadParticipantIds?: string[];
   /**
-   * Optional forced tool on the FIRST Claude call of this run. Set by the
-   * claim-checker retry path (v1.6.2) when the previous draft claimed to have
-   * messaged someone but no message_colleague tool call ran. Passing
-   * { name: 'message_colleague' } uses Anthropic's tool_choice to ensure the
-   * model actually calls the tool this time around. Reverts to auto after
-   * the first iteration.
+   * Required first tool, currently used for active summary feedback.
+   * The loop rejects a missing or different first tool before executing any
+   * action. This does not rely on provider-specific forced tool support.
    */
   forceToolOnFirstTurn?: { name: string };
   /**
@@ -317,6 +315,13 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     availabilityPrecheckToolSummaries,
   } = await buildTurnContext(input);
 
+  // Keep the prefix stable for the entire tool loop: thinking signatures bind
+  // earlier system/tools/messages. The check below, not this instruction,
+  // enforces the required first action.
+  if (input.forceToolOnFirstTurn) {
+    systemBlocks.push({ type: 'text', text: `Your first tool call must be ${input.forceToolOnFirstTurn.name}. Then continue the task normally.` });
+  }
+
   // Track tools called so we can save a summary in conversation history.
   // This prevents Claude from forgetting what it just did on the next turn.
   const toolCallSummaries: string[] = [];
@@ -355,8 +360,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
   // and can correct its narrative.
   const deletedEventIdsThisTurn = new Set<string>();
   // Track message_colleague calls per turn keyed on colleague_slack_id.
-  // A claim-checker false-positive forcing a retry with tool_choice:
-  // message_colleague would otherwise create a second outreach_jobs row
+  // A retry that repeats message_colleague would otherwise create a second outreach_jobs row
   // seconds apart. Even with the upstream fixes in claim-checker +
   // postReply.ts, this is the deterministic backstop: any second
   // message_colleague call this turn for the same colleague is a no-op
@@ -421,38 +425,26 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     }
     iteration++;
 
-    // v1.6.2 — claim-checker retry path: on the very first iteration of a
-    // retry run, force the model to call a specific tool (e.g. message_colleague).
-    // After the first iteration the loop reverts to tool_choice:auto so the
-    // model can finish its work normally.
-    const toolChoice =
-      iteration === 1 && input.forceToolOnFirstTurn
-        ? { type: 'tool' as const, name: input.forceToolOnFirstTurn.name }
-        : undefined;
-
     const response = await callClaude({
       model,
       max_tokens: maxTokens,
-      // Sonnet-5 retry (staged): the orchestrator is a decision/tool-routing loop,
-      // and the thinking-OFF wave (fabricated "I checked", availability flips,
-      // under-escalation) traced to Sonnet 5 being less tool-eager + more literal
-      // with reasoning disabled. Adaptive thinking at `high` restores tool-reaching
-      // + self-verification on the exact layer that broke; `effort` is a ceiling and
-      // adaptive throttles within it, so easy turns stay cheap. The full
-      // response.content (incl. thinking blocks) is echoed back unchanged at the
-      // messages.push below — required on the same model. Guards/classifiers stay
-      // thinking-off (SONNET bundle). Revert = MODEL_SONNET → 4.6 (one line).
+      // Preserve the agentic adaptive/high policy. Effort is guidance, not a
+      // token ceiling; maxTokens bounds thinking plus the answer. Round-trip
+      // content unchanged and append history so thinking signatures stay valid.
       thinking: { type: 'adaptive' },
       output_config: { effort: 'high' },
       system: systemBlocks,
       tools: tools.length > 0 ? tools : undefined,
-      tool_choice: toolChoice,
       messages,
     });
 
     logger.debug('Claude response', { stopReason: response.stop_reason, iteration });
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use');
+    if (iteration === 1 && input.forceToolOnFirstTurn &&
+        (!['tool_use', 'end_turn'].includes(response.stop_reason ?? '') || toolBlocks[0]?.name !== input.forceToolOnFirstTurn.name)) {
+      throw new Error(`Required first tool ${input.forceToolOnFirstTurn.name} was not returned completely; no tools executed.`);
+    }
 
     // v2.9.4 follow-up — ALWAYS capture text from this iteration into
     // finalReply, regardless of whether tool calls also fired. Pre-fix
@@ -519,8 +511,8 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       break;
     }
 
-    // end_turn WITH tool calls means Claude finished tools but forgot to write a
-    // reply — fall through: process the tools and loop once more for the final text.
+    // Complete responses may use end_turn or tool_use with tool blocks.
+    // Process those blocks and append their results before requesting final text.
     messages.push({ role: 'assistant', content: response.content });
 
     const skillContext: SkillContext = {
@@ -787,7 +779,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // rationale). Slack rejects non-panel calls with channel_not_found /
       // not_in_assistant_thread; the catch in setAssistantStatus swallows that
       // at debug level.
-      if (input.app && input.channelId && input.threadTs) {
+      if (input.interactive !== false && input.app && input.channelId && input.threadTs) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { setAssistantStatus } = require('../../connections/slack/messaging') as

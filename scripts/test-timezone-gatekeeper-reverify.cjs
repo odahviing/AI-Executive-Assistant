@@ -29,7 +29,7 @@ function harness(opts={}){
   'src/utils/displaySubject.ts':{displaySubject:()=> 'private',PRIVATE_MASK:'private'},
   'src/utils/floatingBlocks.ts':{getFloatingBlocks:()=>[],blockAppliesOnDay:()=>false,isFloatingBlockEvent:()=>false},
   'src/llm/client.ts':{getAnthropicClient:()=>{throw Error('No model calls allowed in deterministic fixture');}},
-  'src/llm/models.ts':{},'src/utils/usageLog.ts':{logLlmUsage:noop},
+  'src/llm/models.ts':require('./load-test-models.cjs'),'src/utils/usageLog.ts':{logLlmUsage:noop},
   'src/connectors/graph/calendar.ts':{getOwnerEventsForDecision:async(...a)=>{calls.calendar.push(a);if(opts.offline)throw Error('fixture calendar offline');return opts.events??[];}},
  };
  function load(f){

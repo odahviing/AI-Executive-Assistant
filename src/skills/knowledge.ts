@@ -332,15 +332,28 @@ TASK-INPUT VS KNOWLEDGE — read the OWNER SAID caption carefully:
           required: ['kind', 'confidence'],
         },
       }],
-      tool_choice: { type: 'tool', name: 'classify_document' },
+      tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: prompt }],
     });
-    const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    if (!toolUse || !toolUse.input) {
-      logger.warn('KB ingest — no tool_use block in classify response');
+    const toolUses = resp.content.filter((b: any) => b.type === 'tool_use');
+    const toolUse = toolUses[0] as any;
+    const input = toolUse?.input;
+    const text = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+    const valid = (resp.stop_reason === 'tool_use' || resp.stop_reason === 'end_turn') && toolUses.length === 1
+      && toolUse.name === 'classify_document' && input && typeof input === 'object' && !Array.isArray(input)
+      && ['knowledge_doc', 'transcript', 'other'].includes(input.kind)
+      && ['high', 'medium', 'low'].includes(input.confidence)
+      && (input.reason === undefined || typeof input.reason === 'string')
+      && (input.kind !== 'knowledge_doc' || input.confidence === 'low' || (
+        text(input.section_id) && text(input.title) && text(input.summary)
+        && ['create', 'merge', 'sibling'].includes(input.action)
+        && (input.action === 'create' || text(input.existing_match))
+      ));
+    if (!valid) {
+      logger.warn('KB ingest — invalid or incomplete classify response');
       return { kind: 'rejected', reason: 'classifier_error' };
     }
-    verdict = toolUse.input;
+    verdict = input;
   } catch (err) {
     logger.warn('KB ingest — classify call failed', { err: String(err).slice(0, 300) });
     return { kind: 'rejected', reason: 'classifier_error' };

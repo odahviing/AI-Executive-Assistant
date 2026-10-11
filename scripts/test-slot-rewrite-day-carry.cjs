@@ -32,7 +32,7 @@ const clientMock = {
     messages: {
       create: async params => {
         calls.prompts.push(params.messages[0].content);
-        return { content: [{ type: 'tool_use', name: 'verdict', input: modelReply }], usage: {} };
+        return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'verdict', input: modelReply }], usage: {} };
       },
     },
   }),
@@ -40,7 +40,7 @@ const clientMock = {
 
 const mocks = {
   'src/llm/client.ts': clientMock,
-  'src/llm/models.ts': { SONNET: { model: 'fixture-sonnet' }, MODEL_SONNET: 'fixture-sonnet', MODEL_HAIKU: 'fixture-haiku' },
+  'src/llm/models.ts': require('./load-test-models.cjs'),
   'src/utils/logger.ts': loggerMock,
   'src/utils/usageLog.ts': { logLlmUsage: noop },
   'src/utils/detectMessageLanguage.ts': { detectMessageLanguage: () => 'he' },

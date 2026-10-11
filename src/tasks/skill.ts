@@ -38,7 +38,7 @@ import type { RequestKind, RequestRow, ApprovalSubkind as ApprovalSubkindCanonic
 import { parseDetails, toTimerInstant, reminderWorkTimeAtOrAfter } from '../core/requests/types';
 import logger from '../utils/logger';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU, MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from '../utils/usageLog';
 
 type CreateTaskType = 'reminder' | 'follow_up' | 'research';
@@ -203,7 +203,7 @@ async function classifyFreeformCalendarChange(
   if (!text.trim()) return 'not_calendar';
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 20,
       system: `Classify an owner-approval request by whether it concerns a CALENDAR CHANGE to a meeting — booking a new meeting, moving/rescheduling an existing meeting, adding/removing attendees, or cancelling a meeting.
 - 'calendar' — it clearly IS one of those.

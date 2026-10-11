@@ -29,14 +29,15 @@ function harness(options = {}) {
     details: { on_approve: { tool: 'fixture' } },
   };
   const mocks = {
-    '../llm/client': { getAnthropicClient: () => ({ messages: { create: async () => {
+    '../llm/client': { getAnthropicClient: () => ({ messages: { create: async payload => {
+      options.capturePayload?.(payload);
       events.push('classify');
       if (options.pause) await options.pause.promise;
       if (options.classifierThrows) throw Error('classifier unavailable');
       events.push('classified');
       return response;
     } } }) },
-    '../llm/models': { MODEL_HAIKU: 'fixture' },
+    '../llm/models': require('./fixtures/registrar-models.cjs'),
     '../db/requests': { getAwaitingOwnerRequests: () => options.noCandidate ? [] : [row] },
     '../core/requests/types': { parseDetails: request => request.details },
     '../core/approvals/approvalCallbacks': { extractCallbacks: details => details },
@@ -58,6 +59,16 @@ function harness(options = {}) {
   const params = { message: 'yes', threadTs: '100.001', ownerUserId: 'UOWNER', profile: { user: { name: 'Owner Fixture' } } };
   return { events, resolutions, run: overrides => exports.tryAutoResolveThreadBoundApproval({ ...params, ...overrides }) };
 }
+
+test('208 thread-bound classifier preserves disabled thinking and forced tool budget', async () => {
+  const payloads = [], h = harness({ capturePayload: p => payloads.push(p) });
+  await h.run();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].model, 'claude-haiku-5-5');
+  assert.equal(payloads[0].thinking?.type, 'disabled');
+  assert.equal(payloads[0].max_tokens, 80);
+  assert.equal(payloads[0].tool_choice.type, 'tool');
+});
 
 test('S7 delayed classifier cannot resolve after abort; cancellation propagates', async () => {
   const pause = deferred(), controller = new AbortController(), abort = Error('interrupted');

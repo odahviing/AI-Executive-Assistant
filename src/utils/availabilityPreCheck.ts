@@ -33,7 +33,7 @@ import { bookingLeadTimeHours, checkSlot, OWNER_OVERRIDABLE_KINDS, type RuleViol
 import { armsHardFloor, forgetHardBlockedSlot, hardBlockClassPhrase, recordHardBlockedSlot } from './availabilityGate';
 import { blockedSlotAlternativesBlock, type NearbyAlternative } from '../skills/meetings/nearbyAlternatives';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { MODEL_HAIKU, HAIKU } from '../llm/models';
 import { logLlmUsage } from './usageLog';
 import logger from './logger';
 import { extractTimes, extractDates, type DateMatch } from './dateTimeExtract';
@@ -213,7 +213,7 @@ Output EXACTLY ONE call to normalize_slots.`;
 
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 350,
       system: systemPrompt,
       tools: [{

@@ -97,7 +97,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
+import { SONNET, MODEL_SONNET, MODEL_HAIKU, HAIKU } from '../llm/models';
 import logger from './logger';
 import { extractFirstJsonObject } from './extractJson';
 import { logLlmUsage } from './usageLog';
@@ -892,7 +892,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
       // 2026-05-26 "ship it and move all to haiku also the coda" — and so
       // does 'owner_fact' mode (2026-08-14): same reasoning, a narrow
       // pattern-match against tool activity, not open-ended reasoning.
-      model: MODEL_HAIKU,
+      ...HAIKU,
       // 5 fields in the schema; action_summary is the only long field (≤120 chars).
       // 300 tokens is comfortable headroom — used to be 800 to fit the v2.7.8
       // Module F + E extras that were removed in v3.0.6.
@@ -1029,7 +1029,7 @@ Reminder: JSON only. Start with { end with }. No prose. Be strict — false posi
  * Haiku gets wrong — and only on flags (a few/day), so cost is trivial.
  *
  * v3.4.x — STRUCTURED OUTPUT (GH 2026-06-17 leak): the decision comes back as a
- * forced `verdict` tool call ({verdict, message}), NOT free text. We read only
+ * validated `verdict` tool call ({verdict, message}), NOT free text. We read only
  * those fields, so the model's reasoning can NEVER ship as the reply — the bug
  * where Sonnet "thought out loud" and its monologue (ending in "UNCHANGED")
  * went straight to the owner because the old exact-token veto didn't match it.
@@ -1187,7 +1187,7 @@ export async function rewriteOwningTheMiss(opts: {
     ? '\n- The results above are NOT all on the same day. Any time you take from a line whose date differs from the day the draft is already talking about MUST be written with that date beside it — numeric ("15/09 09:45", "on 15/09: 09:45, 10:15") or the same form the lines use ("Tue 23 Sep 16:45"). A day word alone ("today", "tomorrow", "היום", "מחר") does NOT satisfy this, and a time carried across days without its date causes this whole rewrite to be DISCARDED. A time from the SAME day the draft is already speaking about needs nothing extra, and if the draft names no confirmed time of its own to fix which day that is, put the date on EVERY time you offer. Never move a time from one day into a sentence that speaks about another day.'
     : '';
 
-  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that no real availability search confirms — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const slotClaimPrompt = isUngroundedSlotClaim ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as offering a SPECIFIC time as available that no real availability search confirms — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the real search result yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
 
 REAL AVAILABILITY RESULTS (this turn's, plus any \`(earlier turn)\` search from this thread — the ONLY times/verdicts actually confirmed; settled, do not re-judge):
 ${groundedSlotBlock}
@@ -1220,7 +1220,7 @@ ${opts.draft}` : null;
   // `attendee_check=` marker is in a PRIOR turn either, or when one is in
   // THIS turn and the checker judged the draft misreports it — so STEP 2(b)'s
   // "she has not checked here" is true whenever it is reached.
-  const thirdPartyFactPrompt = isInventedThirdPartyFact ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as reporting, as the result of a check it ran, a working-hours or availability finding about a NAMED THIRD PARTY (not ${opts.ownerFirstName} himself) — ${what} — that the tool log does not back. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const thirdPartyFactPrompt = isInventedThirdPartyFact ? `You are reviewing a message an assistant already drafted. An upstream checker flagged the draft as reporting, as the result of a check it ran, a working-hours or availability finding about a NAMED THIRD PARTY (not ${opts.ownerFirstName} himself) — ${what} — that the tool log does not back. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (a line carrying \`attendee_check=\` is one where a slot/meeting tool really evaluated attendees' hours or busy time, or a person's notes were read; its own text says WHAT it found and about whom — a busy collision, "outside … working hours", a refused move, a per-day clip. A line that names nobody still counts):
 ${toolBlock}
@@ -1254,7 +1254,7 @@ If AND ONLY IF the historical contradiction is certain, verdict="rewrite" and mi
 Draft:
 ${opts.draft}` : null;
 
-  const prompt = isDeniedCalendarRead ? deniedCalendarPrompt! : isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+  const prompt = isDeniedCalendarRead ? deniedCalendarPrompt! : isInventedOwnerFact ? `You are reviewing a message an assistant already drafted for a COLLEAGUE — someone other than ${opts.ownerFirstName}, the assistant's principal. An upstream checker flagged the draft as stating, with unwarranted confidence, an unverified PERSONAL fact about ${opts.ownerFirstName} himself — ${what}. The checker is sometimes WRONG, so verify the flagged claim against the tool activity yourself before acting. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (anything that could ground the claim):
 ${toolBlock}
@@ -1274,7 +1274,7 @@ STEP 3 — Also fill \`minimalRedaction\` with a SECOND, more conservative candi
 SAFE-MISS — the hard rule. If you cannot tell whether the claim is truly ungrounded, do NOT rewrite — verdict="keep". Only rewrite when it is clearly a bare, confident, unsupported personal claim about ${opts.ownerFirstName}.
 
 Draft:
-${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : isInventedThirdPartyFact ? thirdPartyFactPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool — do not write any prose outside the tool call.
+${opts.draft}` : isUngroundedSlotClaim ? slotClaimPrompt! : isInventedThirdPartyFact ? thirdPartyFactPrompt! : `You are reviewing a message an assistant already drafted for ${opts.ownerFirstName}. An upstream checker flagged it as possibly claiming a COMPLETED action — ${what} — that no tool actually performed this turn. The checker is sometimes WRONG, so your job is to verify AGAINST THE TOOL ACTIVITY below, not assume. Report your decision by calling the \`verdict\` tool exactly once — do not write any prose outside the tool call.
 
 TOOL ACTIVITY THIS TURN (the ground truth — a mutation summary carries its outcome: \`[update_meeting OK — …]\` succeeded, \`[… FAILED: …]\` did not):
 ${toolBlock}
@@ -1302,13 +1302,8 @@ SAFE-MISS — the hard rule. If you CANNOT tell from the tool activity whether t
 Draft:
 ${opts.draft}`;
 
-  try {
-    const resp = await anthropic.messages.create({
-      // Sonnet — the keep-vs-rewrite judgment is what Haiku misfires on; this
-      // path runs only on flags (a few/day), so the stronger model is cheap here.
-      ...SONNET,
-      max_tokens: 600,
-      tools: [{
+  // Sonnet 5.5 accepts auto only. A missing/invalid tool verdict is a safe miss.
+  const verdictTool = {
         name: 'verdict',
         description: isDeniedCalendarRead ? 'Keep on any uncertainty; rewrite only a categorical denial contradicted by the exact historical receipt. Supply minimalRedaction only; message is unused.' : isInventedOwnerFact
           ? 'Report whether the draft falsely states an unverified personal fact about the owner, and if so the corrected reply.'
@@ -1368,8 +1363,16 @@ ${opts.draft}`;
           },
           required: ['verdict'],
         },
-      }],
-      tool_choice: { type: 'tool', name: 'verdict' },
+      };
+
+  try {
+    const resp = await anthropic.messages.create({
+      // Sonnet — the keep-vs-rewrite judgment is what Haiku misfires on; this
+      // path runs only on flags (a few/day), so the stronger model is cheap here.
+      ...SONNET,
+      max_tokens: 600,
+      tools: [verdictTool],
+      tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: prompt }],
     });
     logLlmUsage('claim_checker_rewrite', MODEL_SONNET, resp);
@@ -1377,8 +1380,24 @@ ${opts.draft}`;
     // Read ONLY the structured tool fields — never a text block. This is what
     // makes a reasoning leak impossible: the model's monologue, if any, lives in
     // text blocks we ignore; only `verdict`/`message` can ever become the reply.
-    const toolUse = resp.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined;
-    const input = (toolUse?.input ?? {}) as {
+    const verdicts = resp.content.filter(b => b.type === 'tool_use');
+    if ((resp.stop_reason !== 'tool_use' && resp.stop_reason !== 'end_turn') || verdicts.length !== 1 || verdicts[0].name !== 'verdict') {
+      logger.warn('Claim rewrite — no unique completed verdict; caller retains the existing safe-miss policy');
+      return null;
+    }
+    const payload = verdicts[0].input;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const fields = payload as Record<string, unknown>;
+    // Validate against the same schema sent to the model; never trust free text.
+    const properties = verdictTool.input_schema.properties as Record<string, { type: string; enum?: string[] }>;
+    const valid = verdictTool.input_schema.required.every(key => Object.hasOwn(fields, key))
+      && Object.entries(fields).every(([key, value]) => Object.hasOwn(properties, key)
+        && typeof value === properties[key].type
+        && (!properties[key].enum || properties[key].enum!.includes(value as string)));
+    // A valid rewrite verdict already confirms the false claim. Invalid rewrite
+    // fields must reach the existing honest fallback, never restore that claim.
+    if (!valid && fields.verdict !== 'rewrite') return null;
+    const input = (valid ? fields : { verdict: 'rewrite' }) as {
       verdict?: string;
       message?: string;
       noPendingActionClaim?: boolean;

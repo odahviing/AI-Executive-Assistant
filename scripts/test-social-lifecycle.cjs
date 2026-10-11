@@ -47,7 +47,7 @@ function harness({ captureFailure = false, profileFailure = false } = {}) {
       if (resolved === 'src/memory/peopleMemory') return {readPersonMemory:async()=>'',writePersonSection:()=>assert.fail('unexpected memory write')};
       if (resolved === 'src/core/assistantSelf') return {selfSlackId:()=>assert.fail('unexpected self path')};
       if (resolved === 'src/config') return {config:{ANTHROPIC_API_KEY:'isolated-placeholder'}};
-      if (resolved === 'src/llm/models') return {MODEL_HAIKU:'isolated-model'};
+      if (resolved === 'src/llm/models') return {HAIKU:{model:'isolated-model',thinking:{type:'disabled'}}};
       if (resolved === 'src/llm/client') return {getAnthropicClient:()=>({messages:{create:async args=>{
         capture.modelCalls++;
         if(capture.failureMode==='all' || (capture.failureMode==='profile' && args.max_tokens===800)) throw Error('isolated capture API failure');

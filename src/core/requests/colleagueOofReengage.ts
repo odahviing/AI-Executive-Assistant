@@ -41,7 +41,7 @@ import { relayNotice, requesterRelayLanguage } from './requesterRelay';
 import type { App } from '@slack/bolt';
 import type { UserProfile } from '../../config/userProfile';
 import { getAnthropicClient } from '../../llm/client';
-import { MODEL_HAIKU } from '../../llm/models';
+import { HAIKU } from '../../llm/models';
 import {
   getRequest,
   createRequest,
@@ -525,7 +525,7 @@ async function classifyOofReengageReply(params: {
   try {
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 30,
       tools: [{
         name: 'classify_reply',

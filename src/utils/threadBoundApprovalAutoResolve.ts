@@ -38,7 +38,7 @@
  */
 
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import { getAwaitingOwnerRequests } from '../db/requests';
 import { resolveRequest, type ResolveContext } from '../core/requests/resolver';
@@ -276,7 +276,7 @@ Rules:
   let verdict: AutoResolveVerdict = 'pass_to_sonnet';
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 80,
       system: systemPrompt,
       tools: [{

@@ -24,7 +24,7 @@ function harness(people = []) {
     'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:()=>undefined},
     'src/config.ts':{config:{ANTHROPIC_API_KEY:'fixture'}},
     'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{state.modelCalls++; return {content:[{type:'text',text:state.modelResult}]};}}})},
-    'src/llm/models.ts':{},
+    'src/llm/models.ts':{HAIKU:{model:'fixture',thinking:{type:'disabled'}}},
     'src/utils/logger.ts':{__esModule:true,default:Object.fromEntries(['info','debug','warn','error'].map(k=>[k,(...args)=>messages.push([k,...args])]))},
     'src/connections/registry.ts':{getConnection:()=>state.unavailable?undefined:({resolveChannelCounterpart:async()=> 'UCHRIS99'})},
     'src/utils/skillPreferences.ts':{},

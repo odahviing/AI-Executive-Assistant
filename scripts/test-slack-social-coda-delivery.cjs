@@ -52,7 +52,7 @@ function harness(options = {}) {
   const realComposer = options.realComposer ? load('generateCoda', {
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async args => {
       composerPrompts.push(args.messages[0].content);
-      return { content: [{ type: 'tool_use', input: { sentence: options.emptySentence ? '' : 'Social question?' } }] };
+      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'compose_coda', input: { sentence: options.emptySentence ? '' : 'Social question?' } }] };
     } } }) },
     '../../llm/models': { SONNET: { model: 'fixture' } },
     '../../utils/usageLog': { logLlmUsage() {} }, '../../utils/logger': logger,

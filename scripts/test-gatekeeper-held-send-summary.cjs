@@ -56,7 +56,7 @@ function loadChecker() {
   const mod = load('src/utils/claimChecker.ts', {
     '@anthropic-ai/sdk': {},
     '../llm/client': { getAnthropicClient: () => client },
-    '../llm/models': { SONNET: {}, MODEL_SONNET: 'fixture-sonnet', MODEL_HAIKU: 'fixture-haiku' },
+    '../llm/models': require('./load-test-models.cjs'),
     './logger': quietLog,
     './extractJson': { extractFirstJsonObject: s => s },
     './usageLog': { logLlmUsage() {} },
@@ -72,7 +72,7 @@ function loadGate(verdict) {
   const mod = load('src/utils/guards/runOutputGates.ts', {
     '../../llm/client': noLlm,
     '../../core/requests/types': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },
-    '../../llm/models': { SONNET: {}, MODEL_SONNET: 'fixture' },
+    '../../llm/models': require('./load-test-models.cjs'),
     '../../core/orchestrator/turnHelpers': { toolLinesMatching: () => [] },
     '../../connections/slack/formatting': { formatForSlack: v => v },
     '../logger': quietLog,

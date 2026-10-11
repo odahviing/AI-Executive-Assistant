@@ -199,7 +199,7 @@ Automatic move FYIs finish on confirmed delivery; explicit reply-required checks
 
 ## LLM layer
 
-`llm/models.ts` — `MODEL_SONNET = 'claude-sonnet-5'` (line 57), bundled with `thinking: { type: 'disabled' }` as `SONNET` (line 59+, used by every guard/classifier). The orchestrator's own agentic loop overrides this locally to `thinking: { type: 'adaptive' }, effort: 'high'` — documented in the file as a staged retry after a v4.0.0→v4.0.1 regression traced to Sonnet 5 being markedly less tool-eager with reasoning off. `MODEL_HAIKU = 'claude-haiku-4-5'` (line 83) is the cheap/fast tier for every guard and classifier.
+`llm/models.ts` defines `MODEL_SONNET = 'claude-sonnet-5-5'` and the `SONNET` bundle with `thinking: { type: 'between_tools' }`. Agentic callers retain their explicit adaptive/high overrides. Sonnet uses automatic tool selection with local validation where a particular tool result is required. `MODEL_HAIKU = 'claude-haiku-5-5'` and the `HAIKU` bundle explicitly disable thinking at classifier calls; omission would adopt the provider's adaptive default. Existing output budgets remain in their callers.
 
 `llm/client.ts`'s `getAnthropicClient()` (line 35) returns either the direct Anthropic SDK client or (`config.LLM_PROVIDER === 'vertex'`) a lazily-`require`'d `AnthropicVertex` client — same `messages.create()` contract either way, so no call site needs to know which provider is live.
 

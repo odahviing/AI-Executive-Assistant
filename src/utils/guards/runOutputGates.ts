@@ -1782,13 +1782,8 @@ export async function runDeliberationGuard(rawReply: string, profile: UserProfil
   if (!trim) return trim;
   if (!DELIBERATION_RE.test(trim)) return trim;
 
-  try {
-    const anthropic = getAnthropicClient();
-    const ownerFirst = profile.user.name.split(' ')[0];
-    const resp = await anthropic.messages.create({
-      ...SONNET,
-      max_tokens: 400,
-      tools: [{
+  // Sonnet 5.5 accepts auto only. A missing/invalid tool verdict is a safe miss.
+  const verdictTool = {
         name: 'rewrite',
         description: 'Output the cleaned final reply for the user.',
         input_schema: {
@@ -1796,11 +1791,19 @@ export async function runDeliberationGuard(rawReply: string, profile: UserProfil
           properties: { final: { type: 'string' } },
           required: ['final'],
         },
-      }],
-      tool_choice: { type: 'tool', name: 'rewrite' },
+      };
+
+  try {
+    const anthropic = getAnthropicClient();
+    const ownerFirst = profile.user.name.split(' ')[0];
+    const resp = await anthropic.messages.create({
+      ...SONNET,
+      max_tokens: 400,
+      tools: [verdictTool],
+      tool_choice: { type: 'auto' },
       messages: [{
         role: 'user',
-        content: `You wrote this draft for ${ownerFirst}'s assistant. It leaked your own thinking-out-loud into the text the reader will see. Output the SAME reply with only that narration removed. Strip:
+        content: `You wrote this draft for ${ownerFirst}'s assistant. It leaked your own thinking-out-loud into the text the reader will see. Call the rewrite tool exactly once with the cleaned final reply; never answer in free text. Output the SAME reply with only that narration removed. Strip:
 - self-correction ("wait,", "actually,", "on second thought", "OK definitive...")
 - planning narration ("I need to find", "let me check", "let me give you the clean")
 - references to your own reasoning process, and the order you worked things out in
@@ -1818,8 +1821,22 @@ ${trim}`,
       }],
     });
     logLlmUsage('deliberation_guard', MODEL_SONNET, resp);
-    const tool = resp.content.find((b: { type: string }) => b.type === 'tool_use') as { input?: { final?: string } } | undefined;
-    const final = tool?.input?.final;
+    const verdicts = resp.content.filter(b => b.type === 'tool_use');
+    if ((resp.stop_reason !== 'tool_use' && resp.stop_reason !== 'end_turn') || verdicts.length !== 1 || verdicts[0].name !== 'rewrite') {
+      logger.warn('Deliberation guard — no unique completed rewrite; draft stays unchanged');
+      return trim;
+    }
+    const payload = verdicts[0].input;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return trim;
+    const fields = payload as Record<string, unknown>;
+    // Validate against the same schema sent to the model; never trust free text.
+    const properties = verdictTool.input_schema.properties as Record<string, { type: string; enum?: string[] }>;
+    const valid = verdictTool.input_schema.required.every(key => Object.hasOwn(fields, key))
+      && Object.entries(fields).every(([key, value]) => Object.hasOwn(properties, key)
+        && typeof value === properties[key].type
+        && (!properties[key].enum || properties[key].enum!.includes(value as string)));
+    if (!valid) return trim;
+    const final = fields.final as string;
     if (!final || !final.trim()) return trim;
     const cleaned = final.trim();
     // Removing narration can only make the text shorter; a longer or near-empty

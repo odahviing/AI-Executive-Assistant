@@ -13,7 +13,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU, MODEL_HAIKU } from '../llm/models';
 import { logLlmUsage } from '../utils/usageLog';
 import logger from '../utils/logger';
 
@@ -133,7 +133,7 @@ export function buildImageBlock(image: DownloadedImage): AnthropicImageBlock {
 export async function describeImage(block: AnthropicImageBlock): Promise<string | null> {
   try {
     const response = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 220,
       messages: [{
         role: 'user',

@@ -451,12 +451,15 @@ Output the coda sentence only, or an empty sentence when either check above fail
           required: ['sentence'],
         },
       }],
-      tool_choice: { type: 'tool', name: 'compose_coda' },
+      tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: prompt }],
     });
-    const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const sentence = toolUse?.input?.sentence as string | undefined;
-    // 2026-09-14 — this was the only forced-tool Sonnet call in src/ with no
+    const toolUses = resp.content.filter((b: any) => b.type === 'tool_use');
+    const toolUse = toolUses[0] as any;
+    const sentence = (resp.stop_reason === 'tool_use' || resp.stop_reason === 'end_turn') && toolUses.length === 1
+      && toolUse?.name === 'compose_coda' && typeof toolUse.input?.sentence === 'string'
+      ? toolUse.input.sentence : undefined;
+    // 2026-09-14 — this composer previously had no
     // usage line, so ten silent no-coda turns could not be attributed or
     // priced. `stop_reason` is what names the next one: 'max_tokens' = the
     // output ceiling truncated the tool block, anything else = the model

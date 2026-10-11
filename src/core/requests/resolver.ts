@@ -29,7 +29,7 @@ import {
 import { runDeferredAction, ReplayToolError } from './deferredActionReplay';
 import { usableRelaySubject, requesterRelayLanguage, relayClosureToRequester, relayNotice, recordRequesterCompositionFailure, recordRequesterRelayFailure, completeRequesterRelay, isRequesterSendUnconfirmed, requesterRelayStopped, beginRequesterRelayAttempt, recordOwnerNotificationOutcome } from './requesterRelay';
 import logger from '../../utils/logger';
-import { MODEL_HAIKU } from '../../llm/models';
+import { HAIKU } from '../../llm/models';
 import { INTERNAL_WORK_ITEM_ID_RE } from '../../utils/textScrubber';
 import { attendeeTzForDay, attendeeTravelTimezoneForDay, loadAttendeeAvailabilityForPerson } from '../../utils/attendeeAvailability';
 import { resolveStatedInstant, statedZoneFromArgs, statedClockPersonContext, StatedTimeClarificationError } from '../../utils/weTimeResolver';
@@ -1500,7 +1500,7 @@ RULES:
         usr = `${historyBlock}Their request: "${rawAsk}".${actionHint ? ` (This was ${actionHint}.)` : ''} Outcome: ${outcome}.${startFormatted ? ` Scheduled for ${startFormatted}.` : ''} Write the message.`;
       }
       const resp = await anthropic.messages.create({
-        model: MODEL_HAIKU,
+        ...HAIKU,
         max_tokens: 200,
         system: sys,
         messages: [{ role: 'user', content: usr }],

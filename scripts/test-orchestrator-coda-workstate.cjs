@@ -36,7 +36,7 @@ async function run(steps, options = {}) {
   const anthropic = { messages: { create: async () => { classifierCalls++; throw Error('Classifier must stay cheap'); } } };
   const classifier = load('src/core/social/classifyTurn.ts', {
     '../../utils/logger': logger, '../../utils/usageLog': { logLlmUsage() {} },
-    '../../db/socialSubjects': { FIXED_CATEGORIES: [] }, '../../llm/models': { MODEL_HAIKU: 'fixture' },
+    '../../db/socialSubjects': { FIXED_CATEGORIES: [] }, '../../llm/models': require('./load-test-models.cjs'),
   });
   const helpers = load('src/core/orchestrator/turnHelpers.ts', {
     'luxon': { DateTime }, '../../llm/client': { getAnthropicClient: () => anthropic },

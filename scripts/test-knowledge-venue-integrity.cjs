@@ -26,7 +26,7 @@ function harness(options = {}) {
   const anthropic = { messages: { create: async request => {
     prompts.push(request); calls++;
     if (options.modelFails) throw Error('fixture provider unavailable');
-    if (request.tools) return { content: [{ type: 'tool_use', input: {
+    if (request.tools) return options.response || { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'classify_document', input: {
       kind: 'knowledge_doc', confidence: 'high', action: options.action || 'create',
       section_id: options.sectionId || 'company/product', existing_match: options.existingMatch,
       title: 'Product', summary: 'Fixture summary', ...options.verdict,
@@ -206,3 +206,15 @@ for (const shape of locationShapes) for (const mode of ['named','discovery']) {
 check('R3 explicit address wins over stale or nonaddress display suffix', { rows: [{ ...north, name: 'Cafe, Old label', address: '2 South Street', rank: 1, area_tags: '["South"]' }], candidates: [{ ...south, name: 'Cafe, New label' }] }, async h => {
   assert.equal((await h.venue({ area: 'South' })).options.length, 0);
 });
+
+for(const [label,response] of [
+ ['missing',{stop_reason:'end_turn',content:[]}],
+ ['wrong tool',{stop_reason:'tool_use',content:[{type:'tool_use',name:'wrong',input:{kind:'transcript',confidence:'high'}}]}],
+ ['duplicate',{stop_reason:'tool_use',content:Array.from({length:2},()=>({type:'tool_use',name:'classify_document',input:{kind:'transcript',confidence:'high'}}))}],
+ ['incomplete',{stop_reason:'max_tokens',content:[{type:'tool_use',name:'classify_document',input:{kind:'transcript',confidence:'high'}}]}],
+ ['invalid kind',{stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_document',input:{kind:'bad',confidence:'high',section_id:'valid'}}]}],
+ ['missing metadata',{stop_reason:'tool_use',content:[{type:'tool_use',name:'classify_document',input:{kind:'knowledge_doc',confidence:'high',section_id:'valid'}}]}],
+])check('migration rejects '+label,{response},async h=>{assert.equal((await h.ingest()).reason,'classifier_error');assert.equal(h.calls(),1);});
+check('migration automatic tool choice retains created document',{},async h=>{assert.equal((await h.ingest()).kind,'created');assert.equal(h.prompts[0].tool_choice.type,'auto');});
+
+check('complete end_turn classification with accompanying text is accepted',{response:{stop_reason:'end_turn',content:[{type:'text',text:'Done'},{type:'tool_use',name:'classify_document',input:{kind:'transcript',confidence:'high'}}]}},async h=>{assert.equal((await h.ingest()).reason,'transcript');assert.equal(h.calls(),1);});

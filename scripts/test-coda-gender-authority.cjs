@@ -12,7 +12,7 @@ const source=process.env.CODA_GENDER_SOURCE||path.join(root,'src/core/social/gen
 async function run(row,options={}) {
  const calls=[],reads=[],validator=[],warnings=[];
  const deps={
-  '../../llm/client':{getAnthropicClient:()=>({messages:{create:async p=>{calls.push(p);return {content:[{type:'tool_use',input:{sentence:'שמעתי שיצא אלבום חדש.'}}]};}}})},
+  '../../llm/client':{getAnthropicClient:()=>({messages:{create:async p=>{calls.push(p);return {stop_reason:'tool_use',content:[{type:'tool_use',name:'compose_coda',input:{sentence:'שמעתי שיצא אלבום חדש.'}}]};}}})},
   '../../llm/models':{SONNET:{model:'fixture'}},'../../utils/usageLog':{logLlmUsage(){}},
   '../../utils/logger':{__esModule:true,default:{info(){},warn:(...a)=>warnings.push(a)}},
   '../../skills/general':{tavilySearch:async()=>({results:options.noGrounding?[]:[{title:'New album',url:'https://example.com/album',content:'A new album was released.'}]})},

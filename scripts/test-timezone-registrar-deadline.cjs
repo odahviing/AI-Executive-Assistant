@@ -35,8 +35,8 @@ function harness(options={}){
  'src/db/scheduleOverrides.ts':{getScheduleOverride:(_id,date)=>options.ownerTrip&&date==='2026-09-14'?{timezone:'America/New_York',isWorkday:true,windows:['09:00-17:00']}:undefined},
  'src/utils/workingElsewhere.ts':{getTravelContextForInstant:()=>({isAway:false,effectiveTz:profile.user.timezone,location:''})},
  'src/utils/scheduleRules.ts':{},'src/connectors/graph/calendarReads.ts':{},'src/connectors/graph/calendar.ts':{},
- 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>({content:[{text:''}]})}})},'src/llm/models.ts':{},'src/utils/shadowNotify.ts':{shadowNotify:async()=>{}},'src/utils/extractJson.ts':{},
- 'src/core/requests/requesterRelay.ts':{ relayNotice: require('./fixtures/relay-copy.cjs').relayNotice,relayClosureToRequester:async()=>{},usableRelaySubject:x=>typeof x==='string'?x:'',requesterRelayLanguage:()=>options.lang||'en',completeRequesterRelay:noop,beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed:()=>false,recordRequesterRelayFailure:noop},
+ 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async payload=>{options.capturePayload?.(payload);return {content:[{text:''}]};}}})},'src/llm/models.ts':require('./fixtures/registrar-models.cjs'),'src/utils/shadowNotify.ts':{shadowNotify:async()=>{}},'src/utils/extractJson.ts':{},
+ 'src/core/requests/requesterRelay.ts':{ relayNotice: require('./fixtures/relay-copy.cjs').relayNotice,relayClosureToRequester:async()=>{},usableRelaySubject:x=>typeof x==='string'?x:'',requesterRelayLanguage:()=>options.lang||'en',completeRequesterRelay:noop,beginRequesterRelayAttempt:()=>true,requesterRelayStopped:()=>false,isRequesterSendUnconfirmed:()=>false,recordRequesterCompositionFailure:noop,recordRequesterRelayFailure:noop},
  'src/core/requests/deferredActionReplay.ts':{},'src/utils/textScrubber.ts':{INTERNAL_WORK_ITEM_ID_RE:/req_\w+/},
  'src/db/conversations.ts':{appendToConversation:noop,getConversationHistory:()=>[]},'src/utils/usageLog.ts':{},'src/connectors/slack/recentOutboundContext.ts':{},
  'src/connections/slack/formatting.ts':{formatForSlack:x=>x},
@@ -64,6 +64,13 @@ function harness(options={}){
  fire:()=>load('src/core/requests/runner.ts').runSendScheduledOutreach(row,profile)};
 }
 const recipient={slackId:'UCOLLEAGUE',ownerTimezone:'Asia/Jerusalem'};
+test('208 requester relay preserves non-thinking Haiku budget',async()=>{
+ const payloads=[],h=harness({actualResolver:true,lang:'ru',capturePayload:p=>payloads.push(p)});
+ const row=h.seed();Object.assign(row,{requester_slack_id:'UCOLLEAGUE',requester_name:'Colleague',kind:'approval'});
+ await h.load('src/core/requests/resolver.ts').notifyRequesterOfDecision(row,'reject',null,undefined,{profile:h.profile});
+ assert.equal(payloads.length,1);assert.equal(payloads[0].model,'claude-haiku-5-5');assert.equal(payloads[0].thinking?.type,'disabled');assert.equal(payloads[0].max_tokens,200);
+ assert.equal(h.sends.length,0,'empty composition in known non-English language must not send invented fallback');
+});
 test('actual tool omitted timezone uses stored recipient; serialized request timer follows job',async()=>{const h=harness();h.setNow('2026-09-14T06:00Z');const r=await h.tool({send_at:'2026-09-14T09:00:00'});assert.equal(r.scheduled_at,'2026-09-14T13:00:00.000Z');assert.equal(h.row().next_check_at,r.scheduled_at);assert.equal(h.job().colleague_tz,null);assert.equal(h.sends.length,0);});
 test('future send after travel return resolves home, ignoring stale tool trip snapshot',async()=>{const h=harness({person:{timezone:'Asia/Jerusalem'},travel:{from:'2026-09-10',until:'2026-09-14',location:'Boston'}});h.setNow('2026-09-11T12:00Z');const r=await h.tool({colleague_tz:'America/New_York',send_at:'2026-09-15T09:00:00'});assert.equal(r.scheduled_at,'2026-09-15T06:00:00.000Z');});
 test('explicit send_now owner relay sends now even outside recipient work hours',async()=>{const h=harness();h.setNow('2026-09-14T06:00Z');const r=await h.tool({await_reply:false,send_now:true});assert.equal(r.ok,true);assert.equal(h.sends.length,1);});

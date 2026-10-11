@@ -4,7 +4,7 @@ description: What Maelle is, how she's built (the lane structure), and how a bug
 type: project
 ---
 
-Maelle is an AI executive assistant platform built in Node.js/TypeScript. She lives primarily on Slack, books meetings against Microsoft Graph (Outlook calendar), reasons with Anthropic Claude (Sonnet 5 for the agentic loop, Haiku for guards/classifiers — see `project_architecture.md`'s LLM layer section), and persists to SQLite via better-sqlite3. Configuration is per-tenant YAML (`config/users/<name>.yaml`); one deployment can host several executives, each with their own Slack app identity.
+Maelle is an AI executive assistant platform built in Node.js/TypeScript. She lives primarily on Slack, books meetings against Microsoft Graph (Outlook calendar), reasons with Anthropic Claude (Sonnet 5.5 for the agentic loop, Haiku 5.5 for guards/classifiers — see `project_architecture.md`'s LLM layer section), and persists to SQLite via better-sqlite3. Configuration is per-tenant YAML (`config/users/<name>.yaml`); one deployment can host several executives, each with their own Slack app identity.
 
 **Mission / filter for every decision:** "would a real human EA do this?" — outranks speed, completeness, elegance.
 

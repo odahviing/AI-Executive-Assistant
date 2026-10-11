@@ -1,3 +1,17 @@
+## 5.0.8 — Claude 5.5 and quieter scheduled updates
+
+Maelle now uses Sonnet 5.5 and Haiku 5.5. Scheduled work sends its finished result without first opening an empty “Working…” thread; progress remains visible in existing conversations.
+
+### Changed
+- Upgraded the Anthropic and Vertex SDKs and migrated Sonnet tool selection to the supported automatic mode, with local validation of required tool results and complete responses.
+- Kept existing adaptive settings for agentic Sonnet calls and explicitly disabled Haiku thinking across existing classifiers. Existing output budgets and call counts are unchanged; a bounded multilingual comparison did not establish an adaptive-thinking benefit.
+
+### Fixed
+- Removed the scheduled routine placeholder lifecycle and suppressed progress status calls for noninteractive runs, while preserving final delivery, silence handling and conversation history.
+
+### Validation
+- Independent review covered all three tracked parts and all 30 Golden paths. The full 250-execution checkpoint plus targeted fixture repairs reconciles to 6,027 passing assertions, with no remaining failures or skips; typechecking passed. Synthetic VM probes verified provider access, signed Sonnet tool continuation and bounded Haiku comparisons; broad production accuracy is not inferred from those probes.
+
 ## 5.0.7 — Better meeting decisions and fresh news
 
 When timezones leave no ordinary meeting options, Maelle asks whether the requester can extend their own hours or wants an owner exception before proceeding. News retrieval preserves valid publisher bodies and materially new developments, while request briefings keep current asks separate from older conversations.

@@ -51,12 +51,13 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // information…" / "Reviewing findings…") during the ~10s pre-first-tool
   // reasoning gap (classifyTurn pre-pass + initial Sonnet pass). Per-tool
   // status text from the pre-tool hook below overwrites this as tools fire.
-  // v2.8.5 — no assistant-thread gating: always try setStatus when we have
-  // channel+thread context. Slack rejects non-panel calls with
+  // Interactive turns try setStatus when we have channel+thread context.
+  // Slack rejects non-panel calls with
   // channel_not_found / not_in_assistant_thread, which the catch in
   // setAssistantStatus already swallows at debug level. (The old v2.7.3 panel
   // registry this used to consult was removed in the v3.7.x cleanup.)
-  if (input.app && input.channelId && input.threadTs) {
+  // Scheduled runs have only an internal run key, not an existing Slack thread.
+  if (input.interactive !== false && input.app && input.channelId && input.threadTs) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { setAssistantStatus } = require('../../connections/slack/messaging') as
@@ -471,14 +472,8 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const MODEL_COLLEAGUE = MODEL_SONNET;
   const model = input.senderRole === 'colleague' ? MODEL_COLLEAGUE : MODEL_OWNER;
 
-  // max_tokens — now carries THINKING headroom. The orchestrator runs adaptive
-  // thinking at `high` (Sonnet-5 retry, see the callClaude site), and thinking
-  // shares the output budget with the reply + tool_use blocks. The old 1400/2700
-  // (sized for thinking-OFF, response-text-only) would truncate the moment the
-  // model reasons — the exact stop_reason:max_tokens failure the migration guide
-  // warns of, worsened by Sonnet 5's ~30%-denser tokenizer. These are a CEILING,
-  // not a target: adaptive throttles actual spend per turn, so easy turns stay
-  // cheap; reply brevity stays a PROMPT concern, not a max_tokens one.
+  // Existing output ceilings include adaptive thinking, visible text and tool
+  // arguments. Preserve them on migration; effort does not impose a token cap.
   const maxTokens = input.senderRole === 'colleague' ? 12000 : 16000;
 
   // Build system prompt in two parts for prompt caching:

@@ -44,13 +44,13 @@ import { promises as fs, existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import { DateTime } from 'luxon';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import { tavilySearch, readNewsArticle, type DomainFilterOpts } from './general';
 import { readSkillPreferencesSnapshot, formatSkillPreferencesBlock } from '../utils/skillPreferences';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 
-const NEWS_MODEL = MODEL_HAIKU;
+
 
 // Cost controls (code constants — tune after measuring).
 const NEWS_GOAL_CAP = 4;               // max research goals per gather
@@ -205,7 +205,7 @@ Output STRICT JSON only: {"goals": ["...","..."], "preferred_domains": ["..."], 
 
   try {
     const res = await getAnthropicClient().messages.create({
-      model: NEWS_MODEL,
+      ...HAIKU,
       max_tokens: 350,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -676,7 +676,7 @@ async function classifyAlreadyCovered(
   const numbered = sources.map((s, i) => `${i}: ${s.title ?? s.url} [published: ${s.published || 'unknown'}]${s.snippet ? ` — ${s.snippet}` : ''}`).join('\n');
   try {
     const res = await getAnthropicClient().messages.create({
-      model: NEWS_MODEL,
+      ...HAIKU,
       max_tokens: 300,
       messages: [{
         role: 'user',
@@ -725,7 +725,7 @@ async function summarizeBundleForSeenLog(bundle: NewsBundle, alreadyLogged: stri
 
   try {
     const res = await getAnthropicClient().messages.create({
-      model: NEWS_MODEL,
+      ...HAIKU,
       max_tokens: 400,
       messages: [{
         role: 'user',

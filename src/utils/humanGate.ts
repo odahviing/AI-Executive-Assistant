@@ -59,7 +59,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { MODEL_HAIKU, HAIKU } from '../llm/models';
 import type { UserProfile } from '../config/userProfile';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
@@ -527,13 +527,13 @@ export async function runHumanGate(
     // for ~3× cost cut + ~1s latency drop per call. Fires on every owner +
     // colleague reply + every brief, so the aggregate savings are meaningful.
     const model = MODEL_HAIKU;
-    // v4.0.x — forced structured output (like concision / rewriteOwningTheMiss):
+    // v4.0.x — forced structured output (Haiku supports forced verdict tools):
     // the verdict comes back as a `verdict` tool call, so the model's prose
     // can never ship (G4). Kills the old free-text + reparse
     // path (Haiku mis-formatted the bare JSON ~half the time). Judgment unchanged
     // — the system prompt is the same; only the output transport is forced.
     const resp = await anthropic.messages.create({
-      model,
+      ...HAIKU,
       max_tokens: 600,
       system: systemPrompt,
       tools: [HUMAN_GATE_VERDICT_TOOL],
@@ -575,7 +575,7 @@ export async function runHumanGate(
         let retry: string | null = null;
         try {
           const retryResp = await anthropic.messages.create({
-            model,
+            ...HAIKU,
             max_tokens: 600,
             system: systemPrompt,
             tools: [HUMAN_GATE_VERDICT_TOOL],

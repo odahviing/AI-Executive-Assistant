@@ -26,7 +26,7 @@ import { nameGenuinelyMatches } from '../../memory/resolveAttendeeEmails';
 /**
  * v3.1 (audit fix LATENT-2) — only pass a `thread_ts` that looks like a real
  * Slack message ts (`1700000000.000100`). Synthetic ids (e.g. a routine's
- * fallback `routine_<id>_<ms>` when its placeholder DM post failed) would
+ * internal run key `routine_<id>_<ms>`) would
  * otherwise reach Slack as a `thread_ts`, get rejected, and DROP the message
  * (coord/approval DMs vanished). When the ts is invalid we post top-level in
  * the real channel instead of failing — the message still lands.
@@ -321,15 +321,8 @@ export async function postToChannel(
 }
 
 /**
- * Edit an existing message in place. Used by the routine dispatcher's
- * placeholder-then-update pattern (v2.8.5): post a "Working…" placeholder
- * to create the thread (so assistant.threads.setStatus can fire on a real
- * threadTs during tool calls), then swap in the final content here.
- *
- * Fire-and-forget tolerance: returns ok=false on failure, never throws.
- * The caller should log at info/warn but never block on this — worst case
- * the placeholder stays as "Working…" forever, which is annoying but not
- * load-bearing.
+ * Edit an existing message in place. Returns ok=false on eligibility or API
+ * failure so the caller can handle an unsuccessful edit.
  */
 export async function updateMessage(
   app: App,
@@ -355,9 +348,7 @@ export async function updateMessage(
 }
 
 /**
- * Delete a message. Used by the routine dispatcher when the orchestrator
- * returns a silent result — we don't want a stale "Working…" placeholder
- * hanging in the DM. Fire-and-forget like updateMessage.
+ * Delete an existing message. Returns ok=false when the API call fails.
  */
 export async function deleteMessage(
   app: App,

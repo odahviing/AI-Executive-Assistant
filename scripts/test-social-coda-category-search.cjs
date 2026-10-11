@@ -24,7 +24,7 @@ function harness() {
   const dependencies = {
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async args => {
       composerPrompts.push(args.messages[0].content);
-      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', input: { sentence: 'A grounded line.' } }] };
+      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'compose_coda', input: { sentence: 'A grounded line.' } }] };
     } } }) },
     '../../llm/models': { SONNET: { model: 'isolated-composer' } },
     '../../utils/usageLog': { logLlmUsage: () => {} },

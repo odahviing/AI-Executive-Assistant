@@ -65,7 +65,7 @@ function loadGate({ verdict, rewrite = 'I did not send that yet.' } = {}) {
   const deps = {
     '../../llm/client': { getAnthropicClient: () => ({ messages: { create: async () => { throw new Error('forbidden LLM call'); } } }) },
     '../../core/requests/types': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },
-    '../../llm/models': { SONNET: {}, MODEL_SONNET: 'fixture' },
+    '../../llm/models': require('./load-test-models.cjs'),
     '../../core/orchestrator/turnHelpers': { toolLinesMatching: () => [] },
     '../../connections/slack/formatting': { formatForSlack: value => value },
     '../logger': { __esModule: true, default: { info() {}, warn: (...args) => calls.warnings.push(args), error() {} } },

@@ -19,7 +19,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { SONNET, MODEL_SONNET, MODEL_HAIKU } from '../llm/models';
+import { SONNET, MODEL_SONNET, MODEL_HAIKU, HAIKU } from '../llm/models';
 import logger from './logger';
 import { logLlmUsage } from './usageLog';
 import { extractFirstJsonObject } from './extractJson';
@@ -274,7 +274,7 @@ Output STRICT JSON only: {"verdict":"asked"|"not_asked"}`;
   try {
     const start = Date.now();
     const response = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 20,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -374,7 +374,7 @@ Output STRICT JSON only: {"verdict":"impersonation"|"benign"}`;
   try {
     const start = Date.now();
     const response = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 40,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -433,7 +433,7 @@ Output ONLY the reply text. No explanation, no quotes, no preamble.`;
     const start = Date.now();
     // Haiku — cheap, only runs on actual signal.
     const response = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });

@@ -50,7 +50,7 @@ export async function classifyEventCategory(
           required: ['category', 'confidence'],
         },
       }],
-      tool_choice: { type: 'tool', name: 'pick_category' },
+      tool_choice: { type: 'auto' },
       messages: [{
         role: 'user',
         content: `Event: "${event.subject}"
@@ -64,12 +64,16 @@ ${catalog}
 Pick the single best-fit category. Return confidence=high ONLY when the match is unambiguous. Default to low/medium for anything borderline — the owner prefers an untagged event over a mis-tagged one.`,
       }],
     });
-    const toolUse = resp.content.find(b => b.type === 'tool_use');
-    if (!toolUse || toolUse.type !== 'tool_use') return null;
+    // Sonnet 5.5 may finish a complete tool result with either stop reason.
+    // Never act on a truncated, refused, missing, or ambiguous selection.
+    if (resp.stop_reason !== 'tool_use' && resp.stop_reason !== 'end_turn') return null;
+    const toolUses = resp.content.filter(b => b.type === 'tool_use');
+    if (toolUses.length !== 1 || toolUses[0].name !== 'pick_category') return null;
+    const toolUse = toolUses[0];
+    if (!toolUse.input || typeof toolUse.input !== 'object' || Array.isArray(toolUse.input)) return null;
     const input = toolUse.input as Record<string, unknown>;
-    const confidence = input.confidence as string | undefined;
-    const category = input.category as string | undefined;
-    if (confidence !== 'high' || !category) return null;
+    const { confidence, category } = input;
+    if (confidence !== 'high' || typeof category !== 'string' || !category) return null;
     // Defense: only return a name that's actually in the profile.
     const match = profile.categories.find(c => c.name === category);
     return match ? match.name : null;

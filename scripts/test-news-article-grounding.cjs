@@ -31,7 +31,7 @@ function fixture({pages={[incident]:{html:html('<p>Seven autonomous testing tool
   'node:http':transport,'node:https':transport,'node:net':require('node:net'),
   'node:dns':{lookup:(host,opts,cb)=>{state.lookups.push(host);cb(null,host==='private.example'?[{address:'10.0.0.1',family:4}]:host==='mixed.example'?[{address:'93.184.216.34',family:4},{address:'127.0.0.1',family:4}]:[{address:'93.184.216.34',family:4}]);}},
   'ipaddr.js':require('ipaddr.js'),'cheerio':require('cheerio'),
-  '../config':{config:{}},'../llm/models':{MODEL_HAIKU:'fixture',SONNET:{model:'fixture'}},
+  '../config':{config:{}},'../llm/models':{HAIKU:{model:'fixture',thinking:{type:'disabled'}},SONNET:{model:'fixture'}},
   '../llm/client':{getAnthropicClient:()=>({messages:{create:async req=>{state.models.push(req);return {content:[{type:'text',text:JSON.stringify({goals})}]};}}})},
   '../utils/logger':{info:()=>{},warn:()=>{},error:()=>{}},'../utils/extractJson':{extractFirstJsonObject:t=>t},
   fs:{existsSync:()=>false,promises:{},readFileSync:()=>{throw Error('unexpected disk read');}},path,luxon:require('luxon'),

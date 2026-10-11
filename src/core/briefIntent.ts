@@ -23,7 +23,7 @@
  */
 
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import logger from '../utils/logger';
 
 const PRE_FILTER = /\b(brief(ing)?|morning update|rundown|what.{0,4}(on|today|do i have)|catch me up|any updates|missed.{0,15}brief|where.{0,10}brief|didn.?t (get|see).{0,20}brief)\b/i;
@@ -37,7 +37,7 @@ export async function isBriefRequest(userMessage: string): Promise<boolean> {
   try {
     const anthropic = getAnthropicClient();
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 80,
       tools: [{
         name: 'classify',

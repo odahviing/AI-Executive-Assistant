@@ -75,7 +75,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../../llm/client';
-import { MODEL_HAIKU } from '../../llm/models';
+import { HAIKU, MODEL_HAIKU } from '../../llm/models';
 import { logLlmUsage } from '../../utils/usageLog';
 import logger from '../../utils/logger';
 
@@ -133,7 +133,7 @@ export async function extractForwardedParticipants(plainTextBody: string): Promi
   const bounded = plainTextBody.slice(0, MAX_BODY_CHARS);
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 400,
       tools: [{
         name: 'extract_participants',

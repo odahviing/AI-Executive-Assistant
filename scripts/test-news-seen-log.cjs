@@ -17,7 +17,7 @@ function harness({log='',results=[],summary='• Current story [daily.example]',
   const p={...profile,user:{...profile.user,timezone:zone}};
   const dependencies={
     fs:{existsSync:()=>!!state.log,mkdirSync:()=>{},readFileSync:()=>{if(readFail)throw Error('unreadable');return state.log;},promises:{writeFile:async(_file,text)=>{if(writeFail)throw Error('disk full');state.log=text;state.writes.push(text);}}},
-    path,luxon:{DateTime},'../llm/models':{MODEL_HAIKU:'fixture',SONNET:{model:'fixture'}},
+    path,luxon:{DateTime},'../llm/models':{HAIKU:{model:'fixture',thinking:{type:'disabled'}},SONNET:{model:'fixture'}},
     '../llm/client':{getAnthropicClient:()=>({messages:{create:async req=>{state.requests.push(req);if(modelFail)throw Error('model unavailable');const input=JSON.stringify(req);return {content:[{type:'text',text:input.includes('You plan a personalized')?JSON.stringify(plan):input.includes('Which numbered sources')?classified:input.includes('These news items')?summary:'Brief fixture'}]};}}})},
     './general':{readNewsArticle:async url=>{const r=results.find(r=>r.url===url);return r?{url:r.url,title:r.title,content:r.content||'Article body fixture.'}:null;},tavilySearch:async(...args)=>{state.searches.push(args);return {results};}},
     '../utils/skillPreferences':{readSkillPreferences:()=>prefs,readSkillPreferencesSnapshot:()=>prefsUnavailable?{ok:false,error:'read_failed'}:{ok:true,text:prefs,revision:'fixture',exists:!!prefs},formatSkillPreferencesBlock:()=>prefs},

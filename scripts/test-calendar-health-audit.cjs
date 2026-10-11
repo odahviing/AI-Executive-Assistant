@@ -58,7 +58,8 @@ function harness(opts = {}) {
     if (modules.has(name)) return modules.get(name);
     const file = ['meetingProtection', 'attendeeScope'].includes(name) ? path.join(root, 'src/utils', `${name}.ts`) : before ? path.join(dir, 'before', `${name}.ts`) : path.join(root, 'src/skills/calendarHealth', ['checkHealth', 'categoryOps'].includes(name) ? 'handlers' : '', `${name}.ts`);
     const m = { exports: {} }; modules.set(name, m.exports);
-    const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+    const source = name === 'classify' && opts.classifySource ? opts.classifySource : fs.readFileSync(file, 'utf8');
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const req = spec => {
       if (spec === 'luxon') return require(spec);
       if (spec.endsWith('/classify')) return load('classify');
@@ -77,8 +78,8 @@ function harness(opts = {}) {
       if (spec.endsWith('/attendeeAvailability')) return { attendeeCheckParams: emails => ({ attendeeEmails: emails }) };
       if (spec.endsWith('/scheduleRules')) return { requiredFreeMinutesForWorkDay: () => 0 };
       if (spec.endsWith('/categoryRules')) return { findCategoryViolations: () => [] };
-      if (spec.endsWith('/llm/client')) return { getAnthropicClient: () => { throw Error('Live LLM forbidden'); } };
-      if (spec.endsWith('/llm/models')) return { SONNET: {} };
+      if (spec.endsWith('/llm/client')) return { getAnthropicClient: () => { if (opts.client) return opts.client; throw Error('Live LLM forbidden'); } };
+      if (spec.endsWith('/llm/models')) return require('./load-test-models.cjs');
       if (spec.endsWith('/rebalanceFloatingBlocks')) return { rebalanceFloatingBlocksAfterMutation: async () => { calls.push(['rebalance']); return opts.rebalanceResult ?? ({ moved: 0, movedBlockEventIds: [] }); } };
       if (spec.endsWith('/closeMeetingArtifacts')) return { closeMeetingArtifacts: async () => { if (opts.cascadeError) throw Error('cascade unavailable'); return { correctedColleagueSlackIds: [] }; } };
       if (spec.endsWith('/closeRequest')) return { closeRequest: p => { calls.push(['close', p]); const r = requestRows.find(r => r.id === p.id); if (r) Object.assign(r, { state: p.state, next_check_at: null, next_check_handler: null }); return { ok: true }; } };
@@ -93,7 +94,8 @@ function harness(opts = {}) {
   return { load, rows, requestRows, calls, profile, manage: args => load('categoryOps').handleManageCalendarIssue(args, { context, profile, userEmail: profile.user.email, timezone: profile.user.timezone }), scan: args => load('checkHealth').handleCheckHealth(args ?? {}, { context, profile, userEmail: profile.user.email, timezone: profile.user.timezone, self: { executeToolCall: async (tool, args) => { calls.push(['book', args]); return { ok: true, created: true, start: '12:00', end: '12:30' }; } } }), async move() { const movable = event('movable'); const issue = { type: 'double_booking', date: '2026-09-14', description: 'clash' }; const internalActions = []; let error; try { await load('autoMove').executeInternalAutoMove({ movable, origStart: DateTime.fromISO('2026-09-14T10:00+03:00'), origEnd: DateTime.fromISO('2026-09-14T11:00+03:00'), durationMin: 60, newStartIso: '2026-09-14T12:00:00+03:00', participantsRaw: movable.attendees, conflictReason: 'clash', moveVerb: 'to clear clash', issue, userEmail: profile.user.email, ownerUserId: 'owner', timezone: profile.user.timezone, profile, context, internalActions }); } catch (e) { error = e; } return { issue, internalActions, error }; } };
 }
 async function test(id, fn) { try { await fn(); results.push({ id, status: 'pass' }); } catch (e) { results.push({ id, status: 'fail', error: e.message }); } }
-(async () => {
+module.exports = { harness, event };
+if (require.main === module) (async () => {
   await test('two-missing-blocks-remain-distinct', async () => { const h = harness({ blocks: ['lunch', 'coffee'].map(name => ({ name, preferred_start: '12:00', preferred_end: '14:00', duration_minutes: 30 })) }); const r = await h.scan(); assert.equal(r.issues.length, 2); });
   await test('new-tracked-issue-id-returned-same-scan', async () => { const h = harness({ events: [{ ...event('uncategorized'), categories: [] }] }); const r = await h.scan(); assert.equal(r.activeTrackedIssues?.[0]?.id, 'ci_uncategorized'); });
   await test('stale-resolved-issue-not-returned', async () => { const h = harness({ rows: [{ id: 'old', event_id: 'gone', event_date: '2026-09-14', issue_class: 'missing_category', status: 'awaiting_owner' }] }); const r = await h.scan(); assert.equal(r.activeTrackedIssues?.length ?? 0, 0); });

@@ -32,7 +32,7 @@ function fixture(options = {}) {
   const news = load('src/skills/news.ts', {
     fs: { existsSync: () => !!state.log, mkdirSync() {}, readFileSync: () => state.log,
       promises: { writeFile: async (_p, text) => { if (options.writeFail) throw Error('disk full'); state.log = text; state.writes.push(text); } } },
-    path, luxon: { DateTime }, '../llm/models': { MODEL_HAIKU: 'fixture' },
+    path, luxon: { DateTime }, '../llm/models': { HAIKU:{model:'fixture',thinking:{type:'disabled'}} },
     '../llm/client': { getAnthropicClient: () => ({ messages: { create: async req => { state.models.push(req); return { content: [{ type: 'text', text: '- Shown story [daily.example]' }] }; } } }) },
     './general': { readNewsArticle: async url => { const r = candidates.find(r => r.url === url); return r ? { url: r.url, title: r.title, content: r.content || 'Article body fixture.' } : null; }, tavilySearch: async (...args) => { state.searches.push(args); return { results: candidates }; } },
     '../utils/skillPreferences': { readSkillPreferences: () => '', readSkillPreferencesSnapshot: () => ({ ok: true, text: '', revision: 'fixture', exists: false }), formatSkillPreferencesBlock: () => '' },

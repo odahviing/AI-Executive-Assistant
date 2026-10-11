@@ -28,7 +28,7 @@ async function run(options={}){
   'src/config.ts':{config:{}},'src/db/client.ts':{getDb:()=>{throw Error('Unexpected DB query');}},
   'src/utils/logger.ts':{__esModule:true,default:{info:noop,warn:(...a)=>calls.warnings.push(a),error:noop,debug:noop}},
   'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>{calls.model++;if(options.modelError)throw Error('fixture model unavailable');return {content:[{type:'tool_use',name:'normalize_slots',input:{slots}}]};}}})},
-  'src/llm/models.ts':{MODEL_HAIKU:'fixture-existing-call'},'src/utils/usageLog.ts':{logLlmUsage:noop},
+  'src/llm/models.ts':require('./load-test-models.cjs'),'src/utils/usageLog.ts':{logLlmUsage:noop},
   'src/connectors/graph/calendar.ts':{getOwnerEventsForDecision:async(...a)=>{calls.calendar.push(a);if(options.calendarError)throw Error('calendar offline');return [{subject:'PRIVATE_CALENDAR_SUBJECT'}];}},
   'src/utils/scheduleRules.ts':{OWNER_OVERRIDABLE_KINDS:new Set(['outside_work_hours']),bookingLeadTimeHours:()=>4,checkSlot:a=>{calls.checks.push(a);if(options.secondReadError&&calls.checks.length===2)throw Error('second read offline');const kind=options.check?.(a,calls.checks.length);return kind?{passes:false,violation_kind:kind,subject:'PRIVATE_CALENDAR_SUBJECT'}:{passes:true};}},
   'src/utils/availabilityGate.ts':{armsHardFloor:k=>k==='owner_busy_collision',forgetHardBlockedSlot:(...a)=>calls.forgets.push(a),recordHardBlockedSlot:a=>calls.records.push(a),hardBlockClassPhrase:()=>"Owner's calendar is busy"},

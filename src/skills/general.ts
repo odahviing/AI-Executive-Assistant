@@ -3,7 +3,7 @@ import type { Skill, SkillContext, ChannelId } from './types';
 import type { UserProfile } from '../config/userProfile';
 import { config } from '../config';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import logger from '../utils/logger';
 import { extractFirstJsonObject } from '../utils/extractJson';
 import { request as httpRequest } from 'node:http';
@@ -13,7 +13,7 @@ import { isIP } from 'node:net';
 import ipaddr from 'ipaddr.js';
 import { loadBuffer } from 'cheerio';
 
-const RESEARCH_PLAN_MODEL = MODEL_HAIKU;
+
 
 // gh#191 piece 3 — tavilyExtract had NO timeout; a hung page's fetch could
 // block indefinitely. Per-call-site budgets, deliberately DIFFERENT: the
@@ -316,7 +316,7 @@ Output STRICT JSON only: {"queries": ["...","..."], "recency_days": <number or n
 - recency_days: if the goal is about recent/current events ("this week", "latest", breaking, news), set 7-30; otherwise null (evergreen).`;
   try {
     const res = await getAnthropicClient().messages.create({
-      model: RESEARCH_PLAN_MODEL,
+      ...HAIKU,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });

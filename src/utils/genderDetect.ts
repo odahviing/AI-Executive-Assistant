@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAnthropicClient } from '../llm/client';
-import { MODEL_HAIKU } from '../llm/models';
+import { HAIKU } from '../llm/models';
 import { getPersonMemory, setCoreFieldWithProvenance } from '../db';
 import type { PersonGender, CoreFieldSetBy } from '../db';
 import { detectMessageLanguage } from './detectMessageLanguage';
@@ -77,7 +77,7 @@ export async function detectGenderFromSelfDeclaredMorphology(
   try {
     const anthropic = getAnthropicClient();
     const response = await anthropic.messages.create({
-      model: MODEL_HAIKU,
+      ...HAIKU,
       max_tokens: 8,
       system:
         `This message is written in ${language}, a language that grammatically inflects verbs and adjectives ` +

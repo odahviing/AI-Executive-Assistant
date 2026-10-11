@@ -24,9 +24,9 @@ import type { UserProfile } from '../../config/userProfile';
 import { getPersonMemory } from '../../db';
 import logger from '../../utils/logger';
 import { logLlmUsage } from '../../utils/usageLog';
-import { MODEL_HAIKU } from '../../llm/models';
+import { HAIKU } from '../../llm/models';
 
-const MODEL = MODEL_HAIKU;
+const MODEL = HAIKU.model;
 
 export type ThreadActionKind = 'book' | 'follow_up' | 'other' | 'unclear';
 
@@ -82,7 +82,7 @@ ${threadContext.slice(0, 4000)}`;
 
   try {
     const resp = await anthropic.messages.create({
-      model: MODEL,
+      ...HAIKU,
       max_tokens: 80,
       system,
       tools: [{

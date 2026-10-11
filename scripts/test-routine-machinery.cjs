@@ -6,12 +6,14 @@ const cp = require('node:child_process');
 const Module = require('node:module');
 const ts = require('typescript');
 const { DateTime } = require('luxon');
-const before = process.argv.includes('--before');
+const revisionIndex = process.argv.indexOf('--source-revision');
+const beforeRevision = revisionIndex >= 0 ? process.argv[revisionIndex + 1] : process.argv.includes('--before') ? 'e760080' : null;
+const before = !!beforeRevision;
 const root = path.resolve(__dirname, '..');
 const outputDir = process.env.ROUTINE_EVIDENCE_DIR;
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 function load(file, mocks) {
-  const source = before ? cp.execFileSync('git', ['show', `e760080:${file}`], { cwd: root, encoding: 'utf8' }) : fs.readFileSync(path.join(root, file), 'utf8');
+  const source = before ? cp.execFileSync('git', ['show', `${beforeRevision}:${file}`], { cwd: root, encoding: 'utf8' }) : fs.readFileSync(path.join(root, file), 'utf8');
   if (outputDir && before) {
     const dest = path.join(outputDir, 'before', file);
     fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, source);
@@ -24,7 +26,7 @@ function load(file, mocks) {
 }
 const profile = { user: { slack_user_id: 'U_OWNER', timezone: 'Asia/Jerusalem' }, schedule: { office_days: { days: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'] }, home_days: { days: [] } } };
 function fixture(opts = {}) {
-  const state = { statuses: [], history: [], dbRuns: [], posts: [], deletes: [], invoked: 0 };
+  const state = { statuses: [], history: [], dbRuns: [], posts: [], deletes: [], edits: [], invoked: 0 };
   const routine = { id: 'r1', owner_user_id: 'U_OWNER', owner_channel: 'D_OWNER', title: 'Weekly research', prompt: 'Research useful sources', status: 'active', schedule_type: 'daily', schedule_time: '07:30', is_system: 0, ...opts.routine };
   const db = { prepare(sql) { return { get() { return opts.missing ? undefined : routine; }, run(...args) { state.dbRuns.push({ sql, args }); } }; } };
   const conn = opts.noConnection ? undefined : {
@@ -34,7 +36,7 @@ function fixture(opts = {}) {
       if (opts.sendThrows) throw Error('send threw');
       return opts.send || { ok: true, ts: '200.2' };
     },
-    async updateMessage(channel, messageTs, text) { if (opts.updateThrows) throw Error('update threw'); return opts.update || { ok: true, ts: messageTs }; },
+    async updateMessage(channel, messageTs, text) { state.edits.push({channel,messageTs,text}); if (opts.updateThrows) throw Error('update threw'); return opts.update || { ok: true, ts: messageTs }; },
     async deleteMessage(channel, messageTs) { state.deletes.push(messageTs); return { ok: true }; },
     async sendDirect() { return { ok: true }; },
   };
@@ -55,14 +57,14 @@ const cases = [];
 function test(id, fn) { cases.push({ id, fn }); }
 test('delivery-explicit-failure', async () => { const s = await fixture({ update: { ok: false }, send: { ok: false, reason: 'unavailable' } }).run(); assert.deepEqual(s.statuses, ['failed']); assert.equal(s.history.length, 0); });
 test('delivery-no-connection', async () => { const s = await fixture({ noConnection: true }).run(); assert.deepEqual(s.statuses, ['failed']); assert.equal(s.invoked, 0); });
-test('delivery-placeholder-failed-final-failed', async () => { const s = await fixture({ placeholder: { ok: false }, send: { ok: false, reason: 'blocked' } }).run(); assert.deepEqual(s.statuses, ['failed']); });
-test('delivery-edit-success', async () => { const s = await fixture().run(); assert.deepEqual(s.statuses, ['completed', 'informed']); assert.equal(s.history[0][0], '100.1'); assert.equal(s.input.surface, 'owner_dm'); assert.equal(s.input.interactive, false); });
-test('delivery-fallback-success', async () => { const s = await fixture({ update: { ok: false } }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); assert.equal(s.history[0][0], '200.2'); });
-test('delivery-no-edit-fallback-success', async () => { const s = await fixture({ noEdit: true }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); });
+test('delivery-final-blocked', async () => { const s = await fixture({ placeholder: { ok: false }, send: { ok: false, reason: 'blocked' } }).run(); assert.deepEqual(s.statuses, ['failed']); });
+test('delivery-final-success', async () => { const s = await fixture().run(); assert.deepEqual(s.statuses, ['completed', 'informed']); assert.equal(s.history[0][0], '200.2'); assert.equal(s.posts.length, 1); assert.equal(s.posts[0].text, '🔁 A source-backed result'); assert.equal(s.edits.length, 0); assert.equal(s.input.surface, 'owner_dm'); assert.equal(s.input.interactive, false); });
+test('delivery-fresh-post-success', async () => { const s = await fixture({ update: { ok: false } }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); assert.equal(s.history[0][0], '200.2'); });
+test('delivery-no-edit-verb-needed', async () => { const s = await fixture({ noEdit: true }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); });
 test('delivery-ok-no-ts', async () => { const s = await fixture({ placeholder: { ok: false }, send: { ok: true } }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); assert.equal(s.history.length, 0); });
 test('delivery-thrown-send', async () => { const s = await fixture({ update: { ok: false }, sendThrows: true }).run(); assert.deepEqual(s.statuses, ['failed']); });
-test('delivery-thrown-orchestrator', async () => { const s = await fixture({ orchestratorThrows: true }).run(); assert.deepEqual(s.statuses, ['failed']); assert.equal(s.deletes.length, 1); });
-test('delivery-silent', async () => { const s = await fixture({ result: { reply: '' } }).run(); assert.deepEqual(s.statuses, ['completed']); assert.equal(s.deletes.length, 1); });
+test('delivery-thrown-orchestrator', async () => { const s = await fixture({ orchestratorThrows: true }).run(); assert.deepEqual(s.statuses, ['failed']); assert.equal(s.deletes.length, 0); assert.equal(s.posts.length, 0); });
+test('delivery-silent', async () => { const s = await fixture({ result: { reply: '' } }).run(); assert.deepEqual(s.statuses, ['completed']); assert.equal(s.deletes.length, 0); assert.equal(s.posts.length, 0); });
 test('delivery-vacuous-health-silent', async () => { const s = await fixture({ result: { reply: 'All clear', healthCheckVacuous: true } }).run(); assert.deepEqual(s.statuses, ['completed']); });
 test('delivery-health-mutation-preserved', async () => { const s = await fixture({ result: { reply: 'Booked', healthCheckVacuous: true, bookingOccurred: true } }).run(); assert.deepEqual(s.statuses, ['completed', 'informed']); });
 for (const status of ['paused', 'deleted']) test(`cancel-${status}`, async () => { const s = await fixture({ routine: { status } }).run(); assert.deepEqual(s.statuses, ['cancelled']); assert.equal(s.invoked, 0); });
@@ -134,7 +136,7 @@ test('materializer-bounded-backlog-never-replays-old-chunks', async () => { cons
 (async () => {
   const results = [];
   for (const c of cases) { try { await c.fn(); results.push({ id: c.id, status: 'pass' }); } catch (err) { results.push({ id: c.id, status: 'fail', error: err.message }); } }
-  const report = { phase: before ? 'before' : 'after', beforeRevision: 'e760080', passed: results.filter(r => r.status === 'pass').length, failed: results.filter(r => r.status === 'fail').length, cases: results };
+  const report = { phase: before ? 'before' : 'after', beforeRevision, passed: results.filter(r => r.status === 'pass').length, failed: results.filter(r => r.status === 'fail').length, cases: results };
   console.log(JSON.stringify(report, null, 2));
   if (outputDir) { fs.mkdirSync(outputDir, { recursive: true }); fs.writeFileSync(path.join(outputDir, `${report.phase}.json`), JSON.stringify(report, null, 2)); }
   process.exitCode = report.failed ? 1 : 0;

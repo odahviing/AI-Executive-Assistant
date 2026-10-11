@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '..');
 const actual = new Set([
   'src/connectors/email/inbound.ts',
   'src/connectors/email/extractParticipants.ts',
+  'src/llm/models.ts',
   'src/connections/email/ownerAddresses.ts',
   'src/connectors/email/htmlToText.ts',
   'src/db/people.ts',
@@ -61,7 +62,7 @@ function harness(options = {}) {
   const connection = {sendDirect:async (...args)=>{sends.push(args); return {ok:true};}};
   const mocks = {
     'src/config.ts':{config:{}},
-    'src/llm/client.ts':{getAnthropicClient:()=>anthropic}, 'src/llm/models.ts':{MODEL_HAIKU:'haiku-fixture'}, 'src/utils/usageLog.ts':{logLlmUsage:noop},
+    'src/llm/client.ts':{getAnthropicClient:()=>anthropic}, 'src/utils/usageLog.ts':{logLlmUsage:noop},
     'src/db/client.ts':{getDb:()=>sqlite}, 'src/db/socialSubjects.ts':{}, 'src/db/engagementRank.ts':{},
     'src/db/scheduleOverrides.ts':{getScheduleOverride:()=>null},
     'src/config/userProfile.ts':{getTenantWorkdaysForTimezone:()=>undefined},

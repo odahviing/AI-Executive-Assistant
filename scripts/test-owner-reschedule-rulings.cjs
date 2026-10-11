@@ -22,7 +22,7 @@ function fixture(o={}){
  'src/core/requests/colleagueOofReengage.ts':{},
  'src/tasks/briefs.ts':{},'src/utils/closeLoopOnOwnerHandled.ts':{},'src/utils/usageLog.ts':{},
  'src/utils/requestDedup.ts':{judgeRequestDedup:async()=>{effects.judges++;return o.dedup?{match:'existing',existing_id:o.dedup}:{match:'new'};}},
- 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async p=>{effects.classifications++;return {content:[{type:'text',text:p.max_tokens===12?'1':JSON.stringify({status:o.status||'counter',counter_start:'09:15',summary:'fixture'})}]};}}})},'src/llm/models.ts':{SONNET:{}},
+ 'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async p=>{effects.classifications++;return {content:[{type:'text',text:p.max_tokens===12?'1':JSON.stringify({status:o.status||'counter',counter_start:'09:15',summary:'fixture'})}]};}}})},'src/llm/models.ts':require('./load-test-models.cjs'),
  'src/connections/registry.ts':{getConnection:()=>o.noConnection?undefined:{sendDirect:send,postToChannel:send}},
  'src/utils/ownerDailyThread.ts':{postOwnerDecision:async p=>{effects.ownerPosts.push(p);if(o.ownerThrow)throw Error('owner delivery unknown');return {ok:!o.ownerFail,channel:'DOWNER',threadTs:'daily.1',ts:'owner.1'};}},
  'src/utils/workHours.ts':{workTimeBaseFromNow:()=>DateTime.now().toISO(),addWorkdays:()=>DateTime.now().plus({days:2}).toISO()},

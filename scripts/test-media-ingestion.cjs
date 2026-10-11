@@ -44,7 +44,7 @@ function fixture() {
       if (state.modelError) throw Error('unavailable');
       return { content: [{ type: 'text', text: state.verdict }] };
     } } }) },
-    'src/llm/models.ts': { SONNET: { model: 'fixture' }, MODEL_HAIKU: 'fixture' },
+    'src/llm/models.ts': require('./load-test-models.cjs'),
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/utils/usageLog.ts': { logLlmUsage() {} },
     'src/utils/shadowNotify.ts': { shadowNotify: async (_, input) => { state.shadows.push(input); } },
