@@ -116,12 +116,13 @@ const fnText = name => one(collect(calReads, n => ts.isFunctionDeclaration(n) &&
 const spread = compileFn(`${fnText('compareSlotPreference')}\n${fnText('slotZonedStart')}\n${fnText('slotLocalDay')}\n${fnText('pickSpreadSlots')}\nreturn { pickSpreadSlots };`, { DateTime });
 
 const HANDLER = 'src/skills/meetings/ops/handlers/findAvailableSlots.ts';
-const mustBeIf = one(collect(sf(HANDLER), n => ts.isIfStatement(n) && n.expression.getText() === 'mustBe && relaxedRecoverySlots.length > 0'), 'must-be branch');
+const mustBeIf = one(collect(sf(HANDLER), n => ts.isIfStatement(n) && ['mustBe && relaxedRecoverySlots.length > 0', '(mustBe || ownerHoursExceptionRequested) && relaxedRecoverySlots.length > 0'].includes(n.expression.getText())), 'must-be branch');
 async function mustBeResult(relaxedRecoverySlots) {
   const { pickSpreadSlots } = await spread();
   const run = compileFn(`${mustBeIf.getText()}\nreturn null;`, {
     mustBe: true, relaxedRecoverySlots, timezone: zone, offerCount: 8, args: { duration_minutes: 25 },
     context: { profile }, DateTime, strictDaySummary: [], recoveryDiagnostics: {}, require: () => ({ pickSpreadSlots }),
+    ownerHoursExceptionRequested: false, presentTzForOutput: () => '',
     compareByRulePriority: rules.compareByRulePriority ?? (() => 0),
   });
   return run();

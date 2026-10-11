@@ -167,15 +167,31 @@ function pronounFor(gender: string | null | undefined): 'he' | 'she' | 'they' {
 }
 
 interface InteractionLogEntry { date: string; type: string; summary: string }
-function recentColleagueContext(slackId: string | null | undefined, limit = 3): InteractionLogEntry[] {
-  if (!slackId) return [];
+/** Request and interaction timestamps are stored as either ISO or SQLite UTC. */
+function briefTimestamp(value: string | null | undefined): number | null {
+  if (!value || typeof value !== 'string') return null;
+  const iso = DateTime.fromISO(value, { zone: 'utc' });
+  const parsed = iso.isValid ? iso : DateTime.fromSQL(value, { zone: 'utc' });
+  return parsed.isValid ? parsed.toMillis() : null;
+}
+
+/** Only interactions since this request began may describe its current work.
+ * Keep outcomes as well as asks; unrelated historical memory remains in store. */
+function recentColleagueContext(slackId: string | null | undefined, createdAt: string | null | undefined, limit = 3): InteractionLogEntry[] {
+  const since = briefTimestamp(createdAt);
+  if (!slackId || since === null) return [];
   try {
     const db = getDb();
     const row = db.prepare(`SELECT interaction_log FROM people_memory WHERE slack_id = ?`).get(slackId) as { interaction_log: string | null } | undefined;
     if (!row?.interaction_log) return [];
     const all = JSON.parse(row.interaction_log) as InteractionLogEntry[];
     if (!Array.isArray(all)) return [];
-    return all.filter(e => e.type !== 'meeting_booked' && e.type !== 'coordination').slice(-limit);
+    return all.filter(e => e && typeof e.summary === 'string' && typeof e.type === 'string')
+      .map(e => ({ entry: e, time: briefTimestamp(e.date) }))
+      .filter((e): e is { entry: InteractionLogEntry; time: number } => e.time !== null && e.time >= since)
+      .sort((a, b) => a.time - b.time)
+      .slice(-limit)
+      .map(e => e.entry);
   } catch (err) {
     logger.warn('recentColleagueContext threw', { slackId, err: String(err).slice(0, 200) });
     return [];
@@ -221,6 +237,7 @@ function requesterNotificationForBrief(r: RequestRow): Record<string, unknown> |
 
 function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
+  const createdAt = briefTimestamp(r.created_at);
   const slotsArr = Array.isArray(det.slots) ? (det.slots as any[]) : [];
   return {
     kind: 'approval',
@@ -239,7 +256,8 @@ function buildApprovalItem(r: RequestRow, timezone: string): RichItem {
     slots: slotsArr,
     payload: det,
     requester_notification: requesterNotificationForBrief(r),
-    recent_context: recentColleagueContext(r.requester_slack_id, 3),
+    request_created_at: createdAt === null ? null : new Date(createdAt).toISOString(),
+    recent_context: recentColleagueContext(r.requester_slack_id, r.created_at, 3),
   };
 }
 
@@ -250,6 +268,7 @@ function buildOutreachItem(
   timezone: string,
 ): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
+  const createdAt = briefTimestamp(r.created_at);
   const msgPreview = String(det.message ?? r.description ?? '').slice(0, 200);
   const replyText = (det.reply_text as string | undefined) ?? null;
 
@@ -302,7 +321,8 @@ function buildOutreachItem(
     replyPreview: replyPreview ?? undefined,
     awaitsReply,
     requester_notification: requesterNotificationForBrief(r),
-    recent_context: recentColleagueContext(r.target_slack_id, 3),
+    request_created_at: createdAt === null ? null : new Date(createdAt).toISOString(),
+    recent_context: recentColleagueContext(r.target_slack_id, r.created_at, 3),
   };
   if (verifiedOutcome && verifiedOutcome.status !== 'none' && verifiedOutcome.event) {
     const ev = verifiedOutcome.event;
@@ -319,6 +339,7 @@ function buildOutreachItem(
 
 function buildTaskItem(r: RequestRow, timezone: string): RichItem {
   const det = parseDetails<Record<string, unknown>>(r) ?? {};
+  const createdAt = briefTimestamp(r.created_at);
   return {
     kind: 'open_task',
     request_id: r.id,
@@ -329,7 +350,8 @@ function buildTaskItem(r: RequestRow, timezone: string): RichItem {
     context: det.message ?? det.subject ?? undefined,
     target_name: r.target_name,
     requester_notification: requesterNotificationForBrief(r),
-    recent_context: recentColleagueContext(r.target_slack_id, 3),
+    request_created_at: createdAt === null ? null : new Date(createdAt).toISOString(),
+    recent_context: recentColleagueContext(r.target_slack_id, r.created_at, 3),
   };
 }
 

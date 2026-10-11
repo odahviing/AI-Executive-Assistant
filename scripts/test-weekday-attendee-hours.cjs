@@ -33,7 +33,7 @@ function override(entry,ov){
  const tree=ts.createSourceFile(file,fs.readFileSync(file,'utf8'),ts.ScriptTarget.Latest,true);let decl;
  function visit(n){if(ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText()==='attendeeHoursOverride'))decl=n;ts.forEachChild(n,visit);}visit(tree);assert.ok(decl);
  const siblings=decl.parent.statements,code=decl.getText()+'\n'+siblings[siblings.indexOf(decl)+1].getText();
- vm.runInNewContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{args:{attendee_hours:[ov]},attendeeAvailability:[entry],logger:{info(){}}});return entry;
+ vm.runInNewContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{args:{attendee_hours:[ov]},attendeeAvailability:[entry],isOwnerInitiatedSearch:true,logger:{info(){}}});return entry;
 }
 test('one-search start override preserves weekday-specific end',()=>{const e=fixture().entries()[0];override(e,{email:e.email,start:'07:00'});assert.equal(e.week.Monday.hoursStart,'07:00');assert.equal(e.week.Monday.hoursEnd,'14:00');});
 test('one-search end override preserves weekday-specific start',()=>{const e=fixture().entries()[0];override(e,{email:e.email,end:'19:00'});assert.equal(e.week.Tuesday.hoursEnd,'19:00');assert.equal(e.week.Tuesday.hoursStart,'10:00');});

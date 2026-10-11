@@ -14,6 +14,7 @@ import {
   type DaySummaryEntry,
   type SearchRejectReason,
   findAvailableSlots,
+  compareOwnerHoursException,
   firstRejectReason,
   oofUntilDisplayFor,
   GraphPermissionError,
@@ -26,7 +27,7 @@ import { resolveStatedInstant, resolveStatedSourceZone, statedClockPersonContext
 import { bookingLeadTimeHours, compareByRulePriority, offeredSlotCount, travelBufferMinutesFor, OWNER_OVERRIDABLE_SEARCH_LABELS } from '../../../../utils/scheduleRules';
 import { subjectViewerFor, viewerEmailFor } from '../../../../utils/displaySubject';
 import type { OpCtx } from './context';
-import { singleAttendeePresentationZone, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
+import { singleAttendeePresentationZone, attendeeTzForDay, type AttendeeAvailabilityEntry } from '../../../../utils/attendeeAvailability';
 
 /**
  * Shared attendee-availability-warning construction for find_available_slots —
@@ -242,7 +243,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
   // logged the same DENIED/owner_room_bend decision a second time per turn.
   // The `?? grantRelaxed(...)` fallback only matters if this handler is ever
   // invoked outside that one dispatch path (it currently isn't).
-  const relaxedGranted = ctx.relaxedGrant?.relaxed ?? grantRelaxed(args, context).relaxed;
+  const relaxedGranted = args.owner_hours_exception_requested !== true
+    && (ctx.relaxedGrant?.relaxed ?? grantRelaxed(args, context).relaxed);
   const leadHours = bookingLeadTimeHours(context.profile, isOwnerPath ? 'owner' : 'colleague');
   const viewer = subjectViewerFor(context);
   // v4.4.9 (#154) — the attendee-aware half of that same mask, threaded
@@ -922,7 +924,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
           const attendeeAvailability = loadAttendeeAvailabilityForEmails(attendeeEmails, userEmail, timezone);
 
           // v3.7.x (Bug 1.5) — conversational per-attendee hours override. When the
-          // owner states an attendee's REAL hours ("Lori starts 7am ET"), thread it
+          // owner states an attendee's REAL hours ("Lori starts 7am ET"), or a
+          // requester chooses a specific temporary window for THEMSELVES, thread it
           // INTO the entry the walker already clips against (calendar.ts per-attendee
           // work-window clip) — NO parallel hours route, so the clip can't drift (the
           // annotation path tags busy/free only, never hours). Partial: only the
@@ -934,10 +937,16 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             ? (args.attendee_hours as Array<{ email?: string; start?: string; end?: string; tz?: string }>)
             : [];
           if (attendeeAvailability && attendeeHoursOverride.length > 0) {
+            // A requester can consent only to their own temporary hours. Identity
+            // comes from the authenticated sender, never a tool-supplied email.
+            const ownerHoursAuthority = isOwnerInitiatedSearch || context.authority === 'owner';
+            const requesterEmail = ownerHoursAuthority ? undefined
+              : getPersonMemory(context.userId ?? '')?.email?.toLowerCase().trim();
             const hhmm = /^\d{1,2}:\d{2}$/;
             for (const ov of attendeeHoursOverride) {
               const ovEmail = (ov?.email ?? '').toLowerCase().trim();
               if (!ovEmail) continue;
+              if (!ownerHoursAuthority && ovEmail !== requesterEmail) continue;
               const entry = attendeeAvailability.find(a => a.email.toLowerCase() === ovEmail);
               if (!entry) continue;
               // This search's explicit bound applies to each regular workday;
@@ -959,8 +968,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // auto-tier reading (M12), so there is nothing left to hedge.
                 entry.tzTempDiffering = undefined;
               }
-              // A conversational override IS a real statement (the owner said
-              // it) — clear the #M3 assumed-default flag so downstream
+              // A conversational override IS a stated window — clear the
+              // #M3 assumed-default flag so downstream
               // narration says "stated", never "assumed", for this entry.
               entry.assumed = false;
               logger.info('find_available_slots — attendee hours override applied', {
@@ -1340,6 +1349,27 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               }
             };
             groundAttendeeHours(diagnosticsOut.daySummary);
+            // Empty recovery is evidence too: first-rejection counts from the
+            // strict pass do not describe what blocks an attendee-busy override.
+            // Reuse day_summary so all existing privacy scrubs still apply.
+            const emptySearchResult = (summary: typeof diagnosticsOut.daySummary) => {
+              groundAttendeeHours(summary);
+              const hoursBlocked = summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
+              return {
+                slots: [],
+                ...(summary?.length ? { day_summary: summary } : {}),
+                ...(hoursBlocked ? {
+                  _scheduling_decision_note: `No confirmed option in this window; working-hour constraints exclude candidates. This is not evidence that anyone is booked solid. ${isOwnerInitiatedSearch
+                    ? 'Ask which path to explore: whether the other attendee would consider earlier/later hours, or whether you want to explore an exception to your own hours. Do not assume an early start.'
+                    : 'Ask the requester to choose: would you consider earlier/later hours, or should I ask the owner about an exception to the owner\'s hours?'} Only after that explicit choice, set owner_hours_exception_requested=true to search for concrete owner-hour exceptions; it authorizes exploration only. For the requester-hours choice, obtain their specific local window and timezone and pass attendee_hours for the authenticated requester only; a general yes is not a window. Keep every other attendee unchanged. Asking the owner is a pending decision, not booking permission; use the existing approval flow with a concrete candidate. Do not book or contact anyone merely because this search found no option. Do not default to widening dates. Quote only tool-computed dated dual clocks.`,
+                } : {}),
+                ...(attendeeEmailWarning ?? {}),
+                ...(attendeeNotCheckedWarning ?? {}),
+                ...(colleagueSoftBlockHint ?? {}),
+                ...(movingEventIdMismatchWarning ?? {}),
+                ...tzGroundingFields,
+              };
+            };
             // v3.0.3 — strict-pass log. Shows the effective args the low-level
             // function actually ran with, plus what came back. The crucial fields:
             // effectiveSearchFrom / search_to (after any internal clipping) and
@@ -1452,10 +1482,13 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // the colleague (see the must-be return below). Regular colleague
             // requests stay fully blocked (no recovery, no surfacing).
             const mustBe = args.must_be === true && !isOwnerInitiatedSearch;
+            // Search permission only, after the requester's decision. This never
+            // grants booking authority and never extends any attendee's hours.
+            const ownerHoursExceptionRequested = args.owner_hours_exception_requested === true;
             const shouldRecover =
               rawSlots.length === 0
-              && (isOwnerInitiatedSearch || mustBe)
-              && userNamedNarrowWindow
+              && (isOwnerInitiatedSearch || mustBe || ownerHoursExceptionRequested)
+              && (userNamedNarrowWindow || ownerHoursExceptionRequested)
               && !isAlreadyRelaxed;
             // ── Rule 6 backstop (shared) — attendee calendar conflicts are a
             // scheduling input, not a reason to hide the owner's real openings.
@@ -1519,7 +1552,8 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                 }
               } catch (err) {
-                logger.warn('find_available_slots — colleague owner-only fallback threw, continuing', { err: String(err).slice(0, 150) });
+                logger.warn('find_available_slots — colleague owner-only fallback unavailable', { err: String(err).slice(0, 150) });
+                throw err;
               }
             }
             // Owner path — OR an insistent colleague (mustBe) — strict-failed only on
@@ -1545,10 +1579,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                 }
               } catch (err) {
-                logger.warn('find_available_slots — owner attendee-tagged backstop threw, continuing', { err: String(err).slice(0, 150) });
+                logger.warn('find_available_slots — owner attendee-tagged backstop unavailable', { err: String(err).slice(0, 150) });
+                throw err;
               }
             }
             if (rawSlots.length === 0 && !shouldRecover && colleagueOwnerOnlySlots.length === 0 && ownerAttendeeTaggedSlots.length === 0) {
+              if (attendeeRecoveryDiagnostics.daySummary?.length) {
+                return emptySearchResult(attendeeRecoveryDiagnostics.daySummary);
+              }
               if (
                 (diagnosticsOut.daySummary && diagnosticsOut.daySummary.length > 0)
                 || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning
@@ -1598,12 +1636,18 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   // recovery passes none — his relaxed labels are unchanged.
                   minBufferHours: mustBe ? leadHours : undefined,
                   relaxed: true,       // bypass focus / lunch / category — his soft day-load rules
-                  keepWorkHours: true, // …but relaxing a soft block is not extending his day
+                  keepWorkHours: !ownerHoursExceptionRequested,
+                  ownerHoursExceptionRequested,
                   excludeEventIds: excludeEventIdsForSearch,
                   category: args.category as string | undefined,
                   autoExpand: false,  // recovery stays inside the user's window
                   diagnosticsOut: recoveryDiagnostics,
                 });
+                if (ownerHoursExceptionRequested) {
+                  // This choice requests an hours exception, not permission to
+                  // spend lunch/focus/category protections or book a busy owner.
+                  relaxedRecoverySlots.sort((a, b) => compareOwnerHoursException(a, b, context.profile));
+                }
                 groundAttendeeHours(recoveryDiagnostics.daySummary);
                 // v3.1.7 — the recovery is clipped to the owner's working DAY, and
                 // that clip now lives INSIDE the walker (`keepWorkHours`), above
@@ -1622,9 +1666,15 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 logger.warn('find_available_slots — relaxed recovery threw', {
                   err: String(recErr).slice(0, 200),
                 });
+                throw recErr;
               }
               if (relaxedRecoverySlots.length === 0) {
-                // Recovery also empty — return original empty result with day_summary.
+                // Preserve the completed recovery verdict instead of blaming
+                // the strict pass's first calendar rejection for the whole day.
+                if (recoveryDiagnostics.daySummary?.length || attendeeRecoveryDiagnostics.daySummary?.length) {
+                  return emptySearchResult(recoveryDiagnostics.daySummary?.length
+                    ? recoveryDiagnostics.daySummary : attendeeRecoveryDiagnostics.daySummary);
+                }
                 if ((strictDaySummary && strictDaySummary.length > 0) || attendeeEmailWarning || attendeeNotCheckedWarning || colleagueSoftBlockHint || movingEventIdMismatchWarning) {
                   return {
                     slots: [],
@@ -1651,19 +1701,27 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
               // clean, so the note tells Sonnet to offer it remote. (Owner-path
               // recovery is unaffected — it falls through to the candidate logic
               // below as before.)
-              if (mustBe && relaxedRecoverySlots.length > 0) {
+              if ((mustBe || ownerHoursExceptionRequested) && relaxedRecoverySlots.length > 0) {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const { pickSpreadSlots: pickSpreadMustBe } = require('../../../../connectors/graph/calendar') as
                   typeof import('../../../../connectors/graph/calendar');
-                const pickedMustBe = new Set(pickSpreadMustBe(relaxedRecoverySlots, timezone, offerCount, undefined, args.duration_minutes as number | undefined));
+                const pickedMustBe = new Set(ownerHoursExceptionRequested
+                  ? relaxedRecoverySlots.slice(0, offerCount).map(slot => slot.start)
+                  : pickSpreadMustBe(relaxedRecoverySlots, timezone, offerCount, undefined, args.duration_minutes as number | undefined));
                 const ownerFirst = context.profile.user.name.split(' ')[0];
                 const candidates = relaxedRecoverySlots
                   .filter(s => pickedMustBe.has(s.start))
                   .map(s => {
                     const st = DateTime.fromISO(s.start).setZone(timezone);
                     const en = DateTime.fromISO(s.end).setZone(timezone);
+                    const presentationZones = ownerHoursExceptionRequested
+                      ? [...new Set((attendeeAvailability ?? []).map(entry => attendeeTzForDay(entry, s.start)))]
+                      : [presentTzForOutput(s.start)];
+                    const presentationLocal = [...new Set(presentationZones.filter(Boolean)
+                      .map(zone => renderClockInZone(s.start, timezone, zone)))].join('; ');
                     return {
                       start: s.start, end: s.end, label: `${st.toFormat('EEE d MMM HH:mm')}–${en.toFormat('HH:mm')}`,
+                      ...(presentationLocal ? { presentation_local: presentationLocal } : {}),
                       broken_rules: s.broken_rules ?? [],
                       ...(s.disturbs_floating_block ? { disturbs_floating_block: true } : {}),
                     };
@@ -1672,7 +1730,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // win"): rule-bending options are ranked by the rules they break
                 // (scheduleRules' priority list), time order only between equal bends.
                 // Array.prototype.sort is stable; the input is chronological.
-                candidates.sort((x, y) => compareByRulePriority(x.broken_rules, y.broken_rules));
+                if (!ownerHoursExceptionRequested) candidates.sort((x, y) => compareByRulePriority(x.broken_rules, y.broken_rules));
                 // A candidate whose ONLY broken rule is the in-person/home-day one
                 // is a normal online slot: meeting remotely there needs no approval.
                 const remoteOnly = candidates.filter(c =>
@@ -1680,7 +1738,10 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 return {
                   slots: [],
                   owner_approval_candidates: candidates,
-                  _must_be_owner_approval_note: `No clean slot here — these times are open only if ${ownerFirst} bends one or more of his own scheduling rules, so they're his call. Each candidate's \`broken_rules\` lists EVERY rule it breaks (\`disturbs_floating_block\`: it lands on his lunch/break as currently placed); they are listed in ${ownerFirst}'s rule-priority order (the fewest/least important bends first; time order only between equal bends), so propose the FIRST one — a requester's "as early as possible" never outranks that order — and never describe any as clean. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason, and name every rule in that candidate's \`broken_rules\` so ${ownerFirst} decides with a single yes.${remoteOnly.length > 0 ? ` In-person is not available that day (${ownerFirst} only meets in person on his office days, and that day isn't one), but ${remoteOnly.map(c => c.label).join(', ')} ${remoteOnly.length === 1 ? 'works' : 'work'} as an online meeting with no approval: tell the colleague that plainly and offer online there first; raise the approval only if they insist on meeting in person.` : ''} Never reveal the other candidates' times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
+                  ...(ownerHoursExceptionRequested ? {
+                    _scheduling_decision_note: 'The requester chose to explore an exception to the owner\'s hours. These are pending candidates, not approved/bookable options. Preserve returned ranking and dated clocks. On the colleague path, create_approval(kind=policy_exception) with one exact candidate and deferred_action matching start/end/attendees; state the requester\'s reason and actual violations to the owner. Await approval before booking; tell the colleague only that you are checking. On the owner path, present the candidates and their actual violations in-thread and await explicit booking authorization. Search permission alone grants no booking authority.',
+                  } : {}),
+                  _must_be_owner_approval_note: ownerHoursExceptionRequested ? 'Pending owner-hours exception candidates: preserve this ranking and quote the returned dated clocks. On a colleague turn, raise create_approval(kind=policy_exception) with one exact candidate and matching deferred_action, then await approval; do not book directly. On an owner turn, ask for explicit booking authorization in-thread. Exploration permission is not booking permission.' : `No clean slot here — these times are open only if ${ownerFirst} bends one or more of his own scheduling rules, so they're his call. Each candidate's \`broken_rules\` lists EVERY rule it breaks (\`disturbs_floating_block\`: it lands on his lunch/break as currently placed); they are listed in ${ownerFirst}'s rule-priority order (the fewest/least important bends first; time order only between equal bends), so propose the FIRST one — a requester's "as early as possible" never outranks that order — and never describe any as clean. This is a MUST-BE request: do NOT tell the colleague there's no time and do NOT book directly. Raise create_approval(kind=policy_exception) with ONE of owner_approval_candidates plus the urgency reason, and name every rule in that candidate's \`broken_rules\` so ${ownerFirst} decides with a single yes.${remoteOnly.length > 0 ? ` In-person is not available that day (${ownerFirst} only meets in person on his office days, and that day isn't one), but ${remoteOnly.map(c => c.label).join(', ')} ${remoteOnly.length === 1 ? 'works' : 'work'} as an online meeting with no approval: tell the colleague that plainly and offer online there first; raise the approval only if they insist on meeting in person.` : ''} Never reveal the other candidates' times (or the mechanism) to the colleague — only that you're checking with ${ownerFirst}.`,
                   ...(recoveryDiagnostics.daySummary?.length ? { day_summary: recoveryDiagnostics.daySummary } : {}),
                 };
               }
@@ -2376,3 +2437,4 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
     throw err;
   }
 }
+

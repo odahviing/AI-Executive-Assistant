@@ -93,6 +93,29 @@ const validEvidence = () => ({
 })
 const validReview = () => ({ attemptId: 'direct-fixture-attempt-1', reviewer: 'independent-bouncer-dispatch', trace: 'actual-test-dispatch/turn-1', verdict: 'pass', reason: 'Fixture guard and legitimate producer independently traced; no live model claim.', outcome: 'traced', inventoryComplete: true, guardsComplete: true, findings: [], reviewedPaths: ['bad-path', 'good-path'], scope: 'behavioral', checks: [{ id: 'gate-suite', command: 'node fixture-test.cjs', exitCode: 0, passed: 2, failed: 0, output: '2 assertions passed' }] })
 const implementations = [['writer/shared', contract]]
+for (const verdict of ['declined', 'converted']) test(`terminal ${verdict} after implementation does not claim a new verification`, () => {
+  const history = [row('terminal-history', 'implemented', { lifecycleVersion: 1, evidence: validEvidence(), snapshot: contract.snapshot(validEvidence().files, root) }), row('terminal-history', verdict)]
+  setRows(history)
+  assert.equal(open().length, 0)
+  const result = cli('ledger-stats.cjs', '--verification', '--json')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), [])
+  assert.equal(contract.collapseRows(history).latest[0].evidence.attemptId, validEvidence().attemptId)
+  assert.equal(contract.collapseRows(history).latest[0].review, undefined)
+})
+for (const verdict of ['implemented', 'verified', 'needs-dependency', 'verification-failed']) test(`historical implementation still blocks ${verdict} without a current pass`, () => {
+  setRows([row('unfinished-history', 'implemented', { lifecycleVersion: 1, evidence: validEvidence() }), row('unfinished-history', verdict)])
+  const result = cli('ledger-stats.cjs', '--verification', '--json')
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.equal(JSON.parse(result.stdout).length, 1)
+})
+test('later explicit legacy reopen after decline requires fresh verification', () => {
+  setRows([row('reopened-history', 'implemented', { lifecycleVersion: 1, evidence: validEvidence() }), row('reopened-history', 'declined'), row('reopened-history', 'needs-dependency')])
+  assert.equal(open().length, 1)
+  const result = cli('ledger-stats.cjs', '--verification', '--json')
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.equal(JSON.parse(result.stdout).length, 1)
+})
 const vm = require('node:vm')
 const blockOf = source => source.match(/\/\/ BEGIN WORKSHOP CONTRACT[\s\S]*?\/\/ END WORKSHOP CONTRACT/)[0]
 const canonical = blockOf(fs.readFileSync(path.join(__dirname, 'workshop-verification.cjs'), 'utf8'))

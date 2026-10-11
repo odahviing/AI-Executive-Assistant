@@ -54,6 +54,7 @@ Thumbs.db
 # Workshop run output — regenerated logs, evidence and review material.
 # Durable regression fixtures live under scripts/fixtures instead.
 /artifacts/workshop-verification/
+/artifacts/regression-yael-20261007/
 
 # Local incident intake can contain private conversation excerpts.
 /artifacts/run-preparation/
@@ -61,6 +62,7 @@ Thumbs.db
 # Ephemeral isolated workspaces created by Workshop regression tests.
 /.workshop-before-linked-*/
 /.workshop-verification-*/
+/.workshop-bookkeeping-*
 
 # Owner-restricted local source evidence; never publish.
 .claude/agent-loop/evidence/intake-3f7889de87436a5c21f01d6b281f25644ec993f314c56f805c3a74b6c4f74316.txt

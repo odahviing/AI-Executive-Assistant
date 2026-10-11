@@ -5,27 +5,29 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{cre
 const file=path.join(__dirname,'test-timezone-owner-interval.cjs'),mod={exports:{}};
 let source=fs.readFileSync(file,'utf8').split('if(require.main===module)')[0]
  .replace("'src/utils/attendeeAvailability.ts':{attendeeTzForDay:e=>e.timezone},",'')
- .replace("if(rel==='src/connectors/graph/calendar.ts')return {...mocks['src/connectors/graph/calendarReads.ts'],","if(rel==='src/connectors/graph/calendar.ts')return {...mocks['src/connectors/graph/calendarReads.ts'],...options.calendar,")
+ .replace("if(rel==='src/connectors/graph/calendar.ts')return {...mocks['src/connectors/graph/calendarReads.ts'],","if(rel==='src/connectors/graph/calendar.ts')return {...mocks['src/connectors/graph/calendarReads.ts'],...options.calendar,compareOwnerHoursException:(...a)=>load('src/connectors/graph/findAvailableSlots.ts').compareOwnerHoursException(...a),")
  .replace("const before=process.env.SLOT_PRIORITY_BEFORE", "const before=process.env.GARAGE_BEFORE && rel === 'src/skills/meetings/ops/handlers/findAvailableSlots.ts' ? path.join(root,process.env.GARAGE_BEFORE,rel) : process.env.SLOT_PRIORITY_BEFORE");
 vm.runInNewContext(source,{require:createRequire(file),module:mod,__dirname,process,console,Date,Buffer,setTimeout,clearTimeout});
 const email='peer@example.test',zone='Asia/Jerusalem';
 const prefixes=['attendee_busy_collision','outside_attendee_work_hours','attendee_out_of_office'];
-async function run({clean=false,busy=false,offhours=false,offline=false,unknown=false,role='owner',mustBe=false,multi=false,argsOverride={},contacts=[],availabilityOverride,workHoursOverride}={}) {
+async function run({clean=false,busy=false,offhours=false,offline=false,recoveryOffline=false,unknown=false,role='owner',mustBe=false,multi=false,argsOverride={},contacts=[],availabilityOverride,workHoursOverride,requesterEmail,inPersonHome=false,contextOverride={}}={}) {
+ let calendarReads=0;
  const availability=availabilityOverride??[{email,timezone:zone,week:require('./fixtures/regular-week.cjs').regularWeek(['Sunday','Monday','Tuesday','Wednesday','Thursday'],offhours?'20:00':'09:00',offhours?'21:00':'18:00')}];
  const h=mod.exports.harness(multi?{'2026-10-05':{isWorkday:false}}:{}, {offline, calendar:{oofUntilDisplayFor:()=>undefined,GraphPermissionError:class extends Error{},firstRejectReason:d=>Object.keys(d??{})[0]},extraMocks:{
   'src/skills/meetings/ops/analysis.ts':{},'src/skills/meetings/ops/handlers/createMeeting.ts':{},'src/skills/meetings/ops/handlers/moveMeeting.ts':{},'src/skills/meetings/ops/handlers/calendarReads.ts':{},
   'src/skills/meetings/ops/violationLabels.ts':{humanizeViolationLabel:x=>x,attendeeFirstName:()=> 'Peer',attendeeConflictLine:c=>c.email+' '+c.reason},
-  'src/skills/meetings/bookingRequest.ts':{grantRelaxed:()=>({relaxed:false})},
+  'src/skills/meetings/bookingRequest.ts':{grantRelaxed:(args,context)=>({relaxed:args.relaxed===true&&context.senderRole==='owner'})},
   'src/db/slotHolds.ts':{getActiveSlotHolds:()=>[]},'src/utils/offeredSlotsStash.ts':{getOfferedSlots:()=>[],getOfferedSearchFingerprint:()=>null,recordOfferedSlots:()=>{}},
-  'src/db.ts':{getPersonMemory:()=>({}),getPersonByEmail:()=>({name:'Peer'}),listSchedulingContacts:()=>contacts,getEffectiveTimezoneById:id=>({timezone:contacts.find(p=>p.person_id===id)?.timezone}),getTravelRecordById:()=>null},
+  'src/db.ts':{getPersonMemory:()=>({email:requesterEmail}),getPersonByEmail:()=>({name:'Peer'}),listSchedulingContacts:()=>contacts,getEffectiveTimezoneById:id=>({timezone:contacts.find(p=>p.person_id===id)?.timezone}),getTravelRecordById:()=>null},
   'src/utils/displaySubject.ts':{subjectViewerFor:()=> 'owner',viewerEmailFor:()=>undefined},
-  'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async(_u,_e,_s,_t,_z,diag)=>{if(unknown&&diag)diag.notChecked=[email];return {[email]:busy?[{start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00',status:'busy'}]:[]}},getOwnerEventsForDecision:async()=>{if(offline)throw Error('fixture calendar unavailable');return []},isOutageShaped:()=>false,CalendarOfflineError:Error},
+  'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async(_u,_e,_s,_t,_z,diag)=>{if(unknown&&diag)diag.notChecked=[email];return {[email]:busy?[{start:'2026-10-06T00:00:00+03:00',end:'2026-10-07T00:00:00+03:00',status:'busy'}]:[]}},getOwnerEventsForDecision:async()=>{if(offline || (recoveryOffline && ++calendarReads>1))throw Error('fixture calendar unavailable');return []},isOutageShaped:()=>false,CalendarOfflineError:Error},
  }});
  Object.assign(h.load('src/utils/attendeeAvailability.ts'),{loadAttendeeAvailabilityForEmails:()=>availability,singleAttendeePresentationZone:()=>undefined});
  h.profile.schedule.work_hours=workHoursOverride??Object.fromEntries(['Sunday','Monday','Tuesday','Wednesday','Thursday'].map(d=>[d,['09:00-18:00']]));
  h.profile.meetings.work_hours_per_free_hour=clean?0:1;
+ if(inPersonHome){h.profile.meetings.physical_meetings_require_office_day=true;h.profile.schedule.office_days.days=['Monday'];h.profile.schedule.home_days.days=['Tuesday'];}
  const args={search_from:multi?'2026-10-05T09:00:00+03:00':'2026-10-06T09:00:00+03:00',search_to:'2026-10-06T18:00:00+03:00',duration_minutes:40,meeting_mode:'online',attendee_emails:[email],must_be:mustBe,...argsOverride};
- const out=await new(h.load('src/skills/meetings/ops.ts').SchedulingSkill)().executeToolCall('find_available_slots',args,{profile:h.profile,channel:'slack',senderRole:role,userId:'UOWNER',channelId:'fixture',threadTs:'fixture'});
+ const out=await new(h.load('src/skills/meetings/ops.ts').SchedulingSkill)().executeToolCall('find_available_slots',args,{profile:h.profile,channel:'slack',senderRole:role,userId:'UOWNER',channelId:'fixture',threadTs:'fixture',...contextOverride});
  const summary=h.load('src/core/orchestrator/turnHelpers.ts').summarizeToolCall('find_available_slots',args,out,zone);
  return {out,summary,warnings:h.warnings,calls:h.calls};
 }
@@ -41,4 +43,7 @@ test('preserved recovered multi-day search retains real earlier offday',async()=
 test('preserved unknown attendee calendar stays explicit on recovered offers',async()=>{const {out}=await run({unknown:true});assert.ok(out.slots.length);assert.ok(out.attendees_not_checked.includes(email));assert.match(out._attendee_not_checked_warning,/NOT confirmed-free/);});
 
 test('colleague owner-only fallback retains accepted-day facts and unverified calendar disclosure',async()=>{const {out,summary}=await run({clean:true,busy:true,role:'colleague'});assert.ok(out.slots.length);assert.ok(out.day_summary[0].accepted>0);assert.ok(!summary.includes('attendee_blocked='),summary);assert.ok(out._attendee_unverified_note,JSON.stringify(out));});
+
+
+
 

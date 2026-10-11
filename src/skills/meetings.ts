@@ -187,7 +187,7 @@ Do NOT use for:
       },
       {
         name: 'find_available_slots',
-        description: `Find bookable slots — ${profile.user.name}'s calendar intersected with every attendee you pass in attendee_emails, with all schedule rules applied. This is THE tool for proposing meeting times, for any attendee count: search → offer the slots → book the pick with create_meeting.
+        description: `Find owner availability or meeting-specific slots, applying the supplied attendees and category. For the owner's preliminary availability, use attendee_emails=[] when no attendees are established. Retain known attendee and internal/external category constraints. If missing meeting type changes the applicable rules, ask only the needed type question or label results as general owner availability conditional on meeting type. Colleague searches retain the authenticated requester and established attendee context. Reuse stated duration, dates and mode; default only unstated duration/dates. Named attendees constrain joint searches; clarify ambiguous identities. Booking requires necessary details and invitation authorization; options alone authorize only search.
 
 Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
@@ -291,6 +291,10 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             relaxed: {
               type: 'boolean',
               description: 'OPTIONAL (default false). Owner override path — see OWNER-PATH OVERRIDE rule in the MEETINGS SKILL section. Owner-only; ignored on colleague-path calls.',
+            },
+            owner_hours_exception_requested: {
+              type: 'boolean',
+              description: 'OPTIONAL (default false). Set true only after the requester explicitly chooses to ask the owner for an earlier/later-hours exception, or the owner explicitly asks to explore one. An empty search alone leaves this false: follow _scheduling_decision_note to ask whether the requester would consider earlier/later hours or wants the owner asked. For the requester-hours choice, obtain their exact local window/timezone and use attendee_hours for the authenticated requester only; preserve every other attendee and saved hours. This flag permits SEARCH only. Returned owner_approval_candidates need a concrete candidate and matching deferred_action through create_approval(kind=policy_exception) on colleague path; await owner approval before booking. On owner path, present candidates and violations in-thread and await explicit selection/booking authorization. Preserve returned dated clocks and ranking; search permission grants no invitation or override authority.',
             },
             must_be: {
               type: 'boolean',
@@ -1163,7 +1167,7 @@ When ${firstName} explicitly asks for something that would violate a soft rule (
 \`create_approval(kind=policy_exception)\` is COLLEAGUE-PATH only — when a colleague is requesting something that needs ${firstName}'s sign-off in his own DM.
 
 NO WORKING-HOURS PREAMBLE when asking about time.
-Time is computed, not requested (see PROPOSE DON'T ASK ABOUT TIME above — same STATE test, owner or colleague, and it holds even when he's answering your own clarifying question): once you hold attendee + duration + day/window, search and offer slots instead of asking "what time works?". Ask here only when the day, duration, or attendee itself is still open — and even then, JUST ASK. Don't preface with "(Office hours Wednesday are 10:30–19:00.)" or any equivalent recitation of his own hours back at him — he knows his schedule. Working-hours mentions belong in REJECTION explanations ("3:30 is past your hours, want 14:30 instead?"), not in clarifying questions before any slot has been searched.`;
+Follow find_available_slots' search contract to compute and offer times. Ask only for unresolved details the current operation needs. Keep clarifying questions brief; working-hours explanations belong with a searched slot's rejection or override, rather than a pre-search preamble.`;
     })();
 
     return `

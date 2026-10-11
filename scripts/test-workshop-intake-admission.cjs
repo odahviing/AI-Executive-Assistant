@@ -474,5 +474,7 @@ test('terminal disposition closes owner scope but does not pretend its unreviewe
   capture(); ok(assess(assessment())); build(); question()
   ok(write('--ref', 'alpha', '--source', 'owner', '--finding', 'Owner declined further implementation.', '--verdict', 'declined', '--invariant', 'none', '--note', 'Owner declined this work.'))
   assert.equal(JSON.parse(stats('--intake').stdout).items.length, 0)
-  bad(stats('--verification')); bad(continuationPlan().result)
+  ok(stats('--verification')); ok(stats('--report')); bad(continuationPlan().result)
+  assert.equal(item().verdict, 'declined')
+  assert.equal(item().review, undefined)
 })

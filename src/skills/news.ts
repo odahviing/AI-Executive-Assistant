@@ -673,7 +673,7 @@ async function classifyAlreadyCovered(
   alreadyLogged: string,
 ): Promise<{ novel: NewsSource[]; covered: NewsSource[] }> {
   if (!alreadyLogged.trim() || sources.length === 0) return { novel: sources, covered: [] };
-  const numbered = sources.map((s, i) => `${i}: ${s.title ?? s.url}${s.snippet ? ` — ${s.snippet}` : ''}`).join('\n');
+  const numbered = sources.map((s, i) => `${i}: ${s.title ?? s.url} [published: ${s.published || 'unknown'}]${s.snippet ? ` — ${s.snippet}` : ''}`).join('\n');
   try {
     const res = await getAnthropicClient().messages.create({
       model: NEWS_MODEL,
@@ -686,7 +686,10 @@ ${alreadyLogged.trim()}
 SOURCES gathered just now:
 ${numbered}
 
-Which numbered sources report a story that is ALREADY in the covered list above (same underlying event/development)? Output ONLY a JSON array of the matching numbers, e.g. [0,3,5]. Output [] if none match.`,
+Which numbered sources report a story that is ALREADY in the covered list above?
+Match the SAME SPECIFIC EVENT and material facts, not merely a shared company, topic, or trend. A monthly total and a quarterly total cover different reporting periods. A later funding round, a changed amount, a new product/version, or a material new development must remain available even when that company/topic was covered before. If a roundup contains at least one material new development, keep the source.
+Publication dates are context, not proof of novelty: a newly published retelling of the same event is still covered. Mark covered only when the supplied source evidence and a logged entry establish the same development; when the match is uncertain, keep it for the composer to assess relevance.
+Output ONLY a JSON array of the covered source numbers, e.g. [0,3,5]. Output [] if none match.`,
       }],
     });
     const text = ((res.content[0] as Anthropic.TextBlock).text ?? '').trim();

@@ -190,9 +190,10 @@ const POINTS_SOMEWHERE = /(:\d+)|(\bwf_[a-z0-9-]+)|(\.(?:js|cjs|ts|md|log|jsonl|
 // and every re-file is refused with "still open" about work that shipped. Same
 // merge `ledger-stats --architect` does, for the same reason.
 let rows = []
+const ledgerText = fs.existsSync(LEDGER) ? fs.readFileSync(LEDGER, 'utf8') : ''
 if (fs.existsSync(LEDGER)) {
   const latest = new Map()
-  fs.readFileSync(LEDGER, 'utf8')
+  ledgerText
     .split(/\r?\n/)
     .filter((l) => l.trim())
     .forEach((l) => {
@@ -224,12 +225,19 @@ if (implementationId || reviewId || wrapId) {
   if (!row || [implementationId, reviewId, wrapId].filter(Boolean).length !== 1) die('name one existing Architect row with --implementation, --review or --wrap-companion')
   if (['declined', 'refuted'].includes(row.verdict)) die('a ruling or refutation cannot be reopened by implementation metadata')
   const stateFile = path.join(REPO, '.claude/agent-loop/state.json')
-  const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile)) : {}
-  if (['running', 'stopped'].includes(state.lastRun?.status) || state.inFlight?.length) die('live run must be resolved before Architect metadata writes')
+  const stateText = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : ''
+  const state = stateText ? JSON.parse(stateText) : {}
+  const wrapMetadata = state.lastRun?.status === 'running' && /^wrap-.+/.test(state.lastRun?.id || '') &&
+    argOf('--runId') === state.lastRun.id && Array.isArray(state.inFlight) && state.inFlight.length === 0
+  if ((!wrapMetadata && ['running', 'stopped'].includes(state.lastRun?.status)) || state.inFlight?.length) die('live run must be resolved before Architect metadata writes')
   const lock = `${LEDGER}.lock`
   let fd
   try { fd = fs.openSync(lock, 'wx') } catch { die('Architect ledger writer lock exists; no append performed') }
   try {
+    const unchanged = () => {
+      if ((fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : '') !== stateText || fs.readFileSync(LEDGER, 'utf8') !== ledgerText) throw new Error('run state or Architect ledger changed; retry against current state')
+    }
+    unchanged()
     let event
     if (wrapId) {
       const version = argOf('--version'), requestedSha = argOf('--sha'), attemptId = argOf('--attempt-id')
@@ -295,8 +303,9 @@ if (implementationId || reviewId || wrapId) {
       const stored = { ...event }
       if (payload.evidenceRef) { stored.implementationRef = payload.evidenceRef; delete stored.implementation }
       if (payload.reviewRef) { stored.reviewRef = payload.reviewRef; delete stored.review }
+      unchanged()
       fs.appendFileSync(LEDGER, JSON.stringify(stored) + '\n')
-    }
+    } else unchanged()
     // Ledger is authoritative. Report failure remains loud and retryable.
     const intake = require('./workshop-intake.cjs')
     const productRows = intake.read(REPO)

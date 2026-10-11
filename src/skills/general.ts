@@ -714,16 +714,57 @@ export async function readNewsArticle(url: string, timeoutMs: number): Promise<{
       }
       if (!page.bytes) return null;
       const $ = loadBuffer(page.bytes);
+      // JSON-LD articleBody is publisher-marked article content too. Bind it
+      // to this exact page so recommendations/listings cannot supply a body.
+      const pageIdentity = (raw: unknown): string | null => {
+        if (typeof raw !== 'string' || !raw.trim()) return null;
+        try {
+          const u = new URL(raw, current);
+          u.hash = '';
+          u.pathname = u.pathname.replace(/\/+$/, '');
+          return u.href;
+        } catch { return null; }
+      };
+      const structuredBodies: Array<{ title?: string; content: string }> = [];
+      $('script[type="application/ld+json"]').each((_, script) => {
+        try {
+          const pending: unknown[] = [JSON.parse($(script).text())];
+          while (pending.length) {
+            const value = pending.pop();
+            if (Array.isArray(value)) { pending.push(...value); continue; }
+            if (!value || typeof value !== 'object') continue;
+            const node = value as Record<string, unknown>;
+            if (Array.isArray(node['@graph'])) pending.push(...node['@graph']);
+            const types = Array.isArray(node['@type']) ? node['@type'] : [node['@type']];
+            if (!types.some(type => ['Article', 'NewsArticle', 'BlogPosting'].includes(String(type)))) continue;
+            const entity = node.mainEntityOfPage;
+            const identity = typeof entity === 'object' && entity !== null
+              ? (entity as Record<string, unknown>)['@id'] : entity;
+            if (pageIdentity(identity ?? node.url ?? node['@id']) !== pageIdentity(current.href)
+              || typeof node.articleBody !== 'string' || !node.articleBody.trim()) continue;
+            structuredBodies.push({
+              title: typeof node.headline === 'string' ? node.headline : undefined,
+              content: node.articleBody.replace(/\s+/g, ' ').trim(),
+            });
+          }
+        } catch { /* Invalid metadata does not invalidate a marked DOM body. */ }
+      });
+      if (structuredBodies.length > 1) return null; // ambiguous publisher bodies
+      if (structuredBodies.length === 1) return { url: current.href, ...structuredBodies[0] };
+
       $('script, style, template, noscript, nav, aside, footer, form, [role="navigation"], [role="complementary"], [hidden], [aria-hidden="true"]').remove();
       // Publisher structural metadata, never English prose/heading matching.
       // entry-content is the WordPress/h-entry body convention used by the
-      // incident publisher. Require one article so listing pages cannot merge.
-      const articles = $('article');
+      // incident publisher. Require one primary article so listing pages cannot merge.
+      // WordPress h-entry marks the primary post even when related cards
+      // also use article elements. Multiple h-entries remain ambiguous.
+      const posts = $('article.hentry');
+      const articles = posts.length === 1 ? posts : $('article');
       const marked = $('[itemprop~="articleBody"]');
       const entries = articles.find('.entry-content');
       const body = marked.length === 1 ? marked : articles.length === 1 ? (entries.length ? entries : articles) : $();
       if (body.length !== 1) return null;
-      body.find('article, .post-related, .related-posts, .sharedaddy, .social-share, [itemtype$="/SiteNavigationElement"]').remove();
+      body.find('article, .post-related, .related-posts, .yarpp-related, .sharedaddy, .social-share, [itemtype$="/SiteNavigationElement"]').remove();
       const title = articles.length === 1 ? articles.find('h1').first().text().replace(/\s+/g, ' ').trim() : undefined;
       body.find('p, div, li, h1, h2, h3, h4, br, section, tr').append('\n');
       const content = body.text().replace(/\s+/g, ' ').trim();

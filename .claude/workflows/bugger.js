@@ -547,13 +547,12 @@ if (carriedDeferred.length)
 // — always drop, unless the match is flagged REGRESSION (see `regressionNote`
 // above), in which case it is reframed and kept rather than silently lost a
 // second time. `parkedRefs` (openKnown: converted/declined) is a past DECISION
-// — naming it directly in a preset is his own current act, which per E12/E2 is
-// exactly what overrides a decline, so it is never dropped here, only NAMED so
-// the override is visible.
+// — a preset match is named here for visibility, not treated as authorization.
+// Explicit owner reassessment and current native admission still gate dispatch.
 const presetParked = presetArg.filter((i) => i && parkedRefs.has(refKey(i.id || i.ref)))
 if (presetParked.length)
   argWarnings.push(
-    `${presetParked.length} preset item(s) match an \`openKnown\` (parked/declined) ref and were KEPT, not dropped: ${presetParked.map((i) => i.id || i.ref || '(no id)').join(', ')}. Naming it directly in a preset is his own act and overrides a decline/conversion (E12) — this was never checked before now.`,
+    `${presetParked.length} preset item(s) match an \`openKnown\` (parked/declined) ref and were retained for admission checking: ${presetParked.map((i) => i.id || i.ref || '(no id)').join(', ')}. A preset alone does not reverse a disposition; explicit owner reassessment and current native admission are required before dispatch (E12).`,
   )
 const presetBuiltAll = presetArg.filter((i) => i && builtRefs.has(refKey(i.id || i.ref)))
 const presetRegression = presetBuiltAll.filter((i) => {
@@ -703,19 +702,17 @@ const EDITOR = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you — a `converted` match (always dropped) or a `declined` match whose OWN source is a bare `logs` rediscovery (stays declined; see `overriddenDeclined` for the one case that proceeds instead). X51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
+        'the ref of every finding you dropped because it matched a row on the `openKnown` list the brief handed you — a `converted` match (always dropped) or a `declined` match without an explicit new owner instruction for reassessment, including unchanged GitHub tickets (see `overriddenDeclined`). X51 · THAT LIST ONLY — a row you saw in `ledger-stats --open` is corroboration, never grounds to drop. Empty array if none; do NOT omit the field, an omission is indistinguishable from "the check did not run".',
     },
-    // X190 · the ONE case an `openKnown` match does NOT drop. A `declined` row
-    // matched by anything but a bare `logs` rediscovery is the owner's own act
-    // reaching the editor again — a ticket, a direct restatement — and his rule
-    // is that only his own act can undo a decline. This is the trace for that
-    // reversal, kept separate from `droppedAsOpenKnown` because it is a state
-    // CHANGE, not a routine drop, and needs its own visibility in the manifest.
+    // An explicit new owner instruction supports reassessing a declined ref;
+    // an unchanged ticket listing or automated rediscovery does not. Retain
+    // the reversal trace separately from routine suppression. Native admission
+    // still decides whether the reassessed work may dispatch.
     overriddenDeclined: {
       type: 'array',
       items: { type: 'string' },
       description:
-        "the ref of every `openKnown` row you matched that was `declined`, where the matching finding's OWN `source` is anything but a bare `logs` rediscovery — the owner's own act overriding his prior decline. Also tagged per-issue via `overridesDeclined`. Empty array if none; do NOT omit — an omission is indistinguishable from the check never running.",
+        "the ref of every declined `openKnown` row explicitly requested for reassessment by a new owner instruction, cited on the issue. An unchanged GitHub ticket or source label alone does not reverse a decline. Also tagged per-issue via `overridesDeclined`; native admission still gates dispatch. Empty array if none; do NOT omit.",
     },
     droppedAsAlreadyBuilt: {
       type: 'array',
@@ -897,16 +894,12 @@ const EDITOR = {
             description:
               "the ref of an `openBacklog` row this finding matches — same bug, still open, getting fresh evidence tonight. Never a reason to drop; the finding ships normally. Omit when it matches nothing on that list.",
           },
-          // X190 · the reversal tag. Set only when this issue's own `source`
-          // overrode a PRIOR `declined` verdict on the matched `openKnown` ref —
-          // never when it merely matches an open or converted row. Omitting this
-          // on an override makes the issue indistinguishable from ordinary new
-          // work, which is exactly the ambiguity his rule (only his own act
-          // reopens a decline) needs to be visibly resolved against.
+          // Reassessment tag for an explicit new owner instruction, never an
+          // unchanged source listing or a match to an open/converted row.
           overridesDeclined: {
             type: 'string',
             description:
-              "the ref of a `declined` `openKnown` row this issue explicitly overrides. Set ONLY when this finding's own `source` is anything but a bare `logs` rediscovery — a ticket or a direct restatement is the owner's own act, the one thing that can reopen a decline (editor.md E12, E2). Omit entirely otherwise; a bare `logs` match against a `declined` row is DROPPED into `droppedAsOpenKnown`, never overridden.",
+              "the ref of a declined `openKnown` row explicitly requested for reassessment by a new owner instruction. Cite that instruction in `whyHypothesis`; source labels and unchanged GitHub tickets are insufficient (editor.md E12, E2). Omit otherwise and report the suppressed ref in `droppedAsOpenKnown`. Native reassessment/admission is still required before dispatch.",
           },
           // Filled ONLY when the issue cites a code location. This was its own
           // Haiku pass; the editor is already holding the issue, so it resolves
@@ -1518,7 +1511,7 @@ const editor = await agent(
         `Each of these left the bug track as a DECISION, not a fix. Its own \`state\` says which: \`converted\` (moved to a GitHub issue where the design question is being worked) or \`declined\` (the owner ruled directly it is not a bug, or not worth fixing). Neither is fixed, so unlike \`alreadyBuilt\` above these do not stop recurring after a deploy — the symptom can reappear indefinitely and you WILL find it again. That is expected. It is not news.\n\n` +
         `**Match on \`ref\` first, then a shared \`identity\` slug where one is shown below, then the description** — same order as \`alreadyBuilt\`.\n\n` +
         `**A \`converted\` match: always DROP it.** List the ref in \`droppedAsOpenKnown\`.\n\n` +
-        `**A \`declined\` match: branch on THIS finding's own \`source\` (E2's rule, applied here).** A bare \`logs\` source is a pure automated rediscovery — it can NEVER override a decline: DROP it, but list the ref in \`droppedAsOpenKnown\` all the same, so it is held with a trace rather than silently discarded. Any other source (\`github\`, \`owner\`, \`both\`) is the owner's own act reaching you again — a ticket, a direct restatement — and OVERRIDES the decline: keep the issue, proceed exactly as new work, set \`overridesDeclined\` to the matched ref, and also list that ref in \`overriddenDeclined\`. A decline must never resurface on its own; it comes back only on his own act.\n\n` +
+        `**A \`declined\` match: preserve the decision unless a new owner instruction explicitly requests reassessment.** DROP automated rediscoveries, including unchanged GitHub tickets, and list the ref in \`droppedAsOpenKnown\`. A source label alone never reverses a decline. With an explicit new instruction, cite it in \`whyHypothesis\`, set \`overridesDeclined\` to the matched ref and list it in \`overriddenDeclined\`; native reassessment and admission still gate dispatch. Apply Manager OPERATIONS' Scope and decomposition.\n\n` +
         `**One exception on either state — report it under the SAME ref, never as a new issue:** if the recurrence carries materially new information (it now hits colleagues rather than only him, the frequency has jumped, or it fails in a way the parked description does not cover), say so in \`whyHypothesis\` against that ref. A change in severity is worth knowing; a duplicate row is not.\n\n${OPEN_KNOWN.map(describeOpen).join('\n')}\n`
       : '') +
     (OPEN_BACKLOG.length

@@ -1,6 +1,6 @@
 # Maelle session context
 
-Working on Maelle at `E:/Code/Maelle`. **Every fact in this file that a command can print is NAMED BY ITS COMMAND, never copied** — a number written here is stale by the next wrap, and this file is the first thing a fresh chat reads. **Version:** the `version` field in `package.json`. **HEAD:** `git log -1` — a wrap commit's subject opens with the version it shipped. **Open bug tickets:** `gh issue list --label Bug`; when that comes back empty the work is in the ledger backlog and the logs.
+Working on Maelle at `E:/Code/Maelle`. **Every fact in this file that a command can print is NAMED BY ITS COMMAND, never copied** — a number written here is stale by the next wrap, and this file is the first thing a fresh chat reads. **Version:** the `version` field in `package.json`. **HEAD:** `git log -1` — a wrap commit's subject opens with the version it shipped. **Backlog scope:** [Manager OPERATIONS — Scope and decomposition](skills/manager/OPERATIONS.md#scope-and-decomposition). GitHub inventory is separate from active backlog; use `gh issue list --label Bug` when requested or required by an authorized discovery run.
 
 ## He flags a bug or suggestion — capture it, don't investigate it
 
@@ -202,9 +202,9 @@ Assume multiple lanes (and chats) hold uncommitted edits at any time. At wrap: `
 
 **Infrastructure is HANDYMAN'S as of 2026-08-03** — the VM, the deploy watcher, PM2, automation and the DB schema all have an owner now, where this line said *"no lane owns these"* for a week while 69 infrastructure-shaped ledger refs spread across all eight lanes with no concentration anywhere. **Still owner-driven:** model/LLM-layer campaigns (`llm/models.ts`, thinking policy, effort per surface) — a tier is his call (the Workshop's W12, as of 2026-08-04 — every lane's, not only Handyman's), and these are deliberate projects rather than nightly bug flow.
 
-## Open / deferred bugs
+## Historical context and standing constraints
 
-**The live list is `node scripts/ledger-stats.cjs --open` and `gh issue list`** — both print their own counts and their own split, so no number from either is copied here. Only what neither of those can tell you is kept here:
+**The active list is `node scripts/ledger-stats.cjs --open`**, governed by Manager OPERATIONS' backlog scope. The notes below are historical context and constraints, not an intake list or authorization to reopen old work. Do not recite them in routine status.
 
 - **1.4 — MPIM owner-clamp: KEEP it, do NOT loosen.** The clamp is an **anti-cheat security boundary across ALL tools** (colleagues must never gain owner authority / book for themselves), not just calendar privacy. Keyed on the Slack-authenticated sender, not spoofable (`app.ts`, the sender-identity read; `processMessage.ts` holds the clamp). The owner's "flag-and-override" in his own group DM is delivered SAFELY via the approval flow, NOT by re-granting in-group authority. An earlier "Option A" loosen was stood down. Live context: **#157 and #158 are open MPIM tickets** — do not read either as licence to loosen this.
 - **Move-path roster: union or replace?** — still undecided, and the harm it named is already guarded. `findAvailableSlots.ts` (`resolveMovingEventAttendees` + the `#145b` overlap test) folds a moving event's roster in only when it shares an attendee with the explicit set, so the 4→7 balloon cannot recur. The open question is whether the event roster should be **authoritative** (replace) rather than merged — his call, no ticket.

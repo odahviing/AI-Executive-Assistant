@@ -1,3 +1,24 @@
+## 5.0.7 — Better meeting decisions and fresh news
+
+When timezones leave no ordinary meeting options, Maelle asks whether the requester can extend their own hours or wants an owner exception before proceeding. News retrieval preserves valid publisher bodies and materially new developments, while request briefings keep current asks separate from older conversations.
+
+### Fixed
+- Reuse supplied meeting duration and allow preliminary owner availability without unnecessary attendee questions, preserving known meeting-type constraints.
+- Report the actual reason a scheduling search failed. Apply a requester's temporary hours choice only to their own availability; route concrete owner-hours exceptions to approval without booking first.
+- Anchor briefing context to the current request's creation time and retain relevant booking outcomes, preventing older asks from implying that a new request has waited for months.
+- Read URL-bound publisher article bodies and unique primary posts, exclude related-story recommendations, and distinguish genuinely new reporting periods or material developments from repeat coverage.
+- Ignore local regression evidence and bookkeeping temporaries without deleting them, correcting the inflated working-tree change count.
+
+### Framework
+- Keep agreed backlog work separate from historical GitHub inventory and preserve owner dispositions across automated rediscovery.
+- Stop closed scope dispositions from demanding implementation reviews; record the requester's bounded-hours ruling in the scheduling charter.
+- Allow the active wrap to save validated review and release metadata without dropping its lock, while rejecting other runs, active builders and concurrent state changes.
+
+### Verification and limits
+- Five maintenance references and four framework repairs independently reviewed, including the joint scheduling/schema path. Full checkpoint: 240 suite/timezone executions and 5,791 assertions passed; the subsequent release-writer repair passed independent targeted replacement checks and a fresh TypeScript check.
+- All 30 required flows independently traced, with nine stale line-number anchors and no behavior failures. Prompt interpretation remains model-dependent; the corrected news classifier/composer also passed one controlled live sample.
+- Model upgrades are excluded and tracked in high-priority Improvement #208. Current runtime models and thinking policy remain unchanged.
+
 ## 5.0.6 — Ground news in article content
 
 News retrieval now separates an article from surrounding site links before selecting company mentions or supplying briefing and on-demand sources. This addresses the observed Reflectiz misattribution; the referenced page currently mentions Reflectiz only in navigation linking another story.

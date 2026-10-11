@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import logger from '../../utils/logger';
 import type { UserProfile } from '../../config/userProfile';
-import { slotDayMinutes } from '../../utils/workHours';
+import { slotDayMinutes, ownerWorkIntervalsBetween } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
 import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped, compareSlotPreference } from './calendarReads';
@@ -13,6 +13,20 @@ import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
 // combined `SearchRejectReason`, scheduleRules.ts for the checkSlot-facing
 // `RuleViolationKind` side — without needing both import paths.
 export type { SearchRejectLabel };
+
+/** Prefer the smallest extension of the owner's actual dated workday. */
+export function compareOwnerHoursException(
+  a: { start: string; end: string }, b: { start: string; end: string }, profile: UserProfile,
+): number {
+  const distance = (slot: typeof a) => {
+    const start = DateTime.fromISO(slot.start).setZone(profile.user.timezone);
+    const end = DateTime.fromISO(slot.end);
+    const intervals = ownerWorkIntervalsBetween(start.startOf('day'), start.endOf('day'), profile);
+    return Math.min(...intervals.map(interval => Math.max(
+      interval.start.toMillis() - end.toMillis(), start.toMillis() - interval.end.toMillis(), 0)));
+  };
+  return distance(a) - distance(b) || Date.parse(a.start) - Date.parse(b.start);
+}
 import { attendeeWorkSegmentsBetween, tzTempDifferingForDay, ATTENDEE_REASON_PREFIXES, loadSchedulingComparisonAvailability, schedulingComparisonIntervals } from '../../utils/attendeeAvailability';
 import type { TimezoneTempSource } from '../../db/people';
 
@@ -380,6 +394,9 @@ export async function findAvailableSlots(params: {
   // (which, computed in the SEARCH zone instead of the day's effective zone,
   // could disagree with checkSlot on an away day — M1).
   keepWorkHours?: boolean;
+  // Explicit requester choice to explore ONLY owner-hours exceptions. Apply
+  // eligibility and proximity ranking before the per-day candidate cap.
+  ownerHoursExceptionRequested?: boolean;
   // v4.1.x (M10) — WHO the returned annotations are for. The only annotation
   // that carries free text is `over_optional` (the optional-join event's
   // subject), and find_available_slots is colleague-allowed, so a private
@@ -1557,6 +1574,10 @@ export async function findAvailableSlots(params: {
         }
         if (params.relaxed) {
           const broken = brokenOwnerRules(slotCheckInput);
+          if (params.ownerHoursExceptionRequested) {
+            const otherRule = broken.find(rule => rule !== 'outside_working_hours');
+            if (otherRule) return { kind: 'reject', reason: mapVerdictToRejectLabel(otherRule, dayType), iso: cursorDt.toISO()! };
+          }
           if (broken.length > 0) verdictBrokenRules = broken;
         }
       } else {
@@ -1669,6 +1690,11 @@ export async function findAvailableSlots(params: {
     // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
     for (const [, daySlots] of dayBuckets) {
       if (daySlots.length === 0) continue;
+      if (params.ownerHoursExceptionRequested && profile) {
+        daySlots.sort((a, b) => compareOwnerHoursException(a, b, profile));
+        candidates.push(...daySlots.slice(0, MAX_PER_DAY));
+        continue;
+      }
       daySlots.sort((a, b) => Number(!!a.over_optional) - Number(!!b.over_optional) || compareSlotPreference(a, b));
       // Keep an earlier reasonable alternative when the budget allows it; a
       // better late slot must not erase speed from the choice altogether.
@@ -1860,3 +1886,4 @@ export async function findAvailableSlots(params: {
   // by the search window; only the spread picks reach the model.
   return candidates;
 }
+

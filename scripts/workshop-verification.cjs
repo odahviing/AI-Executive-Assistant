@@ -273,6 +273,9 @@ function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
   }
   const blockers = []
   for (const r of collapsed.latest) {
+    // Owner dispositions close scope without asserting implementation quality.
+    // Retain historical evidence, but do not demand a new review of a decline.
+    if (['declined', 'converted'].includes(r.verdict)) continue
     // Legacy releases remain historical facts. A new implementation/overturn
     // clears inherited wrapped state in collapseRows and must earn a fresh pass.
     if ((r.verdict === 'wrapped' || r.state === 'wrapped') && isClosed(r)) continue
