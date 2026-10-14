@@ -229,7 +229,7 @@ async function dispatchHandler(
  */
 async function runExpiry(row: RequestRow, profile: UserProfile): Promise<'closed'> {
   const outcome = JSON.parse(row.outcome_json ?? '{}') as Record<string, unknown>;
-  if (outcome.verified === false && typeof outcome.replayed === 'string') {
+  if ((outcome.verified === false || Array.isArray(outcome.outcomes)) && typeof outcome.replayed === 'string') {
     await closeUnconfirmedExecution(row, { profile, wasAwaitingColleague: true }, outcome.replayed);
     return 'closed';
   }

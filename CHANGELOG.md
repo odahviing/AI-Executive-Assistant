@@ -1,3 +1,19 @@
+## 5.0.9 — Reliable meeting rescheduling
+
+Meeting rescheduling now excludes the exact events being moved from conflict checks and validates coordinated moves against the resulting calendars. Maelle carries each meeting's actual outcome through approval, retry and conversation summaries, so a partial result cannot become a claim that everything is done.
+
+### Fixed
+- Preserve unrelated attendee and room conflicts while checking the full duration of each proposed move. Unchanged targets do not send another calendar update.
+- Block calendar writes on turns classified as exploratory requests or negative social feedback. Keep proposal context available and guide replies toward a concise recommendation and a clear next decision.
+- Persist the exact coordinated plan, reconcile each meeting independently, and retry only unfinished work. Verify the current event identity before replaying a remaining move.
+- Confirm completion from the exact observed calendar state, distinguish an observed result from a new write, and report failed or unknown outcomes accurately.
+- Keep detailed terminal outcomes in the owner's private surface; shared-channel notices retain scoped wording.
+- Restore provider-compatible meeting tool schemas and enforce conditional argument requirements in the handlers. Repair affected regression fixtures without dropping their semantic checks.
+
+### Validation and limits
+- All 15 shipping references independently reviewed. The full release checkpoint plus targeted repair rechecks reconciles to 257 passing suite/timezone executions and 6,243 passing assertions; typechecking passed. All 30 Golden paths were independently reviewed, with 14 stale citation anchors recorded.
+- Conversation guidance and classification remain model-dependent; deterministic and structural checks do not establish live-chat accuracy. No extra acknowledgement classifier call was added, following the owner's decision.
+
 ## 5.0.8 — Claude 5.5 and quieter scheduled updates
 
 Maelle now uses Sonnet 5.5 and Haiku 5.5. Scheduled work sends its finished result without first opening an empty “Working…” thread; progress remains visible in existing conversations.

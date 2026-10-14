@@ -29,7 +29,7 @@ function harness(responses = [verdict(true)], overrides = {}) {
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/utils/usageLog.ts': { logLlmUsage() {} },
     'src/core/requests/types.ts': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag', ORIGIN_SURFACE_REPLAY_TOOLS: ['create_meeting','move_meeting','update_meeting','delete_meeting','book_floating_block','promote_timezone_temp'] },
-    'src/core/orchestrator/turnHelpers.ts': { toolLinesMatching: () => [] },
+    'src/utils/attendeeAvailability.ts': { ATTENDEE_REASON_PREFIXES: [] },
     'src/connections/slack/formatting.ts': { formatForSlack: s => s },
     'src/utils/availabilityGate.ts': { freshHardBlockedSlots: () => [] },
     'src/utils/claimChecker.ts': { checkReplyClaims: async () => ({ claimed_action: false }) },
@@ -38,7 +38,7 @@ function harness(responses = [verdict(true)], overrides = {}) {
     'src/db/index.ts': { getPersonMemory: () => ({ email: 'yael@example.com' }) },
   };
   Object.assign(stubs, overrides);
-  const actual = new Set(['src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
+  const actual = new Set(['src/core/orchestrator/turnHelpers.ts', 'src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
   function load(rel) {
     if (Object.hasOwn(stubs, rel)) return stubs[rel];
     if (cache[rel]) return cache[rel].exports;

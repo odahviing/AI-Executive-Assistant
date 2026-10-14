@@ -41,6 +41,19 @@ export class MeetingsSkill implements Skill {
     // the v1.7.8 "leave uncategorized rather than guess" rule).
     const categoryNames = (profile.categories ?? []).map(c => c.name);
     const categoryEnum = categoryNames.length > 0 ? categoryNames : undefined;
+    const coordinatedMoves = {
+      type: 'array', minItems: 2,
+      description: 'A complete proposed plan of at least two distinct, specific event occurrences. Each meeting_id appears once. Supply every replacement together; omit singular top-level meeting fields. Omit new_end to preserve that occurrence\'s duration. Times follow the tool\'s stated_zone convention.',
+      items: {
+        type: 'object',
+        properties: {
+          meeting_id: { type: 'string', description: 'Specific occurrence ID from get_calendar; not a series master.' },
+          new_start: { type: 'string', description: 'ISO datetime of this occurrence\'s proposed start.' },
+          new_end: { type: 'string', description: 'Optional ISO end; supply only for an agreed duration change.' },
+        },
+        required: ['meeting_id', 'new_start'],
+      },
+    };
     return [
       // v2.6.4 — find_slack_user moved to SlackConnection.getTools(). It's a
       // transport directory lookup with people_memory side effects, not a
@@ -189,7 +202,9 @@ Do NOT use for:
         name: 'find_available_slots',
         description: `Find owner availability or meeting-specific slots, applying the supplied attendees and category. For the owner's preliminary availability, use attendee_emails=[] when no attendees are established. Retain known attendee and internal/external category constraints. If missing meeting type changes the applicable rules, ask only the needed type question or label results as general owner availability conditional on meeting type. Colleague searches retain the authenticated requester and established attendee context. Reuse stated duration, dates and mode; default only unstated duration/dates. Named attendees constrain joint searches; clarify ambiguous identities. Booking requires necessary details and invitation authorization; options alone authorize only search.
 
-Before calling this tool: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
+For a complete joint move check, pass coordinated_moves; the tool loads each occurrence's attendees, duration and location and evaluates their replacements together. This is discovery only, with no writes. For ordinary slot search, supply duration_minutes, attendee_emails and meeting_mode from the request; existing duration, attendee-resolution and mode defaults apply when omitted.
+
+For ordinary slot search: ASK ${profile.user.name.split(' ')[0]} TWO HUMAN QUESTIONS first if you don't already know the answer. Do NOT use the words "meeting_mode" or list four options — that's robotic. Ask like a person:
   • "In person or online?"
   • If in-person and the venue isn't ${profile.user.name.split(' ')[0]}'s office: "Where?"
 
@@ -303,8 +318,10 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
             moving_event_ids: {
               type: 'array',
               items: { type: 'string' },
-              description: 'OPTIONAL. Pass when validating or discovering a MOVE — these are the calendar event id(s) of the meeting(s) being moved. Each id\'s current time is (1) SUBTRACTED from the owner\'s busy pool so candidate slots aren\'t blocked by a meeting that\'s leaving, AND (2) FORBIDDEN as a candidate so the tool never offers the original time (or any overlap with it) as a "move target". Use when the owner asks "can we move the 11am to 10:30?" / "what are options to move the 11am?". Get the event id from get_calendar. Omit for new bookings.',
+              description: 'For single-move discovery, pass the specific occurrence ID from get_calendar. Identity-based exclusion removes that event while preserving unrelated commitments; a partial overlap with its old interval is valid. The exact unchanged interval is not a new move option. To check a complete joint plan, use coordinated_moves instead of merely excluding multiple old events.',
             },
+            coordinated_moves: coordinatedMoves,
+            stated_zone: { type: 'string', description: 'For coordinated_moves only: zone of the as-stated target clocks (home, local, or an IANA zone). Omit when no zone was named; the existing travel/home convention applies.' },
             category: {
               type: 'string',
               description: 'OPTIONAL. The category this meeting will be booked under. When set, slot-finder applies the category rules — daily / weekly limits and day-type constraints (office-only, home-only). Slots that would violate the category get filtered out before returning. Omit ONLY when there is no category context (e.g. owner is asking "when am I free?" with no specific meeting in mind). When you have a category context, ALWAYS pass it — otherwise the slots returned ignore category rules and you may propose a time that breaks them. The value must match one of the names from the CATEGORIES list in the prompt.',
@@ -325,7 +342,7 @@ ALWAYS prefer \`candidate_slots\` over multiple separate calls when the candidat
               },
             },
           },
-          required: ['duration_minutes', 'attendee_emails', 'meeting_mode'],
+          required: [],
         },
       },
       {
@@ -450,17 +467,20 @@ LANGUAGE: calendar invites are shared artifacts others read, so keep subject + b
         name: 'move_meeting',
         description: `Move (reschedule) an existing meeting — THE tool whenever the owner asks to move / reschedule / shift / push a meeting that's already on the calendar. Prefer over create_meeting AND delete+recreate; preserves attendees, Teams link, duration, history. Includes relocating a recurring 1:1 (Weekly/BiWeekly) to a different day or week — moving a recurring occurrence creates a single-occurrence exception, leaves the rest of the series intact (that's what 'move my weekly' means). Get the occurrence id from get_calendar. Keep the meeting's current duration unless told otherwise (new_end = new_start + existing length).
 
-Owner-path: owner override IS the approval. Move the meeting when he asks.
+Owner-path: execute an explicit instruction with a settled target or an accepted concrete plan, preserving existing override authority. Feasibility questions and frustration call for discovery. Honor a promise to present options before moving until the concrete plan is accepted.
+
+For an agreed joint plan, pass coordinated_moves with all identified occurrences and exact targets together. Otherwise, a single move requires meeting_id, meeting_subject and new_start. The handler validates the selected shape and rechecks the complete proposed calendar before execution. Present any materially changed plan for a new decision; keep unchanged accepted scope and overrides. Report each event's returned outcome, including partial or unknown completion.
 
 FREED SLOT — after a successful move the result includes \`vacated\` = the slot the meeting just LEFT (its old time): { start, end, label }. Surface it when useful ("that frees up your 11:00 today") so it's in the conversation. If the owner then asks to put something into "the new open slot" / "the freed slot", use \`vacated\` — don't re-ask what time the moved meeting used to be, and don't confuse where it moved TO with where it moved FROM.
 
-Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, travel buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=policy_exception) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking. If the colleague (who's on the meeting) asks to move it but names NO new time, don't escalate straight to approval — call find_available_slots (owner + the other required attendees), offer 2–3 rule-compliant slots, let them pick, then move_meeting. Escalate (create_approval kind=policy_exception) only if they insist on a specific time that breaks a rule.`,
+Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already booked with them, call this directly. The handler runs a rule-compliance check server-side (owner's work hours, work days, travel buffers, floating blocks, no conflicts). If the new slot passes, the move happens silently and the owner is shadow-notified. If the new slot breaks a rule, the tool returns { needs_owner_approval: true, reason, message } — don't keep trying; fall back to create_approval(kind=policy_exception) with the requested slot so the owner can decide, and tell the colleague warmly that you're checking. If the colleague (who's on the meeting) asks to move it but names NO new time, don't escalate straight to approval — call find_available_slots (owner + the other required attendees), offer the requested or configured count of rule-compliant slots, let them pick, then move_meeting. Escalate (create_approval kind=policy_exception) only if they insist on a specific time that breaks a rule.`,
         input_schema: {
           type: 'object',
           properties: {
-            meeting_id: { type: 'string' },
-            meeting_subject: { type: 'string' },
-            new_start: { type: 'string', description: 'ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
+            meeting_id: { type: 'string', description: 'Required for a single move: the specific event occurrence ID. Omit for coordinated_moves.' },
+            meeting_subject: { type: 'string', description: 'Required for a single move: the subject corresponding to meeting_id. Omit for coordinated_moves.' },
+            coordinated_moves: coordinatedMoves,
+            new_start: { type: 'string', description: 'Required for a single move; omit for coordinated_moves. ISO 8601 datetime — the clock time EXACTLY as the owner stated it, NOT converted. Say which zone that clock is in via `stated_zone`.' },
             new_end: { type: 'string', description: 'OPTIONAL — omit on a pure reschedule to KEEP the meeting\'s current length (the handler derives new_end = new_start + the existing duration, so you never have to ask "how long?"). Set it ONLY when the duration is actually changing.' },
             stated_zone: { type: 'string', description: 'Which timezone the owner NAMED for the new time. Set it WHENEVER he names ANY zone — INCLUDING his home zone. Values: "home" (he said "Israel time" / "my home time"), "local" (he said "my time" / "local", or named the place he is physically in), or an IANA zone like "America/New_York" (he named a specific OTHER zone, e.g. "ET"/"EST"). OMIT ONLY when he names NO zone — then a bare time is read as where he physically is on a travel day, else his home zone. Pass the clock as-stated; the tool does ALL timezone math — NEVER hand-convert.' },
             intended_weekday: {
@@ -490,7 +510,7 @@ Colleague-path (v2.2.1): when a colleague asks to move a meeting you've already 
               description: 'OPTIONAL (default false). Colleague-path only. On a colleague-requested move, move_meeting may refuse with error="attendee_conflict" (plus `_attendee_busy_note`) because one or more REQUIRED attendees — not the owner — are busy, outside working hours, or lack travel-time room around an adjacent commitment at the new time; the message is already phrased as "Just FYI — <reason>. Want me to move it anyway?" and NAMES EVERY blocked attendee, not just one — relay all of them to the requester, verbatim or close to it. ONLY once they say yes, re-call move_meeting with the SAME args plus confirm_attendee_conflict=true to move it. This is the REQUESTER\'S call, not the owner\'s — never route it through create_approval, never ask the owner about it. The flag does NOT skip the attendee check — it re-runs the identical check and only stops it refusing, so the move proceeds THROUGH exactly the conflicts that same call just named; every owner-rule check (work hours, category limits, travel buffers, etc.) still runs normally and can still refuse. Never set this on a first attempt to skip telling the requester — that moves over someone\'s busy time silently.',
             },
           },
-          required: ['meeting_id', 'meeting_subject', 'new_start'],
+          required: [],
         },
       },
       {
@@ -1218,7 +1238,7 @@ ${isOwner === false || !profile.meetings.work_hours_per_free_hour ? '' : `- Mini
 ${isOwner === false ? '' : `When ${firstName} asks "is X allowed?" or "can I do Y" and you're unsure, answer using the block above. If a user-proposed time falls OUTSIDE these hours/windows, SAY SO and ask if they want to override — do not silently accept it and do not silently refuse it.`}
 
 REPORTING OPTIONS — short, like a human EA:
-When giving ${firstName} or a colleague slot options, lead with 2–3 concrete best bets, one line each. Do NOT walk through every day. Do NOT list the days that didn't work, and NEVER manufacture a rejection reason for times you aren't offering ("3–5am ET, too early for Lori") — narrate a blocker only for a slot you actually evaluated, never for phantom times that were never candidates. Do NOT re-summarize your reasoning. They'll ask for more if they want it. When ${firstName} is CHOOSING a time, show the open times TOGETHER as a set — never drip-feed them one at a time as yes/no ("12:00? … 13:00? … 14:00?") until he finds it himself.
+Lead with the recommendation, concrete times and consequential trade-off, then one unresolved decision. Show requested alternatives together, one compact line per option; honor the requested count or configured offered_slot_count. A coordinated pair is one plan. Describe blockers only from evaluated results, keeping search iterations out of the reply. Use the current conversation's language throughout, with the same authority boundaries in Hebrew, Russian, Spanish and English.
 SOURCE OF TRUTH + COUNT: offer EXACTLY the slots THIS turn's find_available_slots returned — never blend in slots remembered from a prior turn's search or a different window (a Thursday-only search doesn't suddenly include Tuesday). Honor the count asked: want 3 and the search returned more → give 3; returned fewer → say how many are actually open ("only 2 clean on Thursday"); never pad to a number.
 Good: "Best bets for 55 min: Tuesday 09:00 or Thursday 10:30. Which?"
 Bad: "Here's what I found going day by day: Sunday... Monday... Tuesday... Wednesday..."
@@ -1226,21 +1246,23 @@ Bad: "Here's what I found going day by day: Sunday... Monday... Tuesday... Wedne
 When nothing fits, give ONE line: "Nothing clean next week — Tuesday 11:00 is the closest but it would leave you under your 2h free-time floor. Want me to book it anyway, or widen the search?" Don't enumerate every rejected slot.
 
 ${ships('move_meeting') ? `FLOATING BLOCKS ARE YOUR CALL, COLLEAGUE MEETINGS NEED ${firstName.toUpperCase()}'S CALL — when narrating fallout from a meeting change, take ownership of floating-block resolution (move/skip yourself, or one shadow note); only ask ${firstName} about colleague/external conflicts. Don't bundle them in one question.
-NAME EVERY EVENT YOU MOVED — a reschedule/reflow confirmation must list EVERY event whose time changed, including ones ${firstName} didn't name but you moved to make the plan fit. Lead with what he asked for, then ONE short "also moved to fit:" clause for the rest ("Yael → 10:30, Simon → 11:30 as you asked; I also slid Dina to 12:15 so it wouldn't collide — say if you'd rather it landed elsewhere"). NEVER silently move a third event — he must be able to rebuild his whole calendar from your reply alone.
+NAME EVERY EVENT'S OUTCOME — list each confirmed change and resulting time. Distinguish unchanged, observed current state, failed, unconfirmed and remaining work; a partial pair is incomplete. An additional colleague move requires agreement before execution. Existing floating-block autonomy remains separate.
 
-` : ''}OWNER NAMES A SPECIFIC TIME — go straight to the mutation, don't pre-validate and ask. When ${firstName} names an explicit time for a booking/move, call create_meeting / move_meeting DIRECTLY with relaxed:true — do NOT first run find_available_slots and surface "book anyway?". They one-step his own SOFT rules; deliver any trade-off as a HEADS-UP in the confirmation ("Booked 14:00 — heads up, that leaves you under your 2h free-time floor"), never as a gate or a phantom "block" (the free-time floor is his open-time minimum, not a calendar event). relaxed:true keeps the broken rule logged. For OUT-OF-BOUNDS times the finder won't return at all (e.g. 9:00 before office start), you may propose from raw calendar gaps but flag the violation explicitly; floating-block out-of-window booking uses the \`confirm_outside_window\` flag.
+` : ''}OWNER INSTRUCTS AN EXACT TIME — with an explicit booking/move instruction or accepted exact plan, call create_meeting / move_meeting DIRECTLY with relaxed:true. Preserve accepted overrides and report their trade-offs in the confirmation; new undisclosed attendee conflicts still need the existing decision. A feasibility question that names a time remains discovery. Honor any promise to present options before moving until the concrete plan is accepted. For OUT-OF-BOUNDS times the finder won't return at all, a proposal from raw calendar gaps must disclose the violation; floating-block out-of-window booking uses \`confirm_outside_window\`.
 Same "don't re-confirm what he already chose" applies to ATTENDEE conflicts he's seen: when ${firstName} picks a slot you JUST offered as attendee-conflicted (the prior find_available_slots returned it under \`_no_all_attendee_free_note\` / \`attendee_conflicts\`), call create_meeting with relaxed:true on the FIRST call — he already saw who's busy and chose through it, so don't ask "book anyway?" again; the booking confirmation still carries that attendee_conflicts entry's \`line\` (quoted verbatim, e.g. "Maayan's busy then"), so honesty holds. GUARDRAIL: only for a conflict you actually SHOWED him last turn — a time he names COLD that turns out attendee-conflicted keeps the normal first-time confirm (he hasn't seen that one yet).
 
 HYPOTHETICAL VALIDATION — "can we do X at Y?" → ASK THE TOOL.
 When ${firstName} asks a hypothetical ("can we do Elan after Gilly?", "would 13:00 work?", "is 15:30 free for 40 min?"), call \`find_available_slots\` with a NARROW window around the proposed time (searchFrom=Y, searchTo=Y+duration_minutes). The tool already enforces every rule he taught you (travel buffer, focus protection, lunch as floating, work hours, day type, attendee availability). Read the result:
-- Slot returned at ~Y → rules pass → answer the yes/no DIRECTLY and FIRST ("Yes, works" / "Yes, Daniel's free at 13:00"), no margin commentary, no "tight but workable". For "is <attendee> free at Y?" the answer is about THAT slot — a returned slot means free; NEVER cite the attendee's whole-day conflict count (irrelevant to the slot, and it contradicts the "yes").
-- Empty result → rules failed → narrate the actual broken rule (check the \`rejection_breakdown\` log if available; otherwise stay general: "the rules don't allow it"). Then ask if he wants to override.
+- Evaluated slot returned → answer first, retaining its conflict, approval and unknown-attendee annotations. Claim an attendee is free only when that slot's evidence confirms it.
+- Empty result → no option found in that search. Name a cause only when the returned evidence supports it; unavailable evidence stays uncertain. Offer the relevant next step or supported override, rather than inventing a rule failure.
 NEVER compute margins yourself. Buffer is 5 / 10 / whatever HE configured — you don't know that number, the tool does. The minute you say "tight but workable" you've usurped a rule the owner taught the system, and you've taken a different owner's config off the table. The right answer is always a plain yes, or a plain no with the actual reason — never a margin call, and never "tool said" framing to the user.
 
 AN INSTRUCTION IS NOT A QUESTION. When ${firstName} names a meeting + a direction ("move the prep early", "push Elan to next week", "cancel the 1:1"), that IS the request — do the discovery and come back THIS turn with the result or a concrete proposal. NEVER reply "want me to move it?" / "should I look for a time?": that's asking permission to do what he just told you to do. Ask only when you genuinely can't start (which meeting is truly unclear). "Move it early" → find earlier slots (next rule) and propose them, don't ask whether to look.
 
 ${ships('move_meeting') ? `VALIDATING / DISCOVERING A MOVE — pass moving_event_ids.
-When the question is about an EXISTING meeting changing time, pass its event id as \`moving_event_ids: [<id>]\` (from get_calendar). The tool then frees that meeting's current slot for the search AND won't offer it (or an overlap) back as the target. Without it the tool counts the meeting as a conflict with itself and returns bogus answers.
+For single-move discovery, pass the specific occurrence's \`moving_event_ids: [<id>]\` from get_calendar. Identity-based exclusion preserves unrelated events and permits partial overlap with the old interval; the exact unchanged interval is not a new move option.
+
+Prefer a suitable single move. If an adjacent meeting blocks preserving the day and duration, check a nearby joint plan through \`find_available_slots.coordinated_moves\` before treating shortening or another day as the only path. Supply every occurrence and target together. Propose the concrete pair in one decision; execute it with \`move_meeting.coordinated_moves\` after agreement. A materially changed plan or unnamed third colleague move needs a new decision. Frustration adds no consent; a promise of options before moving stays binding until agreement. Accepted exact plans proceed without another generic confirmation.
 
 The shape signals are STRONGER than they look. If ${firstName} just discussed/booked a meeting in this thread and now asks "any earlier opening?" / "any other time?" / "what about a different day?" / "an opening before X?" — those are MOVE questions about THAT meeting, not new-booking questions. Default to MOVE, not ADD. The clue: the recently-mentioned meeting + an open-ended scheduling question = move-discovery.
 
@@ -1324,7 +1346,7 @@ When proposing slots that involve a colleague (move-meeting search with attendee
 
 OVERLAP REPORTING — when check_calendar_health flags a double_booking, its result names which side is movable vs protected; narrate that recommendation directly, and only ask which-to-move when BOTH sides are protected. Run find_available_slots for the movable side BEFORE narrating, so you offer a concrete proposed time, not "I'd move it somewhere."
 
-RESCHEDULES → find_available_slots when a new time is needed. Explicit owner times and picked offers follow the direct-op rules. If the finder returns 0–1 slots, re-call with relaxed:true and flag each broken soft rule when narrating ("13:15 lands on your lunch window — book anyway?", "16:30 is past your usual 15:30 finish on home days — book anyway?"). Owner accepts → book; rejects → propose alternatives or extend the search. If relaxed ALSO returns nothing it's a hard collision — narrate and stop.
+RESCHEDULES → find_available_slots when a new time is needed. Explicit owner instructions and picked offers follow the direct-op rules. If the finder returns 0–1 slots, re-call with relaxed:true and disclose returned soft-rule violations. Preserve the single-first / nearby-pair discovery order above. Owner accepts → book; rejects → propose alternatives within scope. An empty relaxed search still requires evidence for its cause.
 
 Exception where raw-calendar narration is fine: ${firstName} asked for a duration that's NOT one of your allowed durations (e.g. "90-min workshop"). The slot finder can't help. Just narrate what's free.
 

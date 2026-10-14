@@ -11,7 +11,7 @@
  * Two serial roundtrips (~2.9s: Sonnet intent + Haiku scope) collapse into one
  * Haiku call (~1s). Both halves are independently fail-safe and bias in
  * aligned directions (task-message → meetings/tasks scope; social-message →
- * general/social), so combining them in one prompt doesn't create conflicts.
+ * general/social).
  *
  * The two halves are gated independently by the caller via `needIntent` /
  * `needScopes`:
@@ -22,8 +22,9 @@
  *   - Neither                    → caller skips this entirely.
  *
  * Fails open on every axis: intent → kind='other' (drops the soft social
- * nudge), scopes → ['general'] (ships every tool). A misclassification is
- * never a correctness bug.
+ * nudge), scopes → ['general'] (ships every tool), meetingAction → undefined.
+ * Explicit exploration is consumed as a write boundary by buildTurnContext;
+ * missing classification does not establish either permission or refusal.
  *
  * Model note: Haiku. The hard social work (subject matching, granularity) was
  * already moved to the end-of-chat reconciler (also Haiku). The per-turn
@@ -76,6 +77,10 @@ const INTENT_OTHER: OwnerIntentClassification = { kind: 'other', conversation_st
 export interface ClassifyTurnResult {
   intent: OwnerIntentClassification;
   scope: ToolScopeResult;
+  /** Current scheduling intent, including recent proposal/commitment context.
+   * Undefined means unavailable, not permission. Uses the existing participant
+   * extraction call; bare-ack shortcuts retain their existing behavior. */
+  meetingAction?: 'execute' | 'explore' | 'none';
   /**
    * v3.1.2 (D) — true when the OWNER is asking a "do I have buffer / free
    * time / how packed is X / am I free" question. Orchestrator uses this
@@ -236,6 +241,11 @@ How to choose scopes:
 ` : '';
 
   const meetingPeopleSection = needMeetingPeople ? `
+MEETING ACTION (meeting_action) — classify the LAST message's meaning using recent context, in any language:
+- execute: an authorized instruction to act or acceptance of a concrete exact plan. Preserve explicit action in a mixed message ("you are not helping — move Elinor to 13:30" is execute). A settled instruction needs no generic reconfirmation.
+- explore: feasibility, discovery, correction or dissatisfaction without an explicit action; a plan still awaiting a choice; or an outstanding promise to present options before moving. A time inside "would 13:30 work?" is exploration. Frustration adds no consent. Acceptance of the concrete plan fulfills the promise and is execute.
+- none: unrelated to meeting action or discovery. Interpret contextual acceptance against the actual plan, not the acknowledgement word alone. A broad directional request authorizes discovery; unresolved target selection remains explore.
+
 MEETING PARTICIPANTS (meeting_people) — set this ONLY when ${senderName} is giving a NEW instruction to set up, schedule, move, or book a MEETING WITH someone. List the people that meeting is WITH, exactly as each is named in the message (first name, full name, nickname, @handle — however written; any language or script).
 - Include everyone named as a participant EXCEPT ${assistantName} (you) and ${senderName} (the person writing this message).
 - "${isOwner ? 'book 30 min with Lori and Simon' : `I need a meeting with ${ownerFirst} and Simon`}" → the participants named are the OTHER people (e.g. Lori, Simon${isOwner ? '' : `, ${ownerFirst}`}).
@@ -289,6 +299,10 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
     required.push('scopes');
   }
   if (needMeetingPeople) {
+    properties.meeting_action = {
+      type: 'string',
+      enum: ['execute', 'explore', 'none'],
+    };
     properties.meeting_people = {
       type: 'array',
       description: 'People named as participants in a scheduling request, copied as written. Empty array when this is not a scheduling request or nobody is named.',
@@ -314,7 +328,7 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
     logLlmUsage('classify_turn', MODEL, resp);
 
     const toolUse = resp.content.find((b: any) => b.type === 'tool_use') as any;
-    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown }) | undefined;
+    const raw = toolUse?.input as (OwnerIntentClassification & { scopes?: string[]; free_time_inquiry?: boolean; meeting_people?: unknown; meeting_action?: unknown }) | undefined;
 
     // ── Resolve intent ──
     let intent: OwnerIntentClassification = INTENT_OTHER;
@@ -366,6 +380,10 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
           .map(s => s.trim())
           .slice(0, 12)
       : [];
+    const rawMeetingAction = raw?.meeting_action;
+    const meetingAction = needMeetingPeople
+      && (rawMeetingAction === 'execute' || rawMeetingAction === 'explore' || rawMeetingAction === 'none')
+      ? rawMeetingAction : undefined;
 
     logger.info('classifyTurn', {
       ...(needIntent ? {
@@ -377,12 +395,13 @@ ${intentSection}${scopeSection}${meetingPeopleSection}${recentContext ? `\nRecen
       } : {}),
       ...(needScopes ? { scopes: scope.scopes } : {}),
       ...(needMeetingPeople && meetingPeople.length > 0 ? { meetingPeople } : {}),
+      ...(meetingAction ? { meetingAction } : {}),
       preview: message.slice(0, 80),
     });
 
     const freeTimeInquiry = isOwner && needIntent && raw?.free_time_inquiry === true;
 
-    return { intent, scope, freeTimeInquiry, meetingPeople };
+    return { intent, scope, freeTimeInquiry, meetingPeople, meetingAction };
   } catch (err) {
     logger.warn('classifyTurn threw — defaulting to other / general', { err: String(err).slice(0, 300) });
     return { intent: INTENT_OTHER, scope: ALL_TOOLS, freeTimeInquiry: false, meetingPeople: [] };

@@ -581,6 +581,21 @@ export async function createApprovalRequest(
           expiresAt = addWorkdays(base, n, profile);
         }
 
+        const approvalAction = extractCallbacks(payload).on_approve;
+        if (approvalAction?.tool === 'move_meeting' && 'coordinated_moves' in approvalAction.args) {
+          try {
+            const { canonicalizeCoordinatedMoveArgs } = await import('../core/requests/deferredActionReplay');
+            const frozen = { tool: approvalAction.tool, args: await canonicalizeCoordinatedMoveArgs(approvalAction.args, profile) };
+            const callbacks = payload.callbacks as Record<string, unknown> | undefined;
+            if (callbacks?.on_approve) {
+              payload.callbacks = { ...callbacks, on_approve: frozen };
+              delete payload.deferred_action;
+            } else payload.deferred_action = frozen;
+          } catch (err) {
+            if (err instanceof StatedTimeClarificationError) return err.toToolResult();
+            return { error: 'invalid_move_plan', reason: err instanceof Error ? err.message : 'The exact plan could not be established.' };
+          }
+        }
         expiresAt = boundApprovalExpiry(expiresAt, payload, profile);
 
         // Already bound to the authenticated caller (or owner-nominated recipient)
@@ -1570,6 +1585,7 @@ When the approval is asking permission for a SPECIFIC tool call (e.g. "should I 
 
 Shape: \`payload.deferred_action = { tool: "<tool-name>", args: <full-tool-args> }\`.
 Supported tools: \`create_meeting\`, \`move_meeting\`, \`update_meeting\`, \`book_floating_block\`, \`delete_meeting\`.
+For an agreed joint move, preserve the complete \`coordinated_moves\` array (specific occurrence IDs and exact targets) in \`deferred_action.args\`. Replay retains confirmed progress and resumes only remaining necessary work. A singular time counter cannot silently replace a pair; a changed pair needs the complete exact replacement plan. Report per-event outcomes rather than treating a recorded approval as completed moves.
 
 Cancellations: a cancel is a CALENDAR change, so raise create_approval(kind=policy_exception) — NOT freeform — with an explicit:
   payload.deferred_action = { tool: "delete_meeting", args: { meeting_id, meeting_subject } }

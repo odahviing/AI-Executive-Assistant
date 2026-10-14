@@ -414,21 +414,13 @@ export async function findAvailableSlots(params: {
   //   1) The event's time range is SUBTRACTED from the owner's busy pool —
   //      so other candidate slots aren't blocked by a meeting that's about
   //      to move away. (Same pattern as floating-block subtraction.)
-  //   2) The event's time range is FORBIDDEN as a candidate — so the slot
-  //      finder never offers the original time (or any overlap with it) as
-  //      a "move target". 11:00 + 10:45 are both excluded when moving an
-  //      11:00-11:45 meeting because they're not really moves.
+  //   2) The exact unchanged interval is omitted as a move alternative.
+  //      A partial overlap is a real move; other commitments still apply.
   // Pass when validating ("can we move it to 10:30?") or discovering ("what
   // are options to move it?") a move. Omit for new bookings.
   excludeEventIds?: string[];
-  // v3.8.x — defrag exemption for behavior 2 above. When true, the moving
-  // event is still SUBTRACTED from busy (behavior 1) but its original slot is
-  // NOT added to the forbidden-zone list (behavior 2 is skipped). Calendar-
-  // health defrag needs this: a pull/push closes a 6–29 min dead gap by moving
-  // the meeting LESS than its own duration, so the back-to-back target always
-  // overlaps the meeting's current slot — and that target is a specific computed
-  // abut, not an offered alternative, so "don't offer the original back" must
-  // not reject it. Omit (default false) for user-facing move discovery.
+  // Internal candidate checks may also evaluate the exact unchanged interval.
+  // Existing defrag callers retain that exemption; overlap is always allowed.
   allowMovingEventOverlap?: boolean;
   // v2.6 — category scheduling rules. When set, the slot loop applies the
   // category's rules (day_type, per_day, per_week limits) and filters out
@@ -541,7 +533,7 @@ export async function findAvailableSlots(params: {
     // infrastructure.
     let busyMap: Record<string, import('./calendarTypes').FreeBusySlot[]>;
     try {
-      busyMap = await getFreeBusyForDecision(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, fbDiag);
+      busyMap = await getFreeBusyForDecision(params.userEmail, busyFilterEmails, windowFrom, windowTo, params.timezone, fbDiag, params.excludeEventIds);
     } catch (err) {
       if (!isOutageShaped(err)) throw err;
       logger.error('findAvailableSlots — owner free/busy read failed; treating the calendar as OFFLINE', {
@@ -881,10 +873,8 @@ export async function findAvailableSlots(params: {
     // readdPool) — so a real meeting fused into the same merged interval is
     // never falsely freed. Duplicate/overlapping re-adds are fine: the slot
     // walker only checks overlap (idempotent, see all-day note above).
-    // Attendee busy (email !== owner) is carved only for moving events
-    // (includeAttendees=true): the moving meeting sits in their calendar
-    // too, but we can't see their events to re-add — an attendee
-    // double-booked inside that exact window is the accepted edge.
+    // Attendee exclusion is identity-based in getFreeBusyForDecision.
+    // This carve is owner-only, backed by the complete owner event pool.
     const excludeIdSet = new Set(params.excludeEventIds ?? []);
     const readdPool: Array<{ start: number; end: number }> = [];
     for (const evt of ownerEventsForFb) {
@@ -899,11 +889,11 @@ export async function findAvailableSlots(params: {
         ? { start: s.startOf('day').toMillis(), end: e.endOf('day').toMillis() }
         : { start: s.toMillis(), end: e.toMillis() });
     }
-    const carveRangeFromBusy = (rangeStart: number, rangeEnd: number, includeAttendees: boolean): void => {
+    const carveRangeFromBusy = (rangeStart: number, rangeEnd: number): void => {
       if (rangeEnd <= rangeStart) return;
       for (let i = allBusy.length - 1; i >= 0; i--) {
         const b = allBusy[i];
-        if (!includeAttendees && b.email !== ownerEmailLower) continue;
+        if (b.email !== ownerEmailLower) continue;
         const bs = b.start.getTime();
         const be = b.end.getTime();
         if (bs >= rangeEnd || be <= rangeStart) continue;  // no overlap
@@ -918,18 +908,11 @@ export async function findAvailableSlots(params: {
       }
     };
     for (const r of blockRanges) {
-      carveRangeFromBusy(r.start, r.end, false);
+      carveRangeFromBusy(r.start, r.end);
     }
 
-    // v2.4.1 — moving-event subtraction + forbidden-zone build. When the
-    // caller passes excludeEventIds (the meeting(s) being moved), each one
-    // is carved out of the busy pool (so candidate slots aren't blocked by a
-    // meeting that's leaving its current time anyway) AND added to a
-    // forbidden-zones list (so the slot walker won't offer the original time
-    // as a "move target"). Closes the "move 11:00 to 10:30" / "options to
-    // move 11:00" cases that pre-v2.4.1 either over-rejected (treated the
-    // meeting as a hard conflict with itself) or would have offered 11:00
-    // back as a valid alternative.
+    // Exclude the old commitment, but suppress only an unchanged interval
+    // from move alternatives. Small shifts can overlap their original time.
     const movingEventForbiddenZones: Array<{ start: number; end: number }> = [];
     if (params.excludeEventIds && params.excludeEventIds.length > 0 && ownerEventsForFb.length > 0) {
       for (const evt of ownerEventsForFb) {
@@ -939,15 +922,11 @@ export async function findAvailableSlots(params: {
           .setZone(params.timezone).toMillis();
         const eEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' })
           .setZone(params.timezone).toMillis();
-        // Behavior 2 (forbid the original slot as a target) — skipped for
-        // defrag moves, which deliberately abut a neighbour a few minutes off
-        // the current slot. Behavior 1 (the busy-carve below) always runs.
+        // Preserve the internal exact-candidate exemption used by defrag.
         if (!params.allowMovingEventOverlap) {
           movingEventForbiddenZones.push({ start: eStart, end: eEnd });
         }
-        // Carve from busy — shared helper, attendee intervals included (the
-        // moving meeting exists in their calendars too).
-        carveRangeFromBusy(eStart, eEnd, true);
+        carveRangeFromBusy(eStart, eEnd);
       }
     }
 
@@ -1328,14 +1307,14 @@ export async function findAvailableSlots(params: {
       if (!profile && isWithinBookingLeadTime(cursor.getTime(), params.minBufferHours)) {
         return { kind: 'reject', reason: 'within_lead_time', iso: cursorDt.toISO()! };
       }
-      // v2.4.1 — slots overlapping the meeting being moved are forbidden as move
-      // targets (don't offer 11:00 back when moving the 11:00 meeting).
+      // Only the same start AND end fail to accomplish a move. Changing the
+      // duration at the same start remains a distinct update.
       if (movingEventForbiddenZones.length > 0) {
         const overlapsMovingEvent = movingEventForbiddenZones.some(zone =>
-          cursor.getTime() < zone.end && slotEnd.getTime() > zone.start
+          cursor.getTime() === zone.start && slotEnd.getTime() === zone.end
         );
         if (overlapsMovingEvent) {
-          return { kind: 'reject', reason: 'overlaps_meeting_being_moved', iso: cursorDt.toISO()! };
+          return { kind: 'reject', reason: 'unchanged_meeting_time', iso: cursorDt.toISO()! };
         }
       }
 

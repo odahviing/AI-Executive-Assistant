@@ -6,7 +6,8 @@ function fixtureFrom(file,transform){const full=path.join(__dirname,file),m={exp
 const promptFixture=fixtureFrom('test-canonical-person-prompt.cjs',s=>s.split("test('authenticated colleague")[0]);
 const taskFixture=fixtureFrom('test-conditional-follow-up.cjs',s=>s.split('afterEach(()=>')[0]
  .replace("postOwnerDecision:async()=>({ok:true})","postOwnerDecision:async()=>{if(options.throwDelivery)throw Error('unknown delivery');return {ok:!options.deliveryFailed,channel:'DOWNER',threadTs:'thread.1',ts:'msg.1'};}")
- .replace("'src/core/approvals/approvalCallbacks.ts':{}","'src/core/approvals/approvalCallbacks.ts':{composeOwnerAskText:async({askText})=>askText,boundApprovalExpiry:x=>x}")
+ .replace(",'src/core/approvals/approvalCallbacks.ts':{}",'')
+ .replace("['src/core/requests/runner.ts'","['src/core/approvals/approvalCallbacks.ts','src/core/requests/runner.ts'")
  .replace("'src/utils/requestDedup.ts':{}","'src/utils/requestDedup.ts':{judgeRequestDedup:async()=>({match:'new'})}")
  .replace("getAnthropicClient:()=>({})","getAnthropicClient:()=>({messages:{create:async()=>({content:[{type:'tool_use',name:'classify',input:{verdict:options.classifier||'not_calendar'}}]})}})")
  .replace("'src/utils/usageLog.ts':{}","'src/utils/usageLog.ts':{logUsage(){},trackUsage(){},logLlmUsage(){}}")

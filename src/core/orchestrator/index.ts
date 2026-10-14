@@ -175,9 +175,17 @@ export interface OrchestratorOutput {
    */
   mutationActions?: Array<{
     tool: string;
+    /** Confirmed desired state; changed distinguishes this attempt's mutation
+     * from unchanged/reconciled state. Failed/unconfirmed entries are false. */
     ok: boolean;
+    changed?: boolean;
+    /** Shared only by children of one coordinated tool call. This prevents a
+     * partial child success from masquerading as the completed operation. */
+    operationId?: string;
+    operationComplete?: boolean;
     subject?: string;
     start?: string;
+    end?: string;
     new_start?: string;
     eventId?: string;
     reason?: string;
@@ -233,6 +241,39 @@ function localizedFallback(userMessage: string, lines: { en: string; he: string;
 }
 
 type PendingTurnWork = { tool: string; args: Record<string, unknown>; result: unknown };
+
+// Coordinated calls and approval replays use the same existing per-event
+// outcomes. Feed those identities to accounting and pending-work completion;
+// a top-level success/failure is not the result of every individual meeting.
+function perEventToolResults(tool: string, args: Record<string, unknown>, result: unknown): PendingTurnWork[] {
+  const r = result && typeof result === 'object' ? result as Record<string, unknown> : null;
+  if (!r || (tool !== 'move_meeting' && tool !== 'resolve_approval')) return [{ tool, args, result }];
+  const targets = Array.isArray(args.coordinated_moves) ? args.coordinated_moves as Array<Record<string, unknown>> : [];
+  if (!Array.isArray(r.outcomes) && targets.length === 0) return [{ tool, args, result }];
+  const base = tool === 'move_meeting' ? { ...args } : {};
+  delete base.coordinated_moves;
+  const outcomes = Array.isArray(r.outcomes) ? r.outcomes as Array<Record<string, unknown>> : [];
+  const identity = (item: Record<string, unknown>) => item.meeting_id ?? item.meetingId ?? item.event_id ?? item.id;
+  const items = outcomes.filter(o => o && typeof o === 'object');
+  const unfinished = Array.isArray(r.remaining) ? r.remaining : outcomes.length === 0 ? targets : [];
+  for (const target of unfinished) {
+    if (target && typeof target === 'object' && !items.some(o => identity(o) === identity(target))) {
+      items.push({ ...target, success: false, error: 'not_attempted' });
+    }
+  }
+  // Preserve an invalid/empty aggregate as unconfirmed work rather than
+  // silently dropping it from pending accounting.
+  if (items.length === 0) return [{ tool, args, result: { ...r, success: false, error: 'coordinated_move_unconfirmed' } }];
+  return items.map(item => {
+    const id = identity(item);
+    const target = targets.find(t => t?.meeting_id === id);
+    return { tool: 'move_meeting', args: { ...base,
+      meeting_id: id,
+      new_start: target?.new_start ?? item.new_start ?? item.booked_start,
+      new_end: target?.new_end ?? item.new_end ?? item.booked_end,
+    }, result: item };
+  });
+}
 
 // These flags confirm the SAME operation; all other arguments must still match.
 // In particular, never clear another meeting merely because its tool name matches.
@@ -310,6 +351,7 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     turnPersonSlackId,
     socialActive,
     socialClassification,
+    blockedWriteTools,
     resolvedMeetingAttendees,
     availabilityQuestionDetected,
     availabilityPrecheckToolSummaries,
@@ -564,6 +606,17 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolBlocks as Anthropic.ToolUseBlock[]) {
+      if (blockedWriteTools?.has(toolUse.name)) {
+        toolResults.push({
+          type: 'tool_result', tool_use_id: toolUse.id,
+          content: JSON.stringify({
+            ok: false, reason: 'turn_is_read_only',
+            _note: 'This action was not executed. Answer the question or present the concrete plan for agreement; do not claim a change.',
+          }),
+        });
+        toolCallSummaries.push(`[${toolUse.name} FAILED] not executed — this turn permits discovery or explanation only`);
+        continue;
+      }
       // ── IDEMPOTENCY: message_colleague once per turn per colleague (v1.7.4) ──
       // Same-turn duplicate sends are never what the user meant — and the
       // claim-checker false-positive retry was hitting this exact path.
@@ -1098,24 +1151,32 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
         'create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting',
         'book_floating_block',
       ]);
-      if (mutationToolNames.has(toolUse.name)) {
-        const outcome = mutationOutcome(result);
-        const input = toolUse.input as Record<string, unknown>;
+      const actionResults = perEventToolResults(toolUse.name, toolInputForCall, result);
+      const coordinatedResult = result && typeof result === 'object'
+        && (Array.isArray((result as { outcomes?: unknown }).outcomes) || Array.isArray(toolInputForCall.coordinated_moves));
+      const operationComplete = coordinatedResult ? mutationOutcome(result).ok : undefined;
+      for (const action of actionResults.filter(a => mutationToolNames.has(a.tool))) {
+        const outcome = mutationOutcome(action.result);
+        const input = action.args;
         // #1.5 — prefer the tool RESULT's ACTUAL booked start (post grid-snap) over
         // the pre-snap input arg. create_meeting / move_meeting now return
         // booked_start; without this, mutationActions recorded the time Sonnet
         // ASKED for, so dateVerifier + the #135 honesty backstop compared the reply
         // against a time the meeting never landed on (an off-grid snap slipped by).
         // Fallback to the input arg only when the result didn't surface it.
-        const r = (result && typeof result === 'object') ? result as Record<string, unknown> : null;
+        const r = (action.result && typeof action.result === 'object') ? action.result as Record<string, unknown> : null;
         const bookedStart = r && typeof r.booked_start === 'string' ? r.booked_start : undefined;
         mutationActions.push({
-          tool: toolUse.name,
+          tool: action.tool,
           ok: outcome.ok,
-          subject: typeof input.subject === 'string' ? input.subject : undefined,
+          changed: outcome.changed,
+          ...(coordinatedResult ? { operationId: toolUse.id, operationComplete } : {}),
+          subject: typeof r?.moved === 'string' ? r.moved : typeof input.subject === 'string' ? input.subject : undefined,
           start: bookedStart
             ?? (typeof input.start === 'string' ? input.start
               : typeof input.new_start === 'string' ? input.new_start : undefined),
+          end: typeof r?.booked_end === 'string' ? r.booked_end
+            : typeof input.new_end === 'string' ? input.new_end : typeof input.end === 'string' ? input.end : undefined,
           new_start: typeof input.new_start === 'string' ? (bookedStart ?? input.new_start) : undefined,
           eventId: outcome.eventId
             ?? (typeof input.meeting_id === 'string' ? input.meeting_id : undefined)
@@ -1170,8 +1231,9 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
       // — appending a social line here is the jarring non-sequitur. Handoff
       // tools (coordination / approval / await-reply outreach) are NOT flagged
       // — those are lulls the coda is allowed to ride.
-      if (result && typeof result === 'object') {
-        const r = result as Record<string, unknown>;
+      for (const action of actionResults) {
+        if (!action.result || typeof action.result !== 'object') continue;
+        const r = action.result as Record<string, unknown>;
         const awaitingDecision =
           r.needs_owner_approval === true
           || r.needs_confirmation === true
@@ -1197,26 +1259,32 @@ async function runOrchestratorImpl(input: OrchestratorInput): Promise<Orchestrat
           // result, not any other tool's — gate on the tool name so a bare
           // array from a different read (get_calendar's own bare-array
           // shape) is never mistaken for a pending slot slate.
-          || (toolUse.name === 'find_available_slots' && Array.isArray(result));
+          || (action.tool === 'find_available_slots' && Array.isArray(action.result));
         // A mutating meeting op that didn't close, or any tool that errored.
         const mutators = new Set(['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block', 'book_lunch']);
-        const failedMutation = mutators.has(toolUse.name)
-          && !mutationOutcome(result).ok && r.deleted !== true;
+        const failedMutation = mutators.has(action.tool)
+          && !mutationOutcome(action.result).ok && r.deleted !== true;
         const errored = r.ok === false || r.success === false || typeof r.error === 'string';
         if (awaitingDecision || failedMutation || errored) {
-          const movingIds = toolUse.name === 'find_available_slots' ? toolInputForCall.moving_event_ids : undefined;
+          const movingIds = action.tool === 'find_available_slots' ? action.args.moving_event_ids : undefined;
           // The real search contract accepts multiple moves. Keep each event
           // pending independently so completing one cannot clear the others.
           const workArgs = Array.isArray(movingIds) && movingIds.length > 0
             && movingIds.every(id => typeof id === 'string' && id.length > 0)
-            ? [...new Set(movingIds)].map(id => ({ ...toolInputForCall, moving_event_ids: [id] }))
-            : [toolInputForCall];
-          pendingTurnWork.push(...workArgs.map(args => ({ tool: toolUse.name, args: structuredClone(args), result })));
+            ? [...new Set(movingIds)].map(id => ({ ...action.args, moving_event_ids: [id] }))
+            : [action.args];
+          pendingTurnWork.push(...workArgs.map(args => ({ tool: action.tool, args: structuredClone(args), result: action.result })));
         } else {
           pendingTurnWork = pendingTurnWork.filter(pending =>
-            !sameRetriedWork(pending, toolUse.name, toolInputForCall)
-            && !(mutators.has(toolUse.name) && bookedOfferedWork(pending, toolUse.name, toolInputForCall, r)));
+            !sameRetriedWork(pending, action.tool, action.args)
+            && !(mutators.has(action.tool) && bookedOfferedWork(pending, action.tool, action.args, r)));
         }
+      }
+      if (coordinatedResult && operationComplete === false
+          && actionResults.every(action => mutationOutcome(action.result).ok)) {
+        // Contradictory/failed aggregate still needs resolution even when its
+        // children describe achieved states. Do not invent total completion.
+        pendingTurnWork.push({ tool: toolUse.name, args: structuredClone(toolInputForCall), result });
       }
 
       // v2.7.1 (bug 2.3 / 3.1) — open a follow_up request when owner-initiated

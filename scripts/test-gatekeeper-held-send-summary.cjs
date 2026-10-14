@@ -73,7 +73,7 @@ function loadGate(verdict) {
     '../../llm/client': noLlm,
     '../../core/requests/types': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },
     '../../llm/models': require('./load-test-models.cjs'),
-    '../../core/orchestrator/turnHelpers': { toolLinesMatching: () => [] },
+    '../../core/orchestrator/turnHelpers': turn,
     '../../connections/slack/formatting': { formatForSlack: v => v },
     '../logger': quietLog,
     '../usageLog': { logLlmUsage() {} },

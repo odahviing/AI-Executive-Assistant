@@ -29,14 +29,14 @@ function harness(responses = [verdict(true)]) {
     'src/utils/logger.ts': { __esModule: true, default: logger },
     'src/utils/usageLog.ts': { logLlmUsage() {} },
     'src/core/requests/types.ts': { FREEFORM_OWNER_FLAG_SUBKIND: 'freeform_owner_flag' },
-    'src/core/orchestrator/turnHelpers.ts': { toolLinesMatching: () => [] },
+    'src/utils/attendeeAvailability.ts': { ATTENDEE_REASON_PREFIXES: [] },
     'src/utils/availabilityGate.ts': { freshHardBlockedSlots: () => [] },
     'src/utils/claimChecker.ts': { checkReplyClaims: async () => ({ claimed_action: false }) },
     'src/utils/dateVerifier.ts': { verifyDates: async () => ({ ok: true, mismatches: [] }) },
     'src/db/requests.ts': { getLatestRequestForThread: () => null },
     'src/db/index.ts': { getPersonMemory: () => ({ email: 'yael@example.com' }) },
   };
-  const actual = new Set(['src/connections/slack/formatting.ts','src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
+  const actual = new Set(['src/core/orchestrator/turnHelpers.ts','src/connections/slack/formatting.ts','src/utils/humanGate.ts', 'src/utils/securityGate.ts', 'src/utils/guards/runOutputGates.ts', 'src/utils/textScrubber.ts', 'src/utils/extractJson.ts']);
   function load(rel) {
     if (Object.hasOwn(stubs, rel)) return stubs[rel];
     if (cache[rel]) return cache[rel].exports;

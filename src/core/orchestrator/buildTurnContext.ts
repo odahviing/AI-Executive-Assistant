@@ -85,6 +85,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // edit takes effect on the next message (no caching).
   let socialDirective: SocialDirective = noDirective();
   let socialClassification: OwnerIntentClassification | null = null;
+  let meetingExplorationOnly = false;
   // ── TWO questions, two names — never one flag ────────────────────────────
   // Pre-fix this file carried two competing definitions of "owner turn":
   // `input.senderRole === 'owner'` (post-clamp) and a looser
@@ -191,12 +192,20 @@ export async function buildTurnContext(input: OrchestratorInput) {
   const needMeetingPeople = input.interactive !== false && !!userMessage && userMessage.trim().length > 1;
   if (needIntent || needScopes || needMeetingPeople) {
     try {
-      // Last few turns of context so the classifier can read conversation
-      // state (e.g. "Maelle asked a social question and they answered" →
-      // open vs "her question went unanswered, now closing out" → closing).
-      const recentContext = conversationHistory
-        .slice(-4)
-        .map(m => `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${m.content.slice(0, 280)}`)
+      // The latest assistant reply carries the proposal and any promise to
+      // wait. Keeping only its opening can erase that commitment. Preserve
+      // the full reply up to 8,000 characters; for longer replies retain both
+      // ends with an explicit omission marker. Other context stays compact.
+      // This is input to the existing call, not durable agreement state.
+      const recentMessages = conversationHistory.slice(-4);
+      const lastAssistantIndex = recentMessages.map(m => m.role).lastIndexOf('assistant');
+      const recentContext = recentMessages
+        .map((m, i) => {
+          const content = i === lastAssistantIndex
+            ? (m.content.length <= 8000 ? m.content : `${m.content.slice(0, 4000)}\n[...middle omitted...]\n${m.content.slice(-4000)}`)
+            : m.content.slice(0, 280);
+          return `${m.role === 'user' ? (input.senderName ?? profile.user.name.split(' ')[0]) : profile.assistant.name}: ${content}`;
+        })
         .join('\n');
       const turnResult = await classifyTurn({
         anthropic,
@@ -213,6 +222,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
       if (needScopes) toolScopes = turnResult.scope.scopes;
       if (isOwnerPath) isFreeTimeInquiry = turnResult.freeTimeInquiry === true;
       if (needMeetingPeople) {
+        meetingExplorationOnly = turnResult.meetingAction === 'explore';
         const rawMeetingPeople = turnResult.meetingPeople ?? [];
         // gh#158-a — classifyTurn is fed both THIS turn's message and up to 4
         // turns of recentContext so it can read conversational state, but its
@@ -555,7 +565,7 @@ export async function buildTurnContext(input: OrchestratorInput) {
   if (isOwnerPath && threadTs) {
     const tape = extractActionTape(input.conversationHistory);
     if (tape.length > 0) {
-      actionTapeBlock = `\n\nACTIONS YOU TOOK IN THIS THREAD:\n${tape.map(t => `- ${t}`).join('\n')}\n\nWhen the owner asks about anything in this list, lead with what YOU did — not what the calendar currently shows. If he says it didn't happen or the calendar shows otherwise, do NOT insist on this list — re-check via get_calendar and reconcile honestly. The list is what the tool reported, not ground truth.`;
+      actionTapeBlock = `\n\nREPORTED OUTCOMES IN THIS THREAD:\n${tape.map(t => `- ${t}`).join('\n')}\n\nDescribe each reported outcome accurately: OK confirms an action; UNCHANGED means no update; OBSERVED confirms current state without proving this attempt caused it. FAILED, UNCONFIRMED and remaining work stay distinct. COMPLETE describes the whole plan's confirmed state; INCOMPLETE supports only the individual confirmed outcomes. Reconcile disputed or stale state with get_calendar before asserting it. These are tool reports, not independent ground truth.`;
     }
   }
 
@@ -1178,16 +1188,27 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
   // the owner, so his book/move/cancel/approve authority survives the room
   // clamp even though his DATA access does not (registry.ts getSkillTools).
   let tools = getSkillTools(profile, input.senderRole, toolScopes, input.channel, input.authority);
+  // Carry the same per-turn write boundary into dispatch. Tool descriptions
+  // alone cannot prevent a stale or invented tool_use from reaching a handler.
+  const blockedWriteTools = new Set<string>();
+  const negativeReaction = socialClassification?.kind === 'social'
+    && socialClassification.social?.direction === 'reaction'
+    && socialClassification.social?.sentiment === 'negative';
 
-  // v2.8.6 — prose-only mode strips every write tool. Used by the
+  // Explicit exploration and pure negative feedback authorize no new writes,
+  // even when the previous assistant reply was only a proposal. Positive
+  // acceptance and missing classification retain existing behavior.
+  // Prose-only mode also strips every write tool. Used by the
   // dateVerifier retry path so a date-typo retry can't fire a fresh
   // calendar mutation. Reads (get_calendar / find_available_slots /
   // get_my_tasks / recall_*) stay available so Sonnet can re-verify state
   // while she rewrites the wording.
-  if (input.proseOnly === true) {
+  if (input.proseOnly === true || meetingExplorationOnly || negativeReaction) {
+    for (const name of WRITE_TOOLS) blockedWriteTools.add(name);
     const before = tools.length;
     tools = tools.filter(t => !WRITE_TOOLS.has(t.name));
-    logger.info('Orchestrator — proseOnly mode: filtered out write tools', {
+    logger.info('Orchestrator — read-only turn: filtered out write tools', {
+      proseOnly: input.proseOnly === true, meetingExplorationOnly, negativeReaction,
       before, after: tools.length, dropped: before - tools.length,
     });
   }
@@ -1220,6 +1241,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
       );
       const priorTurnMutated = [...ackGuardTools].some(t => lastAssistant.content.includes(`[${t} OK`));
       if (priorTurnMutated) {
+        for (const name of ackGuardTools) blockedWriteTools.add(name);
         const before = tools.length;
         tools = tools.filter(t => !ackGuardTools.has(t.name));
         logger.info('Orchestrator — ack-after-completed-action: stripped write tools (no re-mutation on "thanks")', {
@@ -1329,6 +1351,7 @@ If the message picks one of these — by time ("20:30"), weekday+time ("Tuesday 
     messages,
     systemBlocks,
     tools,
+    blockedWriteTools,
     model,
     maxTokens,
     turnSenderRole,

@@ -40,7 +40,7 @@ test('preserved unavailable calendar cannot fabricate offers',async()=>{await as
 test('preserved recovered multi-day search retains real earlier offday',async()=>{const {out}=await run({multi:true});assert.ok(out.slots.length);const friday=out.day_summary.find(d=>d.date==='2026-10-05');assert.equal(friday.accepted,0);assert.ok(friday.top_reasons.length);});
 
 
-test('preserved unknown attendee calendar stays explicit on recovered offers',async()=>{const {out}=await run({unknown:true});assert.ok(out.slots.length);assert.ok(out.attendees_not_checked.includes(email));assert.match(out._attendee_not_checked_warning,/NOT confirmed-free/);});
+test('preserved unknown attendee calendar stays explicit on recovered offers',async()=>{const {out}=await run({unknown:true});assert.ok(out.slots.length);assert.ok(out.attendees_not_checked.includes(email));assert.match(out._attendee_not_checked_warning,/not confirmed-free/i);assert.match(out._attendee_not_checked_warning,/unconfirmed attendee availability/i);assert.ok(out._attendee_not_checked_warning.includes(email));});
 
 test('colleague owner-only fallback retains accepted-day facts and unverified calendar disclosure',async()=>{const {out,summary}=await run({clean:true,busy:true,role:'colleague'});assert.ok(out.slots.length);assert.ok(out.day_summary[0].accepted>0);assert.ok(!summary.includes('attendee_blocked='),summary);assert.ok(out._attendee_unverified_note,JSON.stringify(out));});
 

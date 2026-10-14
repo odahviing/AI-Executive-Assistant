@@ -77,7 +77,7 @@ function attendeeCheckWarnings(params: {
   if (attendeesNotChecked.length > 0) {
     attendeeNotCheckedWarning = {
       attendees_not_checked: attendeesNotChecked,
-      _attendee_not_checked_warning: `Availability for ${attendeesNotChecked.join(', ')} could NOT be read for this window — the free/busy request failed, so their calendars were never looked at. These are NOT confirmed-free times for them. Present the slots as ${ownerFirstName}'s own openings and say plainly that you could not check the other side, or re-call with a window Graph can actually answer (this one wasn't one). Never say they are free, and never say their address is wrong — it isn't.`,
+      _attendee_not_checked_warning: `Availability for ${attendeesNotChecked.join(', ')} could not be established for this proposed calendar. These are ${ownerFirstName}'s own openings with unconfirmed attendee availability, not confirmed-free times for the other side. An unavailable read or unresolved moving-event identity does not establish a conflict or a wrong address.`,
     };
     logger.warn(`find_available_slots — attendee free/busy was never read for this window${logSuffix}`, {
       notChecked: attendeesNotChecked, ...(logExtra ?? {}),
@@ -212,6 +212,12 @@ function renderAttendeeStatusLine(
 }
 
 export async function handleFindAvailableSlots(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
+  if (args.coordinated_moves !== undefined) {
+    const { checkCoordinatedMoves } = await import('./moveMeeting');
+    const checked = await checkCoordinatedMoves(args, ctx);
+    const { moves: _moves, ...result } = checked;
+    return result;
+  }
   const { context, userEmail, timezone } = ctx;
   try {
   // v4.1.x — resolved ONCE per call from the authenticated sender.

@@ -1,9 +1,7 @@
 /**
- * moveMeeting — extracted VERBATIM (v3.7.x, pass B) from the 'update_meeting' + 'move_meeting' case bodies of
- * SchedulingSkill.executeToolCall in ../../ops.ts. No logic changes: the case
- * bodies are byte-for-byte identical; only relative import/require paths were
- * deepened by two levels for the ops/handlers/ location, and the free
- * variables (context, userEmail, timezone) are threaded via OpCtx.
+ * Existing-event update and move handlers. Coordinated moves project the
+ * requested replacements through planMeeting/checkSlot before reusing the
+ * ordinary move handler in a safe sequence. No provider atomicity is assumed.
  */
 import logger from '../../../../utils/logger';
 import { DateTime } from 'luxon';
@@ -36,6 +34,83 @@ import { createApprovalRequest } from '../../../../tasks/skill';
 import { logActivity } from '../../../../core/requests/logActivity';
 import type { OpCtx } from './context';
 import { getLatestViewedThreadEvents } from '../../../../utils/threadEventLedger';
+
+/** A complete candidate calendar, evaluated by the existing meeting planner. */
+export async function checkCoordinatedMoves(args: Record<string, unknown>, ctx: OpCtx) {
+  const { context, userEmail, timezone } = ctx;
+  const { getEventType, getOwnerEventsForDecision } = await import('../../../../connectors/graph/calendar');
+  const { planMeeting } = await import('../../planMeeting');
+  const { getTravelContextForInstant } = await import('../../../../utils/workingElsewhere');
+  const raw = args.coordinated_moves;
+  if (!Array.isArray(raw) || raw.length < 2) return { error: 'incomplete_move_plan', message: 'Supply every identified meeting and its proposed time together.' };
+  const seen = new Set<string>();
+  const moves: Array<{ meeting_id: string; new_start: string; new_end: string }> = [];
+  const originalDays: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item.meeting_id !== 'string' || !item.meeting_id.trim()
+      || typeof item.new_start !== 'string' || !item.new_start.trim() || seen.has(item.meeting_id)
+      || (item.new_end !== undefined && (typeof item.new_end !== 'string' || !item.new_end.trim()))) {
+      return { error: 'invalid_move_plan', message: 'Each identified occurrence needs one unambiguous proposed time and a valid end when supplied.' };
+    }
+    seen.add(item.meeting_id);
+    const probe = await getEventType(userEmail, item.meeting_id);
+    if (!probe || probe.type === 'seriesMaster' || !probe.startDateTime || !probe.endDateTime) return { error: 'moving_occurrence_unresolved', message: 'Refresh the specific occurrences before planning their moves.' };
+    const resolved = resolveStatedInstant({ startIso: item.new_start, endIso: typeof item.new_end === 'string' ? item.new_end : undefined,
+      statedZone: statedZoneFromArgs(args), homeTz: timezone, profile: context.profile,
+      travel: getTravelContextForInstant(item.new_start, context.profile), emailRoute: context.channel === 'email' });
+    const start = DateTime.fromISO(resolved.startIso, { zone: timezone });
+    const duration = DateTime.fromISO(probe.endDateTime, { zone: timezone }).diff(DateTime.fromISO(probe.startDateTime, { zone: timezone }), 'minutes').minutes;
+    const end = resolved.endIso ? DateTime.fromISO(resolved.endIso, { zone: timezone }) : start.plus({ minutes: duration });
+    if (!start.isValid || !end.isValid || end <= start || !Number.isFinite(duration) || duration <= 0) return { error: 'invalid_move_interval', message: 'The full meeting interval could not be established.' };
+    moves.push({ meeting_id: item.meeting_id, new_start: start.toISO()!, new_end: end.toISO()! });
+    originalDays.push(probe.startDateTime);
+  }
+  const bounds = [...originalDays, ...moves.flatMap(m => [m.new_start, m.new_end])].map(s => DateTime.fromISO(s, { zone: timezone }));
+  const first = bounds.reduce((a,b) => a < b ? a : b).startOf('week');
+  const last = bounds.reduce((a,b) => a > b ? a : b).endOf('week');
+  const events = await getOwnerEventsForDecision(userEmail, first.toISO()!, last.toISO()!, timezone);
+  const sources = moves.map(m => events.find(e => e.id === m.meeting_id));
+  if (sources.some(e => !e || e.isCancelled || e.type === 'seriesMaster')) return { error: 'moving_occurrence_unresolved', message: 'A specified occurrence is missing or changed; refresh the plan before moving anything.' };
+  const originals = sources as import('../../../../connectors/graph/calendar').CalendarEvent[];
+  if (context.authority !== 'owner') {
+    const requester = getPersonMemory(context.userId)?.email?.toLowerCase();
+    if (!requester || originals.some(e => !e.attendees?.some(a => a.emailAddress.address.toLowerCase() === requester))) return { error: 'not_your_meeting', message: 'This plan includes a meeting outside your scheduling authority; the owner needs to decide.' };
+  }
+  const replacements = originals.map((e,i) => ({ ...e, start: { dateTime: moves[i].new_start, timeZone: timezone }, end: { dateTime: moves[i].new_end, timeZone: timezone } }));
+  const projected = [...events.filter(e => !seen.has(e.id)), ...replacements];
+  const grant = grantRelaxed(args, context);
+  const inputs = originals.map((e,i) => ({ profile: context.profile, intent: 'move' as const,
+    initiator: context.senderRole === 'colleague' ? 'colleague' as const : 'owner' as const,
+    slotStartIso: moves[i].new_start, slotEndIso: moves[i].new_end, subject: e.subject,
+    participants: (e.attendees ?? []).map(a => ({ email: a.emailAddress.address, name: a.emailAddress.name })),
+    existingEventId: e.id, existingEventCategories: e.categories, existingEventLocation: e.location?.displayName,
+    existingEventIsOnline: e.isOnlineMeeting, priorSlotStartIso: DateTime.fromISO(e.start.dateTime,{zone:e.start.timeZone}).toISO()!,
+    priorSlotEndIso: DateTime.fromISO(e.end.dateTime,{zone:e.end.timeZone}).toISO()!, preloadedEvents: projected,
+    calendarReplacements: replacements, allowRelaxed: grant.relaxed, ownerRoomBend: grant.relaxedReason === 'owner_room_bend',
+    viewer: subjectViewerFor(context), viewerEmail: viewerEmailFor(context) }));
+  const decisions: import('../../planMeeting').PlanAction[] = [];
+  for (const input of inputs) decisions.push(await planMeeting(input));
+  const results = decisions.map((p,i) => ({ ...moves[i], subject: displaySubject(originals[i], context.profile, subjectViewerFor(context), viewerEmailFor(context)),
+    available: p.action === 'book' && !p.hasConflict, action: p.action,
+    ...(p.action === 'book' ? { notice: p.overrideNotice, availability_unconfirmed: p.availabilityUnconfirmed } : { reason: 'suggestedAskText' in p ? p.suggestedAskText : 'This move needs an unresolved scheduling decision.' }) }));
+  if (decisions.some(p => p.action !== 'book')) return { mode: 'coordinated_move_validation' as const, available: false, results, error: 'move_plan_needs_decision' };
+  // Acyclic replacement dependencies determine order without an optimizer or
+  // a temporary third destination. Every step uses the existing rule validator.
+  const order: number[] = [], remaining = new Set(moves.map((_,i) => i));
+  let intermediate = [...events];
+  while (remaining.size) {
+    const candidates = [...remaining];
+    let next = candidates.find(i => checkSlot({ profile: context.profile, slotStartIso: moves[i].new_start, slotEndIso: moves[i].new_end,
+      category: 'category' in decisions[i] ? decisions[i].category : null, events: intermediate, excludeEventIds:[moves[i].meeting_id],
+      viewer: subjectViewerFor(context), viewerEmail: viewerEmailFor(context) }).passes);
+    if (next === undefined && grant.relaxed) next = candidates[0];
+    if (next === undefined) return { mode: 'coordinated_move_validation' as const, available: false, results, error: 'no_safe_move_order', message: 'The final plan cannot be reached safely with sequential updates; no meetings have moved.' };
+    order.push(next); remaining.delete(next);
+    intermediate = [...intermediate.filter(e => e.id !== moves[next!].meeting_id), replacements[next]];
+  }
+  return { mode: 'coordinated_move_validation' as const, available: results.every(r => r.available), results,
+    execution_order: order.map(i => moves[i].meeting_id), moves: order.map(i => ({...moves[i], meeting_subject: originals[i].subject})) };
+}
 
 /** An explicit owner correction rejects only the automatic move still reflected in the calendar. */
 export async function recordOwnerAutoMoveCorrection(params: {
@@ -1369,6 +1444,33 @@ export async function handleUpdateMeeting(args: Record<string, unknown>, ctx: Op
 }
 
 export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCtx): Promise<unknown | null> {
+  if (args.coordinated_moves !== undefined) {
+    const checked = await checkCoordinatedMoves(args, ctx);
+    if (!checked.moves || (!checked.available && !grantRelaxed(args, ctx.context).relaxed)) {
+      const { moves: _moves, ...result } = checked;
+      return { ...result, success: false, message: 'The complete move plan needs a decision before any update.' };
+    }
+    const outcomes: Array<Record<string, unknown>> = [];
+    for (const move of checked.moves) {
+      let result: Record<string, unknown>;
+      try {
+        result = await handleMoveMeeting({ ...args, coordinated_moves: undefined, ...move }, ctx) as Record<string, unknown>;
+      } catch {
+        result = { success: false, error: 'move_outcome_unconfirmed', message: 'The move outcome could not be established. Reconcile this event before retrying.' };
+      }
+      outcomes.push({ meeting_id: move.meeting_id, new_start: move.new_start, new_end: move.new_end, ...result });
+      if (result.success !== true) return { success: false, error: 'coordinated_move_incomplete', outcomes,
+        remaining: checked.moves.slice(outcomes.length).map(m => ({ meeting_id: m.meeting_id, new_start: m.new_start, new_end: m.new_end })),
+        message: 'Only the confirmed outcomes below are complete. No successful move was automatically undone. Reconcile the unfinished event before any retry.' };
+    }
+    return { success: true, outcomes, message: 'Every specified meeting is confirmed at its agreed time.' };
+  }
+  // The provider schema permits either input shape; enforce the singular
+  // identity claim here before a missing subject could bypass its match check.
+  const missingFields = ['meeting_id', 'meeting_subject', 'new_start']
+    .filter(field => typeof args[field] !== 'string' || !(args[field] as string).trim());
+  if (missingFields.length) return { success: false, error: 'invalid_move_arguments', missing_fields: missingFields,
+    message: 'Identify the meeting, its subject and the intended start before moving it.' };
   const { context, userEmail, timezone } = ctx;
   // confirm-success-return-does-not-name-who-was-booked-over (2026-09-09) —
   // set by the colleague-path attendee-conflict Guard below on a confirmed
@@ -2152,7 +2254,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 return {
                   success: false,
                   error: 'no_in_window_slot',
-                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. Moving it OUTSIDE the window is the owner's call: raise create_approval(kind='policy_exception') with deferred_action={ tool: 'move_meeting', args: { meeting_id, new_start } } — the approved replay runs as the owner and moves it as asked.`,
+                  message: `No room in the ${matchedBlock.preferred_start}–${matchedBlock.preferred_end} window for ${matchedBlock.name} after that hint. Moving it OUTSIDE the window is the owner's call: raise create_approval(kind='policy_exception') with deferred_action={ tool: 'move_meeting', args: { meeting_id, meeting_subject, new_start } } — the approved replay runs as the owner and moves it as asked.`,
                 };
               }
               const alignedDt = DateTime.fromMillis(alignedMs).setZone(timezone);
@@ -2565,7 +2667,15 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           }
         }
 
-        await updateMeeting({
+        if (preMoveStartIso && preMoveEndIso
+          && DateTime.fromISO(preMoveStartIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveStart, { zone: timezone }).toMillis()
+          && DateTime.fromISO(preMoveEndIso, { zone: timezone }).toMillis() === DateTime.fromISO(effectiveEnd, { zone: timezone }).toMillis()) {
+          return { success: true, unchanged: true, meetingId: args.meeting_id,
+            booked_start: effectiveStart, booked_end: effectiveEnd,
+            message: 'The identified meeting is already at that exact time. No calendar update was sent.' };
+        }
+        let moveWriteError: unknown;
+        try { await updateMeeting({
           userEmail,
           timezone,
           meetingId: args.meeting_id as string,
@@ -2582,7 +2692,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           isOnline: movePlanIsOnline,
           categories: movePlanCategories,
           attendees: movePlanAttendees,
-        });
+        }); } catch (err) { moveWriteError = err; }
 
         // v3.6.x — the post-move Teams-URL-as-location patch was REMOVED (same
         // root as the create path): overwriting the online meeting's location with
@@ -2590,32 +2700,22 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         // stays true through the move, so Graph keeps the toggle / Join button /
         // "Microsoft Teams Meeting" label — nothing to stamp.
 
-        // v2.2.5 (#54) — post-move verification. Graph PATCH can return 200 OK
-        // without the change landing (sync delays, race conditions). Re-read
-        // the event by id and confirm the start matches the requested move
-        // target. Fail-fast: if verify fails, skip the closeMeetingArtifacts
-        // cascade, audit success log, shadow notify, and rebalance — none of
-        // those should fire on a move that didn't actually happen.
+        // Exact readback after BOTH accepted and ambiguous writes. A timeout
+        // does not prove failure, and a matching start does not prove duration.
+        // Reuse the existing approved-action reconciliation reader; never retry
+        // a mutation to discover whether it succeeded.
         {
-          const { verifyEventMoved } = await import('../../../../connectors/graph/calendar');
-          // v2.3.1 — verify against the EFFECTIVE start (post-snap for
-          // floating blocks), not the original args.new_start hint.
-          const verify = await verifyEventMoved(userEmail, args.meeting_id as string, effectiveStart, timezone);
-          if (!verify.ok) {
-            logger.warn('move_meeting verify failed — Graph accepted PATCH but readback drifted', {
-              meetingId: args.meeting_id, reason: verify.reason,
-              expected: 'expected' in verify ? verify.expected : undefined,
-              got: 'got' in verify ? verify.got : undefined,
-            });
-            const subject = args.meeting_subject as string;
-            const message = verify.reason === 'not_found'
-              ? `I tried to move '${subject}' but couldn't find it on the calendar afterward — the move may not have landed. Want me to investigate?`
-              : `I tried to move '${subject}' to ${verify.expected} but the calendar still shows it at ${verify.got}. Graph accepted the change but didn't apply it — want me to retry?`;
-            return {
-              success: false,
-              error: verify.reason === 'not_found' ? 'moved_but_missing' : 'move_did_not_land',
-              message,
-            };
+          const { verifyApprovedCalendarAction } = await import('../../../../connectors/graph/calendar');
+          const verify = await verifyApprovedCalendarAction({ userEmail, profile: context.profile, tool: 'move_meeting',
+            args: { meeting_id: args.meeting_id, new_start: effectiveStart, new_end: effectiveEnd, stated_zone: timezone } });
+          if (verify.status !== 'desired_state_observed') {
+            logger.warn('move_meeting exact outcome not confirmed', { meetingId: args.meeting_id, status: verify.status, reason: verify.reason, writeResponseLost: !!moveWriteError });
+            return { success: false, meetingId: args.meeting_id,
+              error: verify.reason === 'event_absent' ? 'moved_but_missing' : 'move_did_not_land',
+              _calendar_verification: verify.status,
+              message: verify.status === 'different_state_observed'
+                ? 'A read-only check did not find this meeting at the requested full interval. The update was not repeated.'
+                : 'The calendar outcome is unconfirmed. The update was not repeated; reconcile the event before retrying.' };
           }
         }
 
@@ -2629,7 +2729,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // v4.2.x (option C) — the instant this move ACTUALLY landed on, which is
           // the only kind of time a correction to a human may quote. `effectiveStart`
           // is post-snap (grid alignment + floating-block realignment above, not the
-          // raw `args.new_start` hint) and this line is past the `verifyEventMoved`
+          // raw `args.new_start` hint) and this line is past the exact calendar
           // read-back, which fail-fast-returns above when Graph accepted the PATCH
           // without applying it — so the value handed on is one the calendar holds.
           // The comparison, the once-per-event-per-day cap and the DM are the
@@ -2705,7 +2805,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         });
 
         // gh#52 (52-U3) — undo/history record for this move, past the
-        // verifyEventMoved read-back above (verify.ok already confirmed the
+        // Exact calendar read-back above already confirmed the
         // write landed) — never recorded on a PATCH Graph accepted but didn't
         // apply. Reuses the SAME pre-state (preMoveStartIso/preMoveEndIso/
         // start/end) already captured for the auditLog just above — no second
@@ -2863,6 +2963,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
         }
         return {
           success: true,
+          ...(moveWriteError ? { _calendar_verification: 'desired_state_observed', _write_response_lost: true } : {}),
           moved: movedSubject,
           ...(ownerDecisionWarning ? { warning: ownerDecisionWarning } : {}),
           ...presentationLocalFieldFor(preMoveAttendeeEmails, effectiveStart, userEmail, timezone),
@@ -2889,7 +2990,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
           // without this, Sonnet could re-read the calendar post-move and narrate
           // the new time as a fresh discovery ("already at 12:30, nothing to change")
           // instead of acknowledging her own action.
-          action_summary: `Moved '${movedSubject}' to ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.${moveUsedWorkingElsewhereFallback ? ' (No fully clear gap in the window — it now sits against a Working-Elsewhere block.)' : ''}`,
+          action_summary: `${moveWriteError ? 'A read-only check confirms' : 'Moved'} '${movedSubject}' ${moveWriteError ? 'is at' : 'to'} ${renderWeDualClock(effectiveStart, { isAway: !!moveTripDisplay, effectiveTz: moveTripDisplay?.tz ?? timezone, location: moveTripDisplay?.location ?? '' }, timezone, { endIso: effectiveEnd })}.${moveUsedWorkingElsewhereFallback ? ' (No fully clear gap in the window — it now sits against a Working-Elsewhere block.)' : ''}`,
           ...(moveTripDisplay ? { _trip_note: 'Travel day — state the moved time from `action_summary` VERBATIM (both clocks, correctly labelled); do not recompute it.' } : {}),
         };
 }

@@ -80,7 +80,7 @@ import type { SenderRole } from '../../connectors/slack/postReply';
 import type { HumanGateAudience } from '../humanGate';
 import type { OrchestratorOutput } from '../../core/orchestrator';
 import type { ConversationMessage } from '../../db/conversations';
-import { toolLinesMatching } from '../../core/orchestrator/turnHelpers';
+import { extractActionTape, toolLinesMatching } from '../../core/orchestrator/turnHelpers';
 import { formatForSlack } from '../../connections/slack/formatting';
 import logger from '../logger';
 import { logLlmUsage } from '../usageLog';
@@ -794,15 +794,23 @@ async function runClaimCheckAndMaybeRewrite(
     // imagesInTurn) were removed in the latency pass; honesty rules 1/2/2b/2c/2d
     // /3/5b/9 stay in the system prompt per v2.8.5.
     const requestEvidence = await requestOutcomeEvidence(ctx);
+    // The draft can recap an earlier event observation without a new mutation.
+    // Give both the checker and its existing tool-less rewrite the same factual
+    // tape the drafting context saw, with chronology explicit. A mutation-only
+    // shield cannot ground UNCHANGED / OBSERVED / unfinished event outcomes.
+    const outcomeSummaries = [
+      ...(result.toolSummaries ?? []),
+      ...extractActionTape(ctx.history ?? []).map(line => `(earlier turn) ${line}`),
+    ];
     // Preserve the existing cheap short-reply skip when nothing changed and
     // no action/decision evidence exists. A rewrite must be checked even when
     // its invented approval is only two words long.
-    const finalOutcomeContext = cleanReply !== originalDraft || result.toolSummaries?.length
+    const finalOutcomeContext = cleanReply !== originalDraft || outcomeSummaries.length
       || (requestEvidence !== '[]' && requestEvidence !== 'unavailable')
       ? `Requests: ${requestEvidence}` : undefined;
     const verdict = await checkReplyClaims({
       reply: cleanReply,
-      toolSummaries: result.toolSummaries ?? [],
+      toolSummaries: outcomeSummaries,
       bookingOccurred: result.bookingOccurred ?? false,
       ownerFirstName: profile.user.name.split(' ')[0],
       // v1.7.5 — pass MPIM context so the checker recognizes legitimate
@@ -849,6 +857,8 @@ async function runClaimCheckAndMaybeRewrite(
       .map(h => h.content)
       .join(' ');
     const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
+    const currentSummariesText = (result.toolSummaries ?? []).join(' ');
+    const hasCurrentCalendarOutcome = extractActionTape([{ role: 'assistant', content: currentSummariesText }]).length > 0;
 
     // v4.1.x (G1/G2) — READ the carried marker; do not re-derive it.
     //
@@ -867,8 +877,11 @@ async function runClaimCheckAndMaybeRewrite(
     // the honesty rewrite even on `[create_meeting FAILED: …]`. A failed mutation
     // now correctly backs nothing (the same #137b convention the rest of the tool
     // log already follows).
+    // An earlier move cannot certify this turn's failed, unchanged or unknown
+    // attempt. Retain the historical shield for recaps with no current outcome.
     const mutationCarried = !!verdict.action_type
-      && toolSummariesText.includes(`mutated=${verdict.action_type}`);
+      && (verdict.action_type === 'book' && hasCurrentCalendarOutcome ? currentSummariesText : toolSummariesText)
+        .includes(`mutated=${verdict.action_type}`);
     // check-claimed-that-never-ran (2026-09-06, bounce 2) — the READ-side
     // marker, for the one fact-shaped class RULE A itself raises. A finding
     // about a named third party's hours / busy time is backed when a slot or
@@ -994,7 +1007,7 @@ async function runClaimCheckAndMaybeRewrite(
         // the checker read, so it can't invert a true completed action it can't see.
         // o#224 — no approvalGrantContext here: permission_granted claims
         // return above and never reach this call (see the block above).
-        toolSummaries: result.toolSummaries ?? [],
+        toolSummaries: outcomeSummaries,
         isOwnerAudience: isOwnerDirectAudience(ctx),
       });
       // v4.2.x — no history write here any more. This used to append the honest

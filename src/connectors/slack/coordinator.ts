@@ -367,8 +367,9 @@ export async function handleOutreachReply(
  * recentOutboundContext.ts closes on that alone, and routing this job
  * through that blunter rule is exactly the shorter-window regression the
  * generic branch above exists to avoid. Two signals count:
- *   - a calendar mutation landed this turn (mutationActions has an ok:true
- *     entry, or bookingOccurred) — "orchestrator moves the meeting".
+ *   - a complete calendar action confirmed the desired state this turn.
+ *     Per-event success in an incomplete coordinated operation is not enough;
+ *     an unchanged or reconciled complete operation is resolving evidence too.
  *   - the reply was escalated into a FRESH approval now awaiting the owner:
  *     kind='approval', created in the SAME thread, at or after this turn
  *     started — "relays an approval [for] the owner [to answer]". Scoped to
@@ -409,8 +410,13 @@ export async function closeOutreachReplyIfResolvedThisTurn(params: {
   turnStartedAt: string;
   result: Pick<OrchestratorOutput, 'mutationActions' | 'bookingOccurred'>;
 }): Promise<void> {
-  const mutated = params.result.mutationActions?.some(m => m.ok) ?? false;
-  const booked = params.result.bookingOccurred === true;
+  const actions = params.result.mutationActions ?? [];
+  const completedActions = actions.filter(m => m.ok && m.operationComplete !== false);
+  const mutated = completedActions.length > 0;
+  // A legacy booking signal must not turn a partial coordinated operation into
+  // completion. A separate complete action still resolves through its own entry.
+  const booked = params.result.bookingOccurred === true && !actions.some(m => m.operationComplete === false);
+  const changed = booked || completedActions.some(m => m.changed !== false);
   let freshApproval = false;
   if (!mutated && !booked) {
     const turnStartMs = Date.parse(params.turnStartedAt);
@@ -454,7 +460,8 @@ export async function closeOutreachReplyIfResolvedThisTurn(params: {
       const who = requestRow?.target_name ?? requestRow?.requester_name ?? 'They';
       const subject = requestRow?.subject || 'that outreach';
       const detail = (mutated || booked)
-        ? `${who} replied to "${subject}" and it's handled — I acted on it directly.`
+        ? changed ? `${who} replied to "${subject}" and it's handled — I acted on it directly.`
+          : `${who} replied to "${subject}" and the agreed calendar state is confirmed.`
         : `${who} replied to "${subject}" and it needed your call, so I've raised a fresh approval for it.`;
       if ((mutated || booked) && requestRow?.owner_dm_channel) {
         const conn = getConnection(params.ownerUserId, 'slack');

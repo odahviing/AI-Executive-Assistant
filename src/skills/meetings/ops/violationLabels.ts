@@ -51,7 +51,7 @@ const SEARCH_REJECT_PHRASES: Record<SearchRejectLabel, (ownerFirst: string, oofU
   // phrase there read as "That time is conflicts with..." (owner report,
   // 2026-07-30).
   owner_busy_collision: (ownerFirst) => `in conflict with another meeting on ${ownerFirst}'s calendar`,
-  overlaps_meeting_being_moved: () => `overlaps the meeting being moved`,
+  unchanged_meeting_time: () => `the meeting is already at this exact start and end time`,
   focus_time_office: (ownerFirst) => `would leave ${ownerFirst} under the free-time floor (office day)`,
   focus_time_home: (ownerFirst) => `would leave ${ownerFirst} under the free-time floor (home day)`,
   floating_block_no_room: (ownerFirst) => `would leave no room for one of ${ownerFirst}'s daily blocks (lunch / break / etc.)`,

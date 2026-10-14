@@ -11,10 +11,10 @@ function one(xs) { assert.equal(xs.length,1,'unique production AST anchor'); ret
 function compile(src,bindings,deps={}) { const module={exports:{}}; const js=ts.transpileModule(src,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText; vm.runInNewContext(js,{...bindings,module,exports:module.exports,require:id=>{if(id in deps)return deps[id];throw Error('Unexpected '+id);}}); return module.exports; }
 const reader=one(nodes('src/connectors/graph/calendarReads.ts',n=>ts.isFunctionDeclaration(n)&&n.name?.text==='getEventType')).getText().replace('export ','');
 const logger={warn(){},info(){}};
-async function run(tool,{type='singleInstance',subject='Fixture',failure,invalid=false,viewer='owner'}={}) {
+async function run(tool,{id='id',type='singleInstance',subject='Fixture',failure,invalid=false,viewer='owner'}={}) {
   let writes=0;
   const getEventType=compile(reader+'\nmodule.exports=getEventType;',{
-    getClient:()=>({api:()=>({select(){return this;},async get(){if(failure)throw failure;return invalid?{}:{type,subject,attendees:[]};}})}),
+    getClient:()=>({api:()=>({select(){return this;},async get(){if(failure)throw failure;return invalid?{}:{id,type,subject,attendees:[]};}})}),
     eventPartAsInstant:()=>undefined,
   });
   const file=tool==='delete'?'src/skills/meetings/ops/handlers/calendarReads.ts':'src/skills/meetings/ops/handlers/moveMeeting.ts';
@@ -35,6 +35,8 @@ let passed=0,failed=0;
 async function check(name,fn){try{await fn();passed++;console.log('ok '+name);}catch(e){failed++;console.log('not ok '+name+': '+e.message);}}
 (async()=>{
   for(const tool of ['update','move','delete']){
+    await check('regression '+tool+'-mismatched-id-no-write',async()=>{const r=await run(tool,{id:'different-event'});assert.equal(r.writes,0);assert.match(String(r.error),/requested calendar event identity/);});
+    await check('regression '+tool+'-missing-id-no-write',async()=>{const r=await run(tool,{id:null});assert.equal(r.writes,0);assert.match(String(r.error),/requested calendar event identity/);});
     await check('regression '+tool+'-failed-get-no-write',async()=>{const r=await run(tool,{failure:Object.assign(Error('read unavailable'),{statusCode:503})});assert.equal(r.writes,0);assert.ok(r.error);});
     await check('regression '+tool+'-missing-type-no-write',async()=>{const r=await run(tool,{invalid:true});assert.equal(r.writes,0);assert.ok(r.error);});
     await check('preserved '+tool+'-series-refused-private',async()=>{const r=await run(tool,{type:'seriesMaster',viewer:'other'});assert.equal(r.writes,0);assert.equal(r.result?.error,'recurring_series_master');assert.equal(r.result?.meeting_subject,'[Private]');});

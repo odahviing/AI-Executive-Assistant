@@ -17,15 +17,14 @@
  *         owner: room is taken AND the group is too big for the small
  *         fallback. Owner decides: change time, shrink the list, etc.
  *
- * Fails open: if the free/busy call throws or the room email is missing, the
- * caller proceeds as if the room is free — Outlook will tell the owner if
- * the booking conflicts. Better than blocking the entire booking pipeline on
- * a Graph hiccup.
+ * An unread room returns `skip`, never `room_free`; the planner preserves
+ * that uncertainty in its result. Moving occurrences use identity exclusion,
+ * and coordinated replacements retain other proposed room commitments.
  */
 
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
-import { getFreeBusyForDecision } from '../connectors/graph/calendar';
+import { getFreeBusyForDecision, type CalendarEvent } from '../connectors/graph/calendar';
 import logger from './logger';
 
 export type RoomAvailabilityVerdict =
@@ -39,6 +38,8 @@ export async function checkMeetingRoomAvailability(params: {
   startIso: string;
   endIso: string;
   participantCount: number;
+  existingEventId?: string;
+  calendarReplacements?: CalendarEvent[];
 }): Promise<RoomAvailabilityVerdict> {
   const { profile, startIso, endIso, participantCount } = params;
   const roomEmail = profile.meetings.room_email;
@@ -51,7 +52,7 @@ export async function checkMeetingRoomAvailability(params: {
     // land on `room_free`. "The room's free" is one of M9's own examples of a
     // reason that has to be TRUE; an unread calendar is not evidence of a free
     // room. Same outcome as the throw path below, which already declines to guess.
-    const fbDiag: { notChecked?: string[] } = {};
+    const fbDiag: { notChecked?: string[]; unresolved?: string[] } = {};
     const fb = await getFreeBusyForDecision(
       profile.user.email,
       [roomEmail],
@@ -59,14 +60,18 @@ export async function checkMeetingRoomAvailability(params: {
       endIso,
       profile.user.timezone,
       fbDiag,
+      params.calendarReplacements?.map(e => e.id) ?? (params.existingEventId ? [params.existingEventId] : undefined),
     );
-    if ((fbDiag.notChecked ?? []).length > 0) {
+    if ((fbDiag.notChecked ?? []).length > 0 || (fbDiag.unresolved ?? []).length > 0) {
       logger.warn('checkMeetingRoomAvailability — room free/busy was never read; not claiming the room is free', {
         roomEmail, startIso, endIso,
       });
       return { kind: 'skip', reason: 'room availability could not be read' };
     }
-    const slots = fb[roomEmail] ?? [];
+    const slots = [...(fb[roomEmail] ?? []), ...(params.calendarReplacements ?? [])
+      .filter(e => e.id !== params.existingEventId && e.attendees?.some(a => a.emailAddress.address.toLowerCase() === roomEmail.toLowerCase()))
+      .map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone }).toISO()!,
+        end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone }).toISO()!, status: 'busy' }))];
     const slotStart = DateTime.fromISO(startIso, { zone: profile.user.timezone });
     const slotEnd = DateTime.fromISO(endIso, { zone: profile.user.timezone });
     isBusy = slots.some(s => {
@@ -76,7 +81,7 @@ export async function checkMeetingRoomAvailability(params: {
       return sStart < slotEnd && sEnd > slotStart;
     });
   } catch (err) {
-    logger.warn('checkMeetingRoomAvailability — getFreeBusy threw, failing open as room free', {
+    logger.warn('checkMeetingRoomAvailability — getFreeBusy threw, room availability unconfirmed', {
       roomEmail, err: String(err).slice(0, 200),
     });
     return { kind: 'skip', reason: 'freebusy call threw' };

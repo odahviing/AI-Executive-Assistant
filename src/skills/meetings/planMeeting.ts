@@ -107,8 +107,7 @@ export interface PlanMeetingInput {
   // Move-specific: prior slot for comparison (decides if category needs re-detect
   // AND drives the location preserve path)
   priorSlotStartIso?: string;
-  // v2.8.5 — prior slot END for the freebusy-overlap exclusion (see v2.8.5
-  // changelog entry for the move 13:00 → 13:15 self-overlap case).
+  // Existing duration, retained when the caller only changes the start.
   priorSlotEndIso?: string;
 
   // Owner-explicit override (e.g. "yes book it even though it breaks the rule").
@@ -136,6 +135,9 @@ export interface PlanMeetingInput {
 
   // Optional pre-fetched calendar (saves a Graph call when caller already has it)
   preloadedEvents?: CalendarEvent[];
+  // Internal candidate-calendar projection. Each old occurrence is replaced,
+  // and all proposed commitments remain visible to every attendee check.
+  calendarReplacements?: CalendarEvent[];
 
   /**
    * v4.1.x (M10) — WHO will read the strings this plan produces. checkSlot's
@@ -230,6 +232,8 @@ export type PlanAction =
       category: string | null;
       reasoning: string;
       overrideNotice?: string;   // #127 — owner booked through a soft own-day rule; surface this heads-up, never re-ask
+      hasConflict?: boolean;
+      availabilityUnconfirmed?: boolean;
       /**
        * M2 — the booking LEVEL this write lands on. 'free' is the preferred
        * place to book; 'optional' means it sits over a skippable
@@ -680,10 +684,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
   // attendee is busy — booked anyway (rule 6: availability never blocks), but
   // surfaced so the owner is TOLD who's busy (rule 7), never silently.
   let attendeeBusyNotice: string | undefined;
+  let knownAttendeeConflict = false;
+  let availabilityUnconfirmed = false;
   // Set when the owner overrides onto a slot where the big meeting room is taken
   // and the group's too large for the small-room fallback — booked without the
   // room (not double-booked), with a heads-up so he grabs space himself.
   let roomBusyNotice: string | undefined;
+  let roomAvailabilityNotice: string | undefined;
   // M2 — set when the write lands on a slot held by a skippable Working-Elsewhere
   // commitment (level 'optional'): the owner must be told he's booking over it,
   // not handed a confirmation that reads identical to a genuinely free slot.
@@ -1010,34 +1017,22 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             input.slotStartIso, input.slotEndIso,
             profile.user.timezone,
             fbDiag,
+            input.calendarReplacements?.map(e => e.id) ?? (input.existingEventId ? [input.existingEventId] : undefined),
           );
           const notChecked = fbDiag.notChecked ?? [];
           const slotStart = DateTime.fromISO(input.slotStartIso, { zone: profile.user.timezone, setZone: true });
           const slotEnd = DateTime.fromISO(input.slotEndIso, { zone: profile.user.timezone, setZone: true });
-          // v2.8.5 — pre-compute prior-event window for source-event exclusion.
-          // When intent==='move' and we have both prior bounds, busy windows
-          // matching that exact span on attendee calendars are the meeting
-          // being moved (still on their calendar until the move commits).
-          // Skip them so the overlap check doesn't flag the source event as
-          // a conflict with its own move target.
-          const priorStart = input.priorSlotStartIso ? DateTime.fromISO(input.priorSlotStartIso, { zone: profile.user.timezone, setZone: true }) : null;
-          const priorEnd = input.priorSlotEndIso ? DateTime.fromISO(input.priorSlotEndIso, { zone: profile.user.timezone, setZone: true }) : null;
-          const hasPriorWindow = !!(priorStart && priorEnd);
+          // The shared read already excludes only the identified occurrence.
+          // Equal clocks alone never identify another person's calendar event.
           const busyAttendees: string[] = [];
           for (const email of internalEmails) {
-            const slots = fb[email] ?? [];
+            const slots = [...(fb[email] ?? []), ...(input.calendarReplacements ?? [])
+              .filter(e => e.id !== input.existingEventId && e.attendees?.some(a => a.emailAddress.address.toLowerCase() === email))
+              .map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone }).toISO()!, end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone }).toISO()!, status: 'busy' as const }))];
             const overlap = slots.some(s => {
               if (s.status === 'free') return false;
               const sStart = DateTime.fromISO(s.start, { zone: (s as any)._timezone ?? 'utc' });
               const sEnd = DateTime.fromISO(s.end, { zone: (s as any)._timezone ?? 'utc' });
-              // Skip the moving event's prior window. Allow a 60-second
-              // tolerance per side for clock drift / TZ formatting noise.
-              if (hasPriorWindow
-                && Math.abs(sStart.diff(priorStart!, 'seconds').seconds) < 60
-                && Math.abs(sEnd.diff(priorEnd!, 'seconds').seconds) < 60
-              ) {
-                return false;
-              }
               return sStart < slotEnd && sEnd > slotStart;
             });
             if (overlap) busyAttendees.push(email);
@@ -1125,6 +1120,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           };
 
           if (busyAttendees.length > 0 || hoursBlockedEmails.length > 0) {
+            knownAttendeeConflict = true;
             const parts: string[] = [];
             if (busyAttendees.length > 0) {
               const who = joinNames(busyAttendees);
@@ -1169,7 +1165,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
               attendeeBusyLabel = label;
               gates.push({ kind: 'attendee_busy', ask: askText });
             }
-          } else if (notChecked.length > 0) {
+          }
+          if (notChecked.length > 0) {
             // Nobody's calendar was read, so there is nothing to say about a
             // clash, and saying nothing is what made this a bug: the booking went
             // out looking verified. Rides the SAME notice channel a busy attendee
@@ -1180,7 +1177,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
             logger.warn('planMeeting — attendee free/busy was never read for this slot', {
               notChecked, slot: input.slotStartIso,
             });
-            attendeeBusyNotice = `I couldn't check ${who}'s availability for this time — their calendar didn't come back, so this isn't confirmed on their side`;
+            availabilityUnconfirmed = true;
+            attendeeBusyNotice = [attendeeBusyNotice, `I couldn't establish ${who}'s availability for this proposed move, so it isn't confirmed on their side`].filter(Boolean).join('; ');
           }
         } catch (err) {
           // Permission errors (Calendars.Read) or transient Graph failures —
@@ -1189,6 +1187,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           logger.warn('planMeeting — attendee freebusy check threw, proceeding', {
             err: String(err).slice(0, 200), attendees: internalEmails,
           });
+          availabilityUnconfirmed = true;
+          attendeeBusyNotice = 'Attendee availability could not be established; it remains unconfirmed.';
         }
       }
     }
@@ -1208,6 +1208,8 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     isOnline = locationVerdict.isOnline;
     location = locationVerdict.location;
     preserveExisting = true;
+    // Preserving the venue does not preserve its availability at a new time.
+    addRoomEmail = !isOnline && !!profile.meetings.room_email && participants.some(p => p.email?.toLowerCase() === profile.meetings.room_email!.toLowerCase());
   } else if (locationVerdict && locationVerdict.kind === 'skip_stamp') {
     // Logistic / Private category on a fresh booking — no auto-stamp. Empty
     // location, not online. (A move of one comes back `preserve_existing` from
@@ -1237,10 +1239,15 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
         startIso: input.slotStartIso,
         endIso: input.slotEndIso,
         participantCount: headcount,
+        existingEventId: input.existingEventId,
+        calendarReplacements: input.calendarReplacements,
       });
       if (verdict.kind === 'room_busy_small_fits') {
         location = verdict.smallLabel;
         addRoomEmail = false;
+        preserveExisting = false;
+        roomBusyNotice = 'the meeting room is taken; the smaller space has not been checked';
+        availabilityUnconfirmed = true;
         logger.info('planMeeting — meeting room busy, falling back to small room label', {
           slot: input.slotStartIso, smallLabel: verdict.smallLabel,
           participantCount: headcount,
@@ -1253,6 +1260,7 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           // can grab space himself. Was a hard refuse even under override — the
           // one availability check that still blocked the owner.
           addRoomEmail = false;
+          preserveExisting = false;
           roomBusyNotice = 'the meeting room is taken and the group is large — booked without it, you\'ll need to grab space';
           logger.info('planMeeting — meeting room busy + too large, owner override → booking without the room', {
             slot: input.slotStartIso, participantCount: headcount,
@@ -1264,9 +1272,13 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
           roomAskText = verdict.suggestedAskText;
           gates.push({ kind: 'room', ask: verdict.suggestedAskText });
         }
+      } else if (verdict.kind === 'skip') {
+        availabilityUnconfirmed = true;
+        roomAvailabilityNotice = 'Meeting room availability could not be established; it remains unconfirmed.';
       }
     } catch (err) {
-      // Fail open: if anything throws, proceed with the original verdict.
+      availabilityUnconfirmed = true;
+      roomAvailabilityNotice = 'Meeting room availability could not be established; it remains unconfirmed.';
       logger.warn('planMeeting — meeting room availability check threw, proceeding', {
         err: String(err).slice(0, 200),
       });
@@ -1364,8 +1376,10 @@ export async function planMeeting(input: PlanMeetingInput): Promise<PlanAction> 
     // notice, so "booked over your optional standup" and "this double-books you
     // over X with 2 people on it" reach the owner instead of a confirmation
     // that reads identical to booking a genuinely free slot.
-    overrideNotice: [ownerOverrideNotice, unfilteredLevelNotice, optionalLevelNotice, attendeeBusyNotice, roomBusyNotice, tzAssumptionNotes.join('; ') || undefined]
+    overrideNotice: [ownerOverrideNotice, unfilteredLevelNotice, optionalLevelNotice, attendeeBusyNotice, roomBusyNotice, roomAvailabilityNotice, tzAssumptionNotes.join('; ') || undefined]
       .filter(Boolean).join('; ') || undefined,
+    hasConflict: !!ownerOverrideNotice || !!unfilteredLevelNotice || knownAttendeeConflict || !!roomBusyNotice,
+    availabilityUnconfirmed,
   };
 }
 

@@ -978,15 +978,72 @@ export async function getFreeBusy(
  * "Simon is busy then" — or said nothing at all — off a copy up to
  * CALENDAR_CACHE_TTL_SECONDS old.
  */
-export function getFreeBusyForDecision(
+export async function getFreeBusyForDecision(
   callerEmail: string,
   emails: string[],
   startDate: string,
   endDate: string,
   timezone: string,
   diagnostics?: { unresolved?: string[]; notChecked?: string[] },
+  excludeEventIds?: string[],
 ): Promise<Record<string, FreeBusySlot[]>> {
-  return getFreeBusy(callerEmail, emails, startDate, endDate, timezone, 'live', diagnostics);
+  const busy = { ...await getFreeBusy(callerEmail, emails, startDate, endDate, timezone, 'live', diagnostics) };
+  if (!excludeEventIds?.length) return busy;
+  // getSchedule has no event identity. Never subtract an anonymous range:
+  // another attendee commitment can occupy exactly the same interval.
+  const client = getClient();
+  const sources: any[] = [];
+  for (const id of new Set(excludeEventIds)) {
+    const event = await client.api(`/users/${encodeURIComponent(callerEmail)}/events/${encodeURIComponent(id)}`)
+      .header('Prefer', 'outlook.timezone="UTC"')
+      .select('id,iCalUId,type,start,end,attendees,isCancelled').get();
+    if (!event || event.id !== id || event.type === 'seriesMaster' || event.isCancelled !== false
+      || !DateTime.fromISO(event.start?.dateTime ?? '', { zone: event.start?.timeZone ?? 'UTC' }).isValid
+      || !DateTime.fromISO(event.end?.dateTime ?? '', { zone: event.end?.timeZone ?? 'UTC' }).isValid) {
+      throw new Error('Moving event identity is unresolved; refresh the identified occurrence before checking availability.');
+    }
+    sources.push(event);
+  }
+  for (const email of emails) {
+    if (email.toLowerCase() === callerEmail.toLowerCase()) continue;
+    const ownSources = sources.filter(e => e.attendees?.some((a: any) => a.emailAddress?.address?.toLowerCase() === email.toLowerCase()));
+    if (!ownSources.length) continue;
+    const key = Object.keys(busy).find(k => k.toLowerCase() === email.toLowerCase()) ?? email;
+    try {
+      if (ownSources.some(e => !e.iCalUId)) throw new Error('Moving occurrence has no cross-calendar identity');
+      const ids = new Set(ownSources.map(e => e.iCalUId));
+      // Minimal identity-bearing read: no subject, body, location or other
+      // private content enters this availability calculation or its result.
+      const events: any[] = [];
+      let request: any = client.api(`/users/${encodeURIComponent(email)}/calendarView`)
+        .header('Prefer', 'outlook.timezone="UTC"')
+        .query({ startDateTime: toStartOfDayLocal(startDate, timezone), endDateTime: toEndOfDayLocal(endDate, timezone),
+          $select: 'id,iCalUId,type,start,end,showAs,isCancelled', $top: 100 });
+      while (request) {
+        const page = await request.get();
+        if (!Array.isArray(page?.value)) throw new Error('Unavailable attendee event identities');
+        events.push(...page.value);
+        request = page['@odata.nextLink'] ? client.api(page['@odata.nextLink']).header('Prefer', 'outlook.timezone="UTC"') : null;
+      }
+      if (events.some(e => !e.id || !e.iCalUId || typeof e.isCancelled !== 'boolean' || !e.showAs
+        || !DateTime.fromISO(e.start?.dateTime ?? '', { zone: e.start?.timeZone ?? 'UTC' }).isValid
+        || !DateTime.fromISO(e.end?.dateTime ?? '', { zone: e.end?.timeZone ?? 'UTC' }).isValid)) throw new Error('Incomplete attendee event evidence');
+      busy[key] = events.filter(e => !e.isCancelled && !ids.has(e.iCalUId)).map(e => ({
+        start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'UTC' }).toISO()!,
+        end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'UTC' }).toISO()!,
+        status: e.showAs, _timezone: 'UTC',
+      }));
+    } catch (err) {
+      // No identity means unknown, never free or a proven self-conflict.
+      // Preserve complete busy items disjoint from the old occurrences;
+      // do not carve a merged interval or assert its remaining contents.
+      const ranges = ownSources.map(e => ({ start: DateTime.fromISO(e.start.dateTime, { zone: e.start.timeZone ?? 'UTC' }).toMillis(), end: DateTime.fromISO(e.end.dateTime, { zone: e.end.timeZone ?? 'UTC' }).toMillis() }));
+      busy[key] = (busy[key] ?? []).filter(s => !ranges.some(r => Date.parse(s.start) < r.end && Date.parse(s.end) > r.start));
+      if (diagnostics) diagnostics.notChecked = [...new Set([...(diagnostics.notChecked ?? []), email])];
+      logger.warn('Moving attendee availability is unconfirmed — event identity read unavailable', { email, err: String(err).slice(0, 160) });
+    }
+  }
+  return busy;
 }
 
 /**
@@ -1349,6 +1406,9 @@ export async function getEventType(userEmail: string, meetingId: string): Promis
     .api(`/users/${userEmail}/events/${meetingId}`)
     .select('id,type,subject,seriesMasterId,start,end,isAllDay,sensitivity,categories,organizer,attendees')
     .get();
+  if (event?.id !== meetingId) {
+    throw new Error('Cannot establish the requested calendar event identity');
+  }
   if (!['singleInstance', 'occurrence', 'exception', 'seriesMaster'].includes(event?.type)) {
     throw new Error('Cannot determine the calendar event type');
   }

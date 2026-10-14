@@ -86,6 +86,40 @@ export function requesterRelayLanguage(requesterSlackId: string): string {
 // data, never translated or interpreted; only the authored notice is localized.
 // An unrecognized KNOWN language is not an English preference.
 const relayCopy = {
+  coordinated_owner_closed: [
+    '{hi} — the agreed calendar plan was not fully confirmed. This request is closed; no automatic retry or check is pending. No completed move was undone. Check unconfirmed meetings before deciding any further change.',
+    '{hi} — תוכנית היומן שסוכמה לא אושרה במלואה בבדיקה. הבקשה נסגרה; אין ניסיון חוזר או בדיקה אוטומטיים בהמתנה. שום שינוי שהושלם לא בוטל. יש לבדוק פגישות שלא אושרו לפני החלטה על שינוי נוסף.',
+    '{hi} — der vereinbarte Kalenderplan wurde nicht vollständig bestätigt. Die Anfrage ist geschlossen; kein automatischer Versuch oder Prüfschritt steht aus. Keine abgeschlossene Verschiebung wurde rückgängig gemacht. Prüfen Sie unbestätigte Termine vor weiteren Änderungen.',
+    '{hi} — el plan de calendario acordado no se confirmó por completo. La solicitud está cerrada; no hay reintento ni comprobación automática pendiente. No se deshizo ningún cambio completado. Comprueba las reuniones sin confirmar antes de decidir otro cambio.',
+    '{hi} — لم يتم تأكيد خطة التقويم المتفق عليها بالكامل. أُغلق الطلب؛ لا توجد إعادة محاولة أو مراجعة تلقائية معلّقة. لم يتم التراجع عن أي نقل مكتمل. تحقّق من الاجتماعات غير المؤكدة قبل اتخاذ قرار بأي تغيير آخر.',
+    '{hi} — согласованный план календаря подтверждён не полностью. Запрос закрыт; автоматических повторов или проверок не запланировано. Выполненные переносы не отменялись. Проверьте неподтверждённые встречи перед решением о новых изменениях.',
+  ],
+  coordinated_meeting: ['Meeting {number}', 'פגישה {number}', 'Termin {number}', 'Reunión {number}', 'الاجتماع {number}', 'Встреча {number}'],
+  time_tbc: ['time unconfirmed', 'זמן לא מאושר', 'Zeit unbestätigt', 'hora sin confirmar', 'وقت غير مؤكد', 'время не подтверждено'],
+  coordinated_confirmed: [
+    '{label}: confirmed at {start} – {end}.', '{label}: אושר ביומן בשעות {start} – {end}.', '{label}: bestätigt für {start} – {end}.',
+    '{label}: confirmado para {start} – {end}.', '{label}: مؤكد في {start} – {end}.', '{label}: подтверждено на {start} – {end}.',
+  ],
+  coordinated_unknown: [
+    '{label}: outcome unconfirmed; requested {start} – {end}.', '{label}: התוצאה אינה מאושרת; התבקש {start} – {end}.', '{label}: Ergebnis unbestätigt; angefragt war {start} – {end}.',
+    '{label}: resultado sin confirmar; solicitado {start} – {end}.', '{label}: النتيجة غير مؤكدة؛ الموعد المطلوب {start} – {end}.', '{label}: результат не подтверждён; запрошено {start} – {end}.',
+  ],
+  coordinated_different: [
+    '{label}: calendar check did not match the requested interval {start} – {end}.', '{label}: בדיקת היומן לא תאמה לזמן שהתבקש {start} – {end}.', '{label}: Kalenderprüfung stimmt nicht mit dem angefragten Zeitraum {start} – {end} überein.',
+    '{label}: la comprobación del calendario no coincide con el intervalo solicitado {start} – {end}.', '{label}: لم تتطابق مراجعة التقويم مع الفترة المطلوبة {start} – {end}.', '{label}: проверка календаря не подтвердила запрошенный интервал {start} – {end}.',
+  ],
+  coordinated_unfinished: [
+    '{label}: not completed; requested {start} – {end}.', '{label}: לא הושלם; התבקש {start} – {end}.', '{label}: nicht abgeschlossen; angefragt war {start} – {end}.',
+    '{label}: no completado; solicitado {start} – {end}.', '{label}: لم يكتمل؛ الموعد المطلوب {start} – {end}.', '{label}: не завершено; запрошено {start} – {end}.',
+  ],
+  coordinated_incomplete: [
+    '{hi} — the agreed calendar plan was not fully confirmed. Some steps may have completed; no completed move was undone. This request is closed, and no automatic retry or check is pending. Check the calendar before deciding any further change.',
+    '{hi} — תוכנית היומן שסוכמה לא אושרה במלואה בבדיקה. ייתכן שחלק מהצעדים הושלמו; שום שינוי שהושלם לא בוטל. הבקשה נסגרה, ואין ניסיון חוזר או בדיקה אוטומטיים בהמתנה. יש לבדוק את היומן לפני החלטה על שינוי נוסף.',
+    '{hi} — der vereinbarte Kalenderplan wurde nicht vollständig bestätigt. Einzelne Schritte können abgeschlossen sein; keine abgeschlossene Verschiebung wurde rückgängig gemacht. Diese Anfrage ist geschlossen. Es steht kein automatischer Versuch oder Prüfschritt aus. Vor weiteren Änderungen bitte den Kalender prüfen.',
+    '{hi} — el plan de calendario acordado no se confirmó por completo. Algunos pasos pueden haberse completado; no se deshizo ningún cambio completado. Esta solicitud está cerrada y no hay ningún reintento ni comprobación automática pendiente. Revisa el calendario antes de decidir otro cambio.',
+    '{hi} — لم يتم تأكيد خطة التقويم المتفق عليها بالكامل. قد تكون بعض الخطوات اكتملت؛ ولم يتم التراجع عن أي نقل مكتمل. أُغلق هذا الطلب ولا توجد إعادة محاولة أو مراجعة تلقائية معلّقة. تحقّق من التقويم قبل اتخاذ قرار بأي تغيير آخر.',
+    '{hi} — согласованный план календаря подтверждён не полностью. Некоторые шаги могли завершиться; выполненные переносы не отменялись. Запрос закрыт, автоматических повторов или проверок не запланировано. Проверьте календарь перед решением о новых изменениях.',
+  ],
   floating_overlap_notice: ["Your {block} on {date} overlaps \"{subject}\" and there's no free spot left inside its {start}–{end} window. I've left it in place.","מקטע {block} שלך ב{date} חופף ל\"{subject}\", ולא נותר מקום פנוי בחלון {start}–{end} שלו. השארתי אותו במקומו.","Dein Block {block} am {date} überschneidet sich mit „{subject}“. Im Zeitfenster {start}–{end} ist kein Platz mehr frei. Ich habe ihn unverändert gelassen.","Tu bloque {block} del {date} coincide con «{subject}» y no queda ningún hueco libre dentro de su intervalo {start}–{end}. Lo he dejado donde estaba.","تتداخل فترة {block} في {date} مع «{subject}»، ولا توجد مساحة شاغرة ضمن نافذتها {start}–{end}. أبقيتها في مكانها.","Твой блок {block} на {date} пересекается с «{subject}», и в его окне {start}–{end} больше нет свободного места. Я оставила его без изменений."],
   bounce_reject: ['{target} said the counter doesn\'t work{reason}. Back to you on "{subject}" — want to suggest something else, or drop it?', '{target} אמרו שההצעה לא מתאימה{reason}. לגבי "{subject}" — להציע משהו אחר או לוותר?', '{target} kann dem Gegenvorschlag nicht zustimmen{reason}. Möchten Sie für „{subject}“ etwas anderes vorschlagen oder die Anfrage beenden?', '{target} dice que la contrapropuesta no le sirve{reason}. Sobre «{subject}», ¿quieres proponer otra cosa o dejarlo?', 'قال {target} إن الاقتراح البديل لا يناسبه{reason}. بخصوص «{subject}»، هل تقترح بديلاً أم ننهي الطلب؟', '{target} сообщил, что встречное предложение не подходит{reason}. По «{subject}» предложить другой вариант или завершить запрос?'],
   bounce_time: ['{target} accepted your counter on "{subject}". No action was executed because the time needs clarification; the accepted counter is unchanged.\n{quote}', '{target} קיבלו את הצעתך לגבי "{subject}". לא בוצעה פעולה כי נדרש בירור של הזמן; ההצעה שהתקבלה לא שונתה.\n{quote}', '{target} hat Ihren Gegenvorschlag zu „{subject}“ angenommen. Wegen einer nötigen Zeitklärung wurde nichts ausgeführt; der angenommene Vorschlag bleibt unverändert.\n{quote}', '{target} aceptó tu contrapropuesta sobre «{subject}». No se ejecutó nada porque hay que aclarar la hora; la propuesta aceptada no cambia.\n{quote}', 'قبل {target} اقتراحك البديل بشأن «{subject}». لم يُنفذ أي إجراء لأن الوقت يحتاج إلى توضيح؛ الاقتراح المقبول لم يتغير.\n{quote}', '{target} принял ваше встречное предложение по «{subject}». Ничего не выполнено: время требует уточнения. Принятое предложение не изменено.\n{quote}'],

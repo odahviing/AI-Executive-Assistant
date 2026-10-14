@@ -11,6 +11,104 @@ import logger from '../../utils/logger';
 import { PROMOTE_TIMEZONE_TEMP_TOOL, ORIGIN_SURFACE_REPLAY_TOOLS } from './types';
 import type { SkillContext } from '../../skills/types';
 
+/** Freeze each approved occurrence and its complete interval in the existing action. */
+export async function canonicalizeCoordinatedMoveArgs(args: Record<string, unknown>, profile: UserProfile): Promise<Record<string, unknown>> {
+  if (!('coordinated_moves' in args)) return args;
+  const { DateTime } = await import('luxon');
+  const { resolveStatedInstant, statedZoneFromArgs } = await import('../../utils/weTimeResolver');
+  const raw = args.coordinated_moves;
+  if (!Array.isArray(raw) || raw.length < 2 || args.meeting_id || args.new_start || args.new_end) {
+    throw new ReplayToolError('Supply one complete coordinated plan without singular move fields.', { error: 'invalid_move_plan' });
+  }
+  const { getEventType } = await import('../../connectors/graph/calendar');
+  const { getTravelContextForInstant } = await import('../../utils/workingElsewhere');
+  const seen = new Set<string>();
+  const moves: Array<{ meeting_id: string; new_start: string; new_end: string }> = [];
+  for (const item of raw) {
+    if (!item || typeof item.meeting_id !== 'string' || !item.meeting_id.trim() || seen.has(item.meeting_id)
+        || typeof item.new_start !== 'string') throw new ReplayToolError('Each occurrence needs its exact agreed interval.', { error: 'invalid_move_plan' });
+    seen.add(item.meeting_id);
+    // A frozen explicit end never derives duration again from a partly moved calendar.
+    const source = await getEventType(profile.user.email, item.meeting_id);
+    if (!source || source.type === 'seriesMaster' || !source.startDateTime || !source.endDateTime) {
+      throw new ReplayToolError('A specific occurrence could not be read. Refresh its identity before deciding the plan.', { error: 'moving_occurrence_unresolved' });
+    }
+    const resolved = resolveStatedInstant({ startIso: item.new_start, endIso: typeof item.new_end === 'string' ? item.new_end : undefined,
+      statedZone: statedZoneFromArgs(args), homeTz: profile.user.timezone, profile,
+      travel: getTravelContextForInstant(item.new_start, profile) });
+    const start = DateTime.fromISO(resolved.startIso, { zone: profile.user.timezone });
+    const duration = DateTime.fromISO(source.endDateTime).diff(DateTime.fromISO(source.startDateTime), 'milliseconds').milliseconds;
+    const end = resolved.endIso ? DateTime.fromISO(resolved.endIso, { zone: profile.user.timezone }) : start.plus({ milliseconds: duration });
+    if (!start.isValid || !end.isValid || end <= start) throw new ReplayToolError('The full approved interval is invalid.', { error: 'invalid_move_interval' });
+    moves.push({ meeting_id: item.meeting_id, new_start: start.toISO()!, new_end: end.toISO()! });
+  }
+  return { ...args, coordinated_moves: moves };
+}
+
+/** Reconcile every target before any validation that requires a future slot.
+ * Already achieved steps are observations, never replayed mutations. */
+async function runCoordinatedReplay(input: RunDeferredActionInput): Promise<Record<string, unknown>> {
+  const targets = input.args.coordinated_moves as Array<{ meeting_id: string; new_start: string; new_end: string }>;
+  const { verifyApprovedCalendarAction } = await import('../../connectors/graph/calendarReads');
+  const outcomes: Array<Record<string, unknown>> = [];
+  const remaining: typeof targets = [];
+  for (const target of targets) {
+    const check = await verifyApprovedCalendarAction({ userEmail: input.profile.user.email, profile: input.profile,
+      tool: 'move_meeting', args: target });
+    if (check.status === 'desired_state_observed') outcomes.push({ ...target, success: true, unchanged: true, ...check.result });
+    else if (check.status === 'different_state_observed' && check.reason === 'approved_fields_differ') remaining.push(target);
+    else outcomes.push({ ...target, success: false, error: 'move_outcome_unconfirmed', _calendar_verification: check.status });
+  }
+  const incomplete = (error = 'coordinated_move_incomplete'): never => {
+    throw new ReplayToolError('Only the confirmed outcomes are complete. The unchanged agreement remains stored; no successful move was undone.',
+      { success: false, error, outcomes, remaining });
+  };
+  if (outcomes.some(o => o.success !== true)) incomplete();
+  if (!remaining.length) return { success: true, outcomes, _replay_status: 'completed' };
+  if (remaining.some(m => Date.parse(m.new_start) <= Date.now())) incomplete('coordinated_move_elapsed');
+  const args = { ...input.args };
+  delete args.coordinated_moves;
+  let singularSubject: string | undefined;
+  if (remaining.length === 1) {
+    // The singular handler requires the current subject from an exact-ID read.
+    // Keep it solely in executor args: targets/outcomes can reach a room, where
+    // only the handler's scoped display label may be disclosed.
+    try {
+      const { getEventType } = await import('../../connectors/graph/calendar');
+      const source = await getEventType(input.profile.user.email, remaining[0].meeting_id);
+      if (source?.type !== 'seriesMaster' && typeof source?.subject === 'string' && source.subject.trim()) singularSubject = source.subject;
+    } catch { /* Missing identity or read access cannot authorize a write. */ }
+    if (!singularSubject) {
+      outcomes.push({ ...remaining[0], success: false, error: 'move_outcome_unconfirmed', _calendar_verification: 'unavailable' });
+      return incomplete();
+    }
+  }
+  try {
+    // One unfinished step uses the normal singular validator; achieved events
+    // stay on the actual calendar and therefore still constrain this move.
+    const result = await runDeferredAction({ ...input, args: remaining.length === 1
+      ? { ...args, ...remaining[0], meeting_subject: singularSubject } : { ...args, coordinated_moves: remaining }, coordinatedReconciled: true });
+    const attempted = Array.isArray(result.outcomes) ? result.outcomes : [{ ...remaining[0], ...result, success: true }];
+    return { success: true, outcomes: [...outcomes, ...attempted], _replay_status: 'completed' };
+  } catch (err) {
+    const failed = err instanceof ReplayToolError ? err.sentinel : { error: 'move_outcome_unconfirmed' };
+    // A thrown transport may have committed. Check once, without a second write.
+    const reported = Array.isArray(failed.outcomes) ? failed.outcomes : remaining.map(m => ({ ...m, ...failed }));
+    for (const target of remaining) {
+      const prior = reported.find((o: Record<string, unknown>) => o.meeting_id === target.meeting_id);
+      const check = await verifyApprovedCalendarAction({ userEmail: input.profile.user.email, profile: input.profile, tool: 'move_meeting', args: target });
+      outcomes.push(check.status === 'desired_state_observed'
+        // Retain only the already-scoped label, not the attempted write's
+        // causal summary: this read establishes state, not who changed it.
+        ? { ...target, ...(typeof prior?.moved === 'string' ? { moved: prior.moved } : {}), success: true, ...check.result }
+        : { ...target, ...prior, success: false, _calendar_verification: check.status });
+    }
+    if (outcomes.every(o => o.success === true)) return { success: true, outcomes, _replay_status: 'completed' };
+    remaining.splice(0, remaining.length, ...targets.filter(t => outcomes.some(o => o.meeting_id === t.meeting_id && o.success !== true)));
+    return incomplete();
+  }
+}
+
 /**
  * Thrown when the replayed tool returned a structured `{ error }` / `{ success:
  * false }` / `{ ok: false }` sentinel — carries the FULL result (never just the
@@ -27,6 +125,8 @@ export class ReplayToolError extends Error {
 }
 
 export interface RunDeferredActionInput {
+  /** Internal recursion marker; never persisted or accepted from tool args. */
+  coordinatedReconciled?: boolean;
   ownerUserId: string;
   profile: UserProfile;
   tool: string;
@@ -85,6 +185,9 @@ export interface RunDeferredActionInput {
  * executor or an unconfirmed result throws too; neither proves an action ran.
  */
 export async function runDeferredAction(input: RunDeferredActionInput): Promise<Record<string, unknown>> {
+  if (input.tool === 'move_meeting' && Array.isArray(input.args.coordinated_moves) && !input.coordinatedReconciled) {
+    return runCoordinatedReplay(input);
+  }
   const { ownerUserId, profile, tool: rawTool, args, requestId, originChannel, originThreadTs, surface } = input;
 
   // Every caller (resolver.ts) only reaches this function after checking

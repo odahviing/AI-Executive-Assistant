@@ -227,7 +227,7 @@ export type SearchRejectLabel =
   | 'category_per_day'
   | 'category_per_week'
   | 'outside_requested_window'
-  | 'overlaps_meeting_being_moved';
+  | 'unchanged_meeting_time';
 
 /**
  * Map a checkSlot verdict kind to the search-path's own reject label. Single

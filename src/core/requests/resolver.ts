@@ -175,6 +175,8 @@ export interface ResolveResult {
   booked?: boolean;
   start?: string;
   action_summary?: string;
+  outcomes?: Array<Record<string, unknown>>;
+  remaining?: Array<Record<string, unknown>>;
   /**
    * log-notify-requester-not-grounded-for-claimchecker — whether the
    * requester-facing close-loop DM (R3) actually reached them. See
@@ -803,7 +805,19 @@ async function runApproveCallback(
   ctx: ResolveContext,
   meta: { mergedFromAmend: boolean; amendRound: number },
 ): Promise<ResolveResult> {
-  const { tool, args } = approveCallback;
+  const { tool } = approveCallback;
+  let args = approveCallback.args;
+  const coordinated = tool === 'move_meeting' && 'coordinated_moves' in args;
+  if (coordinated) {
+    try {
+      const { canonicalizeCoordinatedMoveArgs } = await import('./deferredActionReplay');
+      args = await canonicalizeCoordinatedMoveArgs(args, ctx.profile);
+    } catch (err) {
+      if (err instanceof StatedTimeClarificationError) return unresolvedApprovalTime(row, ctx, err.toToolResult());
+      return { ok: false, request_id: row.id, state: row.state, effect: 'approve_needs_exact_plan',
+        reason: err instanceof Error ? err.message : 'The exact plan could not be read; nothing was repeated.' };
+    }
+  }
   let priorOutcome: Record<string, unknown> = {};
   try { priorOutcome = JSON.parse(row.outcome_json ?? '{}'); } catch { /* no recorded result */ }
   if (priorOutcome.verified === false && priorOutcome.replayed) {
@@ -811,7 +825,7 @@ async function runApproveCallback(
   }
 
   const proposalExpiry = boundApprovalExpiry('9999-12-31T00:00:00Z', { callbacks: { on_approve: approveCallback } }, ctx.profile);
-  if (Date.parse(proposalExpiry) <= Date.now()) {
+  if (!coordinated && Date.parse(proposalExpiry) <= Date.now()) {
     updateRequest(row.id, { expiresAt: proposalExpiry, nextCheckAt: proposalExpiry, nextCheckHandler: 'expiry' });
     return { ok: false, request_id: row.id, state: row.state, effect: 'proposal_elapsed',
       reason: 'The proposed meeting time has passed. Nothing was executed; this proposal is due to expire. Choose a new future time if still needed.' };
@@ -830,6 +844,7 @@ async function runApproveCallback(
   // surfaced and re-asked; on the emoji path it is logged and the row's own
   // reminder/expiry timers keep it from dying silently (R3).
   if (tool === 'move_meeting'
+      && !coordinated
       && !(typeof args.new_start === 'string' && args.new_start.trim().length > 0)) {
     logger.warn('resolveRequest — bare approve on an open time-less move; a time must be chosen first', {
       id: row.id, subject: row.subject,
@@ -857,7 +872,7 @@ async function runApproveCallback(
   }
   if (tool === 'book_floating_block') {
     replayArgs.confirm_outside_window = true;
-  } else if (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'update_meeting') {
+  } else if (!coordinated && (tool === 'create_meeting' || tool === 'move_meeting' || tool === 'update_meeting')) {
     replayArgs.relaxed = true;
   }
   // v3.4.6 (spine collapse) — the HARD approve→book link. Stamp the
@@ -958,6 +973,19 @@ async function runApproveCallback(
         reason: 'Your acceptance is recorded, but the action could not be confirmed. It is now waiting for the owner to check and resolve; no new counter is needed from you.',
       };
     };
+    if (coordinated && err instanceof ReplayToolError && Array.isArray(err.sentinel.outcomes)) {
+      // Existing outcome_json retains confirmed progress across restart. It is
+      // evidence, never permission to skip the next authoritative read.
+      const outcomes = err.sentinel.outcomes as Array<Record<string, unknown>>;
+      const remaining = Array.isArray(err.sentinel.remaining) ? err.sentinel.remaining : [];
+      updateRequest(row.id, { outcomeJson: { ...priorOutcome, approved: true, replayed: tool, outcomes, remaining } });
+      if (outcomes.some(o => o.success !== true && o._calendar_verification === 'unavailable')) {
+        return closeUnconfirmedExecution(getRequest(row.id) ?? row, ctx, tool);
+      }
+      const failure = await replayFailure(String(err.sentinel.error), err.message);
+      // Recovery data is owner-only, just like existing detailed replay errors.
+      return ctx.wasAwaitingColleague ? failure : { ...failure, outcomes, remaining };
+    }
     // possible-reschedule-replay-failure-has-no-recovery-path (2026-08-14) —
     // pre-fix this fell straight to the generic branch below: the sentinel's
     // existing_meeting_id/subject/when never survived past `ReplayToolError`'s
@@ -1042,6 +1070,7 @@ async function runApproveCallback(
   const calendarAction = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'].includes(tool);
   const executed = {
     tool,
+    coordinated,
     tracked: replayResult?._replay_status === 'tracked',
     start: !calendarAction ? undefined : typeof replayResult?.booked_start === 'string'
       ? (replayResult.booked_start as string)
@@ -1068,6 +1097,7 @@ async function runApproveCallback(
       merged_from_amend: meta.mergedFromAmend,
       amend_round: meta.amendRound,
       ...(executed.start ? { booked_start: executed.start } : {}),
+      ...(coordinated ? { outcomes: replayResult?.outcomes } : {}),
     },
   });
 
@@ -1094,6 +1124,7 @@ async function runApproveCallback(
     ...(replaySubject ? { subject: replaySubject } : {}),
     ...(replayStart ? { start: replayStart } : {}),
     ...(replaySummary ? { action_summary: replaySummary } : {}),
+    ...(coordinated && !ctx.wasAwaitingColleague ? { outcomes: replayResult?.outcomes as Array<Record<string, unknown>> } : {}),
     requester_notify_outcome: requesterNotified,
   };
 }
@@ -1117,6 +1148,7 @@ async function runApproveCallback(
  */
 interface ExecutedOutcome {
   tool: string;
+  coordinated?: boolean;
   tracked?: boolean;
   /** ISO start the action actually landed on. */
   start?: string;
@@ -1287,7 +1319,11 @@ export async function notifyRequesterOfDecision(
     // is the actor here. Use a neutral booking-confirmation phrasing
     // instead. The relay still goes to the requester as a confirmation
     // they can scroll back to.
-    if (executed?.tracked) {
+    if (executed?.coordinated) {
+      body = requesterLang === 'he'
+        ? `${hi} — בדיקת היומן מאשרת שכל הפגישות בתוכנית שאושרה נמצאות בזמנים שסוכמו.`
+        : `${hi} — a calendar check confirms every meeting in the approved plan is at its agreed time.`;
+    } else if (executed?.tracked) {
       body = requesterLang === 'he'
         ? `${hi} — הפעולה שאושרה לגבי ${subject} נקבעה להמשך והיא במעקב, אך עדיין לא הושלמה.`
         : `${hi} — the approved action about ${subject} is scheduled and tracked, but has not completed yet.`;
@@ -1486,7 +1522,7 @@ ${amendPinned.map(p => `- ${p.key.replace(/_/g, ' ')} = ${p.value}`).join('\n')}
 Write the message.`;
       } else {
         const outcome = verdict === 'approve'
-          ? (executed?.tracked ? 'The approved action is scheduled and tracked in an existing request, but has not completed yet.' : executed ? `The action was completed: ${actionHint ?? executed.tool}${startFormatted ? ` at ${startFormatted}` : ''}.`
+          ? (executed?.coordinated ? 'A calendar check confirms every meeting in the agreed plan is at its agreed time; this does not establish which attempt produced that state.' : executed?.tracked ? 'The approved action is scheduled and tracked in an existing request, but has not completed yet.' : executed ? `The action was completed: ${actionHint ?? executed.tool}${startFormatted ? ` at ${startFormatted}` : ''}.`
             : `${ownerFirst} approved the request. No action was executed here; this is the complete yes/no decision.`)
           : verdict === 'closed_by_owner'
             ? `${ownerFirst} closed this out himself${reason && reason.trim() ? ` (${reason.trim()})` : ''} — not an approval or a decline, just handled/no longer needed`
@@ -1736,24 +1772,63 @@ RULES:
  * stored a new colleague counter. Failed acceptance keeps the owner's counter.
  * The lead and consequence use ONE source — the counter a ✅ will replay (R2).
  */
+/** Private owner detail uses the approved plan's order, never opaque event IDs.
+ * Requester and room notices deliberately keep their separate scoped copy. */
+function coordinatedOwnerOutcome(row: RequestRow, prior: Record<string, unknown>, profile: UserProfile, lang: string, hi: string): string {
+  const action = extractCallbacks(parseDetails<Record<string, unknown>>(row)).on_approve;
+  const planned = action?.args.coordinated_moves;
+  const outcomes = prior.outcomes as Array<Record<string, unknown>>;
+  const remaining = Array.isArray(prior.remaining) ? prior.remaining as Array<Record<string, unknown>> : [];
+  const targets = Array.isArray(planned) ? planned as Array<Record<string, unknown>> : [...outcomes, ...remaining];
+  const seen = new Set<unknown>();
+  const clock = (value: unknown): string => {
+    if (typeof value !== 'string') return relayNotice(lang, 'time_tbc');
+    const time = DateTime.fromISO(value, { zone: profile.user.timezone }).setZone(profile.user.timezone);
+    return time.isValid ? time.toISO({ suppressMilliseconds: true, suppressSeconds: true })! : relayNotice(lang, 'time_tbc');
+  };
+  const lines = targets.flatMap((target, index) => {
+    const id = target.meeting_id;
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const outcome = outcomes.find(o => o.meeting_id === id);
+    const state = outcome?._calendar_verification;
+    const confirmed = outcome?.success === true && state !== 'unavailable' && state !== 'different_state_observed';
+    const kind = confirmed ? 'coordinated_confirmed' : state === 'different_state_observed' ? 'coordinated_different'
+      : state === 'unavailable' || outcome?.error === 'move_outcome_unconfirmed' ? 'coordinated_unknown' : 'coordinated_unfinished';
+    const label = typeof outcome?.moved === 'string' && outcome.moved.trim() ? outcome.moved : relayNotice(lang, 'coordinated_meeting', { number: String(index + 1) });
+    const start = confirmed ? outcome?.booked_start ?? outcome?.new_start ?? target.new_start : target.new_start;
+    const end = confirmed ? outcome?.booked_end ?? outcome?.new_end ?? target.new_end : target.new_end;
+    return [relayNotice(lang, kind, { label, start: clock(start), end: clock(end) })];
+  });
+  return [relayNotice(lang, 'coordinated_owner_closed', { hi }), ...lines].join('\n');
+}
+
 /** A completed decision with an uncertain action is terminal, never an unanswered ask. */
 export async function closeUnconfirmedExecution(row: RequestRow, ctx: ResolveContext, tool: string): Promise<ResolveResult> {
-  const reason = "I tried to do it, but I'm not sure it worked. I couldn't confirm the result with an available read-only check. I have not repeated the action, and no further automatic check is pending.";
+  const prior = JSON.parse(row.outcome_json ?? '{}') as Record<string, unknown>;
+  const outcomes = Array.isArray(prior.outcomes) ? prior.outcomes as Array<Record<string, unknown>> : undefined;
+  const noticeKind = outcomes ? 'coordinated_incomplete' as const : 'action_unconfirmed' as const;
+  const reason = outcomes
+    ? 'The agreed plan did not fully complete. Confirmed results are recorded separately; unfinished or unknown results remain unconfirmed. No successful move was undone, and no further automatic check is pending.'
+    : "I tried to do it, but I'm not sure it worked. I couldn't confirm the result with an available read-only check. I have not repeated the action, and no further automatic check is pending.";
   closeRequest({ id: row.id, state: 'resolved', closureReason: 'approved_action_attempted_unconfirmed', closedBy: 'owner',
-    outcomeJson: { approved: true, replayed: tool, verified: false } });
+    outcomeJson: { ...prior, approved: true, replayed: tool, verified: false } });
   const sent = await relayClosureToRequester({ row, profile: ctx.profile, label: 'unconfirmed action requester outcome',
-    compose: ({ lang, hi, subject }) => relayNotice(lang, 'action_unconfirmed', { hi, subject }) });
+    compose: ({ lang, hi, subject }) => relayNotice(lang, noticeKind, { hi, subject }) });
   const { getConnection } = await import('../../connections/registry');
   const { postOwnerDecision } = await import('../../utils/ownerDailyThread');
   const conn = getConnection(row.owner_user_id, 'slack');
   try {
     const lang = requesterRelayLanguage(row.owner_user_id);
-    const text = relayNotice(lang, 'action_unconfirmed', { hi: relayNotice(lang, 'greeting', { name: ctx.profile.user.name.split(' ')[0] }), subject: row.subject });
+    const hi = relayNotice(lang, 'greeting', { name: ctx.profile.user.name.split(' ')[0] });
+    const text = outcomes ? coordinatedOwnerOutcome(row, prior, ctx.profile, lang, hi)
+      : relayNotice(lang, noticeKind, { hi, subject: row.subject });
     const posted = conn ? await postOwnerDecision({ profile: ctx.profile, conn, text, label: 'unconfirmed action owner outcome',
       inThread: row.owner_dm_channel && row.owner_dm_thread_ts ? { channel: row.owner_dm_channel, threadTs: row.owner_dm_thread_ts } : null }) : null;
     recordOwnerNotificationOutcome(row, posted);
   } catch { recordOwnerNotificationOutcome(row, { ok: false, reason: 'error' }); }
   return { ok: false, request_id: row.id, state: 'resolved', effect: 'approve_replay_unconfirmed', reason,
+    ...(outcomes && !ctx.wasAwaitingColleague ? { outcomes, remaining: prior.remaining as Array<Record<string, unknown>> } : {}),
     requester_notify_outcome: sent ? 'sent' : 'failed' };
 }
 

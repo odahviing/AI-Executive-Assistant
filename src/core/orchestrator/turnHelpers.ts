@@ -69,21 +69,38 @@ function trimHistory(
 // outcome info, a failed move_meeting looked the same as a successful one and
 // "all done" got waved through. Now mutations emit OK or FAILED so the checker
 // can flag false-success drafts.
-function mutationOutcome(result: unknown): { ok: boolean; reason?: string; eventId?: string } {
-  if (result == null || typeof result !== 'object') return { ok: false, reason: 'no_result' };
+function mutationOutcome(result: unknown): { ok: boolean; changed: boolean; reason?: string; eventId?: string } {
+  if (result == null || typeof result !== 'object') return { ok: false, changed: false, reason: 'no_result' };
   const r = result as Record<string, unknown>;
+  // A coordinated call confirms each event separately. Aggregate failure must
+  // not erase its confirmed children, nor may an aggregate success invent them.
+  if (Array.isArray(r.outcomes)) {
+    const children = r.outcomes.map(mutationOutcome);
+    const ok = children.length > 0 && children.every(c => c.ok)
+      && r.success !== false && r.ok !== false && typeof r.error !== 'string'
+      && (!Array.isArray(r.remaining) || r.remaining.length === 0);
+    return { ok, changed: children.some(c => c.ok && c.changed),
+      ...(ok ? {} : { reason: typeof r.error === 'string' ? r.error : 'coordinated_move_incomplete' }) };
+  }
   // Common positive shapes: { success: true, ... }, { ok: true, ... }, { meetingId: ... }, { id: ... }
   // Common negative shapes: { success: false, error: '...' }, { ok: false, reason: '...' }, { warning: '...', needs_confirmation: true }
-  if (r.success === false) return { ok: false, reason: typeof r.error === 'string' ? r.error : 'tool_returned_false' };
-  if (r.ok === false) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'tool_returned_false' };
-  if (r.needs_confirmation === true) return { ok: false, reason: typeof r.warning === 'string' ? r.warning : 'needs_confirmation' };
-  if (r.needs_owner_approval === true) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'needs_owner_approval' };
+  if (r.success === false || typeof r.error === 'string') return { ok: false, changed: false, reason: typeof r.error === 'string' ? r.error : 'tool_returned_false' };
+  if (r.ok === false) return { ok: false, changed: false, reason: typeof r.reason === 'string' ? r.reason : 'tool_returned_false' };
+  if (r.needs_confirmation === true) return { ok: false, changed: false, reason: typeof r.warning === 'string' ? r.warning : 'needs_confirmation' };
+  if (r.needs_owner_approval === true) return { ok: false, changed: false, reason: typeof r.reason === 'string' ? r.reason : 'needs_owner_approval' };
+  if (typeof r._calendar_verification === 'string' && r._calendar_verification !== 'desired_state_observed') {
+    return { ok: false, changed: false, reason: 'calendar_outcome_unconfirmed' };
+  }
   if (r.success === true || r.ok === true || typeof r.meetingId === 'string' || typeof r.id === 'string' || typeof r.event_id === 'string') {
-    const eventId = (r.meetingId ?? r.id ?? r.event_id) as string | undefined;
-    return { ok: true, eventId };
+    const eventId = [r.meetingId, r.id, r.event_id, r.meeting_id].find(id => typeof id === 'string') as string | undefined;
+    // Desired state observed after reconciliation is confirmed, but it does
+    // not prove this invocation caused a write or sent an attendee update.
+    const changed = r.unchanged !== true && r._calendar_verification !== 'desired_state_observed'
+      && r._write_response_lost !== true;
+    return { ok: true, changed, eventId };
   }
   // No clear shape — be conservative, treat as not-confirmed-success.
-  return { ok: false, reason: 'unclear_result' };
+  return { ok: false, changed: false, reason: 'unclear_result' };
 }
 
 /**
@@ -134,26 +151,30 @@ const MUTATION_DOMAIN: Record<string, MutationDomain> = {
 /**
  * The domain this call actually mutated, or null when nothing changed.
  *
- * Only an OK outcome earns a marker — the same convention the tool log already
- * uses (`[<tool> OK …]` vs `[<tool> FAILED …]`, #137b). A failed mutation means she
- * did NOT act, so it must not back a "done" claim: the old shield matched the tool
- * NAME and so suppressed the honesty rewrite even on `[create_meeting FAILED: …]`.
+ * Only a confirmed causal write earns a calendar marker. A coordinated call's
+ * confirmed child still counts when another child is unfinished; the per-event
+ * summary supplies the scope. Observed desired state alone earns no marker.
  */
 function mutationDomain(toolName: string, result: unknown): MutationDomain | null {
   const domain = MUTATION_DOMAIN[toolName];
   if (!domain) return null;
   if (result == null || typeof result !== 'object') return null;
   const r = result as Record<string, unknown>;
+  // A coordinated call can confirm one write while another is unfinished.
+  // Read the event outcomes before the aggregate failure; an observed state
+  // (including a reconciled lost response) does not establish a causal write.
+  if ((toolName === 'move_meeting' || toolName === 'resolve_approval') && Array.isArray(r.outcomes)) {
+    return mutationOutcome(result).changed ? 'book' : null;
+  }
   if (toolName === 'update_my_preferences' && r.mode === 'read') return null;
-  // Any explicit negative — a thrown/refused call, or a skill's own no-op verdict
-  // (resolve_approval's `{ok:false}`) — changed nothing.
+  // A singular explicit negative carries no confirmed mutation.
   if (typeof r.error === 'string') return null;
   if (r.ok === false || r.success === false) return null;
   // An exact original-request lookup confirms an earlier delivery, not a new send.
   if (toolName === 'message_colleague' && r.already_sent === true) return null;
   // Calendar mutations carry a rich outcome (needs_confirmation / needs_owner_approval
   // / unclear shapes are all NOT a completed write) — reuse the one reader for it.
-  if (domain === 'book' && !mutationOutcome(result).ok) return null;
+  if (domain === 'book' && !mutationOutcome(result).changed) return null;
   return domain;
 }
 
@@ -342,7 +363,11 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>, res
   // `attendee_check=<source>` rides the same outside-the-bracket slot (see
   // attendeeCheckSource above) — the shield's `includes('attendee_check=')`
   // reads it the same way, this turn and from persisted prior rows.
-  const attendeeCheck = attendeeCheckSource(toolName, result);
+  const outcomes = (toolName === 'move_meeting' || toolName === 'resolve_approval')
+    && result && typeof result === 'object' && Array.isArray((result as { outcomes?: unknown }).outcomes)
+    ? (result as { outcomes: unknown[] }).outcomes : [];
+  const attendeeCheck = attendeeCheckSource(toolName, result)
+    ?? outcomes.map(o => attendeeCheckSource('move_meeting', o)).find(Boolean);
   const markers = [
     ...domains.map(d => `mutated=${d}`),
     ...(approvalOwnerNotified(toolName, result) ? ['notified=approval_owner'] : []),
@@ -417,6 +442,67 @@ function blockMovesSuffix(result: unknown, affectedStart: unknown, ownerTz: stri
 
 function renderToolSummary(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
   try {
+    // Preserve each event's result before an aggregate error or approval state
+    // can hide it. Names and prose come only from the already scoped result;
+    // request arguments establish identity/targets, never observed completion.
+    if ((toolName === 'move_meeting' || toolName === 'resolve_approval') && result && typeof result === 'object') {
+      const r = result as Record<string, unknown>;
+      if (Array.isArray(r.outcomes)) {
+        const outcomes = r.outcomes.filter((o): o is Record<string, unknown> => !!o && typeof o === 'object');
+        const remaining = Array.isArray(r.remaining)
+          ? r.remaining.filter((o): o is Record<string, unknown> => !!o && typeof o === 'object') : [];
+        const targetIds = Array.isArray(input.coordinated_moves)
+          ? input.coordinated_moves.map(t => (t as { meeting_id?: unknown } | null)?.meeting_id) : [];
+        const outcomeIds = outcomes.map(o => o.meeting_id ?? o.meetingId);
+        const complete = outcomes.length >= 2 && new Set(outcomeIds).size === outcomes.length
+          && outcomeIds.every(id => typeof id === 'string')
+          && targetIds.every(id => typeof id === 'string' && outcomeIds.includes(id))
+          && outcomes.every(o => mutationOutcome(o).ok)
+          && remaining.length === 0 && r.ok !== false && r.success !== false && typeof r.error !== 'string';
+        const state = typeof r.state === 'string' ? `; decision state=${r.state}` : '';
+        const notify = r.requester_notify_outcome === 'failed' ? '; requester NOT notified (relay DM failed)' : '';
+        const lines = outcomes.map(o => {
+          const line = renderToolSummary('move_meeting', {}, o, ownerTz);
+          // new_start/new_end on a failed child are targets, not observations.
+          const start = o.booked_start ?? o.new_start;
+          const end = o.booked_end ?? o.new_end;
+          const interval = [start, end].filter(v => typeof v === 'string').join(' to ');
+          const id = o.meetingId ?? o.meeting_id ?? o.event_id;
+          const notices = [o._attendee_busy_note, o.override_notice]
+            .filter((v): v is string => typeof v === 'string')
+            .map(v => v.replace(/\s+/g, ' ').trim().slice(0, 160))
+            .filter(v => v && !line.includes(v));
+          const fields = `${interval ? `; ${mutationOutcome(o).ok ? 'confirmed interval' : 'requested interval'}=${interval}` : ''}`
+            + notices.map(v => ` [${v}]`).join('')
+            + (typeof id === 'string' && !line.includes(`event_id=${id}`) ? ` event_id=${id}` : '');
+          return `${line.slice(0, -1)}${fields}]`;
+        });
+        // Replay remaining includes failed/unknown targets already represented
+        // above. Only direct move remaining proves the target was unattempted.
+        for (const target of remaining) {
+          if (outcomes.some(o => (o.meeting_id ?? o.meetingId) === target.meeting_id)) continue;
+          const interval = [target.new_start, target.new_end].filter(v => typeof v === 'string').join(' to ');
+          lines.push(`[move_meeting ${toolName === 'move_meeting' ? 'NOT ATTEMPTED' : 'NOT COMPLETED'}${interval ? `; requested interval=${interval}` : ''}${typeof target.meeting_id === 'string' ? ` event_id=${target.meeting_id}` : ''}]`);
+        }
+        return `[${toolName} ${complete ? 'COMPLETE' : 'INCOMPLETE'} — per-event outcomes${state}${notify}] ${lines.join(' ')}`;
+      }
+      if (toolName === 'move_meeting') {
+        const state = r.unchanged === true ? 'UNCHANGED'
+          : r._calendar_verification === 'desired_state_observed' ? 'OBSERVED'
+          : r._calendar_verification === 'unavailable' ? 'UNCONFIRMED' : null;
+        if (state) {
+          const interval = [r.booked_start ?? r.new_start ?? (state === 'UNCONFIRMED' ? input.new_start : undefined),
+            r.booked_end ?? r.new_end ?? (state === 'UNCONFIRMED' ? input.new_end : undefined)]
+            .filter(v => typeof v === 'string').join(' to ');
+          const id = r.meetingId ?? r.meeting_id ?? r.event_id;
+          const name = typeof r.moved === 'string' ? ` ${r.moved}` : '';
+          const explanation = state === 'UNCHANGED' ? 'already at the confirmed interval; no calendar update sent'
+            : state === 'OBSERVED' ? 'desired state observed; this attempt causing it is unconfirmed'
+            : 'calendar outcome unknown; no successful or failed write established';
+          return `[move_meeting ${state}${name} — ${explanation}${interval ? `; ${state === 'UNCONFIRMED' ? 'requested' : 'confirmed'} interval=${interval}` : ''}${localSuffix(r.presentation_local)}${typeof id === 'string' ? ` event_id=${id}` : ''}]`;
+        }
+      }
+    }
     // createmeeting-failed-summary-drops-counter-offer-reason (2026-09-04) — a
     // soft counter-proposal (create_meeting's efficiency_counter path in
     // createMeeting.ts) carries a real, specific `counter_offer.reason`
@@ -1015,23 +1101,22 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
 }
 
 // v2.2.5 — Action tape. Scans the assistant turns in this thread's conversation
-// history for successful mutation tool summaries (the `[<tool> OK ...]` markers
-// emitted by summarizeToolCall above) and pins them at the top of the system
+// history for mutation outcomes emitted by summarizeToolCall above and pins
+// them at the top of the system
 // prompt as a fact block. Replaces the prompt-rule attempts (RULE 2e in
 // systemPrompt.ts and the calendarHealth "RULE 2e principle" reference) which
 // kept rotting — Sonnet ignores rules but can't ignore pinned data.
 //
-// Failed mutations (`[<tool> FAILED ...]`) are intentionally excluded — only
-// confirmed successes belong on the tape. The closing line acknowledges the
-// tool-trust gap (Graph can return OK on a write that didn't actually land):
-// when the owner pushes back, Maelle re-checks instead of insisting.
+// Reschedule state observations and unfinished event outcomes also belong on
+// the tape: dropping them turns partial completion into an apparent full success
+// after history trimming. Their explicit status never claims a completed write.
 //
 // 2026-09-09 — was a `[^\]]*` regex, which stops at the FIRST `]`: a line that
 // nests a bracket (`[Heads-up: Erez is busy then]`, and now the attendee-local
 // `[local: …]` reading on every cross-zone booking) was pinned truncated, its
 // event_id and closing bracket cut off. The head stays a regex; the span is
 // lifted balanced by `toolLinesMatching` below.
-const MUTATION_OK_HEAD = /^\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK\b/;
+const MUTATION_OK_HEAD = /^\[(?:(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK\b|move_meeting (?:UNCHANGED|OBSERVED|UNCONFIRMED|FAILED|NOT ATTEMPTED|NOT COMPLETED)\b)/;
 
 /**
  * The bracketed tool line that starts at `start` (a `[`), brackets balanced so

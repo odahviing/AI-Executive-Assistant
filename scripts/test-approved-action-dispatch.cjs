@@ -23,7 +23,7 @@ const compiled = new Map();
 // Execute the real post-PATCH verification block, with only its Graph readback
 // doubled. This checks the producer's actual sentinel branches without sending
 // a mutation or recreating the return object in the test.
-async function postMoveResult(reason) {
+async function postMoveResult(reason, options = {}) {
   const filename = path.join(root, 'src/skills/meetings/ops/handlers/moveMeeting.ts');
   const source = fs.readFileSync(filename, 'utf8');
   const ast = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
@@ -32,21 +32,32 @@ async function postMoveResult(reason) {
     if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'verify'
       && node.initializer && ts.isAwaitExpression(node.initializer)
       && ts.isCallExpression(node.initializer.expression)
-      && node.initializer.expression.expression.getText(ast) === 'verifyEventMoved') {
+      && node.initializer.expression.expression.getText(ast) === 'verifyApprovedCalendarAction') {
       block = node.parent.parent.parent;
     }
     ts.forEachChild(node, visit);
   }
   visit(ast);
   assert.ok(block && ts.isBlock(block), 'actual post-move readback branch located');
-  const wrapped = `module.exports = async function(args,userEmail,effectiveStart,timezone,logger) ${block.getText(ast)}`;
+  const wrapped = `module.exports = async function(args,userEmail,effectiveStart,effectiveEnd,timezone,logger,context,moveWriteError) ${block.getText(ast)}`;
   const code = ts.transpileModule(wrapped, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(`(function(require,module){${code}\n})`, {}, { filename })(spec => {
     assert.equal(spec, '../../../../connectors/graph/calendar');
-    return { verifyEventMoved: async () => ({ ok: false, reason, expected: '12:00', got: '10:00' }) };
+    return { verifyApprovedCalendarAction: async input => {
+      assert.equal(input.tool, 'move_meeting');
+      assert.equal(input.userEmail, 'owner@example.com');
+      assert.equal(input.args.meeting_id, 'event-one');
+      assert.equal(input.args.new_start, '2026-09-12T12:00:00Z');
+      assert.equal(input.args.new_end, '2026-09-12T13:00:00Z', 'full target duration reaches exact verifier');
+      assert.equal(input.args.stated_zone, 'UTC');
+      return { status: options.status || (reason === 'read_unavailable' ? 'unavailable' : 'different_state_observed'),
+        reason: reason === 'not_found' ? 'event_absent' : reason };
+    } };
   }, module);
-  return module.exports({ meeting_id: 'event-one', meeting_subject: 'Private subject' }, 'owner@example.com', '2026-09-12T12:00:00Z', 'UTC', { warn() {} });
+  return module.exports({ meeting_id: 'event-one', meeting_subject: 'Private subject' }, 'owner@example.com',
+    '2026-09-12T12:00:00Z', '2026-09-12T13:00:00Z', 'UTC', { warn() {} }, context,
+    options.responseLost ? Error('write response lost') : undefined);
 }
 function harness(value, options = {}) {
   const calls = [], unexpected = [], verifications = [];
@@ -217,9 +228,11 @@ for (const error of ['rule_violation', 'slot_on_hold', 'event_load_failed', 'own
   assert.equal(outcome.result.error, error);
   assert.notEqual(outcome.result.needs_verification, true);
 });
-for (const reason of ['not_found', 'start_drift']) {
+for (const reason of ['not_found', 'start_drift', 'end_drift', 'read_unavailable']) {
   for (const status of ['desired_state_observed', 'different_state_observed', 'unavailable']) cases.push({ id: `real-post-move-${reason}-${status}`, async run() {
-    const result = await postMoveResult(reason);
+    const result = await postMoveResult(reason, { responseLost: reason === 'read_unavailable' });
+    assert.equal(result.success, false);
+    assert.equal(result._calendar_verification, reason === 'read_unavailable' ? 'unavailable' : 'different_state_observed');
     const h = harness(result, { verification: { status, result: { success: true, meetingId: 'event-one', _calendar_verification: status } } });
     const args = { meeting_id: 'event-one', new_start: '2026-09-12T12:00:00Z', new_end: '2026-09-12T13:00:00Z' };
     if (status === 'desired_state_observed') {
@@ -234,6 +247,10 @@ for (const reason of ['not_found', 'start_drift']) {
     assert.deepEqual(h.unexpected, []);
   } });
 }
+for (const responseLost of [false, true]) cases.push({ id: `real-post-move-exact-state-response-lost-${responseLost}`, async run() {
+  assert.equal(await postMoveResult('matching_full_interval', { status: 'desired_state_observed', responseLost }), undefined,
+    'actual producer readback block permits normal terminal handling only after exact state is observed');
+} });
 cases.push({ id: 'pre-move-refusal-does-not-readback', async run() {
   const h = harness({ success: false, error: 'rule_violation' });
   await assert.rejects(h.replay('move_meeting', { meeting_id: 'event-one' }), err => err.sentinel?.error === 'rule_violation');

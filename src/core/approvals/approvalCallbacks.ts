@@ -168,6 +168,11 @@ export function buildConsequenceText(
       return relayNotice(lang, 'consequence_book', { subject: subj, time: start ? relayNotice(lang, 'at_time', { time: start }) : '' });
     }
     case 'move_meeting': {
+      if (Array.isArray(args.coordinated_moves)) {
+        return args.coordinated_moves.map((move: { meeting_id: string; new_start: string; new_end: string }, index: number) =>
+          relayNotice(lang, 'consequence_move', { subject: `${relayNotice(lang, 'meeting')} ${index + 1}`,
+            time: `${fmtStart(move.new_start)} – ${fmtTime(move.new_end)}` })).join('\n');
+      }
       const subj = (args.meeting_subject as string) ?? relayNotice(lang, 'meeting');
       const newStart = fmtStart(args.new_start as string | undefined, args.new_end as string | undefined);
       // A TIME-LESS move is the open calendar-conflict anchor (skill.ts's
@@ -409,6 +414,10 @@ export function mergeAmendIntoApprove(
   profile: UserProfile,
 ): ToolCallback {
   const args = { ...approveCallback.args, ...counter };
+  if (approveCallback.tool === 'move_meeting' && Array.isArray(args.coordinated_moves)
+      && ['meeting_id', 'new_start', 'new_end', 'start', 'end', 'slot_iso', 'duration_minutes', 'duration_min'].some(k => k in counter)) {
+    throw new Error('Amend the complete coordinated_moves plan, with one exact interval per occurrence. A singular counter cannot change an agreed pair.');
+  }
   // The counter identifies the terms being changed, unlike the merged action
   // where an inherited location looks newly chosen. An explicit online counter
   // with no venue uses the existing Teams sentinel so internal-meeting defaults
