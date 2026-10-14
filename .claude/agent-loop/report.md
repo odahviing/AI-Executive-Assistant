@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 1 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (15):** meeting-reschedule-self-conflict · reschedule-negative-feedback-mutation · reschedule-attendee-conflicts · reschedule-complete-projection · reschedule-unchanged-target · reschedule-observed-completion · reschedule-room-projection · reschedule-event-identity · reschedule-coordinated-replay · reschedule-partial-outreach-closure · reschedule-outcome-summaries · reschedule-outcome-history-grounding · reschedule-stale-success-shield · reschedule-per-event-execution-accounting · reschedule-conversation-contract
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (1)
 
