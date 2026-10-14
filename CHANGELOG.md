@@ -14,6 +14,11 @@ Meeting rescheduling now excludes the exact events being moved from conflict che
 - All 15 shipping references independently reviewed. The full release checkpoint plus targeted repair rechecks reconciles to 257 passing suite/timezone executions and 6,243 passing assertions; typechecking passed. All 30 Golden paths were independently reviewed, with 14 stale citation anchors recorded.
 - Conversation guidance and classification remain model-dependent; deterministic and structural checks do not establish live-chat accuracy. No extra acknowledgement classifier call was added, following the owner's decision.
 
+### Framework
+- Supplemented 5.0.9 at the owner's request without a version bump. Five independently reviewed framework changes add batched native bookkeeping, bounded package evidence gates, and fresh-context Manager wrap execution.
+- Deployment tooling recognizes unfinished wraps and ignores lockfile version-label changes when deciding whether dependencies need reinstalling. Package readiness fixtures now exercise the required retained evidence.
+- The reconciled full checkpoint covers 259 suite/timezone executions and 6,277 passing assertions, with typechecking passed. Independent impact review retained 246 unaffected executions and replaced 13 affected or new suites; the original 30 Golden traces and their 14 stale citation anchors remain recorded.
+
 ## 5.0.8 — Claude 5.5 and quieter scheduled updates
 
 Maelle now uses Sonnet 5.5 and Haiku 5.5. Scheduled work sends its finished result without first opening an empty “Working…” thread; progress remains visible in existing conversations.

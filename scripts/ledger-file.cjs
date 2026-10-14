@@ -89,7 +89,8 @@ const REPO = path.join(__dirname, '..')
 
 const LEDGER = path.join(__dirname, '..', '.claude', 'agent-loop', 'ledger.jsonl')
 
-const argv = process.argv.slice(2)
+function run(argv, transaction) {
+const log = (...args) => { if (!transaction) console.log(...args) }
 const argOf = (flag) => {
   const i = argv.indexOf(flag)
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : null
@@ -97,9 +98,7 @@ const argOf = (flag) => {
 const flag = (name) => argv.includes(name)
 
 const die = (msg, extra) => {
-  console.error(`\nREFUSED — ${msg}\n`)
-  if (extra) console.error(`${extra}\n`)
-  process.exit(1)
+  throw Error(`REFUSED — ${msg}${extra ? '\n' + extra : ''}`)
 }
 
 // ── --date — a REAL override, checked once, used by every append path below.
@@ -180,11 +179,20 @@ const RETIRED_VERDICTS = { 'flagged-for-owner': 'queued-next-run' }
 
 /** Malformed lines fail closed: never append beyond an unreadable partial row. */
 const readRows = () => {
+  if (transaction) return transaction.rows
   if (!fs.existsSync(LEDGER)) return []
   try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
 }
 
 const append = (obj) => {
+  if (transaction) {
+    // Retry only the identical latest event, never an older event after reopening.
+    const prior = transaction.rows.findLast(r => verification.normRef(r.ref) === verification.normRef(obj.ref))
+    if (prior && require('node:util').isDeepStrictEqual({ ...prior, date: undefined }, { ...obj, date: undefined })) { transaction.skipped++; return }
+    transaction.rows.push(obj)
+    transaction.pending.push(obj)
+    return
+  }
   fs.appendFileSync(LEDGER, JSON.stringify(verification.compactRow(obj, REPO)) + '\n')
   // Once adopted, every verdict/review/release append refreshes the projection.
   // Ledger first: a failed report write is loud and recoverable with --sync-report.
@@ -196,12 +204,13 @@ const append = (obj) => {
   }
 }
 const readLifecycleRows = () => {
+  if (transaction) return transaction.rows
   try { return verification.readRows(LEDGER) } catch (e) { die(e.message) }
 }
 
 // Serialize ledger + projection writers. Never steal a lock: a crashed writer's
 // lock requires checking its PID and live state before explicitly removing it.
-if (!flag('--targets') && argv.length) {
+if (!transaction && !flag('--targets') && argv.length) {
   const lock = `${LEDGER}.lock`
   let fd
   try { fd = fs.openSync(lock, 'wx'); fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })) }
@@ -223,8 +232,8 @@ if (flag('--capture-file') || flag('--assess-file') || flag('--sync-report')) {
       if (row) append(row)
     }
     const result = intake.reconcile(REPO, true)
-    console.log(JSON.stringify({ appended: row ? 1 : 0, report: result }))
-    process.exit(0)
+    log(JSON.stringify({ appended: row ? 1 : 0, report: result }))
+    return
   } catch (e) { die(e.message) }
 }
 
@@ -258,18 +267,18 @@ const nearestInvariants = (candidate, vocab) => {
 }
 
 if (argv.includes('--targets') || argv.length === 0) {
-  console.log(`\nUsage — see the file header, or:\n  node ${path.basename(__filename)} --ref "…" --lane <lane> --source <source> --finding "…" --verdict <verdict> --invariant "<slug>|none"\n`)
-  console.log(`Other modes: --capture-file <json>, --assess-file <json>, --sync-report; --review, --wrap-companion, --gh-sync, --recheck, --run-manifest (see Manager OPERATIONS and the file header)`)
-  console.log(`Lanes: ${[...KNOWN_LANES].join(', ')}`)
-  console.log(`Sources: ${[...KNOWN_SOURCES].join(', ')}`)
-  console.log(`Verdicts: ${[...KNOWN_VERDICTS].join(', ')}`)
+  log(`\nUsage — see the file header, or:\n  node ${path.basename(__filename)} --ref "…" --lane <lane> --source <source> --finding "…" --verdict <verdict> --invariant "<slug>|none"\n`)
+  log(`Other modes: --capture-file <json>, --assess-file <json>, --sync-report; --review, --wrap-companion, --gh-sync, --recheck, --run-manifest (see Manager OPERATIONS and the file header)`)
+  log(`Lanes: ${[...KNOWN_LANES].join(', ')}`)
+  log(`Sources: ${[...KNOWN_SOURCES].join(', ')}`)
+  log(`Verdicts: ${[...KNOWN_VERDICTS].join(', ')}`)
   const vocab = invariantVocab(readRows())
-  console.log(`\nKnown invariants (${vocab.length}), most-used first — reuse one of these before minting a new slug:`)
+  log(`\nKnown invariants (${vocab.length}), most-used first — reuse one of these before minting a new slug:`)
   const rows = readRows()
   const counts = new Map()
   for (const r of rows) if (r.invariant) counts.set(r.invariant, (counts.get(r.invariant) || 0) + 1)
-  for (const [v, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(3)}x  ${v}`)
-  process.exit(0)
+  for (const [v, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) log(`  ${String(n).padStart(3)}x  ${v}`)
+  return
 }
 
 // ── WRAP_UP.md's GitHub-issues step, act 1: the built -> wrapped companion ───
@@ -285,13 +294,21 @@ if (flag('--wrap-companion')) {
   if (!version) die('no --version.', 'The wrap this ships in, e.g. 4.4.8.')
   if (!sha) die('no --sha.', 'The commit this ref actually shipped in — `git log -1 --format=%h`.')
   const current = verification.collapseRows(readLifecycleRows()).latest.find(r => verification.normRef(r.ref) === verification.normRef(ref))
+  const companion = { date: stampDate(), runId: `wrap-${version}`, ref, verdict: 'wrapped', state: 'wrapped', note: `shipped in ${sha}` }
+  const last = readLifecycleRows().findLast(r => verification.normRef(r.ref) === verification.normRef(ref))
+  if (transaction && current?.verdict === 'wrapped' && last?.runId === companion.runId && last?.note === companion.note) {
+    const errors = [...verification.checkReview(current.evidence, current.review), ...verification.snapshotErrors(current, REPO)]
+    if (errors.length) die('retry verification is missing or stale.', errors.join('\n'))
+    append(companion)
+    return
+  }
   if (!current || current.verdict !== 'verified') die('wrap requires an independently verified current ref.', ref)
   const errors = [...verification.checkReview(current.evidence, current.review), ...verification.snapshotErrors(current, REPO)]
   if (errors.length) die('wrap verification is missing or stale.', errors.join('\n'))
   const row = { date: stampDate(), runId: `wrap-${version}`, ref, verdict: 'wrapped', state: 'wrapped', note: `shipped in ${sha}` }
   append(row)
-  console.log(`\nAppended — ${ref} now has a wrapped companion row (wrap-${version}, ${sha}).\n`)
-  process.exit(0)
+  log(`\nAppended — ${ref} now has a wrapped companion row (wrap-${version}, ${sha}).\n`)
+  return
 }
 
 // ── WRAP_UP.md's GitHub-issues step, act 2: the GitHub <-> ledger sync row ───
@@ -323,8 +340,8 @@ if (flag('--gh-sync')) {
   if (verdict) row.verdict = verdict
   if (recommend) row.recommend = recommend
   append(row)
-  console.log(`\nAppended — ${ref} synced (${ghstate}, wrap-${version}).\n`)
-  process.exit(0)
+  log(`\nAppended — ${ref} synced (${ghstate}, wrap-${version}).\n`)
+  return
 }
 
 // ── WRAP_UP.md's GitHub-issues step, act 3: the PHANTOM-CANDIDATES recheck row ──
@@ -353,9 +370,9 @@ if (flag('--recheck')) {
   if (!POINTS_SOMEWHERE.test(note)) die('that --note does not point at anything checkable.', 'Cite the file, the other ref, or the command that shows this is distinct.')
   const row = { date: stampDate(), ref, recheck: note }
   append(row)
-  console.log(`\nAppended — ${ref} rechecked ${row.date}. It stays open and will no longer print as a PHANTOM CANDIDATE for this wrap.\n`)
-  console.log(`  recheck : ${note}`)
-  process.exit(0)
+  log(`\nAppended — ${ref} rechecked ${row.date}. It stays open and will no longer print as a PHANTOM CANDIDATE for this wrap.\n`)
+  log(`  recheck : ${note}`)
+  return
 }
 
 // ── the run-manifest row: Manager step-3's own summary of a Workflow-invoked
@@ -392,9 +409,9 @@ if (flag('--run-manifest')) {
   const row = { date: stampDate(), runId, kind: 'run-manifest', lane: '', source: 'engine', ref: 'run-manifest', verdict: 'audit', state: 'n/a', finding, manifest }
   if (note) row.note = note
   append(row)
-  console.log(`\nAppended — run-manifest row for ${runId}.\n`)
-  console.log(`  finding : ${finding.slice(0, 120)}`)
-  process.exit(0)
+  log(`\nAppended — run-manifest row for ${runId}.\n`)
+  log(`  finding : ${finding.slice(0, 120)}`)
+  return
 }
 
 // A Bouncer verdict is a separate append tied to the exact implementation.
@@ -424,15 +441,15 @@ if (flag('--review')) {
     const authority = verification.ownerStates(lifecycleRows).get(verification.normRef(ref))
     if (authority?.hold || authority?.question && !authority.answer || authority?.terminal) die('independent pass cannot release an unresolved owner gate or reopen terminal work')
     if (authority?.answer && implementation.ownerRulingToken !== authority.answer.token && review.ownerRulingToken !== authority.answer.token) die('review must bind the current native owner rulingToken; a pre-answer pass cannot be replayed')
-    const errors = [...verification.checkReview(implementation.evidence, review), ...verification.snapshotErrors(implementation, REPO)]
+    const errors = [...verification.checkReview(implementation.evidence, review), ...verification.snapshotErrors(implementation, REPO), ...verification.packageErrors(implementation.evidence, REPO)]
     if (errors.length) die('independent pass not established.', errors.join('\n'))
   }
   const row = { date: stampDate(), lifecycleVersion: 1, ref, source: 'verify', verdict: review.verdict === 'pass' ? 'verified' : `verification-${review.verdict === 'fail' ? 'failed' : 'unproven'}`, review, note: review.reason }
   if (fromRef) { row.verificationOf = implementation.ref; row.evidence = implementation.evidence; row.snapshot = implementation.snapshot }
   if (argOf('--runId')) row.runId = argOf('--runId')
   append(row)
-  console.log(`Appended — ${ref} [${row.verdict}], attempt ${review.attemptId || 'legacy/untraced'}`)
-  process.exit(0)
+  log(`Appended — ${ref} [${row.verdict}], attempt ${review.attemptId || 'legacy/untraced'}`)
+  return
 }
 
 // ── the ordinary path: file a finding ─────────────────────────────────────────
@@ -479,7 +496,7 @@ if (invariant !== 'none' && !vocab.includes(invariant)) {
     )
   }
   if (!confirmNew)
-    console.log(`  (note: "${invariant}" is a NEW invariant — ${vocab.length} existed before this row. No close match found, minting it.)`)
+    log(`  (note: "${invariant}" is a NEW invariant — ${vocab.length} existed before this row. No close match found, minting it.)`)
 }
 
 if (verdictRaw === 'built' && !rootCause) die('a `built` verdict needs --rootCause.', 'file:line — the place the fix actually went, same bar as a lane\'s return contract.')
@@ -524,7 +541,7 @@ if (['needs-owner-decision', 'blocked-charter'].includes(verdictRaw) && rows.som
 if (argOf('--runId')) row.runId = argOf('--runId')
 if (['built', 'implemented'].includes(verdictRaw)) {
   const evidence = readJson(argOf('--evidence-file'))
-  const errors = verification.checkEvidence(evidence)
+  const errors = [...verification.checkEvidence(evidence), ...verification.packageErrors(evidence, REPO)]
   if (errors.length) die('build evidence incomplete; not ready for Bouncer handoff.', errors.join('\n'))
   if (rows.some(r => verification.normRef(r.ref) === verification.normRef(ref) && r.evidence?.attemptId === evidence.attemptId)) die('attemptId was already used for this ref; a repair needs a fresh attempt.')
   row.verdict = 'implemented'
@@ -540,7 +557,45 @@ if (note) row.note = note
 if (bounces) row.bounces = bounces
 
 append(row)
-console.log(`\nAppended — ${ref} [${row.verdict}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}${bounces ? ' · BOUNCED' : ''}\n`)
-console.log(`  finding : ${finding.slice(0, 120)}`)
-if (rootCause) console.log(`  root    : ${rootCause}`)
-console.log(`\nCheck it landed: node scripts/ledger-stats.cjs --lane ${lane || '""'}\n`)
+log(`\nAppended — ${ref} [${row.verdict}]${invariant !== 'none' ? ` · ${invariant}` : ' · (no invariant — declared local)'}${bounces ? ' · BOUNCED' : ''}\n`)
+log(`  finding : ${finding.slice(0, 120)}`)
+if (rootCause) log(`  root    : ${rootCause}`)
+log(`\nCheck it landed: node scripts/ledger-stats.cjs --lane ${lane || '""'}\n`)
+}
+
+// One bounded native transaction; input is an array of existing CLI argv arrays.
+// Validation uses a staged ledger, so dependent reviews see earlier rows without
+// writing anything until every command passes. No alternate row schema/validator.
+function batch(file) {
+  const commands = JSON.parse(fs.readFileSync(file, 'utf8'))
+  if (!Array.isArray(commands) || !commands.length || commands.some(a => !Array.isArray(a) || !a.length || a.some(v => typeof v !== 'string'))) throw Error('batch must contain nonempty argv arrays')
+  const prohibited = ['--targets', '--capture-file', '--assess-file', '--sync-report', '--batch-file']
+  const mode = commands[0].includes('--review') ? '--review' : '--wrap-companion'
+  if (commands.some(a => !a.includes(mode) || a.includes(mode === '--review' ? '--wrap-companion' : '--review') || a.some(v => prohibited.includes(v)))) throw Error('batch requires one phase: reviews or wrap companions; other commands remain standalone')
+  const allowed = new Set(mode === '--review' ? ['--review', '--ref', '--review-file', '--from-ref', '--runId', '--date'] : ['--wrap-companion', '--ref', '--version', '--sha', '--date'])
+  if (commands.some(a => a.some(v => v.startsWith('--') && !allowed.has(v)))) throw Error('batch contains flags outside its lifecycle phase')
+  const refs = commands.map(a => verification.normRef(a[a.indexOf('--ref') + 1]))
+  if (new Set(refs).size !== refs.length) throw Error('batch refs must be distinct')
+  const lock = `${LEDGER}.lock`
+  const fd = fs.openSync(lock, 'wx')
+  try {
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+    const transaction = { rows: verification.readRows(LEDGER), pending: [], skipped: 0 }
+    for (const argv of commands) run(argv, transaction)
+    // Attachments are immutable; an attachment failure cannot append a partial batch.
+    const lines = transaction.pending.map(row => JSON.stringify(verification.compactRow(row, REPO)))
+    if (lines.length) fs.appendFileSync(LEDGER, lines.join('\n') + '\n')
+    const report = path.join(REPO, '.claude/agent-loop/report.md')
+    let reconciled = false
+    if (transaction.rows.some(r => r.capture || r.intake) || fs.existsSync(report) && fs.readFileSync(report, 'utf8').startsWith('<!-- workshop-ledger-report-v1 -->')) {
+      try { require('./workshop-intake.cjs').reconcile(REPO, true); reconciled = true }
+      catch (e) { throw Error(`ledger batch appended; report synchronization failed: ${e.message}. Retry the identical batch; do not mint new attempts.`) }
+    }
+    console.log(JSON.stringify({ appended: lines.length, skipped: transaction.skipped, reportReconciliations: +reconciled }))
+  } finally { fs.closeSync(fd); fs.unlinkSync(lock) }
+}
+try {
+  const argv = process.argv.slice(2)
+  if (argv[0] === '--batch-file' && argv.length === 2) batch(argv[1])
+  else run(argv)
+} catch (e) { console.error(e.message); process.exitCode = 1 }

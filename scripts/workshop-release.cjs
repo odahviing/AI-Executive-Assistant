@@ -54,8 +54,15 @@ function testResult(run) {
   const skipped = tap ? number(/^# skipped (\d+)/m) + number(/^# todo (\d+)/m) : 0;
   return { passed, failed, skipped, ok: run.exitCode === 0 && !run.timedOut && !run.overflow && !run.error && passed > 0 && failed === 0 && skipped === 0 };
 }
-function checkpointResult(report, root, evidenceRoot) {
-  const errors = [], files = inventory(root), expected = plan(files);
+function selectedSuites(selected, root) {
+  const all = inventory(root);
+  if (!Array.isArray(selected) || !selected.length || new Set(selected).size !== selected.length || selected.some(f => typeof f !== 'string' || !all.includes(f))) throw Error('Suites must be a nonempty distinct list from the discovered test inventory');
+  const expanded = selected.includes('test-timezone-regressions.cjs') ? [...new Set([...selected, ...all.filter(f => f.startsWith('test-timezone-'))])] : selected;
+  return expanded.sort();
+}
+function checkpointResult(report, root, evidenceRoot, scope = 'release') {
+  const errors = [], files = scope === 'package' ? selectedSuites(report.inventory, root) : inventory(root), expected = plan(files);
+  if ((report.scope || 'release') !== scope) errors.push('checkpoint scope mismatch; package checks never satisfy release');
   const checks = Array.isArray(report.checks) ? report.checks : [];
   const keys = checks.map(c => `${c.file}\0${c.zone}`);
   if (JSON.stringify(report.inventory) !== JSON.stringify(files)) errors.push('release inventory changed or missing');
@@ -110,7 +117,7 @@ function bookkeepingPlan(refs, version, root) {
       implementationRefs: selected.filter(r => reviews.some(v => v.ref === r.ref) && !r.verificationOf).length },
     inputs: snapshot([ledger, report, ...new Set(selected.flatMap(r => r.evidence?.files || []))], root),
     report: fs.readFileSync(path.join(root, report), 'utf8'), reviews, dispositions, releaseSha: null,
-    remaining: 'Reconcile EVERY report disposition and selected release scope; preserve owner words and recommendations. Materialize each reviews[].review at its file path, then use argv arrays with the native writer (cwd repo). Disposition argv are drafts, not writer validation. Recheck this plan before the first append; regenerate after any append or retry. Companions require actual shipping commit evidence at WRAP_UP step 12; this draft authorizes no commit, GitHub action, report reset or release claim.' };
+    remaining: 'Reconcile EVERY report disposition and selected release scope; preserve owner words and recommendations. Materialize all reviews[].review files once; check the saved plan once before writing, then pass pending review argv arrays without their script prefix to ledger-file.cjs --batch-file. Dispositions remain standalone validated commands. Regenerate after outside edits or failed validation, not between successful batch rows. Companions require actual shipping commit evidence at WRAP_UP step 12; this draft authorizes no commit, GitHub action, report reset or release claim.' };
 }
 function checkBookkeeping(draft, root) {
   const current = bookkeepingPlan(draft.refs, draft.version, root);
@@ -164,18 +171,20 @@ async function main() {
     const result = checkBookkeeping(JSON.parse(fs.readFileSync(args[1], 'utf8')), root);
     console.log(JSON.stringify(result, null, 2)); process.exitCode = result.status === 'blocked' ? 1 : 0; return;
   }
-  if (args[0] === '--check' && args.length === 2) {
+  if (['--check', '--check-package'].includes(args[0]) && args.length === 2) {
     const report = JSON.parse(fs.readFileSync(args[1], 'utf8'));
-    const result = checkpointResult(report, root, path.dirname(path.resolve(args[1]))), ok = report.status === 'passed' && result.ok;
+    const result = checkpointResult(report, root, path.dirname(path.resolve(args[1])), args[0] === '--check-package' ? 'package' : 'release'), ok = report.status === 'passed' && result.ok;
     console.log(JSON.stringify({ status: ok ? 'current' : 'blocked', previousStatus: report.status, changed: result.changed, errors: result.errors }, null, 2));
     process.exitCode = ok ? 0 : 1; return;
   }
-  if (args.length && !(args.length === 2 && args[0] === '--out')) throw Error('Usage: workshop-release.cjs [--out NEW_DIRECTORY | --check REPORT.json | --bookkeeping-plan REFS.json --version VERSION | --check-bookkeeping PLAN.json | --golden-snapshot | --golden-report SNAPSHOT.json RETURN.json | --check-golden REPORT.json]');
-  const out = path.resolve(args[1] || path.join(root, 'artifacts/workshop-verification/releases', new Date().toISOString().replace(/[:.]/g, '-')));
+  const packageRun = args[0] === '--suites' && args.length === 4 && args[2] === '--out';
+  if (args.length && !packageRun && !(args.length === 2 && args[0] === '--out')) throw Error('Usage: workshop-release.cjs [--out NEW_DIRECTORY | --suites SUITES.json --out NEW_DIRECTORY | --check REPORT.json | --check-package REPORT.json | --bookkeeping-plan REFS.json --version VERSION | --check-bookkeeping PLAN.json | --golden-snapshot | --golden-report SNAPSHOT.json RETURN.json | --check-golden REPORT.json]');
+  const files = packageRun ? selectedSuites(JSON.parse(fs.readFileSync(args[1], 'utf8')), root) : inventory(root);
+  const out = path.resolve((packageRun ? args[3] : args[1]) || path.join(root, 'artifacts/workshop-verification/releases', new Date().toISOString().replace(/[:.]/g, '-')));
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.mkdirSync(out); // Refuse to overwrite a prior attempt, including its logs.
-  const before = sourceSnapshot(root), files = inventory(root), entries = plan(files);
-  const report = { version: 1, startedAt: new Date().toISOString(), status: 'running', inventory: files, aggregate: 'test-timezone-regressions.cjs is expanded into its timezone children; never run twice', snapshot: before, checks: [] };
+  const before = sourceSnapshot(root), entries = plan(files);
+  const report = { version: 1, scope: packageRun ? 'package' : 'release', startedAt: new Date().toISOString(), status: 'running', inventory: files, aggregate: 'test-timezone-regressions.cjs is expanded into its timezone children; never run twice', snapshot: before, checks: [] };
   fs.writeFileSync(path.join(out, 'started.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
   try {
     for (const [i, entry] of entries.entries()) {
@@ -187,7 +196,7 @@ async function main() {
     }
     const typecheck = await execute(['node_modules/typescript/bin/tsc', '--noEmit'], { root, output: path.join(out, 'typecheck.log') });
     report.typecheck = { exitCode: typecheck.exitCode, timedOut: typecheck.timedOut, error: typecheck.error, overflow: typecheck.overflow, output: 'typecheck.log', outputSha256: snapshot(['typecheck.log'], out)[0].sha256 };
-    const result = checkpointResult(report, root, out);
+    const result = checkpointResult(report, root, out, report.scope);
     report.changed = result.changed;
     report.errors = result.errors;
     report.status = result.ok ? 'passed' : 'blocked';
@@ -198,4 +207,4 @@ async function main() {
   process.exitCode = report.status === 'passed' ? 0 : 1;
 }
 if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });
-module.exports = { inventory, plan, sourceSnapshot, changedFiles, execute, testResult, checkpointResult, bookkeepingPlan, checkBookkeeping, goldenSnapshot, goldenResult };
+module.exports = { inventory, plan, selectedSuites, sourceSnapshot, changedFiles, execute, testResult, checkpointResult, bookkeepingPlan, checkBookkeeping, goldenSnapshot, goldenResult };

@@ -100,6 +100,9 @@ const makeRunner = (compiledFn) => async (args, canned) => {
       if (opts?.agentType !== 'bouncer') {
         r.evidence = r.evidence || {
           version: 1, attemptId: `fixture-${calls.length}-${r.id}`, builder: `fixture-builder-${calls.length}`, changeKind: 'deterministic', files: r.filesTouched?.length ? r.filesTouched : ['fixture-only.ts'], exception: 'Synthetic dispatch response; tests only engine orchestration.',
+          // Filesystem-free engine fixture only. Native persistence rejects this
+          // nonexistent report; caller-supplied evidence is never supplemented.
+          packageCheck: { file: 'fixture-only-package-report.json', sha256: '0'.repeat(64), scope: 'package', status: 'passed', suites: ['fixture-only.cjs'] },
           regressions: [{ id: 'fixture-suite', command: 'fixture-command', beforeRevision: 'fixture-before', before: { exitCode: 1, passed: 1, failed: 1, output: 'synthetic fail/pass' }, after: { exitCode: 0, passed: 2, failed: 0, output: 'synthetic pass/pass' }, cases: [{ id: 'bad', kind: 'regression', before: 'fail', after: 'pass', evidence: 'synthetic rejected case' }, { id: 'good', kind: 'preserved', before: 'pass', after: 'pass', evidence: 'synthetic preserved case' }] }],
           boundaries: { inventoryCommand: 'fixture inventory', changedGuards: ['fixture'], paths: [
             { id: 'reject', producer: 'bad producer', state: 'bad state', consumer: 'guard', guard: 'fixture', direction: 'reject', caseIds: ['bad'], status: 'covered', evidence: 'fixture:1' },
@@ -630,7 +633,7 @@ const main = async () => {
   ok('the UNTOUCHED piece (p1) is BYTE-IDENTICAL to what was approved — the cache-hit guarantee', JSON.stringify(resumeP1) === JSON.stringify(GOOD_PIECE), resumeP1)
   const resumeP2 = gate.out && gate.out.resume.pieces.find((p) => p.id === 'p2')
   ok('the RULED piece (p2) carries `awaitingOwner` inside resume.pieces too', resumeP2 && resumeP2.awaitingOwner === true, resumeP2)
-  ok('the OwnerGate warning fired, NAMING bugger.js as the wrong door', gate.out && gate.out.warnings.some((w) => /THIS WAVE IS NOT DONE/.test(w) && /NOT bugger\.js WORK/.test(w)), gate.out && gate.out.warnings)
+  ok('the OwnerGate warning requires the current native owner-answer admission', gate.out && gate.out.warnings.some((w) => /THIS WAVE IS NOT DONE/.test(w) && /OWNER ANSWERS REQUIRED/.test(w) && /--assess-file/.test(w) && /questionToken/.test(w)), gate.out && gate.out.warnings)
   ok('the warning names resumeFromRunId as the re-entry mechanism', gate.out && gate.out.warnings.some((w) => /resumeFromRunId/.test(w)), gate.out && gate.out.warnings)
   ok('the OwnerGate log line fired with the right split', gate.logs.some((l) => /OwnerGate: 1 piece\(s\) stayed as THIS WAVE'S OWN BUSINESS/.test(l) && /0 unrelated discovery/.test(l)), gate.logs)
 

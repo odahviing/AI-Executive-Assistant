@@ -104,8 +104,8 @@ const isClosed = (r, repo = path.join(__dirname, '..')) => {
   if (!CLOSED.has(r.verdict)) return false
   if (r.verdict !== 'wrapped' && (r.lifecycleVersion !== 1 || r.verdict !== 'verified')) return true
   const v = require('./workshop-verification.cjs')
-  if (r.verdict === 'wrapped') return releaseBound(r) && !v.checkReview(r.implementation, r.review).length
-  return !v.checkReview(r.implementation, r.review).length && !v.snapshotErrors({ evidence: r.implementation, snapshot: r.snapshot }, repo).length
+  if (r.verdict === 'wrapped') return releaseBound(r) && !v.checkReview(r.implementation, r.review, true).length
+  return !v.checkReview(r.implementation, r.review, true).length && !v.snapshotErrors({ evidence: r.implementation, snapshot: r.snapshot }, repo).length
 }
 const currentVerdict = (r, repo) => ['verified', 'wrapped'].includes(r.verdict) && !isClosed(r, repo) ? 'verification-unproven' : r.verdict
 const hydrate = (r, repo = path.join(__dirname, '..')) => {
@@ -271,7 +271,7 @@ if (implementationId || reviewId || wrapId) {
     } else if (implementationId) {
       if (!argOf('--evidence-file')) throw new Error('--implementation needs --evidence-file')
       const build = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--evidence-file'))))
-      const errors = v.checkEvidence(build); if (errors.length) throw new Error(errors.join('; '))
+      const errors = [...v.checkEvidence(build), ...(argOf('--snapshot-file') ? [] : v.packageErrors(build, REPO))]; if (errors.length) throw new Error(errors.join('; '))
       let importedReview = null
       const snapshotInput = argOf('--snapshot-file') ? JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--snapshot-file')))) : null
       if (snapshotInput) {
@@ -293,7 +293,7 @@ if (implementationId || reviewId || wrapId) {
       const review = JSON.parse(fs.readFileSync(path.resolve(REPO, argOf('--review-file'))))
       if (review.attemptId !== row.implementation.attemptId || !review.reviewer || review.reviewer === row.implementation.builder || !review.trace || !['pass', 'fail', 'unproven'].includes(review.verdict) || !review.reason) throw new Error('review must name the exact implementation, independent reviewer, trace, verdict and reason')
       const errors = v.checkReview(row.implementation, review)
-      if (review.verdict === 'pass') errors.push(...v.snapshotErrors({ evidence: row.implementation, snapshot: row.snapshot }, REPO))
+      if (review.verdict === 'pass') errors.push(...v.snapshotErrors({ evidence: row.implementation, snapshot: row.snapshot }, REPO), ...v.packageErrors(row.implementation, REPO))
       if (review.verdict === 'pass' && errors.length) throw new Error(errors.join('; '))
       event = { id, date: new Date().toISOString().slice(0, 10), lifecycleVersion: 1, verdict: review.verdict === 'pass' ? 'verified' : review.verdict === 'fail' ? 'verification-failed' : 'verification-unproven', review }
       if (JSON.stringify(row.review) === JSON.stringify(review)) event = null

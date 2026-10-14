@@ -50,6 +50,18 @@ function appliedRevision() {
   return app?.pm2_env?.status === 'online' ? app.pm2_env.GIT_SHA : undefined;
 }
 
+// npm changes these two package-version labels without changing installation.
+// Preserve every other field, including workspace/dependency versions and scripts.
+function dependencyLock(revision) {
+  const lock = JSON.parse(sh(`git show ${revision}:package-lock.json`));
+  if (!lock || !Number.isInteger(lock.lockfileVersion) || !lock.packages || !lock.packages['']) throw new Error('Unsupported dependency lock');
+  delete lock.version;
+  delete lock.packages[''].version;
+  const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered(lock));
+}
+
 function tick() {
   if (deploying) return;
 
@@ -79,20 +91,32 @@ function tick() {
     return;
   }
 
+  // A source commit may be published for GitHub links before its real-SHA
+  // bookkeeping commit. The existing wrap lock is the completion boundary.
+  try {
+    const state = JSON.parse(sh(`git show ${remote}:.claude/agent-loop/state.json`));
+    if (state.lastRun?.status === 'running' && String(state.lastRun.id).startsWith('wrap-')) {
+      log('wrap still running — awaiting final bookkeeping revision');
+      return;
+    }
+  } catch (e) {
+    log('remote wrap state unavailable — skipping', String(e?.message || e).slice(0, 120));
+    return;
+  }
+
   deploying = true;
   try {
     log('revision needs deployment', `${applied || 'unknown'} → ${remote.slice(0, 7)}`);
 
     // Decide whether deps need reinstalling BEFORE pulling (diff old→new).
-    // Only the LOCKFILE signals a real dependency change — a bare version bump
-    // touches package.json alone and must NOT trigger a reinstall.
+    // Compare lock contents: npm also stamps version-only bumps in the lockfile.
     let depsChanged = true;
     // The last applied revision also anchors dependency recovery after npm ci
     // fails. Unknown/unreadable history cannot prove dependencies are current.
     if (typeof applied === 'string' && /^[a-f0-9]{40}$/.test(applied)) {
       try {
         const changed = sh(`git diff --name-only ${applied} ${remote}`).split(/\r?\n/);
-        depsChanged = changed.includes('package-lock.json');
+        depsChanged = changed.includes('package-lock.json') && dependencyLock(applied) !== dependencyLock(remote);
       } catch { /* install when the prior dependency state cannot be established */ }
     }
 

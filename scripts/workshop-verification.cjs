@@ -13,6 +13,7 @@ const workshopContract = (() => {
     for (const key of ['attemptId', 'builder']) if (!text(e[key])) errors.push(`missing ${key}`)
     if (!strings(e.files) || !e.files.length || !unique(e.files)) errors.push('files must enumerate every changed file once')
     if (!['deterministic', 'prompt-only', 'prose-only'].includes(e.changeKind)) errors.push('missing changeKind')
+    if (e.packageCheck) errors.push(...checkPackage(e))
     if (e.changeKind !== 'deterministic' && !text(e.exception)) errors.push('prompt/prose exception needs an explicit limitation')
     const suites = array(e.regressions)
     if (!Array.isArray(e.regressions) || !unique(suites.map(t => t.id))) errors.push('regressions must be an explicit array with unique ids')
@@ -59,8 +60,15 @@ const workshopContract = (() => {
     }
     return errors
   }
-  const checkReview = (e, r) => {
-    const errors = checkEvidence(e)
+  const checkPackage = e => {
+    if (e?.changeKind !== 'deterministic') return []
+    const p = e.packageCheck
+    return p && text(p.file) && /^[a-f0-9]{64}$/.test(p.sha256 || '') && p.scope === 'package' && p.status === 'passed' && strings(p.suites) && p.suites.length && unique(p.suites)
+      ? [] : ['missing or failed affected-suite package evidence']
+  }
+  // Legacy is for reading accepted history, never new completion admission.
+  const checkReview = (e, r, legacy = false) => {
+    const errors = [...checkEvidence(e), ...(!legacy || e?.packageCheck ? checkPackage(e) : [])]
     if (!r || !['pass', 'fail', 'unproven'].includes(r.verdict)) return [...errors, 'missing independent Bouncer verdict']
     if (!text(r.reviewer) || r.reviewer === e?.builder) errors.push('review must identify an independent dispatch')
     if (!text(r.trace)) errors.push('missing actual review dispatch/transcript trace')
@@ -83,7 +91,7 @@ const workshopContract = (() => {
   }
   const gateBuild = r => {
     if (r.verdict !== 'built') return r
-    const errors = checkEvidence(r.evidence)
+    const errors = [...checkEvidence(r.evidence), ...checkPackage(r.evidence)]
     return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [evidence gate: ${errors.join('; ')}]` } : r
   }
   const gateFinal = r => {
@@ -113,6 +121,7 @@ const workshopContract = (() => {
     regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
     boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
   const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
+  evidenceSchema.properties.packageCheck = obj({ file: S, sha256: S, scope: S, status: S, suites: list(S) })
   reviewSchema.properties.ownerRulingToken = { type: 'string', description: 'When checking an existing attempt after an owner answer, copy its current native rulingToken to bind this review to that answer.' }
   // Engines receive a current native projection under the existing owner run
   // authorization. Editor recommendations never release ledger dispositions.
@@ -142,7 +151,7 @@ const workshopContract = (() => {
       return admission.allowFresh === true && ['github', 'logs', 'both'].includes(i.source) ? [] : reject('fresh-source work is outside this authorized run')
     })
   }
-  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
+  return { checkEvidence, checkPackage, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
 
@@ -184,7 +193,7 @@ const refTokens = ref => {
   }
   return out
 }
-const isClosed = r => ['declined', 'converted'].includes(r.verdict) || (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
+const isClosed = r => ['declined', 'converted'].includes(r.verdict) || (!r.lifecycleVersion && !r.evidence && r.state === 'wrapped' && r.verdict !== 'verified') || CLOSED.has(r.verdict) && (!r.evidence && r.verdict !== 'verified' || ['verified', 'wrapped'].includes(r.verdict) && workshopContract.checkReview(r.evidence, r.review, true).length === 0 && (r.verdict === 'wrapped' || snapshotErrors(r, path.join(__dirname, '..')).length === 0))
 function collapseRows(rows, ignoreRow = () => false) {
   rows = rows.map(r => hydrateRow(r))
   const authority = ownerStates(rows, ignoreRow)
@@ -249,6 +258,19 @@ const hashFile = file => {
   catch (e) { if (e.code === 'ENOENT') return null; throw e }
 }
 const snapshot = (files, repo) => files.map(file => ({ file, sha256: hashFile(path.resolve(repo, file)) }))
+function packageErrors(evidence, repo) {
+  const errors = workshopContract.checkPackage(evidence)
+  if (errors.length || evidence?.changeKind !== 'deterministic') return errors
+  try {
+    const p = evidence.packageCheck, file = path.resolve(repo, p.file)
+    if (hashFile(file) !== p.sha256) throw Error('package report missing or changed')
+    const report = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (report.status !== 'passed' || JSON.stringify(report.inventory) !== JSON.stringify(p.suites)) throw Error('package status or suite inventory differs from evidence')
+    const checked = require('./workshop-release.cjs').checkpointResult(report, repo, path.dirname(file), 'package')
+    if (!checked.ok) throw Error(checked.errors.join('; '))
+  } catch (e) { errors.push(`affected-suite package invalid: ${e.message}`) }
+  return errors
+}
 const snapshotErrors = (r, repo) => {
   const recorded = Array.isArray(r.snapshot) ? r.snapshot : []
   if (!recorded.length || recorded.length !== (r.evidence?.files || []).length || (r.evidence?.files || []).some(f => !recorded.some(s => s.file === f))) return ['missing complete build snapshot']
@@ -283,7 +305,7 @@ function verificationBlockers(rows, repo, { lastWrapIso = '' } = {}) {
     const currentLegacyBuild = r.verdict === 'built' && (!lastWrapIso || eventDates.get(normRef(r.ref)) >= lastWrapIso.slice(0, 10))
     const previouslyBuilt = builtKeys.has(normRef(r.ref))
     if (!r.evidence && !currentLegacyBuild && !['implemented', 'verified', 'verification-failed', 'verification-unproven'].includes(r.verdict) && !(previouslyBuilt && !isClosed(r))) continue
-    let errors = workshopContract.checkReview(r.evidence, r.review)
+    let errors = workshopContract.checkReview(r.evidence, r.review, true)
     if (r.verdict !== 'verified') errors = [...errors, `latest status is ${r.verdict || 'unknown'}`]
     if (!errors.length) errors.push(...snapshotErrors(r, repo))
     if (errors.length) blockers.push({ ref: r.ref, verdict: r.verdict, errors })
@@ -339,4 +361,4 @@ function wrapCounts(rows, history = rows) {
   return { events: rows.length, coveredRefs: covered.size, implementationRefs: [...covered].filter(ref => !linked.has(ref)).length,
     verifiedImplementationRefs: refs(r => r.verdict === 'verified' && !linked.has(normRef(r.ref))).size }
 }
-module.exports = { ...workshopContract, CLOSED, normRef, ownerStates, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers, compactRow, hydrateRow, wrapCounts }
+module.exports = { ...workshopContract, packageErrors, CLOSED, normRef, ownerStates, refTokens, isClosed, collapseRows, readRows, snapshot, snapshotErrors, verificationBlockers, compactRow, hydrateRow, wrapCounts }

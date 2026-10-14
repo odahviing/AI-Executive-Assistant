@@ -6,7 +6,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const before = process.argv.includes('--before');
 const evidence = 'artifacts/workshop-verification/v5-readiness-20260923/handyman/attempt1';
-const source = fs.readFileSync(path.join(root, before ? `${evidence}/before/scripts/deploy-watcher.mjs` : 'scripts/deploy-watcher.mjs'), 'utf8').replace(/^import .*;\r?$/gm, '');
+const source = fs.readFileSync(process.env.WORKSHOP_BEFORE_DEPLOY || path.join(root, before ? `${evidence}/before/scripts/deploy-watcher.mjs` : 'scripts/deploy-watcher.mjs'), 'utf8').replace(/^import .*;\r?$/gm, '');
 const old = 'a'.repeat(40), next = 'b'.repeat(40);
 function fixture(options = {}, state = { head: old, remote: next, applied: old, persisted: old, online: true, commands: [] }) {
   let failure = options.failure;
@@ -25,6 +25,8 @@ function fixture(options = {}, state = { head: old, remote: next, applied: old, 
         return JSON.stringify([{ name: 'maelle', pm2_env: { status: state.online ? 'online' : 'errored', GIT_SHA: state.applied } }]);
       }
       if (command.includes('git diff')) return options.lockChanged === false ? 'README.md' : 'package-lock.json';
+      if (command.endsWith(':.claude/agent-loop/state.json')) return options.badWrapState ? 'invalid' : JSON.stringify({ lastRun: { id: 'wrap-fixture', status: options.runningWrap ? 'running' : 'complete' } });
+      if (command.startsWith('git show') && options.locks) return JSON.stringify(command.includes(old) ? options.locks[0] : options.locks[1]);
       if (command.startsWith('git pull')) { state.head = options.advanceDuringPull ? 'c'.repeat(40) : state.remote; return ''; }
       if (command.startsWith('pm2 restart')) {
         state.applied = opts?.env?.GIT_SHA ?? state.head;
@@ -117,4 +119,37 @@ test('branch advances during pull never stamps mismatched source revision', () =
   const f = fixture({ advanceDuringPull: true });
   assert.equal(f.count('npm run build'), 0);
   assert.equal(f.state.applied, old);
+});
+
+const lock = version => ({ name: 'fixture', version, lockfileVersion: 3, packages: { '': { version, dependencies: { module: '^1' } }, 'node_modules/module': { version: '1.0.0', integrity: 'fixture' } } });
+test('lockfile root version-only changes avoid reinstall and still deploy exact SHA', () => {
+  const f = fixture({ locks: [lock('1.0.0'), lock('1.0.1')] });
+  assert.equal(f.count('npm ci --include=dev'), 0);
+  assert.equal(f.state.applied, next);
+});
+test('dependency version or integrity change still installs', () => {
+  for (const key of ['version', 'integrity']) {
+    const changed = lock('1.0.1'); changed.packages['node_modules/module'][key] = 'changed';
+    const f = fixture({ locks: [lock('1.0.0'), changed] });
+    assert.equal(f.count('npm ci --include=dev'), 1);
+    assert.equal(f.state.applied, next);
+  }
+});
+test('unsupported or missing lock metadata conservatively installs', () => {
+  const f = fixture({ locks: [lock('1.0.0'), {}] });
+  assert.equal(f.count('npm ci --include=dev'), 1);
+});
+test('published running wrap waits for bookkeeping without deploying twice', () => {
+  const f = fixture({ runningWrap: true });
+  assert.equal(f.state.applied, old);
+  assert.equal(f.count('npm run build'), 0);
+  assert.equal(f.count('pm2 restart maelle --update-env'), 0);
+  fixture({}, f.state);
+  assert.equal(f.state.applied, next);
+  assert.equal(f.count('pm2 restart maelle --update-env'), 1);
+});
+test('unreadable remote wrap state keeps previous process', () => {
+  const f = fixture({ badWrapState: true });
+  assert.equal(f.state.applied, old);
+  assert.equal(f.count('npm run build'), 0);
 });

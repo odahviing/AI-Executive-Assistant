@@ -15,7 +15,7 @@ const baselineOnly = Boolean(beforeRef) || process.argv.includes('--baseline')
 const root = fs.mkdtempSync(path.join(__dirname, '..', '.workshop-verification-'))
 fs.mkdirSync(path.join(root, 'scripts'))
 fs.mkdirSync(path.join(root, '.claude/agent-loop'), { recursive: true })
-for (const file of ['ledger-stats.cjs', 'ledger-file.cjs', 'workshop-verification.cjs']) {
+for (const file of ['ledger-stats.cjs', 'ledger-file.cjs', 'workshop-verification.cjs', 'architect-file.cjs', 'workshop-intake.cjs']) {
   if (runtimeDirectory) { fs.copyFileSync(path.join(runtimeDirectory, file), path.join(root, 'scripts', file)); continue }
   if (beforeRef || runtimeRef) {
     if (beforeRef && file === 'workshop-verification.cjs') continue
@@ -81,10 +81,31 @@ test('new build cannot be written without executed evidence', () => {
 
 if (!baselineOnly) {
 const contract = require(path.join(root, 'scripts/workshop-verification.cjs'))
-const product = path.join(root, 'fixture.cjs')
+const product = path.join(root, 'scripts/fixture.cjs')
 fs.writeFileSync(product, 'module.exports = value => value !== null\n')
+fs.copyFileSync(path.join(__dirname, 'workshop-release.cjs'), path.join(root, 'scripts/workshop-release.cjs'))
+fs.mkdirSync(path.join(root, 'node_modules/typescript/bin'), { recursive: true })
+fs.writeFileSync(path.join(root, 'node_modules/typescript/bin/tsc'), 'process.exit(0)') // This fixture contains JavaScript only.
+fs.writeFileSync(path.join(root, 'scripts/test-package-fixture.cjs'), "require('node:assert/strict').equal(typeof require('./fixture.cjs'), 'function'); console.log('1 passed; 0 failed')")
+assert.equal(spawnSync('git', ['init', '-q'], { cwd: root }).status, 0)
+fs.writeFileSync(path.join(root, 'suites.json'), JSON.stringify(['test-package-fixture.cjs']))
+let packageNumber = 0, packageSignature, packageCheck
+const validPackage = () => {
+  const runner = require(path.join(root, 'scripts/workshop-release.cjs'))
+  const signature = JSON.stringify(runner.sourceSnapshot(root))
+  if (signature !== packageSignature) {
+    const out = `package-${++packageNumber}`
+    const result = cli('workshop-release.cjs', '--suites', 'suites.json', '--out', out)
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    const file = `${out}/report.json`
+    packageCheck = { file, sha256: contract.snapshot([file], root)[0].sha256, scope: 'package', status: 'passed', suites: ['test-package-fixture.cjs'] }
+    packageSignature = signature
+  }
+  return { ...packageCheck }
+}
 const validEvidence = () => ({
   version: 1, attemptId: 'direct-fixture-attempt-1', builder: 'direct-builder-dispatch-1', changeKind: 'deterministic', files: [product], exception: '',
+  packageCheck: validPackage(),
   regressions: [{ id: 'gate-suite', command: 'node fixture-test.cjs', beforeRevision: 'preserved-before-fixture', before: { exitCode: 1, passed: 1, failed: 1, output: 'null rejection assertion failed; valid value passed' }, after: { exitCode: 0, passed: 2, failed: 0, output: 'null rejected; valid value accepted' }, cases: [{ id: 'invalid', kind: 'regression', before: 'fail', after: 'pass', evidence: 'actual guard rejects null' }, { id: 'valid', kind: 'preserved', before: 'pass', after: 'pass', evidence: 'actual guard accepts ordinary value' }] }],
   boundaries: { inventoryCommand: 'rg guard fixture.cjs', changedGuards: ['guard'], paths: [
     { id: 'bad-path', producer: 'null producer', state: 'normalized null', consumer: 'guard', guard: 'guard', direction: 'reject', caseIds: ['invalid'], status: 'covered', evidence: 'fixture.cjs:1' },
@@ -144,6 +165,12 @@ const invalidEvidence = [
   ['empty exception', e => { e.changeKind = 'prompt-only'; e.exception = '' }],
 ]
 for (const [label, runtime] of implementations) {
+  for (const kind of ['missing', 'blocked']) test(`${label}: ${kind} package cannot complete a new build or verification`, () => {
+    const e = validEvidence(); if (kind === 'missing') delete e.packageCheck; else e.packageCheck.status = 'blocked'
+    assert.notEqual(runtime.gateBuild({ verdict: 'built', evidence: e }).verdict, 'built')
+    assert.notEqual(runtime.gateFinal({ verdict: 'built', evidence: e, review: validReview() }).verdict, 'built')
+    assert.ok(runtime.checkReview(e, validReview()).length)
+  })
   test(`${label}: valid deterministic and mixed bounded evidence is accepted`, () => {
     const e = validEvidence()
     assert.equal(runtime.checkEvidence(e).length, 0)
@@ -509,5 +536,32 @@ test('nested parent links are refused and cannot establish historical closure', 
   assert.deepEqual(open().map(r => r.ref), ['grandchild'], 'unsupported historical nested link is unproven before any parent failure')
   review.verdict = 'fail'; assert.equal(writeReview(review).status, 0)
   assert.deepEqual(open().map(r => r.ref).sort(), ['child', 'grandchild', 'new'])
+})
+test('native implementation requires real current package output rather than a claimed pass', () => {
+  for (const kind of ['missing', 'hash', 'inventory', 'output', 'source']) {
+    setRows([]); const e = validEvidence(); let restore
+    if (kind === 'missing') delete e.packageCheck
+    if (kind === 'hash') e.packageCheck.sha256 = '0'.repeat(64)
+    if (kind === 'inventory') e.packageCheck.suites = ['invented.cjs']
+    if (kind === 'output') { const report = JSON.parse(fs.readFileSync(path.join(root, e.packageCheck.file))); const file = path.join(root, path.dirname(e.packageCheck.file), report.checks[0].output); const original = fs.readFileSync(file); fs.appendFileSync(file, 'tamper'); restore = () => fs.writeFileSync(file, original) }
+    if (kind === 'source') { const original = fs.readFileSync(product); fs.appendFileSync(product, '\n// changed'); restore = () => fs.writeFileSync(product, original) }
+    try { assert.equal(writeBuild(e).status, 1, kind); assert.equal(fs.readFileSync(ledger, 'utf8').trim(), '') } finally { restore?.() }
+  }
+})
+test('native review rejects an old unwrapped implementation with no package, while sealed legacy stays closed', () => {
+  const e = validEvidence(); delete e.packageCheck
+  setRows([row('new', 'implemented', { lifecycleVersion: 1, evidence: e, snapshot: contract.snapshot(e.files, root) })])
+  assert.equal(writeReview().status, 1)
+  assert.equal(contract.isClosed({ verdict: 'wrapped', state: 'wrapped', lifecycleVersion: 1, evidence: e, review: validReview() }), true)
+})
+test('native Architect implementation and independent pass enforce package admission', () => {
+  const file = path.join(root, '.claude/agent-loop/architect-ledger.jsonl')
+  const e = validEvidence(); delete e.packageCheck
+  const seed = { id: 'X1', verdict: 'proposed', target: 'scripts', finding: 'Fixture package admission', evidence: 'scripts/fixture.cjs:1' }
+  fs.writeFileSync(file, JSON.stringify(seed) + '\n')
+  assert.equal(cli('architect-file.cjs', '--session', 'architect', '--implementation', 'X1', '--evidence-file', jsonFile('architect-evidence.json', e)).status, 1)
+  fs.writeFileSync(file, JSON.stringify({ ...seed, verdict: 'implemented', implementation: e, snapshot: contract.snapshot(e.files, root) }) + '\n')
+  assert.equal(cli('architect-file.cjs', '--session', 'architect', '--review', 'X1', '--review-file', jsonFile('architect-review.json', validReview())).status, 1)
+  fs.unlinkSync(file)
 })
 }

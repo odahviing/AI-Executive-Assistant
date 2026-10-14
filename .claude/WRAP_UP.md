@@ -2,19 +2,15 @@
 
 Trigger phrases from the owner: "wrap up", "close the patch", "cut a version", "day close", "let's ship" — all map to running this checklist.
 
+For Codex, enter through [Manager dispatcher mechanics](skills/manager/OPERATIONS.md#dispatcher-mechanics): a fresh-context Manager executes this checklist from the compact frozen handoff; the historical parent coordinates exceptions. Apply that boundary before claiming the tree.
+
 ## HIS STANDING ORDER — all of it is already given, do not ask for it again
 
 Stated 2026-07-30 and again 2026-07-31, with the explicit request that it be encoded: **patch version · take the code from other chats too · nothing left uncommitted · close the GitHub issues that are fully resolved and COMMENT the ones that are not · restart Maelle.** The skill file (`.claude/skills/wrap/SKILL.md`) carries the same list — it is the short form, this is the procedure.
 
 **THIS FILE IS THE PROCEDURE AND THE ONLY NUMBERED COPY OF IT.** Three entry points — `.claude/commands/wrap.md`, `.claude/skills/wrap/SKILL.md` and the Manager's `wrap` verb — all delegate here, so a step that is missing here is a step that does not run. The skill used to number the checklist too, one step short and one number out of step; the wrap therefore ran for seven releases with no bookkeeping at all. **They name steps, this file numbers them** — when a step changes, it changes here.
 
-Five consequences the old checklist did not have:
-
-- **Step 1 claims the tree before anything else runs.** Nothing here ever wrote `state.json.lastRun`, so a wrap in progress was invisible to the one lock a `run` checks before dispatching anything — confirmed by `wf_f81323f1-791`'s own note: *"Landed mid-wrap, which forced the pre-wrap Fable pass and golden battery to be re-run over the grown tree."* Thirty seconds' different timing and a cron-fired `run` would have built onto a tree the wrap had already committed over.
-- **Step 3 means the WHOLE tree.** `git status --porcelain` with no path filter, every chat's files, framework included. A commit holding only your own files is the defect, not a tidy scope.
-- **Step 10 and the stamp at step 11 are the bookkeeping, and they are what gets skipped.** The ledger append is the only moment the day's history can be lost; the stamp is what stops the next run reporting a release nothing stands behind. `node scripts/ledger-stats.cjs --report` is green or the wrap is not finished.
-- **Steps 12-13 are not optional.** The wrap used to end at the push and say "deploy when ready". It now ends with **Maelle running on the new sha** and the GitHub issues either closed or commented.
-- **A verify overturn blocks the wrap; a discovery does not.** His ruling: *"if i do want to fix discoveries, its not blocker, its bonus."* Step 4's battery-then-Fable pass is this rule's own standing enforcement point, not a separate one.
+Claim the shared run lock first; include the whole tree; preserve independent verification and real-SHA bookkeeping; finish only after the final running SHA is observed. An overturn blocks wrap; an unrelated discovery stays next-run intake.
 
 **Deploy is now AUTOMATIC and REMOTE — there is no local restart.** Maelle runs on the GCP VM; after the push, the VM's `maelle-deploy-watcher` pulls, builds, and restarts her within ~2 min. Do NOT `npm run deploy` / `pm2 restart maelle` (no local Maelle exists — starting one = a second Slack socket). Confirm the deploy from the VM's boot stamp: `powershell -File scripts/vm-logs.ps1 "starting up" 6`. The stamp's `gitSha` must equal **HEAD** (the *last* commit — a bookkeeping commit after the version commit shows that one).
 
@@ -44,8 +40,6 @@ Clear, then claim the SAME field a `run` sets on itself — no new key, nothing 
 ```json
 "lastRun": {"id": "wrap-<start time, ISO>", "status": "running", "note": "manual wrap in progress"}
 ```
-
-Until this shipped, nothing here ever wrote `lastRun`, so a wrap in progress was invisible to the one mechanism built to stop exactly this. From the moment this is set, a cron-fired `run` refuses at its own STOP 2 exactly as if a second Workflow were already running — because as far as that check can tell, one is.
 
 **Release it only at step 12**, once every commit this wrap makes has landed: set `"status": "complete"`. **If the wrap dies before that**, the field is left `"running"` forever — the identical failure a killed Workflow run already leaves, and it takes the identical fix, no second recovery path invented for it: the next session to read it treats a running wrap exactly as STOP 2 already treats a running Workflow (may be live, wait, never resume on your own), and only the owner's explicit word turns it into `"stopped"`. There is nothing to `resumeFromRunId` here — a wrap is not a Workflow run, and there is no background process that could still be "slow" once he confirms it dead. On his word, set `"stopped"` and re-open this checklist from wherever `git log` / `git status` shows it actually got to.
 
@@ -192,7 +186,7 @@ The final executable result must pass. If it doesn't, stop and fix — don't shi
 
 **Before the first commit, preflight the release bookkeeping.** Draft the report counts and dispositions from the actual ledger, the writer command arguments (refs, version, run/review IDs and evidence files), and GitHub closing/partial-comment bodies. Check refs and coverage against the independent review, derive counts with `ledger-stats --open`, inspect the writer's accepted arguments, and run step 12's closing-claims check on each body. Keep SHA-dependent fields visibly unresolved in drafts; never execute a wrapped/gh-sync append or claim a release timestamp before its real commit exists. Save the checked drafts for steps 11–12.
 
-Use `node scripts/workshop-release.cjs --bookkeeping-plan <refs.json> --version <version>` to draft the selected ledger refs (a JSON string array). Save stdout as the plan: it supplies exact current review payloads and native-writer argv arrays, disposition drafts, counts, and the untouched report for reconciliation. A blocked plan cannot proceed. Reconcile every report row and owner ruling; the helper does not infer decisions from prose or prove selected refs exhaust release scope. `node scripts/workshop-release.cjs --check-bookkeeping <plan.json>` must return `current-draft` before the first append. Materialize the supplied review JSON files and pass argv arrays to the native writer from the repo root; disposition drafts still require its validation. Regenerate after any write or interrupted batch; entries already stamped with this wrap run ID have null argv and must not be replayed. The helper is read-only: companions and real-SHA/postcommit checks remain at steps 11–12.
+Use `node scripts/workshop-release.cjs --bookkeeping-plan <refs.json> --version <version>` to draft the selected ledger refs (a JSON string array). Save stdout as the plan: it supplies exact current review payloads and native-writer argv arrays, disposition drafts, counts, and the untouched report for reconciliation. A blocked plan cannot proceed. Reconcile every report row and owner ruling; the helper does not infer decisions from prose or prove selected refs exhaust release scope. `node scripts/workshop-release.cjs --check-bookkeeping <plan.json>` must return `current-draft` before the first append. Materialize the supplied review JSON files and pass argv arrays to the native writer from the repo root; disposition drafts still require its validation. Batch the pending review argv arrays with native --batch-file (omit the script-path element), then regenerate only after failed validation or outside edits. Entries already stamped with this wrap run ID have null argv. Retry an identical native batch after projection failure; it appends no duplicate events. The helper is read-only: companions and real-SHA/postcommit checks remain at steps 11–12.
 
 Run `node scripts/check-dispatch-coverage.cjs --since <last-wrap-date>` and `node scripts/check-stale-citations.cjs` before this first commit; resolve failures while the tree is still open. Preflight complements every mandatory postcommit `--report`, `--wrap` and boot-stamp check below. Final SHA substitution or changed evidence requires rechecking the affected draft before publication.
 
@@ -201,17 +195,19 @@ Run `node scripts/check-dispatch-coverage.cjs --since <last-wrap-date>` and `nod
 1. **Use the native ledger writer to record every NEW owner disposition and each shipping ref in `.claude/agent-loop/ledger.jsonl`. Existing captured/held rows already have durable history; do not invent a new disposition or re-authorize them merely because they remain on the report.** Shipping refs keep their evidence and exact independent review: re-append that review with `--review --ref <ref> --runId wrap-<version> --review-file <review.json>`; do not recreate a bare `built` row that discards verification. **Append every disposition** — whatever its verdict, not only the built ones. Two fields on every row, and both exist because this step dropped them:
    - **`"runId":"wrap-<version>"`** — without it `node scripts/ledger-stats.cjs --wrap <version>` cannot name a release's own rows, and the built-list check reaches back past the release to count everything since the last stamp. (This is the ledger's own per-release tag, unrelated to step 1's `state.lastRun.id`, which is the wrap's live-lock marker and never touches `ledger.jsonl`.)
    - **`"recommend":"<verb> — <one clause>"`** on every row that is not `built`. Preserve it from the actual owner/lane disposition — *"Recommend: build — …"* becomes `"recommend":"build — <the clause>"`. Skip it and the row survives in a form he cannot rule on, which is how **54 of 56** standing open rows got there. A `deferred` or `declined` row also carries **his words** in `note`, or the counter he gave dies with the cell.
-   - **A `built` row this wrap ships also needs a `state:"wrapped"` companion row — NOT here.** This step runs *before* step 11's commit exists, and "shipped" means a real sha to point at; nothing at this point in the checklist can honestly claim it yet — an instruction here that cannot be performed here is worse than no instruction. That companion row is minted at **step 12**, together with the GitHub sync, once the commit is real. (X152's own note guessed the gap this closes also explains `alreadyBuilt` matching 0 of 94 refs one night — checked and **refuted**: `bugger.js`'s triage match is pure LLM judgment over the `ref`/`rootCause` text handed to it, with no code path that reads `state` at all. Keep the two as separate defects.)
+   - **A `built` row this wrap ships also needs a `state:"wrapped"` companion row — NOT here.** This step runs *before* step 11's commit exists, and "shipped" means a real sha to point at; nothing at this point in the checklist can honestly claim it yet — an instruction here that cannot be performed here is worse than no instruction. That companion row is minted at **step 12**, together with the GitHub sync, once the commit is real.
 
-2. **Then reconcile `report.md` from the ledger — never clear still-open captures or holds.** The native writer refreshes the projection after each append. At the idle checkpoint use `node scripts/ledger-file.cjs --sync-report`; while the wrap owns the run lock, its native appends already synchronize it. Run `node scripts/ledger-stats.cjs --report`: every open ref and verified claim must agree, and the existing real-release wrap-marker checks still apply. A completed release removes wrapped refs from the awaiting-wrap list, not unresolved work from the board.
+2. **Then reconcile `report.md` from the ledger — never clear still-open captures or holds.** The native writer refreshes the projection once per native batch (or standalone append). At the idle checkpoint use `node scripts/ledger-file.cjs --sync-report`; while the wrap owns the run lock, its native appends already synchronize it. Run `node scripts/ledger-stats.cjs --report`: every open ref and verified claim must agree, and the existing real-release wrap-marker checks still apply. A completed release removes wrapped refs from the awaiting-wrap list, not unresolved work from the board.
 
 3. **Then reduce `state.json` to the keys documented in `.claude/skills/manager/SKILL.md` "State you own".** The append you just made is what makes the run's notes deletable, so this is the one moment it costs nothing.
 
 **Check the append in one command:** `node scripts/ledger-stats.cjs --open` must not name the independently verified rows; implemented, failed and unproven rows remain open and block wrap.
 
+Submit companions as a second native batch after the real commit exists. The watcher must already be running the reviewed wrap-lock deferral code before relying on it for a two-push release; a source-file update alone does not reload its process. Without that evidence, report the deployment count as unconfirmed.
+
 The third marker this step is owed is **not on a row** — it is `state.lastWrapIso`, and it is set at **step 11**, because its value is the release commit's own timestamp and that commit does not exist yet here.
 
-### 11. Commit + push under owner author — then stamp the wrap
+### 11. Commit under owner author — then stamp the wrap
 
 ```bash
 git add -A
@@ -222,12 +218,11 @@ git commit -m "<new version>: <same headline as CHANGELOG>
 <if any high-impact fixes, list with issue numbers>
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
-git push origin master
 ```
 
-Use the owner's author (not `Maelle Auto-Triage`).
+Use the owner's author (not `Maelle Auto-Triage`). Keep the release local until step 12's bookkeeping commit and checks pass, then push both together. If GitHub comments/closes require the published release SHA, push the source commit first with the wrap lock still running; the watcher defers that snapshot until the final completed-wrap revision. Never publish a false completion stamp to force deployment.
 
-**Then stamp the wrap, in the same turn as the push.** The wrap leaves **two** markers and they describe the same fact — *which release this wrap shipped*:
+**Then stamp the wrap from the real local release commit.** The wrap leaves **two** markers and they describe the same fact — *which release this wrap shipped*:
 
 - `"runId":"wrap-<version>"` on every row appended at step 10.
 - `state.lastWrapIso` — the release commit's own timestamp:
@@ -236,7 +231,7 @@ Use the owner's author (not `Maelle Auto-Triage`).
 git log -1 --date=iso-strict --format=%ad     # -> .claude/agent-loop/state.json `lastWrapIso`
 ```
 
-Write that value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 (*nothing uncommitted*) true. It is what `ledger-stats --report` below checks a release commit against. **5 of 7 wraps skipped it; on 2026-08-01 it stood two releases behind.** (It is **not** the cleaner's clock — that is `lastCleanSha`, a separate watermark advanced by the dispatching chat, X131.)
+Write that value straight into `.claude/agent-loop/state.json`; it ships in the bookkeeping commit, which is what keeps standing order 3 (*nothing uncommitted*) true. It is what `ledger-stats --report` below checks a release commit against. (It is **not** the cleaner's clock — that is `lastCleanSha`, a separate watermark advanced by the dispatching chat, X131.)
 
 **The check, and it is one command:**
 
@@ -269,7 +264,7 @@ gh issue close <n>
 
 **X152/X158 — two appends, same moment, same input (this wrap's `built` rows and `ticketCoverage`), done together right here now that the sha exists:**
 
-1. **Every independently `verified` ref this wrap's own commits actually ship gets a companion row using `node scripts/ledger-file.cjs --wrap-companion --ref <ref> --version <version> --sha <sha>` — a SEPARATE line, never a mutation of the original.** The writer refuses missing/stale review. Historical shape: `{"date":"<today>", "runId":"wrap-<version>", "ref":"<same ref>", "verdict":"wrapped", "state":"wrapped", "note":"shipped in <sha>"}`. **`verdict:"wrapped"`, not `"built"`** — a row carrying both on one line answers its own check and is exactly the shape the acceptance test below now refuses. Closes the 313-`built`-vs-18-`wrapped` gap (measured 2026-08-04) — nothing else durably tells "in the tree, uncommitted" from "deployed weeks ago" without re-reading `git log` per ref by hand.
+1. **Every independently `verified` ref this wrap's own commits actually ship gets a companion row using `node scripts/ledger-file.cjs --wrap-companion --ref <ref> --version <version> --sha <sha>` — a SEPARATE line, never a mutation of the original.** The writer refuses missing/stale review. Historical shape: `{"date":"<today>", "runId":"wrap-<version>", "ref":"<same ref>", "verdict":"wrapped", "state":"wrapped", "note":"shipped in <sha>"}`. **`verdict:"wrapped"`, not `"built"`** — a row carrying both on one line answers its own check and is exactly the shape the acceptance test below now refuses.
 
 2. **Whatever GitHub gets, the ledger gets the identical statement — never a second, independent copy of the prose.** For every issue touched above: `{"date":"<today>", "runId":"wrap-<version>", "ref":"gh#<n>", "state":"closed"|"partial", "note":"<the exact text gh issue close/comment sent, verbatim>"}`. `state` is the FACT GitHub shows; do not hardcode a verdict off it. **A closed ticket is `"verdict":"wrapped"`** — never `"built"`: that verdict means "a fresh atomic fix," and a bare ticket ref carrying it falsely demands a companion row nothing will ever mint. **A partial ticket is unfinished work more often than it is a question for him — pick the verb the comment's own "why" actually supports**: `"recommend":"build — <the remaining piece>"` when it just needs another round, `"recommend":"defer — <what it waits on>"`, or `"verdict":"needs-owner-decision"` only when the comment itself says he must choose something. Pairing every partial with `needs-owner-decision` regardless of why would put unfinished-but-routine work on his desk that a lane could simply pick back up — and a row still awaiting his decision is never closed on GitHub in the first place (rule above), so it correctly contributes nothing here to check against. A closed-or-commented ticket with no matching row is why *"a wave ships and the source GitHub issue is never closed or even updated, and nothing reports where a ticket stands"* took him a full day to notice himself.
 
@@ -277,7 +272,7 @@ gh issue close <n>
 
 For each independently reviewed Architect attempt shipped by the release, after the run is idle and before the bookkeeping commit, append `node scripts/architect-file.cjs --session architect --wrap-companion <Xid> --attempt-id <exact-attempt> --version <version> --sha <release-sha>`. This binds its existing pass and snapshot to actual release contents, so later edits do not reopen shipped history. Unwrapped attempts still require current verification; a new attempt or failed review reopens the item. For legacy checkout line endings, `--snapshot-root <preserved-checkout>` may supply bytes matching the recorded hash; only CRLF-to-LF differences are accepted. Never use a historical companion to claim current verification or to mark waived checks as passed. Confirm `node scripts/ledger-stats.cjs --architect` and the report agree.
 
-**COMMIT THESE ROWS before you check them — the check reads git history, not the working tree.** `git add -A && git commit -m "<version> bookkeeping: file <tickets> closes/comments" && git push`, riding alongside (or as) step 11's `lastWrapIso` bookkeeping commit. **The check, one command, run AFTER that commit — extends the same one already run at step 11:**
+**COMMIT THESE ROWS before you check them — the check reads git history, not the working tree.** Add and commit the bookkeeping with step 11's `lastWrapIso`, then run the checks below before the final push. A failed check remains local and blocks publication. **The check, one command, run AFTER that commit — extends the same one already run at step 11:**
 
 ```bash
 node scripts/ledger-stats.cjs --wrap <version>
@@ -287,9 +282,11 @@ Two lines, `BUILT -> WRAPPED` and `GITHUB <-> LEDGER SYNC`, report against this 
 
 **A third check runs in the same command: `PHANTOM CANDIDATES`.** 16 of 23 build-ready backlog rows going into the 4.5.0 wrap were bugs that wave's own diff had already fixed under a *different* ref — found by hand, after the fact, because nothing here ever cross-referenced the shipped diff against the standing backlog. `--wrap <version>` now does: it cross-references every currently-open ledger row against the files this wrap's own commits touched (plus a shared `invariant` with a row this wrap closed, plus a ref appearing in this wrap's own commit subjects), and prints any hit as a candidate. **It never auto-closes.** Verify each against the CURRENT tree, cite the exact `file:line` that makes the original failure impossible, and close it with `node scripts/ledger-file.cjs --verdict already-fixed`. If a candidate is genuinely a distinct, still-open bug, append a `{"date":"…","ref":"…","recheck":"…"}` line dated today or later so it stops being reflagged — it stays open, it just stops being asked about at every future re-run of this wrap's own check. This is the OPPOSITE direction from `alreadyBuilt` (which guards intake against re-filing a shipped fix as new); this guards the standing backlog against staying open after a later wave silently closed it.
 
-### 13. Confirm the boot stamp — the push already restarted her
+After the postcommit checks pass, push the final HEAD once. If step 12 needed an earlier source push for GitHub, this second push releases the watcher; it is still one deployment. A push failure is unfinished publication, never a confirmed release.
 
-**Build and restart nothing here.** The push at step 11 is the deploy: the VM's `maelle-deploy-watcher` pulls, builds and restarts her within ~2 min (header, and `SESSION_STARTER.md`'s Operational deploy bullet). Read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
+### 13. Confirm the boot stamp — the final push deploys her
+
+**Build and restart nothing here.** The final push after step 12 is the deploy: the VM's `maelle-deploy-watcher` pulls, builds and restarts her within ~2 min (header, and `SESSION_STARTER.md`'s Operational deploy bullet). Read the stamp from the log, not the PM2 table — **the log is on the VM she runs on; the local `logs/` dir is STALE (frozen at the 2026-07-31 cutover) and grepping it confirms nothing**:
 
 ```bash
 powershell -File scripts/vm-logs.ps1 "starting up" 6

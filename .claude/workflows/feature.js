@@ -10,6 +10,7 @@ const workshopContract = (() => {
     for (const key of ['attemptId', 'builder']) if (!text(e[key])) errors.push(`missing ${key}`)
     if (!strings(e.files) || !e.files.length || !unique(e.files)) errors.push('files must enumerate every changed file once')
     if (!['deterministic', 'prompt-only', 'prose-only'].includes(e.changeKind)) errors.push('missing changeKind')
+    if (e.packageCheck) errors.push(...checkPackage(e))
     if (e.changeKind !== 'deterministic' && !text(e.exception)) errors.push('prompt/prose exception needs an explicit limitation')
     const suites = array(e.regressions)
     if (!Array.isArray(e.regressions) || !unique(suites.map(t => t.id))) errors.push('regressions must be an explicit array with unique ids')
@@ -56,8 +57,15 @@ const workshopContract = (() => {
     }
     return errors
   }
-  const checkReview = (e, r) => {
-    const errors = checkEvidence(e)
+  const checkPackage = e => {
+    if (e?.changeKind !== 'deterministic') return []
+    const p = e.packageCheck
+    return p && text(p.file) && /^[a-f0-9]{64}$/.test(p.sha256 || '') && p.scope === 'package' && p.status === 'passed' && strings(p.suites) && p.suites.length && unique(p.suites)
+      ? [] : ['missing or failed affected-suite package evidence']
+  }
+  // Legacy is for reading accepted history, never new completion admission.
+  const checkReview = (e, r, legacy = false) => {
+    const errors = [...checkEvidence(e), ...(!legacy || e?.packageCheck ? checkPackage(e) : [])]
     if (!r || !['pass', 'fail', 'unproven'].includes(r.verdict)) return [...errors, 'missing independent Bouncer verdict']
     if (!text(r.reviewer) || r.reviewer === e?.builder) errors.push('review must identify an independent dispatch')
     if (!text(r.trace)) errors.push('missing actual review dispatch/transcript trace')
@@ -80,7 +88,7 @@ const workshopContract = (() => {
   }
   const gateBuild = r => {
     if (r.verdict !== 'built') return r
-    const errors = checkEvidence(r.evidence)
+    const errors = [...checkEvidence(r.evidence), ...checkPackage(r.evidence)]
     return errors.length ? { ...r, verdict: 'needs-dependency', notes: `${r.notes || ''} [evidence gate: ${errors.join('; ')}]` } : r
   }
   const gateFinal = r => {
@@ -110,6 +118,7 @@ const workshopContract = (() => {
     regressions: list(obj({ id: S, command: S, beforeRevision: S, before: run, after: run, cases: list(obj({ id: S, kind: S, before: S, after: S, evidence: S })) })),
     boundaries: obj({ inventoryCommand: S, changedGuards: list(S), paths: list(obj({ id: S, producer: S, state: S, consumer: S, guard: S, direction: S, caseIds: list(S), status: S, evidence: S })), surfaces: list(obj({ id: S, status: S, pathIds: list(S), reason: S })) }) })
   const reviewSchema = obj({ attemptId: S, reviewer: S, trace: S, verdict: { type: 'string', enum: ['pass', 'fail', 'unproven'] }, reason: S, outcome: S, inventoryComplete: B, guardsComplete: B, findings: list(S), reviewedPaths: list(S), scope: S, checks: list(obj({ id: S, command: S, exitCode: N, passed: N, failed: N, output: S })) })
+  evidenceSchema.properties.packageCheck = obj({ file: S, sha256: S, scope: S, status: S, suites: list(S) })
   reviewSchema.properties.ownerRulingToken = { type: 'string', description: 'When checking an existing attempt after an owner answer, copy its current native rulingToken to bind this review to that answer.' }
   // Engines receive a current native projection under the existing owner run
   // authorization. Editor recommendations never release ledger dispositions.
@@ -139,7 +148,7 @@ const workshopContract = (() => {
       return admission.allowFresh === true && ['github', 'logs', 'both'].includes(i.source) ? [] : reject('fresh-source work is outside this authorized run')
     })
   }
-  return { checkEvidence, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
+  return { checkEvidence, checkPackage, checkReview, gateBuild, gateFinal, acceptReviews, evidenceSchema, reviewSchema, checkAdmission, withOwnerRulings }
 })()
 // END WORKSHOP CONTRACT
 const workshopReviews = new Map(), workshopQuestions = new Map()

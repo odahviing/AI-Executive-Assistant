@@ -16,14 +16,24 @@ const ids = [...fs.readFileSync(path.join(repo, '.claude/GOLDEN_PATHS.md'), 'utf
 assert.deepEqual(ids, Array.from({ length: 30 }, (_, i) => 'Z' + (i + 1)), 'fixed release catalog is the actual Golden30 inventory')
 const issue = { id: 'b1', lane: 'slackmaster', symptom: 'Bounded fixture defect', evidence: 'src/x.ts:1', clarity: 'clear', source: 'owner', severity: 'medium' }
 const response = (selected = ids, count = selected.length) => ({ itemsInFile: count, goldenTraces: selected.map(id => ({ id, verdict: 'pass', evidence: 'fixture:1' })) })
-const run = async (release, golden = response()) => {
+const run = async (release, golden = response(), evidence) => {
   const r = await bugger({ issues: [issue], releaseCheckpoint: release }, {
-    'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', workshopRead: true, filesTouched: ['src/x.ts'] }] },
+    'slackmaster(1)': { results: [{ id: 'b1', verdict: 'built', workshopRead: true, filesTouched: ['src/x.ts'], ...(evidence ? { evidence } : {}) }] },
     'bouncer:wave': { results: [{ id: 'b1', verdict: 'built' }], discoveries: [], ticketCoverage: [], verifiedClean: [] },
     traces: golden,
   })
   assert.equal(r.err, null); return r
 }
+
+test('synthetic orchestration package cannot pass native filesystem verification', async () => {
+  const fixture = await makeRunner(async (args, agent) => agent('', { label: 'builder', agentType: 'slackmaster' }))({}, { builder: { results: [{ id: 'b1', verdict: 'built' }] } })
+  const evidence = fixture.out.results[0].evidence
+  assert.ok(require('./workshop-verification.cjs').packageErrors(evidence, repo).length > 0)
+  const missing = structuredClone(evidence); delete missing.packageCheck
+  assert.equal((await run(false, response(), missing)).out.verification.packageReady, false)
+  const blocked = structuredClone(evidence); blocked.packageCheck.status = 'blocked'
+  assert.equal((await run(false, response(), blocked)).out.verification.packageReady, false)
+})
 test('ordinary bugger package is independently ready while release remains pending', async () => {
   const r = await run(false)
   assert.equal(r.out.verification.packageReady, true)
