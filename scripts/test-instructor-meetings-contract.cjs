@@ -67,5 +67,21 @@ check('ROUTE-P02 hypothetical checks still search', () => assert.match(owner, /H
 check('OUTCOME-P01 failures and aggregate success remain qualified', () => { assert.match(owner, /On failure, name what happened/); assert.match(owner, /every individual mutation must have returned success/); assert.match(owner, /Don't summarize unresolved as resolved/); });
 check('SURFACE-P01 email excludes destructive operation guidance', () => { assert.doesNotMatch(email, /DELETE-MEETING PROTOCOL/); assert.doesNotMatch(email, /move_meeting \/ update_meeting \/ delete_meeting —/); });
 check('SURFACE-P02 colleague and room role retain scoped rendering', () => { assert.match(colleague, /SCHEDULE IS PRIVATE/); assert.match(colleague, /MEETINGS HONESTY/); });
+check('OPTIONS-R01 configured count and returned diversity survive every prompt surface', () => {
+  for (const prompt of [owner, colleague, email]) {
+    assert.doesNotMatch(prompt, /returns up to 3 spread slots/);
+    assert.match(prompt, /requested count or configured offered_slot_count/);
+    assert.match(prompt, /Preserve the returned day\/time diversity and preference ranking/);
+    assert.match(prompt, /brevity means compact lines, not fewer options or days/);
+    assert.match(prompt, /If fewer viable choices remain, state the actual count/);
+  }
+});
+check('OPTIONS-R02 legitimate narrowing is disclosed without broad availability claims', () => {
+  for (const prompt of [owner, colleague, email]) {
+    assert.match(prompt, /stated constraint or requested count requires presenting fewer returned choices, name that reason and the remaining count/);
+    assert.match(prompt, /retaining their conflict, approval and unknown-availability annotations/);
+    assert.match(prompt, /not the only availability overall/);
+  }
+});
 console.log('METRICS '+JSON.stringify({ownerPromptChars:owner.length,colleaguePromptChars:colleague.length,emailPromptChars:email.length,toolJsonChars:JSON.stringify(tools).length,deleteDescriptionChars:tool('delete_meeting').description.length,tokenCounts:'unavailable; no character/token estimate used'}));
 console.log(`${passed} passed; ${failed} failed`); process.exitCode=failed?1:0;

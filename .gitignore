@@ -55,6 +55,9 @@ Thumbs.db
 # Durable regression fixtures live under scripts/fixtures instead.
 /artifacts/workshop-verification/
 /artifacts/regression-yael-20261007/
+# Local slot-options run: logs, reports and preserved source snapshots.
+# Keep on disk for verification; canonical hashed ledger attachments stay tracked.
+/.claude/agent-loop/evidence/slot-options-20261016/
 
 # Local incident intake can contain private conversation excerpts.
 /artifacts/run-preparation/

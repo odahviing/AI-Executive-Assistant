@@ -4,7 +4,7 @@ import type { UserProfile } from '../../config/userProfile';
 import { slotDayMinutes, ownerWorkIntervalsBetween } from '../../utils/workHours';
 import { scoreSlotDensity, densityConfigFromProfile, prefersDensePacking } from '../../utils/calendarDensity';
 import type { MeetingMode, CalendarEvent } from './calendarTypes';
-import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped, compareSlotPreference } from './calendarReads';
+import { getFreeBusyForDecision, getOwnerEventsForDecision, CalendarOfflineError, isOutageShaped, pickSpreadSlots } from './calendarReads';
 import type { RuleCheckResult, SearchRejectLabel } from '../../utils/scheduleRules';
 import { mapVerdictToRejectLabel } from '../../utils/scheduleRules';
 // Re-exported (not just imported) so a reader of the search-path vocabulary
@@ -980,25 +980,11 @@ export async function findAvailableSlots(params: {
       return native;
     };
 
-    // v2.0.9 — walker collects ALL valid 15-min-stepped candidates per day
-    // into dayBuckets. After the walker, per-day post-processing picks up to
-    // MAX_PER_DAY with 30-min preferred spacing and 15-min fallback. Prior
-    // chronological-slice(10) truncated the rest of the week whenever Sunday
-    // had 10+ hits; hard-capping the walker at 4/day would also over-cluster
-    // in 15-min increments. Two-stage approach gives both day-diversity AND
-    // nice intra-day spacing ("10, 10:30, 11:30, 14:00" not "10, 10:15,
-    // 10:30, 10:45").
-    // v4.1.x (M4) — the cap was a literal 4, applied BEFORE pickSpreadSlots
-    // ever saw the day, so a single wide window (a cross-TZ overlap band, or
-    // "anytime Tuesday") could only ever yield 4 candidates from that day —
-    // fewer than the 5 we then tried to offer, and a 5th viable slot was culled
-    // pre-spread (the Ayala case). It is now the offered-slot count itself: the
-    // most one day could ever legitimately contribute, so one viable day can
-    // fill the whole offer and nothing viable is discarded before the spreader.
-    // Keeping a cap (rather than dropping it) preserves the dense-packing
-    // branch below, where WHICH slots survive expresses the density ranking.
+    // Collect every valid quarter-hour start before selecting each day's
+    // contribution with the same duration-aware spreader as the final offer.
+    // Capping adjacent starts first discarded later viable options: eight
+    // dense 25-minute candidates became only four nonoverlapping offers.
     const MAX_PER_DAY = offeredCountFor(profile ?? undefined);
-    const PREFERRED_GAP_MS = 30 * 60 * 1000;
     // #133 — efficient-calendar ranking. When the owner prefers dense packing,
     // each candidate is scored by how it sits among the owner's EXISTING
     // commitments (back-to-back / real break = good; a 6–29 min dead gap = bad).
@@ -1663,10 +1649,9 @@ export async function findAvailableSlots(params: {
       : slot.shared_overlap !== undefined && slot.shared_overlap === minimumOverlap || (slot.shared_overlap === undefined && (slot.density ?? 0) > 0)
         ? 'good' : 'medium';
 
-    // Per-day selection. For each day, pick up to MAX_PER_DAY with
-    // PREFERRED_GAP (30 min) between picks; if that yields fewer than
-    // MAX_PER_DAY, fill remaining from the unused list at 15-min spacing.
-    // Owner preference: "10, 10:30, 11:30, 14:00" > "10, 10:15, 10:30, 10:45".
+    // Keep useful, nonoverlapping alternatives before bounding the day. The
+    // shared spreader preserves optional tiers, density/overlap preferences,
+    // earlier alternatives and relaxed-gap fill without a competing picker.
     for (const [, daySlots] of dayBuckets) {
       if (daySlots.length === 0) continue;
       if (params.ownerHoursExceptionRequested && profile) {
@@ -1674,33 +1659,8 @@ export async function findAvailableSlots(params: {
         candidates.push(...daySlots.slice(0, MAX_PER_DAY));
         continue;
       }
-      daySlots.sort((a, b) => Number(!!a.over_optional) - Number(!!b.over_optional) || compareSlotPreference(a, b));
-      // Keep an earlier reasonable alternative when the budget allows it; a
-      // better late slot must not erase speed from the choice altogether.
-      const earliest = comparisonWindows.length && MAX_PER_DAY > 1
-        ? [...daySlots].filter(s => !s.over_optional && !dayCompromise(s)).sort((a, b) => Date.parse(a.start) - Date.parse(b.start))[0]
-        : undefined;
-      const picked: typeof daySlots = earliest ? [earliest] : [];
-      if (packingDense) {
-        picked.push(...daySlots.filter(s => s !== earliest).slice(0, MAX_PER_DAY - picked.length));
-        picked.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-        candidates.push(...picked);
-        continue;
-      }
-      for (let i = 0; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
-        const t = new Date(daySlots[i].start).getTime();
-        if (picked.every(s => Math.abs(t - Date.parse(s.start)) >= PREFERRED_GAP_MS)) {
-          picked.push(daySlots[i]);
-        }
-      }
-      // Fallback: if we still have room, fill with anything we skipped (15-min
-      // spacing allowed). Re-sort chronologically after to keep output tidy.
-      if (picked.length < MAX_PER_DAY) {
-        const pickedSet = new Set(picked.map(p => p.start));
-        for (let i = 0; i < daySlots.length && picked.length < MAX_PER_DAY; i++) {
-          if (!pickedSet.has(daySlots[i].start)) picked.push(daySlots[i]);
-        }
-      }
+      const starts = new Set(pickSpreadSlots(daySlots, params.timezone, MAX_PER_DAY, undefined, params.durationMinutes));
+      const picked = daySlots.filter(s => starts.has(s.start));
       picked.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
       candidates.push(...picked);
     }

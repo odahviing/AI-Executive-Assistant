@@ -1,3 +1,15 @@
+## 5.0.10 — More useful meeting options
+
+Meeting searches retain enough nonoverlapping alternatives to honor the configured offer count, including when only one day is available. Reply guidance preserves returned day and time diversity and explains any narrowing caused by the user's constraints.
+
+### Fixed
+- Select each day's candidates with the shared duration-aware spreader before applying its budget, preserving preference ranking and legitimate smaller or larger offer counts.
+- Remove stale guidance that described a fixed three-option limit; keep returned conflict, approval and unknown-availability annotations when presenting alternatives.
+
+### Validation and limits
+- Both shipping references independently reviewed. The full release battery passed all 260 suite/timezone executions and typechecking; all 30 Golden paths were independently traced, including 13 stale citation anchors mapped to current code.
+- Prompt checks establish the supplied guidance, not model obedience. The exact final tool payload from the reported Scott conversation was unavailable; no claim of replaying that incident is made.
+
 ## 5.0.9 — Reliable meeting rescheduling
 
 Meeting rescheduling now excludes the exact events being moved from conflict checks and validates coordinated moves against the resulting calendars. Maelle carries each meeting's actual outcome through approval, retry and conversation summaries, so a partial result cannot become a claim that everything is done.

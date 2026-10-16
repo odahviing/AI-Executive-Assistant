@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 1 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (0):** none
+**Independently verified, awaiting wrap (2):** slot-options-duration-aware-selection · slot-options-stale-prompt
 
 ### Held — recorded rulings / existing backlog (1)
 

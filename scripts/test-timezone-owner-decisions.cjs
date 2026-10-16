@@ -48,15 +48,18 @@ function harness(options={}) {
   'src/utils/displaySubject.ts':{displaySubject:()=>'',PRIVATE_MASK:'private'},
   'src/utils/floatingBlocks.ts':{getFloatingBlocks:()=>[],blockAppliesOnDay:()=>false,isFloatingBlockEvent:()=>false},
   'src/utils/calendarDensity.ts':{prefersDensePacking:()=>false,densityConfigFromProfile:()=>({})},
+  'src/connectors/graph/graphClient.ts':{},
   'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async()=>({}),getOwnerEventsForDecision:async()=>[],isOutageShaped:()=>false,CalendarOfflineError:Error},
  };
- function load(rel){
-  if(mocks[rel])return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
+ function load(rel,actual=false){
+  if(mocks[rel]&&!actual)return mocks[rel];if(modules.has(rel))return modules.get(rel).exports;
   const mod={exports:{}};modules.set(rel,mod);
   const js=ts.transpileModule(read(rel),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   const req=s=>s==='luxon'?luxon:s.startsWith('.')?load(path.posix.normalize(path.posix.join(path.posix.dirname(rel),s))+'.ts'):(()=>{throw Error('Unexpected module '+s);})();
   vm.runInNewContext('(function(require,module,exports){'+js+'\n})',{Date:PinnedDate,console,Set,Map,Buffer,setTimeout,Intl},{filename:rel})(req,mod,mod.exports);return mod.exports;
  }
+ // Preserve the real selector now shared by the finder; isolate only I/O.
+ mocks['src/connectors/graph/calendarReads.ts']={...load('src/connectors/graph/calendarReads.ts',true),...mocks['src/connectors/graph/calendarReads.ts']};
  const availability=load('src/utils/attendeeAvailability.ts'),resolver=load('src/utils/weTimeResolver.ts');
  const entries=()=>availability.loadAttendeeAvailabilityForEmails([person.email],profile.user.email,profile.user.timezone);
  const find=(start,end,flags={})=>load('src/connectors/graph/findAvailableSlots.ts').findAvailableSlots({userEmail:profile.user.email,timezone:profile.user.timezone,profile,durationMinutes:DateTime.fromISO(end).diff(DateTime.fromISO(start),'minutes').minutes,searchFrom:start,searchTo:end,autoExpand:false,requestedTimeWindow:null,minBufferHours:0,attendeeAvailability:entries(),...flags});
