@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 1 open items; 0 captured, 0 ready for an authorized lane batch, 1 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (2):** M-BOSTON-1 · BOSTON-R1-counter-invented-instant
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (1)
 
