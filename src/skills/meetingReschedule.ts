@@ -36,7 +36,7 @@ import { resolveStatedInstant } from '../utils/weTimeResolver';
 import { isColleagueSendDeferred } from '../utils/responseDeadline';
 import { getPersonMemory } from '../db/people';
 import { relayNotice, requesterRelayLanguage, recordOwnerNotificationOutcome } from '../core/requests/requesterRelay';
-import { updateMeeting, findAvailableSlots } from '../connectors/graph/calendar';
+import { updateMeeting } from '../connectors/graph/calendar';
 import { appendToConversation } from '../db';
 import { getConnection } from '../connections/registry';
 import { shadowNotify } from '../utils/shadowNotify';
@@ -375,141 +375,12 @@ async function handleRescheduleReplyLocked(
     return true;
   }
 
-  // ── Branch: counter → auto-accept if rule-compliant, else ask owner ──────
-  // Owner's natural reply ("yes take it" / "no, push back to 09:15") is handled
-  // by the orchestrator in the next turn — no separate approval row needed.
-  //
-  // v2.1.5 — mirror the coord counter auto-accept: when active mode is on
-  // AND the counter is same ISO week AND passes every schedule rule (buffer,
-  // work hours, floating blocks — all enforced by findAvailableSlots), move
-  // the meeting autonomously and shadow-DM the owner. Maelle doesn't need
-  // approval for "15 minutes earlier on the same day" — that's her job.
+  // Counter classification carries clocks only, without an authoritative date or timezone.
+  // Preserve unresolved terms through the existing owner decision flow.
   if (decision.status === 'counter') {
     const counterDesc = decision.counter_start
       ? (decision.counter_end ? `${decision.counter_start}–${decision.counter_end}` : `around ${decision.counter_start}`)
       : '(time not cleanly extracted — check their reply)';
-
-    // Attempt auto-accept before falling back to owner approval.
-    const activeMode = profile.behavior.calendar_health_mode === 'active';
-    if (activeMode && decision.counter_start) {
-      try {
-        const proposedStartDt = DateTime.fromISO(ctx.proposed_start, { zone: timezone });
-        const [ch, cm] = decision.counter_start.split(':').map(n => parseInt(n, 10));
-        if (proposedStartDt.isValid && !isNaN(ch) && !isNaN(cm)) {
-          const counterStartDt = proposedStartDt.set({ hour: ch, minute: cm, second: 0, millisecond: 0 });
-          const durationMs = DateTime.fromISO(ctx.proposed_end).toMillis() - DateTime.fromISO(ctx.proposed_start).toMillis();
-          const durationMin = Math.max(5, Math.round(durationMs / 60_000));
-          const counterEndDt = counterStartDt.plus({ milliseconds: durationMs });
-
-          // Rule 1 — same ISO week as the original meeting time (falls back to
-          // the proposed_start date when original_start isn't recorded).
-          const originalDt = ctx.original_start
-            ? DateTime.fromISO(ctx.original_start, { zone: timezone })
-            : proposedStartDt;
-          const sameWeek = counterStartDt.weekYear === originalDt.weekYear
-            && counterStartDt.weekNumber === originalDt.weekNumber;
-
-          if (sameWeek) {
-            // Rule 2 — narrow-window findAvailableSlots. Search ±1 min around
-            // the counter; if it comes back, every schedule rule is satisfied.
-            const startMs = counterStartDt.toMillis();
-            const fromIso = DateTime.fromMillis(startMs - 60_000).toUTC().toISO();
-            const toIso = DateTime.fromMillis(startMs + durationMin * 60_000 + 60_000).toUTC().toISO();
-            let validSlots: Array<{ start: string }> = [];
-            if (fromIso && toIso) {
-              try {
-                validSlots = await findAvailableSlots({
-                  userEmail: profile.user.email,
-                  timezone,
-                  durationMinutes: durationMin,
-                  searchFrom: fromIso,
-                  searchTo: toIso,
-                  profile,
-                });
-              } catch (err) {
-                logger.warn('Reschedule counter auto-accept: findAvailableSlots threw, falling back to approval', {
-                  err: String(err).slice(0, 200), jobId: job.id,
-                });
-              }
-            }
-            const matches = validSlots.some(s => {
-              const s1 = DateTime.fromISO(s.start).toMillis();
-              return Math.abs(s1 - startMs) <= 60_000;
-            });
-
-            if (matches) {
-              logger.info('Reschedule counter auto-accept (same week, rule-compliant) — moving', {
-                jobId: job.id, counter: decision.counter_start,
-              });
-              let moveApplied = false;
-              try {
-                await updateMeeting({
-                  userEmail: profile.user.email,
-                  timezone,
-                  meetingId: ctx.meeting_id,
-                  start: counterStartDt.toISO() ?? ctx.proposed_start,
-                  end: counterEndDt.toISO() ?? ctx.proposed_end,
-                });
-                // v3.2.x — headless move (auto-accepted counter): slide any
-                // floating block it landed on, in code. Own try/catch.
-                try {
-                  const { rebalanceFloatingBlocksAfterMutation } = await import('../utils/rebalanceFloatingBlocks');
-                  await rebalanceFloatingBlocksAfterMutation({
-                    profile,
-                    affectedSlotIso: counterStartDt.toISO() ?? ctx.proposed_start,
-                    ownerSlackId: profile.user.slack_user_id,
-                  });
-                } catch (rebErr) {
-                  logger.warn('rebalance after counter auto-accept move threw — continuing', { err: String(rebErr).slice(0, 200), jobId: job.id });
-                }
-                moveApplied = true;
-              } catch (err) {
-                logger.error('Reschedule counter write threw; verifying without replay', {
-                  err: String(err), jobId: job.id,
-                });
-                return finishUncertainMove(counterStartDt.toISO() ?? ctx.proposed_start,
-                  counterEndDt.toISO() ?? ctx.proposed_end);
-              }
-
-              if (moveApplied) {
-                // Confirm to colleague — thread into the original DM if we have it
-                const counterLocal = counterStartDt.toFormat('HH:mm');
-                const colleagueMsg = `Works — moved to ${counterLocal}. See you then.`;
-                conversation.push({ role: 'maelle', text: colleagueMsg });
-                finishHandledAction();
-                try {
-                  if (job.dm_channel_id) {
-                    await conn.postToChannel(job.dm_channel_id, colleagueMsg, { threadTs: job.dm_message_ts });
-                  } else {
-                    await conn.sendDirect(job.colleague_slack_id, colleagueMsg);
-                  }
-                } catch (err) {
-                  logger.warn('Reschedule counter auto-accept: colleague DM failed', { err: String(err) });
-                }
-
-                // The move is terminal; shadow delivery cannot fall into owner approval.
-                try {
-                await shadowNotify(profile, {
-                  channel: job.owner_channel,
-                  threadTs: job.owner_thread_ts ?? undefined,
-                  action: 'Auto-accepted counter',
-                  detail: relayNotice(requesterRelayLanguage(profile.user.slack_user_id), 'auto_counter', { target: job.colleague_name, subject: ctx.meeting_subject, time: counterStartDt.toFormat('EEEE d MMM HH:mm') }),
-                });
-
-                } catch (err) {
-                  logger.warn('Reschedule counter handled; shadow notification failed', { jobId: job.id, err: String(err).slice(0, 200) });
-                }
-                return true;
-              }
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn('Reschedule counter auto-accept pre-check threw — falling back to approval', {
-          err: String(err).slice(0, 200), jobId: job.id,
-        });
-      }
-    }
 
     // Owner ruling 2026-09-19: a counter needing judgment is an approval,
     // never an untracked question. The classifier supplies only a clock, not
@@ -531,7 +402,7 @@ async function handleRescheduleReplyLocked(
         meeting_id: ctx.meeting_id,
         subject: ctx.meeting_subject,
         open_options: [replyText],
-        context: `The colleague countered the proposed move; automatic acceptance was not established. Proposed interval: ${ctx.proposed_start}–${ctx.proposed_end}. Reply: ${replyText}`,
+        context: `The colleague countered the proposed move; the classifier has no authoritative counter date or timezone. The owner must choose the exact counter interval. Original proposed interval: ${ctx.proposed_start}–${ctx.proposed_end}. Reply: ${replyText}`,
         rule: 'reschedule_counter_requires_owner_decision',
       },
     }, {

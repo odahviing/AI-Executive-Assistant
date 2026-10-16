@@ -101,8 +101,8 @@ function bookkeepingPlan(refs, version, root) {
       if (errors.length) { blockers.push({ ref: row.ref, errors }); continue; }
       const file = `artifacts/workshop-verification/wrap-${version}/bookkeeping/review-${reviews.length + 1}.json`;
       reviews.push({ ref: row.ref, attemptId: row.evidence.attemptId, file, review: row.review,
-        alreadyRecorded,
-        argv: alreadyRecorded ? null : ['scripts/ledger-file.cjs', '--review', '--ref', row.ref, '--runId', `wrap-${version}`, '--review-file', file] });
+        alreadyRecorded: true,
+        argv: null }); // The exact current pass is already durable; release membership belongs to the companion.
     } else if (row.evidence || ['built', 'implemented', 'verification-failed', 'verification-unproven', 'wrapped'].includes(row.verdict)) {
       blockers.push({ ref: row.ref, errors: [`Current status ${row.verdict} is not a shipping independent pass`] });
     } else {
@@ -117,7 +117,7 @@ function bookkeepingPlan(refs, version, root) {
       implementationRefs: selected.filter(r => reviews.some(v => v.ref === r.ref) && !r.verificationOf).length },
     inputs: snapshot([ledger, report, ...new Set(selected.flatMap(r => r.evidence?.files || []))], root),
     report: fs.readFileSync(path.join(root, report), 'utf8'), reviews, dispositions, releaseSha: null,
-    remaining: 'Reconcile EVERY report disposition and selected release scope; preserve owner words and recommendations. Materialize all reviews[].review files once; check the saved plan once before writing, then pass pending review argv arrays without their script prefix to ledger-file.cjs --batch-file. Dispositions remain standalone validated commands. Regenerate after outside edits or failed validation, not between successful batch rows. Companions require actual shipping commit evidence at WRAP_UP step 12; this draft authorizes no commit, GitHub action, report reset or release claim.' };
+    remaining: 'Reconcile EVERY report disposition and selected release scope; preserve owner words and recommendations. Reviews are validated references to existing exact attempts, not new appends. Check the saved plan before metadata edits or dispositions; dispositions remain standalone validated commands. Regenerate after outside edits or failed validation. Companions require actual shipping commit evidence at WRAP_UP step 12; this draft authorizes no commit, GitHub action, report reset or release claim.' };
 }
 function checkBookkeeping(draft, root) {
   const current = bookkeepingPlan(draft.refs, draft.version, root);

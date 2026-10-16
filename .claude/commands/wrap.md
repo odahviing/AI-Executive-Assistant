@@ -5,7 +5,7 @@ description: Finish the session — bump version, write CHANGELOG, typecheck, co
 Run the `wrap` skill to bundle this session's work into a shipped version.
 
 Follow `.claude/WRAP_UP.md` step by step:
-- Default to PATCH unless the owner explicitly said minor
+- Select checkpoint scope and version under WRAP_UP.md step 4
 - Write the CHANGELOG entry above the previous one
 - Update memory + README only on architectural / public-behavior changes
 - Typecheck must pass before committing

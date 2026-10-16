@@ -1,7 +1,7 @@
 ---
 name: wrap
 description: |
-  Finish the current working session by bundling the day's work into a version. Triggered when the owner says "wrap", "wrap up", "close the patch", "cut a version", "day close", "ship it", "let's ship", "let's finish for today", "bundle this", "let's commit", or similar phrases. This skill walks the full release checklist and ENDS WITH A RUNNING MAELLE: bundle every chat's work, bump package.json, write the CHANGELOG, ledger-then-report bookkeeping, typecheck, commit, push, close or comment the GitHub issues, and confirm the VM's boot stamp. Default bump is PATCH. The detailed step-by-step lives at .claude/WRAP_UP.md — open it and follow it without improvising.
+  Finish the current working session by bundling the day's work into a version. Triggered when the owner says "wrap", "wrap up", "close the patch", "cut a version", "day close", "ship it", "let's ship", "let's finish for today", "bundle this", "let's commit", or similar phrases. This skill follows the canonical quick/full release checklist and ENDS WITH A RUNNING MAELLE: bundle every chat's work, bump package.json, write the CHANGELOG, ledger-then-report bookkeeping, typecheck, commit, push, close or comment the GitHub issues, and confirm the VM's boot stamp. Default bump is PATCH. The detailed step-by-step lives at .claude/WRAP_UP.md — open it and follow it without improvising.
 ---
 
 # Wrap — finish the session, ship a version, leave Maelle running
@@ -22,7 +22,7 @@ He has now spelled these out on 2026-07-30 and again on 2026-07-31 (*"wrap up / 
 ## Two gates that still belong to him — do not assume these
 
 - **The ship word itself.** Do not wrap because work has accumulated. Wait for "wrap" / "ship" / "commit" / "cut a version" / "bundle".
-- **A verify overturn blocks the wrap.** WRAP_UP.md's pre-wrap verify step is the ONE place this is spelled out — one full release-checkpoint golden battery and one independent accumulated-diff review with WORKSHOP.md’s provider settings, and it runs BEFORE the version bump or CHANGELOG exist. Overturning a fix means do NOT wrap it in: report it and stop. Discoveries do NOT block — his ruling: *"if i do want to fix discoveries, its not blocker, its bonus."*
+- **A verify overturn blocks the wrap.** Follow WRAP_UP.md step 4 for checkpoint selection, required coverage, valid evidence reuse and repair. Complete it before version metadata edits.
 
 ## Other standing rules
 
@@ -39,9 +39,9 @@ Four of them exist because they were once missed. Confirm each actually happened
 
 - **Inventory the whole tree, every chat** — `git status --porcelain` with no path filter.
 - **The `SESSION_STARTER.md` version line.** The rest of the memory update is conditional; that line is not — a stale "Current version" misleads every agent that boots.
-- **Bookkeeping: the ledger BEFORE the report, then the wrap stamp after the push.** Two markers, `"runId":"wrap-<version>"` on every appended row and `state.lastWrapIso`, and one acceptance test for both — `node scripts/ledger-stats.cjs --report` must be **green**. Do not finish a wrap on a red one.
+- **Bookkeeping follows WRAP_UP.md:** validate exact reviews before metadata edits; retain existing passes and record release membership through real-SHA companions. Its native acceptance checks must be green.
 - **Verified against shipped** in the summary — *"7 shipped, 4 verified"*, plus the reason each gap carried.
 
 Issue closing, the boot stamp and the summary are that file's last three steps, and the CHANGELOG's one-question test closes it. All four stood in full in both files until 2026-08-01; **one copy, and it is that one.**
 
-**A fifth, newer than the rest and never duplicated in the first place: pre-wrap adversarial verify — one full release-checkpoint golden battery and one independent accumulated-diff review with WORKSHOP.md’s provider settings (WRAP_UP.md's pre-wrap verify step, run early, before the bump is decided).** An overturn or a battery `fail` blocks the wrap; confirm it ran before you call the wrap done.
+**Complete the selected checkpoint in WRAP_UP.md step 4 before calling the wrap done.**

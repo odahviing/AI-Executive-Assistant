@@ -142,14 +142,14 @@ export function getPendingRequestCountForColleague(ownerUserId: string, colleagu
  * mutation, a booking, or a fresh approval) — every other reply still takes
  * the re-arm path from (1). So coordinator.ts is NOT a zero-producer site;
  * it is a conditional one.
- * Current producers: 'sent' (skills/meetingReschedule.ts:591,
+ * Current producers: 'sent' (skills/meetingReschedule.ts,
  * core/requests/colleagueOofReengage.ts:404,
  * skills/outreach.ts:548 — the isFuture ternary there also produces
  * 'pending_scheduled', so it belongs in both lists),
  * 'pending_scheduled' (skills/outreach.ts:548), 'replied' (several sites in
  * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:647, and
  * coordinator.ts:390 above), 'cancelled' (skills/outreach.ts:479,500,617,
- * skills/meetingReschedule.ts:615, core/requests/colleagueOofReengage.ts:420,637).
+ * skills/meetingReschedule.ts, core/requests/colleagueOofReengage.ts:420,637).
  * The old union also carried 'done', 'expired', 'failed' and 'no_response' with
  * ZERO producers — the branches keyed on them were unreachable and went with the
  * column.

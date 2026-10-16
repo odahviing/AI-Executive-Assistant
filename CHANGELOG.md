@@ -1,3 +1,21 @@
+## 5.1.0 — Safer scheduling across Boston and Israel
+
+Autonomous calendar repairs now confirm every attendee is free at the destination before moving a meeting. Rescheduling counters preserve the colleague's original words and ask for an exact owner decision when the classifier supplies only a clock without an authoritative date or timezone.
+
+### Fixed
+- Stop overlap repairs and both calendar defragmentation directions when attendee availability is busy, unresolved or unchecked; exclude only the meeting occurrence being moved.
+- Remove guessed-date counter acceptance. Keep accepted exact proposals automatic, and retain durable approval and retry protection for unresolved counteroffers.
+
+### Validation and limits
+- Both shipping fixes independently verified. The reconciled full battery covers 262 suite/timezone executions and 6,318 assertions, with typechecking passed; all 30 Golden paths were independently traced, including 13 stale anchors mapped to current code. One fixture cleanup lock failure passed its exact targeted retry; the original failure remains recorded.
+- The minor checkpoint reviews the cumulative changes since 5.0.0, including every intervening patch. Boston fixtures cover weekday hours, office days, preferences, dense calendars and the staggered Boston/Israel daylight-saving transitions.
+- The actual travel YAML remains for the owner's travel-time update. Fixture checks do not establish live-calendar behavior or model obedience; no exact trip date or final office address was supplied.
+
+### Framework
+- Separate quick PATCH checkpoints from cumulative full MINOR checkpoints, reuse valid exact-attempt reviews before version edits, and validate bookkeeping before release metadata changes.
+- Require version-prefixed source and bookkeeping commit titles so native release checks recognize both.
+
+
 ## 5.0.10 — More useful meeting options
 
 Meeting searches retain enough nonoverlapping alternatives to honor the configured offer count, including when only one day is available. Reply guidance preserves returned day and time diversity and explains any narrowing caused by the user's constraints.

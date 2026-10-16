@@ -2,6 +2,7 @@
 import { DateTime } from 'luxon';
 import {
   getCalendarEvents,
+  getFreeBusyForDecision,
   type CalendarEvent,
   updateMeeting,
   findAvailableSlots,
@@ -174,6 +175,29 @@ export async function executeInternalAutoMove(params: {
 
   // An autonomous meeting move cannot trigger a second relocation. Read the actual destination.
   try {
+    // Search can return candidates with unavailable attendee calendars for a
+    // human to decide. Autonomous moves have no such consent: require a
+    // confirmed read here, shared by overlap repair and both defrag directions.
+    // Exclude this occurrence by identity, never by subtracting its time range.
+    const attendeeEmails = [...new Set(participantsRaw
+      .filter(a => a.status?.response !== 'declined')
+      .map(a => a.emailAddress.address.toLowerCase())
+      .filter(email => email !== userEmail.toLowerCase()))];
+    const availability: { unresolved?: string[]; notChecked?: string[] } = {};
+    const busy = await getFreeBusyForDecision(userEmail, attendeeEmails,
+      newStartIso, newEndIso, timezone, availability, [movable.id]);
+    if (availability.unresolved?.length || availability.notChecked?.length) {
+      issue.fix_failed = true;
+      issue.fix_error = 'I could not confirm every attendee’s availability, so I left the meeting unchanged.';
+      return;
+    }
+    if (Object.values(busy).flat().some(slot => slot.status !== 'free' && slot.status !== 'workingElsewhere'
+        && DateTime.fromISO(slot.start).toMillis() < DateTime.fromISO(newEndIso).toMillis()
+        && DateTime.fromISO(slot.end).toMillis() > DateTime.fromISO(newStartIso).toMillis())) {
+      issue.fix_failed = true;
+      issue.fix_error = 'An attendee is busy at the destination, so I left the meeting unchanged.';
+      return;
+    }
     const destinationEvents = await getCalendarEvents(userEmail, newStartIso, newEndIso, timezone, 'live');
     const targetStart = DateTime.fromISO(newStartIso).toMillis();
     const targetEnd = DateTime.fromISO(newEndIso).toMillis();

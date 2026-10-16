@@ -1,9 +1,9 @@
 {
   "lastSeenIso": "2026-09-07T23:05:31.811Z",
   "lastRun": {
-    "id": "wrap-2026-10-16T07:27:29Z",
-    "status": "complete",
-    "note": "5.0.10 wrapped"
+    "id": "wrap-2026-10-16T13:06:56Z",
+    "status": "running",
+    "note": "manual wrap 5.1.0 in progress"
   },
   "lastWrapIso": "2026-10-16T10:45:58+03:00",
   "lastCleanSha": "6bc8f4027fce0d5e078fb9b4a04c3ba7b844cb46",

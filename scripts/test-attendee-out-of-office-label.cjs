@@ -182,6 +182,7 @@ function healthHarness(opts = {}) {
   };
   const requests = { getRecentlyAutoMovedEventIds: () => new Set(), getRequestsByExternalEventId: () => [], createRequest: p => { const r = { id: `req_${requestRows.length}`, ...p, state: p.state }; requestRows.push(r); return r; }, getRequest: id => requestRows.find(r => r.id === id), getRequestByIdempotencyKey: () => undefined, updateRequest: noop };
   const cal = {
+    getFreeBusyForDecision: async () => ({}),
     getOwnerEventsForDecision: async () => opts.events ?? [], getCalendarEvents: async () => opts.events ?? [],
     updateMeeting: async p => { calls.push(['write', p]); }, verifyEventMoved: async () => ({ ok: true }), verifyApprovedCalendarAction: async () => ({ status: 'desired_state_observed' }),
     findAvailableSlots: async p => { calls.push(['slots', p]); if (p.diagnosticsOut && opts.daySummary) p.diagnosticsOut.daySummary = opts.daySummary; return opts.slots ?? []; },

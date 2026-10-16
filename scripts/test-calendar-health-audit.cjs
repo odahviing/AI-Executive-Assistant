@@ -44,6 +44,7 @@ function harness(opts = {}) {
     updateRequest: (id, p) => Object.assign(requestRows.find(r => r.id === id), { next_check_at: p.nextCheckAt, next_check_handler: p.nextCheckHandler, expires_at: p.expiresAt }),
   };
   const cal = {
+    getFreeBusyForDecision: async () => ({}),
     getOwnerEventsForDecision: async () => { if (opts.readError) throw Error('calendar unreadable'); return opts.events ?? []; },
     getCalendarEvents: async (...args) => { calls.push(['read', ...args]); if (opts.readError) throw Error('calendar unreadable'); return opts.events ?? []; },
     updateMeeting: async p => { calls.push(['write', p]); if (opts.writeError) throw Error('write failed'); },

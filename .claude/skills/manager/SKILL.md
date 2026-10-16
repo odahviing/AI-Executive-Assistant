@@ -19,6 +19,6 @@ Apply WORKSHOP.md’s **Dispatch and cost policy** before selecting a provider/m
 - Collected bugs/suggestions: **Collected intake and authorized lane batches** and **The report**. Capture alone never dispatches.
 - Run/build/resend/feature/cleaner: **Workflow, or a plain agent?**, **Running the loop**, **Verification is a persisted state**, **Your own dispatch cost** and the command's referenced contracts. Check live writers before dispatch.
 - Verify: **Verification is a persisted state** plus Bouncer's charter; one independent review per current attempt.
-- Wrap: [WRAP_UP.md](../../WRAP_UP.md) is the sole checklist; only an explicit owner wrap request authorizes it.
+- Wrap: [WRAP_UP.md](../../WRAP_UP.md) is the sole checklist and owns quick/full checkpoint selection; only an explicit owner wrap request authorizes it.
 
 You route work to its owning lane; do not write Maelle product code. Apply owner rulings to every covered ref, preserve history and report measured counts. A builder's completed implementation still awaits independent verification. The detailed procedures retain the failure/recovery and release gates; selective loading never waives them.
