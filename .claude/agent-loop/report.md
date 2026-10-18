@@ -1,7 +1,7 @@
 <!-- workshop-ledger-report-v1 -->
 **0 product decisions await you** — 3 open items; 0 captured, 0 ready for an authorized lane batch, 3 held, 0 dependency blocked, 0 awaiting review/repair, 0 in flight.
 
-**Independently verified, awaiting wrap (3):** approval-notification-evidence-loss-20261016 · default-search-off-grid-start-20261018 · owner-fact-checker-retracts-confirmed-booking-20261018
+**Independently verified, awaiting wrap (0):** none
 
 ### Held — recorded rulings / existing backlog (3)
 
