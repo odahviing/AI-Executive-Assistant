@@ -778,6 +778,117 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<string> {
   return requestEvidence;
 }
 
+/** Shared receipt safeguards for action verdicts, independent of checker mode. */
+function actionClaimEvidence(ctx: OutputGateContext, verdict: import('../claimChecker').ClaimCheckResult) {
+  const { profile, result } = ctx;
+  // v1.7.4 — defense in depth. The claim-checker can false-positive (saw
+  // it happen with "the message is on its way" being flagged even when
+  // message_colleague ran). If the matching tool clearly DID run this turn,
+  // the claim was honest — skip. v3.4: this shield no longer guards a
+  // tool-re-firing retry (that's gone); it now prevents the own-the-miss
+  // rewrite from corrupting an HONEST reply into a false "that didn't go
+  // through" claim when the action actually DID happen.
+  // v3.4.x (#recap, 2026-06-24) — the shield must see PRIOR turns, not just
+  // this one. A TRUTHFUL recap of an action done last turn ("Yael moved to
+  // 11:30 ✓") has no CURRENT-turn tool, so a current-turn-only check flagged
+  // it and own-the-miss NEGATED a true statement (the crash-recovery recap).
+  // The reply pipeline saves each turn's `[tool OK ...]` markers into the
+  // assistant's conversation content (postReply's Step 3b — and it stores
+  // them RAW for this reason: formatForSlack would strip the tool names this
+  // shield matches on), so the matching tool's marker is in ctx.history — scan it
+  // too. Over-suppressing a genuinely-phantom claim in a thread where a similar
+  // tool ran earlier is a safe MISS (G5); denying real work is not.
+  const priorAssistantText = (ctx.history ?? [])
+    .filter(h => h.role === 'assistant')
+    .map(h => h.content)
+    .join(' ');
+  const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
+  const currentSummariesText = (result.toolSummaries ?? []).join(' ');
+  const hasCurrentCalendarOutcome = extractActionTape([{ role: 'assistant', content: currentSummariesText }]).length > 0;
+
+  // v4.1.x (G1/G2) — READ the carried marker; do not re-derive it.
+  //
+  // This used to be four action_type branches over a 5-tool, a 2-tool and a
+  // 14-tool name alternation, each one added after a distinct incident, and each
+  // new mutating tool anywhere in the codebase had to be remembered here or the
+  // guard would manufacture a false phantom-action flag. That is the exact
+  // maintenance shape G1 exists to prevent, and it was the guard GUESSING at a
+  // fact the tool layer already knew.
+  //
+  // summarizeToolCall now stamps `mutated=<domain>` on every call that actually
+  // changed state, using the claim-checker's own action_type vocabulary — so the
+  // shield is one field lookup and knows nothing about tool names. The marker is
+  // OK-only by construction, which also closes a hole the name-matching had: the
+  // old `book`/`task` alternations matched the tool-name PREFIX and so suppressed
+  // the honesty rewrite even on `[create_meeting FAILED: …]`. A failed mutation
+  // now correctly backs nothing (the same #137b convention the rest of the tool
+  // log already follows).
+  // An earlier move cannot certify this turn's failed, unchanged or unknown
+  // attempt. Retain the historical shield for recaps with no current outcome.
+  const mutationCarried = !!verdict.action_type
+    && (verdict.action_type === 'book' && hasCurrentCalendarOutcome ? currentSummariesText : toolSummariesText)
+      .includes(`mutated=${verdict.action_type}`);
+  // check-claimed-that-never-ran (2026-09-06, bounce 2) — the READ-side
+  // marker, for the one fact-shaped class RULE A itself raises. A finding
+  // about a named third party's hours / busy time is backed when a slot or
+  // meeting tool actually evaluated attendees — summarizeToolCall stamps
+  // `attendee_check=` on exactly those calls (turnHelpers.ts
+  // attendeeCheckSource) — and, like `mutated=`, the marker is scanned in
+  // THIS turn's tape AND prior turns' persisted rows: on the turn AFTER a
+  // search, "I checked, the mornings are outside Erez's hours" is a truthful
+  // recap, and rewriting it into "I haven't checked" would make her lie
+  // (G5). The checker's prompt only ever sees this turn, so this is where
+  // the "no matter which turn" promise of its own RULE A exemption is kept.
+  const attendeeCheckCarried = verdict.action_type === 'invented_third_party_fact'
+    && toolSummariesText.includes('attendee_check=');
+  // A misreport of what a check FOUND (the tape says "busy", the draft says
+  // "outside their hours" — the 2026-09-05 incident) is this class's
+  // specifics mismatch, and it can only have been judged against a line the
+  // checker actually saw: this turn's. With no marker this turn the flag
+  // rests on a prior turn's check, and the bit is ignored whatever the model
+  // set — the destructive path stays on a deterministic trigger (G3).
+  const specificsMismatch = verdict.claim_specifics_mismatch === true
+    && (verdict.action_type !== 'invented_third_party_fact'
+      || (result.toolSummaries ?? []).join(' ').includes('attendee_check='));
+
+  // The one class where WHO matters: a DM sent to Yael does not make "already
+  // flagged it to Simon" honest. The recipient is already in the summary
+  // (`[message_colleague: <name>]`), so this reads existing data — it is not a
+  // second list. A SKIPPED relay (`[message_colleague] <id> — … skipped`, pushed
+  // straight to the tape by the orchestrator's idempotency guards) never carries
+  // the marker, so it can no longer back a "sent it" claim either.
+  const targetMatches = verdict.action_type !== 'message'
+    || !verdict.target_name
+    || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase());
+
+  // approval-relay-claim-retracted-after-confirmed-delivery (2026-09-16) —
+  // create_approval correctly carries `mutated=task`: creating the durable
+  // request is not itself a generic message mutation. But its producer also
+  // knows whether the owner-facing post actually landed and stamps the
+  // separate `notified=approval_owner` marker only for owner_notified=true.
+  // Accept that marker only for a MESSAGE claim whose named target is exactly
+  // the configured owner's full name or one of its exact tokens. This keeps a
+  // delivered approval from grounding "sent to Michal," and an absent target
+  // from turning an owner-specific delivery into a blanket message shield.
+  const ownerFullNameLower = profile.user.name.trim().toLowerCase();
+  const ownerNameTokensLower = ownerFullNameLower.split(/\s+/).filter(Boolean);
+  const claimTargetLower = verdict.target_name?.trim().toLowerCase();
+  // Unlike the general mutation recap shield, an approval notification is
+  // accepted from THIS turn only. A prior approval delivered to the same
+  // owner says nothing about whether today's distinct ask was relayed.
+  const currentToolSummariesText = (result.toolSummaries ?? []).join(' ');
+  const approvalOwnerNotificationCarried = verdict.action_type === 'message'
+    && !!claimTargetLower
+    && (claimTargetLower === ownerFullNameLower || ownerNameTokensLower.includes(claimTargetLower))
+    && currentToolSummariesText.includes('notified=approval_owner');
+
+  const matchingToolAlreadyRan = ((mutationCarried || attendeeCheckCarried) && targetMatches)
+    || approvalOwnerNotificationCarried;
+
+
+  return { matchingToolAlreadyRan, specificsMismatch };
+}
+
 async function runClaimCheckAndMaybeRewrite(
   ctx: OutputGateContext,
   initialReply: string,
@@ -801,6 +912,11 @@ async function runClaimCheckAndMaybeRewrite(
     const outcomeSummaries = [
       ...(result.toolSummaries ?? []),
       ...extractActionTape(ctx.history ?? []).map(line => `(earlier turn) ${line}`),
+      // Approval decisions and their delivery receipts are not calendar
+      // mutations. Preserve both in follow-ups without granting a shield.
+      ...(ctx.history ?? []).filter(h => h.role === 'assistant')
+        .flatMap(h => toolLinesMatching(h.content, /^\[resolve_approval\b/))
+        .slice(-20).map(line => `(earlier turn) ${line}`),
     ];
     // Preserve the existing cheap short-reply skip when nothing changed and
     // no action/decision evidence exists. A rewrite must be checked even when
@@ -835,109 +951,7 @@ async function runClaimCheckAndMaybeRewrite(
       return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx));
     }
 
-    // v1.7.4 — defense in depth. The claim-checker can false-positive (saw
-    // it happen with "the message is on its way" being flagged even when
-    // message_colleague ran). If the matching tool clearly DID run this turn,
-    // the claim was honest — skip. v3.4: this shield no longer guards a
-    // tool-re-firing retry (that's gone); it now prevents the own-the-miss
-    // rewrite from corrupting an HONEST reply into a false "that didn't go
-    // through" claim when the action actually DID happen.
-    // v3.4.x (#recap, 2026-06-24) — the shield must see PRIOR turns, not just
-    // this one. A TRUTHFUL recap of an action done last turn ("Yael moved to
-    // 11:30 ✓") has no CURRENT-turn tool, so a current-turn-only check flagged
-    // it and own-the-miss NEGATED a true statement (the crash-recovery recap).
-    // The reply pipeline saves each turn's `[tool OK ...]` markers into the
-    // assistant's conversation content (postReply's Step 3b — and it stores
-    // them RAW for this reason: formatForSlack would strip the tool names this
-    // shield matches on), so the matching tool's marker is in ctx.history — scan it
-    // too. Over-suppressing a genuinely-phantom claim in a thread where a similar
-    // tool ran earlier is a safe MISS (G5); denying real work is not.
-    const priorAssistantText = (ctx.history ?? [])
-      .filter(h => h.role === 'assistant')
-      .map(h => h.content)
-      .join(' ');
-    const toolSummariesText = [(result.toolSummaries ?? []).join(' '), priorAssistantText].join(' ');
-    const currentSummariesText = (result.toolSummaries ?? []).join(' ');
-    const hasCurrentCalendarOutcome = extractActionTape([{ role: 'assistant', content: currentSummariesText }]).length > 0;
-
-    // v4.1.x (G1/G2) — READ the carried marker; do not re-derive it.
-    //
-    // This used to be four action_type branches over a 5-tool, a 2-tool and a
-    // 14-tool name alternation, each one added after a distinct incident, and each
-    // new mutating tool anywhere in the codebase had to be remembered here or the
-    // guard would manufacture a false phantom-action flag. That is the exact
-    // maintenance shape G1 exists to prevent, and it was the guard GUESSING at a
-    // fact the tool layer already knew.
-    //
-    // summarizeToolCall now stamps `mutated=<domain>` on every call that actually
-    // changed state, using the claim-checker's own action_type vocabulary — so the
-    // shield is one field lookup and knows nothing about tool names. The marker is
-    // OK-only by construction, which also closes a hole the name-matching had: the
-    // old `book`/`task` alternations matched the tool-name PREFIX and so suppressed
-    // the honesty rewrite even on `[create_meeting FAILED: …]`. A failed mutation
-    // now correctly backs nothing (the same #137b convention the rest of the tool
-    // log already follows).
-    // An earlier move cannot certify this turn's failed, unchanged or unknown
-    // attempt. Retain the historical shield for recaps with no current outcome.
-    const mutationCarried = !!verdict.action_type
-      && (verdict.action_type === 'book' && hasCurrentCalendarOutcome ? currentSummariesText : toolSummariesText)
-        .includes(`mutated=${verdict.action_type}`);
-    // check-claimed-that-never-ran (2026-09-06, bounce 2) — the READ-side
-    // marker, for the one fact-shaped class RULE A itself raises. A finding
-    // about a named third party's hours / busy time is backed when a slot or
-    // meeting tool actually evaluated attendees — summarizeToolCall stamps
-    // `attendee_check=` on exactly those calls (turnHelpers.ts
-    // attendeeCheckSource) — and, like `mutated=`, the marker is scanned in
-    // THIS turn's tape AND prior turns' persisted rows: on the turn AFTER a
-    // search, "I checked, the mornings are outside Erez's hours" is a truthful
-    // recap, and rewriting it into "I haven't checked" would make her lie
-    // (G5). The checker's prompt only ever sees this turn, so this is where
-    // the "no matter which turn" promise of its own RULE A exemption is kept.
-    const attendeeCheckCarried = verdict.action_type === 'invented_third_party_fact'
-      && toolSummariesText.includes('attendee_check=');
-    // A misreport of what a check FOUND (the tape says "busy", the draft says
-    // "outside their hours" — the 2026-09-05 incident) is this class's
-    // specifics mismatch, and it can only have been judged against a line the
-    // checker actually saw: this turn's. With no marker this turn the flag
-    // rests on a prior turn's check, and the bit is ignored whatever the model
-    // set — the destructive path stays on a deterministic trigger (G3).
-    const specificsMismatch = verdict.claim_specifics_mismatch === true
-      && (verdict.action_type !== 'invented_third_party_fact'
-        || (result.toolSummaries ?? []).join(' ').includes('attendee_check='));
-
-    // The one class where WHO matters: a DM sent to Yael does not make "already
-    // flagged it to Simon" honest. The recipient is already in the summary
-    // (`[message_colleague: <name>]`), so this reads existing data — it is not a
-    // second list. A SKIPPED relay (`[message_colleague] <id> — … skipped`, pushed
-    // straight to the tape by the orchestrator's idempotency guards) never carries
-    // the marker, so it can no longer back a "sent it" claim either.
-    const targetMatches = verdict.action_type !== 'message'
-      || !verdict.target_name
-      || toolSummariesText.toLowerCase().includes(verdict.target_name.toLowerCase());
-
-    // approval-relay-claim-retracted-after-confirmed-delivery (2026-09-16) —
-    // create_approval correctly carries `mutated=task`: creating the durable
-    // request is not itself a generic message mutation. But its producer also
-    // knows whether the owner-facing post actually landed and stamps the
-    // separate `notified=approval_owner` marker only for owner_notified=true.
-    // Accept that marker only for a MESSAGE claim whose named target is exactly
-    // the configured owner's full name or one of its exact tokens. This keeps a
-    // delivered approval from grounding "sent to Michal," and an absent target
-    // from turning an owner-specific delivery into a blanket message shield.
-    const ownerFullNameLower = profile.user.name.trim().toLowerCase();
-    const ownerNameTokensLower = ownerFullNameLower.split(/\s+/).filter(Boolean);
-    const claimTargetLower = verdict.target_name?.trim().toLowerCase();
-    // Unlike the general mutation recap shield, an approval notification is
-    // accepted from THIS turn only. A prior approval delivered to the same
-    // owner says nothing about whether today's distinct ask was relayed.
-    const currentToolSummariesText = (result.toolSummaries ?? []).join(' ');
-    const approvalOwnerNotificationCarried = verdict.action_type === 'message'
-      && !!claimTargetLower
-      && (claimTargetLower === ownerFullNameLower || ownerNameTokensLower.includes(claimTargetLower))
-      && currentToolSummariesText.includes('notified=approval_owner');
-
-    const matchingToolAlreadyRan = ((mutationCarried || attendeeCheckCarried) && targetMatches)
-      || approvalOwnerNotificationCarried;
+    const { matchingToolAlreadyRan, specificsMismatch } = actionClaimEvidence(ctx, verdict);
 
     // v2.6.1 — when the claim-checker LLM has named a SPECIFIC change the
     // tool that ran doesn't cover (e.g. "updated to 25 min" claim while only
@@ -1207,6 +1221,18 @@ async function runOwnerFactCheckAndMaybeRewrite(
       ? cleanReply : genericHonestHedge(originalDraft, isOwnerDirectAudience(ctx));
     if (!verdict.claimed_action) return cleanReply;
     if (['permission_granted', 'book', 'message', 'task'].includes(verdict.action_type ?? '')) {
+      // A grant is request-specific, never established by a mutation receipt.
+      // Action verdicts use the same successful-action safeguards as RULE A.
+      // A named booking additionally needs its target on that booking receipt;
+      // an unrelated successful write cannot ground the claimed meeting.
+      const { matchingToolAlreadyRan, specificsMismatch } = actionClaimEvidence(ctx, verdict);
+      const target = verdict.target_name?.trim().toLowerCase();
+      const bookingTargetMatches = verdict.action_type !== 'book' || !target
+        || (result.toolSummaries?.length ? result.toolSummaries
+          : (ctx.history ?? []).filter(row => row.role === 'assistant').flatMap(row => row.toolSummaries ?? []))
+          .some(line => line.includes('mutated=book') && line.toLowerCase().includes(target));
+      if (verdict.action_type !== 'permission_granted' && matchingToolAlreadyRan
+        && !specificsMismatch && bookingTargetMatches) return cleanReply;
       return genericHonestHedge(cleanReply, isOwnerDirectAudience(ctx));
     }
 

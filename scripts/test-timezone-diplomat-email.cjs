@@ -16,6 +16,7 @@ const actual = new Set([
   'src/utils/timezoneValidator.ts',
   'src/utils/timezoneConvert.ts',
   'src/utils/workHours.ts',
+  'src/utils/calendarDensity.ts',
 ]);
 const compiled = new Map();
 let now;

@@ -13,7 +13,7 @@ const selected=['calendarMutationCompleted','runAvailabilityFloorAndMaybeRewrite
  const nodes=tree.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert.equal(nodes.length,1,'unique actual '+name);return nodes[0].getText(tree);
 });
 const gateSource=selected.join('\n')+'\nexports.run=runAvailabilityFloorAndMaybeRewrite;';
-const actual=new Set(['src/utils/scheduleRules.ts','src/utils/workHours.ts','src/utils/availabilityGate.ts','src/utils/timezoneConvert.ts','src/utils/dateTimeExtract.ts']);
+const actual=new Set(['src/utils/scheduleRules.ts','src/utils/workHours.ts','src/utils/calendarDensity.ts','src/utils/availabilityGate.ts','src/utils/timezoneConvert.ts','src/utils/dateTimeExtract.ts']);
 const sourceCache=new Map(),noop=()=>{},start='2026-09-14T23:45:00+03:00';
 function harness(opts={}){
  const profile={user:{name:'Owner Example',email:'owner@example.test',slack_user_id:'UOWNER',timezone:'Asia/Jerusalem'},schedule:{work_hours:Object.fromEntries(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d=>[d,['09:00-23:59']])),office_days:{days:['Monday','Tuesday']},home_days:{days:[]}},meetings:{buffer_minutes:0,allowed_durations:[10,25,50],categories:[]}};

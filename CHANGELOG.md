@@ -1,3 +1,16 @@
+## 5.1.1 — Reliable meeting options and booking confirmations
+
+Default meeting searches now start on a clean quarter-hour boundary and cover five eligible workdays. Confirmed bookings and approval notification receipts retain their evidence through reply checks, while failed or unknown current actions remain eligible for correction.
+
+### Fixed
+- Remove inherited current seconds and off-grid minutes from implicit search windows; preserve explicit requested times, exact-slot validation, dense alternatives and eight-option diversity.
+- Prevent the owner-fact checker from retracting a matching confirmed booking, without shielding mismatched claims or failed, unknown and unrelated actions.
+- Preserve approval requester notification outcomes in checker summaries and bounded follow-up history.
+
+### Validation and limits
+- Three fixes independently verified against the shipping snapshot. Quick PATCH coverage: 81 affected suites, 101 suite/timezone executions and 3,004 assertions, with no failures or skips and typechecking passed.
+- Controlled model verdicts and write receipts establish deterministic routing and evidence transport; they do not establish model obedience or live delivery. Full Golden30 was not run for this bounded quick checkpoint.
+
 ## 5.1.0 — Safer scheduling across Boston and Israel
 
 Autonomous calendar repairs now confirm every attendee is free at the destination before moving a meeting. Rescheduling counters preserve the colleague's original words and ask for an exact owner decision when the classifier supplies only a clock without an authoritative date or timezone.

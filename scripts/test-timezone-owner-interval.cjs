@@ -31,7 +31,7 @@ function harness(rows={},options={}){
   'src/skills/meetings/detectCategory.ts':{detectCategory:async()=>({category:null,reason:'fixture'})},
   'src/skills/meetings/findMeetingOwner.ts':{findMeetingOwner:async()=>({ownerIsOrganizer:true})},
   'src/utils/floatingBlocks.ts':{getFloatingBlocks:()=>[],blockAppliesOnDay:()=>false,isFloatingBlockEvent:()=>false},
-  'src/utils/calendarDensity.ts':{prefersDensePacking:()=>false,densityConfigFromProfile:()=>({})},
+  'src/utils/calendarDensity.ts':{prefersDensePacking:()=>false,densityConfigFromProfile:()=>({}),alignUpQuarter:(...args)=>load('src/utils/calendarDensity.ts',true).alignUpQuarter(...args)},
   'src/connectors/graph/calendarReads.ts':{getFreeBusyForDecision:async()=>({}),getOwnerEventsForDecision:async()=>{if(options.offline)throw Error('fixture calendar unavailable');return [];},isOutageShaped:()=>false,CalendarOfflineError:Error},
   'src/llm/client.ts':{getAnthropicClient:()=>({messages:{create:async()=>({content:[{type:'tool_use',name:'normalize_slots',input:{slots:options.slots??[{wall_clock:'2026-09-14T23:45',stated_timezone:home,duration_minutes:25}]}}]})}})},
   'src/llm/models.ts':{MODEL_HAIKU:'existing-call-fixture'},'src/utils/usageLog.ts':{logLlmUsage:noop},

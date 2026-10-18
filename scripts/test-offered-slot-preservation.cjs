@@ -63,6 +63,7 @@ const tz = compile(source('src/utils/timezoneConvert.ts').text, {}, name => {
 });
 const workHours = compile(source('src/utils/workHours.ts').text, {}, name => {
   if (name === 'luxon') return { DateTime };
+  if (name === './calendarDensity') return compile(source('src/utils/calendarDensity.ts').text, {}, () => ({ DateTime }));
   if (name === '../db/scheduleOverrides') return { getScheduleOverride: () => null };
   throw Error(`FORBIDDEN work-hours dependency: ${name}`);
 });

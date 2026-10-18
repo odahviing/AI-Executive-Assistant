@@ -7,6 +7,7 @@ const days=['Monday','Tuesday','Wednesday','Thursday','Friday'];
 actual.add('src/core/requests/resolver.ts');
 actual.add('src/utils/timezoneValidator.ts');
 actual.add('src/utils/workHours.ts');
+actual.add('src/utils/calendarDensity.ts');
 let now=Date.parse('2026-09-14T06:00:00Z');
 class Clock extends Date {constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
 Settings.now=()=>now;

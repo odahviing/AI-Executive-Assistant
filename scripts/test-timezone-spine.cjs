@@ -36,7 +36,7 @@ function harness() {
     schedule: { work_hours: Object.fromEntries(['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d=>[d,['09:00-17:00']])),
       office_days: { days: ['Monday','Wednesday'] }, home_days: { days: ['Sunday','Tuesday','Thursday'] } },
     meetings: { buffer_minutes: 0 } };
-  const wh = load('src/utils/workHours.ts', { luxon, '../db/scheduleOverrides': {
+  const wh = load('src/utils/workHours.ts', { luxon, './calendarDensity':load('src/utils/calendarDensity.ts',{luxon}), '../db/scheduleOverrides': {
     getScheduleOverride(_id, date) { return rows[date] ?? null; },
   } });
   const tz = load('src/utils/timezoneConvert.ts', { luxon });

@@ -6,6 +6,7 @@ const root=path.resolve(__dirname,'..'),baseline='cc532f74fc1696516c845ea3f7e102
 const actual=new Set(['src/memory/resolveAttendeeEmails.ts','src/db/people.ts','src/db/jobs.ts','src/core/requests/types.ts','src/core/assistant.ts','src/utils/resolvePersonTarget.ts','src/utils/workingHoursDefault.ts','src/utils/locationTz.ts','src/utils/timezoneValidator.ts','src/utils/attendeeAvailability.ts','src/utils/timezoneConvert.ts','src/utils/responseDeadline.ts']);
 
 actual.add('src/utils/workHours.ts');
+actual.add('src/utils/calendarDensity.ts');
 const days=['Monday','Tuesday','Wednesday','Thursday','Friday'];let now=Date.parse('2026-09-11T12:00:00Z');
 class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
 Settings.now=()=>now;

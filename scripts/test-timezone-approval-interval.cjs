@@ -7,7 +7,7 @@ const root=path.resolve(__dirname,'..'),beforeRoot=process.env.TZ_APPROVAL_BEFOR
 Settings.now=()=>Date.parse('2026-09-11T00:00:00Z');
 class Clock extends Date { constructor(...a){super(...(a.length?a:[Settings.now()]));} static now(){return Settings.now();} }
 const captured=new Set(['src/core/approvals/approvalCallbacks.ts','src/core/requests/resolver.ts']);
-const actual=new Set([...captured,'src/core/requests/deferredActionReplay.ts','src/core/requests/types.ts','src/utils/weTimeResolver.ts','src/utils/timezoneConvert.ts','src/utils/workHours.ts','src/utils/workingElsewhere.ts','src/utils/textScrubber.ts']);
+const actual=new Set([...captured,'src/core/requests/deferredActionReplay.ts','src/core/requests/types.ts','src/utils/weTimeResolver.ts','src/utils/timezoneConvert.ts','src/utils/workHours.ts','src/utils/calendarDensity.ts','src/utils/workingElsewhere.ts','src/utils/textScrubber.ts']);
 const read=f=>fs.readFileSync(path.join(beforeRoot&&captured.has(f)?beforeRoot:root,f),'utf8');
 const clone=x=>JSON.parse(JSON.stringify(x)),noop=()=>{};
 function harness(tool,counter,opts={}){

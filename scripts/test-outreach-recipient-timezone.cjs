@@ -27,7 +27,7 @@ const before = process.env.OUTREACH_TZ_BEFORE === '1';
 const laneFiles = new Set(['src/skills/outreach.ts']);
 const actual = new Set([...laneFiles,
   'src/utils/responseDeadline.ts', 'src/utils/attendeeAvailability.ts', 'src/utils/workingHoursDefault.ts',
-  'src/utils/timezoneConvert.ts', 'src/utils/weTimeResolver.ts', 'src/utils/workHours.ts', 'src/utils/timezoneValidator.ts',
+  'src/utils/timezoneConvert.ts', 'src/utils/weTimeResolver.ts', 'src/utils/workHours.ts', 'src/utils/calendarDensity.ts', 'src/utils/timezoneValidator.ts',
   'src/core/requests/types.ts', 'src/db/jobs.ts', 'src/db/people.ts', 'src/core/requests/runner.ts',
   'src/core/requests/colleagueOofReengage.ts', 'src/core/approvals/approvalCallbacks.ts',
 ]);

@@ -18,6 +18,7 @@
 import { DateTime } from 'luxon';
 import type { UserProfile } from '../config/userProfile';
 import { getScheduleOverride } from '../db/scheduleOverrides';
+import { alignUpQuarter } from './calendarDensity';
 
 export interface WorkHourRange {
   startMin: number;  // inclusive, minutes since local midnight
@@ -415,24 +416,29 @@ export function computeHealthCheckWindow(profile: UserProfile): {
   };
 }
 
-/** Unspecified meeting timing: today and the next two owner working dates.
+/** Unspecified meeting timing: the next five owner working dates with time left.
  * Dated overrides and their timezone own the final day's endpoint. This is a
  * search boundary, selected before availability or preference ranking.
  */
 export function defaultMeetingSearchWindow(profile: UserProfile): { from: string; to: string } {
   const now = DateTime.now().setZone(profile.user.timezone);
+  // Only an implicit search cursor is aligned. Explicit windows and exact-slot
+  // validation retain their requested start in the shared finder.
+  const from = DateTime.fromMillis(alignUpQuarter(now.toMillis(), profile.user.timezone), { zone: profile.user.timezone });
   let day = now.startOf('day');
-  let remaining = 2;
+  let remaining = 5;
   // Bound malformed/empty schedules without silently inventing a workday.
-  for (let scanned = 0; scanned < 366; scanned++) {
-    day = day.plus({ days: 1 });
+  for (let scanned = 0; scanned < 366; scanned++, day = day.plus({ days: 1 })) {
     const effective = getEffectiveWorkDay(day.toISODate()!, profile);
     if (!effective.isWorkday || effective.windows.length === 0) continue;
+    const end = DateTime.fromISO(day.toISODate()!, { zone: effective.timezone }).endOf('day');
+    const start = DateTime.max(from, end.startOf('day'));
+    if (!configuredWorkIntervalsBetween(start, end.plus({ milliseconds: 1 }), effective.timezone, effective.windows).length) continue;
     if (--remaining === 0) {
-      return { from: now.toISO()!, to: DateTime.fromISO(day.toISODate()!, { zone: effective.timezone }).endOf('day').toISO()! };
+      return { from: from.toISO()!, to: end.toISO()! };
     }
   }
-  throw new Error('No two future owner working days are configured for the meeting search.');
+  throw new Error('No five upcoming owner working dates are configured for the meeting search.');
 }
 
 /**

@@ -19,6 +19,7 @@ const actual = new Set([
   'src/utils/timezoneValidator.ts',
   'src/utils/timezoneConvert.ts',
   'src/utils/workHours.ts',
+  'src/utils/calendarDensity.ts',
 ]);
 const compiled = new Map();
 const now = Date.parse('2026-09-12T09:00:00Z');

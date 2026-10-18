@@ -346,7 +346,19 @@ function attendeeCheckSource(toolName: string, result: unknown): 'slots' | 'note
 }
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>, result: unknown, ownerTz: string): string {
-  const summary = renderToolSummary(toolName, input, result, ownerTz);
+  let summary = renderToolSummary(toolName, input, result, ownerTz);
+  // Decision/action completion and requester delivery are independent facts.
+  // Carry every receipt, including failed/early-return and per-event results;
+  // never infer delivery from ok, a closed decision, or requester_notified.
+  if (toolName === 'resolve_approval') {
+    const outcome = result && typeof result === 'object'
+      ? (result as { requester_notify_outcome?: unknown }).requester_notify_outcome : undefined;
+    const receipt = outcome === 'sent' ? 'sent — requester notified (relay confirmed)'
+      : outcome === 'failed' ? 'failed — requester NOT notified (relay DM failed)'
+      : outcome === 'no_requester' ? 'no_requester — no requester to notify; no notification sent'
+      : 'unknown — requester delivery not confirmed';
+    summary += ` [resolve_approval requester notification: ${receipt}]`;
+  }
   const domain = mutationDomain(toolName, result);
   // Stamped OUTSIDE the tool's bracket on purpose: MUTATION_OK_RE below lifts the
   // bracketed span verbatim into the pinned action tape, so keeping the marker out
@@ -460,7 +472,6 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           && outcomes.every(o => mutationOutcome(o).ok)
           && remaining.length === 0 && r.ok !== false && r.success !== false && typeof r.error !== 'string';
         const state = typeof r.state === 'string' ? `; decision state=${r.state}` : '';
-        const notify = r.requester_notify_outcome === 'failed' ? '; requester NOT notified (relay DM failed)' : '';
         const lines = outcomes.map(o => {
           const line = renderToolSummary('move_meeting', {}, o, ownerTz);
           // new_start/new_end on a failed child are targets, not observations.
@@ -484,7 +495,7 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
           const interval = [target.new_start, target.new_end].filter(v => typeof v === 'string').join(' to ');
           lines.push(`[move_meeting ${toolName === 'move_meeting' ? 'NOT ATTEMPTED' : 'NOT COMPLETED'}${interval ? `; requested interval=${interval}` : ''}${typeof target.meeting_id === 'string' ? ` event_id=${target.meeting_id}` : ''}]`);
         }
-        return `[${toolName} ${complete ? 'COMPLETE' : 'INCOMPLETE'} — per-event outcomes${state}${notify}] ${lines.join(' ')}`;
+        return `[${toolName} ${complete ? 'COMPLETE' : 'INCOMPLETE'} — per-event outcomes${state}] ${lines.join(' ')}`;
       }
       if (toolName === 'move_meeting') {
         const state = r.unchanged === true ? 'UNCHANGED'
@@ -1010,23 +1021,8 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         // (reject / amend / expired) stays neutral so the checker never
         // manufactures a flag off it (G5 safe-miss).
         //
-        // log-notify-requester-not-grounded-for-claimchecker — the resolver's
-        // return also now carries `requester_notify_outcome` (resolver.ts's
-        // RequesterNotifyOutcome): whether the requester-facing close-loop DM
-        // (R3) actually reached them, distinct from whether the underlying
-        // action replayed. Pre-fix this marker was silent on it, so a false "and
-        // I let them know" narration after a dead Slack connection or a failed
-        // send had nothing here to check it against. Only `failed` is worth a
-        // flag (G5 safe-miss): `sent` is the expected case and `no_requester`
-        // means nothing was ever owed (owner-internal ask), neither is a signal
-        // the checker needs to act on. NOT the same field as the sibling
-        // `requester_notified` boolean skill.ts spreads onto this same return
-        // (a different question — "skip message_colleague, they already know" —
-        // now itself derived straight off this same `requester_notify_outcome`,
-        // requester-notified-boolean-ignores-failed-relay 2026-09-09, so the two
-        // agree: a failed relay send is neither "notified" nor silent here).
-        const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string; requester_notify_outcome?: string };
-        const notifyFailedTail = r.requester_notify_outcome === 'failed' ? ' — requester NOT notified (relay DM failed)' : '';
+        // summarizeToolCall carries the separate requester delivery receipt.
+        const r = result as { ok?: boolean; state?: string; effect?: string; action_summary?: string; booked?: boolean; reason?: string };
         if (r.ok === false) {
           return `[resolve_approval — not resolved${typeof r.reason === 'string' ? `: ${r.reason.slice(0, 60)}` : ''}]`;
         }
@@ -1036,12 +1032,12 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
         if (replayed) {
           const summ = typeof r.action_summary === 'string' && r.action_summary.trim().length
             ? `: ${r.action_summary.replace(/\s+/g, ' ').trim().slice(0, 120)}` : '';
-          return `[resolve_approval OK — replayed the approved action${summ}${notifyFailedTail}]`;
+          return `[resolve_approval OK — replayed the approved action${summ}]`;
         }
         if (effect.includes('no replay') || effect.includes('no action to replay')) {
-          return `[resolve_approval OK — decision recorded, NO calendar change${notifyFailedTail}]`;
+          return `[resolve_approval OK — decision recorded, NO calendar change]`;
         }
-        return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}${notifyFailedTail}]`;
+        return `[resolve_approval OK — ${r.effect ?? r.state ?? 'resolved'}]`;
       }
       case 'set_work_schedule_override': {
         // gh#200 (200b) — before this case, the generic `default` below rendered
@@ -1116,7 +1112,9 @@ function renderToolSummary(toolName: string, input: Record<string, unknown>, res
 // `[local: …]` reading on every cross-zone booking) was pinned truncated, its
 // event_id and closing bracket cut off. The head stays a regex; the span is
 // lifted balanced by `toolLinesMatching` below.
-const MUTATION_OK_HEAD = /^\[(?:(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) OK\b|move_meeting (?:UNCHANGED|OBSERVED|UNCONFIRMED|FAILED|NOT ATTEMPTED|NOT COMPLETED)\b)/;
+// Every current calendar outcome must supersede an older successful receipt,
+// including failed or unknown creates/updates/deletes, not only moves.
+const MUTATION_OUTCOME_HEAD = /^\[(?:create_meeting|move_meeting|update_meeting|delete_meeting|book_floating_block) (?:OK|UNCHANGED|OBSERVED|UNCONFIRMED|FAILED|NOT ATTEMPTED|NOT COMPLETED)\b/;
 
 /**
  * The bracketed tool line that starts at `start` (a `[`), brackets balanced so
@@ -1161,7 +1159,7 @@ function extractActionTape(history: Array<{ role: 'user' | 'assistant'; content:
   const out: string[] = [];
   for (const msg of history) {
     if (msg.role !== 'assistant') continue;
-    out.push(...toolLinesMatching(msg.content, MUTATION_OK_HEAD));
+    out.push(...toolLinesMatching(msg.content, MUTATION_OUTCOME_HEAD));
   }
   return out.slice(-20);
 }
