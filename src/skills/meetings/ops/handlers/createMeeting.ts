@@ -908,6 +908,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   delete diagnostics.rejectedCounts;
                   delete diagnostics.rejectedExamples;
                   delete diagnostics.conflictingEvent;
+                  delete diagnostics.daySummary;
                   validSlots = await runSlotCheck({ from: fromIso, to: toIso }, requestedMode, diagnostics);
                 }
               }
@@ -969,7 +970,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                 // either way. `firstRejectReason` (connectors/graph/
                 // findAvailableSlots.ts) is the ONE place `Object.keys` on
                 // `rejectedCounts` gets cast back to the declared vocabulary.
-                const brokenRule = firstRejectReason(diagnostics.rejectedCounts);
+                const brokenRule = firstRejectReason(diagnostics.rejectedCounts, diagnostics.daySummary);
                 // gh#200 — an all-day OOF rejects the whole day before
                 // checkSlot ever runs (so `conflictingEvent` below stays
                 // unset for it — see its own field doc); the away span's
@@ -1035,7 +1036,7 @@ export async function handleCreateMeeting(args: Record<string, unknown>, ctx: Op
                   try {
                     const remoteSlots = await runSlotCheck({ from: fromIso, to: toIso }, undefined, remoteDiag);
                     const remoteMatched = remoteSlots.some(s => Math.abs(DateTime.fromISO(s.start).toMillis() - startMs) <= 60_000);
-                    const remoteRule = firstRejectReason(remoteDiag.rejectedCounts);
+                    const remoteRule = firstRejectReason(remoteDiag.rejectedCounts, remoteDiag.daySummary);
                     // `wrong_day_type` also labels an OFF day (rule 1). If the same
                     // time fails the same way online, in person was never the
                     // reason — keep the plain refusal instead of claiming it was.

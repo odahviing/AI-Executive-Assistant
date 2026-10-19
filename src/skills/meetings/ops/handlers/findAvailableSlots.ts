@@ -1207,7 +1207,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                 // v3.7.x (#143) — an away day is now walked normally (its stated
                 // hours in its own tz), so an unavailable away candidate yields a
                 // real rejection reason in rejectedCounts — no WE special-casing.
-                const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts);
+                const brokenRule = matches ? undefined : firstRejectReason(diag.rejectedCounts, diag.daySummary);
                 // gh#200 — an all-day OOF rejects every instant on that day
                 // before checkSlot ever runs, so the away span's real end
                 // lives on the day_summary entry for this candidate's date
@@ -1360,10 +1360,14 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
             // Reuse day_summary so all existing privacy scrubs still apply.
             const emptySearchResult = (summary: typeof diagnosticsOut.daySummary) => {
               groundAttendeeHours(summary);
-              const hoursBlocked = summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
+              const allDaysOccupied = !!summary?.length && summary.every(day => day.owner_all_day_busy || day.top_reasons.includes('owner_out_of_office'));
+              const hoursBlocked = !allDaysOccupied && summary?.some(day => day.top_reasons.includes('outside_attendee_work_hours'));
               return {
                 slots: [],
                 ...(summary?.length ? { day_summary: summary } : {}),
+                ...(allDaysOccupied ? {
+                  _scheduling_decision_note: `The owner's calendar has an all-day commitment on every date checked. Explain that full-day conflict; earlier or later attendee hours cannot remove it. A busy block alone does not establish vacation or permission to change any meeting. Offer another date, or ask the owner about a specific exception through the existing approval flow.`,
+                } : {}),
                 ...(hoursBlocked ? {
                   _scheduling_decision_note: `No confirmed option in this window; working-hour constraints exclude candidates. This is not evidence that anyone is booked solid. ${isOwnerInitiatedSearch
                     ? 'Ask which path to explore: whether the other attendee would consider earlier/later hours, or whether you want to explore an exception to your own hours. Do not assume an early start.'
@@ -1921,7 +1925,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   const prefEndIso = prefStartDt.isValid
                     ? (prefStartDt.plus({ minutes: durMinPref }).toISO() ?? preferredSlot)
                     : preferredSlot;
-                  const prefDiag: { rejectedCounts?: Partial<Record<SearchRejectReason, number>> } = {};
+                  const prefDiag: { rejectedCounts?: Partial<Record<SearchRejectReason, number>>; daySummary?: DaySummaryEntry[] } = {};
                   const prefSlots = await findAvailableSlots({
                     userEmail,
                     timezone,
@@ -1945,7 +1949,7 @@ export async function handleFindAvailableSlots(args: Record<string, unknown>, ct
                   });
                   const prefAvailable = prefSlots.some(s =>
                     DateTime.fromISO(s.start, { zone: timezone }).toMillis() === prefStartDt.toMillis());
-                  const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts);
+                  const brokenRule = prefAvailable ? undefined : firstRejectReason(prefDiag.rejectedCounts, prefDiag.daySummary);
                   // Shared presentation-zone (presentTzForOutput, declared above) —
                   // this branch answers about the SAME preferred_slot instant the
                   // main `slots` list renders below, and must use the same zone, or

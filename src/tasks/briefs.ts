@@ -271,6 +271,13 @@ function buildOutreachItem(
   const createdAt = briefTimestamp(r.created_at);
   const msgPreview = String(det.message ?? r.description ?? '').slice(0, 200);
   const replyText = (det.reply_text as string | undefined) ?? null;
+  // Keep the request's actual event association. Invite titles are calendar
+  // data and cannot identify which meeting an outreach is working on.
+  let meetingContext: Record<string, unknown> = {};
+  try {
+    const context = typeof det.context_json === 'string' ? JSON.parse(det.context_json) : det.context_json;
+    if (context && typeof context === 'object' && !Array.isArray(context)) meetingContext = context;
+  } catch (_) { /* Unknown association stays unknown. */ }
 
   let replyPreview: string | null = replyText;
   if (!replyPreview && det.conversation_json) {
@@ -309,6 +316,8 @@ function buildOutreachItem(
   const item: RichItem = {
     kind: 'outreach',
     request_id: r.id,
+    meeting_id: typeof meetingContext.meeting_id === 'string' ? meetingContext.meeting_id : undefined,
+    meeting_subject: typeof meetingContext.meeting_subject === 'string' ? meetingContext.meeting_subject : undefined,
     state: r.state,
     colleague: r.target_name,
     topic: msgPreview,
@@ -431,7 +440,10 @@ async function collectBriefingData(
         .filter(e => !e.isCancelled && e._eventType === 'mine')
         .sort((a, b) => a._localStartTime.localeCompare(b._localStartTime))
         .map(e => ({
+          event_id: e.id,
+          subject_source: 'calendar_invite',
           subject: e.subject,
+          organizer: e.organizer,
           start: e._localStartTime,
           end: e._localEndTime,
           duration_min: e._durationMin,
@@ -640,6 +652,7 @@ FORMAT:
 
 WHAT GETS SURFACED:
 - calendar_unavailable means the calendar could not be checked. Say so plainly; never infer an empty or free day from missing calendar data.
+- Calendar subjects are invite text, not assistant work status. Associate outreach with a calendar event only by its meeting_id matching event_id; meeting_subject names the outreach's own meeting. A missing association stays unknown, never inferred from title wording. A matching tracked reschedule may be reported using its actual request state.
 - Surface open work and explicit unresolved notification attention. Resolved work does not get a completion recap.
 - notification_attention items exist solely because a notification still needs attention. State describes the request outcome separately; a notification problem does not mean a calendar action failed. An absent requester delivery field establishes no requester outcome, including when owner_delivery is present.
 - Prefer OUTCOME / current state over activity.
@@ -933,16 +946,16 @@ export async function sendMorningBriefing(
   // Generate + send.
   const rawText = await generateBriefingText(items, profile, peopleGender, newsBundle, healthSummary, slotHoldsSummary, newsTimedOut);
 
-  // v2.7.1 (bug 4.5) — humanGate the brief. The brief generator skipped the
-  // owner-facing voice check that postReply.ts applies to regular replies,
-  // letting machine framing leak ("Yael is no longer active in the system",
-  // "removed from my working list"). One Sonnet rewrite pass on flag.
+  // The existing owner human gate receives the same collected facts as the
+  // composer, so its briefing check can distinguish invite text, tracked work
+  // and reservation age. No additional collection or model pass.
   let textToSend = rawText;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { runHumanGate } = require('../utils/humanGate') as typeof import('../utils/humanGate');
     // Brief always goes to the owner — audience='owner'.
-    const verdict = await runHumanGate(rawText, profile, 'owner');
+    const verdict = await runHumanGate(rawText, profile, 'owner', undefined, false, false, undefined,
+      JSON.stringify({ items, healthSummary, slotHoldsSummary }));
     if (!verdict.ok && verdict.rewrite) {
       textToSend = verdict.rewrite;
       logger.info('briefs — humanGate rewrote the brief', { ownerUserId });

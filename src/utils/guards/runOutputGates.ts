@@ -749,7 +749,15 @@ async function requestOutcomeEvidence(ctx: OutputGateContext): Promise<string> {
   try {
     const { getRequestsForThread } = await import('../../db/requests');
     const { ORIGIN_SURFACE_REPLAY_TOOLS } = await import('../../core/requests/types');
-    requestEvidence = JSON.stringify(getRequestsForThread(ctx.profile.user.slack_user_id, ctx.threadTs).map(row => {
+    // Owner decisions live in the owner's private signature thread, separate
+    // from the requester's origin. Scope this read by authenticated identity
+    // AND surface; role or a guessed owner thread alone grants no access.
+    const ownerDecisionChannel = (ctx.transport ?? 'slack') === 'slack'
+      && ctx.senderId === ctx.profile.user.slack_user_id && ctx.role === 'owner'
+      && /^D[A-Z0-9]+$/.test(ctx.channelId)
+      && ctx.isMpim !== true && ctx.isChannel !== true && ctx.isOwnerInGroup !== true
+      ? ctx.channelId : undefined;
+    requestEvidence = JSON.stringify(getRequestsForThread(ctx.profile.user.slack_user_id, ctx.threadTs, ownerDecisionChannel).map(row => {
       let outcome: Record<string, unknown> = {};
       let details: Record<string, any> = {};
       try { outcome = JSON.parse(row.outcome_json ?? '{}') ?? {}; } catch { /* unknown */ }

@@ -178,10 +178,12 @@ export function processCalendarEvents(
     const localEndTime   = endDt.toFormat('HH:mm');           // "19:00"
     const durationMin    = Math.round(endDt.diff(startDt, 'minutes').minutes);
 
-    // Classify all-day events that belong to someone else
+    // A Busy/OOF/tentative invitation occupies this calendar regardless of
+    // its organizer or title. Only a non-occupying WE marker is informational.
     const organizerEmail = ev.organizer?.emailAddress?.address ?? '';
     let eventType: ProcessedEvent['_eventType'] = 'mine';
-    if (ev.isAllDay && isOtherPersonsAllDayEvent(ev.subject, ownerName, organizerEmail, ownerEmail)) {
+    if (ev.isAllDay && ev.showAs === 'workingElsewhere'
+      && isOtherPersonsAllDayEvent(ev.subject, ownerName, organizerEmail, ownerEmail)) {
       eventType = 'colleague_info';
     }
 
@@ -371,6 +373,11 @@ export function analyzeCalendar(
   const oofSpans = events
     .filter(e => e._eventType === 'mine' && isAllDayOutOfOffice(e))
     .map(e => computeOofSpan(e.id, e._localDate, e._durationMin, profile.user.timezone));
+  // Busy is occupancy, not evidence of vacation. Keep these spans separate
+  // from OOF so reporting an overlap never grants cancellation authority.
+  const busySpans = events
+    .filter(e => !e.isCancelled && e.isAllDay && (e.showAs === 'busy' || e.showAs === 'tentative') && !e.is_floating_block)
+    .map(e => ({ event: e, ...computeOofSpan(e.id, e._localDate, e._durationMin, profile.user.timezone) }));
   // gh#200 — every meeting found sitting on a MULTI-day OOF span's day 2..N
   // (previously invisible past the event's own `_localDate` — see above),
   // bucketed by the underlying OOF event's id and accumulated across the WHOLE
@@ -455,6 +462,19 @@ export function analyzeCalendar(
     const coveringOofSpan = oofSpans.find(s => s.startDate <= dateStr && dateStr < s.endDateExclusive);
     const outOfOfficeAllDay = coveringOofSpan !== undefined;
     const nonAllDayMeetings = myEvents.filter(e => !e.isAllDay && e.showAs !== 'oof');
+    const coveringBusySpans = busySpans.filter(s => s.startDate <= dateStr && dateStr < s.endDateExclusive);
+    for (const block of coveringBusySpans) {
+      // Personal/solo commitments and floating objects can intentionally sit
+      // within a full-day hold. Report work with others, without moving it.
+      const meetings = nonAllDayMeetings.filter(e => e.showAs !== 'workingElsewhere'
+        && !e.is_floating_block && e.sensitivity === 'normal' && (e.attendees?.length ?? 0) > 0);
+      if (meetings.length > 0) issues.push({
+        type: 'overlap',
+        severity: 'high',
+        detail: `All-day busy block "${block.event.subject}" overlaps ${meetings.map(e => `${e.subject} at ${e._localStartTime}`).join(', ')}`,
+        suggestedFix: 'Confirm which commitments to keep before changing any meeting.',
+      });
+    }
 
     // gh#200 retry (bouncer overturn) — the `oof_with_meetings` gate must catch
     // ANY oof event on the day, timed included, not only an all-day span: HEAD
@@ -617,7 +637,7 @@ export function analyzeCalendar(
     // not his to spend, so counting the untouched work window as focus time made
     // "how packed is tomorrow?" answer "8h free" on a vacation day, and the
     // free-time-floor issue below would be measuring a day that isn't happening.
-    if (outOfOfficeAllDay) freeMin = 0;
+    if (outOfOfficeAllDay || coveringBusySpans.length > 0) freeMin = 0;
 
     const requiredFreeMin = requiredFreeMinutesForWorkDay(workTotalMin, profile.meetings.work_hours_per_free_hour);
     if (!outOfOfficeAllDay && requiredFreeMin > 0 && freeMin < requiredFreeMin) {

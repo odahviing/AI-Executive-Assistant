@@ -584,7 +584,9 @@ export async function executeApprovedSkillTool(
   // A rule refusal before PATCH is different: never label it attempted.
   const postMoveUnconfirmed = toolName === 'move_meeting'
     && (result.error === 'moved_but_missing' || result.error === 'move_did_not_land');
-  if (postMoveUnconfirmed || result.needs_verification === true || result.partial === true
+  // Outreach preserves transport uncertainty even without a scheduled copy.
+  // Keep it unconfirmed through replay so the resolver cannot retry the send.
+  if (postMoveUnconfirmed || result.delivery_unconfirmed === true || result.needs_verification === true || result.partial === true
     || (result.not_saved && typeof result.not_saved === 'object' && Object.keys(result.not_saved).length > 0)) {
     return failed(true);
   }

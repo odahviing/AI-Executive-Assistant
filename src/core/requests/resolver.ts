@@ -1058,15 +1058,8 @@ async function runApproveCallback(
     ? (replayResult.meetingId as string)
     : undefined;
 
-  // #11 — WHAT ACTUALLY HAPPENED, read off the executed action, not off the row.
-  // The stored `deferred_action` is the ORIGINAL ask; on an amended approval the
-  // executed args are `mergeAmendIntoApprove(on_approve, counter)`, built locally
-  // and never written back. So a counter of 13:00 → 15:30 booked 15:30 while
-  // anything reading the row still said 13:00 — and the requester relay read the
-  // row. Both the tool return and the relay are now fed from this one object:
-  // `booked_start` is the tool's own truth (it can snap/normalize the time),
-  // falling back to the args we actually replayed. Same for subject — a counter
-  // can rename the meeting too.
+  // Report the executed decision and its receipt. The decision is frozen above;
+  // calendar results may additionally normalize the requested instant.
   const calendarAction = ['create_meeting', 'move_meeting', 'update_meeting', 'delete_meeting', 'book_floating_block'].includes(tool);
   const executed = {
     tool,
@@ -1081,6 +1074,19 @@ async function runApproveCallback(
       ? (replayArgs.subject as string)
       : (typeof replayArgs.meeting_subject === 'string' ? (replayArgs.meeting_subject as string) : undefined),
   };
+
+  // A confirmed message to the requester IS the close-loop. Composing another
+  // approval notice from the old ask both duplicates it and can contradict the
+  // owner's replacement decision. A scheduled send or a send to somebody else
+  // does not establish this requester's receipt. Text delivery still counts
+  // when attachments failed; repeating the text would duplicate a real send.
+  const messageDelivered = tool === 'message_colleague' && replayResult?.sent === true;
+  const requesterMessageDelivered = messageDelivered && !!row.requester_slack_id
+      && row.requester_slack_id !== row.owner_user_id
+      && replayArgs.colleague_slack_id === row.requester_slack_id;
+  if (requesterMessageDelivered) {
+    completeRequesterRelay(row);
+  }
 
   // Replay succeeded — close and relay.
   closeRequest({
@@ -1101,7 +1107,8 @@ async function runApproveCallback(
     },
   });
 
-  const requesterNotified = await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx, executed);
+  const requesterNotified = requesterMessageDelivered ? 'sent'
+    : await notifyRequesterOfDecision(row, 'approve', { replayed: tool }, undefined, ctx, executed);
 
   // 138a + 138c (GH #140) — surface the CONCRETE outcome, not resolver jargon.
   // Pre-fix this returned `approved approval/policy_exception — replayed
@@ -1114,9 +1121,14 @@ async function runApproveCallback(
   const isBookingTool = tool === 'create_meeting' || tool === 'book_floating_block';
   const replayStart = executed.start;
   const replaySubject = executed.subject ?? row.subject ?? undefined;
+  const messageSummary = messageDelivered && typeof replayArgs.colleague_name === 'string'
+    ? (typeof replayResult?.attachments_failed === 'number' && replayResult.attachments_failed > 0
+        ? `The text reached ${replayArgs.colleague_name}, but ${replayResult.attachments_failed} attachment(s) failed. Do not repeat the text.`
+        : `Message delivered to ${replayArgs.colleague_name}.`)
+    : undefined;
   const replaySummary = calendarAction && typeof replayResult?.action_summary === 'string'
     ? (replayResult.action_summary as string)
-    : undefined;
+    : ctx.wasAwaitingColleague ? undefined : messageSummary;
   return {
     ok: true, request_id: row.id, state: 'resolved',
     effect: executed.tracked ? 'approved — action scheduled and tracked; not completed yet' : 'approved — action replayed',

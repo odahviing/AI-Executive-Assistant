@@ -56,8 +56,13 @@ export type SearchRejectReason = SearchRejectLabel | AttendeeTaggedReason;
  */
 export function firstRejectReason(
   counts: Partial<Record<SearchRejectReason, number>> | undefined,
+  daySummary?: DaySummaryEntry[],
 ): SearchRejectReason | undefined {
-  return (Object.keys(counts ?? {}) as SearchRejectReason[])[0];
+  // A dated off-day is a day_skip, not a rejected cursor, so it has no count.
+  // Exact/preferred checks must retain that existing authoritative diagnostic.
+  return (Object.keys(counts ?? {}) as SearchRejectReason[])[0]
+    ?? (daySummary?.some(day => day.accepted === 0 && day.top_reasons.includes('vacation_or_off_day'))
+      ? 'vacation_or_off_day' : undefined);
 }
 
 /**
@@ -194,6 +199,9 @@ export interface DaySummaryEntry {
   date: string;
   accepted: number;
   top_reasons: string[];
+  /** Calendar-proven occupancy for the whole date, not an inferred vacation.
+   * No subject or other event details leave this boundary. */
+  owner_all_day_busy?: true;
   /**
    * Per-attendee blame for this day. Populated when one or more attendees'
    * busy time blocked slots. Empty when the blockers were all owner-side
@@ -734,6 +742,7 @@ export async function findAvailableSlots(params: {
     // the one shared predicate, so "is he out that day" has exactly one answer in
     // the subsystem. Span-aware (a multi-day vacation covers every day it spans).
     const oofDayKeys = new Set<string>();
+    const busyDayKeys = new Set<string>();
     // gh#200 — date → the away span's LAST day (inclusive, owner tz), set ONLY
     // when the span reaches past that one day. So day_summary can tell the
     // drafter "away through Aug 29" once instead of a fresh day-scoped
@@ -744,7 +753,11 @@ export async function findAvailableSlots(params: {
     // use, off the SAME `isAllDayOutOfOffice` predicate — one span answer.
     const oofUntilByDay = new Map<string, string>();
     for (const evt of ownerEventsForFb) {
-      if (!isAllDayOutOfOffice(evt)) continue;
+      const outOfOffice = isAllDayOutOfOffice(evt);
+      const allDayBusy = !evt.isCancelled && evt.isAllDay
+        && (evt.showAs === 'busy' || evt.showAs === 'tentative')
+        && !(params.excludeEventIds ?? []).includes(evt.id);
+      if (!outOfOffice && !allDayBusy) continue;
       const evStart = DateTime.fromISO(evt.start.dateTime, { zone: evt.start.timeZone ?? 'utc' });
       const evEnd = DateTime.fromISO(evt.end.dateTime, { zone: evt.end.timeZone ?? 'utc' });
       if (!evStart.isValid || !evEnd.isValid) continue;
@@ -768,8 +781,12 @@ export async function findAvailableSlots(params: {
       const lastInclusiveDisplay = formatOofUntilDisplay(span, params.timezone);
       for (let d = from; d < toExclusive; d = d.plus({ days: 1 })) {
         const key = d.toFormat('yyyy-MM-dd');
-        oofDayKeys.add(key);
-        if (lastInclusiveDisplay) oofUntilByDay.set(key, lastInclusiveDisplay);
+        if (outOfOffice) {
+          oofDayKeys.add(key);
+          if (lastInclusiveDisplay) oofUntilByDay.set(key, lastInclusiveDisplay);
+        } else {
+          busyDayKeys.add(key);
+        }
       }
     }
 
@@ -1794,6 +1811,7 @@ export async function findAvailableSlots(params: {
               : undefined;
           return {
             date, accepted, top_reasons,
+            ...(accepted === 0 && busyDayKeys.has(date) ? { owner_all_day_busy: true as const } : {}),
             ...(blocked_by ? { blocked_by } : {}),
             ...(attendee_partial_conflicts ? { attendee_partial_conflicts } : {}),
             ...(oof_until_display ? { oof_until_display } : {}),

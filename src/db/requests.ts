@@ -308,14 +308,19 @@ export function getOpenRequestsForThread(ownerUserId: string, threadTs: string):
   `).all(ownerUserId, threadTs) as RequestRow[];
 }
 
-/** Decision evidence from this originating conversation only. Logged activity
- * is excluded, matching getLatestRequestForThread's privacy boundary. */
-export function getRequestsForThread(ownerUserId: string, threadTs: string): RequestRow[] {
+/** Decision evidence from the originating conversation. An authenticated private
+ * owner caller may additionally supply its channel to read exact stored owner
+ * decision anchors. Without that scope, owner-thread guesses reveal nothing.
+ * Logged activity is excluded on both paths. Caller authentication is required
+ * before supplying ownerDecisionChannel; the query enforces owner/channel/thread. */
+export function getRequestsForThread(ownerUserId: string, threadTs: string, ownerDecisionChannel?: string): RequestRow[] {
   return getDb().prepare(`
     SELECT * FROM requests
-    WHERE owner_user_id = ? AND origin_thread_ts = ? AND state != 'logged'
+    WHERE owner_user_id = ? AND state != 'logged'
+      AND (origin_thread_ts = ?${ownerDecisionChannel ? `
+        OR (owner_dm_channel = ? AND (owner_dm_thread_ts = ? OR terminal_dm_msg_ts = ?))` : ''})
     ORDER BY created_at ASC
-  `).all(ownerUserId, threadTs) as RequestRow[];
+  `).all(ownerUserId, threadTs, ...(ownerDecisionChannel ? [ownerDecisionChannel, threadTs, threadTs] : [])) as RequestRow[];
 }
 
 /**

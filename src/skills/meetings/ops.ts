@@ -41,7 +41,7 @@ import {
 } from './ops/handlers/calendarReads';
 import type { OpCtx } from './ops/handlers/context';
 import { grantRelaxed } from './bookingRequest';
-import { OWNER_OVERRIDABLE_SEARCH_LABELS, type SearchRejectLabel } from '../../utils/scheduleRules';
+import { OWNER_OVERRIDABLE_KINDS, OWNER_OVERRIDABLE_SEARCH_LABELS, type RuleViolationKind, type SearchRejectLabel } from '../../utils/scheduleRules';
 
 /**
  * Internal ops helper. Not a registered skill (see file header). MeetingsSkill
@@ -218,15 +218,53 @@ export class SchedulingSkill {
       // Search returns either a bare array or a wrapped result. Owner-authored
       // email searches still use the owner's validator, so its diagnostics must
       // be scoped here BEFORE the orchestrator serializes the result for the model.
+      // Project structured reasons once, before either candidate or day-summary
+      // privacy scrubbing. These categories contain neither identities nor the
+      // owner's private rule details, and never change availability or consent.
+      const absenceLabel = (reason: unknown): string | undefined =>
+        reason === 'vacation_or_off_day' ? 'The owner has this date off'
+          : reason === 'owner_out_of_office' ? 'The owner is out of office on this date' : undefined;
+      const decisionNote = (reasons: unknown[], unavailable = false): string | undefined => {
+        if (unavailable) return 'Availability could not be established for this time. A failed check does not establish a calendar conflict.';
+        const kinds = reasons.filter((reason): reason is string => typeof reason === 'string')
+          .map(reason => reason.split(':', 1)[0]);
+        if (!kinds.length) return undefined;
+        const attendee = kinds.filter(kind => kind === 'outside_attendee_work_hours'
+          || kind === 'attendee_busy_collision' || kind === 'attendee_out_of_office');
+        const absence = [...new Set(reasons.map(absenceLabel).filter(Boolean))];
+        if (absence.length) return `Reported date-specific limitations: ${absence.join('; ')}.${attendee.length ? ' Attendee availability is also constrained.' : ''} Other reported limits still apply; this grants no booking or override authority.`;
+        if (attendee.length === kinds.length) {
+          if (kinds.every(kind => kind === 'outside_attendee_work_hours')) {
+            return "This result was limited by an attendee's working-hours window, not by a demonstrated conflict on the owner's calendar. Availability is unconfirmed; the result does not establish that the requested time fails on the owner's side. An explicit acceptance of the requested time may supply a temporary attendee-hours window; preserve the agreed instant and check it through the existing scheduling tools.";
+          }
+          return "The reported limitation concerns attendee availability; it does not establish a conflict on the owner's calendar. Availability remains unconfirmed.";
+        }
+        if (attendee.length) return 'Reported limitations include attendee availability and other scheduling constraints. Do not attribute the entire result to an owner calendar conflict; availability remains unconfirmed.';
+        if (kinds.every(kind => OWNER_OVERRIDABLE_KINDS.has(kind as RuleViolationKind)
+          || OWNER_OVERRIDABLE_SEARCH_LABELS.has(kind as SearchRejectLabel)
+          || kind === 'owner_busy_collision' || kind === 'owner_out_of_office'
+          || kind === 'vacation_or_off_day')) {
+          return 'The reported limitation concerns owner-side scheduling constraints. This does not by itself mean a calendar conflict or permission to override a constraint.';
+        }
+        return 'The requested time has not been confirmed. The reported limitation does not establish whose calendar is in conflict.';
+      };
       const scopeSlot = (slot: Record<string, unknown>) => {
+        const reasons = [slot.broken_rule, ...(Array.isArray(slot.broken_rules) ? slot.broken_rules : [])];
+        const note = decisionNote(reasons, slot.error === 'validation_error');
+        const absenceReason = slot.available !== true && slot.error !== 'validation_error'
+          ? reasons.find(reason => absenceLabel(reason)) : undefined;
+        const absence = absenceLabel(absenceReason);
+        if (note) slot._scheduling_decision_note = note;
         const needsConfirmation = typeof slot.broken_rule_label === 'string'
           || (Array.isArray(slot.broken_rules) && slot.broken_rules.length > 0);
         delete slot.over_optional;
         delete slot.less_preferred_label;
         delete slot.attendee_conflicts;
         delete slot.attendee_status;
-        delete slot.broken_rule;
-        delete slot.broken_rule_label;
+        // Keep only trusted identity-free absence codes in the existing fields:
+        // compact history and grounding also consume these, not decisionNote.
+        if (absence) { slot.broken_rule = absenceReason; slot.broken_rule_label = absence; }
+        else { delete slot.broken_rule; delete slot.broken_rule_label; }
         delete slot.broken_rules;
         delete slot.attendee_hours_note;
         delete slot.disturbs_floating_block;
@@ -315,11 +353,25 @@ export class SchedulingSkill {
       // (turnHelpers' `attendee_partial=`), which renders from the
       // POST-scrub result, so this one delete closes both.
       if (Array.isArray(r.day_summary)) {
+        const days = r.day_summary as Array<Record<string, unknown>>;
+        if (days.length > 0 && days.every(day => day.accepted === 0
+          && Array.isArray(day.top_reasons) && day.top_reasons.length > 0)) {
+          const note = decisionNote(days.flatMap(day => [
+            ...(day.top_reasons as unknown[]), ...(day.owner_all_day_busy ? ['owner_busy_collision'] : []),
+          ]));
+          // Keep the handler's bounded recovery/full-day instructions alongside
+          // the safe category; attribution must not erase their consent limits.
+          if (note) r._scheduling_decision_note = [r._scheduling_decision_note, note]
+            .filter(part => typeof part === 'string' && part.length > 0).join(' ');
+        }
         for (const day of r.day_summary as Array<Record<string, unknown>>) {
           delete day.blocked_by;
           delete day.attendee_partial_conflicts;
           delete day.attendee_hours_note;
-          delete day.top_reasons;
+          const absenceReasons = day.accepted === 0 && Array.isArray(day.top_reasons)
+            ? day.top_reasons.filter(reason => absenceLabel(reason)) : [];
+          if (absenceReasons.length) day.top_reasons = absenceReasons;
+          else delete day.top_reasons;
         }
       }
     }

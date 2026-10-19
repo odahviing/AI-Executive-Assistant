@@ -1,8 +1,8 @@
 const fs=require('fs'),path=require('path'),vm=require('vm'),{createRequire}=require('module'),assert=require('node:assert/strict');
 const file=path.join(__dirname,'test-email-mechanics-integration.cjs');
 let prefix=fs.readFileSync(file,'utf8').split("test('regression")[0];
-prefix=prefix.replace('relaxed=true}={}',"relaxed=true,role='owner',surface='dm',mustBe=false}={}")
- .replace("senderRole:'owner'","senderRole:role,surface")
+prefix=prefix.replace('overrideRows={},ownerEvents=[]}={}',"overrideRows={},ownerEvents=[],role='owner',surface='owner_dm',mustBe=false}={}")
+ .replace("senderRole:'owner',surface:'owner_dm',authority:'owner'","senderRole:role,surface,authority:role==='owner'?'owner':'colleague'")
  .replace('meeting_mode:\'online\',relaxed,','meeting_mode:\'online\',relaxed,must_be:mustBe,');
 const mod={exports:{}};vm.runInNewContext(prefix+'\nmodule.exports={run};',{require:createRequire(file),module:mod,__dirname,process,console,Date,Buffer,setTimeout,clearTimeout});
 const {run}=mod.exports;

@@ -15,6 +15,7 @@ import {
   updateMeeting,
   type AttendeeConflictTag,
   type SearchRejectReason,
+  type DaySummaryEntry,
   firstRejectReason,
   CalendarOfflineError,
 } from '../../../../connectors/graph/calendar';
@@ -1812,7 +1813,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                 const fromIso = startDt.toUTC().toISO();
                 const toIso = endDt.toUTC().toISO();
                 let validSlots: Array<{ start: string; attendee_conflicts?: AttendeeConflictTag[] }> = [];
-                const diagnostics: { rejectedCounts?: Partial<Record<SearchRejectReason, number>>; rejectedExamples?: Partial<Record<SearchRejectReason, string[]>> } = {};
+                const diagnostics: { rejectedCounts?: Partial<Record<SearchRejectReason, number>>; rejectedExamples?: Partial<Record<SearchRejectReason, string[]>>; daySummary?: DaySummaryEntry[] } = {};
                 // v3.5.x (step 2) — check the OTHER required attendees too: everyone
                 // required EXCEPT the owner (checked via userEmail) and the asker (whose
                 // own busy doesn't block their own request). attendeeCheckParams passes
@@ -1931,7 +1932,7 @@ export async function handleMoveMeeting(args: Record<string, unknown>, ctx: OpCt
                   // can't tell which one" — the mechanical non-answer M9 forbids.
                   const labelFor = (reason: SearchRejectReason | undefined): string =>
                     humanizeViolationLabel(reason, ownerFirst);
-                  const brokenRule = firstRejectReason(diagnostics.rejectedCounts);
+                  const brokenRule = firstRejectReason(diagnostics.rejectedCounts, diagnostics.daySummary);
                   const reasonCode = HANDLER_ERROR_CODE.NOT_RULE_COMPLIANT;
                   const humanReason = labelFor(brokenRule);
                   logger.info('move_meeting colleague-path refused — new slot blocked', {

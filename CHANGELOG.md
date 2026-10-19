@@ -1,3 +1,22 @@
+## 5.2.0 — Truthful calendar, briefing and approval context
+
+Maelle now carries calendar occupancy, invitation provenance and current approval outcomes through scheduling and reply checks. This cumulative MINOR checkpoint also covers the meeting-option and confirmation fixes shipped in 5.1.1.
+
+### Fixed
+- Include full-day Busy occupancy in interactive calendar analysis and explain blocked searches without suggesting misleading earlier or later hours. Busy alone does not imply vacation, an off-day or permission to cancel meetings.
+- Preserve identity-free scheduling refusal reasons across email, exact-slot, create and move paths, including authoritative off-day and out-of-office evidence without exposing attendee identities.
+- Ground morning-brief work claims in actual activity; distinguish invitation text from assistant work and retain useful waiting windows.
+- Carry current owner decisions into approval checks, separate requester facts from the owner's internal assessment, and resolve known directory entries before asking about optional attendees.
+- Use current published artifacts and the correct link roles; preserve attempted, confirmed and unknown outreach and notification outcomes.
+- Keep email subjects out of message bodies, default unstated meeting duration to 25 minutes while honoring explicit duration, and constrain temporary consent to the exact accepted instant.
+
+### Validation and limits
+- Thirteen new product corrections independently verified. The cumulative checkpoint since 5.1.0 includes 253 native suites, 280 executions and 6,633 passing assertions, with typechecking passed. All 30 Golden paths were independently reviewed: 11 current-anchor passes and 19 relocated anchors, with no failures.
+- Deterministic harnesses and structural prompt checks establish bounded behavior and supplied context; model interpretation and live production outcomes remain unproven. Calendar Health's broader rebuild, per-skill memory design and the separate uploaded-document feature hold remain outside this release.
+
+### Framework
+- X250 repairs the standalone timezone regression wrapper to use the native inventory and runner, retaining all 14 child suites across three zones and failure detection.
+
 ## 5.1.1 — Reliable meeting options and booking confirmations
 
 Default meeting searches now start on a clean quarter-hour boundary and cover five eligible workdays. Confirmed bookings and approval notification receipts retain their evidence through reply checks, while failed or unknown current actions remain eligible for correction.

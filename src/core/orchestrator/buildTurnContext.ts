@@ -359,17 +359,19 @@ export async function buildTurnContext(input: OrchestratorInput) {
   // v3.6.4 — DETERMINISTIC attendee resolution (the "resolve WHO before WHEN"
   // guarantee, moved from a prompt rule Sonnet ignored into code). Resolve the
   // participant names classifyTurn extracted into KNOWN INTERNAL colleagues
-  // (single unambiguous people_memory match only — never fuzzy-guessed). The
-  // resolved set is (a) threaded into the search via skillContext so
+  // (single unambiguous people_memory match — never fuzzy-guessed). The
+  // stored resolved set is (a) threaded into the search via skillContext so
   // find_available_slots can't run a partial list, and (b) surfaced to Sonnet as
   // a resolved-participants block so she searches instead of asking who they are
   // / for an email she already has. External / unknown names are deliberately
   // left out — they never block showing options; their email matters only at
-  // booking. Fail-open: any error → empty, Sonnet's normal flow takes over.
+  // booking. Unresolved names also get the existing scoped directory lookup;
+  // its contact evidence does not decide required/optional participation.
+  // Lookup errors remain unresolved; Sonnet's normal flow takes over.
   if (turnMeetingPeople.length > 0) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveNamedInternalAttendees } = require('../../memory/resolveAttendeeEmails') as
+      const { resolveNamedInternalAttendees, nameGenuinelyMatches } = require('../../memory/resolveAttendeeEmails') as
         typeof import('../../memory/resolveAttendeeEmails');
       const { resolved, unresolved } = resolveNamedInternalAttendees({
         names: turnMeetingPeople,
@@ -378,9 +380,46 @@ export async function buildTurnContext(input: OrchestratorInput) {
       });
       resolvedMeetingAttendees = resolved.map(r => r.email);
       namedInternalAttendeeEmails = resolvedMeetingAttendees;
-      if (resolved.length > 0 || unresolved.length > 0) {
+      // Memory ambiguity is not current directory ambiguity. Use the existing
+      // surface-scoped lookup before asking the human for a known identity.
+      // Identity alone does not establish required participation: these contacts
+      // are context, never automatically added to required availability.
+      const directoryContacts: Array<{ name: string; email: string }> = [];
+      const directoryStates: Array<{ name: string; status: string }> = [];
+      if (unresolved.length > 0) {
+        const { getConnection } = require('../../connections/registry') as typeof import('../../connections/registry');
+        const connection = getConnection(profile.user.slack_user_id, 'slack');
+        for (const name of [...new Set(unresolved)]) {
+          try {
+            const response = await connection?.executeToolCall?.('find_slack_user', { name }, { surface: input.surface });
+            const result = response as { error?: unknown; matches?: Array<{ name?: string; email?: string }> } | null;
+            if (!result || result.error || !Array.isArray(result.matches)) {
+              directoryStates.push({ name, status: 'directory_unavailable' });
+              continue;
+            }
+            const domain = profile.user.email.toLowerCase().split('@')[1];
+            const matches = result.matches.filter(m => typeof m?.email === 'string' && typeof m.name === 'string'
+              && m.email.toLowerCase().endsWith('@' + domain)
+              && nameGenuinelyMatches(m.name, m.email, name));
+            const distinct = new Map(matches.map(m => [m.email!.toLowerCase(), { name: m.name!, email: m.email!.toLowerCase() }]));
+            if (distinct.size === 1) {
+              directoryContacts.push([...distinct.values()][0]);
+              unresolved.splice(unresolved.indexOf(name), 1);
+            } else {
+              directoryStates.push({ name, status: distinct.size > 1 ? 'multiple_internal_matches' : 'no_scoped_internal_contact' });
+            }
+          } catch {
+            directoryStates.push({ name, status: 'directory_unavailable' });
+          }
+        }
+      }
+      if (resolved.length > 0 || unresolved.length > 0 || directoryContacts.length > 0) {
         const ownerFirst = profile.user.name.split(' ')[0];
         const sections: string[] = ['## MEETING PARTICIPANTS (deterministic — use this, do not re-derive)'];
+        if (directoryContacts.length > 0) {
+          sections.push(`Current directory contact identities (not added to required availability; retain the participation role requested in the current message):\n${directoryContacts.map(r => `- ${r.name} <${r.email}>`).join('\n')}`);
+        }
+        if (directoryStates.length > 0) sections.push(`Current directory lookup outcomes: ${JSON.stringify(directoryStates)}`);
         if (resolved.length > 0) {
           const list = resolved.map(r => `- ${r.name} <${r.email}>`).join('\n');
           sections.push(`Known internal colleagues, resolved from the directory — do NOT call find_slack_user for these and do NOT ask who they are or for their email. I have ALREADY added them to this turn's find_available_slots search; search now and offer times that work for everyone, never propose without them:\n${list}`);

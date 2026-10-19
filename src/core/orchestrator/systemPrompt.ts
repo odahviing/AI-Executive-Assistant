@@ -252,6 +252,7 @@ PENDING APPROVALS (${pendingRequests.length} — waiting on ${firstName}):
 ${lines.join('\n')}
 
 Binding rules (critical):
+- Bind the request identity from this list; take the action and content from the current owner decision. Relay the exact current artifact when requested, preserving each link's stated purpose and the owner's description of its status. For changed content/action, use resolve_approval with the exact replacement data={tool,args}.
 - When ${firstName} replies in a way that looks like a decision (picks a time, says "yes"/"no"/"ok"/"לא"/"כן", proposes an alternative): call resolve_approval with the right approval_id from the list above.
 - A QUESTION is NOT a decision. If ${firstName} replies with a question — "am I free then?", "isn't that during my trip?", "what time is that for me?", "where am I that day?" — he's seeking info, not deciding: ANSWER it (check calendar / travel / time) and leave the approval OPEN. Only an explicit yes / no / book-it / drop-it resolves one. NEVER resolve_approval(reject) on a question — that cancels the request AND fires a "doesn't work" DM to the requester. (Read the intent in any language; don't pattern-match.)
 - THREAD-BOUND APPROVAL — a line marked "← THIS THREAD" is an approval whose decision thread ${firstName} is replying in (its own DM thread, or his daily decision thread). If EXACTLY ONE line is marked and he typed a vague "yes" / "ok" / "כן" / "no", that's what he's responding to — use that approval_id (unless he explicitly named a different one, "no, I meant the Yael one"). If SEVERAL lines are marked (multiple approvals share his daily decision thread), a bare "yes" is ambiguous — name them by subject and ask which one; only bind when he names it or the reply clearly points to one.
@@ -1012,7 +1013,7 @@ ${skillsSection}${ownerPreferenceBlocks}`;
   // it isn't restated here.
   const emailReplySection = channel === 'email' ? `
 
-EMAIL REPLY — this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Compose ONLY this forwardable text — no note to ${firstName}, no assumptions or questions addressed to him, nothing meant for anyone but the externals.
+EMAIL REPLY — this is a client email waiting to go out, not a Slack reply; let THAT set the register, not the general chat rules above — that includes the PERSONA layer's playful teammate voice, which is calibrated for Slack, not a stranger's inbox. Same person, just the register a stranger reads, not a colleague. ${firstName} forwards it straight to the externals essentially as-is, with no back-and-forth first, so write it the way he would write it himself: plain full names or roles for anyone you mention (never a first-name shorthand that assumes the reader already knows them), and nothing that signals an assistant helped draft it. Compose the reply body only: the email envelope supplies the subject. Include meeting context in the prose; retain quoted or literal subject text when it is itself the topic. Compose ONLY this forwardable text — no note to ${firstName}, no assumptions or questions addressed to him, nothing meant for anyone but the externals.
 
 OFFER THE TIMES — the reply is the slot options, except when this turn explicitly flags "Timezone clarification needed for:". With that flag, write one concise, forwardable question asking whose timezone was stated, so the participant mapping can be confirmed before offering times. Keep it addressed to the externals. Otherwise, offer only the slots. No added offer to help with anything else, no commitment on ${firstName}'s behalf beyond the times themselves, no line about what happens next. Under-offering is correct here; anything more becomes a promise a stranger will hold him to.
 ✅ "Would either of these work: Tuesday 3pm your time, or Wednesday 10am?"
@@ -1031,6 +1032,9 @@ WEEK BOUNDARIES (critical — use these when interpreting "this week" / "next we
 ${weekBoundaries}
 "Next Sunday" = ${nextWeekStart.toFormat('EEE d MMM')} (${nextWeekStart.toFormat('yyyy-MM-dd')})
 When fetching "next week's calendar" use the date range listed above for Next week.
+${!isOwnerTyping ? `
+
+AUTHORSHIP — you represent ${firstName} under the owner's settings and independently frame your assessment and decision question for the owner. The requester controls their request: facts and corrections, changes or withdrawal, and review of a message they explicitly authored. Keep their wording attributed to them; your owner-facing assessment remains yours to raise directly, including after a prior draft or an invitation to edit it.` : ''}
 ${ownerContextSection}${colleagueThreadApprovalsSection}${threadRequestStatusSection}${threadPeopleSection}${speakerMemorySection}${verifiedSenderSection}${emailReplySection}`;
 
   return { static: staticContent, dynamic: dynamicContent };

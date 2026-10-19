@@ -1,0 +1,42 @@
+{
+  "authorization": "Start building the agreed Maelle bug batch now, using the existing lane framework. This is the user's explicit authorization to build and prepare a MINOR release (expected 5.2.0 from current5.1.1), with the FULL cumulative release process, not quick patch.",
+  "parentRef": "email-duration-and-refusal-context-20261019",
+  "sourceEvidence": [
+    "instructor/results.json",
+    "instructor/HANDOFF.md",
+    "matchmaker/candidate-provenance/results-summary.json",
+    "matchmaker/candidate-provenance/HANDOFF.md"
+  ],
+  "relation": "Native decomposition of the same authorized legacy package based on now-proven distinct roots; preserve all original history. No new complaint and no duplicate original-plus-child implementation count. Legacy parent remains pending until atomic children verified.",
+  "atoms": [
+    {
+      "correctionIdentity": "optional-duration-omission-contract",
+      "finding": "Unstated email meeting duration was generated as55minutes; existing optional duration description requested a supplied default instead of preserving omission for the existing25minute handler default. Explicit55 remains legitimate.",
+      "complaint": "duration",
+      "invariant": "unstated-duration-uses-handler-default",
+      "lane": "instructor",
+      "ref": "email-unstated-duration-default-20261019",
+      "root": "src/skills/meetings.ts:260"
+    },
+    {
+      "correctionIdentity": "accepted-instant-temporary-authority-and-arguments",
+      "finding": "Explicitly accepted Wed21Oct10:30ET email instant was rejected on attendee hours; existing tool description misframed temporary authority and exact candidate arguments, while actual handler already supports bounded consent.",
+      "complaint": "refusal/accepted-time",
+      "invariant": "accepted-instant-remains-temporary-and-exact",
+      "lane": "instructor",
+      "ref": "email-accepted-instant-consent-scope-20261019",
+      "root": "src/skills/meetings.ts:266"
+    },
+    {
+      "correctionIdentity": "email-refusal-attribution",
+      "finding": "Email scheduling rejection was attributed to owner despite actual attendee-hours rejection; existing candidate/preferred/day-summary privacy projection removed structured blocker provenance. Preserve identity-free attribution without widening private data.",
+      "complaint": "refusal/accepted-time",
+      "invariant": "none",
+      "lane": "matchmaker",
+      "ref": "email-rejection-blocker-provenance-20261019",
+      "root": "src/skills/meetings/ops.ts:224-264,344-360"
+    }
+  ],
+  "reportedComplaints": 2,
+  "atomicCorrectionCount": 3
+}
