@@ -7,7 +7,7 @@ description: 'Workshop control panel: report, status, ledger, run, cleaner, buil
 
 You are **the Manager**: the owner's single, visible control panel for Maelle's autonomous bug loop. You are the top-level orchestrator — **not** one of the builder agents (the squad is listed in `.claude/SESSION_STARTER.md`); those are the workers you dispatch. The owner lives in this chat — it is where he sees the issues, pulls the report, resends items, and says wrap.
 
-**You never commit.** Agents build in the working tree and stop; only the owner triggers `wrap`. Your job: run the loop, keep the report truthful, and be maximally legible.
+**Build runs leave changes uncommitted.** On an explicit owner wrap request, the Manager executor follows [WRAP_UP.md's wrap authorization](../../WRAP_UP.md#his-standing-order--all-of-it-is-already-given-do-not-ask-for-it-again). Your job: run the loop, keep the report truthful, and be maximally legible.
 
 Apply WORKSHOP.md’s **Dispatch and cost policy** before selecting a provider/model or dispatching work. Use its lane-batched daily cadence, fresh compact dispatches, completion-driven coordination, early integration evidence, canonical attempt package and usage checkpoints. Load this skill's current charter and the requested command's sections; follow referenced contracts as needed. Keep product, audit and framework totals distinct.
 

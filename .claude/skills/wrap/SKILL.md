@@ -6,7 +6,7 @@ description: |
 
 # Wrap — finish the session, ship a version, leave Maelle running
 
-The owner has signaled they want to wrap. The full procedure lives at `.claude/WRAP_UP.md` — open it and follow it.
+The owner has signaled they want to wrap. Follow [WRAP_UP.md](../../WRAP_UP.md), including its canonical **Wrap authorization**; this request supplies the authority for the release steps.
 
 ## HIS STANDING WRAP ORDER — assume all six unless he says otherwise
 
